@@ -1,0 +1,296 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import type { ProjectSnapshot } from "@/lib/domain/types";
+import {
+  CHAT_PROJECT_STORAGE_KEY,
+  planSessionBootstrap,
+} from "./chat-session";
+import { Composer } from "./Composer";
+import { ConceptCards } from "./ConceptCards";
+import { MessageBubble } from "./MessageBubble";
+import { useIsClient } from "./use-is-client";
+
+type ApiSnapshot = ProjectSnapshot & {
+  persistenceMode?: "supabase" | "local";
+};
+
+export function ChatApp() {
+  const isClient = useIsClient();
+  const [snapshot, setSnapshot] = useState<ApiSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isClient) return;
+    void bootstrap();
+  }, [isClient]);
+
+  useEffect(() => {
+    if (!isClient) return;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [isClient, snapshot?.messages.length, snapshot?.artworkVersions.length, sending]);
+
+  async function bootstrap() {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const plan = planSessionBootstrap(
+        window.localStorage.getItem(CHAT_PROJECT_STORAGE_KEY),
+      );
+
+      if (plan.action === "restore") {
+        const response = await fetch(`/api/projects/${plan.projectId}`);
+        if (response.ok) {
+          const data = (await response.json()) as ApiSnapshot;
+          setSnapshot(data);
+          return;
+        }
+        window.localStorage.removeItem(CHAT_PROJECT_STORAGE_KEY);
+      }
+
+      const created = await fetch("/api/projects", { method: "POST" });
+      if (!created.ok) throw new Error("Could not start conversation");
+      const data = (await created.json()) as ApiSnapshot;
+      window.localStorage.setItem(CHAT_PROJECT_STORAGE_KEY, data.project.id);
+      setSnapshot(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function sendMessage(content: string) {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    // Optimistic user message for snappier feel
+    const optimisticId = `temp-${Date.now()}`;
+    setSnapshot({
+      ...snapshot,
+      messages: [
+        ...snapshot.messages,
+        {
+          id: optimisticId,
+          conversationId: snapshot.conversation.id,
+          projectId: snapshot.project.id,
+          role: "user",
+          content,
+          metadata: {},
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/messages`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        },
+      );
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to send message");
+      }
+
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send message");
+      await refresh();
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function selectConcept(artworkVersionId: string) {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/select`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ artworkVersionId }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to select concept");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to select concept");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function refresh() {
+    if (!snapshot) return;
+    const response = await fetch(`/api/projects/${snapshot.project.id}`);
+    if (response.ok) {
+      setSnapshot((await response.json()) as ApiSnapshot);
+    }
+  }
+
+  async function startOver() {
+    window.localStorage.removeItem(CHAT_PROJECT_STORAGE_KEY);
+    setSnapshot(null);
+    setLoading(true);
+    await bootstrap();
+  }
+
+  const phase = snapshot?.conversation.phase;
+  const composerDisabled =
+    !isClient ||
+    loading ||
+    sending ||
+    !snapshot ||
+    phase === "generating" ||
+    phase === "skip_references" ||
+    phase === "concepts_ready";
+
+  const placeholder = useMemo(() => {
+    if (!isClient || loading) return "Message iHeartPrints...";
+    switch (phase) {
+      case "ask_product":
+        return "e.g. A T-shirt for our summer camp...";
+      case "ask_design":
+        return "Describe the artwork you have in mind...";
+      case "ask_shirt_color":
+        return "e.g. Navy blue";
+      case "ask_text":
+        return 'Exact text, or "none"';
+      case "ask_revisions":
+      case "revision_received":
+        return "Describe the changes you'd like...";
+      case "concepts_ready":
+        return "Select a concept above to continue";
+      case "generating":
+        return "Generating concepts...";
+      default:
+        return "Message iHeartPrints...";
+    }
+  }, [isClient, loading, phase]);
+
+  const showConcepts =
+    !!snapshot &&
+    snapshot.artworkVersions.length > 0 &&
+    (phase === "concepts_ready" ||
+      phase === "ask_revisions" ||
+      phase === "revision_received");
+
+  return (
+    <div className="flex min-h-full flex-1 flex-col">
+      <header className="mx-auto flex w-full max-w-2xl items-start justify-between gap-4 px-4 pb-2 pt-8">
+        <div>
+          <div className="flex items-center gap-2.5">
+            <LogoMark />
+            <h1 className="font-display text-2xl tracking-tight text-ink">
+              iHeartPrints
+            </h1>
+          </div>
+          <p className="mt-1 pl-[42px] text-sm text-muted">
+            Print-Ready Artwork
+          </p>
+        </div>
+        {isClient && snapshot ? (
+          <button
+            type="button"
+            onClick={() => void startOver()}
+            className="mt-1 text-xs text-muted underline-offset-2 hover:text-ink hover:underline"
+          >
+            Start over
+          </button>
+        ) : null}
+      </header>
+
+      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col px-4 pb-4 pt-6">
+        {!isClient || loading ? (
+          <div className="flex flex-1 items-center justify-center text-sm text-muted">
+            Starting conversation...
+          </div>
+        ) : (
+          <div className="flex flex-1 flex-col gap-4">
+            {snapshot?.messages.map((message) => (
+              <div key={message.id}>
+                <MessageBubble message={message} />
+                {message.role === "assistant" &&
+                message.metadata?.phase === "concepts_ready" &&
+                showConcepts ? (
+                  <ConceptCards
+                    concepts={snapshot.artworkVersions}
+                    selectedId={snapshot.project.selectedArtworkVersionId}
+                    selectable={phase === "concepts_ready"}
+                    busy={sending}
+                    onSelect={(id) => void selectConcept(id)}
+                  />
+                ) : null}
+              </div>
+            ))}
+
+            {sending && phase !== "concepts_ready" ? (
+              <div className="flex justify-start">
+                <div className="rounded-2xl bg-white px-4 py-3 text-sm text-muted shadow-sm ring-1 ring-black/5">
+                  <span className="inline-flex gap-1">
+                    <span className="animate-pulse">●</span>
+                    <span className="animate-pulse [animation-delay:150ms]">
+                      ●
+                    </span>
+                    <span className="animate-pulse [animation-delay:300ms]">
+                      ●
+                    </span>
+                  </span>
+                </div>
+              </div>
+            ) : null}
+
+            {error ? (
+              <p className="text-sm text-red-700">{error}</p>
+            ) : null}
+
+            <div ref={bottomRef} />
+          </div>
+        )}
+      </main>
+
+      <Composer
+        disabled={composerDisabled}
+        placeholder={placeholder}
+        onSend={sendMessage}
+      />
+    </div>
+  );
+}
+
+function LogoMark() {
+  return (
+    <svg
+      width="32"
+      height="32"
+      viewBox="0 0 32 32"
+      fill="none"
+      aria-hidden="true"
+      className="shrink-0"
+    >
+      <rect width="32" height="32" rx="10" fill="#173F35" />
+      <path
+        d="M16 23c-.4 0-.7-.1-1-.4l-5.2-5.1c-1.8-1.8-1.8-4.7 0-6.5 1.7-1.7 4.4-1.8 6.2-.3 1.8-1.5 4.5-1.4 6.2.3 1.8 1.8 1.8 4.7 0 6.5L17 22.6c-.3.3-.6.4-1 .4Z"
+        fill="#F3EDE4"
+      />
+    </svg>
+  );
+}

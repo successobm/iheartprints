@@ -1,0 +1,43 @@
+---
+description: Supabase migration filename and safety workflow for iHeartPrints
+globs: supabase/migrations/**/*.sql,docs/database/**/*,scripts/validate-migrations*
+alwaysApply: true
+---
+
+# Migration rules
+
+Before creating or modifying any file under `supabase/migrations`:
+
+1. Read `docs/database/MIGRATION_WORKFLOW.md`.
+2. Inspect every existing file in `supabase/migrations` first.
+3. Generate a valid **14-digit UTC** timestamp (`YYYYMMDDHHMMSS`).
+4. Report the proposed migration filename and wait for that name to be used exactly.
+5. Ensure the new timestamp sorts after the current latest migration.
+6. Prefer descriptive schema names over sprint-only names.
+
+## Renames and applied history
+
+- Before renaming a migration, confirm whether it has already been applied in:
+  - local Supabase
+  - remote Supabase
+  - CI / deployment environments
+- If application status is unknown, assume it may be applied.
+- Never rename an applied migration.
+- Never edit an applied migration to change behavior.
+- Prefer forward-only corrective migrations for applied schema.
+
+## Verification
+
+After creating, renaming, or otherwise changing migrations:
+
+```powershell
+npm run validate:migrations
+```
+
+Report:
+
+- the exact migration filename(s)
+- the validator result
+- whether any renamed migration had already been applied
+
+Never commit or push unless explicitly instructed by the user.
