@@ -1,5 +1,14 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Product Constitution
+
+All product, design, and architecture decisions must align with the
+[iHeartPrints Constitution](./IHEARTPRINTS_CONSTITUTION.md).
+
+When a roadmap item, specification, implementation choice, or feature conflicts
+with the Constitution, the Constitution takes precedence unless it is formally
+amended.
+
 ## Getting Started
 
 First, run the development server:
