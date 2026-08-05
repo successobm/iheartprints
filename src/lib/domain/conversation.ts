@@ -1,6 +1,33 @@
 import type { ConversationPhase, TShirtDesignBrief } from "./types";
 
+/**
+ * Sprint 2F: this module's phase-ladder functions (`applyUserReplyToBrief`,
+ * `nextPhaseAfterUserReply`, `promptForPhase`) are legacy-only, still used
+ * for historical projects still sitting in an `ask_*` phase (resumed, not
+ * upgraded mid-flow — see `isLegacyScriptedPhase`). New projects and every
+ * pre-approval interview turn go through `IntentExtractionCapability` +
+ * `InterviewIntelligenceCapability` instead.
+ *
+ * Sprint 2G Part 2: the post-concept revision loop (`ask_revisions` /
+ * `revision_received`) is no longer legacy either — ConversationCapability
+ * routes it through the same adaptive pipeline plus RevisionIntelligence.
+ * `nextPhaseAfterUserReply`'s cases for those two phases and
+ * `applyUserReplyToBrief`'s append-only case for them are dead for new
+ * activity but left in place; nothing calls them for these phases anymore.
+ */
 export const OPENING_PROMPT = "What are we printing today?";
+
+/** Phases still driven by the fixed ladder in this module, never the adaptive engine. */
+const LEGACY_PHASES: ConversationPhase[] = [
+  "ask_product",
+  "ask_design",
+  "ask_shirt_color",
+  "ask_text",
+];
+
+export function isLegacyScriptedPhase(phase: ConversationPhase): boolean {
+  return LEGACY_PHASES.includes(phase);
+}
 
 const PHASE_PROMPTS: Record<ConversationPhase, string | null> = {
   ask_product: OPENING_PROMPT,
@@ -21,6 +48,9 @@ const PHASE_PROMPTS: Record<ConversationPhase, string | null> = {
   brief_approved: null,
   edit_requested: "What would you like to change about the design?",
   continue_requested: "What else would you like the designer to know?",
+  // Sprint 2F: adaptive interview messages come from InterviewIntelligence's
+  // question catalog, not a static per-phase prompt.
+  interviewing: null,
 };
 
 export function promptForPhase(phase: ConversationPhase): string | null {
@@ -104,6 +134,11 @@ function appendInstruction(
   existing: string | null,
   next: string,
 ): string {
+  return appendNote(existing, next);
+}
+
+/** Shared "add a note, keep prior notes" helper (Sprint 2F: also used by intent extraction). */
+export function appendNote(existing: string | null, next: string): string {
   if (!existing?.trim()) return next;
   return `${existing.trim()}\n\n${next}`;
 }

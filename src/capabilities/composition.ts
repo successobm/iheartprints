@@ -17,6 +17,7 @@ import { createPrintVaultCapability } from "@/capabilities/print-vault";
 import { createProductIntelligenceCapability } from "@/capabilities/product-intelligence";
 import { PlaceholderConceptProvider } from "@/capabilities/providers";
 import { createRevisionCapability } from "@/capabilities/revision";
+import { createRevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
 
 export interface CapabilityGraph {
   conversation: ConversationCapability;
@@ -26,6 +27,7 @@ export interface CapabilityGraph {
   intentExtraction: ReturnType<typeof createIntentExtractionCapability>;
   designIntelligence: ReturnType<typeof createDesignIntelligenceCapability>;
   interviewIntelligence: ReturnType<typeof createInterviewIntelligenceCapability>;
+  revisionIntelligence: ReturnType<typeof createRevisionIntelligenceCapability>;
   productIntelligence: ReturnType<typeof createProductIntelligenceCapability>;
   designSummary: ReturnType<typeof createDesignSummaryCapability>;
   conceptGeneration: ReturnType<typeof createConceptGenerationCapability>;
@@ -52,6 +54,7 @@ export function createCapabilityGraph(
   const designIntelligence =
     createDesignIntelligenceCapability(productIntelligence);
   const interviewIntelligence = createInterviewIntelligenceCapability();
+  const revisionIntelligence = createRevisionIntelligenceCapability();
   const designSummary = createDesignSummaryCapability();
 
   const provider = new PlaceholderConceptProvider((designId) =>
@@ -66,6 +69,7 @@ export function createCapabilityGraph(
     briefEvaluation,
     designIntelligence,
     interviewIntelligence,
+    revisionIntelligence,
     designSummary,
     conceptGeneration,
   });
@@ -77,6 +81,7 @@ export function createCapabilityGraph(
     intentExtraction,
     designIntelligence,
     interviewIntelligence,
+    revisionIntelligence,
     productIntelligence,
     designSummary,
     conceptGeneration,

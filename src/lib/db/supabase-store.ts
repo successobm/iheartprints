@@ -4,6 +4,7 @@ import {
   OPENING_PROMPT,
   projectNameFromBrief,
 } from "@/lib/domain/conversation";
+import { emptyInterviewState } from "@/lib/domain/types";
 import type {
   ArtworkVersion,
   ConversationMessage,
@@ -11,6 +12,7 @@ import type {
   DesignBriefVersion,
   DesignBriefVersionStatus,
   DesignConversation,
+  InterviewStateData,
   PrintProject,
   ProjectSnapshot,
   ProjectStatus,
@@ -47,6 +49,10 @@ type DbBrief = {
   preferred_colors: string[] | null;
   design_style: string | null;
   additional_instructions: string | null;
+  audience: string | null;
+  purpose: string | null;
+  exclusions: string | null;
+  deferred_sections: string[] | null;
   created_at: string;
   updated_at: string;
 };
@@ -55,6 +61,7 @@ type DbConversation = {
   id: string;
   project_id: string;
   phase: ConversationPhase;
+  interview_state: InterviewStateData | null;
   created_at: string;
   updated_at: string;
 };
@@ -120,6 +127,10 @@ function mapBrief(row: DbBrief): TShirtDesignBrief {
     preferredColors: row.preferred_colors ?? [],
     designStyle: row.design_style,
     additionalInstructions: row.additional_instructions,
+    audience: row.audience ?? null,
+    purpose: row.purpose ?? null,
+    exclusions: row.exclusions ?? null,
+    deferredSections: row.deferred_sections ?? [],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -130,6 +141,10 @@ function mapConversation(row: DbConversation): DesignConversation {
     id: row.id,
     projectId: row.project_id,
     phase: row.phase,
+    // Spread onto the full default shape (not just `??`) so a row written
+    // before a new InterviewStateData field existed still gets a default
+    // for it instead of `undefined`.
+    interviewState: { ...emptyInterviewState(), ...row.interview_state },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -222,10 +237,21 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .single();
     if (briefError) throw briefError;
 
+    // Sprint 2F: new projects start in the adaptive interview lifecycle.
+    // "product" is always the first question — nothing can be known yet.
+    const initialInterviewState = {
+      ...emptyInterviewState(),
+      pendingSection: "product",
+      askCounts: { product: 1 },
+    };
     const { data: conversationRow, error: conversationError } =
       await this.client
         .from("design_conversations")
-        .insert({ project_id: project.id, phase: "ask_product" })
+        .insert({
+          project_id: project.id,
+          phase: "interviewing",
+          interview_state: initialInterviewState,
+        })
         .select("*")
         .single();
     if (conversationError) throw conversationError;
@@ -239,7 +265,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
         project_id: project.id,
         role: "assistant",
         content: OPENING_PROMPT,
-        metadata: { phase: "ask_product" },
+        metadata: { phase: "interviewing", act: "ask", section: "product" },
       })
       .select("*")
       .single();
@@ -367,6 +393,11 @@ export class SupabaseProjectRepository implements ProjectRepository {
       payload.design_style = patch.designStyle;
     if (patch.additionalInstructions !== undefined)
       payload.additional_instructions = patch.additionalInstructions;
+    if (patch.audience !== undefined) payload.audience = patch.audience;
+    if (patch.purpose !== undefined) payload.purpose = patch.purpose;
+    if (patch.exclusions !== undefined) payload.exclusions = patch.exclusions;
+    if (patch.deferredSections !== undefined)
+      payload.deferred_sections = patch.deferredSections;
 
     const { data, error } = await this.client
       .from("tshirt_design_briefs")
@@ -388,6 +419,23 @@ export class SupabaseProjectRepository implements ProjectRepository {
     const { data, error } = await this.client
       .from("design_conversations")
       .update({ phase, updated_at: new Date().toISOString() })
+      .eq("project_id", projectId)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapConversation(data as DbConversation);
+  }
+
+  async updateConversationInterviewState(
+    projectId: string,
+    interviewState: InterviewStateData,
+  ): Promise<DesignConversation> {
+    const { data, error } = await this.client
+      .from("design_conversations")
+      .update({
+        interview_state: interviewState,
+        updated_at: new Date().toISOString(),
+      })
       .eq("project_id", projectId)
       .select("*")
       .single();

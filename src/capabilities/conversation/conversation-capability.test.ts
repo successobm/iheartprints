@@ -5,16 +5,15 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { removeTempDir } from "@/test-support/remove-temp-dir";
+import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-interview";
 
 /**
  * Sprint 2D: verifies the constitutional approval gate.
- *
- * The scripted four-question interview itself is unchanged (kept identical
- * to Sprint 1); only what happens *after* the fourth answer changes: the
- * system must present a Design Summary and wait for an explicit customer
- * decision instead of generating concepts automatically.
+ * Sprint 2F: the interview itself is now adaptive (see
+ * `runAdaptiveInterviewToSummary`) instead of a fixed four-question ladder;
+ * everything downstream of "the summary is presented" is unchanged.
  */
-describe("ConversationCapability — Design Summary approval gate", () => {
+describe("ConversationCapability — adaptive interview + Design Summary approval gate", () => {
   let tempDir = "";
   let previousCwd = "";
 
@@ -41,42 +40,25 @@ describe("ConversationCapability — Design Summary approval gate", () => {
     return getCapabilityGraph().conversation;
   }
 
-  async function runScriptedInterview(
-    conversation: Awaited<ReturnType<typeof freshConversation>>,
-  ) {
-    const started = await conversation.start();
-    const projectId = started.project.id;
-
-    await conversation.handleUserMessage(projectId, "Camp shirts");
-    await conversation.handleUserMessage(projectId, "A friendly bear logo");
-    await conversation.handleUserMessage(projectId, "Navy");
-    const afterText = await conversation.handleUserMessage(
-      projectId,
-      "Camp Wildwood 2026",
-    );
-
-    return { projectId, afterText };
-  }
-
-  it("stops after the fourth scripted answer with a Design Summary instead of concepts", async () => {
+  it("stops with a Design Summary instead of concepts once the interview is complete", async () => {
     const conversation = await freshConversation();
-    const { afterText } = await runScriptedInterview(conversation);
+    const { afterSummary } = await runAdaptiveInterviewToSummary(conversation);
 
-    assert.equal(afterText.conversation.phase, "awaiting_summary_confirmation");
-    assert.equal(afterText.artworkVersions.length, 0);
-    assert.equal(afterText.designBriefVersions.length, 0);
+    assert.equal(afterSummary.conversation.phase, "awaiting_summary_confirmation");
+    assert.equal(afterSummary.artworkVersions.length, 0);
+    assert.equal(afterSummary.designBriefVersions.length, 0);
 
-    const lastMessage = afterText.messages.at(-1);
+    const lastMessage = afterSummary.messages.at(-1);
     assert.ok(lastMessage);
     assert.equal(lastMessage?.role, "assistant");
     assert.equal(lastMessage?.metadata.phase, "awaiting_summary_confirmation");
   });
 
-  it("Design Summary includes only known fields and never invents others", async () => {
+  it("Design Summary reflects provided fields and friendly copy for deferred ones — never raw internal state", async () => {
     const conversation = await freshConversation();
-    const { afterText } = await runScriptedInterview(conversation);
+    const { afterSummary } = await runAdaptiveInterviewToSummary(conversation);
 
-    const summary = afterText.messages.at(-1)?.metadata.summary as
+    const summary = afterSummary.messages.at(-1)?.metadata.summary as
       | Record<string, unknown>
       | undefined;
     assert.ok(summary);
@@ -86,17 +68,59 @@ describe("ConversationCapability — Design Summary approval gate", () => {
     assert.equal(summary?.productColor, "Navy");
     assert.equal(summary?.requiredWording, "Camp Wildwood 2026");
 
-    // Never asked by the current scripted interview — must not be fabricated.
-    assert.equal(summary?.audience, undefined);
-    assert.equal(summary?.purpose, undefined);
-    assert.equal(summary?.printLocation, undefined);
+    // High-value sections were all deferred ("You choose.") by the helper —
+    // they should render as friendly copy, not be silently omitted or show
+    // raw internal state.
+    for (const key of ["style", "colors", "printLocation", "purpose", "audience"]) {
+      assert.ok(summary?.[key], key);
+      assert.doesNotMatch(String(summary?.[key]), /deferred_to_designer/);
+    }
+
+    // References/exclusions/additional notes were never touched — still omitted.
     assert.equal(summary?.references, undefined);
-    assert.equal(summary?.productionConsiderations, undefined);
+    assert.equal(summary?.exclusions, undefined);
+  });
+
+  it("fills several fields from one rich reply and skips the questions they answer", async () => {
+    const conversation = await freshConversation();
+    const started = await conversation.start();
+    const projectId = started.project.id;
+    assert.equal(started.conversation.interviewState.pendingSection, "product");
+
+    const afterRich = await conversation.handleUserMessage(
+      projectId,
+      "Black hoodies with a vintage gold logo.",
+    );
+
+    assert.equal(afterRich.brief.productSummary?.toLowerCase().includes("hoodies"), true);
+    assert.equal(afterRich.brief.shirtColor?.toLowerCase(), "black");
+    assert.match(afterRich.brief.designStyle ?? "", /vintage/i);
+
+    // productColor and style are now resolved — Interview Intelligence
+    // should have skipped straight past them.
+    const pending = afterRich.conversation.interviewState.pendingSection;
+    assert.notEqual(pending, "productColor");
+    assert.notEqual(pending, "style");
+  });
+
+  it("resume mid-interview restores the pending section", async () => {
+    const conversation = await freshConversation();
+    const started = await conversation.start();
+    const projectId = started.project.id;
+
+    const afterFirst = await conversation.handleUserMessage(projectId, "Camp shirts");
+    const restored = await conversation.get(projectId);
+
+    assert.equal(
+      restored?.conversation.interviewState.pendingSection,
+      afterFirst.conversation.interviewState.pendingSection,
+    );
+    assert.equal(restored?.conversation.phase, "interviewing");
   });
 
   it("blocks free-text chat while awaiting a summary decision", async () => {
     const conversation = await freshConversation();
-    const { projectId } = await runScriptedInterview(conversation);
+    const { projectId } = await runAdaptiveInterviewToSummary(conversation);
 
     await assert.rejects(
       () => conversation.handleUserMessage(projectId, "actually make it red"),
@@ -140,7 +164,7 @@ describe("ConversationCapability — Design Summary approval gate", () => {
 
   it("approve creates exactly one durable brief version and three placeholder concepts", async () => {
     const conversation = await freshConversation();
-    const { projectId } = await runScriptedInterview(conversation);
+    const { projectId } = await runAdaptiveInterviewToSummary(conversation);
 
     const approved = await conversation.submitDesignBriefDecision(
       projectId,
@@ -169,7 +193,7 @@ describe("ConversationCapability — Design Summary approval gate", () => {
 
   it("repeated approval requests are idempotent — no duplicate versions or concepts", async () => {
     const conversation = await freshConversation();
-    const { projectId } = await runScriptedInterview(conversation);
+    const { projectId } = await runAdaptiveInterviewToSummary(conversation);
 
     await conversation.submitDesignBriefDecision(projectId, "approve");
     const second = await conversation.submitDesignBriefDecision(
@@ -187,9 +211,9 @@ describe("ConversationCapability — Design Summary approval gate", () => {
     assert.equal(third.artworkVersions.length, 3);
   });
 
-  it("Edit returns to conversational collection and re-presents an updated summary", async () => {
+  it("Edit corrects a specific field (via real extraction) and re-presents an updated summary", async () => {
     const conversation = await freshConversation();
-    const { projectId } = await runScriptedInterview(conversation);
+    const { projectId } = await runAdaptiveInterviewToSummary(conversation);
 
     const editing = await conversation.submitDesignBriefDecision(
       projectId,
@@ -203,24 +227,26 @@ describe("ConversationCapability — Design Summary approval gate", () => {
     );
 
     assert.equal(updated.conversation.phase, "awaiting_summary_confirmation");
-    assert.match(
-      updated.brief.additionalInstructions ?? "",
-      /forest green/,
-    );
+    assert.equal(updated.brief.shirtColor, "forest green");
 
     const summary = updated.messages.at(-1)?.metadata.summary as
       | Record<string, unknown>
       | undefined;
-    assert.match(String(summary?.additionalNotes ?? ""), /forest green/);
+    assert.match(String(summary?.productColor), /forest green/i);
+
+    // Sprint 2G Part 2: the refreshed summary flags what just changed so
+    // the UI can highlight it, without exposing internal impact detail.
+    const updatedSections = updated.messages.at(-1)?.metadata.updatedSections;
+    assert.deepEqual(updatedSections, ["productColor"]);
 
     // Still requires a fresh approval — editing does not auto-approve.
     assert.equal(updated.designBriefVersions.length, 0);
     assert.equal(updated.artworkVersions.length, 0);
   });
 
-  it("Continue collects additional notes and returns to the summary for approval", async () => {
+  it("Continue preserves uncertain free text as a note and returns to the summary for approval", async () => {
     const conversation = await freshConversation();
-    const { projectId } = await runScriptedInterview(conversation);
+    const { projectId } = await runAdaptiveInterviewToSummary(conversation);
 
     const continuing = await conversation.submitDesignBriefDecision(
       projectId,
@@ -242,7 +268,7 @@ describe("ConversationCapability — Design Summary approval gate", () => {
 
   it("rejects Edit or Continue outside the summary confirmation state", async () => {
     const conversation = await freshConversation();
-    const { projectId } = await runScriptedInterview(conversation);
+    const { projectId } = await runAdaptiveInterviewToSummary(conversation);
     await conversation.submitDesignBriefDecision(projectId, "approve");
 
     await assert.rejects(
@@ -252,6 +278,31 @@ describe("ConversationCapability — Design Summary approval gate", () => {
     await assert.rejects(
       () => conversation.submitDesignBriefDecision(projectId, "continue"),
       /Cannot continue the design brief/,
+    );
+  });
+
+  it("a historical project still sitting in a legacy ask_* phase keeps using the fixed ladder", async () => {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+
+    const repo = new LocalProjectRepository();
+    const created = await repo.createProject();
+    // Simulate a project that predates Sprint 2F, still on the scripted ladder.
+    await repo.updateConversationPhase(created.project.id, "ask_product");
+
+    const graph = getCapabilityGraph();
+    const afterReply = await graph.conversation.handleUserMessage(
+      created.project.id,
+      "A T-shirt for the school fair",
+    );
+
+    assert.equal(afterReply.conversation.phase, "ask_design");
+    assert.equal(
+      afterReply.brief.productSummary,
+      "A T-shirt for the school fair",
     );
   });
 });

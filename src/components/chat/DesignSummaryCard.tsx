@@ -14,9 +14,13 @@ const FIELD_LABELS: Array<[keyof DesignSummaryView, string]> = [
   ["product", "Product"],
   ["graphics", "Design Description"],
   ["productColor", "Product Color"],
+  ["printLocation", "Print Location"],
   ["requiredWording", "Required Wording"],
-  ["colors", "Preferred Colors"],
   ["style", "Style"],
+  ["colors", "Preferred Colors"],
+  ["audience", "Audience"],
+  ["purpose", "Purpose"],
+  ["exclusions", "Exclusions"],
   ["additionalNotes", "Additional Notes"],
 ];
 

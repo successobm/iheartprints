@@ -5,6 +5,7 @@ import type {
   DesignBriefSnapshotContent,
   DesignBriefVersion,
   DesignConversation,
+  InterviewStateData,
   MessageRole,
   PrintProject,
   ProjectSnapshot,
@@ -64,6 +65,15 @@ export interface ProjectRepository {
   updateConversationPhase(
     projectId: string,
     phase: ConversationPhase,
+  ): Promise<DesignConversation>;
+  /**
+   * Sprint 2F: persists adaptive interview bookkeeping (pending section, ask
+   * counts, dismissed advisories) separately from `phase` so a reload can
+   * resume the adaptive loop. Never used for Design Brief content.
+   */
+  updateConversationInterviewState(
+    projectId: string,
+    interviewState: InterviewStateData,
   ): Promise<DesignConversation>;
   addMessage(
     projectId: string,

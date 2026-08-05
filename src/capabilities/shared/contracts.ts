@@ -73,9 +73,18 @@ export interface BriefConflict {
   sections: BriefSectionKey[];
   message: string;
   severity: "info" | "warning" | "blocking";
+  /**
+   * Sprint 2F: stable identifier for the rule that produced this conflict
+   * (e.g. "color_clash"). Lets downstream layers (Design Intelligence,
+   * question phrasing) branch on a known rule instead of parsing `message`.
+   * Unrecognized/absent codes must fall back gracefully to `message`.
+   */
+  code?: string;
 }
 
 export interface DesignRecommendation {
+  /** Sprint 2F: stable id so an InterviewAct("advise") can reference it and track dismissal. */
+  id: string;
   kind:
     | "typography"
     | "contrast"
@@ -85,6 +94,7 @@ export interface DesignRecommendation {
     | "general";
   message: string;
   severity: "info" | "warning";
+  followUpSection?: BriefSectionKey;
 }
 
 export interface SectionEvaluation {
@@ -110,21 +120,48 @@ export interface IntelligenceAssessment {
  * fixes, never asks questions, and never generates anything.
  */
 
+/**
+ * Sprint 2F: how much a section matters to this interview, per
+ * `InterviewCoveragePolicy`.
+ *   - "required"   — must be provided (or, for requiredWording, explicitly
+ *                    none). Cannot be deferred. Blocks summary/approval.
+ *   - "high_value" — materially affects concept quality; must be provided
+ *                    or explicitly deferred before summary, but deferral is
+ *                    always available.
+ *   - "optional"   — never gates summary/approval either way.
+ */
+export type SectionRequirementTier = "required" | "high_value" | "optional";
+
+/**
+ * Sprint 2F: how a section actually got resolved, distinct from whether it
+ * has a concrete value. A deferred section has no content but is not
+ * "missing" in the sense of blocking further progress.
+ */
+export type SectionResolution =
+  | "provided"
+  | "deferred_to_designer"
+  | "not_applicable"
+  | "unknown";
+
 /** Per-section objective evaluation. `confidence` is 0-100 and is orthogonal
  * to `known` — a section can be known with low confidence (vague wording). */
 export interface BriefSectionEvaluation {
   section: BriefSectionKey;
-  /** Customer has provided something for this section, however vague. */
+  tier: SectionRequirementTier;
+  resolution: SectionResolution;
+  /** tier !== "required" — deferral is never allowed for required sections. */
+  deferrable: boolean;
+  /** resolution === "provided". Customer has given content, however vague. */
   known: boolean;
-  /** Convenience negation of `known`, kept explicit per the evaluation model. */
+  /** resolution === "unknown". Nothing provided and nothing deferred either. */
   missing: boolean;
-  /** True when the section is not required for summary/approval readiness. */
+  /** tier === "optional". Kept alongside `tier` for simpler call sites. */
   optional: boolean;
-  /** True when this section being missing blocks summary/approval readiness. */
+  /** tier === "required". Kept alongside `tier` for simpler call sites. */
   blocking: boolean;
-  /** True when known but phrased too vaguely to act on with confidence. */
+  /** True when provided but phrased too vaguely to act on with confidence. */
   ambiguous: boolean;
-  /** 0-100. 0 when missing. Independent of completeness. */
+  /** 0-100. 0 when not provided. Independent of completeness. */
   confidence: number;
   /** Machine-facing rationale; never customer-facing prose. */
   reason: string;
@@ -163,30 +200,39 @@ export interface BriefEvaluation {
   approvalReadiness: ApprovalReadiness;
 }
 
-export type InterviewActType =
-  | "ask"
-  | "clarify"
-  | "advise"
-  | "summarize"
-  | "request_approval"
-  | "generate_concepts"
-  | "acknowledge"
-  | "await_customer";
+/**
+ * Interview Intelligence output (Sprint 2F) — one primary act per turn,
+ * derived from `BriefEvaluation` + `IntelligenceAssessment` rather than a
+ * fixed phase ladder. Concept generation is never triggered by this act —
+ * it only happens after an explicit customer approval of the Design Summary
+ * (Sprint 2D gate, unchanged).
+ */
+export type InterviewAct =
+  | { type: "ask"; section: BriefSectionKey; message: string }
+  | { type: "clarify"; section: BriefSectionKey; message: string }
+  | {
+      type: "advise";
+      findingId: string;
+      message: string;
+      followUpSection?: BriefSectionKey;
+    }
+  | { type: "summarize" }
+  | { type: "await_customer" };
+
+export type InterviewActType = InterviewAct["type"];
 
 /**
- * Interview Intelligence output — one primary act per turn.
- * Sprint 1 bridge field (`nextPhase`) preserves linear behavior. Concept
- * generation is never triggered directly by this act (Sprint 2D) — it only
- * happens after an explicit customer approval of the Design Summary.
+ * Sprint 2F: recent conversation context Interview Intelligence needs to
+ * avoid repeating itself, without inspecting the Design Brief or
+ * Conversation directly.
  */
-export interface InterviewAct {
-  type: InterviewActType;
-  /** Customer-facing assistant message, when applicable. */
-  message?: string;
-  /** Highest-value brief section this act targets, when applicable. */
-  targetSection?: BriefSectionKey;
-  /** Sprint 1: next conversation phase after this act. */
-  nextPhase?: ConversationPhase;
+export interface InterviewContext {
+  /** The section most recently asked/clarified, if any. */
+  pendingSection: BriefSectionKey | null;
+  /** How many times each section has been asked/clarified this session. */
+  askCounts: Partial<Record<BriefSectionKey, number>>;
+  /** DesignRecommendation ids already surfaced as an "advise" act. */
+  dismissedAdvisories: string[];
 }
 
 export type OwnershipClass =
@@ -214,6 +260,44 @@ export interface ProductionFinding {
   plainLanguage: string;
 }
 
+/**
+ * Sprint 2G Part 2: stable identifier for a Product Intelligence rule pack.
+ * Lets Revision Intelligence say "these rule packs are affected" without
+ * depending on ProductIntelligenceCapability itself — both it and
+ * ProductIntelligenceCapability read the same dependency table from
+ * `shared/product-rule-packs`.
+ */
+export type ProductionRulePackId =
+  | "small_placement_long_wording"
+  | "small_placement_dense_graphics"
+  | "full_placement_wall_of_text";
+
+/**
+ * Revision Intelligence output (Sprint 2G Part 2) — the impact of a Design
+ * Brief change (previous → updated), provider-neutral and free of UI/
+ * implementation detail. Produced by comparing two brief snapshots only;
+ * consumed by Product Intelligence (selective rule-pack routing), Design
+ * Intelligence, Interview Intelligence, Design Summary, and Concept
+ * Generation. Never mutates the brief and never decides *what* changed —
+ * only what that change means downstream.
+ */
+export interface RevisionImpact {
+  /** Brief sections whose value differs between the two snapshots (a section newly deferred or un-deferred also counts). */
+  changedSections: BriefSectionKey[];
+  /** Product Intelligence rule packs whose dependencies overlap `changedSections`. */
+  affectedRulePacks: ProductionRulePackId[];
+  /** Whether Brief Evaluation / Design Intelligence should recompute at all. */
+  needsReevaluation: boolean;
+  /** Whether a presented Design Summary (pre-approval) should be regenerated. */
+  needsSummaryRefresh: boolean;
+  /** Whether new Design Intelligence recommendations may now exist. */
+  needsNewRecommendations: boolean;
+  /** Whether already-generated concepts no longer represent the brief. */
+  needsConceptRegeneration: boolean;
+  /** True when nothing actually changed (e.g. a reply that restated the same value). */
+  isNoOp: boolean;
+}
+
 export interface DesignSummaryView {
   product?: string | null;
   audience?: string | null;
@@ -225,6 +309,8 @@ export interface DesignSummaryView {
   printLocation?: string | null;
   requiredWording?: string | null;
   references?: string | null;
+  /** Sprint 2F. */
+  exclusions?: string | null;
   productionConsiderations?: string | null;
   additionalNotes?: string | null;
 }

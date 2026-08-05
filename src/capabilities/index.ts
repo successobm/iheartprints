@@ -14,6 +14,7 @@ export type { DesignBriefCapability } from "./design-brief";
 export type { BriefEvaluationCapability } from "./brief-evaluation";
 export type { DesignIntelligenceCapability } from "./design-intelligence";
 export type { InterviewIntelligenceCapability } from "./interview-intelligence";
+export type { RevisionIntelligenceCapability } from "./revision-intelligence";
 export type { ProductIntelligenceCapability } from "./product-intelligence";
 export type { DesignSummaryCapability } from "./design-summary";
 export type { ConceptGenerationCapability } from "./concept-generation";

@@ -1,3 +1,5 @@
+import { deriveRequiredWording } from "@/lib/domain/required-wording";
+import { printPlacementLabel } from "@/lib/domain/print-placement";
 import type { TShirtDesignBrief } from "@/lib/domain/types";
 import type {
   BriefEvaluation,
@@ -10,19 +12,14 @@ import type {
  * Consumes the Design Brief and its Brief Evaluation. Nothing else creates
  * or formats summaries.
  *
- * Constitutional rule: never display a field the interview did not actually
- * collect. The Sprint 1 script only gathers product, design description,
- * shirt color, and required wording — plus whatever the customer volunteers
- * via Edit/Continue (stored as additional notes). Audience, purpose,
- * references, production considerations, and print location are NOT asked by
- * the current script, so they are intentionally omitted rather than shown as
- * blank or invented placeholders.
- *
- * Sprint 2E: which fields are known is now read from BriefEvaluation's
- * per-section `known` flag (BriefEvaluationCapability is the single source
- * of truth for that determination) instead of duplicating each field's
- * presence check here. The rendered values and their inclusion rules are
- * unchanged — this only removes duplicated "is this field present" logic.
+ * Constitutional rule: never display a field the customer didn't actually
+ * resolve. Sprint 2E/2F: "resolved" now includes explicit deferral, not
+ * only a concrete value — BriefEvaluation's per-section `resolution` (not
+ * ad hoc presence checks here) is the single source of truth for whether a
+ * section shows up at all. A deferred section renders as a short,
+ * customer-friendly note instead of the raw value it doesn't have.
+ * Optional sections that were never resolved are omitted entirely — the
+ * summary never shows a blank or invented placeholder.
  */
 export interface DesignSummaryCapability {
   createSummary(
@@ -36,43 +33,81 @@ const FIELD_LABELS: Array<[keyof DesignSummaryView, string]> = [
   ["product", "Product"],
   ["graphics", "Design Description"],
   ["productColor", "Product Color"],
+  ["printLocation", "Print Location"],
   ["requiredWording", "Required Wording"],
-  ["colors", "Preferred Colors"],
   ["style", "Style"],
+  ["colors", "Preferred Colors"],
+  ["audience", "Audience"],
+  ["purpose", "Purpose"],
+  ["exclusions", "Exclusions"],
   ["additionalNotes", "Additional Notes"],
 ];
+
+/**
+ * Short, friendly copy for a section the customer explicitly deferred to
+ * the designer's judgment. Never displayed for a required section — those
+ * cannot be deferred (see InterviewCoveragePolicy), so this map only needs
+ * entries for the deferrable high-value sections.
+ */
+const DEFERRED_COPY: Partial<Record<BriefSectionKey, string>> = {
+  purpose: "Left to our designer's judgment",
+  audience: "Left to our designer's judgment",
+  style: "We'll choose a style that fits the rest of the brief",
+  colors: "We'll choose colors that work well with the shirt",
+  printLocation: "We'll choose the placement that works best",
+};
 
 export function createDesignSummaryCapability(): DesignSummaryCapability {
   return {
     createSummary(brief, evaluation) {
-      const known = knownSections(evaluation);
+      const resolution = sectionResolutions(evaluation);
       const summary: DesignSummaryView = {};
 
-      if (known.has("product") && brief.productSummary?.trim()) {
-        summary.product = brief.productSummary.trim();
-      }
-      if (known.has("graphics") && brief.designDescription?.trim()) {
-        summary.graphics = brief.designDescription.trim();
-      }
-      if (known.has("productColor") && brief.shirtColor?.trim()) {
-        summary.productColor = brief.shirtColor.trim();
-      }
-      if (known.has("requiredWording") && brief.exactText !== null) {
-        const trimmed = brief.exactText.trim();
-        summary.requiredWording = trimmed.length > 0 ? trimmed : "None";
-      }
-      if (known.has("style") && brief.designStyle?.trim()) {
-        summary.style = brief.designStyle.trim();
-      }
-      if (known.has("colors") && brief.preferredColors.length > 0) {
-        summary.colors = brief.preferredColors.join(", ");
-      }
-      if (known.has("additionalNotes") && brief.additionalInstructions?.trim()) {
-        summary.additionalNotes = brief.additionalInstructions.trim();
+      const setIfResolved = (
+        section: BriefSectionKey,
+        key: keyof DesignSummaryView,
+        value: string | null | undefined,
+      ) => {
+        const state = resolution.get(section);
+        if (state === "provided" && value?.trim()) {
+          summary[key] = value.trim();
+        } else if (state === "deferred_to_designer" && DEFERRED_COPY[section]) {
+          summary[key] = DEFERRED_COPY[section];
+        }
+      };
+
+      setIfResolved("product", "product", brief.productSummary);
+      setIfResolved("graphics", "graphics", brief.designDescription);
+      setIfResolved("productColor", "productColor", brief.shirtColor);
+      setIfResolved(
+        "printLocation",
+        "printLocation",
+        printPlacementLabel(brief.printPlacement),
+      );
+      setIfResolved("style", "style", brief.designStyle);
+      setIfResolved(
+        "colors",
+        "colors",
+        brief.preferredColors.length > 0 ? brief.preferredColors.join(", ") : null,
+      );
+      setIfResolved("audience", "audience", brief.audience);
+      setIfResolved("purpose", "purpose", brief.purpose);
+      setIfResolved("exclusions", "exclusions", brief.exclusions);
+      setIfResolved(
+        "additionalNotes",
+        "additionalNotes",
+        brief.additionalInstructions,
+      );
+
+      // Required wording keeps its own rule: "" is a resolved, deliberate
+      // "None" answer, not blank content to filter out.
+      if (resolution.get("requiredWording") === "provided") {
+        const wording = deriveRequiredWording(brief);
+        summary.requiredWording = wording.mode === "none" ? "None" : wording.text ?? "None";
       }
 
-      // Intentionally not populated by the current scripted interview:
-      // audience, purpose, references, productionConsiderations, printLocation.
+      // Intentionally never populated: references, production
+      // considerations — not yet gathered by this workflow.
       return summary;
     },
 
@@ -94,10 +129,8 @@ export function createDesignSummaryCapability(): DesignSummaryCapability {
   };
 }
 
-function knownSections(evaluation: BriefEvaluation): Set<BriefSectionKey> {
-  return new Set(
-    evaluation.sections
-      .filter((section) => section.known)
-      .map((section) => section.section),
-  );
+function sectionResolutions(
+  evaluation: BriefEvaluation,
+): Map<BriefSectionKey, BriefEvaluation["sections"][number]["resolution"]> {
+  return new Map(evaluation.sections.map((s) => [s.section, s.resolution]));
 }

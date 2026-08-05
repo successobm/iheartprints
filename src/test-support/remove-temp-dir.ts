@@ -6,9 +6,15 @@ import { rm } from "node:fs/promises";
  * codes with short exponential backoff — never swallow a persistent failure.
  */
 const RETRYABLE_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
-const MAX_ATTEMPTS = 10;
-const INITIAL_DELAY_MS = 15;
-const MAX_DELAY_MS = 100;
+// Sprint 2F's adaptive interview — and Sprint 2G Part 2's revision loop on
+// top of it — drive many more read/write cycles per test (each turn
+// rewrites the whole local JSON store several times), which made the
+// original, tighter retry budget insufficient against transient Windows
+// locks (AV scanners, indexing) on the temp directory right after a test
+// finishes writing to it.
+const MAX_ATTEMPTS = 40;
+const INITIAL_DELAY_MS = 25;
+const MAX_DELAY_MS = 600;
 
 function isRetryable(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;

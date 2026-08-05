@@ -100,6 +100,10 @@ function toSnapshotContent(
     preferredColors: [...brief.preferredColors],
     designStyle: brief.designStyle,
     additionalInstructions: brief.additionalInstructions,
+    audience: brief.audience,
+    purpose: brief.purpose,
+    exclusions: brief.exclusions,
+    deferredSections: [...brief.deferredSections],
   };
 }
 

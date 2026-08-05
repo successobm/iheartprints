@@ -221,17 +221,35 @@ export function ChatApp() {
         return "What would you like to change?";
       case "continue_requested":
         return "Anything else the designer should know?";
+      case "interviewing":
+        // Sprint 2F: the adaptive engine's actual question is shown in the
+        // transcript above; the composer placeholder stays generic.
+        return "Message iHeartPrints...";
       default:
         return "Message iHeartPrints...";
     }
   }, [isClient, loading, phase]);
 
+  // Sprint 2G Part 2: a post-approval revision can regenerate concepts,
+  // adding a newer batch alongside the old one (never deleting history —
+  // Constitution §6.11). Only the batch tied to the most recently approved
+  // Design Brief version is "current" and shown to the customer.
+  const latestApprovedVersionId = snapshot?.designBriefVersions.at(-1)?.id ?? null;
+  const currentArtworkVersions =
+    snapshot?.artworkVersions.filter(
+      (version) => version.designBriefVersionId === latestApprovedVersionId,
+    ) ?? [];
+
   const showConcepts =
     !!snapshot &&
-    snapshot.artworkVersions.length > 0 &&
+    currentArtworkVersions.length > 0 &&
     (phase === "concepts_ready" ||
       phase === "ask_revisions" ||
       phase === "revision_received");
+
+  const lastConceptsReadyMessageId = [...(snapshot?.messages ?? [])]
+    .reverse()
+    .find((message) => message.metadata?.phase === "concepts_ready")?.id;
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
@@ -279,9 +297,10 @@ export function ChatApp() {
                   <MessageBubble message={message} />
                   {message.role === "assistant" &&
                   message.metadata?.phase === "concepts_ready" &&
+                  message.id === lastConceptsReadyMessageId &&
                   showConcepts ? (
                     <ConceptCards
-                      concepts={snapshot.artworkVersions}
+                      concepts={currentArtworkVersions}
                       selectedId={snapshot.project.selectedArtworkVersionId}
                       selectable={phase === "concepts_ready"}
                       busy={sending}

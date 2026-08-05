@@ -1,65 +1,128 @@
 import type { TShirtDesignBrief } from "@/lib/domain/types";
 import type { ProductIntelligenceCapability } from "@/capabilities/product-intelligence";
+import { contradictionMessage } from "@/capabilities/shared/question-phrasing";
 import type {
   BriefEvaluation,
+  DesignRecommendation,
   IntelligenceAssessment,
+  RevisionImpact,
   SectionConfidence,
   SectionEvaluation,
 } from "@/capabilities/shared/contracts";
 
 /**
- * Design Intelligence (Sprint 2E).
+ * Design Intelligence (Sprint 2E: consumes BriefEvaluation instead of
+ * recomputing it; Sprint 2F: turns non-blocking contradictions into real,
+ * thin recommendation objects; Sprint 2G Part 2: consumes RevisionImpact to
+ * run only the affected Product Intelligence rule packs).
  *
- * Sprint 2E moved objective evaluation (known/missing/ambiguity/
- * contradictions/confidence) out of this capability and into
- * BriefEvaluationCapability. Design Intelligence now consumes that
- * evaluation rather than recomputing it, and focuses on what remains its
- * job: design quality, production reasoning, and recommendation objects.
- * It still never asks questions and never generates concepts.
+ * Focuses on what remains its job after Sprint 2E moved objective
+ * evaluation out: design quality, production reasoning, and preparing
+ * recommendation objects. Still never asks questions and never generates
+ * concepts — Interview Intelligence decides whether/when to surface a
+ * recommendation as an "advise" act.
  */
 export interface DesignIntelligenceCapability {
   /**
-   * Evaluate the working brief. Never asks questions. Never generates concepts.
-   * Takes the raw brief only for production-intelligence reasoning
-   * (garment, placement, method) — completeness/confidence/ambiguity come
-   * from the supplied BriefEvaluation, not recomputed here.
+   * Evaluate the working brief. Never asks questions. Never generates
+   * concepts. Takes the raw brief only for production-intelligence
+   * reasoning (garment, placement, method) — completeness/confidence/
+   * ambiguity/contradictions come from the supplied BriefEvaluation.
+   *
+   * `impact`, when supplied, scopes Product Intelligence to only the rule
+   * packs `impact.affectedRulePacks` names — "do not recompute everything,
+   * only evaluate affected reasoning." Omitted (e.g. no prior brief to
+   * diff against yet) means every rule pack runs, which is also correct:
+   * BriefEvaluation itself is always fully recomputed regardless — it is
+   * cheap and needs the whole brief to determine section resolution
+   * either way, so selective evaluation applies only to Product
+   * Intelligence's rule packs, per this sprint's Rule Pack Runner.
    */
   assess(
     brief: TShirtDesignBrief,
     evaluation: BriefEvaluation,
+    impact?: RevisionImpact,
   ): IntelligenceAssessment;
 }
 
-/**
- * Sprint 2C produced a neutral assessment so the call path exists. Sprint 2E
- * makes it a thin consumer of BriefEvaluation: readiness still ignores the
- * evaluation for now (Interview Intelligence still follows the Sprint 1
- * linear script) — that wiring is scoped to a future sprint.
- */
 export function createDesignIntelligenceCapability(
   productIntelligence: ProductIntelligenceCapability,
 ): DesignIntelligenceCapability {
   return {
-    assess(brief, evaluation) {
-      const productionFindings = productIntelligence.evaluateBrief(brief);
+    assess(brief, evaluation, impact) {
+      const productionFindings = productIntelligence.evaluateBrief(
+        brief,
+        impact?.affectedRulePacks,
+      );
+      const productionRecommendations: DesignRecommendation[] = productionFindings.map(
+        (finding) => ({
+          id: `production:${finding.code}`,
+          kind: "production" as const,
+          message: finding.plainLanguage,
+          // DesignRecommendation only distinguishes info/warning — both
+          // ProductionFinding's "warning" and "blocking" map to "warning"
+          // here (still soft, dismissible advice; see this capability's
+          // module doc). "info" findings stay "info" and are never
+          // surfaced as an Interview Intelligence "advise" act.
+          severity: finding.severity === "info" ? "info" : "warning",
+          followUpSection: followUpSectionForProductionCode(finding.code),
+        }),
+      );
+
+      // Blocking contradictions become an Interview Intelligence "clarify"
+      // act directly from `evaluation.contradictions` — surfacing them here
+      // too would be a second, redundant channel for the same issue.
+      const contradictionRecommendations: DesignRecommendation[] = evaluation.contradictions
+        .filter((conflict) => conflict.severity !== "blocking")
+        .map((conflict) => ({
+          id: `contradiction:${conflict.code ?? conflict.sections.join(",")}`,
+          kind: recommendationKindForCode(conflict.code),
+          message: contradictionMessage(conflict),
+          severity: "warning" as const,
+          followUpSection: conflict.sections[0],
+        }));
 
       return {
         sections: toSectionEvaluations(evaluation),
         ambiguities: evaluation.ambiguities,
         conflicts: evaluation.contradictions,
-        recommendations: productionFindings.map((finding) => ({
-          kind: "production" as const,
-          message: finding.plainLanguage,
-          severity: finding.severity === "blocking" ? "warning" : "info",
-        })),
-        // Sprint 1/2D do not gate on readiness — keep continue_interview
-        // always. evaluation.summaryReadiness / approvalReadiness carry the
-        // real signal for a future adaptive-interview sprint.
-        readiness: "continue_interview",
+        recommendations: [...productionRecommendations, ...contradictionRecommendations],
+        readiness: evaluation.approvalReadiness.ready
+          ? "ready_to_request_approval"
+          : evaluation.summaryReadiness.ready
+            ? "ready_to_summarize"
+            : "continue_interview",
         overallConfidence: numericToSectionConfidence(evaluation.overall.confidence),
       };
     },
   };
+}
+
+function followUpSectionForProductionCode(
+  code: string,
+): DesignRecommendation["followUpSection"] {
+  switch (code) {
+    case "small_placement_long_wording":
+    case "full_placement_wall_of_text":
+      return "requiredWording";
+    case "small_placement_dense_graphics":
+      return "graphics";
+    default:
+      return undefined;
+  }
+}
+
+function recommendationKindForCode(code?: string): DesignRecommendation["kind"] {
+  switch (code) {
+    case "color_clash":
+      return "color";
+    case "minimalist_wording_clash":
+      return "typography";
+    case "minimalist_graphics_clash":
+      return "layout";
+    default:
+      return "general";
+  }
 }
 
 function toSectionEvaluations(evaluation: BriefEvaluation): SectionEvaluation[] {

@@ -14,6 +14,8 @@ export const PROJECT_STATUSES = [
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 
 export const CONVERSATION_PHASES = [
+  // Legacy Sprint 1 scripted ladder. No longer used by new projects
+  // (Sprint 2F), but preserved so historical rows remain readable/resumable.
   "ask_product",
   "ask_design",
   "ask_shirt_color",
@@ -28,6 +30,11 @@ export const CONVERSATION_PHASES = [
   "brief_approved",
   "edit_requested",
   "continue_requested",
+  // Sprint 2F: single adaptive interview lifecycle phase. Replaces the
+  // ask_* ladder as the source of truth for new projects — the specific
+  // pending question lives in `interviewState`, not in a dedicated phase
+  // value per field.
+  "interviewing",
 ] as const;
 
 export type ConversationPhase = (typeof CONVERSATION_PHASES)[number];
@@ -60,19 +67,66 @@ export interface TShirtDesignBrief {
   designDescription: string | null;
   exactText: string | null;
   shirtColor: string | null;
-  printPlacement: PrintPlacement;
+  /**
+   * Sprint 2F: nullable. `null` means the customer has never confirmed a
+   * print location — it is no longer defaulted to "full_front" at creation,
+   * since that default was previously indistinguishable from a real answer.
+   */
+  printPlacement: PrintPlacement | null;
   intendedPrintWidthIn: number | null;
   preferredColors: string[];
   designStyle: string | null;
   additionalInstructions: string | null;
+  /** Sprint 2F additions — additive, nullable, no historical backfill needed. */
+  audience: string | null;
+  purpose: string | null;
+  exclusions: string | null;
+  /**
+   * Section keys (loosely typed as `string` here to avoid a domain →
+   * capabilities import cycle; narrowed to `BriefSectionKey` at the
+   * capability boundary) the customer explicitly deferred to the designer's
+   * judgment, e.g. "you choose" in reply to a style question.
+   */
+  deferredSections: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Sprint 2F: per-conversation adaptive interview bookkeeping. Never used as
+ * Design Brief content — purely interview UX state (which section is
+ * pending, how many times it has been asked, which advisories have already
+ * been surfaced) so a reload can resume the adaptive loop without repeating
+ * itself. `pendingSection` is loosely typed as `string` for the same reason
+ * as `TShirtDesignBrief.deferredSections`.
+ */
+export interface InterviewStateData {
+  pendingSection: string | null;
+  askCounts: Record<string, number>;
+  dismissedAdvisories: string[];
+  /**
+   * Sprint 2G Part 2: true right after a post-approval revision marked the
+   * existing concepts stale and asked the customer whether to regenerate
+   * them — so the *next* reply is interpreted as a yes/no answer to that
+   * question rather than another open-ended revision.
+   */
+  awaitingConceptRegenerationConfirmation: boolean;
+}
+
+export function emptyInterviewState(): InterviewStateData {
+  return {
+    pendingSection: null,
+    askCounts: {},
+    dismissedAdvisories: [],
+    awaitingConceptRegenerationConfirmation: false,
+  };
 }
 
 export interface DesignConversation {
   id: string;
   projectId: string;
   phase: ConversationPhase;
+  interviewState: InterviewStateData;
   createdAt: string;
   updatedAt: string;
 }
@@ -112,10 +166,14 @@ export interface DesignBriefSnapshotContent {
   designDescription: string | null;
   exactText: string | null;
   shirtColor: string | null;
-  printPlacement: PrintPlacement;
+  printPlacement: PrintPlacement | null;
   preferredColors: string[];
   designStyle: string | null;
   additionalInstructions: string | null;
+  audience: string | null;
+  purpose: string | null;
+  exclusions: string | null;
+  deferredSections: string[];
 }
 
 export type DesignBriefVersionStatus = "draft" | "approved" | "superseded";

@@ -6,12 +6,14 @@ import {
   OPENING_PROMPT,
   projectNameFromBrief,
 } from "@/lib/domain/conversation";
+import { emptyInterviewState } from "@/lib/domain/types";
 import type {
   ArtworkVersion,
   ConversationMessage,
   ConversationPhase,
   DesignBriefVersion,
   DesignConversation,
+  InterviewStateData,
   PrintProject,
   ProjectSnapshot,
   ProjectStatus,
@@ -56,12 +58,29 @@ async function readDb(): Promise<LocalDatabase> {
   try {
     const raw = await fs.readFile(DATA_FILE, "utf8");
     const parsed = JSON.parse(raw) as Partial<LocalDatabase>;
-    // Normalize Sprint 1 local JSON that predates design_brief_versions /
-    // artwork designBriefVersionId so resume does not crash.
+    // Normalize Sprint 1/2D local JSON that predates design_brief_versions /
+    // artwork designBriefVersionId / Sprint 2F brief fields / interview
+    // state so resume does not crash on older on-disk data.
     return {
       projects: parsed.projects ?? [],
-      briefs: parsed.briefs ?? [],
-      conversations: parsed.conversations ?? [],
+      briefs: (parsed.briefs ?? []).map((brief) => ({
+        ...brief,
+        audience: brief.audience ?? null,
+        purpose: brief.purpose ?? null,
+        exclusions: brief.exclusions ?? null,
+        deferredSections: brief.deferredSections ?? [],
+      })),
+      conversations: (parsed.conversations ?? []).map((conversation) => ({
+        ...conversation,
+        // Spread onto the full default shape (not just `??`) so a partial
+        // interviewState from before a new field existed (e.g. Sprint 2G's
+        // awaitingConceptRegenerationConfirmation) still gets a default
+        // instead of ending up `undefined`.
+        interviewState: {
+          ...emptyInterviewState(),
+          ...conversation.interviewState,
+        },
+      })),
       messages: parsed.messages ?? [],
       artworkVersions: (parsed.artworkVersions ?? []).map((artwork) => ({
         ...artwork,
@@ -132,19 +151,32 @@ export class LocalProjectRepository implements ProjectRepository {
       designDescription: null,
       exactText: null,
       shirtColor: null,
-      printPlacement: "full_front",
+      // Sprint 2F: unset until the customer actually confirms a location —
+      // no longer defaulted to "full_front" at creation.
+      printPlacement: null,
       intendedPrintWidthIn: null,
       preferredColors: [],
       designStyle: null,
       additionalInstructions: null,
+      audience: null,
+      purpose: null,
+      exclusions: null,
+      deferredSections: [],
       createdAt: timestamp,
       updatedAt: timestamp,
     };
 
+    // Sprint 2F: new projects start in the adaptive interview lifecycle.
+    // "product" is always the first question — nothing can be known yet.
     const conversation: DesignConversation = {
       id: conversationId,
       projectId,
-      phase: "ask_product",
+      phase: "interviewing",
+      interviewState: {
+        ...emptyInterviewState(),
+        pendingSection: "product",
+        askCounts: { product: 1 },
+      },
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -155,7 +187,7 @@ export class LocalProjectRepository implements ProjectRepository {
       projectId,
       role: "assistant",
       content: OPENING_PROMPT,
-      metadata: { phase: "ask_product" },
+      metadata: { phase: "interviewing", act: "ask", section: "product" },
       createdAt: timestamp,
     };
 
@@ -228,6 +260,22 @@ export class LocalProjectRepository implements ProjectRepository {
     if (!conversation) throw new Error("Conversation not found");
 
     conversation.phase = phase;
+    conversation.updatedAt = nowIso();
+    await writeDb(db);
+    return conversation;
+  }
+
+  async updateConversationInterviewState(
+    projectId: string,
+    interviewState: InterviewStateData,
+  ): Promise<DesignConversation> {
+    const db = await readDb();
+    const conversation = db.conversations.find(
+      (item) => item.projectId === projectId,
+    );
+    if (!conversation) throw new Error("Conversation not found");
+
+    conversation.interviewState = interviewState;
     conversation.updatedAt = nowIso();
     await writeDb(db);
     return conversation;

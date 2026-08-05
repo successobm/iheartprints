@@ -1,25 +1,34 @@
+import { deriveRequiredWording } from "@/lib/domain/required-wording";
+import { printPlacementLabel } from "@/lib/domain/print-placement";
 import type { TShirtDesignBrief } from "@/lib/domain/types";
 import type {
   BriefConflict,
   BriefEvaluation,
   BriefSectionEvaluation,
   BriefSectionKey,
+  SectionRequirementTier,
+  SectionResolution,
 } from "@/capabilities/shared/contracts";
+import {
+  ALL_SECTIONS_IN_POLICY_ORDER,
+  tierOf,
+} from "@/capabilities/shared/interview-coverage-policy";
 
 /**
- * Brief Evaluation Engine (Sprint 2E).
+ * Brief Evaluation Engine (Sprint 2E, tiered policy Sprint 2F).
  *
  * The objective evaluation layer between the Design Brief and Design
  * Intelligence. It answers one question only: "what do we objectively know
- * about this design?"
+ * about this design, and how has each part of it been resolved?" It never
+ * recommends fixes, never asks questions, and never generates anything —
+ * that judgment belongs to Design Intelligence, Interview Intelligence, and
+ * Concept Generation respectively.
  *
- * It does NOT recommend improvements, does NOT ask interview questions, and
- * does NOT generate concepts — that judgment belongs to Design Intelligence,
- * Interview Intelligence, and Concept Generation respectively.
- *
- * Deterministic and provider-independent: the same brief always produces the
- * same evaluation. Consumes only `TShirtDesignBrief` data — no Conversation,
- * no providers, no UI, no persistence.
+ * Deterministic and provider-independent: the same brief always produces
+ * the same evaluation. Consumes only `TShirtDesignBrief` data (including
+ * its own `deferredSections` — an explicit customer decision that lives on
+ * the brief, not the conversation) — no Conversation, no providers, no UI,
+ * no persistence.
  */
 export interface BriefEvaluationCapability {
   evaluate(brief: TShirtDesignBrief): BriefEvaluation;
@@ -28,8 +37,9 @@ export interface BriefEvaluationCapability {
 export function createBriefEvaluationCapability(): BriefEvaluationCapability {
   return {
     evaluate(brief) {
-      const sections = SECTION_DEFINITIONS.map((definition) =>
-        evaluateSection(brief, definition),
+      const deferredSet = new Set(brief.deferredSections);
+      const sections = ALL_SECTIONS_IN_POLICY_ORDER.map((section) =>
+        evaluateSection(brief, section, deferredSet),
       );
       const contradictions = detectContradictions(brief);
 
@@ -40,28 +50,37 @@ export function createBriefEvaluationCapability(): BriefEvaluationCapability {
           message: section.reason,
         }));
 
-      const knownSections = sections.filter((section) => section.known);
-      const missingSections = sections.filter((section) => section.missing);
-      const blockingSections = sections.filter((section) => section.blocking);
-      const blockingMissingSections = sections.filter(
-        (section) => section.blocking && section.missing,
+      const knownSections = sections.filter((s) => s.resolution === "provided");
+      const missingSections = sections.filter((s) => s.resolution === "unknown");
+      const blockingSections = sections.filter((s) => s.blocking);
+
+      const unresolvedRequired = sections.filter(
+        (s) => s.tier === "required" && s.resolution === "unknown",
+      );
+      const unresolvedHighValue = sections.filter(
+        (s) => s.tier === "high_value" && s.resolution === "unknown",
       );
 
       const completeness = Math.round(
-        (knownSections.length / sections.length) * 100,
+        (sections.filter((s) => s.resolution !== "unknown").length /
+          sections.length) *
+          100,
       );
       const confidence = knownSections.length
         ? Math.round(
-            knownSections.reduce((sum, section) => sum + section.confidence, 0) /
+            knownSections.reduce((sum, s) => sum + s.confidence, 0) /
               knownSections.length,
           )
         : 0;
 
-      const summaryReady = blockingMissingSections.length === 0;
+      const summaryReady =
+        unresolvedRequired.length === 0 && unresolvedHighValue.length === 0;
       const blockingContradictions = contradictions.filter(
-        (contradiction) => contradiction.severity === "blocking",
+        (c) => c.severity === "blocking",
       );
       const approvalReady = summaryReady && blockingContradictions.length === 0;
+
+      const unresolvedForSummary = [...unresolvedRequired, ...unresolvedHighValue];
 
       return {
         sections,
@@ -77,25 +96,19 @@ export function createBriefEvaluationCapability(): BriefEvaluationCapability {
         summaryReadiness: {
           ready: summaryReady,
           reason: summaryReady
-            ? "All required sections have been provided."
-            : `Missing required information: ${blockingMissingSections
-                .map((section) => section.section)
-                .join(", ")}.`,
+            ? "All required and high-value sections are resolved (provided or explicitly deferred)."
+            : `Still needed: ${unresolvedForSummary.map((s) => s.section).join(", ")}.`,
         },
         approvalReadiness: {
           ready: approvalReady,
-          blockingSections: blockingMissingSections.map(
-            (section) => section.section,
-          ),
+          blockingSections: unresolvedRequired.map((s) => s.section),
           reason: !summaryReady
-            ? `Missing required information: ${blockingMissingSections
-                .map((section) => section.section)
-                .join(", ")}.`
+            ? `Still needed: ${unresolvedForSummary.map((s) => s.section).join(", ")}.`
             : blockingContradictions.length > 0
               ? `Unresolved contradictions: ${blockingContradictions
-                  .map((contradiction) => contradiction.message)
+                  .map((c) => c.message)
                   .join(" ")}`
-              : "All required sections are known and no blocking contradictions were found.",
+              : "All required sections are resolved and no blocking contradictions were found.",
         },
       };
     },
@@ -106,170 +119,143 @@ export function createBriefEvaluationCapability(): BriefEvaluationCapability {
 /* Section evaluation                                                  */
 /* ------------------------------------------------------------------ */
 
-interface SectionDefinition {
-  section: BriefSectionKey;
-  optional: boolean;
-  /**
-   * Extracts the raw customer-provided value for this section, or `null`
-   * when the current Design Brief data model / scripted interview does not
-   * yet gather it at all (structurally missing, independent of brief content).
-   */
-  getValue: (brief: TShirtDesignBrief) => string | null;
-  /** Overrides the generic reason text when the section is missing. */
-  missingReason?: string;
-}
+const NOT_YET_ASKED_REASON = "Not yet asked by the current Design Interview.";
+const NO_DATA_MODEL_REASON =
+  "Not yet gathered by the current Design Brief data model.";
+const DEFERRED_REASON = "Customer explicitly left this to the designer's judgment.";
 
-const NOT_YET_GATHERED_REASON =
-  "Not yet asked by the current Design Interview.";
+/** Sections with no backing TShirtDesignBrief field yet — always unresolved. */
+const NO_FIELD_SECTIONS = new Set<BriefSectionKey>([
+  "references",
+  "production",
+  "layoutPreference",
+]);
 
-const SECTION_DEFINITIONS: SectionDefinition[] = [
-  {
-    section: "product",
-    optional: false,
-    getValue: (brief) => brief.productSummary,
-  },
-  {
-    section: "graphics",
-    optional: false,
-    getValue: (brief) => brief.designDescription,
-  },
-  {
-    section: "productColor",
-    optional: false,
-    getValue: (brief) => brief.shirtColor,
-  },
-  {
-    section: "requiredWording",
-    optional: false,
-    // exactText === null means never answered; "" means the customer
-    // explicitly said there is no required wording, which is still known.
-    getValue: (brief) => brief.exactText,
-  },
-  {
-    section: "style",
-    optional: true,
-    getValue: (brief) => brief.designStyle,
-  },
-  {
-    section: "colors",
-    optional: true,
-    getValue: (brief) =>
-      brief.preferredColors.length > 0
-        ? brief.preferredColors.join(", ")
-        : null,
-  },
-  {
-    section: "additionalNotes",
-    optional: true,
-    getValue: (brief) => brief.additionalInstructions,
-  },
-  // The remaining sections have no backing field yet, or (printLocation) a
-  // field that only ever holds an internal default the customer never
-  // confirmed. They are always structurally missing today. Flagging them
-  // this way (rather than reading a stale/default field) keeps the
-  // evaluator honest about what the customer actually told us — the same
-  // rule DesignSummaryCapability already documents for what it renders.
-  {
-    section: "audience",
-    optional: true,
-    getValue: () => null,
-  },
-  {
-    section: "purpose",
-    optional: true,
-    getValue: () => null,
-  },
-  {
-    section: "references",
-    optional: true,
-    getValue: () => null,
-  },
-  {
-    section: "production",
-    optional: true,
-    getValue: () => null,
-  },
-  {
-    section: "layoutPreference",
-    optional: true,
-    getValue: () => null,
-  },
-  {
-    section: "exclusions",
-    optional: true,
-    getValue: () => null,
-  },
-  {
-    section: "printLocation",
-    optional: true,
-    getValue: () => null,
-    missingReason:
-      "Not yet asked by the current Design Interview; an internal default placement is used but not customer-confirmed.",
-  },
-];
+const FREE_TEXT_GETTERS: Partial<
+  Record<BriefSectionKey, (brief: TShirtDesignBrief) => string | null>
+> = {
+  product: (b) => b.productSummary,
+  graphics: (b) => b.designDescription,
+  productColor: (b) => b.shirtColor,
+  style: (b) => b.designStyle,
+  colors: (b) => (b.preferredColors.length > 0 ? b.preferredColors.join(", ") : null),
+  audience: (b) => b.audience,
+  purpose: (b) => b.purpose,
+  exclusions: (b) => b.exclusions,
+  additionalNotes: (b) => b.additionalInstructions,
+};
 
 function evaluateSection(
   brief: TShirtDesignBrief,
-  definition: SectionDefinition,
+  section: BriefSectionKey,
+  deferredSet: Set<string>,
 ): BriefSectionEvaluation {
-  const rawValue = definition.getValue(brief);
-
-  if (rawValue === null) {
-    return {
-      section: definition.section,
-      known: false,
-      missing: true,
-      optional: definition.optional,
-      blocking: !definition.optional,
-      ambiguous: false,
-      confidence: 0,
-      reason: definition.missingReason ?? NOT_YET_GATHERED_REASON,
-    };
+  if (section === "requiredWording") {
+    return evaluateRequiredWording(brief);
+  }
+  if (section === "printLocation") {
+    return evaluatePrintLocation(brief, deferredSet);
   }
 
-  const trimmed = rawValue.trim();
+  const tier = tierOf(section);
+  const getValue = FREE_TEXT_GETTERS[section] ?? (() => null);
+  const trimmed = getValue(brief)?.trim() ?? "";
 
-  // requiredWording is special: "" is a valid, fully-confident answer
-  // ("no required wording"), not an unanswered field.
-  if (definition.section === "requiredWording" && trimmed.length === 0) {
-    return {
-      section: definition.section,
-      known: true,
-      missing: false,
-      optional: definition.optional,
-      blocking: !definition.optional,
-      ambiguous: false,
+  if (trimmed.length > 0) {
+    const { confidence, ambiguous } = scoreConfidence(trimmed);
+    return build(section, tier, "provided", {
+      confidence,
+      ambiguous,
+      reason: ambiguous
+        ? `Customer said "${trimmed}" — known, but too vague to treat as high confidence.`
+        : `Customer specified "${trimmed}".`,
+    });
+  }
+
+  if (tier !== "required" && deferredSet.has(section)) {
+    return build(section, tier, "deferred_to_designer", { reason: DEFERRED_REASON });
+  }
+
+  return build(section, tier, "unknown", {
+    reason: NO_FIELD_SECTIONS.has(section)
+      ? NO_DATA_MODEL_REASON
+      : tier === "required"
+        ? "Required, but not yet provided."
+        : NOT_YET_ASKED_REASON,
+  });
+}
+
+function evaluateRequiredWording(brief: TShirtDesignBrief): BriefSectionEvaluation {
+  const tier = tierOf("requiredWording"); // always "required"
+  const wording = deriveRequiredWording(brief);
+
+  if (wording.mode === "none") {
+    return build("requiredWording", tier, "provided", {
       confidence: 100,
-      reason: "Customer explicitly indicated no required wording.",
-    };
-  }
-
-  if (trimmed.length === 0) {
-    return {
-      section: definition.section,
-      known: false,
-      missing: true,
-      optional: definition.optional,
-      blocking: !definition.optional,
       ambiguous: false,
-      confidence: 0,
-      reason: definition.missingReason ?? NOT_YET_GATHERED_REASON,
-    };
+      reason: "Customer explicitly indicated no required wording.",
+    });
   }
 
-  const { confidence, ambiguous } = scoreConfidence(trimmed);
+  if (wording.mode === "provided" && wording.text) {
+    const { confidence, ambiguous } = scoreConfidence(wording.text);
+    return build("requiredWording", tier, "provided", {
+      confidence,
+      ambiguous,
+      reason: ambiguous
+        ? `Customer said "${wording.text}" — known, but too vague to treat as high confidence.`
+        : `Customer specified "${wording.text}".`,
+    });
+  }
 
+  // requiredWording is "required" tier — never deferrable.
+  return build("requiredWording", tier, "unknown", {
+    reason: 'Required, but not yet provided (or confirmed as "none").',
+  });
+}
+
+function evaluatePrintLocation(
+  brief: TShirtDesignBrief,
+  deferredSet: Set<string>,
+): BriefSectionEvaluation {
+  const tier = tierOf("printLocation"); // "high_value"
+  const label = printPlacementLabel(brief.printPlacement);
+
+  if (label) {
+    return build("printLocation", tier, "provided", {
+      confidence: 95,
+      ambiguous: false,
+      reason: `Customer specified "${label}".`,
+    });
+  }
+
+  if (deferredSet.has("printLocation")) {
+    return build("printLocation", tier, "deferred_to_designer", {
+      reason: DEFERRED_REASON,
+    });
+  }
+
+  return build("printLocation", tier, "unknown", { reason: NOT_YET_ASKED_REASON });
+}
+
+function build(
+  section: BriefSectionKey,
+  tier: SectionRequirementTier,
+  resolution: SectionResolution,
+  opts: { confidence?: number; ambiguous?: boolean; reason: string },
+): BriefSectionEvaluation {
   return {
-    section: definition.section,
-    known: true,
-    missing: false,
-    optional: definition.optional,
-    blocking: !definition.optional,
-    ambiguous,
-    confidence,
-    reason: ambiguous
-      ? `Customer said "${trimmed}" — known, but too vague to treat as high confidence.`
-      : `Customer specified "${trimmed}".`,
+    section,
+    tier,
+    resolution,
+    deferrable: tier !== "required",
+    known: resolution === "provided",
+    missing: resolution === "unknown",
+    optional: tier === "optional",
+    blocking: tier === "required",
+    ambiguous: opts.ambiguous ?? false,
+    confidence: opts.confidence ?? 0,
+    reason: opts.reason,
   };
 }
 
@@ -279,14 +265,12 @@ function evaluateSection(
 
 /**
  * Deterministic confidence heuristic. Confidence is not the same axis as
- * completeness: a section can be fully "known" and still low-confidence
- * because the customer's phrasing is too vague to act on.
+ * completeness/resolution: a section can be fully "provided" and still
+ * low-confidence because the customer's phrasing is too vague to act on.
  *
  * This is intentionally a coarse two-tier model (vague vs. concrete) rather
  * than a graduated score — it is easy to reason about, easy to test, and
- * easy to extend later without changing the contract shape. A future sprint
- * may refine the scoring function; the `BriefEvaluation` shape does not need
- * to change to support that.
+ * easy to extend later without changing the contract shape.
  */
 const AMBIGUOUS_PHRASES = [
   "i want something nice",
@@ -305,6 +289,7 @@ const AMBIGUOUS_PHRASES = [
   "up to you",
   "surprise me",
   "you decide",
+  "you choose",
   "anything is fine",
   "anything works",
   "no preference",
@@ -323,7 +308,7 @@ const AMBIGUOUS_SINGLE_WORDS = new Set([
   "something",
 ]);
 
-function scoreConfidence(trimmedValue: string): {
+export function scoreConfidence(trimmedValue: string): {
   confidence: number;
   ambiguous: boolean;
 } {
@@ -351,7 +336,8 @@ const LONG_WORDING_WORD_COUNT = 12;
 
 /**
  * Reports contradictions between sections. Never proposes a resolution —
- * that judgment belongs to Design Intelligence.
+ * that judgment belongs to Design Intelligence. `code` lets downstream
+ * layers branch on a known rule rather than parsing `message`.
  */
 function detectContradictions(brief: TShirtDesignBrief): BriefConflict[] {
   const conflicts: BriefConflict[] = [];
@@ -372,15 +358,22 @@ function detectColorClash(brief: TShirtDesignBrief): BriefConflict | null {
   const shirtColor = brief.shirtColor?.trim().toLowerCase();
   if (!shirtColor || brief.preferredColors.length === 0) return null;
 
-  const clash = brief.preferredColors.find(
+  const clashes = brief.preferredColors.filter(
     (color) => color.trim().toLowerCase() === shirtColor,
   );
-  if (!clash) return null;
+  if (clashes.length === 0) return null;
+
+  // Every requested artwork color matching the product color means the
+  // design would be effectively invisible when printed — a real production
+  // blocker, not just a style aside. A partial match is worth mentioning
+  // but does not block approval on its own.
+  const allColorsClash = clashes.length === brief.preferredColors.length;
 
   return {
     sections: ["colors", "productColor"],
-    message: `Requested color "${clash}" matches the product color "${brief.shirtColor}", which may not be visible when printed.`,
-    severity: "warning",
+    code: "color_clash",
+    message: `Requested color "${clashes[0]}" matches the product color "${brief.shirtColor}", which may not be visible when printed.`,
+    severity: allColorsClash ? "blocking" : "warning",
   };
 }
 
@@ -388,7 +381,7 @@ function detectMinimalistWordingClash(
   brief: TShirtDesignBrief,
 ): BriefConflict | null {
   const style = brief.designStyle?.trim();
-  const wording = brief.exactText?.trim();
+  const wording = deriveRequiredWording(brief).text;
   if (!style || !wording) return null;
   if (!MINIMALIST_STYLE_PATTERN.test(style)) return null;
 
@@ -399,6 +392,7 @@ function detectMinimalistWordingClash(
 
   return {
     sections: ["style", "requiredWording"],
+    code: "minimalist_wording_clash",
     message: `Style "${style}" reads as minimalist, but the required wording is long (${wordCount} words), which may conflict with a minimalist layout.`,
     severity: "warning",
   };
@@ -415,6 +409,7 @@ function detectMinimalistGraphicsClash(
 
   return {
     sections: ["style", "graphics"],
+    code: "minimalist_graphics_clash",
     message: `Style "${style}" reads as minimalist, but the design description ("${graphics}") reads as graphic-heavy.`,
     severity: "warning",
   };

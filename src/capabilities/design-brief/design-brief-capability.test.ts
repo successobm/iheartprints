@@ -105,6 +105,10 @@ describe("DesignBriefCapability.approveWorkingBrief", () => {
         preferredColors: [],
         designStyle: null,
         additionalInstructions: null,
+        audience: null,
+        purpose: null,
+        exclusions: null,
+        deferredSections: [],
       },
     });
 

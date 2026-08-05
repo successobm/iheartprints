@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { removeTempDir } from "@/test-support/remove-temp-dir";
+import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-interview";
 
 /**
  * Sprint 2D: exercises the same facade the API route calls, plus the request
@@ -44,13 +45,10 @@ describe("submitDesignBriefDecision (API facade)", () => {
       getConversation,
     } = await import("./conversation-service");
 
-    const created = await startConversation();
-    const projectId = created.project.id;
-
-    await handleUserMessage(projectId, "Camp shirts");
-    await handleUserMessage(projectId, "A friendly bear logo");
-    await handleUserMessage(projectId, "Navy");
-    await handleUserMessage(projectId, "Camp Wildwood 2026");
+    const { projectId } = await runAdaptiveInterviewToSummary({
+      start: startConversation,
+      handleUserMessage,
+    });
 
     // Resume mid-gate, before any decision — simulates a reload.
     const beforeDecision = await getConversation(projectId);
