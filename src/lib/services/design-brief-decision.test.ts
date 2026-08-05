@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { removeTempDir } from "@/test-support/remove-temp-dir";
+import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-interview";
 
 /**
@@ -24,12 +24,7 @@ describe("submitDesignBriefDecision (API facade)", () => {
   });
 
   after(async () => {
-    process.chdir(previousCwd);
-    const { resetCapabilityGraphForTests } = await import(
-      "@/capabilities/composition"
-    );
-    resetCapabilityGraphForTests();
-    await removeTempDir(tempDir);
+    await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
   it("succeeds from the expected state and reflects resume before approval", async () => {
@@ -44,6 +39,7 @@ describe("submitDesignBriefDecision (API facade)", () => {
       submitDesignBriefDecision,
       getConversation,
     } = await import("./conversation-service");
+    const { getCapabilityGraph } = await import("@/capabilities/composition");
 
     const { projectId } = await runAdaptiveInterviewToSummary({
       start: startConversation,
@@ -58,9 +54,16 @@ describe("submitDesignBriefDecision (API facade)", () => {
     );
     assert.equal(beforeDecision?.artworkVersions.length, 0);
 
-    const approved = await submitDesignBriefDecision(projectId, "approve");
-    assert.equal(approved.conversation.phase, "concepts_ready");
-    assert.equal(approved.artworkVersions.length, 3);
+    const enqueued = await submitDesignBriefDecision(projectId, "approve");
+    // Sprint 2H Part 2A: generation is enqueued, not run synchronously —
+    // the customer's request returns before any provider call happens.
+    assert.equal(enqueued.conversation.phase, "generating");
+    assert.equal(enqueued.artworkVersions.length, 0);
+
+    await getCapabilityGraph().generationWorker.processNextJob();
+    const approved = await getConversation(projectId);
+    assert.equal(approved?.conversation.phase, "concepts_ready");
+    assert.equal(approved?.artworkVersions.length, 3);
 
     const afterReload = await getConversation(projectId);
     assert.equal(afterReload?.conversation.phase, "concepts_ready");

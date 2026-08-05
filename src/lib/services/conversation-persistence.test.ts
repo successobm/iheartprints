@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { removeTempDir } from "@/test-support/remove-temp-dir";
+import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-interview";
 
 describe("Sprint 1/2F conversation persistence", () => {
@@ -18,12 +18,7 @@ describe("Sprint 1/2F conversation persistence", () => {
   });
 
   after(async () => {
-    process.chdir(previousCwd);
-    const { resetCapabilityGraphForTests } = await import(
-      "@/capabilities/composition"
-    );
-    resetCapabilityGraphForTests();
-    await removeTempDir(tempDir);
+    await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
   it("restores the same project and adaptive interview state instead of resetting", async () => {

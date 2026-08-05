@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { removeTempDir } from "@/test-support/remove-temp-dir";
+import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-interview";
 
 /**
@@ -24,12 +24,7 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
   });
 
   after(async () => {
-    process.chdir(previousCwd);
-    const { resetCapabilityGraphForTests } = await import(
-      "@/capabilities/composition"
-    );
-    resetCapabilityGraphForTests();
-    await removeTempDir(tempDir);
+    await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
   async function freshConversation() {
@@ -172,25 +167,31 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
     );
   });
 
-  it("approve creates exactly one durable brief version and three placeholder concepts", async () => {
+  it("approve enqueues generation, and the background worker completes it with one durable brief version and three placeholder concepts", async () => {
     const conversation = await freshConversation();
+    const { getCapabilityGraph } = await import("@/capabilities/composition");
     const { projectId } = await runAdaptiveInterviewToSummary(conversation);
 
-    const approved = await conversation.submitDesignBriefDecision(
+    const enqueued = await conversation.submitDesignBriefDecision(
       projectId,
       "approve",
     );
+    assert.equal(enqueued.conversation.phase, "generating");
+    assert.equal(enqueued.artworkVersions.length, 0);
 
-    assert.equal(approved.conversation.phase, "concepts_ready");
-    assert.equal(approved.designBriefVersions.length, 1);
-    assert.equal(approved.designBriefVersions[0]?.versionNumber, 1);
-    assert.equal(approved.designBriefVersions[0]?.status, "approved");
-    assert.equal(approved.artworkVersions.length, 3);
+    await getCapabilityGraph().generationWorker.processNextJob();
+    const approved = await conversation.get(projectId);
 
-    for (const artwork of approved.artworkVersions) {
+    assert.equal(approved?.conversation.phase, "concepts_ready");
+    assert.equal(approved?.designBriefVersions.length, 1);
+    assert.equal(approved?.designBriefVersions[0]?.versionNumber, 1);
+    assert.equal(approved?.designBriefVersions[0]?.status, "approved");
+    assert.equal(approved?.artworkVersions.length, 3);
+
+    for (const artwork of approved?.artworkVersions ?? []) {
       assert.equal(
         artwork.designBriefVersionId,
-        approved.designBriefVersions[0]?.id,
+        approved?.designBriefVersions[0]?.id,
       );
     }
 
@@ -203,9 +204,12 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
 
   it("repeated approval requests are idempotent — no duplicate versions or concepts", async () => {
     const conversation = await freshConversation();
+    const { getCapabilityGraph } = await import("@/capabilities/composition");
     const { projectId } = await runAdaptiveInterviewToSummary(conversation);
 
     await conversation.submitDesignBriefDecision(projectId, "approve");
+    await getCapabilityGraph().generationWorker.processNextJob();
+
     const second = await conversation.submitDesignBriefDecision(
       projectId,
       "approve",

@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { getPersistenceMode } from "@/lib/db";
-import { submitDesignBriefDecision } from "@/lib/services/conversation-service";
+import {
+  submitDesignBriefDecision,
+  triggerGenerationWorker,
+} from "@/lib/services/conversation-service";
 import { briefDecisionBodySchema } from "./schema";
 
 type RouteContext = {
@@ -22,6 +25,11 @@ export async function POST(request: Request, context: RouteContext) {
       projectId,
       parsed.data.action,
     );
+
+    // Sprint 2H Part 2A: an "approve" may have just enqueued a generation
+    // job — kick the worker without making the customer wait on it. A
+    // no-op for edit/continue, where nothing was enqueued.
+    triggerGenerationWorker();
 
     return NextResponse.json({
       ...snapshot,

@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { getPersistenceMode } from "@/lib/db";
-import { regenerateConcepts } from "@/lib/services/conversation-service";
+import {
+  regenerateConcepts,
+  triggerGenerationWorker,
+} from "@/lib/services/conversation-service";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
@@ -17,6 +20,9 @@ export async function POST(_request: Request, context: RouteContext) {
   try {
     const { projectId } = await context.params;
     const snapshot = await regenerateConcepts(projectId);
+
+    // Sprint 2H Part 2A: kick the worker without making the customer wait.
+    triggerGenerationWorker();
 
     return NextResponse.json({
       ...snapshot,

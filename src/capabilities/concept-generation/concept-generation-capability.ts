@@ -5,18 +5,9 @@ import type {
   ProjectSnapshot,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
-import type { AssetCapability } from "@/capabilities/assets";
-import type { PromptTranslationCapability } from "@/capabilities/prompt-translation";
-import { GenerationUnavailableError } from "@/capabilities/providers";
-import type { ConceptGenerationProvider } from "@/capabilities/providers";
 import { diffBriefSections } from "@/capabilities/shared/brief-diff";
 import { isConceptRelevantChange } from "@/capabilities/shared/concept-relevance";
-import type {
-  ConceptGenerationResult,
-  ConceptStatusView,
-  GeneratedAssetPayload,
-} from "@/capabilities/shared/contracts";
-import { logConceptGenerationUnavailable } from "@/lib/config/generation-provider-logging";
+import type { ConceptStatusView } from "@/capabilities/shared/contracts";
 
 /**
  * Sprint 2H Part 1: a job that has failed this many times gives up asking
@@ -37,12 +28,13 @@ export interface ConceptGenerationCapability {
    * call, a stale client, or an accidental orchestration call cannot bypass
    * the approval gate.
    *
-   * Sprint 2H Part 1: internally now runs a real (provider-neutral)
-   * generation pipeline — translate the approved brief, call the
-   * configured provider, persist any real assets it returns, and record a
-   * durable `GenerationJob` — behind the exact same signature and customer
-   * workflow as before. A provider failure never throws out to the caller;
-   * it resolves to a snapshot with a friendly assistant message instead.
+   * Sprint 2H Part 2A: this now ONLY enqueues a durable `GenerationJob` and
+   * returns immediately — the customer never waits on a synchronous
+   * provider call. Actual generation runs in `GenerationWorkerCapability`,
+   * out of band; the returned snapshot reflects "generating", not the
+   * finished result. Idempotent the same way Part 1 was: calling this
+   * again while a job is already in flight (or already succeeded) is a
+   * safe no-op rather than a duplicate job/message.
    */
   generatePlaceholders(
     designId: string,
@@ -51,13 +43,14 @@ export interface ConceptGenerationCapability {
   /**
    * Sprint 2G Part 2: generates a fresh batch of concepts after a
    * post-approval revision made the existing ones stale. Same approval
-   * guard as `generatePlaceholders`, but continues artwork version
-   * numbering from the existing count instead of guarding on "no concepts
-   * yet" — prior concepts are never deleted (Constitution §6.11, Version
-   * Everything), just superseded by a newer batch tied to the newer
-   * approved brief version. Idempotent the same way: calling it again for
-   * a version that already has concepts does not duplicate them. Clears
-   * any prior concept selection, since it no longer applies to the new batch.
+   * guard and enqueue-only behavior as `generatePlaceholders`, but
+   * continues artwork version numbering from the existing count instead of
+   * guarding on "no concepts yet" — prior concepts are never deleted
+   * (Constitution §6.11, Version Everything), just superseded by a newer
+   * batch tied to the newer approved brief version. Idempotent the same
+   * way: calling it again for a version that already has concepts does not
+   * duplicate them. Clearing any prior concept selection happens once the
+   * new batch actually completes, not at enqueue time.
    */
   regenerateAfterRevision(
     designId: string,
@@ -81,9 +74,7 @@ export interface ConceptGenerationCapability {
 
 export function createConceptGenerationCapability(
   repo: ProjectRepository,
-  provider: ConceptGenerationProvider,
-  promptTranslation: PromptTranslationCapability,
-  assets: AssetCapability,
+  providerKey: string,
 ): ConceptGenerationCapability {
   function buildIdempotencyKey(
     designId: string,
@@ -93,85 +84,36 @@ export function createConceptGenerationCapability(
   }
 
   /**
-   * Registers one concept's generated image (and a thumbnail record) via
-   * `AssetCapability`. Placeholder-generated drafts have no `asset` payload
-   * and get no asset rows at all — identical to today's behavior.
+   * Enqueues (or resumes enqueueing) a generation job for one approved
+   * brief version and returns immediately — never calls a provider, never
+   * uploads an asset. `kind` records which customer-facing flow this is,
+   * so the worker can later choose the right completion/failure message
+   * and post-success side effect without staying coupled to this call.
    */
-  async function persistConceptAsset(
+  async function enqueue(
     designId: string,
-    generationJobId: string,
-    providerKey: string,
-    asset: GeneratedAssetPayload | undefined,
-  ): Promise<{ primaryAssetId: string | null; thumbnailAssetId: string | null }> {
-    if (!asset) return { primaryAssetId: null, thumbnailAssetId: null };
+    approvedVersionId: string,
+    kind: "initial" | "regeneration",
+  ): Promise<ProjectSnapshot> {
+    if (!approvedVersionId) {
+      throw new Error(
+        "Cannot generate concepts without an approved design brief",
+      );
+    }
 
-    const primary = await assets.registerAsset(designId, {
-      kind: "generated_artwork",
-      storageKey: asset.storageKey,
-      contentType: asset.contentType,
-      isThumbnail: false,
-      widthPx: asset.widthPx,
-      heightPx: asset.heightPx,
-      hasTransparency: asset.hasTransparency,
-      providerKey,
-      generationJobId,
-      metadata: asset.providerMetadata,
-      vectorAssetId: null,
-      printAssetId: null,
-    });
+    const approvedVersion =
+      await repo.getDesignBriefVersionById(approvedVersionId);
+    if (!approvedVersion || approvedVersion.projectId !== designId) {
+      throw new Error(
+        "Cannot generate concepts without an approved design brief",
+      );
+    }
 
-    // Real thumbnail resizing is future work (Sprint 2H Part 2); for now a
-    // second asset record marks the same (or provider-supplied distinct)
-    // image data as the thumbnail, so the Concept model's "Thumbnail"
-    // reference is real and queryable rather than a placeholder id.
-    const thumbnail = await assets.registerAsset(designId, {
-      kind: "generated_artwork",
-      storageKey: asset.thumbnailStorageKey ?? asset.storageKey,
-      contentType: asset.contentType,
-      isThumbnail: true,
-      widthPx: asset.widthPx,
-      heightPx: asset.heightPx,
-      hasTransparency: asset.hasTransparency,
-      providerKey,
-      generationJobId,
-      metadata: {},
-      vectorAssetId: null,
-      printAssetId: null,
-    });
-
-    return {
-      primaryAssetId: primary?.id ?? null,
-      thumbnailAssetId: thumbnail?.id ?? null,
-    };
-  }
-
-  /**
-   * Runs (or resumes) the generation job for one approved brief version.
-   * Idempotent: if concepts already exist for this version, this is a
-   * no-op success regardless of job status — actual persisted data, not
-   * job bookkeeping, is the source of truth for "did this already happen"
-   * (the same guard the pre-2H-Part-1 code used), so a crash between a
-   * successful `addArtworkVersions` and marking the job "completed" can
-   * never produce duplicate concepts on retry.
-   */
-  async function runGeneration(
-    designId: string,
-    approvedVersion: DesignBriefVersion,
-    options: { clearSelectionOnSuccess: boolean },
-  ): Promise<{ ok: boolean; unavailable: boolean }> {
     const idempotencyKey = buildIdempotencyKey(designId, approvedVersion.id);
     let job = await repo.getGenerationJobByIdempotencyKey(
       designId,
       idempotencyKey,
     );
-    if (!job) {
-      job = await repo.createGenerationJob(designId, {
-        designBriefVersionId: approvedVersion.id,
-        conceptCount: 3,
-        providerKey: provider.providerKey,
-        idempotencyKey,
-      });
-    }
 
     const current = await repo.getProject(designId);
     if (!current) throw new Error("Project not found");
@@ -180,263 +122,77 @@ export function createConceptGenerationCapability(
       (artwork) => artwork.designBriefVersionId === approvedVersion.id,
     );
     if (alreadyGenerated) {
-      if (job.status !== "completed") {
-        await repo.updateGenerationJob(job.id, { status: "completed" });
+      // Idempotent: concepts already exist for this version — nothing to
+      // enqueue. Reconcile a lagging job record if one exists, but don't
+      // touch messages/status; whatever completed this already posted them.
+      if (job && job.status !== "completed") {
+        await repo.updateGenerationJob(job.id, {
+          status: "completed",
+          completedAt: new Date().toISOString(),
+        });
       }
-      return { ok: true, unavailable: false };
+      return current;
     }
 
-    if (job.status === "failed" && job.attempts >= MAX_GENERATION_ATTEMPTS) {
-      return { ok: false, unavailable: wasUnavailableFailure(job.lastError) };
-    }
+    let shouldAnnounce = false;
 
-    await repo.updateGenerationJob(job.id, {
-      status: "running",
-      attempts: job.attempts + 1,
-    });
-
-    try {
-      const promptRequest = promptTranslation.translate(approvedVersion.content);
-      const result: ConceptGenerationResult = await provider.generate({
-        designId,
-        designBriefId: approvedVersion.id,
+    if (!job) {
+      job = await repo.createGenerationJob(designId, {
+        designBriefVersionId: approvedVersion.id,
+        kind,
         conceptCount: 3,
-        prompt: promptRequest,
+        providerKey,
         idempotencyKey,
       });
-
-      const startingVersionNumber = current.artworkVersions.length;
-      // Sequential, not `Promise.all` — asset registration is a
-      // read-modify-write against shared persistence (the local JSON store
-      // has no transactional isolation), so concurrent writes here can
-      // race and silently drop data. One concept at a time keeps every
-      // write ordered and safe on both repository implementations.
-      const versionsInput: Parameters<ProjectRepository["addArtworkVersions"]>[1] =
-        [];
-      for (const [index, concept] of result.concepts.entries()) {
-        const assetIds = await persistConceptAsset(
-          designId,
-          job.id,
-          provider.providerKey,
-          concept.asset,
-        );
-        versionsInput.push({
-          versionNumber: startingVersionNumber + index + 1,
-          kind: concept.kind,
-          title: concept.title,
-          summary: concept.summary,
-          placeholderLabel: concept.placeholderLabel,
-          accentColor: concept.accentColor,
-          designBriefVersionId: approvedVersion.id,
-          generationJobId: job.id,
-          primaryAssetId: assetIds.primaryAssetId,
-          thumbnailAssetId: assetIds.thumbnailAssetId,
-          providerKey: provider.providerKey,
-        });
+      shouldAnnounce = true;
+    } else if (job.status === "failed") {
+      if (job.attempts >= MAX_GENERATION_ATTEMPTS) {
+        // Gave up — the customer already saw why. Re-queuing endlessly
+        // would just retry a provider that has already failed repeatedly;
+        // a genuinely new attempt needs a genuinely new approved version.
+        return current;
       }
-
-      await repo.addArtworkVersions(designId, versionsInput);
-      if (options.clearSelectionOnSuccess) {
-        await repo.updateProject(designId, { selectedArtworkVersionId: null });
-      }
-      await repo.updateGenerationJob(job.id, { status: "completed" });
-      return { ok: true, unavailable: false };
-    } catch (error) {
-      await repo.updateGenerationJob(job.id, {
-        status: "failed",
-        lastError: describeGenerationError(error),
-      });
-
-      if (error instanceof GenerationUnavailableError) {
-        // Sprint 2H Part 1A: this is the one failure class worth a
-        // structured server-side log — an invalid production configuration
-        // that a customer would otherwise mistake for a transient hiccup.
-        // Never includes the API key or any provider request detail.
-        logConceptGenerationUnavailable({
-          safeErrorCode: error.safeErrorCode,
-          intendedProvider: error.intendedProviderKey,
-          internalReason: error.message,
-          environment: process.env.NODE_ENV ?? "development",
-          generationJobId: job.id,
-          projectId: designId,
-        });
-      }
-
-      return { ok: false, unavailable: error instanceof GenerationUnavailableError };
+      await repo.updateGenerationJob(job.id, { status: "queued" });
+      shouldAnnounce = true;
     }
+    // Otherwise the job is already queued/running/recoverable — already
+    // announced when it was first enqueued; nothing new to say here.
+
+    if (shouldAnnounce) {
+      await repo.setProjectStatus(designId, "generating");
+      await repo.updateConversationPhase(designId, "generating");
+      await repo.addMessage(designId, {
+        role: "assistant",
+        content:
+          kind === "initial"
+            ? "Design brief approved — generating three concept directions..."
+            : "Updating your concepts to match the changes — generating three new directions...",
+        metadata: { phase: "generating" },
+      });
+    }
+
+    const snapshot = await repo.getProject(designId);
+    if (!snapshot) throw new Error("Project not found");
+    return snapshot;
   }
 
   return {
     describeProvider() {
-      return provider.providerKey;
+      return providerKey;
     },
 
-    async generatePlaceholders(designId, approvedVersionId) {
-      if (!approvedVersionId) {
-        throw new Error(
-          "Cannot generate concepts without an approved design brief",
-        );
-      }
-
-      const approvedVersion =
-        await repo.getDesignBriefVersionById(approvedVersionId);
-      if (!approvedVersion || approvedVersion.projectId !== designId) {
-        throw new Error(
-          "Cannot generate concepts without an approved design brief",
-        );
-      }
-
-      await repo.setProjectStatus(designId, "generating");
-      await repo.updateConversationPhase(designId, "generating");
-      await repo.addMessage(designId, {
-        role: "assistant",
-        content:
-          "Design brief approved — generating three concept directions...",
-        metadata: { phase: "generating" },
-      });
-
-      // Preserve Sprint 1 simulated latency for UX validation.
-      await sleep(1400);
-
-      const { ok, unavailable } = await runGeneration(designId, approvedVersion, {
-        clearSelectionOnSuccess: false,
-      });
-
-      if (ok) {
-        await repo.setProjectStatus(designId, "concepts_ready");
-        await repo.updateConversationPhase(designId, "concepts_ready");
-        await repo.addMessage(designId, {
-          role: "assistant",
-          content:
-            "Here are three concept directions. Pick the one that feels closest.",
-          metadata: { phase: "concepts_ready" },
-        });
-      } else {
-        await repo.setProjectStatus(designId, "failed");
-        await repo.addMessage(designId, {
-          role: "assistant",
-          content: unavailable
-            ? "Concept generation is temporarily unavailable. Please try again shortly."
-            : "We ran into a problem creating your concepts. Let's give it another try — just ask me to try again whenever you're ready.",
-          metadata: {
-            phase: "generating",
-            act: "generation_failed",
-            ...(unavailable ? { reason: "provider_unavailable" } : {}),
-          },
-        });
-      }
-
-      const snapshot = await repo.getProject(designId);
-      if (!snapshot) throw new Error("Project not found");
-      return snapshot;
+    generatePlaceholders(designId, approvedVersionId) {
+      return enqueue(designId, approvedVersionId, "initial");
     },
 
-    async regenerateAfterRevision(designId, approvedVersionId) {
-      if (!approvedVersionId) {
-        throw new Error(
-          "Cannot generate concepts without an approved design brief",
-        );
-      }
-
-      const approvedVersion =
-        await repo.getDesignBriefVersionById(approvedVersionId);
-      if (!approvedVersion || approvedVersion.projectId !== designId) {
-        throw new Error(
-          "Cannot generate concepts without an approved design brief",
-        );
-      }
-
-      await repo.setProjectStatus(designId, "generating");
-      await repo.updateConversationPhase(designId, "generating");
-      await repo.addMessage(designId, {
-        role: "assistant",
-        content:
-          "Updating your concepts to match the changes — generating three new directions...",
-        metadata: { phase: "generating" },
-      });
-
-      // Preserve Sprint 1 simulated latency for UX validation.
-      await sleep(1400);
-
-      const { ok, unavailable } = await runGeneration(designId, approvedVersion, {
-        clearSelectionOnSuccess: true,
-      });
-
-      if (ok) {
-        await repo.setProjectStatus(designId, "concepts_ready");
-        await repo.updateConversationPhase(designId, "concepts_ready");
-        await repo.addMessage(designId, {
-          role: "assistant",
-          content:
-            "Here are three updated concept directions. Pick the one that feels closest.",
-          metadata: { phase: "concepts_ready" },
-        });
-      } else {
-        // Unlike the very first generation, concepts already exist here —
-        // a failed regeneration should never take away what the customer
-        // could already see (Constitution §14: revisions continue the same
-        // design relationship, they don't restart it).
-        await repo.setProjectStatus(designId, "concepts_ready");
-        await repo.updateConversationPhase(designId, "concepts_ready");
-        await repo.addMessage(designId, {
-          role: "assistant",
-          content: unavailable
-            ? "Updating concepts is temporarily unavailable. Your current concepts are still available — please try again shortly."
-            : "We ran into a problem updating your concepts. Your current concepts are still available — you can try again anytime.",
-          metadata: {
-            phase: "concepts_ready",
-            act: "generation_failed",
-            ...(unavailable ? { reason: "provider_unavailable" } : {}),
-          },
-        });
-      }
-
-      const snapshot = await repo.getProject(designId);
-      if (!snapshot) throw new Error("Project not found");
-      return snapshot;
+    regenerateAfterRevision(designId, approvedVersionId) {
+      return enqueue(designId, approvedVersionId, "regeneration");
     },
 
     describeConceptStatus(brief, artworkVersions, designBriefVersions) {
       return describeConceptStatus(brief, artworkVersions, designBriefVersions);
     },
   };
-}
-
-/**
- * Marks the persisted `lastError` of an unavailable-configuration failure,
- * so a later call (e.g. after `MAX_GENERATION_ATTEMPTS` is exhausted) can
- * tell it apart from an ordinary transient provider failure without a
- * dedicated persisted column — see `wasUnavailableFailure`. Sprint 2H Part
- * 1B: generic across every `GenerationUnavailableSafeErrorCode` (missing
- * provider credentials, production-unsafe asset storage, ...) — the prefix
- * itself is the marker; the actual code that follows it is
- * `error.safeErrorCode`, never hardcoded to one specific failure class.
- */
-const UNAVAILABLE_ERROR_PREFIX = "GENERATION_UNAVAILABLE:";
-
-/**
- * Sanitized, non-secret description of a generation failure, safe to store
- * as `GenerationJob.lastError` (internal only — never surfaced through
- * `ProjectSnapshot` or the conversation). `ProviderError` already carries a
- * customer-safe message; anything else is reduced to its classification
- * only, so a raw provider error (which could contain request details) is
- * never persisted verbatim.
- */
-function describeGenerationError(error: unknown): string {
-  if (error instanceof GenerationUnavailableError) {
-    return `${UNAVAILABLE_ERROR_PREFIX}${error.safeErrorCode}: ${error.message}`;
-  }
-  if (error && typeof error === "object" && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string" && message.length > 0) {
-      return message;
-    }
-  }
-  return "Generation failed for an unknown reason.";
-}
-
-function wasUnavailableFailure(lastError: string | null): boolean {
-  return lastError !== null && lastError.startsWith(UNAVAILABLE_ERROR_PREFIX);
 }
 
 /**
@@ -509,8 +265,4 @@ export function describeConceptStatus(
         currentConcepts,
         previousBatches,
       };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

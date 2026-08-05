@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { removeTempDir } from "@/test-support/remove-temp-dir";
+import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 describe("DesignBriefCapability.approveWorkingBrief", () => {
   let tempDir = "";
@@ -17,8 +17,7 @@ describe("DesignBriefCapability.approveWorkingBrief", () => {
   });
 
   after(async () => {
-    process.chdir(previousCwd);
-    await removeTempDir(tempDir);
+    await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
   it("creates version 1 on first approval and reuses it for an unchanged brief", async () => {

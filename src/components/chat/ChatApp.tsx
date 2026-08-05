@@ -64,6 +64,54 @@ export function ChatApp() {
     previousConceptStatusRef.current = currentStatus;
   }, [snapshot?.conceptStatus.status]);
 
+  // Sprint 2H Part 2A: concept generation now runs in the background —
+  // while the project is "generating", poll a lightweight status endpoint
+  // (never the full snapshot) until it flips, then refresh once for the
+  // real result. No manual reload, no reopening the conversation.
+  useEffect(() => {
+    if (!isClient || !snapshot || snapshot.project.status !== "generating") {
+      return;
+    }
+
+    const projectId = snapshot.project.id;
+    let cancelled = false;
+    const POLL_INTERVAL_MS = 3000;
+
+    const interval = setInterval(() => {
+      void (async () => {
+        if (cancelled) return;
+        try {
+          const response = await fetch(
+            `/api/projects/${projectId}/generation/status`,
+          );
+          if (!response.ok || cancelled) return;
+          const data = (await response.json()) as { status: string };
+          if (data.status !== "generating" && !cancelled) {
+            // Inlined rather than calling the component's `refresh` —
+            // keeps this effect's dependency list accurate (`projectId`
+            // above, captured once per poll cycle) instead of depending
+            // on a per-render function identity.
+            const full = await fetch(`/api/projects/${projectId}`);
+            if (full.ok && !cancelled) {
+              setSnapshot((await full.json()) as ApiSnapshot);
+            }
+          }
+        } catch {
+          // Transient polling error — the next tick tries again.
+        }
+      })();
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+    // Deliberately scoped to just status/id, not the whole snapshot object
+    // — restarting this interval on every unrelated snapshot update (a new
+    // message, a summary edit, ...) would fight the polling cadence below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isClient, snapshot?.project.status, snapshot?.project.id]);
+
   async function bootstrap() {
     setLoading(true);
     setError(null);
@@ -457,11 +505,14 @@ export function ChatApp() {
               );
             })}
 
-            {sending &&
+            {(sending || snapshot?.project.status === "generating") &&
             phase !== "concepts_ready" &&
             phase !== "awaiting_summary_confirmation" ? (
               <div className="flex justify-start">
-                <div className="rounded-2xl bg-white px-4 py-3 text-sm text-muted shadow-sm ring-1 ring-black/5">
+                <div
+                  className="rounded-2xl bg-white px-4 py-3 text-sm text-muted shadow-sm ring-1 ring-black/5"
+                  aria-label="Generating concepts"
+                >
                   <span className="inline-flex gap-1">
                     <span className="animate-pulse">●</span>
                     <span className="animate-pulse [animation-delay:150ms]">

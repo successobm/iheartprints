@@ -9,6 +9,21 @@ import { PlaceholderConceptProvider } from "./placeholder-concept-provider";
 import { UnavailableConceptGenerationProvider } from "./unavailable-concept-provider";
 
 /**
+ * Sprint 2H Part 2A: real OpenAI generation stays off in every environment
+ * — independent of how well provider credentials and asset storage are
+ * configured — until this sprint's background-job/storage pipeline has
+ * been fully verified end to end. A deliberate, reversible kill switch:
+ * set `CONCEPT_GENERATION_ENABLE_REAL=true` to lift it. Read at call time
+ * (not cached) to match every other config function in this codebase.
+ */
+function isRealGenerationEnabled(): boolean {
+  return (
+    (process.env.CONCEPT_GENERATION_ENABLE_REAL ?? "false").trim().toLowerCase() ===
+    "true"
+  );
+}
+
+/**
  * Sprint 2H Part 1A: turns a `ConceptGenerationConfig` decision into an
  * actual provider instance. Composition-layer concern, not a domain or
  * capability one — `ConceptGenerationCapability` never inspects
@@ -26,6 +41,14 @@ import { UnavailableConceptGenerationProvider } from "./unavailable-concept-prov
 export function resolveConceptGenerationProvider(
   config: ConceptGenerationConfig = getConceptGenerationConfig(),
 ): ConceptGenerationProvider {
+  if (config.mode === "openai" && !isRealGenerationEnabled()) {
+    return new UnavailableConceptGenerationProvider(
+      "REAL_GENERATION_NOT_YET_ENABLED",
+      "openai",
+      "Real provider generation is intentionally disabled pending Sprint 2H Part 2A verification. Set CONCEPT_GENERATION_ENABLE_REAL=true to enable it.",
+    );
+  }
+
   switch (config.mode) {
     case "openai":
       return new OpenAIConceptGenerationProvider({

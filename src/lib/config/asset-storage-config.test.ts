@@ -29,8 +29,11 @@ describe("getAssetStorageMode", () => {
     assert.equal(getAssetStorageMode(), "data_uri");
   });
 
-  it("recognizes supabase_storage and s3", async () => {
+  it("recognizes filesystem, supabase_storage, and s3", async () => {
     const { getAssetStorageMode } = await import("./asset-storage-config");
+
+    process.env.ASSET_STORAGE_MODE = "filesystem";
+    assert.equal(getAssetStorageMode(), "filesystem");
 
     process.env.ASSET_STORAGE_MODE = "supabase_storage";
     assert.equal(getAssetStorageMode(), "supabase_storage");
@@ -58,6 +61,13 @@ describe("isProductionSafeAssetStorageMode", () => {
       "./asset-storage-config"
     );
     assert.equal(isProductionSafeAssetStorageMode("data_uri"), false);
+  });
+
+  it("Sprint 2H Part 2A: filesystem is not production-safe — local container disk isn't durable object storage", async () => {
+    const { isProductionSafeAssetStorageMode } = await import(
+      "./asset-storage-config"
+    );
+    assert.equal(isProductionSafeAssetStorageMode("filesystem"), false);
   });
 
   it("supabase_storage and s3 are treated as production-safe by contract", async () => {

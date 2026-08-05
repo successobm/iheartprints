@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 
-import { removeTempDir } from "@/test-support/remove-temp-dir";
-import { createAssetCapability } from "@/capabilities/assets";
+import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
+import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
+import { createGenerationWorkerCapability } from "@/capabilities/generation-worker";
 import { createPromptTranslationCapability } from "@/capabilities/prompt-translation";
 import {
   UnavailableConceptGenerationProvider,
@@ -37,7 +39,7 @@ class WorkingProvider implements ConceptGenerationProvider {
   }
 }
 
-describe("ConceptGenerationCapability — production-unsafe configuration (Sprint 2H Part 1A)", () => {
+describe("ConceptGenerationCapability — production-unsafe configuration (Sprint 2H Part 1A/2A)", () => {
   let tempDir = "";
   let previousCwd = "";
   let warnCalls: unknown[][] = [];
@@ -52,8 +54,7 @@ describe("ConceptGenerationCapability — production-unsafe configuration (Sprin
   });
 
   after(async () => {
-    process.chdir(previousCwd);
-    await removeTempDir(tempDir);
+    await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
   beforeEach(() => {
@@ -88,16 +89,24 @@ describe("ConceptGenerationCapability — production-unsafe configuration (Sprin
     return { projectId: created.project.id, version };
   }
 
-  function buildCapability(
+  function buildPipeline(
     repo: Awaited<ReturnType<typeof freshRepo>>,
     provider: ConceptGenerationProvider,
   ) {
-    return createConceptGenerationCapability(
+    const promptTranslation = createPromptTranslationCapability();
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const capability = createConceptGenerationCapability(repo, provider.providerKey);
+    const worker = createGenerationWorkerCapability(
       repo,
       provider,
-      createPromptTranslationCapability(),
-      createAssetCapability(repo),
+      promptTranslation,
+      assets,
     );
+    return { capability, worker, assets };
   }
 
   function unavailableProvider() {
@@ -110,17 +119,18 @@ describe("ConceptGenerationCapability — production-unsafe configuration (Sprin
 
   it("fails the job with a safe error code, creates no concepts or assets, and shows a customer-safe message", async () => {
     const repo = await freshRepo();
-    const capability = buildCapability(repo, unavailableProvider());
+    const { capability, worker, assets } = buildPipeline(repo, unavailableProvider());
     const { projectId, version } = await approvedProject(repo);
-    const assets = createAssetCapability(repo);
 
-    const snapshot = await capability.generatePlaceholders(projectId, version.id);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+    const snapshot = await repo.getProject(projectId);
 
-    assert.equal(snapshot.artworkVersions.length, 0);
-    assert.equal(snapshot.project.status, "failed");
+    assert.equal(snapshot?.artworkVersions.length, 0);
+    assert.equal(snapshot?.project.status, "failed");
     assert.deepEqual(await assets.listAssets(projectId), []);
 
-    const lastMessage = snapshot.messages.at(-1);
+    const lastMessage = snapshot?.messages.at(-1);
     assert.equal(
       lastMessage?.content,
       "Concept generation is temporarily unavailable. Please try again shortly.",
@@ -134,22 +144,25 @@ describe("ConceptGenerationCapability — production-unsafe configuration (Sprin
 
   it("never leaks provider or key terminology into any customer-facing message", async () => {
     const repo = await freshRepo();
-    const capability = buildCapability(repo, unavailableProvider());
+    const { capability, worker } = buildPipeline(repo, unavailableProvider());
     const { projectId, version } = await approvedProject(repo);
 
-    const snapshot = await capability.generatePlaceholders(projectId, version.id);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+    const snapshot = await repo.getProject(projectId);
 
-    for (const message of snapshot.messages) {
+    for (const message of snapshot?.messages ?? []) {
       assert.doesNotMatch(message.content, /openai|api[_-]?key|GENERATION_PROVIDER_NOT_CONFIGURED|placeholder/i);
     }
   });
 
   it("logs a structured, secret-free configuration error including the job and project id", async () => {
     const repo = await freshRepo();
-    const capability = buildCapability(repo, unavailableProvider());
+    const { capability, worker } = buildPipeline(repo, unavailableProvider());
     const { projectId, version } = await approvedProject(repo);
 
     await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
     const jobs = await repo.listGenerationJobs(projectId);
 
     assert.equal(errorCalls.length, 1);
@@ -166,39 +179,44 @@ describe("ConceptGenerationCapability — production-unsafe configuration (Sprin
 
   it("a failed regeneration due to unavailable configuration preserves existing concepts and reassures the customer", async () => {
     const repo = await freshRepo();
-    const capability = buildCapability(repo, new WorkingProvider());
+    const working = buildPipeline(repo, new WorkingProvider());
     const { projectId, version: v1 } = await approvedProject(repo);
-    await capability.generatePlaceholders(projectId, v1.id);
+    await working.capability.generatePlaceholders(projectId, v1.id);
+    await working.worker.processNextJob();
 
     await repo.updateBrief(projectId, { designDescription: "A revised bear mascot" });
     const designBrief = createDesignBriefCapability(repo);
     const v2 = await designBrief.approveWorkingBrief(projectId);
 
     // Configuration became unavailable before this regeneration attempt —
-    // a fresh capability instance stands in for "the process restarted
-    // with broken config", which is how env-driven configuration actually
-    // changes in this architecture.
-    const brokenCapability = buildCapability(repo, unavailableProvider());
-    const failedSnapshot = await brokenCapability.regenerateAfterRevision(projectId, v2.id);
+    // a fresh worker built against the unavailable provider stands in for
+    // "the process restarted with broken config", which is how env-driven
+    // configuration actually changes in this architecture.
+    const broken = buildPipeline(repo, unavailableProvider());
+    await broken.capability.regenerateAfterRevision(projectId, v2.id);
+    await broken.worker.processNextJob();
+    const failedSnapshot = await repo.getProject(projectId);
 
-    assert.equal(failedSnapshot.artworkVersions.length, 3); // original batch intact
-    assert.equal(failedSnapshot.project.status, "concepts_ready");
+    assert.equal(failedSnapshot?.artworkVersions.length, 3); // original batch intact
+    assert.equal(failedSnapshot?.project.status, "concepts_ready");
     assert.match(
-      failedSnapshot.messages.at(-1)?.content ?? "",
+      failedSnapshot?.messages.at(-1)?.content ?? "",
       /temporarily unavailable/i,
     );
     assert.match(
-      failedSnapshot.messages.at(-1)?.content ?? "",
+      failedSnapshot?.messages.at(-1)?.content ?? "",
       /current concepts are still available/i,
     );
 
     // Retry remains possible once configuration is fixed (a new process
     // picking up the corrected environment).
-    const fixedCapability = buildCapability(repo, new WorkingProvider());
-    const recoveredSnapshot = await fixedCapability.regenerateAfterRevision(projectId, v2.id);
+    const fixed = buildPipeline(repo, new WorkingProvider());
+    await fixed.capability.regenerateAfterRevision(projectId, v2.id);
+    await fixed.worker.processNextJob();
+    const recoveredSnapshot = await repo.getProject(projectId);
 
-    assert.equal(recoveredSnapshot.artworkVersions.length, 6);
-    assert.equal(recoveredSnapshot.project.status, "concepts_ready");
+    assert.equal(recoveredSnapshot?.artworkVersions.length, 6);
+    assert.equal(recoveredSnapshot?.project.status, "concepts_ready");
 
     // No duplicate concepts from the failed attempt.
     const jobs = await repo.listGenerationJobs(projectId);
@@ -207,10 +225,12 @@ describe("ConceptGenerationCapability — production-unsafe configuration (Sprin
 
   it("secrets never appear in the returned snapshot", async () => {
     const repo = await freshRepo();
-    const capability = buildCapability(repo, unavailableProvider());
+    const { capability, worker } = buildPipeline(repo, unavailableProvider());
     const { projectId, version } = await approvedProject(repo);
 
-    const snapshot = await capability.generatePlaceholders(projectId, version.id);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+    const snapshot = await repo.getProject(projectId);
     const serialized = JSON.stringify(snapshot);
     assert.doesNotMatch(serialized, /sk-|Bearer|authorization/i);
   });

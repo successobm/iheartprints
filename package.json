@@ -10,23 +10,27 @@
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "validate:migrations": "node scripts/validate-migrations.mjs",
-    "test": "node --test scripts/validate-migrations.test.mjs && node --import tsx --test src/components/chat/chat-session.test.ts src/components/chat/ChatApp.ssr.test.tsx src/components/chat/DesignSummaryCard.test.tsx src/components/chat/ConceptStatusBanner.test.tsx src/components/chat/RecommendationCard.test.tsx src/components/chat/DesignerDecisionCard.test.tsx src/components/chat/revision-timeline.test.ts src/lib/services/conversation-persistence.test.ts src/lib/services/design-brief-decision.test.ts src/capabilities/conversation/conversation-capability.test.ts src/capabilities/design-brief/design-brief-capability.test.ts src/capabilities/design-summary/design-summary-capability.test.ts src/capabilities/brief-evaluation/brief-evaluation-capability.test.ts src/capabilities/intent-extraction/intent-extraction-capability.test.ts src/capabilities/interview-intelligence/interview-intelligence-capability.test.ts src/capabilities/product-intelligence/product-intelligence-capability.test.ts src/capabilities/revision-intelligence/revision-intelligence-capability.test.ts src/capabilities/concept-generation/concept-generation-capability.test.ts src/capabilities/concept-generation/concept-generation-pipeline.test.ts src/capabilities/conversation/conversation-revision.test.ts src/capabilities/shared/retry.test.ts src/capabilities/prompt-translation/prompt-translation-capability.test.ts src/capabilities/providers/openai-concept-provider.test.ts src/capabilities/assets/asset-capability.test.ts src/lib/config/generation-provider-config.test.ts src/lib/config/asset-storage-config.test.ts src/capabilities/providers/resolve-concept-provider.test.ts src/capabilities/concept-generation/concept-generation-unavailable.test.ts src/capabilities/concept-generation/concept-generation-production-safety.test.ts",
+    "test": "node --test scripts/validate-migrations.test.mjs && node --import tsx --test src/components/chat/chat-session.test.ts src/components/chat/ChatApp.ssr.test.tsx src/components/chat/DesignSummaryCard.test.tsx src/components/chat/ConceptStatusBanner.test.tsx src/components/chat/RecommendationCard.test.tsx src/components/chat/DesignerDecisionCard.test.tsx src/components/chat/revision-timeline.test.ts src/lib/services/conversation-persistence.test.ts src/lib/services/design-brief-decision.test.ts src/capabilities/conversation/conversation-capability.test.ts src/capabilities/design-brief/design-brief-capability.test.ts src/capabilities/design-summary/design-summary-capability.test.ts src/capabilities/brief-evaluation/brief-evaluation-capability.test.ts src/capabilities/intent-extraction/intent-extraction-capability.test.ts src/capabilities/interview-intelligence/interview-intelligence-capability.test.ts src/capabilities/product-intelligence/product-intelligence-capability.test.ts src/capabilities/revision-intelligence/revision-intelligence-capability.test.ts src/capabilities/concept-generation/concept-generation-capability.test.ts src/capabilities/concept-generation/concept-generation-pipeline.test.ts src/capabilities/conversation/conversation-revision.test.ts src/capabilities/shared/retry.test.ts src/capabilities/prompt-translation/prompt-translation-capability.test.ts src/capabilities/providers/openai-concept-provider.test.ts src/capabilities/assets/asset-capability.test.ts src/lib/config/generation-provider-config.test.ts src/lib/config/asset-storage-config.test.ts src/capabilities/providers/resolve-concept-provider.test.ts src/capabilities/concept-generation/concept-generation-unavailable.test.ts src/capabilities/concept-generation/concept-generation-production-safety.test.ts src/capabilities/asset-storage/signed-url-token.test.ts src/capabilities/asset-storage/filesystem-asset-storage-provider.test.ts src/capabilities/asset-storage/resolve-asset-storage-provider.test.ts src/capabilities/asset-storage/supabase-storage-asset-provider.test.ts src/capabilities/assets/png-thumbnail-generator.test.ts src/capabilities/generation-worker/generation-worker-capability.test.ts src/lib/services/conversation-service.test.ts src/app/api/assets/[...objectKey]/route.test.ts src/app/api/projects/[projectId]/generation/status/route.test.ts",
     "verify": "npm run lint && npm run typecheck && npm run typecheck:tests && npm run validate:migrations && npm run test && npm run build"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.109.0",
     "next": "16.3.0",
+    "pngjs": "^7.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "uuid": "^14.0.1",
+    "ws": "^8.21.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
     "eslint": "^9",
     "eslint-config-next": "16.3.0",
     "tailwindcss": "^4",

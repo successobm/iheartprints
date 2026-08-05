@@ -12,20 +12,27 @@
  * it inflates database rows, API responses, snapshots, backups, memory
  * usage, and local-store writes.
  *
- * `supabase_storage` and `s3` name the production-safe replacements this
- * config contract is designed for. Neither is implemented yet — no bytes
- * are ever written to either backend by this codebase today. Selecting one
- * only changes what `isProductionSafeAssetStorageMode` reports; wiring a
- * real backend behind it is Sprint 2H Part 2A's job (see
- * `IHEARTPRINTS_CONSTITUTION.md` §6.11 — prior versions/data must never be
- * silently discarded, so that migration must be deliberate, not implied by
- * flipping this flag).
+ * Sprint 2H Part 2A: `filesystem` and `supabase_storage` are now real,
+ * implemented backends (`FilesystemAssetStorageProvider`,
+ * `SupabaseStorageAssetProvider` — see `capabilities/asset-storage/`).
+ * `filesystem` writes to local disk and mirrors Supabase Storage's
+ * bucket/object-key/signed-URL semantics for local dev and tests without
+ * needing real cloud infrastructure — like `data_uri`, it is NOT
+ * production-safe (disk on a container is not durable object storage).
+ * `s3` remains reserved-but-unimplemented (see
+ * `resolveAssetStorageProvider`) — its `isProductionSafeAssetStorageMode`
+ * answer is aspirational until an adapter exists, matching how this module
+ * already treated `supabase_storage` before Part 2A implemented it.
  *
  * Pure and side-effect-free, mirroring `generation-provider-config.ts` —
  * no logging here, trivially testable.
  */
 
-export type AssetStorageMode = "data_uri" | "supabase_storage" | "s3";
+export type AssetStorageMode =
+  | "data_uri"
+  | "filesystem"
+  | "supabase_storage"
+  | "s3";
 
 const DEFAULT_ASSET_STORAGE_MODE: AssetStorageMode = "data_uri";
 
@@ -34,6 +41,7 @@ export function getAssetStorageMode(): AssetStorageMode {
     .trim()
     .toLowerCase();
 
+  if (requested === "filesystem") return "filesystem";
   if (requested === "supabase_storage") return "supabase_storage";
   if (requested === "s3") return "s3";
   // Unrecognized values fall back to the safe, always-implemented default
@@ -43,11 +51,10 @@ export function getAssetStorageMode(): AssetStorageMode {
 }
 
 /**
- * Production-safe: real object storage, not bytes embedded in a database
- * row. Only `data_uri` is unsafe — every other declared mode is treated as
- * a real object-storage backend by contract, even before it has an actual
- * implementation (see module doc).
+ * Production-safe: real, durable object storage — not bytes embedded in a
+ * database row (`data_uri`) and not local container disk (`filesystem`),
+ * neither of which survives a redeploy or scales across instances.
  */
 export function isProductionSafeAssetStorageMode(mode: AssetStorageMode): boolean {
-  return mode !== "data_uri";
+  return mode === "supabase_storage" || mode === "s3";
 }

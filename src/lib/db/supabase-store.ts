@@ -1,5 +1,3 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-
 import {
   OPENING_PROMPT,
   projectNameFromBrief,
@@ -32,6 +30,7 @@ import type {
   UpdateGenerationJobInput,
 } from "./repository";
 import { UniqueConstraintViolationError } from "./repository";
+import { getSupabaseServiceClient, isSupabaseConfigured } from "./supabase-client";
 
 type DbProject = {
   id: string;
@@ -109,11 +108,15 @@ type DbGenerationJob = {
   project_id: string;
   design_brief_version_id: string;
   status: GenerationJobStatus;
+  kind: GenerationJob["kind"];
   concept_count: number;
   provider_key: string;
   idempotency_key: string;
   attempts: number;
   last_error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  heartbeat_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -237,11 +240,15 @@ function mapGenerationJob(row: DbGenerationJob): GenerationJob {
     projectId: row.project_id,
     designBriefVersionId: row.design_brief_version_id,
     status: row.status,
+    kind: row.kind,
     conceptCount: row.concept_count,
     providerKey: row.provider_key,
     idempotencyKey: row.idempotency_key,
     attempts: row.attempts,
     lastError: row.last_error,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    heartbeatAt: row.heartbeat_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -283,31 +290,10 @@ function mapDesignBriefVersion(row: DbDesignBriefVersion): DesignBriefVersion {
 /** Postgres unique_violation. See https://www.postgresql.org/docs/current/errcodes-appendix.html */
 const POSTGRES_UNIQUE_VIOLATION = "23505";
 
-function getServiceClient(): SupabaseClient {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!url || !key) {
-    throw new Error("Supabase environment variables are not configured");
-  }
-
-  return createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-}
-
-export function isSupabaseConfigured(): boolean {
-  return Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-      (process.env.SUPABASE_SERVICE_ROLE_KEY ||
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
-  );
-}
+export { isSupabaseConfigured };
 
 export class SupabaseProjectRepository implements ProjectRepository {
-  private client = getServiceClient();
+  private client = getSupabaseServiceClient();
 
   async createProject(): Promise<ProjectSnapshot> {
     const { data: projectRow, error: projectError } = await this.client
@@ -686,6 +672,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
         project_id: projectId,
         design_brief_version_id: input.designBriefVersionId,
         status: "queued",
+        kind: input.kind,
         concept_count: input.conceptCount,
         provider_key: input.providerKey,
         idempotency_key: input.idempotencyKey,
@@ -755,6 +742,9 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.status !== undefined) payload.status = patch.status;
     if (patch.attempts !== undefined) payload.attempts = patch.attempts;
     if (patch.lastError !== undefined) payload.last_error = patch.lastError;
+    if (patch.startedAt !== undefined) payload.started_at = patch.startedAt;
+    if (patch.completedAt !== undefined) payload.completed_at = patch.completedAt;
+    if (patch.heartbeatAt !== undefined) payload.heartbeat_at = patch.heartbeatAt;
 
     const { data, error } = await this.client
       .from("generation_jobs")
@@ -764,6 +754,82 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .single();
     if (error) throw error;
     return mapGenerationJob(data as DbGenerationJob);
+  }
+
+  // --- Sprint 2H Part 2A: background worker ---------------------------
+
+  async claimNextQueuedJob(): Promise<GenerationJob | null> {
+    // Optimistic claim: read the oldest due candidate, then update it
+    // conditioned on it still being in the status we read — if a
+    // concurrent claimant won the race, the conditional update touches
+    // zero rows and we simply report "nothing claimed" rather than
+    // retrying, which is safe (the caller's next tick tries again).
+    const { data: candidate, error: candidateError } = await this.client
+      .from("generation_jobs")
+      .select("*")
+      .in("status", ["queued", "recoverable"])
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (candidateError) throw candidateError;
+    if (!candidate) return null;
+
+    const row = candidate as DbGenerationJob;
+    const timestamp = new Date().toISOString();
+
+    const { data, error } = await this.client
+      .from("generation_jobs")
+      .update({
+        status: "running",
+        attempts: row.attempts + 1,
+        started_at: timestamp,
+        heartbeat_at: timestamp,
+        updated_at: timestamp,
+      })
+      .eq("id", row.id)
+      .eq("status", row.status)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapGenerationJob(data as DbGenerationJob) : null;
+  }
+
+  async touchGenerationJobHeartbeat(jobId: string): Promise<void> {
+    const { error } = await this.client
+      .from("generation_jobs")
+      .update({ heartbeat_at: new Date().toISOString() })
+      .eq("id", jobId);
+    if (error) throw error;
+  }
+
+  async recoverAbandonedJobs(staleAfterMs: number): Promise<GenerationJob[]> {
+    const staleBefore = new Date(Date.now() - staleAfterMs).toISOString();
+
+    // A job that was claimed but never got a heartbeat is treated as stale
+    // from `started_at`; one that did heartbeat is judged on that instead.
+    const { data, error } = await this.client
+      .from("generation_jobs")
+      .select("*")
+      .eq("status", "running")
+      .or(
+        `and(heartbeat_at.is.null,started_at.lt.${staleBefore}),heartbeat_at.lt.${staleBefore}`,
+      );
+    if (error) throw error;
+
+    const stale = (data as DbGenerationJob[]) ?? [];
+    if (stale.length === 0) return [];
+
+    const { data: updated, error: updateError } = await this.client
+      .from("generation_jobs")
+      .update({ status: "recoverable", updated_at: new Date().toISOString() })
+      .in(
+        "id",
+        stale.map((job) => job.id),
+      )
+      .select("*");
+    if (updateError) throw updateError;
+
+    return ((updated as DbGenerationJob[]) ?? []).map(mapGenerationJob);
   }
 
   // --- Sprint 2H Part 1: assets ---------------------------------------
@@ -813,5 +879,10 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .maybeSingle();
     if (error) throw error;
     return data ? mapAsset(data as DbAsset) : null;
+  }
+
+  async deleteAsset(assetId: string): Promise<void> {
+    const { error } = await this.client.from("assets").delete().eq("id", assetId);
+    if (error) throw error;
   }
 }

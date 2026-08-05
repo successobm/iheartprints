@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { removeTempDir } from "@/test-support/remove-temp-dir";
-import { createAssetCapability } from "@/capabilities/assets";
+import { PNG } from "pngjs";
+
+import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
+import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
+import { createGenerationWorkerCapability } from "@/capabilities/generation-worker";
 import { createPromptTranslationCapability } from "@/capabilities/prompt-translation";
 import {
   PlaceholderConceptProvider,
@@ -18,6 +22,13 @@ import type {
   ConceptGenerationResult,
 } from "@/capabilities/shared/contracts";
 import { createConceptGenerationCapability } from "./concept-generation-capability";
+
+/** A tiny, genuinely decodable PNG — real enough for the thumbnail pipeline to actually resize it. */
+function tinyPng(): Buffer {
+  const png = new PNG({ width: 4, height: 4 });
+  png.data.fill(128);
+  return PNG.sync.write(png);
+}
 
 /**
  * Sprint 2H Part 1: a fully controllable fake provider — real enough to
@@ -64,10 +75,10 @@ class ScriptedProvider implements ConceptGenerationProvider {
         ...(withAssets
           ? {
               asset: {
-                storageKey: `data:image/png;base64,scripted-${index}`,
+                imageBytes: tinyPng(),
                 contentType: "image/png",
-                widthPx: 512,
-                heightPx: 512,
+                widthPx: 4,
+                heightPx: 4,
                 hasTransparency: true,
                 providerMetadata: { generatedAt: "2026-08-05T00:00:00.000Z" },
               },
@@ -78,7 +89,7 @@ class ScriptedProvider implements ConceptGenerationProvider {
   }
 }
 
-describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Part 1)", () => {
+describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Part 2A: background jobs)", () => {
   let tempDir = "";
   let previousCwd = "";
 
@@ -89,8 +100,7 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
   });
 
   after(async () => {
-    process.chdir(previousCwd);
-    await removeTempDir(tempDir);
+    await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
   async function freshRepo() {
@@ -111,33 +121,54 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
     return { projectId: created.project.id, version };
   }
 
-  function buildCapability(
+  function buildPipeline(
     repo: Awaited<ReturnType<typeof freshRepo>>,
     provider: ConceptGenerationProvider,
   ) {
     const promptTranslation = createPromptTranslationCapability();
-    const assets = createAssetCapability(repo);
-    return createConceptGenerationCapability(repo, provider, promptTranslation, assets);
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const capability = createConceptGenerationCapability(repo, provider.providerKey);
+    const worker = createGenerationWorkerCapability(
+      repo,
+      provider,
+      promptTranslation,
+      assets,
+    );
+    return { capability, worker, assets };
   }
 
-  it("generates concepts through the real pipeline and records a completed generation job", async () => {
+  it("enqueues fast — no provider call until the worker runs — then completes in the background", async () => {
     const repo = await freshRepo();
     const provider = new ScriptedProvider(["succeed_with_assets"]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker } = buildPipeline(repo, provider);
     const { projectId, version } = await approvedProject(repo);
 
-    const snapshot = await capability.generatePlaceholders(projectId, version.id);
+    const enqueued = await capability.generatePlaceholders(projectId, version.id);
+    assert.equal(enqueued.project.status, "generating");
+    assert.equal(enqueued.artworkVersions.length, 0);
+    assert.equal(provider.calls.length, 0, "the provider must not be called synchronously");
 
-    assert.equal(snapshot.artworkVersions.length, 3);
-    assert.equal(snapshot.project.status, "concepts_ready");
+    const { processedJobId } = await worker.processNextJob();
+    assert.ok(processedJobId);
+
+    const snapshot = await repo.getProject(projectId);
+    assert.equal(snapshot?.artworkVersions.length, 3);
+    assert.equal(snapshot?.project.status, "concepts_ready");
 
     const jobs = await repo.listGenerationJobs(projectId);
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0]?.status, "completed");
     assert.equal(jobs[0]?.attempts, 1);
     assert.equal(jobs[0]?.providerKey, "scripted");
+    assert.equal(jobs[0]?.kind, "initial");
+    assert.ok(jobs[0]?.startedAt);
+    assert.ok(jobs[0]?.completedAt);
 
-    for (const artwork of snapshot.artworkVersions) {
+    for (const artwork of snapshot?.artworkVersions ?? []) {
       assert.equal(artwork.generationJobId, jobs[0]?.id);
       assert.equal(artwork.providerKey, "scripted");
       assert.ok(artwork.primaryAssetId);
@@ -148,17 +179,18 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
   it("registers real, retrievable asset records linked back to the concept and job", async () => {
     const repo = await freshRepo();
     const provider = new ScriptedProvider(["succeed_with_assets"]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker, assets } = buildPipeline(repo, provider);
     const { projectId, version } = await approvedProject(repo);
-    const assets = createAssetCapability(repo);
 
-    const snapshot = await capability.generatePlaceholders(projectId, version.id);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+    const snapshot = await repo.getProject(projectId);
     const allAssets = await assets.listAssets(projectId);
 
     // Primary + thumbnail per concept.
-    assert.equal(allAssets.length, snapshot.artworkVersions.length * 2);
+    assert.equal(allAssets.length, (snapshot?.artworkVersions.length ?? 0) * 2);
 
-    const first = snapshot.artworkVersions[0]!;
+    const first = snapshot!.artworkVersions[0]!;
     const primary = allAssets.find((asset) => asset.id === first.primaryAssetId);
     const thumbnail = allAssets.find((asset) => asset.id === first.thumbnailAssetId);
     assert.ok(primary);
@@ -172,14 +204,15 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
   it("the placeholder provider still produces concepts with no asset records (backward compatible)", async () => {
     const repo = await freshRepo();
     const provider = new PlaceholderConceptProvider();
-    const capability = buildCapability(repo, provider);
+    const { capability, worker, assets } = buildPipeline(repo, provider);
     const { projectId, version } = await approvedProject(repo);
-    const assets = createAssetCapability(repo);
 
-    const snapshot = await capability.generatePlaceholders(projectId, version.id);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+    const snapshot = await repo.getProject(projectId);
 
-    assert.equal(snapshot.artworkVersions.length, 3);
-    for (const artwork of snapshot.artworkVersions) {
+    assert.equal(snapshot?.artworkVersions.length, 3);
+    for (const artwork of snapshot?.artworkVersions ?? []) {
       assert.equal(artwork.primaryAssetId, null);
       assert.equal(artwork.thumbnailAssetId, null);
       assert.equal(artwork.providerKey, "placeholder");
@@ -187,39 +220,50 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
     assert.deepEqual(await assets.listAssets(projectId), []);
   });
 
-  it("is idempotent: calling generatePlaceholders again for the same approved version never duplicates concepts or jobs", async () => {
+  it("is idempotent: calling generatePlaceholders again after completion never re-enqueues or re-runs the provider", async () => {
     const repo = await freshRepo();
     const provider = new ScriptedProvider(["succeed_without_assets"]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker } = buildPipeline(repo, provider);
     const { projectId, version } = await approvedProject(repo);
 
     await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+
     const second = await capability.generatePlaceholders(projectId, version.id);
+    const { processedJobId } = await worker.processNextJob();
 
     assert.equal(second.artworkVersions.length, 3);
     assert.equal(provider.calls.length, 1); // provider was never called a second time
+    assert.equal(processedJobId, null); // nothing left queued
     const jobs = await repo.listGenerationJobs(projectId);
     assert.equal(jobs.length, 1);
   });
 
-  it("resumes a failed job on the next call instead of starting a duplicate one (job resume)", async () => {
+  it("resumes a failed job on the next enqueue instead of starting a duplicate one (job resume)", async () => {
     const repo = await freshRepo();
     const provider = new ScriptedProvider(["fail", "succeed_without_assets"]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker } = buildPipeline(repo, provider);
     const { projectId, version } = await approvedProject(repo);
 
-    const firstAttempt = await capability.generatePlaceholders(projectId, version.id);
-    assert.equal(firstAttempt.artworkVersions.length, 0);
-    assert.equal(firstAttempt.project.status, "failed");
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
 
     let jobs = await repo.listGenerationJobs(projectId);
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0]?.status, "failed");
     assert.equal(jobs[0]?.attempts, 1);
+    const afterFirstFailure = await repo.getProject(projectId);
+    assert.equal(afterFirstFailure?.artworkVersions.length, 0);
+    assert.equal(afterFirstFailure?.project.status, "failed");
 
-    const secondAttempt = await capability.generatePlaceholders(projectId, version.id);
-    assert.equal(secondAttempt.artworkVersions.length, 3);
-    assert.equal(secondAttempt.project.status, "concepts_ready");
+    // A later retry (a new approve/regenerate action, or a button press)
+    // re-enqueues the SAME job — never a new one.
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+
+    const secondAttempt = await repo.getProject(projectId);
+    assert.equal(secondAttempt?.artworkVersions.length, 3);
+    assert.equal(secondAttempt?.project.status, "concepts_ready");
 
     jobs = await repo.listGenerationJobs(projectId);
     assert.equal(jobs.length, 1); // still the same job — resumed, not duplicated
@@ -230,20 +274,24 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
   it("gives up after exhausting the retry budget without ever creating partial concepts", async () => {
     const repo = await freshRepo();
     const provider = new ScriptedProvider(["fail", "fail", "fail", "fail"]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker } = buildPipeline(repo, provider);
     const { projectId, version } = await approvedProject(repo);
 
-    await capability.generatePlaceholders(projectId, version.id);
-    await capability.generatePlaceholders(projectId, version.id);
-    const thirdAttempt = await capability.generatePlaceholders(projectId, version.id);
-    assert.equal(thirdAttempt.artworkVersions.length, 0);
+    for (let i = 0; i < 3; i += 1) {
+      await capability.generatePlaceholders(projectId, version.id);
+      await worker.processNextJob();
+    }
 
     let jobs = await repo.listGenerationJobs(projectId);
     assert.equal(jobs[0]?.attempts, 3);
+    assert.equal(jobs[0]?.status, "failed");
 
-    // A fourth call gives up without calling the provider again or bumping attempts.
-    const fourthAttempt = await capability.generatePlaceholders(projectId, version.id);
-    assert.equal(fourthAttempt.artworkVersions.length, 0);
+    // A fourth enqueue attempt gives up without re-queuing or calling the
+    // provider a fourth time.
+    const fourthEnqueue = await capability.generatePlaceholders(projectId, version.id);
+    assert.equal(fourthEnqueue.artworkVersions.length, 0);
+    const { processedJobId } = await worker.processNextJob();
+    assert.equal(processedJobId, null);
     assert.equal(provider.calls.length, 3);
 
     jobs = await repo.listGenerationJobs(projectId);
@@ -256,60 +304,75 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
       "succeed_without_assets",
       "succeed_without_assets",
     ]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker } = buildPipeline(repo, provider);
     const { projectId, version: v1 } = await approvedProject(repo);
     await capability.generatePlaceholders(projectId, v1.id);
+    await worker.processNextJob();
 
     await repo.updateBrief(projectId, { shirtColor: "Black" });
     const designBrief = createDesignBriefCapability(repo);
     const v2 = await designBrief.approveWorkingBrief(projectId);
 
-    const snapshot = await capability.regenerateAfterRevision(projectId, v2.id);
+    await capability.regenerateAfterRevision(projectId, v2.id);
+    await worker.processNextJob();
+    const snapshot = await repo.getProject(projectId);
 
-    assert.equal(snapshot.artworkVersions.length, 6);
-    const versionNumbers = snapshot.artworkVersions.map((a) => a.versionNumber).sort((a, b) => a - b);
+    assert.equal(snapshot?.artworkVersions.length, 6);
+    const versionNumbers = snapshot!.artworkVersions
+      .map((a) => a.versionNumber)
+      .sort((a, b) => a - b);
     assert.deepEqual(versionNumbers, [1, 2, 3, 4, 5, 6]);
 
-    const firstBatch = snapshot.artworkVersions.filter((a) => a.designBriefVersionId === v1.id);
-    const secondBatch = snapshot.artworkVersions.filter((a) => a.designBriefVersionId === v2.id);
+    const firstBatch = snapshot!.artworkVersions.filter(
+      (a) => a.designBriefVersionId === v1.id,
+    );
+    const secondBatch = snapshot!.artworkVersions.filter(
+      (a) => a.designBriefVersionId === v2.id,
+    );
     assert.equal(firstBatch.length, 3);
     assert.equal(secondBatch.length, 3);
 
     const jobs = await repo.listGenerationJobs(projectId);
     assert.equal(jobs.length, 2);
+    assert.equal(jobs[1]?.kind, "regeneration");
   });
 
   it("a failed regeneration keeps the existing concepts available instead of wiping them out", async () => {
     const repo = await freshRepo();
     const provider = new ScriptedProvider(["succeed_without_assets", "fail"]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker } = buildPipeline(repo, provider);
     const { projectId, version: v1 } = await approvedProject(repo);
     await capability.generatePlaceholders(projectId, v1.id);
+    await worker.processNextJob();
 
     await repo.updateBrief(projectId, { shirtColor: "Black" });
     const designBrief = createDesignBriefCapability(repo);
     const v2 = await designBrief.approveWorkingBrief(projectId);
 
-    const snapshot = await capability.regenerateAfterRevision(projectId, v2.id);
+    await capability.regenerateAfterRevision(projectId, v2.id);
+    await worker.processNextJob();
+    const snapshot = await repo.getProject(projectId);
 
-    assert.equal(snapshot.artworkVersions.length, 3); // original batch still intact
-    assert.equal(snapshot.project.status, "concepts_ready"); // not "failed" — customer keeps what they had
+    assert.equal(snapshot?.artworkVersions.length, 3); // original batch intact
+    assert.equal(snapshot?.project.status, "concepts_ready"); // not "failed" — customer keeps what they had
   });
 
   it("never mentions the provider name, a job id, or an asset id in any customer-facing message", async () => {
     const repo = await freshRepo();
     const provider = new ScriptedProvider(["succeed_with_assets"]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker } = buildPipeline(repo, provider);
     const { projectId, version } = await approvedProject(repo);
 
-    const snapshot = await capability.generatePlaceholders(projectId, version.id);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+    const snapshot = await repo.getProject(projectId);
     const jobs = await repo.listGenerationJobs(projectId);
     const job = jobs[0]!;
 
-    for (const message of snapshot.messages) {
+    for (const message of snapshot?.messages ?? []) {
       assert.doesNotMatch(message.content, /scripted|openai|placeholder/i);
       assert.doesNotMatch(message.content, new RegExp(job.id));
-      for (const artwork of snapshot.artworkVersions) {
+      for (const artwork of snapshot?.artworkVersions ?? []) {
         if (artwork.primaryAssetId) {
           assert.doesNotMatch(message.content, new RegExp(artwork.primaryAssetId));
         }
@@ -320,13 +383,14 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
   it("translates the approved brief — not the live working brief — into the generation prompt", async () => {
     const repo = await freshRepo();
     const provider = new ScriptedProvider(["succeed_without_assets"]);
-    const capability = buildCapability(repo, provider);
+    const { capability, worker } = buildPipeline(repo, provider);
     const { projectId, version } = await approvedProject(repo);
 
     // Diverge the working brief *after* approval but before generation runs.
     await repo.updateBrief(projectId, { shirtColor: "Hot Pink" });
 
     await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
 
     assert.equal(provider.calls.length, 1);
     assert.equal(provider.calls[0]?.prompt.productColor, "Navy");
@@ -353,12 +417,14 @@ describe("ConceptGenerationCapability — real generation pipeline (Sprint 2H Pa
           assert.equal(warnCalls.length, 1);
 
           const repo = await freshRepo();
-          const capability = buildCapability(repo, provider);
+          const { capability, worker } = buildPipeline(repo, provider);
           const { projectId, version } = await approvedProject(repo);
-          const snapshot = await capability.generatePlaceholders(projectId, version.id);
+          await capability.generatePlaceholders(projectId, version.id);
+          await worker.processNextJob();
+          const snapshot = await repo.getProject(projectId);
 
-          assert.equal(snapshot.artworkVersions.length, 3);
-          assert.equal(snapshot.project.status, "concepts_ready");
+          assert.equal(snapshot?.artworkVersions.length, 3);
+          assert.equal(snapshot?.project.status, "concepts_ready");
         } finally {
           console.warn = originalWarn;
           if (originalNodeEnv === undefined) delete process.env.NODE_ENV;

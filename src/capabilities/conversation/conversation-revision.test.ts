@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { removeTempDir } from "@/test-support/remove-temp-dir";
+import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-interview";
 import type { ProjectSnapshot } from "@/lib/domain/types";
 
@@ -28,12 +28,7 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
   });
 
   after(async () => {
-    process.chdir(previousCwd);
-    const { resetCapabilityGraphForTests } = await import(
-      "@/capabilities/composition"
-    );
-    resetCapabilityGraphForTests();
-    await removeTempDir(tempDir);
+    await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
   async function freshConversation() {
@@ -42,6 +37,12 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
     );
     resetCapabilityGraphForTests();
     return getCapabilityGraph().conversation;
+  }
+
+  /** Drives the background worker to completion — Sprint 2H Part 2A: generation is enqueued, not synchronous. */
+  async function runWorkerToCompletion(): Promise<void> {
+    const { getCapabilityGraph } = await import("@/capabilities/composition");
+    await getCapabilityGraph().generationWorker.processNextJob();
   }
 
   /** Runs the interview to summary, approves it, and selects the first concept. */
@@ -53,10 +54,10 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
       conversation,
       answerOverrides,
     );
-    const approved = await conversation.submitDesignBriefDecision(
-      projectId,
-      "approve",
-    );
+    await conversation.submitDesignBriefDecision(projectId, "approve");
+    await runWorkerToCompletion();
+    const approved = await conversation.get(projectId);
+    assert.ok(approved);
     assert.equal(approved.artworkVersions.length, 3);
 
     const firstConcept = approved.artworkVersions[0];
@@ -112,14 +113,16 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
       projectId,
       "By the way, what's the turnaround time usually like?",
     );
-    const afterRegenerate = await conversation.handleUserMessage(
+    await conversation.handleUserMessage(
       projectId,
       "Please regenerate the concepts.",
     );
+    await runWorkerToCompletion();
+    const afterRegenerate = await conversation.get(projectId);
 
-    assert.equal(afterRegenerate.conversation.phase, "concepts_ready");
-    assert.equal(afterRegenerate.designBriefVersions.length, 2);
-    assert.equal(afterRegenerate.artworkVersions.length, 6);
+    assert.equal(afterRegenerate?.conversation.phase, "concepts_ready");
+    assert.equal(afterRegenerate?.designBriefVersions.length, 2);
+    assert.equal(afterRegenerate?.artworkVersions.length, 6);
   });
 
   it("explicit regenerateConcepts() creates a new brief version and a new batch of concepts", async () => {
@@ -127,7 +130,10 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
     const { projectId } = await runToRevisionReady(conversation);
 
     await conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
-    const afterRegen = await conversation.regenerateConcepts(projectId);
+    await conversation.regenerateConcepts(projectId);
+    await runWorkerToCompletion();
+    const afterRegen = await conversation.get(projectId);
+    assert.ok(afterRegen);
 
     assert.equal(afterRegen.conversation.phase, "concepts_ready");
     assert.equal(afterRegen.designBriefVersions.length, 2);

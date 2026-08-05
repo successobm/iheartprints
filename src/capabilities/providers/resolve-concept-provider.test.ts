@@ -13,6 +13,7 @@ describe("resolveConceptGenerationProvider", () => {
   const originalWarn = console.warn;
   const originalError = console.error;
   const originalNodeEnv = process.env.NODE_ENV;
+  const originalEnableReal = process.env.CONCEPT_GENERATION_ENABLE_REAL;
 
   beforeEach(() => {
     warnCalls = [];
@@ -30,9 +31,12 @@ describe("resolveConceptGenerationProvider", () => {
     console.error = originalError;
     if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalNodeEnv;
+    if (originalEnableReal === undefined) delete process.env.CONCEPT_GENERATION_ENABLE_REAL;
+    else process.env.CONCEPT_GENERATION_ENABLE_REAL = originalEnableReal;
   });
 
-  it("resolves an OpenAI provider for mode 'openai' without logging anything", () => {
+  it("resolves an OpenAI provider for mode 'openai' when the real-generation kill switch is explicitly enabled", () => {
+    process.env.CONCEPT_GENERATION_ENABLE_REAL = "true";
     const config: ConceptGenerationConfig = {
       mode: "openai",
       apiKey: "sk-should-never-be-logged",
@@ -42,6 +46,71 @@ describe("resolveConceptGenerationProvider", () => {
     assert.equal(provider.providerKey, "openai");
     assert.equal(warnCalls.length, 0);
     assert.equal(errorCalls.length, 0);
+  });
+
+  it("Sprint 2H Part 2A: mode 'openai' resolves to unavailable by default, even fully configured, until the kill switch is enabled", async () => {
+    delete process.env.CONCEPT_GENERATION_ENABLE_REAL;
+    const config: ConceptGenerationConfig = {
+      mode: "openai",
+      apiKey: "sk-should-never-be-logged",
+      model: "gpt-image-1",
+    };
+    const provider = resolveConceptGenerationProvider(config);
+    assert.equal(provider.providerKey, "unavailable");
+
+    await assert.rejects(
+      provider.generate({
+        designId: "design-1",
+        designBriefId: "version-1",
+        conceptCount: 3,
+        prompt: {
+          product: "a t-shirt",
+          subject: "a logo",
+          style: null,
+          colors: [],
+          productColor: null,
+          requiredWording: null,
+          printLocation: null,
+          audience: null,
+          purpose: null,
+          exclusions: null,
+          notes: null,
+        },
+        idempotencyKey: "concept-generation:design-1:version-1",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof GenerationUnavailableError);
+        assert.equal(error.safeErrorCode, "REAL_GENERATION_NOT_YET_ENABLED");
+        return true;
+      },
+    );
+  });
+
+  it("an explicit CONCEPT_GENERATION_ENABLE_REAL=false behaves the same as unset", () => {
+    process.env.CONCEPT_GENERATION_ENABLE_REAL = "false";
+    const config: ConceptGenerationConfig = {
+      mode: "openai",
+      apiKey: "sk-test",
+      model: "gpt-image-1",
+    };
+    assert.equal(resolveConceptGenerationProvider(config).providerKey, "unavailable");
+  });
+
+  it("the kill switch never affects placeholder or already-unavailable configs", () => {
+    delete process.env.CONCEPT_GENERATION_ENABLE_REAL;
+    assert.equal(
+      resolveConceptGenerationProvider({ mode: "placeholder", reason: "configured" })
+        .providerKey,
+      "placeholder",
+    );
+    assert.equal(
+      resolveConceptGenerationProvider({
+        mode: "unavailable",
+        safeErrorCode: "GENERATION_PROVIDER_NOT_CONFIGURED",
+        internalReason: "test",
+      }).providerKey,
+      "unavailable",
+    );
   });
 
   it("resolves the placeholder provider silently when placeholder was explicitly configured", () => {

@@ -1,7 +1,11 @@
 import { getProjectRepository } from "@/lib/db";
 import type { ProjectRepository } from "@/lib/db/repository";
 
-import { createAssetCapability } from "@/capabilities/assets";
+import { resolveAssetStorageProvider } from "@/capabilities/asset-storage";
+import {
+  createAssetCapability,
+  PngThumbnailGenerator,
+} from "@/capabilities/assets";
 import { createBriefEvaluationCapability } from "@/capabilities/brief-evaluation";
 import { createConceptGenerationCapability } from "@/capabilities/concept-generation";
 import { createConversationCapability } from "@/capabilities/conversation";
@@ -9,6 +13,7 @@ import type { ConversationCapability } from "@/capabilities/conversation";
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import { createDesignIntelligenceCapability } from "@/capabilities/design-intelligence";
 import { createDesignSummaryCapability } from "@/capabilities/design-summary";
+import { createGenerationWorkerCapability } from "@/capabilities/generation-worker";
 import { createIntentExtractionCapability } from "@/capabilities/intent-extraction";
 import { createInterviewIntelligenceCapability } from "@/capabilities/interview-intelligence";
 import { createOwnershipCapability } from "@/capabilities/ownership";
@@ -33,6 +38,8 @@ export interface CapabilityGraph {
   designSummary: ReturnType<typeof createDesignSummaryCapability>;
   promptTranslation: ReturnType<typeof createPromptTranslationCapability>;
   conceptGeneration: ReturnType<typeof createConceptGenerationCapability>;
+  /** Sprint 2H Part 2A: background job runner — see `generation-worker/`. */
+  generationWorker: ReturnType<typeof createGenerationWorkerCapability>;
   printValidation: ReturnType<typeof createPrintValidationCapability>;
   revision: ReturnType<typeof createRevisionCapability>;
   printVault: ReturnType<typeof createPrintVaultCapability>;
@@ -59,10 +66,17 @@ export function createCapabilityGraph(
   const revisionIntelligence = createRevisionIntelligenceCapability();
   const designSummary = createDesignSummaryCapability();
   const promptTranslation = createPromptTranslationCapability();
-  const assets = createAssetCapability(repo);
+
+  const assetStorage = resolveAssetStorageProvider();
+  const thumbnails = new PngThumbnailGenerator();
+  const assets = createAssetCapability(repo, assetStorage, thumbnails);
 
   const provider = resolveConceptGenerationProvider();
   const conceptGeneration = createConceptGenerationCapability(
+    repo,
+    provider.providerKey,
+  );
+  const generationWorker = createGenerationWorkerCapability(
     repo,
     provider,
     promptTranslation,
@@ -93,6 +107,7 @@ export function createCapabilityGraph(
     designSummary,
     promptTranslation,
     conceptGeneration,
+    generationWorker,
     printValidation: createPrintValidationCapability(),
     revision: createRevisionCapability(),
     printVault: createPrintVaultCapability(),

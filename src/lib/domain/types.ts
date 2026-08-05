@@ -183,13 +183,32 @@ export type GenerationJobStatus =
   | "running"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  /**
+   * Sprint 2H Part 2A: a "running" job whose worker went silent (no
+   * heartbeat) for too long — the process that claimed it likely died
+   * mid-attempt. Distinct from "failed": nothing about generation itself
+   * failed, so a job in this state is eligible to be claimed and retried
+   * again, same as "queued".
+   */
+  | "recoverable";
+
+/**
+ * Sprint 2H Part 2A: which customer-facing flow this job belongs to. The
+ * worker is otherwise fully self-sufficient (it never talks to
+ * ConversationCapability) — this is what lets it choose the right
+ * completion/failure message and post-success side effect (clearing the
+ * concept selection only applies to a regeneration) purely from the job
+ * record, without the caller staying involved after enqueueing.
+ */
+export type GenerationJobKind = "initial" | "regeneration";
 
 export interface GenerationJob {
   id: string;
   projectId: string;
   designBriefVersionId: string;
   status: GenerationJobStatus;
+  kind: GenerationJobKind;
   conceptCount: number;
   /** Internal only — never surfaced to conversation/customer. */
   providerKey: string;
@@ -202,6 +221,17 @@ export interface GenerationJob {
   attempts: number;
   /** Sanitized, non-secret description of the most recent failure, if any. */
   lastError: string | null;
+  /** Sprint 2H Part 2A: set each time a worker claims this job. */
+  startedAt: string | null;
+  /** Sprint 2H Part 2A: set once, when the job reaches "completed". */
+  completedAt: string | null;
+  /**
+   * Sprint 2H Part 2A: bumped periodically while a worker is actively
+   * running this job. `recoverAbandonedJobs` uses staleness here — not
+   * `updatedAt` — to decide a job's worker has gone silent, so an
+   * intentional status/attempts update doesn't reset the abandonment clock.
+   */
+  heartbeatAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

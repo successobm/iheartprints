@@ -106,7 +106,15 @@ async function readDb(): Promise<LocalDatabase> {
         printValidationStatus: artwork.printValidationStatus ?? null,
       })),
       designBriefVersions: parsed.designBriefVersions ?? [],
-      generationJobs: parsed.generationJobs ?? [],
+      // Sprint 2H Part 2A: default new job fields for on-disk data written
+      // before they existed, so resume never crashes.
+      generationJobs: (parsed.generationJobs ?? []).map((job) => ({
+        ...job,
+        kind: job.kind ?? "initial",
+        startedAt: job.startedAt ?? null,
+        completedAt: job.completedAt ?? null,
+        heartbeatAt: job.heartbeatAt ?? null,
+      })),
       assets: parsed.assets ?? [],
     };
   } catch (error) {
@@ -147,7 +155,58 @@ function snapshot(db: LocalDatabase, projectId: string): ProjectSnapshot | null 
   };
 }
 
+/**
+ * Sprint 2H Part 2A: the local JSON store has no real transactions — every
+ * method here is a read-modify-write over one file. That was safe as long
+ * as nothing called it concurrently, but the background worker breaks that
+ * assumption on purpose (a fire-and-forget dispatch racing an explicit
+ * caller, or two poll-triggered recovery sweeps overlapping). Without
+ * serialization, two concurrent calls can both read the same stale state,
+ * or worse, interleave their writes into a truncated/corrupt JSON file
+ * ("Unexpected end of JSON input" on the next read). A simple in-process
+ * mutex — every call queues behind the previous one — makes every method
+ * atomic relative to every other, which is exactly what
+ * `claimNextQueuedJob`'s "only one caller ever wins" contract requires.
+ * (Supabase's implementation gets this from real row-level conditional
+ * updates instead — see its `claimNextQueuedJob`.)
+ */
+let mutex: Promise<unknown> = Promise.resolve();
+function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = mutex.then(fn, fn);
+  mutex = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * Test-only: wait until every queued local-store read/write has settled.
+ * Needed before deleting a temp cwd on Windows — an in-flight `writeFile`
+ * keeps the directory locked (`EBUSY`) even after assertions finish.
+ */
+export async function drainLocalStoreMutexForTests(): Promise<void> {
+  await mutex;
+}
+
 export class LocalProjectRepository implements ProjectRepository {
+  constructor() {
+    // Every method on this class is a read-modify-write over one shared
+    // JSON file — wrapping the instance in a Proxy that serializes every
+    // call through `withLock` makes each one atomic relative to the
+    // others, without having to repeat that wrapping in each method body.
+    // See `withLock`'s doc comment for why this is necessary.
+    return new Proxy(this, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function" || prop === "constructor") {
+          return value;
+        }
+        return (...args: unknown[]) => withLock(() => value.apply(target, args));
+      },
+    });
+  }
+
   async createProject(): Promise<ProjectSnapshot> {
     const db = await readDb();
     const timestamp = nowIso();
@@ -463,11 +522,15 @@ export class LocalProjectRepository implements ProjectRepository {
       projectId,
       designBriefVersionId: input.designBriefVersionId,
       status: "queued",
+      kind: input.kind,
       conceptCount: input.conceptCount,
       providerKey: input.providerKey,
       idempotencyKey: input.idempotencyKey,
       attempts: 0,
       lastError: null,
+      startedAt: null,
+      completedAt: null,
+      heartbeatAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -515,6 +578,59 @@ export class LocalProjectRepository implements ProjectRepository {
     return job;
   }
 
+  // --- Sprint 2H Part 2A: background worker ---------------------------
+
+  async claimNextQueuedJob(): Promise<GenerationJob | null> {
+    const db = await readDb();
+    const candidates = db.generationJobs
+      .filter((job) => job.status === "queued" || job.status === "recoverable")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const job = candidates[0];
+    if (!job) return null;
+
+    // A single-process local store has no real concurrent-claim race, but
+    // the shape mirrors the Supabase optimistic-claim contract exactly:
+    // read the candidate, then only commit if it's still in the status we
+    // read it in.
+    const timestamp = nowIso();
+    job.status = "running";
+    job.attempts += 1;
+    job.startedAt = timestamp;
+    job.heartbeatAt = timestamp;
+    job.updatedAt = timestamp;
+    await writeDb(db);
+    return job;
+  }
+
+  async touchGenerationJobHeartbeat(jobId: string): Promise<void> {
+    const db = await readDb();
+    const job = db.generationJobs.find((item) => item.id === jobId);
+    if (!job) return;
+    job.heartbeatAt = nowIso();
+    await writeDb(db);
+  }
+
+  async recoverAbandonedJobs(staleAfterMs: number): Promise<GenerationJob[]> {
+    const db = await readDb();
+    const now = Date.now();
+    const recovered: GenerationJob[] = [];
+
+    for (const job of db.generationJobs) {
+      if (job.status !== "running") continue;
+      const lastHeartbeat = job.heartbeatAt
+        ? Date.parse(job.heartbeatAt)
+        : Date.parse(job.startedAt ?? job.updatedAt);
+      if (now - lastHeartbeat < staleAfterMs) continue;
+
+      job.status = "recoverable";
+      job.updatedAt = nowIso();
+      recovered.push(job);
+    }
+
+    if (recovered.length > 0) await writeDb(db);
+    return recovered;
+  }
+
   // --- Sprint 2H Part 1: assets ---------------------------------------
 
   async createAsset(
@@ -543,5 +659,13 @@ export class LocalProjectRepository implements ProjectRepository {
   async getAssetById(assetId: string): Promise<AssetRecord | null> {
     const db = await readDb();
     return db.assets.find((asset) => asset.id === assetId) ?? null;
+  }
+
+  async deleteAsset(assetId: string): Promise<void> {
+    const db = await readDb();
+    const index = db.assets.findIndex((asset) => asset.id === assetId);
+    if (index === -1) return;
+    db.assets.splice(index, 1);
+    await writeDb(db);
   }
 }

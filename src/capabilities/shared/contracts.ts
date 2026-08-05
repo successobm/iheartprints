@@ -381,21 +381,24 @@ export interface ConceptGenerationRequest {
 }
 
 /**
- * Sprint 2H Part 1: the image bytes/reference a real provider produced for
- * one concept. Absent on `GeneratedConceptDraft` for providers that don't
+ * Sprint 2H Part 1: the image bytes a real provider produced for one
+ * concept. Absent on `GeneratedConceptDraft` for providers that don't
  * produce real artwork yet (the placeholder provider).
+ *
+ * Sprint 2H Part 2A: carries raw `imageBytes`, never a storage reference —
+ * deciding *where* those bytes end up (a data URI, local disk, Supabase
+ * Storage, ...) is `AssetCapability`'s job, never a provider adapter's.
+ * This keeps storage strategy swappable without touching a single provider
+ * file (see `capability-boundaries.ts`).
  */
 export interface GeneratedAssetPayload {
-  /** Opaque reference to where the image bytes live. Never a customer-facing detail. */
-  storageKey: string;
+  imageBytes: Buffer;
   contentType: string;
   widthPx: number | null;
   heightPx: number | null;
   hasTransparency: boolean | null;
   /** Sanitized provider response envelope — never prompt text or credentials. */
   providerMetadata: Record<string, unknown>;
-  /** Optional distinct thumbnail reference; when absent the primary asset doubles as its own thumbnail. */
-  thumbnailStorageKey?: string | null;
 }
 
 export interface GeneratedConceptDraft {

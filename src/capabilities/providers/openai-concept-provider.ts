@@ -108,7 +108,7 @@ export class OpenAIConceptGenerationProvider
         accentColor: variant.accentColor,
         kind: "concept",
         asset: {
-          storageKey: image.storageKey,
+          imageBytes: image.bytes,
           contentType: "image/png",
           widthPx: image.widthPx,
           heightPx: image.heightPx,
@@ -126,7 +126,7 @@ export class OpenAIConceptGenerationProvider
   }
 
   private async requestImage(prompt: string): Promise<{
-    storageKey: string;
+    bytes: Buffer;
     widthPx: number;
     heightPx: number;
     metadata: Record<string, unknown>;
@@ -196,7 +196,7 @@ export class OpenAIConceptGenerationProvider
       number,
     ];
     return {
-      storageKey: `data:image/png;base64,${image.b64}`,
+      bytes: Buffer.from(image.b64, "base64"),
       widthPx,
       heightPx,
       // Sanitized: intentionally excludes the provider's echoed/revised

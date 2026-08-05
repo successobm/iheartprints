@@ -63,7 +63,8 @@ describe("OpenAIConceptGenerationProvider", () => {
     assert.equal(result.concepts.length, 2);
     for (const concept of result.concepts) {
       assert.ok(concept.asset);
-      assert.match(concept.asset!.storageKey, /^data:image\/png;base64,/);
+      assert.ok(Buffer.isBuffer(concept.asset!.imageBytes));
+      assert.ok(concept.asset!.imageBytes.length > 0);
       assert.equal(concept.asset!.hasTransparency, true);
       // Never leaks the prompt text into what gets persisted downstream.
       assert.equal("prompt" in (concept.asset!.providerMetadata ?? {}), false);

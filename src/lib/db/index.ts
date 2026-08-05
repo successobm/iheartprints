@@ -19,6 +19,11 @@ export function getProjectRepository(): ProjectRepository {
   return repository;
 }
 
+/** Test-only: drop the repository singleton so temp-dir cleanup can release it. */
+export function resetProjectRepositoryForTests(): void {
+  repository = null;
+}
+
 export function getPersistenceMode(): "supabase" | "local" {
   return isSupabaseConfigured() ? "supabase" : "local";
 }

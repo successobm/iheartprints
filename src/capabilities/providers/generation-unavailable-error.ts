@@ -10,7 +10,14 @@
  */
 export type GenerationUnavailableSafeErrorCode =
   | "GENERATION_PROVIDER_NOT_CONFIGURED"
-  | "PRODUCTION_ASSET_STORAGE_NOT_CONFIGURED";
+  | "PRODUCTION_ASSET_STORAGE_NOT_CONFIGURED"
+  /**
+   * Sprint 2H Part 2A: real provider generation is intentionally kept off
+   * — regardless of how well everything else is configured — until this
+   * sprint's background job / storage pipeline has been fully verified.
+   * See `resolveConceptGenerationProvider` and `CONCEPT_GENERATION_ENABLE_REAL`.
+   */
+  | "REAL_GENERATION_NOT_YET_ENABLED";
 
 /**
  * Sprint 2H Part 1A: thrown by `UnavailableConceptGenerationProvider` when
