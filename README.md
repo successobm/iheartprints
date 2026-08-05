@@ -9,6 +9,42 @@ When a roadmap item, specification, implementation choice, or feature conflicts
 with the Constitution, the Constitution takes precedence unless it is formally
 amended.
 
+## Concept Generation & Asset Storage (Production Safety)
+
+Real (OpenAI) concept generation must stay **disabled** in production until a
+production-safe object-storage asset backend exists. Until then, the current
+production-safe environment configuration is:
+
+```
+CONCEPT_GENERATION_PROVIDER=placeholder
+ASSET_STORAGE_MODE=data_uri
+```
+
+Why: generated images are currently stored as `data:` URIs embedded directly
+in database rows / JSON records. That's acceptable for local development,
+automated tests, placeholder concepts, and architecture verification — it is
+**not** acceptable for real production images, since it inflates database
+rows, API responses, snapshots, backups, memory usage, and local-store
+writes.
+
+The app enforces this itself (`src/lib/config/generation-provider-config.ts`
++ `src/lib/config/asset-storage-config.ts`): setting
+`CONCEPT_GENERATION_PROVIDER=openai` in production without a production-safe
+`ASSET_STORAGE_MODE` does not silently fall back to placeholder concepts —
+it makes generation report itself unavailable with a safe, non-secret error
+code, before any provider request is made and before any concept or asset is
+persisted.
+
+Enabling real generation in production requires **both**:
+
+1. a real provider configured (`CONCEPT_GENERATION_PROVIDER=openai` +
+   `OPENAI_API_KEY`), and
+2. a production-safe object-storage `ASSET_STORAGE_MODE` (e.g.
+   `supabase_storage` or `s3`) — not yet implemented; see Sprint 2H Part 2A.
+
+See `.env.example` for the full list of variables. Never commit a real API
+key.
+
 ## Getting Started
 
 First, run the development server:

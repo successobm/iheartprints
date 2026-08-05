@@ -54,11 +54,12 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
     assert.equal(lastMessage?.metadata.phase, "awaiting_summary_confirmation");
   });
 
-  it("Design Summary reflects provided fields and friendly copy for deferred ones — never raw internal state", async () => {
+  it("Design Summary reflects provided fields; deferred ones appear as designer decisions, never raw internal state", async () => {
     const conversation = await freshConversation();
     const { afterSummary } = await runAdaptiveInterviewToSummary(conversation);
 
-    const summary = afterSummary.messages.at(-1)?.metadata.summary as
+    const lastMessage = afterSummary.messages.at(-1);
+    const summary = lastMessage?.metadata.summary as
       | Record<string, unknown>
       | undefined;
     assert.ok(summary);
@@ -69,11 +70,20 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
     assert.equal(summary?.requiredWording, "Camp Wildwood 2026");
 
     // High-value sections were all deferred ("You choose.") by the helper —
-    // they should render as friendly copy, not be silently omitted or show
-    // raw internal state.
+    // Sprint 2G Part 3: they are excluded from the regular field list...
     for (const key of ["style", "colors", "printLocation", "purpose", "audience"]) {
-      assert.ok(summary?.[key], key);
-      assert.doesNotMatch(String(summary?.[key]), /deferred_to_designer/);
+      assert.equal(summary?.[key], undefined, key);
+    }
+
+    // ...and instead appear as their own "Designer will determine" list,
+    // never as raw internal state.
+    const deferredDecisions = lastMessage?.metadata.deferredDecisions as
+      | Array<{ section: string; label: string }>
+      | undefined;
+    assert.ok(deferredDecisions);
+    assert.equal(deferredDecisions.length, 5);
+    for (const decision of deferredDecisions) {
+      assert.doesNotMatch(decision.label, /deferred_to_designer|missing|unknown/i);
     }
 
     // References/exclusions/additional notes were never touched — still omitted.

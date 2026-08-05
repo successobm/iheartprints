@@ -1,40 +1,35 @@
 /**
  * Asset management boundary — uploads, references, generated files.
- * No provider knowledge. Storage remains abstracted / stubbed in Sprint 2C.
+ * Sprint 2H Part 1: backed by real repository persistence instead of a
+ * no-op stub. Storage itself stays abstracted behind `AssetRecord.storageKey`
+ * (an opaque reference) — this capability owns registering and listing
+ * asset metadata, never the bytes' transport. Providers never write here
+ * directly; only `ConceptGenerationCapability` calls `registerAsset`, after
+ * a provider adapter has already returned its result.
  */
 
-export type AssetKind =
-  | "customer_upload"
-  | "logo"
-  | "reference_image"
-  | "generated_artwork"
-  | "svg"
-  | "png"
-  | "pdf";
-
-export interface AssetRecord {
-  id: string;
-  designId: string;
-  kind: AssetKind;
-  storageKey?: string | null;
-  contentType?: string | null;
-  metadata: Record<string, unknown>;
-  createdAt: string;
-}
+import type { ProjectRepository } from "@/lib/db/repository";
+import type { AssetKind, AssetRecord } from "@/lib/domain/types";
 
 export interface AssetCapability {
-  listAssets(_designId: string): Promise<AssetRecord[]>;
-  /** Future: register a stored asset. */
-  registerAsset(_input: Omit<AssetRecord, "id" | "createdAt">): Promise<AssetRecord | null>;
+  listAssets(designId: string): Promise<AssetRecord[]>;
+  registerAsset(
+    designId: string,
+    input: Omit<AssetRecord, "id" | "projectId" | "createdAt">,
+  ): Promise<AssetRecord | null>;
 }
 
-export function createAssetCapability(): AssetCapability {
+export function createAssetCapability(
+  repo: ProjectRepository,
+): AssetCapability {
   return {
-    async listAssets() {
-      return [];
+    async listAssets(designId) {
+      return repo.listAssets(designId);
     },
-    async registerAsset() {
-      return null;
+    async registerAsset(designId, input) {
+      return repo.createAsset(designId, input);
     },
   };
 }
+
+export type { AssetKind, AssetRecord };

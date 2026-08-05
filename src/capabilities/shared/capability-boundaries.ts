@@ -2,7 +2,7 @@
  * Documented dependency directions for the capability architecture.
  * These are conventions enforced by composition and code review (Sprint 2C,
  * refined Sprint 2E, adaptive interview Sprint 2F, adaptive revisions
- * Sprint 2G Part 2).
+ * Sprint 2G Part 2, real generation infrastructure Sprint 2H Part 1).
  *
  * Pipeline (Sprint 2G Part 2):
  *   Conversation → IntentExtraction → DesignBrief
@@ -11,6 +11,23 @@
  *                → InterviewIntelligence → best next act
  *                → DesignSummary → Approval → ConceptGeneration
  *                  (± RevisionIntelligence-driven concept regeneration)
+ *
+ * Generation pipeline (Sprint 2H Part 1):
+ *   ConceptGeneration → PromptTranslation (approved brief snapshot →
+ *                  provider-neutral GenerationPromptRequest; pure, no
+ *                  provider knowledge) → ConceptGenerationProvider
+ *                  (interface; a provider adapter owns 100% of its own
+ *                  prompt dialect and quality-boosting language internally
+ *                  — never exported, never persisted) → AssetCapability
+ *                  (persists any real image/asset a provider returned) →
+ *                  durable GenerationJob record (queued → running →
+ *                  completed/failed/cancelled, deterministic
+ *                  idempotencyKey so a retried job never duplicates
+ *                  concepts) → ArtworkVersion ("Concept") rows referencing
+ *                  the job/assets/provider internally. None of
+ *                  job id / asset id / provider key / prompt language is
+ *                  ever placed in a customer-facing message or
+ *                  `ProjectSnapshot` field the UI renders as such.
  *
  * Allowed (high level):
  *   Conversation → IntentExtraction, DesignBrief, BriefEvaluation,
@@ -49,12 +66,24 @@
  *   DesignSummary → Design Brief data, BriefEvaluation (for section
  *                  resolution only — rendered values still come from the
  *                  brief)
- *   ConceptGeneration → ConceptGenerationProvider (interface), persistence.
- *                  Regeneration after a revision still requires an
- *                  approved Design Brief version — never generates from an
- *                  unapproved working brief, revision or not.
+ *   ConceptGeneration → PromptTranslation, ConceptGenerationProvider
+ *                  (interface), AssetCapability, persistence. Regeneration
+ *                  after a revision still requires an approved Design
+ *                  Brief version — never generates from an unapproved
+ *                  working brief, revision or not.
+ *   PromptTranslation → Design Brief snapshot data only. Pure and
+ *                  deterministic: no I/O, no provider knowledge, no
+ *                  quality-boosting/prompt-dialect language of any kind.
+ *   AssetCapability → persistence only. Called by ConceptGeneration after a
+ *                  provider has already returned its result — never by a
+ *                  provider adapter directly.
  *   PrintValidation → brief/artwork data (read-only); never mutates briefs
- *   Provider adapters → generation DTOs only; never mutate domain objects
+ *   Provider adapters → generation DTOs only (a `ConceptGenerationRequest`
+ *                  carrying a provider-neutral `GenerationPromptRequest`,
+ *                  never a raw Design Brief); never mutate domain objects,
+ *                  never write to a repository, never touch a conversation.
+ *                  A provider's own prompt dialect/quality keywords are
+ *                  private to that provider's file.
  *
  * `shared/interview-coverage-policy`, `shared/question-phrasing`, and
  * `shared/product-rule-packs` are pure, side-effect-free data/phrasing
@@ -83,8 +112,13 @@
  *     beyond IntelligenceAssessment, or vice versa (both depend on the
  *     shared phrasing/policy modules instead of on each other)
  *   Print Validation modifying Design Briefs
- *   Provider adapters mutating Design Briefs
+ *   Provider adapters mutating Design Briefs, writing directly to a
+ *     repository, or receiving a raw Design Brief instead of a
+ *     PromptTranslation-produced GenerationPromptRequest
  *   Design Brief storing prompt syntax / provider dialect
+ *   Provider identity, generation job ids, asset ids, or any provider
+ *     error detail reaching a customer-facing message or ProjectSnapshot
+ *     field the UI renders as such (Sprint 2H Part 1)
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2G2" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2H1" as const;

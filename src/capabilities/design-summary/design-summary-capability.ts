@@ -4,6 +4,7 @@ import type { TShirtDesignBrief } from "@/lib/domain/types";
 import type {
   BriefEvaluation,
   BriefSectionKey,
+  DeferredDecisionView,
   DesignSummaryView,
 } from "@/capabilities/shared/contracts";
 
@@ -13,20 +14,28 @@ import type {
  * or formats summaries.
  *
  * Constitutional rule: never display a field the customer didn't actually
- * resolve. Sprint 2E/2F: "resolved" now includes explicit deferral, not
- * only a concrete value — BriefEvaluation's per-section `resolution` (not
- * ad hoc presence checks here) is the single source of truth for whether a
- * section shows up at all. A deferred section renders as a short,
- * customer-friendly note instead of the raw value it doesn't have.
- * Optional sections that were never resolved are omitted entirely — the
- * summary never shows a blank or invented placeholder.
+ * resolve. BriefEvaluation's per-section `resolution` (not ad hoc presence
+ * checks here) is the single source of truth for whether a section shows
+ * up at all.
+ *
+ * Sprint 2G Part 3: a deferred section is no longer folded into the
+ * regular field list as friendly-but-blank-ish text — it gets its own
+ * "Designer will determine" section (`listDeferredDecisions`), presented
+ * as a completed decision, not missing information. The regular
+ * `DesignSummaryView` now only ever contains sections the customer
+ * actually gave content for.
  */
 export interface DesignSummaryCapability {
   createSummary(
     brief: TShirtDesignBrief,
     evaluation: BriefEvaluation,
   ): DesignSummaryView;
-  formatForCustomer(summary: DesignSummaryView): string;
+  /** Sections explicitly deferred to the designer — a completed decision, not a gap. */
+  listDeferredDecisions(evaluation: BriefEvaluation): DeferredDecisionView[];
+  formatForCustomer(
+    summary: DesignSummaryView,
+    deferredDecisions?: DeferredDecisionView[],
+  ): string;
 }
 
 const FIELD_LABELS: Array<[keyof DesignSummaryView, string]> = [
@@ -44,17 +53,16 @@ const FIELD_LABELS: Array<[keyof DesignSummaryView, string]> = [
 ];
 
 /**
- * Short, friendly copy for a section the customer explicitly deferred to
- * the designer's judgment. Never displayed for a required section — those
- * cannot be deferred (see InterviewCoveragePolicy), so this map only needs
- * entries for the deferrable high-value sections.
+ * Short noun phrases for the "Designer will determine" section — never a
+ * full sentence, never phrased as absence ("no style set"), always framed
+ * as a decision that will be made well on the customer's behalf.
  */
-const DEFERRED_COPY: Partial<Record<BriefSectionKey, string>> = {
-  purpose: "Left to our designer's judgment",
-  audience: "Left to our designer's judgment",
-  style: "We'll choose a style that fits the rest of the brief",
-  colors: "We'll choose colors that work well with the shirt",
-  printLocation: "We'll choose the placement that works best",
+const DEFERRED_LABELS: Partial<Record<BriefSectionKey, string>> = {
+  purpose: "The occasion or purpose",
+  audience: "Who this is for",
+  style: "The overall style",
+  colors: "Best artwork colors",
+  printLocation: "Final print placement",
 };
 
 export function createDesignSummaryCapability(): DesignSummaryCapability {
@@ -63,37 +71,34 @@ export function createDesignSummaryCapability(): DesignSummaryCapability {
       const resolution = sectionResolutions(evaluation);
       const summary: DesignSummaryView = {};
 
-      const setIfResolved = (
+      const setIfProvided = (
         section: BriefSectionKey,
         key: keyof DesignSummaryView,
         value: string | null | undefined,
       ) => {
-        const state = resolution.get(section);
-        if (state === "provided" && value?.trim()) {
+        if (resolution.get(section) === "provided" && value?.trim()) {
           summary[key] = value.trim();
-        } else if (state === "deferred_to_designer" && DEFERRED_COPY[section]) {
-          summary[key] = DEFERRED_COPY[section];
         }
       };
 
-      setIfResolved("product", "product", brief.productSummary);
-      setIfResolved("graphics", "graphics", brief.designDescription);
-      setIfResolved("productColor", "productColor", brief.shirtColor);
-      setIfResolved(
+      setIfProvided("product", "product", brief.productSummary);
+      setIfProvided("graphics", "graphics", brief.designDescription);
+      setIfProvided("productColor", "productColor", brief.shirtColor);
+      setIfProvided(
         "printLocation",
         "printLocation",
         printPlacementLabel(brief.printPlacement),
       );
-      setIfResolved("style", "style", brief.designStyle);
-      setIfResolved(
+      setIfProvided("style", "style", brief.designStyle);
+      setIfProvided(
         "colors",
         "colors",
         brief.preferredColors.length > 0 ? brief.preferredColors.join(", ") : null,
       );
-      setIfResolved("audience", "audience", brief.audience);
-      setIfResolved("purpose", "purpose", brief.purpose);
-      setIfResolved("exclusions", "exclusions", brief.exclusions);
-      setIfResolved(
+      setIfProvided("audience", "audience", brief.audience);
+      setIfProvided("purpose", "purpose", brief.purpose);
+      setIfProvided("exclusions", "exclusions", brief.exclusions);
+      setIfProvided(
         "additionalNotes",
         "additionalNotes",
         brief.additionalInstructions,
@@ -111,7 +116,17 @@ export function createDesignSummaryCapability(): DesignSummaryCapability {
       return summary;
     },
 
-    formatForCustomer(summary) {
+    listDeferredDecisions(evaluation) {
+      return evaluation.sections
+        .filter((section) => section.resolution === "deferred_to_designer")
+        .map((section): DeferredDecisionView | null => {
+          const label = DEFERRED_LABELS[section.section];
+          return label ? { section: section.section, label } : null;
+        })
+        .filter((entry): entry is DeferredDecisionView => entry !== null);
+    },
+
+    formatForCustomer(summary, deferredDecisions = []) {
       const knownRows = FIELD_LABELS.filter(([key]) =>
         Boolean(summary[key]?.toString().trim()),
       );
@@ -120,9 +135,20 @@ export function createDesignSummaryCapability(): DesignSummaryCapability {
         "Here's my understanding of your design so far:",
         "",
         ...knownRows.map(([key, label]) => `${label}: ${summary[key]}`),
+      ];
+
+      if (deferredDecisions.length > 0) {
+        lines.push(
+          "",
+          "Designer will determine:",
+          ...deferredDecisions.map((decision) => `- ${decision.label}`),
+        );
+      }
+
+      lines.push(
         "",
         "Would you like to approve this, make an edit, or tell me more before we continue?",
-      ];
+      );
 
       return lines.join("\n");
     },

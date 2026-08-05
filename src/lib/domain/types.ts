@@ -100,17 +100,24 @@ export interface TShirtDesignBrief {
  * itself. `pendingSection` is loosely typed as `string` for the same reason
  * as `TShirtDesignBrief.deferredSections`.
  */
+/**
+ * Sprint 2G Part 3: one level of undo. The revisable-field snapshot of the
+ * brief immediately before the most recently accepted change, plus enough
+ * to describe it in plain language. Overwritten (not stacked) by the next
+ * accepted change, and cleared after an undo — "undo most recent accepted
+ * revision", not arbitrary history editing.
+ */
+export interface LastRevisionSnapshot {
+  previousBrief: DesignBriefSnapshotContent;
+  changedSections: string[];
+}
+
 export interface InterviewStateData {
   pendingSection: string | null;
   askCounts: Record<string, number>;
   dismissedAdvisories: string[];
-  /**
-   * Sprint 2G Part 2: true right after a post-approval revision marked the
-   * existing concepts stale and asked the customer whether to regenerate
-   * them — so the *next* reply is interpreted as a yes/no answer to that
-   * question rather than another open-ended revision.
-   */
-  awaitingConceptRegenerationConfirmation: boolean;
+  /** Sprint 2G Part 3: see `LastRevisionSnapshot`. `null` when there is nothing to undo. */
+  lastRevision: LastRevisionSnapshot | null;
 }
 
 export function emptyInterviewState(): InterviewStateData {
@@ -118,7 +125,7 @@ export function emptyInterviewState(): InterviewStateData {
     pendingSection: null,
     askCounts: {},
     dismissedAdvisories: [],
-    awaitingConceptRegenerationConfirmation: false,
+    lastRevision: null,
   };
 }
 
@@ -141,6 +148,103 @@ export interface ConversationMessage {
   createdAt: string;
 }
 
+/**
+ * Sprint 2H Part 1: provider-neutral, plain-language description of what to
+ * generate — the only thing a `ConceptGenerationProvider` ever receives.
+ * Produced by `PromptTranslationCapability` from an approved Design Brief
+ * snapshot. Contains no provider prompt syntax or quality-boosting keywords
+ * ("highly detailed", "8k", "masterpiece", "photorealistic", etc.) — those
+ * belong exclusively inside each provider adapter's own internal prompt
+ * translation, never here and never on the Design Brief itself.
+ */
+export interface GenerationPromptRequest {
+  product: string;
+  subject: string;
+  style: string | null;
+  colors: string[];
+  productColor: string | null;
+  requiredWording: string | null;
+  printLocation: PrintPlacement | null;
+  audience: string | null;
+  purpose: string | null;
+  exclusions: string | null;
+  notes: string | null;
+}
+
+/**
+ * Sprint 2H Part 1: customer-never-sees-this lifecycle for a single
+ * generation attempt. Modeled as its own durable record (rather than inline
+ * fields on `ArtworkVersion`) so a job can be looked up, resumed, and
+ * retried by its deterministic `idempotencyKey` without depending on
+ * whether it ever produced any concepts.
+ */
+export type GenerationJobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface GenerationJob {
+  id: string;
+  projectId: string;
+  designBriefVersionId: string;
+  status: GenerationJobStatus;
+  conceptCount: number;
+  /** Internal only — never surfaced to conversation/customer. */
+  providerKey: string;
+  /**
+   * Deterministic identity — the same (project, approved brief version)
+   * pair always maps to the same job, so retrying never creates duplicate
+   * concepts (Sprint 2H Part 1 idempotency strategy).
+   */
+  idempotencyKey: string;
+  attempts: number;
+  /** Sanitized, non-secret description of the most recent failure, if any. */
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Sprint 2H Part 1: a generated or uploaded file and its metadata. Storage
+ * itself stays abstracted behind `storageKey` (an opaque reference — a data
+ * URI today, a real object-store key in a future sprint) so swapping
+ * storage backends never touches the domain model.
+ */
+export type AssetKind =
+  | "customer_upload"
+  | "logo"
+  | "reference_image"
+  | "generated_artwork"
+  | "svg"
+  | "png"
+  | "pdf";
+
+export interface AssetRecord {
+  id: string;
+  projectId: string;
+  kind: AssetKind;
+  /** Opaque reference to where the bytes live. Never a customer-facing detail. */
+  storageKey: string | null;
+  contentType: string | null;
+  /** True when this record is a thumbnail companion to another asset. */
+  isThumbnail: boolean;
+  widthPx: number | null;
+  heightPx: number | null;
+  hasTransparency: boolean | null;
+  /** Internal provenance only — never surfaced to the customer. */
+  providerKey: string | null;
+  generationJobId: string | null;
+  /** Sanitized provider response envelope. Must never contain prompt text or credentials. */
+  metadata: Record<string, unknown>;
+  /** Reserved for a future vector (SVG) companion asset. */
+  vectorAssetId: string | null;
+  /** Reserved for a future print-ready production asset. */
+  printAssetId: string | null;
+  createdAt: string;
+}
+
 export interface ArtworkVersion {
   id: string;
   projectId: string;
@@ -153,6 +257,24 @@ export interface ArtworkVersion {
   isSelected: boolean;
   /** Sprint 2D: the approved Design Brief version that authorized this concept. */
   designBriefVersionId: string | null;
+  /**
+   * Sprint 2H Part 1: internal generation provenance. `null` for
+   * placeholder-generated concepts (no real generation job exists for
+   * them). Never surfaced to the customer.
+   */
+  generationJobId: string | null;
+  /** Internal reference to the primary generated image asset, if any. */
+  primaryAssetId: string | null;
+  /** Internal reference to the thumbnail asset, if any. */
+  thumbnailAssetId: string | null;
+  /** Internal provenance only — which provider produced this concept. Never rendered to the customer. */
+  providerKey: string | null;
+  /** Reserved for a future customer rating feature. Always null until implemented. */
+  customerRating: number | null;
+  /** Reserved for future automated concept evaluation. Always null until implemented. */
+  evaluationStatus: string | null;
+  /** Reserved for future print validation. Always null until implemented. */
+  printValidationStatus: string | null;
   createdAt: string;
 }
 

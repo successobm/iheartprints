@@ -159,6 +159,30 @@ const SECTION_LABELS: Record<BriefSectionKey, string> = {
 };
 
 /**
+ * Sprint 2G Part 3: the same short label used to acknowledge a revision,
+ * exposed directly for other presentation needs (e.g. the revision
+ * timeline) that want "Shirt Color" rather than the internal section key —
+ * single source of truth, safe to reuse client-side too (pure data, no
+ * server-only dependency).
+ */
+export function sectionLabel(section: BriefSectionKey): string {
+  return SECTION_LABELS[section];
+}
+
+/**
+ * Title-cased variant for headings/badges (the timeline, "Updated" badges)
+ * where "the shirt color" would read oddly — "Shirt Color" instead.
+ */
+export function sectionTitle(section: BriefSectionKey): string {
+  const label = SECTION_LABELS[section].replace(/^(the|what to avoid)\s*/i, "");
+  const base = label || SECTION_LABELS[section];
+  return base
+    .split(" ")
+    .map((word) => (word.length > 0 ? word[0]!.toUpperCase() + word.slice(1) : word))
+    .join(" ");
+}
+
+/**
  * Brief acknowledgement of a revision that needed no follow-up question —
  * "continue naturally" rather than restart or interrogate.
  */
@@ -174,4 +198,37 @@ export function acknowledgeRevision(changedSections: BriefSectionKey[]): string 
 /** Asked once, after a revision, only when concepts already exist and are now stale. */
 export function conceptRegenerationPrompt(): string {
   return "Your changes affect the current concepts. Would you like me to generate updated concepts?";
+}
+
+/**
+ * Sprint 2G Part 3: shown as a "Designer Decision" card when the customer
+ * explicitly defers a decision ("You choose.") — a completed decision the
+ * designer will make well, not a gap. Distinct from `DEFERRED_LABELS` in
+ * DesignSummaryCapability (a short noun phrase for a list); this is the
+ * standalone sentence shown in the moment.
+ */
+const DESIGNER_DECISION_MESSAGES: Partial<Record<BriefSectionKey, string>> = {
+  style: "We'll choose a style that fits the rest of the brief.",
+  colors: "We'll choose colors that work well with the shirt.",
+  printLocation: "We'll choose the placement that works best for this design.",
+  purpose: "We'll keep the design broadly appropriate without a specific occasion in mind.",
+  audience: "We'll design with broad appeal in mind.",
+};
+
+export function designerDecisionMessage(section: BriefSectionKey): string {
+  return (
+    DESIGNER_DECISION_MESSAGES[section] ?? "We'll make the best call here for you."
+  );
+}
+
+/** Plain acknowledgement after undoing the most recent accepted revision. */
+export function describeUndo(changedSections: string[]): string {
+  const known = changedSections.filter(
+    (section): section is BriefSectionKey => section in SECTION_LABELS,
+  );
+  if (known.length === 0) return "Done — I've undone the last change.";
+  if (known.length === 1) {
+    return `Done — I've undone the change to ${SECTION_LABELS[known[0]!]}.`;
+  }
+  return "Done — I've undone the last change.";
 }

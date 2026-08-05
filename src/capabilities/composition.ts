@@ -15,7 +15,8 @@ import { createOwnershipCapability } from "@/capabilities/ownership";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import { createPrintVaultCapability } from "@/capabilities/print-vault";
 import { createProductIntelligenceCapability } from "@/capabilities/product-intelligence";
-import { PlaceholderConceptProvider } from "@/capabilities/providers";
+import { createPromptTranslationCapability } from "@/capabilities/prompt-translation";
+import { resolveConceptGenerationProvider } from "@/capabilities/providers";
 import { createRevisionCapability } from "@/capabilities/revision";
 import { createRevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
 
@@ -30,6 +31,7 @@ export interface CapabilityGraph {
   revisionIntelligence: ReturnType<typeof createRevisionIntelligenceCapability>;
   productIntelligence: ReturnType<typeof createProductIntelligenceCapability>;
   designSummary: ReturnType<typeof createDesignSummaryCapability>;
+  promptTranslation: ReturnType<typeof createPromptTranslationCapability>;
   conceptGeneration: ReturnType<typeof createConceptGenerationCapability>;
   printValidation: ReturnType<typeof createPrintValidationCapability>;
   revision: ReturnType<typeof createRevisionCapability>;
@@ -56,11 +58,16 @@ export function createCapabilityGraph(
   const interviewIntelligence = createInterviewIntelligenceCapability();
   const revisionIntelligence = createRevisionIntelligenceCapability();
   const designSummary = createDesignSummaryCapability();
+  const promptTranslation = createPromptTranslationCapability();
+  const assets = createAssetCapability(repo);
 
-  const provider = new PlaceholderConceptProvider((designId) =>
-    designBrief.getWorkingBrief(designId),
+  const provider = resolveConceptGenerationProvider();
+  const conceptGeneration = createConceptGenerationCapability(
+    repo,
+    provider,
+    promptTranslation,
+    assets,
   );
-  const conceptGeneration = createConceptGenerationCapability(repo, provider);
 
   const conversation = createConversationCapability({
     repo,
@@ -84,11 +91,12 @@ export function createCapabilityGraph(
     revisionIntelligence,
     productIntelligence,
     designSummary,
+    promptTranslation,
     conceptGeneration,
     printValidation: createPrintValidationCapability(),
     revision: createRevisionCapability(),
     printVault: createPrintVaultCapability(),
-    assets: createAssetCapability(),
+    assets,
     ownership: createOwnershipCapability(),
   };
 }

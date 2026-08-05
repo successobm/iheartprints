@@ -94,34 +94,69 @@ describe("DesignSummaryCapability", () => {
     assert.equal(summary.printLocation, "left chest");
   });
 
-  it("renders friendly copy for deferred sections instead of blank/raw content", () => {
-    const summary = summaryFor(
-      brief({ deferredSections: ["style", "colors", "printLocation"] }),
-    );
+  it("Sprint 2G Part 3: deferred sections are excluded from the regular field list entirely", () => {
+    const theBrief = brief({ deferredSections: ["style", "colors", "printLocation"] });
+    const summary = summaryFor(theBrief);
 
-    assert.match(String(summary.style), /designer|choose/i);
-    assert.match(String(summary.colors), /choose/i);
-    assert.match(String(summary.printLocation), /choose|placement/i);
+    assert.equal(summary.style, undefined);
+    assert.equal(summary.colors, undefined);
+    assert.equal(summary.printLocation, undefined);
+  });
 
-    const formatted = capability.formatForCustomer(summary);
+  it("lists deferred sections as completed designer decisions, not missing information", () => {
+    const theBrief = brief({ deferredSections: ["style", "colors", "printLocation"] });
+    const evaluation = briefEvaluation.evaluate(theBrief);
+    const deferred = capability.listDeferredDecisions(evaluation);
+
+    assert.equal(deferred.length, 3);
+    const labels = deferred.map((d) => d.label);
+    assert.ok(labels.some((l) => /style/i.test(l)));
+    assert.ok(labels.some((l) => /colors/i.test(l)));
+    assert.ok(labels.some((l) => /placement/i.test(l)));
+    for (const label of labels) {
+      assert.doesNotMatch(label, /missing|unknown|n\/a/i);
+    }
+  });
+
+  it("does not list a section that was never deferred nor provided", () => {
+    const theBrief = brief(); // nothing set, nothing deferred
+    const evaluation = briefEvaluation.evaluate(theBrief);
+    assert.deepEqual(capability.listDeferredDecisions(evaluation), []);
+  });
+
+  it("formatForCustomer renders a 'Designer will determine' section from deferred decisions", () => {
+    const theBrief = brief({
+      productSummary: "Camp shirts",
+      deferredSections: ["colors", "printLocation"],
+    });
+    const summary = summaryFor(theBrief);
+    const evaluation = briefEvaluation.evaluate(theBrief);
+    const deferred = capability.listDeferredDecisions(evaluation);
+
+    const formatted = capability.formatForCustomer(summary, deferred);
+    assert.match(formatted, /Designer will determine/i);
+    assert.match(formatted, /Best artwork colors/i);
+    assert.match(formatted, /Final print placement/i);
     assert.doesNotMatch(formatted, /\bdeferred_to_designer\b/);
   });
 
-  it("does not render a deferred section as blank — content or friendly copy, never neither", () => {
-    const summary = summaryFor(brief({ deferredSections: ["colors"] }));
-    assert.ok(summary.colors && summary.colors.trim().length > 0);
+  it("formatForCustomer omits the deferred section entirely when nothing was deferred", () => {
+    const summary = summaryFor(brief({ productSummary: "Camp shirts" }));
+    const formatted = capability.formatForCustomer(summary, []);
+    assert.doesNotMatch(formatted, /designer will determine/i);
   });
 
   it("never displays raw internal resolution codes or confidence numbers", () => {
-    const summary = summaryFor(
-      brief({
-        productSummary: "Camp shirts",
-        designStyle: "make it cool",
-        deferredSections: ["printLocation"],
-      }),
-    );
-    const formatted = capability.formatForCustomer(summary);
+    const theBrief = brief({
+      productSummary: "Camp shirts",
+      designStyle: "make it cool",
+      deferredSections: ["printLocation"],
+    });
+    const summary = summaryFor(theBrief);
+    const evaluation = briefEvaluation.evaluate(theBrief);
+    const deferred = capability.listDeferredDecisions(evaluation);
+    const formatted = capability.formatForCustomer(summary, deferred);
     assert.doesNotMatch(formatted, /\d+%/);
-    assert.doesNotMatch(formatted, /unknown|ambiguous|confidence/i);
+    assert.doesNotMatch(formatted, /unknown|ambiguous|confidence|deferred_to_designer/i);
   });
 });

@@ -2,7 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { DesignSummaryView } from "@/capabilities/shared/contracts";
+import type {
+  BriefSectionKey,
+  ConceptStatusView,
+  DeferredDecisionView,
+  DesignSummaryView,
+  RecommendationAction,
+} from "@/capabilities/shared/contracts";
 import type { ProjectSnapshot } from "@/lib/domain/types";
 import {
   CHAT_PROJECT_STORAGE_KEY,
@@ -10,12 +16,18 @@ import {
 } from "./chat-session";
 import { Composer } from "./Composer";
 import { ConceptCards } from "./ConceptCards";
-import { DesignSummaryCard } from "./DesignSummaryCard";
+import { ConceptStatusBanner } from "./ConceptStatusBanner";
+import { DesignerDecisionCard } from "./DesignerDecisionCard";
+import { DesignSummaryCard, type FieldTransition } from "./DesignSummaryCard";
 import { MessageBubble } from "./MessageBubble";
+import { RecommendationCard } from "./RecommendationCard";
+import { buildRevisionTimeline } from "./revision-timeline";
+import { RevisionTimeline } from "./RevisionTimeline";
 import { useIsClient } from "./use-is-client";
 
 type ApiSnapshot = ProjectSnapshot & {
   persistenceMode?: "supabase" | "local";
+  conceptStatus: ConceptStatusView;
 };
 
 export function ChatApp() {
@@ -24,6 +36,8 @@ export function ChatApp() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [conceptBannerDismissed, setConceptBannerDismissed] = useState(false);
+  const previousConceptStatusRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -35,6 +49,20 @@ export function ChatApp() {
     if (!isClient) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [isClient, snapshot?.messages.length, snapshot?.artworkVersions.length, sending]);
+
+  // Sprint 2G Part 3: a dismissed "needs update" banner stays dismissed for
+  // that episode — "do not repeatedly interrupt" — but reappears if a
+  // *new* change makes concepts stale again after being current.
+  useEffect(() => {
+    const currentStatus = snapshot?.conceptStatus.status ?? null;
+    if (
+      currentStatus === "needs_update" &&
+      previousConceptStatusRef.current !== "needs_update"
+    ) {
+      setConceptBannerDismissed(false);
+    }
+    previousConceptStatusRef.current = currentStatus;
+  }, [snapshot?.conceptStatus.status]);
 
   async function bootstrap() {
     setLoading(true);
@@ -168,6 +196,53 @@ export function ChatApp() {
     }
   }
 
+  /** Sprint 2G Part 3: explicit action, independent of chat — no message required. */
+  async function regenerateConcepts() {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/concepts/regenerate`,
+        { method: "POST" },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to generate updated concepts");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to generate updated concepts",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /** Sprint 2G Part 3: undoes the most recent accepted revision, if any. */
+  async function undoLastChange() {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/projects/${snapshot.project.id}/undo`, {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to undo the last change");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to undo the last change");
+    } finally {
+      setSending(false);
+    }
+  }
+
   async function refresh() {
     if (!snapshot) return;
     const response = await fetch(`/api/projects/${snapshot.project.id}`);
@@ -251,6 +326,20 @@ export function ChatApp() {
     .reverse()
     .find((message) => message.metadata?.phase === "concepts_ready")?.id;
 
+  const timelineEntries = useMemo(
+    () => buildRevisionTimeline(snapshot?.messages ?? []),
+    [snapshot?.messages],
+  );
+
+  const canUndo = Boolean(snapshot?.conversation.interviewState.lastRevision);
+
+  const showConceptStatusBanner =
+    !!snapshot &&
+    snapshot.conceptStatus.status === "needs_update" &&
+    !conceptBannerDismissed &&
+    // Only meaningful once the customer can actually see concepts.
+    (phase === "ask_revisions" || phase === "revision_received" || phase === "concepts_ready");
+
   return (
     <div className="flex min-h-full flex-1 flex-col">
       <header className="mx-auto flex w-full max-w-2xl items-start justify-between gap-4 px-4 pb-2 pt-8">
@@ -266,13 +355,26 @@ export function ChatApp() {
           </p>
         </div>
         {isClient && snapshot ? (
-          <button
-            type="button"
-            onClick={() => void startOver()}
-            className="mt-1 text-xs text-muted underline-offset-2 hover:text-ink hover:underline"
-          >
-            Start over
-          </button>
+          <div className="mt-1 flex items-center gap-3 text-xs">
+            {canUndo ? (
+              <button
+                type="button"
+                disabled={sending}
+                onClick={() => void undoLastChange()}
+                aria-label="Undo the most recent change"
+                className="text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Undo last change
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void startOver()}
+              className="text-muted underline-offset-2 hover:text-ink hover:underline"
+            >
+              Start over
+            </button>
+          </div>
         ) : null}
       </header>
 
@@ -282,7 +384,7 @@ export function ChatApp() {
             Starting conversation...
           </div>
         ) : (
-          <div className="flex flex-1 flex-col gap-4">
+          <div className="flex flex-1 flex-col gap-4" aria-live="polite">
             {snapshot?.messages.map((message, index) => {
               const isLatestMessage = index === snapshot.messages.length - 1;
               const showSummaryCard =
@@ -291,10 +393,30 @@ export function ChatApp() {
                 Boolean(message.metadata?.summary) &&
                 isLatestMessage &&
                 phase === "awaiting_summary_confirmation";
+              const showRecommendationCard =
+                message.role === "assistant" &&
+                message.metadata?.act === "advise" &&
+                isLatestMessage &&
+                Array.isArray(message.metadata?.actions) &&
+                (message.metadata?.actions as unknown[]).length > 0;
+              const deferredDecision = message.metadata?.deferredDecision as
+                | { section: string; message: string }
+                | undefined;
 
               return (
                 <div key={message.id}>
                   <MessageBubble message={message} />
+                  {deferredDecision ? (
+                    <DesignerDecisionCard message={deferredDecision.message} />
+                  ) : null}
+                  {showRecommendationCard ? (
+                    <RecommendationCard
+                      message={message.content}
+                      actions={message.metadata!.actions as RecommendationAction[]}
+                      busy={sending}
+                      onAction={(replyText) => void sendMessage(replyText)}
+                    />
+                  ) : null}
                   {message.role === "assistant" &&
                   message.metadata?.phase === "concepts_ready" &&
                   message.id === lastConceptsReadyMessageId &&
@@ -310,6 +432,21 @@ export function ChatApp() {
                   {showSummaryCard ? (
                     <DesignSummaryCard
                       summary={message.metadata!.summary as DesignSummaryView}
+                      deferredDecisions={
+                        message.metadata!.deferredDecisions as
+                          | DeferredDecisionView[]
+                          | undefined
+                      }
+                      updatedSections={
+                        message.metadata!.updatedSections as
+                          | BriefSectionKey[]
+                          | undefined
+                      }
+                      fieldTransitions={
+                        message.metadata!.fieldTransitions as
+                          | Record<string, FieldTransition>
+                          | undefined
+                      }
                       busy={sending}
                       onApprove={() => void submitDecision("approve")}
                       onEdit={() => void submitDecision("edit")}
@@ -338,8 +475,23 @@ export function ChatApp() {
               </div>
             ) : null}
 
+            {showConceptStatusBanner && snapshot ? (
+              <ConceptStatusBanner
+                status={snapshot.conceptStatus}
+                busy={sending}
+                onRegenerate={() => void regenerateConcepts()}
+                onKeepCurrent={() => setConceptBannerDismissed(true)}
+              />
+            ) : null}
+
+            {timelineEntries.length > 1 ? (
+              <RevisionTimeline entries={timelineEntries} />
+            ) : null}
+
             {error ? (
-              <p className="text-sm text-red-700">{error}</p>
+              <p className="text-sm text-red-700" role="alert">
+                {error}
+              </p>
             ) : null}
 
             <div ref={bottomRef} />

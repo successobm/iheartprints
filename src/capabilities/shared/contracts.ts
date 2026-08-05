@@ -4,7 +4,9 @@
  */
 
 import type {
+  ArtworkVersion,
   ConversationPhase,
+  GenerationPromptRequest,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 
@@ -82,6 +84,19 @@ export interface BriefConflict {
   code?: string;
 }
 
+/**
+ * Sprint 2G Part 3: one clickable option on a recommendation card. `label`
+ * and `replyText` are both plain customer-facing language — `replyText` is
+ * simply what gets sent through the normal chat pipeline when clicked
+ * (identical to the customer typing it themselves), so no new mutation
+ * path or endpoint is needed for recommendation cards to act.
+ */
+export interface RecommendationAction {
+  label: string;
+  kind: "apply" | "keep" | "dismiss";
+  replyText: string;
+}
+
 export interface DesignRecommendation {
   /** Sprint 2F: stable id so an InterviewAct("advise") can reference it and track dismissal. */
   id: string;
@@ -95,6 +110,8 @@ export interface DesignRecommendation {
   message: string;
   severity: "info" | "warning";
   followUpSection?: BriefSectionKey;
+  /** Sprint 2G Part 3: customer stays in control — never forced, always dismissible. */
+  actions?: RecommendationAction[];
 }
 
 export interface SectionEvaluation {
@@ -298,6 +315,18 @@ export interface RevisionImpact {
   isNoOp: boolean;
 }
 
+/**
+ * Sprint 2G Part 3: a decision the customer explicitly left to the
+ * designer, presented as its own "Designer will determine" section —
+ * never mixed into the regular field list and never phrased as missing
+ * information (§ Deferred Decisions: "They are completed decisions").
+ */
+export interface DeferredDecisionView {
+  section: BriefSectionKey;
+  /** Short customer-facing noun phrase, e.g. "Best artwork colors". */
+  label: string;
+}
+
 export interface DesignSummaryView {
   product?: string | null;
   audience?: string | null;
@@ -337,6 +366,36 @@ export interface ConceptGenerationRequest {
   /** Approved brief version id when versioning exists; working brief id until then. */
   designBriefId: string;
   conceptCount: number;
+  /**
+   * Sprint 2H Part 1: provider-neutral prompt DTO produced by
+   * `PromptTranslationCapability`. This — never the raw Design Brief — is
+   * what a `ConceptGenerationProvider` actually receives.
+   */
+  prompt: GenerationPromptRequest;
+  /**
+   * Deterministic identity shared with the underlying `GenerationJob`, so a
+   * provider that wants to dedupe internally can — the platform already
+   * guards duplicate persistence regardless.
+   */
+  idempotencyKey: string;
+}
+
+/**
+ * Sprint 2H Part 1: the image bytes/reference a real provider produced for
+ * one concept. Absent on `GeneratedConceptDraft` for providers that don't
+ * produce real artwork yet (the placeholder provider).
+ */
+export interface GeneratedAssetPayload {
+  /** Opaque reference to where the image bytes live. Never a customer-facing detail. */
+  storageKey: string;
+  contentType: string;
+  widthPx: number | null;
+  heightPx: number | null;
+  hasTransparency: boolean | null;
+  /** Sanitized provider response envelope — never prompt text or credentials. */
+  providerMetadata: Record<string, unknown>;
+  /** Optional distinct thumbnail reference; when absent the primary asset doubles as its own thumbnail. */
+  thumbnailStorageKey?: string | null;
 }
 
 export interface GeneratedConceptDraft {
@@ -346,10 +405,36 @@ export interface GeneratedConceptDraft {
   placeholderLabel: string;
   accentColor: string;
   kind: "concept";
+  /** Present only when the provider produced real image bytes (Sprint 2H Part 1). Absent for the placeholder provider. */
+  asset?: GeneratedAssetPayload;
 }
 
 export interface ConceptGenerationResult {
   jobId: string;
   concepts: GeneratedConceptDraft[];
-  providerKey: "placeholder";
+  /** Internal provider identity — never surfaced to the customer. */
+  providerKey: string;
+}
+
+/**
+ * Sprint 2G Part 3: customer-friendly concept lifecycle status — never
+ * "stale", "invalidated", or "version mismatch". `"archived"` is modeled
+ * for forward compatibility (e.g. a future abandoned/reset project) but
+ * nothing produces it yet.
+ */
+export type ConceptStatus =
+  | "none"
+  | "current"
+  | "needs_update"
+  | "superseded"
+  | "archived";
+
+export interface ConceptStatusView {
+  /** Status of the newest batch of concepts — the one the customer sees by default. */
+  status: ConceptStatus;
+  /** Plain-language summary, safe to show verbatim. */
+  message: string;
+  currentConcepts: ArtworkVersion[];
+  /** Older batches, most recent first. Never deleted — Constitution §6.11. */
+  previousBatches: ArtworkVersion[][];
 }

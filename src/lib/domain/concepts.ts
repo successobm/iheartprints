@@ -1,4 +1,4 @@
-import type { TShirtDesignBrief } from "./types";
+import type { GenerationPromptRequest } from "./types";
 
 export interface ConceptSeed {
   versionNumber: number;
@@ -8,15 +8,20 @@ export interface ConceptSeed {
   accentColor: string;
 }
 
+/**
+ * Sprint 2H Part 1: now takes the provider-neutral `GenerationPromptRequest`
+ * (the same input every real provider adapter receives) instead of the raw
+ * Design Brief, so the placeholder path stays a faithful stand-in for a
+ * real provider rather than a special case.
+ */
 export function buildPlaceholderConcepts(
-  brief: TShirtDesignBrief,
+  prompt: GenerationPromptRequest,
 ): ConceptSeed[] {
-  const subject = brief.designDescription?.trim() || "your design";
-  const shirt = brief.shirtColor?.trim() || "the shirt";
-  const text =
-    brief.exactText && brief.exactText.length > 0
-      ? `Featuring the text "${brief.exactText}".`
-      : "No text lockup — graphic-led.";
+  const subject = prompt.subject.trim() || "your design";
+  const shirt = prompt.productColor?.trim() || "the shirt";
+  const text = prompt.requiredWording
+    ? `Featuring the text "${prompt.requiredWording}".`
+    : "No text lockup — graphic-led.";
 
   return [
     {

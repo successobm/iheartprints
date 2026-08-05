@@ -1,4 +1,5 @@
 import type { ProjectRepository } from "@/lib/db/repository";
+import { toDesignBriefSnapshotContent } from "@/lib/domain/brief-snapshot";
 import {
   isLegacyScriptedPhase,
   nextPhaseAfterUserReply,
@@ -22,9 +23,13 @@ import { ALL_SECTIONS_IN_POLICY_ORDER } from "@/capabilities/shared/interview-co
 import {
   acknowledgeRevision,
   conceptRegenerationPrompt,
+  describeUndo,
+  designerDecisionMessage,
 } from "@/capabilities/shared/question-phrasing";
 import type {
   BriefSectionKey,
+  DesignSummaryView,
+  IntelligenceAssessment,
   InterviewAct,
   RevisionImpact,
 } from "@/capabilities/shared/contracts";
@@ -69,10 +74,18 @@ const REVISION_REQUEST_PHASES: ConversationPhase[] = [
 
 const KNOWN_SECTIONS = new Set<string>(ALL_SECTIONS_IN_POLICY_ORDER);
 
-const YES_PATTERN =
-  /^(?:yes|yeah|yep|yup|sure|please|ok|okay|go ahead|do it|please do|sounds good|let'?s do it|update them|regenerate)\b/i;
-const NO_PATTERN =
-  /^(?:no|nope|nah|not now|no thanks|leave it|keep (?:the |)(?:current|existing|old)|don'?t)\b/i;
+/**
+ * Sprint 2G Part 3: deterministic natural-language triggers. None of these
+ * gate interpretation of the *next* reply the way Sprint 2G Part 2's
+ * `awaitingConceptRegenerationConfirmation` did — every reply is always
+ * just itself. "If the customer ignores it, continue normally."
+ */
+const UNDO_PATTERN =
+  /^(?:undo|revert)\b|undo (?:that|it|the last (?:change|revision|edit)|shirt color|wording|graphics|colors?|style|placement)|go back to (?:the )?previous(?: version)?/i;
+const REGENERATE_REQUEST_PATTERN =
+  /\b(regenerate|update the concepts|new concepts|updated concepts|refresh the concepts|generate updated concepts)\b/i;
+const KEEP_CONCEPTS_PATTERN =
+  /\bkeep (?:the )?(?:current|existing) concepts\b|\bleave (?:them|the concepts)(?: as (?:is|they are))?\b/i;
 
 /**
  * Owns conversation lifecycle, messages, state, and orchestration.
@@ -88,12 +101,17 @@ const NO_PATTERN =
  * fixed phase ladder. The old ladder is preserved verbatim for historical
  * projects still mid-flow in an `ask_*` phase.
  *
- * Sprint 2G Part 2: the post-concept revision loop is adaptive too. A
- * revision reply runs through the same Intent Extraction → Design Brief
- * pipeline, then Revision Intelligence compares the brief before/after to
- * scope what actually needs re-evaluating (Design/Product Intelligence)
- * and whether existing concepts are now stale — never restarting the
- * interview or re-asking already-answered questions.
+ * Sprint 2G Part 2: the post-concept revision loop is adaptive too —
+ * Revision Intelligence scopes what actually needs re-evaluating and
+ * whether existing concepts are now stale.
+ *
+ * Sprint 2G Part 3: that intelligence becomes visible and actionable —
+ * updated-field transitions and deferred decisions ride along with the
+ * Design Summary; a "Designer Decision" note accompanies any explicit
+ * deferral; concept staleness is a persistent, non-interrupting action
+ * (`regenerateConcepts`) rather than a one-shot yes/no gate; and one level
+ * of undo (`undoLastChange`) is available for the most recently accepted
+ * revision.
  */
 export interface ConversationCapability {
   start(): Promise<ProjectSnapshot>;
@@ -111,6 +129,10 @@ export interface ConversationCapability {
     designId: string,
     action: DesignBriefDecisionAction,
   ): Promise<ProjectSnapshot>;
+  /** Explicit action behind the persistent "Generate Updated Concepts" control. */
+  regenerateConcepts(designId: string): Promise<ProjectSnapshot>;
+  /** Explicit action behind an "Undo" control — undoes the most recent accepted revision, if any. */
+  undoLastChange(designId: string): Promise<ProjectSnapshot>;
 }
 
 export function createConversationCapability(
@@ -135,19 +157,38 @@ export function createConversationCapability(
    * matters here: a full adaptive interview does many more small
    * read-modify-write turns than the old four-question ladder did.
    *
-   * `updatedSections`, when given, is attached to the message metadata so
-   * the UI can highlight what just changed (Sprint 2G Part 2) — never more
-   * than the section keys themselves, no internal impact detail.
+   * `updatedSections` and `previousBrief`, when given, produce
+   * `fieldTransitions` (old → new values, Sprint 2G Part 3) attached to
+   * the message metadata so the UI can highlight what changed without any
+   * internal detail beyond the section keys and their own displayed
+   * values. `deferredDecisions` always accompanies the summary as its own
+   * section — never blank, never phrased as missing.
    */
   async function presentDesignSummary(
     designId: string,
     brief: TShirtDesignBrief,
     interviewState: InterviewStateData | null,
-    updatedSections: BriefSectionKey[] = [],
+    options: {
+      previousBrief?: TShirtDesignBrief;
+      updatedSections?: BriefSectionKey[];
+    } = {},
   ): Promise<void> {
+    const updatedSections = options.updatedSections ?? [];
     const evaluation = briefEvaluation.evaluate(brief);
     const summary = designSummary.createSummary(brief, evaluation);
-    const content = designSummary.formatForCustomer(summary);
+    const deferredDecisions = designSummary.listDeferredDecisions(evaluation);
+    const content = designSummary.formatForCustomer(summary, deferredDecisions);
+
+    const fieldTransitions = options.previousBrief
+      ? buildFieldTransitions(
+          designSummary.createSummary(
+            options.previousBrief,
+            briefEvaluation.evaluate(options.previousBrief),
+          ),
+          summary,
+          updatedSections,
+        )
+      : {};
 
     await repo.updateConversationPhase(designId, "awaiting_summary_confirmation");
     if (interviewState) {
@@ -162,13 +203,27 @@ export function createConversationCapability(
       metadata: {
         phase: "awaiting_summary_confirmation",
         summary,
+        deferredDecisions,
         updatedSections,
+        fieldTransitions,
       },
     });
   }
 
   async function approveAndGenerate(designId: string): Promise<ProjectSnapshot> {
     const version = await designBrief.approveWorkingBrief(designId);
+
+    // Approval is a checkpoint: undo is scoped to "the most recent
+    // accepted revision" of the post-approval revision phase, not
+    // leftover state from resolving the interview itself (e.g. a final
+    // deferral just before summarizing).
+    const beforeApproval = await repo.getProject(designId);
+    if (beforeApproval?.conversation.interviewState.lastRevision) {
+      await repo.updateConversationInterviewState(designId, {
+        ...beforeApproval.conversation.interviewState,
+        lastRevision: null,
+      });
+    }
 
     await repo.updateConversationPhase(designId, "brief_approved");
     await repo.setProjectStatus(designId, "approved");
@@ -183,7 +238,7 @@ export function createConversationCapability(
   }
 
   /** Re-approves the working brief and regenerates concepts against it. */
-  async function regenerateConcepts(
+  async function performRegeneration(
     designId: string,
     state: InterviewStateData,
   ): Promise<ProjectSnapshot> {
@@ -191,9 +246,50 @@ export function createConversationCapability(
     await repo.updateConversationInterviewState(designId, {
       ...state,
       pendingSection: null,
-      awaitingConceptRegenerationConfirmation: false,
     });
     return conceptGeneration.regenerateAfterRevision(designId, version.id);
+  }
+
+  /** Restores the brief to its state before the most recently accepted revision, if any. */
+  async function performUndo(
+    designId: string,
+    current: ProjectSnapshot,
+  ): Promise<ProjectSnapshot> {
+    const state = current.conversation.interviewState;
+
+    if (!state.lastRevision) {
+      await repo.addMessage(designId, {
+        role: "assistant",
+        content: "There's nothing to undo right now.",
+        metadata: { phase: current.conversation.phase, act: "acknowledge" },
+      });
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new Error("Project not found");
+      return snapshot;
+    }
+
+    await designBrief.applyProposal(designId, {
+      fields: state.lastRevision.previousBrief,
+      source: "intent_extraction",
+      rationale: "undo_last_revision",
+    });
+    await repo.updateConversationInterviewState(designId, {
+      ...state,
+      lastRevision: null,
+    });
+    await repo.addMessage(designId, {
+      role: "assistant",
+      content: describeUndo(state.lastRevision.changedSections),
+      metadata: {
+        phase: current.conversation.phase,
+        act: "acknowledge",
+        undone: true,
+      },
+    });
+
+    const snapshot = await repo.getProject(designId);
+    if (!snapshot) throw new Error("Project not found");
+    return snapshot;
   }
 
   /**
@@ -258,14 +354,13 @@ export function createConversationCapability(
   /**
    * Sprint 2F: Intent Extraction → Design Brief → Brief Evaluation →
    * Design Intelligence → Interview Intelligence → best next act. Used for
-   * every new project's pre-approval turn, and for Edit/Continue replies
-   * (which now get real multi-field, correction-aware extraction instead
-   * of a single appended note).
+   * every new project's pre-approval turn, and for Edit/Continue replies.
    *
-   * Sprint 2G Part 2: also computes Revision Impact every turn (comparing
-   * the brief immediately before and after this turn's proposals) so
+   * Sprint 2G Part 2: also computes Revision Impact every turn so
    * Design/Product Intelligence only re-run what the reply actually
-   * touched, and so a re-presented Design Summary can flag what changed.
+   * touched. Sprint 2G Part 3: records a one-level undo snapshot before
+   * any accepted change, and flags an explicit deferral with a "Designer
+   * Decision" note.
    */
   async function handleAdaptiveReply(
     designId: string,
@@ -277,6 +372,10 @@ export function createConversationCapability(
 
     const state = current.conversation.interviewState;
     const pendingSection = narrowSection(state.pendingSection);
+
+    if (UNDO_PATTERN.test(trimmed)) {
+      return performUndo(designId, current);
+    }
 
     const extraction = intentExtraction.extract({
       brief: current.brief,
@@ -292,6 +391,7 @@ export function createConversationCapability(
     const impact = revisionIntelligence.analyze(current.brief, workingBrief);
     const evaluation = briefEvaluation.evaluate(workingBrief);
     const assessment = designIntelligence.assess(workingBrief, evaluation, impact);
+    const deferredDecision = computeDeferredDecision(current.brief, workingBrief);
 
     const act = interviewIntelligence.selectNextAct({
       evaluation,
@@ -303,19 +403,27 @@ export function createConversationCapability(
       },
     });
 
+    const stateWithUndo: InterviewStateData = impact.isNoOp
+      ? state
+      : {
+          ...state,
+          lastRevision: {
+            previousBrief: toDesignBriefSnapshotContent(current.brief),
+            changedSections: impact.changedSections,
+          },
+        };
+
     if (act.type === "summarize") {
-      await presentDesignSummary(
-        designId,
-        workingBrief,
-        current.conversation.interviewState,
-        impact.changedSections,
-      );
+      await presentDesignSummary(designId, workingBrief, stateWithUndo, {
+        previousBrief: current.brief,
+        updatedSections: impact.changedSections,
+      });
       const snapshot = await repo.getProject(designId);
       if (!snapshot) throw new Error("Project not found");
       return snapshot;
     }
 
-    const nextState = applyActToInterviewState(state, act);
+    const nextState = applyActToInterviewState(stateWithUndo, act);
     await repo.updateConversationPhase(designId, "interviewing");
     await repo.updateConversationInterviewState(designId, nextState);
 
@@ -327,6 +435,10 @@ export function createConversationCapability(
           phase: "interviewing",
           act: act.type,
           section: actSection(act),
+          ...(deferredDecision ? { deferredDecision } : {}),
+          ...(act.type === "advise"
+            ? { actions: findRecommendationActions(assessment, act.findingId) }
+            : {}),
         },
       });
     }
@@ -339,10 +451,12 @@ export function createConversationCapability(
   /**
    * Sprint 2G Part 2: adaptive post-concept revision handling. Never
    * restarts the interview and never re-asks an already-answered question
-   * unless this revision itself invalidated it — Interview Intelligence's
-   * `selectRevisionAct` only reacts to what Revision Intelligence says
-   * actually changed. If concepts already exist and the change affects
-   * them, asks once whether to regenerate rather than silently doing so.
+   * unless this revision itself invalidated it.
+   *
+   * Sprint 2G Part 3: concept regeneration is no longer a one-shot yes/no
+   * gate on the *next* reply — "regenerate"/"keep current" are recognized
+   * whenever concepts actually need it, on any turn, and an ignored prompt
+   * never blocks or repeats. One level of undo is available here too.
    */
   async function handleRevisionReply(
     designId: string,
@@ -355,19 +469,20 @@ export function createConversationCapability(
     const state = current.conversation.interviewState;
     await repo.setProjectStatus(designId, "revision_requested");
 
-    // A pending "would you like updated concepts?" question takes priority
-    // over interpreting this reply as a fresh revision.
-    if (state.awaitingConceptRegenerationConfirmation) {
-      const answer = classifyYesNo(trimmed);
-      if (answer === "yes") {
-        return regenerateConcepts(designId, state);
+    if (UNDO_PATTERN.test(trimmed)) {
+      return performUndo(designId, current);
+    }
+
+    const conceptStatus = conceptGeneration.describeConceptStatus(
+      current.brief,
+      current.artworkVersions,
+      current.designBriefVersions,
+    );
+    if (conceptStatus.status === "needs_update") {
+      if (REGENERATE_REQUEST_PATTERN.test(trimmed)) {
+        return performRegeneration(designId, state);
       }
-      if (answer === "no") {
-        await repo.updateConversationPhase(designId, "revision_received");
-        await repo.updateConversationInterviewState(designId, {
-          ...state,
-          awaitingConceptRegenerationConfirmation: false,
-        });
+      if (KEEP_CONCEPTS_PATTERN.test(trimmed)) {
         await repo.addMessage(designId, {
           role: "assistant",
           content:
@@ -378,7 +493,6 @@ export function createConversationCapability(
         if (!snapshot) throw new Error("Project not found");
         return snapshot;
       }
-      // Unclear — fall through and treat this as a new revision instead.
     }
 
     const previousBrief = current.brief;
@@ -396,6 +510,7 @@ export function createConversationCapability(
 
     const updatedBrief = await designBrief.getWorkingBrief(designId);
     const impact = revisionIntelligence.analyze(previousBrief, updatedBrief);
+    const deferredDecision = computeDeferredDecision(previousBrief, updatedBrief);
 
     if (impact.isNoOp) {
       // Nothing structured changed — unstructured feedback was already
@@ -405,12 +520,23 @@ export function createConversationCapability(
         role: "assistant",
         content:
           "Got it — I've noted that. Anything else you would like to adjust?",
-        metadata: { phase: "revision_received" },
+        metadata: {
+          phase: "revision_received",
+          ...(deferredDecision ? { deferredDecision } : {}),
+        },
       });
       const snapshot = await repo.getProject(designId);
       if (!snapshot) throw new Error("Project not found");
       return snapshot;
     }
+
+    const stateWithUndo: InterviewStateData = {
+      ...state,
+      lastRevision: {
+        previousBrief: toDesignBriefSnapshotContent(previousBrief),
+        changedSections: impact.changedSections,
+      },
+    };
 
     const evaluation = briefEvaluation.evaluate(updatedBrief);
     const assessment = designIntelligence.assess(updatedBrief, evaluation, impact);
@@ -426,12 +552,9 @@ export function createConversationCapability(
     });
 
     if (act.type === "clarify" || act.type === "advise") {
-      const nextState = applyActToInterviewState(state, act);
+      const nextState = applyActToInterviewState(stateWithUndo, act);
       await repo.updateConversationPhase(designId, "revision_received");
-      await repo.updateConversationInterviewState(designId, {
-        ...nextState,
-        awaitingConceptRegenerationConfirmation: false,
-      });
+      await repo.updateConversationInterviewState(designId, nextState);
       await repo.addMessage(designId, {
         role: "assistant",
         content: act.message,
@@ -439,6 +562,10 @@ export function createConversationCapability(
           phase: "revision_received",
           act: act.type,
           section: actSection(act),
+          ...(deferredDecision ? { deferredDecision } : {}),
+          ...(act.type === "advise"
+            ? { actions: findRecommendationActions(assessment, act.findingId) }
+            : {}),
         },
       });
       const snapshot = await repo.getProject(designId);
@@ -447,27 +574,29 @@ export function createConversationCapability(
     }
 
     // The revision was unambiguous and raised nothing new — continue
-    // naturally. Only ask about regenerating concepts if some already
-    // exist and this change would actually make them stale.
+    // naturally. Only mention regenerating concepts if some already exist
+    // and this change would actually make them stale; the persistent
+    // concept-status action (not this message) is what actually lets the
+    // customer act on it whenever they're ready.
     const hasExistingConcepts = current.artworkVersions.length > 0;
-    const shouldPromptRegeneration =
+    const shouldMentionRegeneration =
       impact.needsConceptRegeneration && hasExistingConcepts;
 
     await repo.updateConversationPhase(designId, "revision_received");
     await repo.updateConversationInterviewState(designId, {
-      ...state,
+      ...stateWithUndo,
       pendingSection: null,
-      awaitingConceptRegenerationConfirmation: shouldPromptRegeneration,
     });
     await repo.addMessage(designId, {
       role: "assistant",
-      content: shouldPromptRegeneration
+      content: shouldMentionRegeneration
         ? `${acknowledgeRevision(impact.changedSections)} ${conceptRegenerationPrompt()}`
         : acknowledgeRevision(impact.changedSections),
       metadata: {
         phase: "revision_received",
         act: "acknowledge",
         updatedSections: impact.changedSections,
+        ...(deferredDecision ? { deferredDecision } : {}),
       },
     });
 
@@ -590,6 +719,23 @@ export function createConversationCapability(
       if (!snapshot) throw new Error("Project not found");
       return snapshot;
     },
+
+    async regenerateConcepts(designId) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+      if (current.designBriefVersions.length === 0) {
+        throw new Error(
+          "Cannot generate concepts without an approved design brief",
+        );
+      }
+      return performRegeneration(designId, current.conversation.interviewState);
+    },
+
+    async undoLastChange(designId) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+      return performUndo(designId, current);
+    },
   };
 }
 
@@ -598,13 +744,6 @@ function narrowSection(pending: string | null): BriefSectionKey | null {
     return pending as BriefSectionKey;
   }
   return null;
-}
-
-function classifyYesNo(reply: string): "yes" | "no" | "unclear" {
-  const trimmed = reply.trim();
-  if (YES_PATTERN.test(trimmed)) return "yes";
-  if (NO_PATTERN.test(trimmed)) return "no";
-  return "unclear";
 }
 
 function applyActToInterviewState(
@@ -635,6 +774,56 @@ function actSection(act: InterviewAct): string | undefined {
   if (act.type === "ask" || act.type === "clarify") return act.section;
   if (act.type === "advise") return act.followUpSection;
   return undefined;
+}
+
+/**
+ * Sprint 2G Part 3: old → new value for every updated, currently-visible
+ * field — the raw material for "Black → Navy" styling. A section that
+ * changed but isn't shown in the summary (e.g. it's now deferred) has no
+ * entry; a section whose displayed value didn't actually change (only
+ * bookkeeping did) is also skipped.
+ */
+function buildFieldTransitions(
+  previousSummary: DesignSummaryView,
+  newSummary: DesignSummaryView,
+  updatedSections: BriefSectionKey[],
+): Record<string, { from: string | null; to: string }> {
+  const transitions: Record<string, { from: string | null; to: string }> = {};
+  for (const section of updatedSections) {
+    const key = section as keyof DesignSummaryView;
+    const to = newSummary[key];
+    if (!to) continue;
+    const from = previousSummary[key] ?? null;
+    if (from === to) continue;
+    transitions[section] = { from, to };
+  }
+  return transitions;
+}
+
+/** The section, if any, the customer just explicitly deferred this turn. */
+function computeDeferredDecision(
+  previousBrief: TShirtDesignBrief,
+  updatedBrief: TShirtDesignBrief,
+): { section: BriefSectionKey; message: string } | null {
+  const previousSet = new Set(previousBrief.deferredSections);
+  const newlyDeferred = updatedBrief.deferredSections.find(
+    (section) => !previousSet.has(section),
+  );
+  if (!newlyDeferred || !KNOWN_SECTIONS.has(newlyDeferred)) return null;
+  const section = newlyDeferred as BriefSectionKey;
+  return { section, message: designerDecisionMessage(section) };
+}
+
+/**
+ * Looks up the clickable actions for the recommendation an "advise" act
+ * came from, so the recommendation card can render them — `InterviewAct`
+ * itself only carries `findingId`/`message`, not the full recommendation.
+ */
+function findRecommendationActions(
+  assessment: IntelligenceAssessment,
+  findingId: string,
+) {
+  return assessment.recommendations.find((r) => r.id === findingId)?.actions ?? [];
 }
 
 // Re-exported only so downstream call sites can type revision-derived

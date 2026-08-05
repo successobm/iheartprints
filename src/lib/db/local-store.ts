@@ -9,10 +9,12 @@ import {
 import { emptyInterviewState } from "@/lib/domain/types";
 import type {
   ArtworkVersion,
+  AssetRecord,
   ConversationMessage,
   ConversationPhase,
   DesignBriefVersion,
   DesignConversation,
+  GenerationJob,
   InterviewStateData,
   PrintProject,
   ProjectSnapshot,
@@ -22,8 +24,11 @@ import type {
 import type {
   ApproveDesignBriefInput,
   CreateArtworkVersionInput,
+  CreateAssetInput,
+  CreateGenerationJobInput,
   CreateMessageInput,
   ProjectRepository,
+  UpdateGenerationJobInput,
 } from "./repository";
 import { UniqueConstraintViolationError } from "./repository";
 
@@ -34,6 +39,9 @@ interface LocalDatabase {
   messages: ConversationMessage[];
   artworkVersions: ArtworkVersion[];
   designBriefVersions: DesignBriefVersion[];
+  /** Sprint 2H Part 1. */
+  generationJobs: GenerationJob[];
+  assets: AssetRecord[];
 }
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -51,6 +59,8 @@ function emptyDb(): LocalDatabase {
     messages: [],
     artworkVersions: [],
     designBriefVersions: [],
+    generationJobs: [],
+    assets: [],
   };
 }
 
@@ -73,20 +83,31 @@ async function readDb(): Promise<LocalDatabase> {
       conversations: (parsed.conversations ?? []).map((conversation) => ({
         ...conversation,
         // Spread onto the full default shape (not just `??`) so a partial
-        // interviewState from before a new field existed (e.g. Sprint 2G's
-        // awaitingConceptRegenerationConfirmation) still gets a default
-        // instead of ending up `undefined`.
+        // interviewState from before a new field existed (e.g. Sprint 2G
+        // Part 3's `lastRevision`) still gets a default instead of ending
+        // up `undefined`.
         interviewState: {
           ...emptyInterviewState(),
           ...conversation.interviewState,
         },
       })),
       messages: parsed.messages ?? [],
+      // Sprint 2H Part 1: default new provenance/reserved fields for
+      // on-disk data written before they existed, so resume never crashes.
       artworkVersions: (parsed.artworkVersions ?? []).map((artwork) => ({
         ...artwork,
         designBriefVersionId: artwork.designBriefVersionId ?? null,
+        generationJobId: artwork.generationJobId ?? null,
+        primaryAssetId: artwork.primaryAssetId ?? null,
+        thumbnailAssetId: artwork.thumbnailAssetId ?? null,
+        providerKey: artwork.providerKey ?? null,
+        customerRating: artwork.customerRating ?? null,
+        evaluationStatus: artwork.evaluationStatus ?? null,
+        printValidationStatus: artwork.printValidationStatus ?? null,
       })),
       designBriefVersions: parsed.designBriefVersions ?? [],
+      generationJobs: parsed.generationJobs ?? [],
+      assets: parsed.assets ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -323,6 +344,14 @@ export class LocalProjectRepository implements ProjectRepository {
       accentColor: version.accentColor,
       isSelected: false,
       designBriefVersionId: version.designBriefVersionId,
+      generationJobId: version.generationJobId ?? null,
+      primaryAssetId: version.primaryAssetId ?? null,
+      thumbnailAssetId: version.thumbnailAssetId ?? null,
+      providerKey: version.providerKey ?? null,
+      // Reserved for future sprints — always null until implemented.
+      customerRating: null,
+      evaluationStatus: null,
+      printValidationStatus: null,
       createdAt: timestamp,
     }));
 
@@ -419,5 +448,100 @@ export class LocalProjectRepository implements ProjectRepository {
     return (
       db.designBriefVersions.find((item) => item.id === versionId) ?? null
     );
+  }
+
+  // --- Sprint 2H Part 1: generation jobs -----------------------------
+
+  async createGenerationJob(
+    projectId: string,
+    input: CreateGenerationJobInput,
+  ): Promise<GenerationJob> {
+    const db = await readDb();
+    const timestamp = nowIso();
+    const job: GenerationJob = {
+      id: randomUUID(),
+      projectId,
+      designBriefVersionId: input.designBriefVersionId,
+      status: "queued",
+      conceptCount: input.conceptCount,
+      providerKey: input.providerKey,
+      idempotencyKey: input.idempotencyKey,
+      attempts: 0,
+      lastError: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.generationJobs.push(job);
+    await writeDb(db);
+    return job;
+  }
+
+  async getGenerationJobByIdempotencyKey(
+    projectId: string,
+    idempotencyKey: string,
+  ): Promise<GenerationJob | null> {
+    const db = await readDb();
+    return (
+      db.generationJobs.find(
+        (job) =>
+          job.projectId === projectId &&
+          job.idempotencyKey === idempotencyKey,
+      ) ?? null
+    );
+  }
+
+  async getGenerationJob(jobId: string): Promise<GenerationJob | null> {
+    const db = await readDb();
+    return db.generationJobs.find((job) => job.id === jobId) ?? null;
+  }
+
+  async listGenerationJobs(projectId: string): Promise<GenerationJob[]> {
+    const db = await readDb();
+    return db.generationJobs
+      .filter((job) => job.projectId === projectId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async updateGenerationJob(
+    jobId: string,
+    patch: UpdateGenerationJobInput,
+  ): Promise<GenerationJob> {
+    const db = await readDb();
+    const job = db.generationJobs.find((item) => item.id === jobId);
+    if (!job) throw new Error("Generation job not found");
+
+    Object.assign(job, patch, { updatedAt: nowIso() });
+    await writeDb(db);
+    return job;
+  }
+
+  // --- Sprint 2H Part 1: assets ---------------------------------------
+
+  async createAsset(
+    projectId: string,
+    input: CreateAssetInput,
+  ): Promise<AssetRecord> {
+    const db = await readDb();
+    const asset: AssetRecord = {
+      id: randomUUID(),
+      projectId,
+      ...input,
+      createdAt: nowIso(),
+    };
+    db.assets.push(asset);
+    await writeDb(db);
+    return asset;
+  }
+
+  async listAssets(projectId: string): Promise<AssetRecord[]> {
+    const db = await readDb();
+    return db.assets
+      .filter((asset) => asset.projectId === projectId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async getAssetById(assetId: string): Promise<AssetRecord | null> {
+    const db = await readDb();
+    return db.assets.find((asset) => asset.id === assetId) ?? null;
   }
 }

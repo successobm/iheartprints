@@ -9,12 +9,13 @@ import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-inter
 import type { ProjectSnapshot } from "@/lib/domain/types";
 
 /**
- * Sprint 2G Part 2: adaptive post-concept revision handling, end to end
+ * Sprint 2G Part 2/3: adaptive post-concept revision handling, end to end
  * through ConversationCapability. Unit-level RevisionIntelligence/
- * InterviewIntelligence/ProductIntelligence coverage lives in their own
- * capability test files — this file proves the full pipeline wires up
- * correctly and the customer-visible behavior (no restarts, no repeated
- * questions, stale-concept prompting) actually holds.
+ * InterviewIntelligence/ProductIntelligence/ConceptGeneration coverage
+ * lives in their own capability test files — this file proves the full
+ * pipeline wires up correctly and the customer-visible behavior (no
+ * restarts, no repeated questions, no forced yes/no, persistent
+ * regeneration availability, undo) actually holds.
  */
 describe("ConversationCapability — adaptive post-concept revisions", () => {
   let tempDir = "";
@@ -46,8 +47,12 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
   /** Runs the interview to summary, approves it, and selects the first concept. */
   async function runToRevisionReady(
     conversation: Awaited<ReturnType<typeof freshConversation>>,
+    answerOverrides: Partial<Record<string, string>> = {},
   ): Promise<{ projectId: string; afterSelect: ProjectSnapshot }> {
-    const { projectId } = await runAdaptiveInterviewToSummary(conversation);
+    const { projectId } = await runAdaptiveInterviewToSummary(
+      conversation,
+      answerOverrides,
+    );
     const approved = await conversation.submitDesignBriefDecision(
       projectId,
       "approve",
@@ -62,7 +67,7 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
     return { projectId, afterSelect };
   }
 
-  it("a product-only revision updates the brief, prompts for regeneration, and asks nothing else", async () => {
+  it("a product-only revision updates the brief and mentions regeneration, without asking anything else", async () => {
     const conversation = await freshConversation();
     const { projectId } = await runToRevisionReady(conversation);
 
@@ -78,48 +83,76 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
     const lastMessage = afterRevision.messages.at(-1);
     assert.equal(lastMessage?.role, "assistant");
     assert.match(lastMessage?.content ?? "", /updated concepts/i);
-    assert.equal(
-      afterRevision.conversation.interviewState.awaitingConceptRegenerationConfirmation,
-      true,
-    );
   });
 
-  it("confirming regeneration creates a new brief version and a new batch of concepts", async () => {
+  it("ignoring the regeneration mention entirely still lets the conversation continue normally", async () => {
     const conversation = await freshConversation();
     const { projectId } = await runToRevisionReady(conversation);
 
     await conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
-    const afterYes = await conversation.handleUserMessage(projectId, "Yes please.");
-
-    assert.equal(afterYes.conversation.phase, "concepts_ready");
-    assert.equal(afterYes.designBriefVersions.length, 2);
-    assert.equal(afterYes.artworkVersions.length, 6); // original 3 + new 3, never deleted
-    assert.equal(afterYes.project.selectedArtworkVersionId, null);
-    assert.equal(
-      afterYes.conversation.interviewState.awaitingConceptRegenerationConfirmation,
-      false,
+    // Completely unrelated reply — must not be misread as a yes/no answer
+    // to the earlier regeneration mention.
+    const afterUnrelated = await conversation.handleUserMessage(
+      projectId,
+      "By the way, what's the turnaround time usually like?",
     );
 
-    const newestConcepts = afterYes.artworkVersions.filter(
-      (v) => v.designBriefVersionId === afterYes.designBriefVersions.at(-1)?.id,
+    assert.equal(afterUnrelated.conversation.phase, "revision_received");
+    assert.equal(afterUnrelated.artworkVersions.length, 3); // still not regenerated
+    const lastMessage = afterUnrelated.messages.at(-1);
+    assert.doesNotMatch(lastMessage?.content ?? "", /would you like me to generate/i);
+  });
+
+  it("a clear 'regenerate' reply on ANY later turn triggers regeneration, not just the immediate next one", async () => {
+    const conversation = await freshConversation();
+    const { projectId } = await runToRevisionReady(conversation);
+
+    await conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
+    await conversation.handleUserMessage(
+      projectId,
+      "By the way, what's the turnaround time usually like?",
+    );
+    const afterRegenerate = await conversation.handleUserMessage(
+      projectId,
+      "Please regenerate the concepts.",
+    );
+
+    assert.equal(afterRegenerate.conversation.phase, "concepts_ready");
+    assert.equal(afterRegenerate.designBriefVersions.length, 2);
+    assert.equal(afterRegenerate.artworkVersions.length, 6);
+  });
+
+  it("explicit regenerateConcepts() creates a new brief version and a new batch of concepts", async () => {
+    const conversation = await freshConversation();
+    const { projectId } = await runToRevisionReady(conversation);
+
+    await conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
+    const afterRegen = await conversation.regenerateConcepts(projectId);
+
+    assert.equal(afterRegen.conversation.phase, "concepts_ready");
+    assert.equal(afterRegen.designBriefVersions.length, 2);
+    assert.equal(afterRegen.artworkVersions.length, 6); // original 3 + new 3, never deleted
+    assert.equal(afterRegen.project.selectedArtworkVersionId, null);
+
+    const newestConcepts = afterRegen.artworkVersions.filter(
+      (v) => v.designBriefVersionId === afterRegen.designBriefVersions.at(-1)?.id,
     );
     assert.equal(newestConcepts.length, 3);
   });
 
-  it("declining regeneration keeps the existing concepts untouched", async () => {
+  it("declining regeneration in chat keeps the existing concepts untouched", async () => {
     const conversation = await freshConversation();
     const { projectId } = await runToRevisionReady(conversation);
 
     await conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
-    const afterNo = await conversation.handleUserMessage(projectId, "No thanks.");
+    const afterNo = await conversation.handleUserMessage(
+      projectId,
+      "Keep the current concepts for now.",
+    );
 
     assert.equal(afterNo.conversation.phase, "revision_received");
     assert.equal(afterNo.artworkVersions.length, 3);
     assert.equal(afterNo.designBriefVersions.length, 1);
-    assert.equal(
-      afterNo.conversation.interviewState.awaitingConceptRegenerationConfirmation,
-      false,
-    );
   });
 
   it("a product color change that clashes with artwork colors produces a clarification, not a silent update", async () => {
@@ -166,15 +199,11 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
     );
 
     assert.equal(afterNoOp.conversation.phase, "revision_received");
-    assert.equal(
-      afterNoOp.conversation.interviewState.awaitingConceptRegenerationConfirmation,
-      false,
-    );
     const lastMessage = afterNoOp.messages.at(-1);
     assert.match(lastMessage?.content ?? "", /noted|anything else/i);
   });
 
-  it("audience/purpose-only revisions do not prompt for concept regeneration", async () => {
+  it("audience/purpose-only revisions never mention concept regeneration", async () => {
     const conversation = await freshConversation();
     const { projectId } = await runToRevisionReady(conversation);
 
@@ -183,10 +212,8 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
       "This is actually for our alumni association, not current campers.",
     );
 
-    assert.equal(
-      afterRevision.conversation.interviewState.awaitingConceptRegenerationConfirmation,
-      false,
-    );
+    const lastMessage = afterRevision.messages.at(-1);
+    assert.doesNotMatch(lastMessage?.content ?? "", /would you like me to generate/i);
     assert.equal(afterRevision.artworkVersions.length, 3);
   });
 
@@ -209,5 +236,150 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
     // this happened) is allowed to contain it.
     const lastMessage = afterRevision.messages.at(-1);
     assert.doesNotMatch(lastMessage?.content ?? "", /what are we printing today/i);
+  });
+
+  it("a deferral during a revision produces a Designer Decision note", async () => {
+    const conversation = await freshConversation();
+    // Seed a concrete (non-deferred) print location so deferring it during
+    // the revision is a genuine first-time change, not a no-op re-defer.
+    const { projectId } = await runToRevisionReady(conversation, {
+      printLocation: "Full front",
+    });
+
+    const afterRevision = await conversation.handleUserMessage(
+      projectId,
+      "Actually, you choose the print placement.",
+    );
+
+    const lastMessage = afterRevision.messages.at(-1);
+    assert.ok(lastMessage?.metadata.deferredDecision);
+    const decision = lastMessage?.metadata.deferredDecision as {
+      section: string;
+      message: string;
+    };
+    assert.equal(decision.section, "printLocation");
+    assert.doesNotMatch(decision.message, /missing|unknown/i);
+  });
+
+  describe("undo", () => {
+    it("undoes the most recently accepted revision and restores the prior value", async () => {
+      const conversation = await freshConversation();
+      const { projectId } = await runToRevisionReady(conversation);
+
+      const original = await conversation.get(projectId);
+      const originalProduct = original?.brief.productSummary;
+
+      await conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
+      const afterUndo = await conversation.handleUserMessage(projectId, "Undo that.");
+
+      assert.equal(afterUndo.brief.productSummary, originalProduct);
+      const lastMessage = afterUndo.messages.at(-1);
+      assert.match(lastMessage?.content ?? "", /undone/i);
+    });
+
+    it("explicit undoLastChange() works the same way as typing 'undo'", async () => {
+      const conversation = await freshConversation();
+      const { projectId } = await runToRevisionReady(conversation);
+
+      const original = await conversation.get(projectId);
+      const originalColor = original?.brief.shirtColor;
+
+      await conversation.handleUserMessage(projectId, "Make the shirt black.");
+      const afterUndo = await conversation.undoLastChange(projectId);
+
+      assert.equal(afterUndo.brief.shirtColor, originalColor);
+    });
+
+    it("only supports one level of undo — undoing twice in a row says there's nothing left", async () => {
+      const conversation = await freshConversation();
+      const { projectId } = await runToRevisionReady(conversation);
+
+      await conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
+      await conversation.handleUserMessage(projectId, "Undo that.");
+      const secondUndo = await conversation.handleUserMessage(projectId, "Undo that.");
+
+      const lastMessage = secondUndo.messages.at(-1);
+      assert.match(lastMessage?.content ?? "", /nothing to undo/i);
+    });
+
+    it("undoing with no prior revision at all is a safe no-op", async () => {
+      const conversation = await freshConversation();
+      const { projectId } = await runToRevisionReady(conversation);
+
+      const afterUndo = await conversation.undoLastChange(projectId);
+      const lastMessage = afterUndo.messages.at(-1);
+      assert.match(lastMessage?.content ?? "", /nothing to undo/i);
+    });
+
+    it("a second real revision replaces the undo point rather than stacking", async () => {
+      const conversation = await freshConversation();
+      const { projectId } = await runToRevisionReady(conversation);
+
+      await conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
+      const afterSecond = await conversation.handleUserMessage(
+        projectId,
+        "Make the shirt black.",
+      );
+      assert.equal(afterSecond.brief.shirtColor, "black");
+      assert.match(afterSecond.brief.productSummary ?? "", /hoodie/i);
+
+      // Undo only reverts the *second* change (shirt color), not the first.
+      const afterUndo = await conversation.undoLastChange(projectId);
+      assert.notEqual(afterUndo.brief.shirtColor, "black");
+      assert.match(afterUndo.brief.productSummary ?? "", /hoodie/i);
+    });
+  });
+
+  describe("reload persistence", () => {
+    it("concept status and the undo point survive a reload, not just the in-memory response", async () => {
+      const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
+        "@/capabilities/composition"
+      );
+      resetCapabilityGraphForTests();
+      const graph = getCapabilityGraph();
+
+      const { projectId } = await runToRevisionReady(graph.conversation);
+      await graph.conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
+
+      const reloaded = await graph.conversation.get(projectId);
+      assert.ok(reloaded);
+      assert.ok(reloaded.conversation.interviewState.lastRevision);
+      assert.deepEqual(
+        reloaded.conversation.interviewState.lastRevision?.changedSections,
+        ["product"],
+      );
+
+      const status = graph.conceptGeneration.describeConceptStatus(
+        reloaded.brief,
+        reloaded.artworkVersions,
+        reloaded.designBriefVersions,
+      );
+      assert.equal(status.status, "needs_update");
+
+      // A second reload sees the exact same thing — not a one-time fluke.
+      const reloadedAgain = await graph.conversation.get(projectId);
+      assert.deepEqual(
+        reloadedAgain?.conversation.interviewState.lastRevision,
+        reloaded.conversation.interviewState.lastRevision,
+      );
+    });
+
+    it("an undo performed before reload is reflected after reload", async () => {
+      const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
+        "@/capabilities/composition"
+      );
+      resetCapabilityGraphForTests();
+      const graph = getCapabilityGraph();
+
+      const { projectId } = await runToRevisionReady(graph.conversation);
+      const original = await graph.conversation.get(projectId);
+
+      await graph.conversation.handleUserMessage(projectId, "Actually, make it a hoodie.");
+      await graph.conversation.undoLastChange(projectId);
+
+      const reloaded = await graph.conversation.get(projectId);
+      assert.equal(reloaded?.brief.productSummary, original?.brief.productSummary);
+      assert.equal(reloaded?.conversation.interviewState.lastRevision, null);
+    });
   });
 });

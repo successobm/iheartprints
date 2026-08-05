@@ -7,11 +7,15 @@ import {
 import { emptyInterviewState } from "@/lib/domain/types";
 import type {
   ArtworkVersion,
+  AssetKind,
+  AssetRecord,
   ConversationMessage,
   ConversationPhase,
   DesignBriefVersion,
   DesignBriefVersionStatus,
   DesignConversation,
+  GenerationJob,
+  GenerationJobStatus,
   InterviewStateData,
   PrintProject,
   ProjectSnapshot,
@@ -21,8 +25,11 @@ import type {
 import type {
   ApproveDesignBriefInput,
   CreateArtworkVersionInput,
+  CreateAssetInput,
+  CreateGenerationJobInput,
   CreateMessageInput,
   ProjectRepository,
+  UpdateGenerationJobInput,
 } from "./repository";
 import { UniqueConstraintViolationError } from "./repository";
 
@@ -87,6 +94,45 @@ type DbArtwork = {
   accent_color: string;
   is_selected: boolean;
   design_brief_version_id: string | null;
+  generation_job_id: string | null;
+  primary_asset_id: string | null;
+  thumbnail_asset_id: string | null;
+  provider_key: string | null;
+  customer_rating: number | null;
+  evaluation_status: string | null;
+  print_validation_status: string | null;
+  created_at: string;
+};
+
+type DbGenerationJob = {
+  id: string;
+  project_id: string;
+  design_brief_version_id: string;
+  status: GenerationJobStatus;
+  concept_count: number;
+  provider_key: string;
+  idempotency_key: string;
+  attempts: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type DbAsset = {
+  id: string;
+  project_id: string;
+  kind: AssetKind;
+  storage_key: string | null;
+  content_type: string | null;
+  is_thumbnail: boolean;
+  width_px: number | null;
+  height_px: number | null;
+  has_transparency: boolean | null;
+  provider_key: string | null;
+  generation_job_id: string | null;
+  metadata: Record<string, unknown> | null;
+  vector_asset_id: string | null;
+  print_asset_id: string | null;
   created_at: string;
 };
 
@@ -174,6 +220,49 @@ function mapArtwork(row: DbArtwork): ArtworkVersion {
     accentColor: row.accent_color,
     isSelected: row.is_selected,
     designBriefVersionId: row.design_brief_version_id,
+    generationJobId: row.generation_job_id ?? null,
+    primaryAssetId: row.primary_asset_id ?? null,
+    thumbnailAssetId: row.thumbnail_asset_id ?? null,
+    providerKey: row.provider_key ?? null,
+    customerRating: row.customer_rating ?? null,
+    evaluationStatus: row.evaluation_status ?? null,
+    printValidationStatus: row.print_validation_status ?? null,
+    createdAt: row.created_at,
+  };
+}
+
+function mapGenerationJob(row: DbGenerationJob): GenerationJob {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    designBriefVersionId: row.design_brief_version_id,
+    status: row.status,
+    conceptCount: row.concept_count,
+    providerKey: row.provider_key,
+    idempotencyKey: row.idempotency_key,
+    attempts: row.attempts,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapAsset(row: DbAsset): AssetRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    kind: row.kind,
+    storageKey: row.storage_key,
+    contentType: row.content_type,
+    isThumbnail: row.is_thumbnail,
+    widthPx: row.width_px,
+    heightPx: row.height_px,
+    hasTransparency: row.has_transparency,
+    providerKey: row.provider_key,
+    generationJobId: row.generation_job_id,
+    metadata: row.metadata ?? {},
+    vectorAssetId: row.vector_asset_id,
+    printAssetId: row.print_asset_id,
     createdAt: row.created_at,
   };
 }
@@ -486,6 +575,10 @@ export class SupabaseProjectRepository implements ProjectRepository {
           accent_color: version.accentColor,
           is_selected: false,
           design_brief_version_id: version.designBriefVersionId,
+          generation_job_id: version.generationJobId ?? null,
+          primary_asset_id: version.primaryAssetId ?? null,
+          thumbnail_asset_id: version.thumbnailAssetId ?? null,
+          provider_key: version.providerKey ?? null,
         })),
       )
       .select("*")
@@ -579,5 +672,146 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .maybeSingle();
     if (error) throw error;
     return data ? mapDesignBriefVersion(data as DbDesignBriefVersion) : null;
+  }
+
+  // --- Sprint 2H Part 1: generation jobs -----------------------------
+
+  async createGenerationJob(
+    projectId: string,
+    input: CreateGenerationJobInput,
+  ): Promise<GenerationJob> {
+    const { data, error } = await this.client
+      .from("generation_jobs")
+      .insert({
+        project_id: projectId,
+        design_brief_version_id: input.designBriefVersionId,
+        status: "queued",
+        concept_count: input.conceptCount,
+        provider_key: input.providerKey,
+        idempotency_key: input.idempotencyKey,
+        attempts: 0,
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      // Idempotent retry: a concurrent/duplicate call raced us to create
+      // the same (project, approved version) job. Return the winner's row
+      // rather than erroring, mirroring `approveDesignBrief`'s pattern.
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        const existing = await this.getGenerationJobByIdempotencyKey(
+          projectId,
+          input.idempotencyKey,
+        );
+        if (existing) return existing;
+      }
+      throw error;
+    }
+
+    return mapGenerationJob(data as DbGenerationJob);
+  }
+
+  async getGenerationJobByIdempotencyKey(
+    projectId: string,
+    idempotencyKey: string,
+  ): Promise<GenerationJob | null> {
+    const { data, error } = await this.client
+      .from("generation_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("idempotency_key", idempotencyKey)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapGenerationJob(data as DbGenerationJob) : null;
+  }
+
+  async getGenerationJob(jobId: string): Promise<GenerationJob | null> {
+    const { data, error } = await this.client
+      .from("generation_jobs")
+      .select("*")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapGenerationJob(data as DbGenerationJob) : null;
+  }
+
+  async listGenerationJobs(projectId: string): Promise<GenerationJob[]> {
+    const { data, error } = await this.client
+      .from("generation_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbGenerationJob[]) ?? []).map(mapGenerationJob);
+  }
+
+  async updateGenerationJob(
+    jobId: string,
+    patch: UpdateGenerationJobInput,
+  ): Promise<GenerationJob> {
+    const payload: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+    if (patch.status !== undefined) payload.status = patch.status;
+    if (patch.attempts !== undefined) payload.attempts = patch.attempts;
+    if (patch.lastError !== undefined) payload.last_error = patch.lastError;
+
+    const { data, error } = await this.client
+      .from("generation_jobs")
+      .update(payload)
+      .eq("id", jobId)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapGenerationJob(data as DbGenerationJob);
+  }
+
+  // --- Sprint 2H Part 1: assets ---------------------------------------
+
+  async createAsset(
+    projectId: string,
+    input: CreateAssetInput,
+  ): Promise<AssetRecord> {
+    const { data, error } = await this.client
+      .from("assets")
+      .insert({
+        project_id: projectId,
+        kind: input.kind,
+        storage_key: input.storageKey,
+        content_type: input.contentType,
+        is_thumbnail: input.isThumbnail,
+        width_px: input.widthPx,
+        height_px: input.heightPx,
+        has_transparency: input.hasTransparency,
+        provider_key: input.providerKey,
+        generation_job_id: input.generationJobId,
+        metadata: input.metadata,
+        vector_asset_id: input.vectorAssetId,
+        print_asset_id: input.printAssetId,
+      })
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapAsset(data as DbAsset);
+  }
+
+  async listAssets(projectId: string): Promise<AssetRecord[]> {
+    const { data, error } = await this.client
+      .from("assets")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbAsset[]) ?? []).map(mapAsset);
+  }
+
+  async getAssetById(assetId: string): Promise<AssetRecord | null> {
+    const { data, error } = await this.client
+      .from("assets")
+      .select("*")
+      .eq("id", assetId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapAsset(data as DbAsset) : null;
   }
 }

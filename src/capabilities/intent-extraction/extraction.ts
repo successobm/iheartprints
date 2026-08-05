@@ -188,15 +188,23 @@ export function extractAdaptive(context: ExtractionContext): ExtractionOutcome {
   const trimmed = context.reply.trim();
   const fields: BriefFieldPatch = {};
 
-  // 1. Explicit deferral of the pending section — checked first so a short
-  // "you choose" never gets misread as an attempted (ambiguous) answer.
-  if (
+  // 1. Explicit deferral — checked first so a short "you choose" never
+  // gets misread as an attempted (ambiguous) answer. Two ways to trigger
+  // it: answering the pending question with a deferral phrase (the
+  // interview case), or spontaneously naming a section to defer (the
+  // revision case, where there is no pending question — "Actually, you
+  // choose the print placement" said out of nowhere).
+  const pendingDeferral =
     context.pendingSection &&
     isDeferrable(context.pendingSection) &&
     isDeferralReply(trimmed)
-  ) {
+      ? context.pendingSection
+      : null;
+  const deferredTarget = pendingDeferral ?? detectMentionedDeferral(trimmed);
+
+  if (deferredTarget) {
     const next = new Set(context.brief.deferredSections);
-    next.add(context.pendingSection);
+    next.add(deferredTarget);
     return {
       fields: { deferredSections: [...next] },
       intents: ["defer"],
@@ -257,6 +265,32 @@ export function extractAdaptive(context: ExtractionContext): ExtractionOutcome {
 function isDeferralReply(trimmed: string): boolean {
   if (wordCount(trimmed) > 8) return false; // a deferral phrase inside a longer answer is not a deferral
   return DEFERRAL_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+// Unanchored deferral-verb detection, for the no-pending-question case
+// (revisions). Kept separate from DEFERRAL_PATTERNS (mostly `^`-anchored,
+// tuned for "this whole short reply IS the deferral") — this variant must
+// also work mid-sentence ("Actually, you choose the print placement"), so
+// it is paired with an explicit section mention to stay precise instead of
+// firing on any passing use of "choose"/"decide".
+const DEFERRAL_VERB_PATTERN =
+  /\b(?:you|the designer)\s+(?:choose|decide|pick)\b|\bwhatever\s+(?:you\s+(?:think|want|recommend)|works(?:\s+best)?|looks\s+good|is\s+fine)\b|\bsurprise me\b|\bdecide for me\b|\bup to you\b|\bno preference\b|\bleave it (?:up )?to you\b/i;
+
+const SECTION_MENTION_PATTERNS: Array<[RegExp, BriefSectionKey]> = [
+  [/\bprint\s*(?:location|placement|position)\b|\bplacement\b/i, "printLocation"],
+  [/\b(?:artwork|design)\s*colou?rs?\b|\bcolou?rs?\b/i, "colors"],
+  [/\bstyle\b|\blook\b/i, "style"],
+  [/\baudience\b/i, "audience"],
+  [/\bpurpose\b|\boccasion\b/i, "purpose"],
+];
+
+function detectMentionedDeferral(trimmed: string): BriefSectionKey | null {
+  if (wordCount(trimmed) > 14) return null; // stay scoped to short, clearly-deferral-shaped replies
+  if (!DEFERRAL_VERB_PATTERN.test(trimmed)) return null;
+  for (const [pattern, section] of SECTION_MENTION_PATTERNS) {
+    if (pattern.test(trimmed) && isDeferrable(section)) return section;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -391,17 +425,32 @@ function extractGraphics(positiveText: string): string | null {
 /* Product                                                              */
 /* ------------------------------------------------------------------ */
 
+// "make (the|your|our|it) <product-word>" — a predicate about an existing
+// product ("make the shirt black", "make it a hoodie" only WITHOUT an
+// intervening article) reads as an attribute change, not a new product
+// description. Deliberately does not match "make it a hoodie" (there's an
+// article between "it" and "hoodie"), which should still count.
+const PRODUCT_ATTRIBUTE_CHANGE_PATTERN = new RegExp(
+  `\\bmake\\s+(?:the|your|our|it)?\\s*(${PRODUCT_WORDS.join("|")})\\b`,
+  "i",
+);
+
 function extractProduct(positiveText: string): string | null {
   if (!PRODUCT_PATTERN.test(positiveText)) return null;
   // Use the clause containing the product word rather than the full,
-  // possibly multi-sentence reply. A clause that also says "color"/"colour"
-  // (e.g. "make the shirt color forest green") is about the product's
-  // color, not the product itself — skip it so a color correction never
+  // possibly multi-sentence reply. A clause about the product's *color*
+  // (mentions "color"/"colour", or reads as "make the shirt <word>") is
+  // not a product description — skip it so a color correction never
   // overwrites the product description just because it names the garment.
   const clause = positiveText
     .split(/[.!?]/)
     .map((c) => c.trim())
-    .find((c) => PRODUCT_PATTERN.test(c) && !/\bcolou?r\b/i.test(c));
+    .find(
+      (c) =>
+        PRODUCT_PATTERN.test(c) &&
+        !/\bcolou?r\b/i.test(c) &&
+        !PRODUCT_ATTRIBUTE_CHANGE_PATTERN.test(c),
+    );
   return clause || null;
 }
 

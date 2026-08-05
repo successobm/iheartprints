@@ -2,6 +2,7 @@ import {
   UniqueConstraintViolationError,
   type ProjectRepository,
 } from "@/lib/db/repository";
+import { toDesignBriefSnapshotContent } from "@/lib/domain/brief-snapshot";
 import type {
   DesignBriefSnapshotContent,
   DesignBriefVersion,
@@ -62,7 +63,7 @@ export function createDesignBriefCapability(
 
     async approveWorkingBrief(designId) {
       const brief = await this.getWorkingBrief(designId);
-      const content = toSnapshotContent(brief);
+      const content = toDesignBriefSnapshotContent(brief);
       const existing = await repo.getLatestDesignBriefVersion(designId);
 
       if (existing && contentEquals(existing.content, content)) {
@@ -85,25 +86,6 @@ export function createDesignBriefCapability(
         throw error;
       }
     },
-  };
-}
-
-function toSnapshotContent(
-  brief: TShirtDesignBrief,
-): DesignBriefSnapshotContent {
-  return {
-    productSummary: brief.productSummary,
-    designDescription: brief.designDescription,
-    exactText: brief.exactText,
-    shirtColor: brief.shirtColor,
-    printPlacement: brief.printPlacement,
-    preferredColors: [...brief.preferredColors],
-    designStyle: brief.designStyle,
-    additionalInstructions: brief.additionalInstructions,
-    audience: brief.audience,
-    purpose: brief.purpose,
-    exclusions: brief.exclusions,
-    deferredSections: [...brief.deferredSections],
   };
 }
 

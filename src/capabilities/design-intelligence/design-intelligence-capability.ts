@@ -1,10 +1,13 @@
 import type { TShirtDesignBrief } from "@/lib/domain/types";
 import type { ProductIntelligenceCapability } from "@/capabilities/product-intelligence";
+import { suggestContrastingColor } from "@/capabilities/shared/color-families";
 import { contradictionMessage } from "@/capabilities/shared/question-phrasing";
 import type {
+  BriefConflict,
   BriefEvaluation,
   DesignRecommendation,
   IntelligenceAssessment,
+  RecommendationAction,
   RevisionImpact,
   SectionConfidence,
   SectionEvaluation,
@@ -66,6 +69,7 @@ export function createDesignIntelligenceCapability(
           // surfaced as an Interview Intelligence "advise" act.
           severity: finding.severity === "info" ? "info" : "warning",
           followUpSection: followUpSectionForProductionCode(finding.code),
+          actions: finding.severity === "info" ? undefined : GENERIC_ACTIONS,
         }),
       );
 
@@ -80,6 +84,7 @@ export function createDesignIntelligenceCapability(
           message: contradictionMessage(conflict),
           severity: "warning" as const,
           followUpSection: conflict.sections[0],
+          actions: actionsForConflict(conflict, brief),
         }));
 
       return {
@@ -110,6 +115,53 @@ function followUpSectionForProductionCode(
     default:
       return undefined;
   }
+}
+
+/**
+ * Sprint 2G Part 3: recommendation cards always offer a safe, non-presumptuous
+ * way out — "customers remain in control." Both a plain "keep" and an
+ * explicit "dismiss" are offered since they read differently to a customer
+ * (one affirms the current choice, the other just moves on) even though
+ * this system currently treats them the same way once clicked.
+ */
+const DISMISS_ACTION: RecommendationAction = {
+  label: "Dismiss",
+  kind: "dismiss",
+  replyText: "No changes for now, keep going.",
+};
+const KEEP_ACTION: RecommendationAction = {
+  label: "Keep as-is",
+  kind: "keep",
+  replyText: "Keep it as-is for now.",
+};
+const GENERIC_ACTIONS: RecommendationAction[] = [KEEP_ACTION, DISMISS_ACTION];
+
+function actionsForConflict(
+  conflict: BriefConflict,
+  brief: TShirtDesignBrief,
+): RecommendationAction[] {
+  if (conflict.code === "color_clash" && brief.shirtColor) {
+    const current = brief.shirtColor;
+    const suggested = suggestContrastingColor(current);
+    return [
+      {
+        label: `Use ${capitalize(suggested)}`,
+        kind: "apply",
+        replyText: `Use ${suggested} instead of ${current} for the design colors.`,
+      },
+      {
+        label: `Keep ${capitalize(current)}`,
+        kind: "keep",
+        replyText: `Keep it as ${current} — that's fine.`,
+      },
+      DISMISS_ACTION,
+    ];
+  }
+  return GENERIC_ACTIONS;
+}
+
+function capitalize(value: string): string {
+  return value.length > 0 ? value[0]!.toUpperCase() + value.slice(1) : value;
 }
 
 function recommendationKindForCode(code?: string): DesignRecommendation["kind"] {

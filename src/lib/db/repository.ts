@@ -1,10 +1,12 @@
 import type {
   ArtworkVersion,
+  AssetRecord,
   ConversationMessage,
   ConversationPhase,
   DesignBriefSnapshotContent,
   DesignBriefVersion,
   DesignConversation,
+  GenerationJob,
   InterviewStateData,
   MessageRole,
   PrintProject,
@@ -28,7 +30,34 @@ export interface CreateArtworkVersionInput {
   accentColor: string;
   /** Sprint 2D: required provenance link to the approved brief that authorized this concept. */
   designBriefVersionId: string | null;
+  /**
+   * Sprint 2H Part 1: internal generation provenance. Optional so
+   * placeholder-only call sites (and old tests) don't have to supply them —
+   * repository implementations default missing values to `null`.
+   */
+  generationJobId?: string | null;
+  primaryAssetId?: string | null;
+  thumbnailAssetId?: string | null;
+  providerKey?: string | null;
 }
+
+/** Sprint 2H Part 1: input for creating a durable generation job record. */
+export interface CreateGenerationJobInput {
+  designBriefVersionId: string;
+  conceptCount: number;
+  providerKey: string;
+  idempotencyKey: string;
+}
+
+export type UpdateGenerationJobInput = Partial<
+  Pick<GenerationJob, "status" | "attempts" | "lastError">
+>;
+
+/** Sprint 2H Part 1: input for registering a stored/generated asset. */
+export type CreateAssetInput = Omit<
+  AssetRecord,
+  "id" | "projectId" | "createdAt"
+>;
 
 export interface ApproveDesignBriefInput {
   briefId: string;
@@ -106,4 +135,29 @@ export interface ProjectRepository {
   getDesignBriefVersionById(
     versionId: string,
   ): Promise<DesignBriefVersion | null>;
+
+  /**
+   * Sprint 2H Part 1: real generation job persistence, backing
+   * ConceptGenerationCapability's idempotency and retry strategy. Never
+   * exposed through `ProjectSnapshot` — internal tracing only.
+   */
+  createGenerationJob(
+    projectId: string,
+    input: CreateGenerationJobInput,
+  ): Promise<GenerationJob>;
+  getGenerationJobByIdempotencyKey(
+    projectId: string,
+    idempotencyKey: string,
+  ): Promise<GenerationJob | null>;
+  getGenerationJob(jobId: string): Promise<GenerationJob | null>;
+  listGenerationJobs(projectId: string): Promise<GenerationJob[]>;
+  updateGenerationJob(
+    jobId: string,
+    patch: UpdateGenerationJobInput,
+  ): Promise<GenerationJob>;
+
+  /** Sprint 2H Part 1: real asset persistence, backing AssetCapability. */
+  createAsset(projectId: string, input: CreateAssetInput): Promise<AssetRecord>;
+  listAssets(projectId: string): Promise<AssetRecord[]>;
+  getAssetById(assetId: string): Promise<AssetRecord | null>;
 }
