@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import type { DesignSummaryView } from "@/capabilities/shared/contracts";
 import type { ProjectSnapshot } from "@/lib/domain/types";
 import {
   CHAT_PROJECT_STORAGE_KEY,
@@ -9,6 +10,7 @@ import {
 } from "./chat-session";
 import { Composer } from "./Composer";
 import { ConceptCards } from "./ConceptCards";
+import { DesignSummaryCard } from "./DesignSummaryCard";
 import { MessageBubble } from "./MessageBubble";
 import { useIsClient } from "./use-is-client";
 
@@ -138,6 +140,34 @@ export function ChatApp() {
     }
   }
 
+  async function submitDecision(action: "approve" | "edit" | "continue") {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/brief/decision`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to submit decision");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to submit decision",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
   async function refresh() {
     if (!snapshot) return;
     const response = await fetch(`/api/projects/${snapshot.project.id}`);
@@ -161,7 +191,9 @@ export function ChatApp() {
     !snapshot ||
     phase === "generating" ||
     phase === "skip_references" ||
-    phase === "concepts_ready";
+    phase === "concepts_ready" ||
+    phase === "awaiting_summary_confirmation" ||
+    phase === "brief_approved";
 
   const placeholder = useMemo(() => {
     if (!isClient || loading) return "Message iHeartPrints...";
@@ -181,6 +213,14 @@ export function ChatApp() {
         return "Select a concept above to continue";
       case "generating":
         return "Generating concepts...";
+      case "awaiting_summary_confirmation":
+        return "Choose Approve, Edit, or Continue above";
+      case "brief_approved":
+        return "Approved — generating concepts...";
+      case "edit_requested":
+        return "What would you like to change?";
+      case "continue_requested":
+        return "Anything else the designer should know?";
       default:
         return "Message iHeartPrints...";
     }
@@ -225,24 +265,45 @@ export function ChatApp() {
           </div>
         ) : (
           <div className="flex flex-1 flex-col gap-4">
-            {snapshot?.messages.map((message) => (
-              <div key={message.id}>
-                <MessageBubble message={message} />
-                {message.role === "assistant" &&
-                message.metadata?.phase === "concepts_ready" &&
-                showConcepts ? (
-                  <ConceptCards
-                    concepts={snapshot.artworkVersions}
-                    selectedId={snapshot.project.selectedArtworkVersionId}
-                    selectable={phase === "concepts_ready"}
-                    busy={sending}
-                    onSelect={(id) => void selectConcept(id)}
-                  />
-                ) : null}
-              </div>
-            ))}
+            {snapshot?.messages.map((message, index) => {
+              const isLatestMessage = index === snapshot.messages.length - 1;
+              const showSummaryCard =
+                message.role === "assistant" &&
+                message.metadata?.phase === "awaiting_summary_confirmation" &&
+                Boolean(message.metadata?.summary) &&
+                isLatestMessage &&
+                phase === "awaiting_summary_confirmation";
 
-            {sending && phase !== "concepts_ready" ? (
+              return (
+                <div key={message.id}>
+                  <MessageBubble message={message} />
+                  {message.role === "assistant" &&
+                  message.metadata?.phase === "concepts_ready" &&
+                  showConcepts ? (
+                    <ConceptCards
+                      concepts={snapshot.artworkVersions}
+                      selectedId={snapshot.project.selectedArtworkVersionId}
+                      selectable={phase === "concepts_ready"}
+                      busy={sending}
+                      onSelect={(id) => void selectConcept(id)}
+                    />
+                  ) : null}
+                  {showSummaryCard ? (
+                    <DesignSummaryCard
+                      summary={message.metadata!.summary as DesignSummaryView}
+                      busy={sending}
+                      onApprove={() => void submitDecision("approve")}
+                      onEdit={() => void submitDecision("edit")}
+                      onContinue={() => void submitDecision("continue")}
+                    />
+                  ) : null}
+                </div>
+              );
+            })}
+
+            {sending &&
+            phase !== "concepts_ready" &&
+            phase !== "awaiting_summary_confirmation" ? (
               <div className="flex justify-start">
                 <div className="rounded-2xl bg-white px-4 py-3 text-sm text-muted shadow-sm ring-1 ring-black/5">
                   <span className="inline-flex gap-1">

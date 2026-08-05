@@ -6,7 +6,8 @@
   "include": [
     "src/**/*.test.ts",
     "src/**/*.test.tsx",
-    "src/**/*.ssr.test.tsx"
+    "src/**/*.ssr.test.tsx",
+    "src/test-support/**/*.ts"
   ],
   "exclude": ["node_modules"]
 }

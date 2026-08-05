@@ -16,6 +16,11 @@ const PHASE_PROMPTS: Record<ConversationPhase, string | null> = {
   ask_revisions: "What changes would you like to make to this concept?",
   revision_received:
     "Got it — I have noted those changes. Anything else you would like to adjust?",
+  // Sprint 2D: presented via DesignSummaryCapability, not a static prompt.
+  awaiting_summary_confirmation: null,
+  brief_approved: null,
+  edit_requested: "What would you like to change about the design?",
+  continue_requested: "What else would you like the designer to know?",
 };
 
 export function promptForPhase(phase: ConversationPhase): string | null {
@@ -33,7 +38,9 @@ export function nextPhaseAfterUserReply(
     case "ask_shirt_color":
       return "ask_text";
     case "ask_text":
-      return "skip_references";
+      // Sprint 2D: the scripted interview no longer auto-generates. It hands
+      // off to the Design Summary confirmation gate instead.
+      return "awaiting_summary_confirmation";
     case "skip_references":
       return "generating";
     case "ask_revisions":
@@ -73,6 +80,8 @@ export function applyUserReplyToBrief(
     }
     case "ask_revisions":
     case "revision_received":
+    case "edit_requested":
+    case "continue_requested":
       return {
         additionalInstructions: appendInstruction(
           brief.additionalInstructions,

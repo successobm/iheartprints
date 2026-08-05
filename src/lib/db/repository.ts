@@ -2,6 +2,8 @@ import type {
   ArtworkVersion,
   ConversationMessage,
   ConversationPhase,
+  DesignBriefSnapshotContent,
+  DesignBriefVersion,
   DesignConversation,
   MessageRole,
   PrintProject,
@@ -23,6 +25,25 @@ export interface CreateArtworkVersionInput {
   summary: string;
   placeholderLabel: string;
   accentColor: string;
+  /** Sprint 2D: required provenance link to the approved brief that authorized this concept. */
+  designBriefVersionId: string | null;
+}
+
+export interface ApproveDesignBriefInput {
+  briefId: string;
+  versionNumber: number;
+  content: DesignBriefSnapshotContent;
+}
+
+/**
+ * Thrown when a repository detects a duplicate (project_id, version_number)
+ * approval insert — used by DesignBriefCapability to resolve idempotent retries.
+ */
+export class UniqueConstraintViolationError extends Error {
+  constructor(constraint: string) {
+    super(`Unique constraint violated: ${constraint}`);
+    this.name = "UniqueConstraintViolationError";
+  }
 }
 
 export interface ProjectRepository {
@@ -60,4 +81,19 @@ export interface ProjectRepository {
     projectId: string,
     status: ProjectStatus,
   ): Promise<PrintProject>;
+  /**
+   * Sprint 2D: durable, append-only approval record.
+   * Implementations must throw UniqueConstraintViolationError on a duplicate
+   * (project_id, version_number) rather than silently overwriting history.
+   */
+  approveDesignBrief(
+    projectId: string,
+    input: ApproveDesignBriefInput,
+  ): Promise<DesignBriefVersion>;
+  getLatestDesignBriefVersion(
+    projectId: string,
+  ): Promise<DesignBriefVersion | null>;
+  getDesignBriefVersionById(
+    versionId: string,
+  ): Promise<DesignBriefVersion | null>;
 }

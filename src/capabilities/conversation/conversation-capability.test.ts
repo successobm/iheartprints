@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+
+import { removeTempDir } from "@/test-support/remove-temp-dir";
 
 /**
  * Sprint 2D: verifies the constitutional approval gate.
@@ -22,9 +24,13 @@ describe("ConversationCapability — Design Summary approval gate", () => {
     process.chdir(tempDir);
   });
 
-  after(() => {
+  after(async () => {
     process.chdir(previousCwd);
-    rmSync(tempDir, { recursive: true, force: true });
+    const { resetCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+    await removeTempDir(tempDir);
   });
 
   async function freshConversation() {

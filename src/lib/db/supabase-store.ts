@@ -8,6 +8,8 @@ import type {
   ArtworkVersion,
   ConversationMessage,
   ConversationPhase,
+  DesignBriefVersion,
+  DesignBriefVersionStatus,
   DesignConversation,
   PrintProject,
   ProjectSnapshot,
@@ -15,10 +17,12 @@ import type {
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 import type {
+  ApproveDesignBriefInput,
   CreateArtworkVersionInput,
   CreateMessageInput,
   ProjectRepository,
 } from "./repository";
+import { UniqueConstraintViolationError } from "./repository";
 
 type DbProject = {
   id: string;
@@ -75,6 +79,18 @@ type DbArtwork = {
   placeholder_label: string;
   accent_color: string;
   is_selected: boolean;
+  design_brief_version_id: string | null;
+  created_at: string;
+};
+
+type DbDesignBriefVersion = {
+  id: string;
+  project_id: string;
+  brief_id: string;
+  version_number: number;
+  status: DesignBriefVersionStatus;
+  content: DesignBriefVersion["content"];
+  approved_at: string;
   created_at: string;
 };
 
@@ -142,9 +158,26 @@ function mapArtwork(row: DbArtwork): ArtworkVersion {
     placeholderLabel: row.placeholder_label,
     accentColor: row.accent_color,
     isSelected: row.is_selected,
+    designBriefVersionId: row.design_brief_version_id,
     createdAt: row.created_at,
   };
 }
+
+function mapDesignBriefVersion(row: DbDesignBriefVersion): DesignBriefVersion {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    briefId: row.brief_id,
+    versionNumber: row.version_number,
+    status: row.status,
+    content: row.content,
+    approvedAt: row.approved_at,
+    createdAt: row.created_at,
+  };
+}
+
+/** Postgres unique_violation. See https://www.postgresql.org/docs/current/errcodes-appendix.html */
+const POSTGRES_UNIQUE_VIOLATION = "23505";
 
 function getServiceClient(): SupabaseClient {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -218,6 +251,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
       conversation,
       messages: [mapMessage(messageRow as DbMessage)],
       artworkVersions: [],
+      designBriefVersions: [],
     };
   }
 
@@ -230,29 +264,39 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (projectError) throw projectError;
     if (!projectRow) return null;
 
-    const [{ data: briefRow }, { data: conversationRow }, { data: messages }, { data: versions }] =
-      await Promise.all([
-        this.client
-          .from("tshirt_design_briefs")
-          .select("*")
-          .eq("project_id", projectId)
-          .single(),
-        this.client
-          .from("design_conversations")
-          .select("*")
-          .eq("project_id", projectId)
-          .single(),
-        this.client
-          .from("conversation_messages")
-          .select("*")
-          .eq("project_id", projectId)
-          .order("created_at", { ascending: true }),
-        this.client
-          .from("artwork_versions")
-          .select("*")
-          .eq("project_id", projectId)
-          .order("version_number", { ascending: true }),
-      ]);
+    const [
+      { data: briefRow },
+      { data: conversationRow },
+      { data: messages },
+      { data: versions },
+      { data: briefVersions },
+    ] = await Promise.all([
+      this.client
+        .from("tshirt_design_briefs")
+        .select("*")
+        .eq("project_id", projectId)
+        .single(),
+      this.client
+        .from("design_conversations")
+        .select("*")
+        .eq("project_id", projectId)
+        .single(),
+      this.client
+        .from("conversation_messages")
+        .select("*")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: true }),
+      this.client
+        .from("artwork_versions")
+        .select("*")
+        .eq("project_id", projectId)
+        .order("version_number", { ascending: true }),
+      this.client
+        .from("design_brief_versions")
+        .select("*")
+        .eq("project_id", projectId)
+        .order("version_number", { ascending: true }),
+    ]);
 
     if (!briefRow || !conversationRow) return null;
 
@@ -262,6 +306,9 @@ export class SupabaseProjectRepository implements ProjectRepository {
       conversation: mapConversation(conversationRow as DbConversation),
       messages: ((messages as DbMessage[]) ?? []).map(mapMessage),
       artworkVersions: ((versions as DbArtwork[]) ?? []).map(mapArtwork),
+      designBriefVersions: ((briefVersions as DbDesignBriefVersion[]) ?? []).map(
+        mapDesignBriefVersion,
+      ),
     };
   }
 
@@ -390,6 +437,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
           placeholder_label: version.placeholderLabel,
           accent_color: version.accentColor,
           is_selected: false,
+          design_brief_version_id: version.designBriefVersionId,
         })),
       )
       .select("*")
@@ -429,5 +477,59 @@ export class SupabaseProjectRepository implements ProjectRepository {
     status: ProjectStatus,
   ): Promise<PrintProject> {
     return this.updateProject(projectId, { status });
+  }
+
+  async approveDesignBrief(
+    projectId: string,
+    input: ApproveDesignBriefInput,
+  ): Promise<DesignBriefVersion> {
+    const { data, error } = await this.client
+      .from("design_brief_versions")
+      .insert({
+        project_id: projectId,
+        brief_id: input.briefId,
+        version_number: input.versionNumber,
+        status: "approved",
+        content: input.content,
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "design_brief_versions_project_id_version_number",
+        );
+      }
+      throw error;
+    }
+
+    return mapDesignBriefVersion(data as DbDesignBriefVersion);
+  }
+
+  async getLatestDesignBriefVersion(
+    projectId: string,
+  ): Promise<DesignBriefVersion | null> {
+    const { data, error } = await this.client
+      .from("design_brief_versions")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("version_number", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapDesignBriefVersion(data as DbDesignBriefVersion) : null;
+  }
+
+  async getDesignBriefVersionById(
+    versionId: string,
+  ): Promise<DesignBriefVersion | null> {
+    const { data, error } = await this.client
+      .from("design_brief_versions")
+      .select("*")
+      .eq("id", versionId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapDesignBriefVersion(data as DbDesignBriefVersion) : null;
   }
 }

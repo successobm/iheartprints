@@ -10,6 +10,7 @@ import type {
   ArtworkVersion,
   ConversationMessage,
   ConversationPhase,
+  DesignBriefVersion,
   DesignConversation,
   PrintProject,
   ProjectSnapshot,
@@ -17,10 +18,12 @@ import type {
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 import type {
+  ApproveDesignBriefInput,
   CreateArtworkVersionInput,
   CreateMessageInput,
   ProjectRepository,
 } from "./repository";
+import { UniqueConstraintViolationError } from "./repository";
 
 interface LocalDatabase {
   projects: PrintProject[];
@@ -28,6 +31,7 @@ interface LocalDatabase {
   conversations: DesignConversation[];
   messages: ConversationMessage[];
   artworkVersions: ArtworkVersion[];
+  designBriefVersions: DesignBriefVersion[];
 }
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -44,13 +48,27 @@ function emptyDb(): LocalDatabase {
     conversations: [],
     messages: [],
     artworkVersions: [],
+    designBriefVersions: [],
   };
 }
 
 async function readDb(): Promise<LocalDatabase> {
   try {
     const raw = await fs.readFile(DATA_FILE, "utf8");
-    return JSON.parse(raw) as LocalDatabase;
+    const parsed = JSON.parse(raw) as Partial<LocalDatabase>;
+    // Normalize Sprint 1 local JSON that predates design_brief_versions /
+    // artwork designBriefVersionId so resume does not crash.
+    return {
+      projects: parsed.projects ?? [],
+      briefs: parsed.briefs ?? [],
+      conversations: parsed.conversations ?? [],
+      messages: parsed.messages ?? [],
+      artworkVersions: (parsed.artworkVersions ?? []).map((artwork) => ({
+        ...artwork,
+        designBriefVersionId: artwork.designBriefVersionId ?? null,
+      })),
+      designBriefVersions: parsed.designBriefVersions ?? [],
+    };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") return emptyDb();
@@ -81,6 +99,9 @@ function snapshot(db: LocalDatabase, projectId: string): ProjectSnapshot | null 
       .filter((item) => item.projectId === projectId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     artworkVersions: db.artworkVersions
+      .filter((item) => item.projectId === projectId)
+      .sort((a, b) => a.versionNumber - b.versionNumber),
+    designBriefVersions: db.designBriefVersions
       .filter((item) => item.projectId === projectId)
       .sort((a, b) => a.versionNumber - b.versionNumber),
   };
@@ -150,6 +171,7 @@ export class LocalProjectRepository implements ProjectRepository {
       conversation,
       messages: [opening],
       artworkVersions: [],
+      designBriefVersions: [],
     };
   }
 
@@ -252,6 +274,7 @@ export class LocalProjectRepository implements ProjectRepository {
       placeholderLabel: version.placeholderLabel,
       accentColor: version.accentColor,
       isSelected: false,
+      designBriefVersionId: version.designBriefVersionId,
       createdAt: timestamp,
     }));
 
@@ -293,5 +316,60 @@ export class LocalProjectRepository implements ProjectRepository {
     status: ProjectStatus,
   ): Promise<PrintProject> {
     return this.updateProject(projectId, { status });
+  }
+
+  async approveDesignBrief(
+    projectId: string,
+    input: ApproveDesignBriefInput,
+  ): Promise<DesignBriefVersion> {
+    const db = await readDb();
+    const project = db.projects.find((item) => item.id === projectId);
+    if (!project) throw new Error("Project not found");
+
+    const duplicate = db.designBriefVersions.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.versionNumber === input.versionNumber,
+    );
+    if (duplicate) {
+      throw new UniqueConstraintViolationError(
+        "design_brief_versions_project_id_version_number",
+      );
+    }
+
+    const timestamp = nowIso();
+    const version: DesignBriefVersion = {
+      id: randomUUID(),
+      projectId,
+      briefId: input.briefId,
+      versionNumber: input.versionNumber,
+      status: "approved",
+      content: input.content,
+      approvedAt: timestamp,
+      createdAt: timestamp,
+    };
+
+    db.designBriefVersions.push(version);
+    await writeDb(db);
+    return version;
+  }
+
+  async getLatestDesignBriefVersion(
+    projectId: string,
+  ): Promise<DesignBriefVersion | null> {
+    const db = await readDb();
+    const versions = db.designBriefVersions
+      .filter((item) => item.projectId === projectId)
+      .sort((a, b) => b.versionNumber - a.versionNumber);
+    return versions[0] ?? null;
+  }
+
+  async getDesignBriefVersionById(
+    versionId: string,
+  ): Promise<DesignBriefVersion | null> {
+    const db = await readDb();
+    return (
+      db.designBriefVersions.find((item) => item.id === versionId) ?? null
+    );
   }
 }

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+
+import { removeTempDir } from "@/test-support/remove-temp-dir";
 
 describe("Sprint 1 conversation persistence", () => {
   let tempDir = "";
@@ -14,12 +16,21 @@ describe("Sprint 1 conversation persistence", () => {
     process.chdir(tempDir);
   });
 
-  after(() => {
+  after(async () => {
     process.chdir(previousCwd);
-    rmSync(tempDir, { recursive: true, force: true });
+    const { resetCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+    await removeTempDir(tempDir);
   });
 
   it("restores the same project and opening message instead of resetting", async () => {
+    const { resetCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+
     const { startConversation, getConversation, handleUserMessage } =
       await import("./conversation-service");
 
@@ -44,5 +55,33 @@ describe("Sprint 1 conversation persistence", () => {
     const restoredAgain = await getConversation(projectId);
     assert.equal(restoredAgain?.project.id, projectId);
     assert.equal(restoredAgain?.messages.length, afterReply.messages.length);
+  });
+
+  it("restores awaiting summary confirmation without fabricating approvals or concepts", async () => {
+    const { resetCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+
+    const { startConversation, getConversation, handleUserMessage } =
+      await import("./conversation-service");
+
+    const created = await startConversation();
+    const projectId = created.project.id;
+
+    await handleUserMessage(projectId, "Camp shirts");
+    await handleUserMessage(projectId, "A friendly bear logo");
+    await handleUserMessage(projectId, "Navy");
+    await handleUserMessage(projectId, "Camp Wildwood 2026");
+
+    const restored = await getConversation(projectId);
+    assert.ok(restored);
+    assert.equal(restored.conversation.phase, "awaiting_summary_confirmation");
+    assert.equal(restored.artworkVersions.length, 0);
+    assert.equal(restored.designBriefVersions.length, 0);
+    assert.equal(
+      restored.messages.at(-1)?.metadata.phase,
+      "awaiting_summary_confirmation",
+    );
   });
 });
