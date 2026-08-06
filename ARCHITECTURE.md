@@ -182,19 +182,18 @@ Conversation
   → Updated Working Brief / optional regeneration
 ```
 
-Sprint 2J Phase 2 integrates Regeneration Intelligence architecturally:
+Sprint 2J Phase 3 activates Regeneration Intelligence on the customer's
+**explicit** regeneration path only (`Generate Updated Concepts` →
+`regenerateAfterRevision` → `GenerationJob.kind === "regeneration"`).
 
-- `RevisionTimelineCapability` derives an ephemeral timeline from immutable
-  records (no `revision_history` table, never persisted).
-- `RegenerationIntelligenceCapability` consumes that `RevisionTimeline`
-  (not a persisted RevisionHistory) and produces a `RegenerationPlan`.
-- `PromptTranslationCapability` accepts an optional `RegenerationPlan` and
-  merges it into one provider-neutral `GenerationPromptRequest`.
+- `GenerationIntent` is the sole provider-neutral input to Prompt Translation.
+- Initial generation builds a brief-only intent (no timeline, no plan) and
+  produces byte-for-byte equivalent prompts to pre-Phase-3 behavior.
+- Regeneration derives RevisionTimeline → RegenerationPlan →
+  GenerationIntent → PromptTranslation → provider.
 
-None of this is auto-wired into `GenerationWorkerCapability` or customer
-routes yet — the live worker still calls `translate(brief)` with no plan,
-so customer behavior is unchanged. No automatic regeneration, no new UI,
-no new messages. See §5 and §13a.
+No automatic regeneration, no UI changes, no new messages. Timeline, plan,
+and intent remain ephemeral. See §5 and §13a.
 
 ### Synchronous vs asynchronous
 
@@ -230,11 +229,11 @@ Status legend:
 - **Active** — used by the live conversation / generation pipeline
 - **Partial** — real implementation with intentional gaps
 - **Reserved** — contract/stub only; not product behavior yet
-- **New (architecture only)** — a real, fully implemented and tested
-  capability, distinct from a **Reserved** stub, that is not yet composed
-  into `CapabilityGraph` or called by the live worker/routes; currently
-  `RevisionTimelineCapability` and `RegenerationIntelligenceCapability`
-  (Sprint 2J Phase 2)
+- **New (architecture only)** — unused in this sprint (none currently)
+- **Active (regeneration path)** — `RevisionTimelineCapability` and
+  `RegenerationIntelligenceCapability` are composed into
+  `GenerationWorkerCapability` for `kind === "regeneration"` jobs only
+  (Sprint 2J Phase 3); initial generation does not use them
 
 ### ConversationCapability — Active
 
@@ -354,37 +353,33 @@ Stub only (`classifyRevisionRequest` → `unclassified`; `forkBriefFromApproved`
 Post-approval conversational revisions today flow through Intent Extraction →
 DesignBrief + RevisionIntelligence, not this capability.
 
-### RevisionTimelineCapability — New (Sprint 2J Phase 2, architecture only — not yet composed)
+### RevisionTimelineCapability — Active (regeneration path only, Sprint 2J Phase 3)
 
 | | |
 |---|---|
 | **Responsibility** | Derive an ordered, ephemeral revision timeline from existing immutable records |
-| **Inputs** | `DesignBriefVersion[]`, `GenerationJob[]`, `ArtworkVersion[]` (Concept Evaluations live on these rows), caller-supplied `TimedRevisionImpact[]` (recomputed via Revision Intelligence — never a stored history) |
-| **Outputs** | `RevisionTimeline` — chronological domain events (`generation`, `customer_revision`, `evaluation_failed`, `evaluation_passed`) with plain-language labels |
+| **Inputs** | `DesignBriefVersion[]`, `GenerationJob[]`, `ArtworkVersion[]` (Concept Evaluations live on these rows), caller-supplied `TimedRevisionImpact[]` |
+| **Outputs** | `RevisionTimeline` — chronological domain events with plain-language labels |
 | **Dependencies** | `shared/question-phrasing` (section titles for labels only) |
-| **Owns** | Deterministic timeline ordering; GenerationAttempt ordinal derivation via `resolveGenerationAttemptNumber` |
+| **Owns** | Deterministic timeline ordering; GenerationAttempt ordinal via `resolveGenerationAttemptNumber` |
 | **Must never own** | Persistence; a `revision_history` table; mutable history; provider/prompt language; regeneration decisions |
 
-Pure and deterministic — always recomputable, never stored. Distinct from
-the customer-facing chat `buildRevisionTimeline` helper (message metadata
-chips); this capability is the regeneration-pipeline domain timeline.
+Used by `GenerationWorkerCapability` only when `GenerationJob.kind === "regeneration"`.
+Always recomputable, never stored. Distinct from the customer-facing chat
+`buildRevisionTimeline` helper.
 
-### RegenerationIntelligenceCapability — New (Sprint 2J Phase 2, architecture only — not yet composed)
+### RegenerationIntelligenceCapability — Active (regeneration path only, Sprint 2J Phase 3)
 
 | | |
 |---|---|
 | **Responsibility** | Decide what should change in the *next* generation attempt — never generates, never evaluates |
-| **Inputs** | Approved `DesignBriefSnapshotContent`; the current concept batch's persisted Concept Evaluation (or `null`); a derived `RevisionTimeline`; caller-supplied generation attempt metadata (`attemptNumber` from GenerationJob via `resolveGenerationAttemptNumber`; optional `rejectedSections` from future `RejectedConceptMemory`) |
-| **Outputs** | `RegenerationPlan` — provider-neutral `preserve` / `strengthen` / `remove` / `replace` / `avoid` / `priorityChanges` / `unchangedSections` / `customerRequestedChanges` / `evaluationDrivenChanges` |
+| **Inputs** | Approved `DesignBriefSnapshotContent`; latest Concept Evaluation (or `null`); derived `RevisionTimeline`; GenerationAttempt from GenerationJob |
+| **Outputs** | `RegenerationPlan` (ephemeral) |
 | **Dependencies** | `shared/concept-relevance`; `lib/domain/required-wording`; RevisionTimeline data shape |
-| **Owns** | Deterministic preserve/strengthen/remove/replace/avoid categorization; the priority order documented below |
-| **Must never own** | Generating artwork; evaluating artwork; re-scoring a concept; mutating the Design Brief; persistence; prompt dialect or quality-boosting language; a parallel attempt counter |
+| **Owns** | Deterministic preserve/strengthen/remove/replace/avoid categorization; priority order |
+| **Must never own** | Generating artwork; evaluating artwork; mutating the Design Brief; persistence; prompt dialect; a parallel attempt counter |
 
-Pure and deterministic — same inputs always produce a `deepEqual`
-`RegenerationPlan`; nothing is persisted. **Not yet wired into
-`GenerationWorkerCapability`, composition, or any route** — Prompt
-Translation can consume a plan when supplied, but the live worker does not
-pass one. See §13a.
+Composed into the worker for regeneration jobs only. See §13a.
 
 ### ConceptGenerationCapability — Active (enqueue-only)
 
@@ -403,26 +398,27 @@ Does not invoke providers. Workers do.
 
 | | |
 |---|---|
-| **Responsibility** | Approved brief snapshot (+ optional `RegenerationPlan`) → provider-neutral `GenerationPromptRequest` |
-| **Inputs** | `DesignBriefSnapshotContent`; optional `RegenerationPlan` (Sprint 2J Phase 2) |
+| **Responsibility** | `GenerationIntent` → provider-neutral `GenerationPromptRequest` |
+| **Inputs** | `GenerationIntent` (approved brief + optional `RegenerationPlan`) |
 | **Outputs** | `GenerationPromptRequest` |
-| **Dependencies** | Snapshot data; optional RegenerationPlan data shape |
-| **Owns** | Provider-neutral field mapping; plan merge priority when a plan is supplied |
-| **Must never own** | Provider dialect; quality-boosting keywords; I/O |
+| **Dependencies** | GenerationIntent data only |
+| **Owns** | Provider-neutral field mapping; plan merge priority when a plan is present |
+| **Must never own** | Provider dialect; quality-boosting keywords; I/O; mutating the Design Brief |
 
-Without a plan, behavior is identical to Sprint 2H Part 1. The live
-`GenerationWorkerCapability` still calls `translate(brief)` only.
+`GenerationIntent` is immutable, never persisted, never customer-facing.
+Without a `regenerationPlan`, output is byte-for-byte equivalent to the
+historical brief-only translator (initial generation regression).
 
 ### GenerationWorkerCapability — Active
 
 | | |
 |---|---|
-| **Responsibility** | Claim job → translate → provider → assets → concept evaluation → artwork → assistant message |
+| **Responsibility** | Claim job → build GenerationIntent → translate → provider → assets → concept evaluation → artwork → assistant message |
 | **Inputs** | Claimed `GenerationJob` |
 | **Outputs** | Completed/failed job; artwork versions (with evaluation); assets; customer-safe messages |
-| **Dependencies** | ProjectRepository, PromptTranslation, ConceptGenerationProvider, AssetCapability, ConceptEvaluationCapability |
-| **Owns** | Generation runtime business logic |
-| **Must never own** | HTTP auth, cron scheduling, browser lifecycle |
+| **Dependencies** | ProjectRepository, PromptTranslation, ConceptGenerationProvider, AssetCapability, ConceptEvaluationCapability, RevisionIntelligence (regeneration path), RevisionTimeline + RegenerationIntelligence (via `buildGenerationIntentForJob`) |
+| **Owns** | Generation runtime business logic; initial vs regeneration intent assembly |
+| **Must never own** | HTTP auth, cron scheduling, browser lifecycle; persisting timeline/plan/intent |
 
 Evaluation failure never discards concepts and never changes customer-facing
 copy in Phase 1.
@@ -573,7 +569,13 @@ GenerationSchedulerCapability
     |
     +--> GenerationWorkerCapability
               |
-              +--> PromptTranslationCapability
+              +--> buildGenerationIntentForJob
+              |         |
+              |         +--> RevisionIntelligence (regeneration only)
+              |         +--> RevisionTimelineCapability (regeneration only)
+              |         +--> RegenerationIntelligenceCapability (regeneration only)
+              |         +--> GenerationIntent (ephemeral)
+              +--> PromptTranslationCapability.translate(GenerationIntent)
               +--> ConceptGenerationProvider (interface)
               +--> AssetCapability
               |         |
@@ -583,23 +585,6 @@ GenerationSchedulerCapability
               |         |
               |         +--> ConceptEvaluationProvider (interface)
               +--> ProjectRepository
-
-RegenerationIntelligenceCapability (Sprint 2J Phase 2 — standalone;
-not yet called by the live worker)
-    |
-    +--> shared/concept-relevance
-    +--> lib/domain/required-wording
-    (takes an approved brief snapshot + a Concept Evaluation result +
-     a RevisionTimeline + generation attempt metadata derived from
-     GenerationJob as plain function arguments — no capability
-     dependency on ConceptEvaluationCapability or
-     RevisionIntelligenceCapability themselves)
-
-RevisionTimelineCapability (Sprint 2J Phase 2 — standalone)
-    |
-    +--> shared/question-phrasing (labels only)
-    (takes DesignBriefVersions + GenerationJobs + ArtworkVersions +
-     TimedRevisionImpact[] — never persists; always recomputes)
 
 Shared pure modules (not capabilities):
   interview-coverage-policy, product-rule-packs, concept-relevance,
@@ -1030,134 +1015,111 @@ misrepresenting anything to a customer.
 
 ---
 
-## 13a. Regeneration Pipeline Architecture (Sprint 2J Phase 2)
+## 13a. Regeneration Pipeline Architecture (Sprint 2J Phase 3)
 
-Sprint 2J Phase 2 completes the architectural integration of Regeneration
-Intelligence. Customer workflow is unchanged: no UI changes, no automatic
-regeneration, no new messages, and the live worker still translates the
-approved brief alone.
+Sprint 2J Phase 3 activates Regeneration Intelligence on the customer's
+**explicit** regeneration path only. Initial concept generation is unchanged.
+No automatic regeneration, no UI changes, no new messages, no evaluation
+gating, no concept suppression.
 
-```
-RevisionIntelligenceCapability
-       │  RevisionImpact (per change; never stored as history)
-       ▼
-RevisionTimelineCapability.derive(...)
-       │  DesignBriefVersions + GenerationJobs + ArtworkVersions
-       │  (ConceptEvaluations) + TimedRevisionImpact[]
-       │  → ephemeral RevisionTimeline (never persisted)
-       ▼
-RegenerationIntelligenceCapability.planNextGeneration(...)
-       │  ApprovedBrief + latest ConceptEvaluation + RevisionTimeline
-       │  + GenerationAttempt (from GenerationJob)
-       │  → ephemeral RegenerationPlan (never persisted)
-       ▼
-PromptTranslationCapability.translate(brief, plan?)
-       │  ApprovedBrief + optional RegenerationPlan
-       │  → one provider-neutral GenerationPromptRequest
-       ▼
-GenerationWorkerCapability → ConceptGenerationProvider
-```
-
-### Revision Timeline
-
-`RevisionTimelineCapability` (`src/capabilities/revision-timeline/`) derives
-an ordered domain timeline from existing immutable records. There is **no**
-`revision_history` table and **no** persisted RevisionHistory model. The
-timeline is always recomputable and ephemeral.
-
-Example labels (pure domain events — no provider/prompt language):
+### Live regeneration path
 
 ```
-Generation 1
-↓
-Customer changed wording
-↓
-Generation 2
-↓
-Evaluation failed wording
-↓
-Customer changed colors
-↓
-Generation 3
-↓
-Evaluation passed
+Customer: Generate Updated Concepts
+       │
+       ▼
+ConceptGenerationCapability.regenerateAfterRevision (enqueue only)
+       │  GenerationJob.kind = "regeneration"
+       ▼
+GenerationWorkerCapability
+       │
+       ├─ initial  → GenerationIntent(brief, plan=null) → translate → provider
+       │
+       └─ regeneration
+              │
+              ▼
+         RevisionIntelligence (consecutive DesignBriefVersions → impacts)
+              │
+              ▼
+         RevisionTimelineCapability.derive(...)
+              │  ephemeral RevisionTimeline
+              ▼
+         RegenerationIntelligenceCapability.planNextGeneration(...)
+              │  ephemeral RegenerationPlan
+              ▼
+         GenerationIntent(brief, plan)   ← immutable; never persisted
+              │
+              ▼
+         PromptTranslationCapability.translate(generationIntent)
+              │
+              ▼
+         ConceptGenerationProvider → Asset → Concept Evaluation → Persist
 ```
 
-Distinct from the customer-facing chat helper
-`components/chat/revision-timeline.ts` (message-metadata chips).
+### GenerationIntent
 
-### GenerationAttempt authority
-
-`GenerationJob` is the sole authoritative source for generation-attempt
-numbering used by Regeneration Intelligence:
-
-| Concept | Source | Meaning |
-|---|---|---|
-| Cross-job generation ordinal (`RegenerationPlan.generationAttempt`) | Count of **completed** `GenerationJob` rows + 1 via `resolveGenerationAttemptNumber` | Which generation round is being planned (Generation 1, 2, 3…) |
-| Per-job claim/retry budget (`GenerationJob.attempts`) | Incremented on each worker claim | Worker recovery / `MAX_GENERATION_ATTEMPTS` — **not** the regeneration ordinal |
-
-Do **not** invent a parallel attempt counter or column.
-
-### Rejected concepts (future interface)
-
-`RejectedConceptMemory` / optional `currentGeneration.rejectedSections`
-defines the interface for future customer-rejection support. No rejection
-persistence is invented in this sprint. Regeneration Intelligence operates
-correctly when memory is empty or absent (`EMPTY_REJECTED_CONCEPT_MEMORY`).
-
-### Regeneration Intelligence inputs
+`GenerationIntent` (`src/capabilities/prompt-translation/generation-intent.ts`)
+is the single provider-neutral input into Prompt Translation.
 
 ```ts
-interface RegenerationIntelligenceInput {
-  approvedBrief: DesignBriefSnapshotContent;
-  latestEvaluation: { status: ConceptEvaluationStatus; result: ConceptEvaluation } | null;
-  revisionTimeline: RevisionTimeline; // derived; never a persisted RevisionHistory
-  currentGeneration: {
-    attemptNumber: number; // from resolveGenerationAttemptNumber(jobs)
-    rejectedSections?: BriefSectionKey[]; // optional RejectedConceptMemory
-  };
+interface GenerationIntent {
+  readonly approvedBrief: DesignBriefSnapshotContent;
+  readonly regenerationPlan: RegenerationPlan | null;
 }
 ```
 
-### Prompt Translation inputs
+- Immutable (`Object.freeze`)
+- Never persisted
+- Never exposed to customers
+- No prompt wording, AI terminology, or provider dialect
+- Does not mutate the approved Design Brief — it is an instruction set for
+  this generation attempt only
+
+Lifecycle: constructed in the worker per claimed job → passed to
+`translate` → discarded. Recomputed on every attempt.
+
+### Initial vs regeneration
+
+| Path | GenerationIntent | Timeline / Plan |
+|---|---|---|
+| `kind === "initial"` | `createInitialGenerationIntent(brief)` | **Not used** |
+| `kind === "regeneration"` | `createRegenerationGenerationIntent(brief, plan)` | Derived every time |
+
+Initial output is byte-for-byte equivalent to the historical brief-only
+translator (`translateApprovedBrief`).
+
+### Prompt Translation
 
 ```ts
-translate(
-  content: DesignBriefSnapshotContent,
-  regenerationPlan?: RegenerationPlan | null,
-): GenerationPromptRequest
+translate(generationIntent: GenerationIntent): GenerationPromptRequest
 ```
 
-Without a plan, output is identical to Sprint 2H Part 1. With a plan, field
-values still come from the approved brief; plan guidance is merged as
-plain-language notes in priority order. Provider adapters still own dialect.
+Priority when a plan is present:
 
-### Priority rules (deterministic)
+1. Explicit exclusions
+2. Required wording
+3. Latest customer revisions
+4. Evaluation-driven improvements
+5. Product Intelligence (reserved)
+6. Design Intelligence (reserved)
+7. Preserve satisfied requirements
 
-1. **Explicit exclusions**
-2. **Required wording**
-3. **Latest customer revisions** (older revisions never override newer ones)
-4. **Evaluation failures**
-5. **Product Intelligence** (reserved — no signal in Phase 2)
-6. **Design Intelligence** (reserved — no signal in Phase 2)
-7. **Preserve already-satisfied requirements**
+### GenerationAttempt authority
 
-`priorityChanges` follows that order. Each tier is sorted by a fixed
-canonical section order for determinism.
+| Concept | Source |
+|---|---|
+| `RegenerationPlan.generationAttempt` | `resolveGenerationAttemptNumber(jobs)` — completed jobs + 1 |
+| `GenerationJob.attempts` | Per-job claim/retry budget — **not** the regeneration ordinal |
 
-### Responsibility boundaries
+### Persistence
 
-- RevisionTimeline / RegenerationPlan are **never** persisted
-- Regeneration Intelligence does **not** generate, evaluate, or mutate briefs
-- Prompt Translation does **not** emit provider dialect
-- No automatic regeneration, ranking, retries, or customer-visible changes
+No schema changes. No migrations. `GenerationIntent`, `RevisionTimeline`,
+and `RegenerationPlan` remain ephemeral.
 
-### Not yet live-wired
+### Rejected concepts (future)
 
-Neither `RevisionTimelineCapability` nor `RegenerationIntelligenceCapability`
-is part of `CapabilityGraph` or called by `GenerationWorkerCapability`.
-Phase 3 should compose them into the regeneration path when a customer
-explicitly requests updated concepts — still without automatic retries.
+`RejectedConceptMemory` remains the interface for future rejection support.
+Phase 3 does not invent rejection persistence.
 
 ---
 
@@ -1483,11 +1445,12 @@ Verified against the implementation:
   signed image URLs in the UI
 - Optional interview sections `production` / `layoutPreference` are policy-
   reserved without full extraction/rule backing
-- `RevisionTimelineCapability` and `RegenerationIntelligenceCapability`
-  (Sprint 2J Phase 2) are implemented and tested but not composed into
-  `CapabilityGraph`, not called by `GenerationWorkerCapability`, and not
-  reachable from any route — no automatic regeneration; the live worker
-  still translates the approved brief without a `RegenerationPlan`
+- Sprint 2J Phase 3 activates Regeneration Intelligence on the explicit
+  customer regeneration path only (`GenerationJob.kind === "regeneration"`).
+  Initial generation remains brief-only via `GenerationIntent` with
+  `regenerationPlan: null`. No automatic regeneration, ranking, retries,
+  evaluation gating, or UI changes. Timeline / plan / intent are never
+  persisted.
 
 Do not treat future work as completed architecture.
 
@@ -1500,8 +1463,9 @@ Describe attachment points only — not a delivery plan:
 | Extension | Attach where |
 |---|---|
 | ConceptEvaluationCapability | **Phase 1 (architecture) + Phase 2 (first real evaluator) done.** Phase 3+: gating/ranking/regeneration decisions driven by evaluation results; never mutate brief |
-| RegenerationIntelligenceCapability | **Phase 1 + Phase 2 (timeline + plan + PromptTranslation merge) done — see §13a.** Phase 3: compose into the explicit customer regeneration path so a plan is produced per attempt and passed to Prompt Translation; never auto-retry; never generate artwork itself; never re-score Concept Evaluation; never mutate the brief |
-| RevisionTimelineCapability | **Phase 2 done.** Derive ephemeral timelines only; never persist; never invent RevisionHistory storage |
+| RegenerationIntelligenceCapability | **Phase 1–3 done — see §13a.** Live on explicit regeneration only. Future: richer evaluation-driven guidance / RejectedConceptMemory population; never auto-retry; never generate artwork itself; never mutate the brief |
+| RevisionTimelineCapability | **Phase 2–3 done.** Derive ephemeral timelines on regeneration only; never persist |
+| GenerationIntent | **Phase 3 done.** Sole PromptTranslation input; immutable; never persisted; never customer-facing |
 | PrintValidationCapability | Replace stub; validate artwork against approved brief; never mutate brief; never confuse with Concept Evaluation |
 | Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider` (e.g. a dedicated OCR specialist, a different vision model); no domain change |
 | Production file generation | New assets linked via `printAssetId` / dedicated kinds |

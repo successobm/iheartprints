@@ -20,6 +20,7 @@ export type { RegenerationIntelligenceCapability } from "./regeneration-intellig
 export type { ProductIntelligenceCapability } from "./product-intelligence";
 export type { DesignSummaryCapability } from "./design-summary";
 export type { PromptTranslationCapability } from "./prompt-translation";
+export type { GenerationIntent } from "./prompt-translation";
 export type { ConceptGenerationCapability } from "./concept-generation";
 export type { ConceptEvaluationCapability } from "./concept-evaluation";
 export type { GenerationWorkerCapability } from "./generation-worker";

@@ -14,6 +14,8 @@ import {
   PlaceholderConceptEvaluationProvider,
 } from "@/capabilities/concept-evaluation";
 import type { PromptTranslationCapability } from "@/capabilities/prompt-translation";
+import type { RevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
+import { createRevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
 import { GenerationUnavailableError } from "@/capabilities/providers";
 import type { ConceptGenerationProvider } from "@/capabilities/providers";
 import type {
@@ -23,6 +25,8 @@ import type {
 import { MAX_GENERATION_ATTEMPTS } from "@/capabilities/shared/generation-retry-policy";
 import { logConceptGenerationUnavailable } from "@/lib/config/generation-provider-logging";
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
+
+import { buildGenerationIntentForJob } from "./build-generation-intent";
 
 /**
  * Sprint 2H Part 2A: a "running" job with no heartbeat for this long is
@@ -68,6 +72,11 @@ export function createGenerationWorkerCapability(
   conceptEvaluation: ConceptEvaluationCapability = createConceptEvaluationCapability(
     new PlaceholderConceptEvaluationProvider(),
   ),
+  /**
+   * Sprint 2J Phase 3: used only on the regeneration path to recompute
+   * TimedRevisionImpact entries from consecutive approved brief versions.
+   */
+  revisionIntelligence: RevisionIntelligenceCapability = createRevisionIntelligenceCapability(),
 ): GenerationWorkerCapability {
   async function persistConceptAsset(
     designId: string,
@@ -314,7 +323,20 @@ export function createGenerationWorkerCapability(
     }
 
     try {
-      const promptRequest = promptTranslation.translate(approvedVersion.content);
+      // Sprint 2J Phase 3: GenerationIntent is the sole PromptTranslation
+      // input. Initial jobs get a brief-only intent (byte-for-byte equivalent
+      // to pre-Phase-3 translation). Regeneration jobs derive RevisionTimeline
+      // → RegenerationPlan → intent with plan. Timeline/plan/intent are
+      // never persisted.
+      const generationJobs = await repo.listGenerationJobs(designId);
+      const generationIntent = buildGenerationIntentForJob({
+        job,
+        approvedVersion,
+        project: current,
+        generationJobs,
+        deps: { revisionIntelligence },
+      });
+      const promptRequest = promptTranslation.translate(generationIntent);
       await repo.touchGenerationJobHeartbeat(job.id);
 
       const result: ConceptGenerationResult = await withPeriodicHeartbeat(

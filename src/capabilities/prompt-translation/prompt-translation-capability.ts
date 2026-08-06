@@ -5,42 +5,45 @@ import type {
 } from "@/lib/domain/types";
 import type { RegenerationPlan } from "@/capabilities/regeneration-intelligence";
 
+import type { GenerationIntent } from "./generation-intent";
+
 /**
- * Sprint 2H Part 1 + Sprint 2J Phase 2: the only bridge between the Design
- * Brief (and optional RegenerationPlan) and a generation provider. Pure and
- * deterministic — no I/O, no provider knowledge, no quality-boosting
- * keywords. Turns an *approved* Design Brief snapshot into a plain-language,
- * provider-neutral request. When a `RegenerationPlan` is supplied, its
- * signals are merged into the same `GenerationPromptRequest` in documented
- * priority order — still provider-neutral; adapters own their dialect.
+ * Sprint 2H Part 1 + Sprint 2J Phase 3: the only bridge between
+ * GenerationIntent and a generation provider. Pure and deterministic —
+ * no I/O, no provider knowledge, no quality-boosting keywords.
  *
- * Sections the customer explicitly deferred to the designer are intentionally
- * left out (`null`/empty) rather than filled in with an assumed value.
+ * `translate(generationIntent)` is the sole entry point. When the intent
+ * has no RegenerationPlan, output is byte-for-byte equivalent to the
+ * historical brief-only translation (initial generation regression).
+ * When a plan is present, the approved brief is merged with regeneration
+ * guidance in documented priority order — still provider-neutral.
+ *
+ * Never mutates the approved Design Brief.
  */
 export interface PromptTranslationCapability {
-  /**
-   * @param content Approved Design Brief snapshot.
-   * @param regenerationPlan Optional plan from Regeneration Intelligence.
-   *   When omitted/null, behavior is identical to Sprint 2H Part 1 (live
-   *   worker path unchanged).
-   */
-  translate(
-    content: DesignBriefSnapshotContent,
-    regenerationPlan?: RegenerationPlan | null,
-  ): GenerationPromptRequest;
+  translate(generationIntent: GenerationIntent): GenerationPromptRequest;
 }
 
 export function createPromptTranslationCapability(): PromptTranslationCapability {
   return {
-    translate(content, regenerationPlan = null) {
-      const base = translateApprovedBrief(content);
-      if (!regenerationPlan) return base;
-      return mergeRegenerationPlan(base, content, regenerationPlan);
+    translate(generationIntent) {
+      const base = translateApprovedBrief(generationIntent.approvedBrief);
+      if (!generationIntent.regenerationPlan) return base;
+      return mergeRegenerationPlan(
+        base,
+        generationIntent.approvedBrief,
+        generationIntent.regenerationPlan,
+      );
     },
   };
 }
 
-function translateApprovedBrief(
+/**
+ * Historical brief→request mapping. Kept as a named function so initial-
+ * generation regression tests can prove byte-for-byte equivalence with
+ * the pre-GenerationIntent translator.
+ */
+export function translateApprovedBrief(
   content: DesignBriefSnapshotContent,
 ): GenerationPromptRequest {
   const deferred = new Set(content.deferredSections);
@@ -65,17 +68,14 @@ function translateApprovedBrief(
 }
 
 /**
- * Merge priority (Sprint 2J Phase 2) — older signals never override newer:
+ * Merge priority (Sprint 2J Phase 3):
  * 1. Explicit exclusions
  * 2. Required wording
  * 3. Latest customer revisions
- * 4. Evaluation failures
- * 5. Product Intelligence (reserved — no signal yet)
- * 6. Design Intelligence (reserved — no signal yet)
- * 7. Preserve already-satisfied requirements
- *
- * Field values still come from the approved brief. Plan guidance is appended
- * as plain-language notes in `priorityChanges` order — never provider dialect.
+ * 4. Evaluation-driven improvements
+ * 5. Product Intelligence (reserved)
+ * 6. Design Intelligence (reserved)
+ * 7. Preserve satisfied requirements
  */
 function mergeRegenerationPlan(
   base: GenerationPromptRequest,
@@ -84,19 +84,14 @@ function mergeRegenerationPlan(
 ): GenerationPromptRequest {
   const merged: GenerationPromptRequest = { ...base };
 
-  // Priority 1: exclusions field always reflects the approved brief.
   if (content.exclusions?.trim()) {
     merged.exclusions = content.exclusions.trim();
   }
 
-  // Priority 2–3: apply explicit removals (customer cleared a section).
   for (const change of plan.remove) {
     applyRemove(merged, change.section);
   }
 
-  // Remaining plan guidance — already ordered by Regeneration Intelligence
-  // priorityChanges (exclusions → required wording → customer → evaluation →
-  // preserve). Exclusions stay in the exclusions field, not duplicated here.
   const guidance = plan.priorityChanges
     .filter((change) => change.section !== "exclusions")
     .map((change) => change.description.trim())

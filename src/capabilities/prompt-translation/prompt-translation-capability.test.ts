@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createPromptTranslationCapability } from "./prompt-translation-capability";
 import type { DesignBriefSnapshotContent } from "@/lib/domain/types";
 import type { RegenerationPlan } from "@/capabilities/regeneration-intelligence";
+
+import {
+  createInitialGenerationIntent,
+  createPromptTranslationCapability,
+  createRegenerationGenerationIntent,
+  translateApprovedBrief,
+} from "./index";
 
 function content(
   overrides: Partial<DesignBriefSnapshotContent> = {},
@@ -42,11 +48,19 @@ function plan(overrides: Partial<RegenerationPlan> = {}): RegenerationPlan {
   };
 }
 
-describe("PromptTranslationCapability", () => {
+describe("PromptTranslationCapability — GenerationIntent", () => {
   const translation = createPromptTranslationCapability();
 
+  it("initial intent is byte-for-byte equivalent to the historical brief-only mapping", () => {
+    const brief = content();
+    const viaIntent = translation.translate(createInitialGenerationIntent(brief));
+    const historical = translateApprovedBrief(brief);
+    assert.deepEqual(viaIntent, historical);
+    assert.equal(JSON.stringify(viaIntent), JSON.stringify(historical));
+  });
+
   it("carries plain Design Brief fields into the neutral request unembellished", () => {
-    const result = translation.translate(content());
+    const result = translation.translate(createInitialGenerationIntent(content()));
     assert.equal(result.product, "Camp t-shirts");
     assert.equal(result.subject, "A friendly bear logo");
     assert.equal(result.requiredWording, "Camp Wildwood 2026");
@@ -61,27 +75,33 @@ describe("PromptTranslationCapability", () => {
   });
 
   it("never introduces provider quality-boosting keywords", () => {
-    const result = translation.translate(content());
-    const joined = JSON.stringify(result);
+    const result = translation.translate(createInitialGenerationIntent(content()));
     assert.doesNotMatch(
-      joined,
+      JSON.stringify(result),
       /highly detailed|8k|masterpiece|photorealistic|trending on/i,
     );
   });
 
   it("leaves a deferred section out of the prompt request instead of guessing a value", () => {
     const result = translation.translate(
-      content({ deferredSections: ["style", "colors"], designStyle: "Rustic", preferredColors: ["Gold"] }),
+      createInitialGenerationIntent(
+        content({
+          deferredSections: ["style", "colors"],
+          designStyle: "Rustic",
+          preferredColors: ["Gold"],
+        }),
+      ),
     );
     assert.equal(result.style, null);
     assert.deepEqual(result.colors, []);
-    // Un-deferred fields are unaffected.
     assert.equal(result.productColor, "Navy");
   });
 
   it("falls back to safe, generic language when the brief itself is sparse", () => {
     const result = translation.translate(
-      content({ productSummary: null, designDescription: null, shirtColor: null }),
+      createInitialGenerationIntent(
+        content({ productSummary: null, designDescription: null, shirtColor: null }),
+      ),
     );
     assert.equal(result.product, "a custom t-shirt");
     assert.match(result.subject, /customer's intent/);
@@ -90,76 +110,50 @@ describe("PromptTranslationCapability", () => {
 
   it("preserves required wording exactly, including punctuation and case", () => {
     const result = translation.translate(
-      content({ exactText: 'Camp "Wildwood" — Est. 1987' }),
+      createInitialGenerationIntent(
+        content({ exactText: 'Camp "Wildwood" — Est. 1987' }),
+      ),
     );
     assert.equal(result.requiredWording, 'Camp "Wildwood" — Est. 1987');
   });
 });
 
-describe("PromptTranslationCapability — optional RegenerationPlan", () => {
+describe("PromptTranslationCapability — RegenerationPlan via GenerationIntent", () => {
   const translation = createPromptTranslationCapability();
-
-  it("without a plan, output matches the brief-only translation exactly", () => {
-    const brief = content();
-    assert.deepEqual(translation.translate(brief), translation.translate(brief, null));
-    assert.deepEqual(translation.translate(brief), translation.translate(brief, undefined));
-  });
 
   it("merges plan priorityChanges into notes in priority order without provider dialect", () => {
     const result = translation.translate(
-      content(),
-      plan({
-        avoid: [
-          {
-            section: "exclusions",
-            description: "No cartoon animals",
-            source: "brief",
-            reason: "exclusions",
-          },
-        ],
-        strengthen: [
-          {
-            section: "style",
-            description: "Make sure the design style reflects the customer's requested change.",
-            source: "customer_revision",
-            reason: "customer",
-          },
-        ],
-        evaluationDrivenChanges: [
-          {
-            section: "graphics",
-            description: "Strengthen the graphics so it clearly matches the brief.",
-            source: "evaluation",
-            reason: "evaluation",
-          },
-        ],
-        priorityChanges: [
-          {
-            section: "exclusions",
-            description: "No cartoon animals",
-            source: "brief",
-            reason: "exclusions",
-          },
-          {
-            section: "requiredWording",
-            description: "Make sure the required wording reflects the customer's requested change.",
-            source: "customer_revision",
-            reason: "customer",
-          },
-          {
-            section: "style",
-            description: "Make sure the design style reflects the customer's requested change.",
-            source: "customer_revision",
-            reason: "customer",
-          },
-          {
-            section: "graphics",
-            description: "Strengthen the graphics so it clearly matches the brief.",
-            source: "evaluation",
-            reason: "evaluation",
-          },
-        ],
-      }),
+      createRegenerationGenerationIntent(
+        content(),
+        plan({
+          priorityChanges: [
+            {
+              section: "exclusions",
+              description: "No cartoon animals",
+              source: "brief",
+              reason: "exclusions",
+            },
+            {
+              section: "requiredWording",
+              description: "Make sure the required wording reflects the customer's requested change.",
+              source: "customer_revision",
+              reason: "customer",
+            },
+            {
+              section: "style",
+              description: "Make sure the design style reflects the customer's requested change.",
+              source: "customer_revision",
+              reason: "customer",
+            },
+            {
+              section: "graphics",
+              description: "Strengthen the graphics so it clearly matches the brief.",
+              source: "evaluation",
+              reason: "evaluation",
+            },
+          ],
+        }),
+      ),
     );
 
     assert.equal(result.exclusions, "No cartoon animals");
@@ -168,7 +162,6 @@ describe("PromptTranslationCapability — optional RegenerationPlan", () => {
     assert.match(result.notes ?? "", /required wording/);
     assert.match(result.notes ?? "", /design style/);
     assert.match(result.notes ?? "", /graphics/);
-    // Exclusions description is not duplicated into notes.
     assert.equal((result.notes ?? "").includes("No cartoon animals"), false);
     assert.doesNotMatch(
       JSON.stringify(result),
@@ -178,43 +171,83 @@ describe("PromptTranslationCapability — optional RegenerationPlan", () => {
 
   it("applies remove actions by clearing the corresponding request fields", () => {
     const result = translation.translate(
-      content({ exactText: "" }),
-      plan({
-        remove: [
-          {
-            section: "requiredWording",
-            description: "Customer removed the required wording",
-            source: "customer_revision",
-            reason: "removed",
-          },
-          {
-            section: "style",
-            description: "Customer removed the design style",
-            source: "customer_revision",
-            reason: "removed",
-          },
-        ],
-        priorityChanges: [],
-      }),
+      createRegenerationGenerationIntent(
+        content({ exactText: "" }),
+        plan({
+          remove: [
+            {
+              section: "requiredWording",
+              description: "Customer removed the required wording",
+              source: "customer_revision",
+              reason: "removed",
+            },
+            {
+              section: "style",
+              description: "Customer removed the design style",
+              source: "customer_revision",
+              reason: "removed",
+            },
+          ],
+        }),
+      ),
     );
     assert.equal(result.requiredWording, null);
     assert.equal(result.style, null);
   });
 
-  it("is deterministic and idempotent for the same brief + plan", () => {
-    const brief = content();
-    const regenerationPlan = plan({
-      priorityChanges: [
-        {
-          section: "style",
-          description: "Strengthen the design style so it clearly matches the brief.",
-          source: "evaluation",
-          reason: "failed",
-        },
-      ],
-    });
-    const a = translation.translate(brief, regenerationPlan);
-    const b = translation.translate(brief, regenerationPlan);
-    assert.deepEqual(a, b);
+  it("is deterministic and idempotent for the same intent", () => {
+    const intent = createRegenerationGenerationIntent(
+      content(),
+      plan({
+        priorityChanges: [
+          {
+            section: "style",
+            description: "Strengthen the design style so it clearly matches the brief.",
+            source: "evaluation",
+            reason: "failed",
+          },
+        ],
+      }),
+    );
+    assert.deepEqual(
+      translation.translate(intent),
+      translation.translate(intent),
+    );
+  });
+
+  it("does not mutate the approved brief on the intent", () => {
+    const brief = content({ exclusions: "No skulls" });
+    const before = JSON.stringify(brief);
+    translation.translate(
+      createRegenerationGenerationIntent(
+        brief,
+        plan({
+          remove: [
+            {
+              section: "style",
+              description: "removed",
+              source: "customer_revision",
+              reason: "x",
+            },
+          ],
+        }),
+      ),
+    );
+    assert.equal(JSON.stringify(brief), before);
+  });
+});
+
+describe("GenerationIntent construction", () => {
+  it("createInitialGenerationIntent is immutable with a null regenerationPlan", () => {
+    const intent = createInitialGenerationIntent(content());
+    assert.equal(intent.regenerationPlan, null);
+    assert.equal(Object.isFrozen(intent), true);
+  });
+
+  it("createRegenerationGenerationIntent is immutable with the supplied plan", () => {
+    const regenerationPlan = plan({ generationAttempt: 3 });
+    const intent = createRegenerationGenerationIntent(content(), regenerationPlan);
+    assert.equal(intent.regenerationPlan?.generationAttempt, 3);
+    assert.equal(Object.isFrozen(intent), true);
   });
 });

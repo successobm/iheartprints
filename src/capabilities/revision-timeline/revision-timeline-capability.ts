@@ -29,7 +29,7 @@ import type {
  *        ↓
  *   RegenerationIntelligenceCapability.planNextGeneration(...)
  *        ↓
- *   PromptTranslationCapability.translate(brief, plan?)
+ *   PromptTranslationCapability.translate(generationIntent)
  *        ↓
  *   GenerationWorkerCapability
  *

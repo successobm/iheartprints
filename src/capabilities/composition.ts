@@ -102,6 +102,7 @@ export function createCapabilityGraph(
     promptTranslation,
     assets,
     conceptEvaluation,
+    revisionIntelligence,
   );
   const workerScheduler = createGenerationSchedulerCapability(generationWorker);
 
