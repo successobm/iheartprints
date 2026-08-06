@@ -363,11 +363,16 @@ describe("Sprint 2I Phase 2 — sourceUrl and providerMetadata boundaries", () =
   });
 
   it("keeps request-path sourceUrl ephemeral — never copied onto the result", async () => {
-    let seenRequest: ConceptEvaluationRequest | null = null;
+    // Box the capture so TypeScript keeps `ConceptEvaluationRequest | null`
+    // across the async provider callback (a bare `let` is CFA-narrowed to
+    // the initializer `null` and then collapses at the read site).
+    const capture: { request: ConceptEvaluationRequest | null } = {
+      request: null,
+    };
     const provider: ConceptEvaluationProvider = {
       providerKey: "echo",
       async evaluate(request) {
-        seenRequest = request;
+        capture.request = request;
         return {
           overallScore: null,
           passed: null,
@@ -396,7 +401,10 @@ describe("Sprint 2I Phase 2 — sourceUrl and providerMetadata boundaries", () =
       }),
     );
 
-    assert.equal(seenRequest?.assets[0]?.sourceUrl, "https://assets.example.test/signed/asset-1");
+    assert.equal(
+      capture.request?.assets[0]?.sourceUrl,
+      "https://assets.example.test/signed/asset-1",
+    );
     assert.equal(JSON.stringify(result).includes("assets.example.test"), false);
     assert.equal("sourceUrl" in result.providerMetadata, false);
   });

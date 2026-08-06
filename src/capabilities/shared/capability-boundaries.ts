@@ -4,7 +4,8 @@
  * refined Sprint 2E, adaptive interview Sprint 2F, adaptive revisions
  * Sprint 2G Part 2, real generation infrastructure Sprint 2H Part 1,
  * Concept Evaluation architecture Sprint 2I Phase 1, first real Concept
- * Evaluation provider Sprint 2I Phase 2).
+ * Evaluation provider Sprint 2I Phase 2, Regeneration Intelligence
+ * architecture Sprint 2J Phase 1).
  *
  * Pipeline (Sprint 2G Part 2):
  *   Conversation → IntentExtraction → DesignBrief
@@ -13,6 +14,19 @@
  *                → InterviewIntelligence → best next act
  *                → DesignSummary → Approval → ConceptGeneration
  *                  (± RevisionIntelligence-driven concept regeneration)
+ *
+ * Regeneration pipeline (Sprint 2J Phase 1 — architecture only, not yet
+ * wired into the live worker):
+ *   Approved Design Brief + Concept Evaluation + Revision History (a
+ *   chronological sequence of RevisionImpact) → RegenerationIntelligence
+ *   → provider-neutral RegenerationPlan → (future) PromptTranslation →
+ *   (future) ConceptGenerationProvider. RegenerationIntelligence never
+ *   generates artwork, never evaluates artwork, never re-scores concepts,
+ *   and never mutates the Design Brief — it only decides what the *next*
+ *   generation attempt should preserve, strengthen, remove, replace, or
+ *   avoid. Its output is never persisted; it is cheap and pure enough to
+ *   recompute on demand from an approved brief snapshot + the latest
+ *   evaluation + revision history.
  *
  * Generation pipeline (Sprint 2H Part 1 + Sprint 2I Phase 1):
  *   ConceptGeneration → PromptTranslation (approved brief snapshot →
@@ -112,6 +126,23 @@
  *                  private to that provider's file.
  *   ConceptEvaluationProvider adapters → ConceptEvaluationRequest only;
  *                  return ConceptEvaluationResult; no repository writes.
+ *   RegenerationIntelligence → approved Design Brief snapshot content, the
+ *                  persisted Concept Evaluation for the current concept
+ *                  batch (or `null` before one exists), a chronological
+ *                  RevisionImpact history, and caller-supplied generation
+ *                  attempt bookkeeping only. Reuses
+ *                  `shared/concept-relevance` (the same policy Revision
+ *                  Intelligence and Concept Generation already use) to
+ *                  scope itself to sections that actually change generated
+ *                  artwork. Pure and deterministic: no Conversation, no
+ *                  persistence, no repository, no provider, no UI, no
+ *                  clock reads. Never re-scores a concept (that is Concept
+ *                  Evaluation's job, consumed only as input here), never
+ *                  regenerates artwork itself, never mutates the Design
+ *                  Brief, and never emits provider prompt dialect or
+ *                  quality-boosting language — its `RegenerationPlan`
+ *                  output is provider-neutral, exactly like
+ *                  `GenerationPromptRequest`.
  *
  * `shared/interview-coverage-policy`, `shared/question-phrasing`, and
  * `shared/product-rule-packs` are pure, side-effect-free data/phrasing
@@ -144,6 +175,18 @@
  *   Concept Evaluation blocking or discarding concepts in Phase 1
  *   Concept Evaluation provider adapters receiving customer/conversation/
  *     job ids, secrets, or repository handles
+ *   Regeneration Intelligence generating artwork, calling a provider, or
+ *     depending on ConceptGenerationProvider / ConceptEvaluationProvider
+ *   Regeneration Intelligence re-scoring or re-running Concept Evaluation
+ *     (it only ever consumes an already-produced evaluation result)
+ *   Regeneration Intelligence mutating the Design Brief, or depending on
+ *     Conversation, persistence, a repository, or UI
+ *   Regeneration Intelligence persisting a RegenerationPlan — plans are
+ *     always ephemeral and recomputed, never stored
+ *   Regeneration Intelligence emitting provider prompt dialect or
+ *     quality-boosting keywords ("masterpiece", "8k", etc.) — that
+ *     vocabulary belongs exclusively to a provider adapter, several
+ *     capabilities removed from this one
  *   Print Validation modifying Design Briefs
  *   Print Validation depending on Concept Evaluation internals (share
  *     ArtworkVersion fields only)
@@ -157,4 +200,4 @@
  *     Sprint 2I Phase 1)
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2I2" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2J1" as const;

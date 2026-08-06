@@ -182,6 +182,13 @@ Conversation
   → Updated Working Brief / optional regeneration
 ```
 
+Sprint 2J Phase 1 adds `RegenerationIntelligenceCapability` as an
+architecture-only building block for the last step above ("optional
+regeneration"). It is fully implemented and tested but **not yet composed
+into `GenerationWorkerCapability` or any customer-facing route** — nothing
+in this sprint calls it, and no `RegenerationPlan` is produced, consumed, or
+persisted by the live pipeline yet. See §5 and §13a.
+
 ### Synchronous vs asynchronous
 
 | Step | Timing |
@@ -216,6 +223,10 @@ Status legend:
 - **Active** — used by the live conversation / generation pipeline
 - **Partial** — real implementation with intentional gaps
 - **Reserved** — contract/stub only; not product behavior yet
+- **New (architecture only)** — a real, fully implemented and tested
+  capability, distinct from a **Reserved** stub, that is not yet composed
+  into `CapabilityGraph` or called by anything else; currently only
+  `RegenerationIntelligenceCapability` (Sprint 2J Phase 1)
 
 ### ConversationCapability — Active
 
@@ -334,6 +345,26 @@ Distinct from **RevisionCapability** (reserved artwork-level lifecycle stub).
 Stub only (`classifyRevisionRequest` → `unclassified`; `forkBriefFromApproved` → `null`; `listRevisions` → `[]`).
 Post-approval conversational revisions today flow through Intent Extraction →
 DesignBrief + RevisionIntelligence, not this capability.
+
+### RegenerationIntelligenceCapability — New (Sprint 2J Phase 1, architecture only — not yet composed)
+
+| | |
+|---|---|
+| **Responsibility** | Decide what should change in the *next* generation attempt — never generates, never evaluates |
+| **Inputs** | Approved `DesignBriefSnapshotContent`; the current concept batch's persisted Concept Evaluation (or `null`); a chronological `RevisionImpact` history since approval; caller-supplied generation attempt metadata (`attemptNumber`, optional `rejectedSections`) |
+| **Outputs** | `RegenerationPlan` — provider-neutral `preserve` / `strengthen` / `remove` / `replace` / `avoid` / `priorityChanges` / `unchangedSections` / `customerRequestedChanges` / `evaluationDrivenChanges` |
+| **Dependencies** | `shared/concept-relevance` (scopes itself to sections that actually change generated artwork — same policy Revision Intelligence and Concept Generation already use); `lib/domain/required-wording` |
+| **Owns** | Deterministic preserve/strengthen/remove/replace/avoid categorization; the priority order documented in the capability's module doc |
+| **Must never own** | Generating artwork; evaluating artwork; re-scoring a concept; mutating the Design Brief; persistence; prompt dialect or quality-boosting language |
+
+Pure and deterministic — same inputs always produce a `deepEqual`
+`RegenerationPlan`; nothing is persisted, since a plan is always cheap to
+recompute from an approved brief snapshot + the latest evaluation + revision
+history. **Not yet wired into `GenerationWorkerCapability`, composition, or
+any route** — this sprint delivers the capability itself (contracts,
+implementation, tests) with no behavior change to the live pipeline. A
+future sprint composes it between Concept Evaluation/Revision Intelligence
+and Prompt Translation. See §13a for the full contract and priority rules.
 
 ### ConceptGenerationCapability — Active (enqueue-only)
 
@@ -530,6 +561,17 @@ GenerationSchedulerCapability
               |         +--> ConceptEvaluationProvider (interface)
               +--> ProjectRepository
 
+RegenerationIntelligenceCapability (Sprint 2J Phase 1 — standalone;
+not yet called by anything above)
+    |
+    +--> shared/concept-relevance
+    +--> lib/domain/required-wording
+    (takes an approved brief snapshot + a Concept Evaluation result +
+     a RevisionImpact history + generation attempt metadata as plain
+     function arguments — no capability dependency on
+     ConceptEvaluationCapability or RevisionIntelligenceCapability
+     themselves, only on the data shapes they produce)
+
 Shared pure modules (not capabilities):
   interview-coverage-policy, product-rule-packs, concept-relevance,
   question-phrasing, brief-diff, generation-retry-policy
@@ -548,6 +590,9 @@ Do not introduce:
 - Provider adapters → repositories, conversations, or raw Design Briefs
 - ConceptEvaluationProvider → customer/conversation/job ids, secrets, repositories
 - Concept Evaluation ↔ Print Validation capability dependency (share ArtworkVersion fields only)
+- RegenerationIntelligence → generation providers, ConceptGenerationProvider, ConceptEvaluationProvider, persistence, Conversation, or UI
+- RegenerationIntelligence re-running or re-scoring Concept Evaluation (consumes its output only)
+- RegenerationPlan persistence — plans are always ephemeral and recomputed
 - Design Brief storage of provider prompt dialect
 - Customer-facing exposure of provider keys, job ids, asset ids, evaluation scores, or storage modes
 - ProductIntelligence ↔ RevisionIntelligence capability dependency (share `product-rule-packs`)
@@ -954,6 +999,165 @@ misrepresenting anything to a customer.
 
 ---
 
+## 13a. Regeneration Intelligence Architecture (Sprint 2J Phase 1)
+
+`RegenerationIntelligenceCapability` (`src/capabilities/regeneration-intelligence/`)
+answers one question: **what should change in the next generation
+attempt?** It is deliberately positioned downstream of both Concept
+Evaluation and Revision Intelligence, and upstream of Prompt Translation:
+
+```
+Approved Design Brief
+       │
+       ▼
+Concept Evaluation (persisted evaluation for the current concept batch)
+       │
+       ▼
+Revision History (chronological RevisionImpact entries since approval)
+       │
+       ▼
+RegenerationIntelligenceCapability.planNextGeneration(...)
+       │
+       ▼
+RegenerationPlan  (provider-neutral; never persisted; always recomputed)
+       │
+       ▼
+PromptTranslationCapability   ← not wired yet; Sprint 2J Phase 2+
+       │
+       ▼
+ConceptGenerationProvider
+```
+
+**Sprint 2J Phase 1 ships the capability itself only.** Nothing in this
+sprint calls `planNextGeneration`, no route or worker composes it, and
+`RegenerationPlan` is not yet consumed by Prompt Translation. This section
+documents the contract and priority rules for the capability that now
+exists, not a change to live behavior.
+
+### Responsibility boundaries
+
+Regeneration Intelligence:
+
+- does **not** generate artwork (no `ConceptGenerationProvider` dependency)
+- does **not** evaluate artwork or re-score a concept (it only ever
+  consumes an already-produced `ConceptEvaluation` result)
+- does **not** mutate the Design Brief
+- does **not** persist anything — a `RegenerationPlan` is cheap to
+  recompute and is always ephemeral
+- never contains provider prompt dialect or quality-boosting language
+  ("masterpiece", "8k", "highly detailed", etc.) — that vocabulary stays
+  inside a provider adapter, several capabilities downstream
+
+### Inputs
+
+```ts
+interface RegenerationIntelligenceInput {
+  approvedBrief: DesignBriefSnapshotContent;
+  latestEvaluation: { status: ConceptEvaluationStatus; result: ConceptEvaluation } | null;
+  revisionHistory: RevisionImpact[]; // chronological, oldest → newest
+  currentGeneration: {
+    attemptNumber: number;
+    rejectedSections?: BriefSectionKey[]; // caller-supplied memory of past rejections
+  };
+}
+```
+
+No repository, no provider, no customer/conversation/job ids — only data
+shapes already produced by capabilities upstream (`DesignBriefSnapshotContent`
+from an approved `DesignBriefVersion`, the persisted evaluation from
+`ArtworkVersion.evaluationStatus` / `evaluation`, and `RevisionImpact` from
+`RevisionIntelligenceCapability`).
+
+### RegenerationPlan contract
+
+```ts
+interface RegenerationPlan {
+  preserve: RegenerationChange[];
+  strengthen: RegenerationChange[];
+  remove: RegenerationChange[];
+  replace: RegenerationChange[];
+  avoid: RegenerationChange[];
+  priorityChanges: RegenerationChange[];       // deterministically ordered — see priority rules below
+  unchangedSections: BriefSectionKey[];
+  customerRequestedChanges: RegenerationChange[];
+  evaluationDrivenChanges: RegenerationChange[];
+  generationAttempt: number;
+  reason: string;                              // plain-language, provider-neutral summary
+}
+
+interface RegenerationChange {
+  section: BriefSectionKey;
+  description: string;   // plain-language, provider-neutral
+  source: "customer_revision" | "evaluation" | "brief";
+  reason: string;
+}
+```
+
+Only sections in `shared/concept-relevance`'s `CONCEPT_RELEVANT_SECTIONS`
+(`product`, `productColor`, `colors`, `graphics`, `requiredWording`,
+`style`, `printLocation`) — the same policy Revision Intelligence and
+Concept Generation already use to decide what actually changes generated
+artwork — plus `exclusions` (handled as its own unconditional `avoid`
+source) ever produce a plan entry. Sections like audience/purpose/notes
+matter to the brief but don't change what a provider generates, so they
+stay out of scope here exactly as they do for concept staleness today.
+
+### Priority rules (deterministic, documented in the capability's module doc)
+
+1. **Explicit exclusions override everything.** `approvedBrief.exclusions`,
+   plus any evaluation-confirmed exclusion violation, always lands in
+   `avoid[]` first — ahead of every other signal.
+2. **Previously rejected ideas are never reintroduced.**
+   `currentGeneration.rejectedSections` always routes to `avoid[]`,
+   regardless of what the brief or evaluation currently say.
+3. **Required wording is never removed.** Whenever `requiredWording` has
+   any action at all, it is surfaced immediately after `avoid` in
+   `priorityChanges` — a provider can never miss it. "Removed" only ever
+   means the customer themselves explicitly cleared it; the capability
+   never drops present wording on its own initiative.
+4. **Customer revisions always override evaluation suggestions.** A
+   section the customer touched (per `revisionHistory`) is decided from
+   the customer's side only — evaluation is not consulted a second time
+   for that same section.
+5. **Evaluation failures produce regeneration actions.** Any
+   regeneration-relevant section evaluation marked failed, that the
+   customer did not already touch, becomes an `evaluationDrivenChanges` /
+   `strengthen` entry.
+6. **Satisfied requirements become preservation actions.** A
+   customer-touched section already confirmed by evaluation, or an
+   untouched section evaluation confirmed passed, moves to `preserve`
+   rather than being re-requested.
+7. **Later customer revisions supersede earlier ones.** A section touched
+   more than once across `revisionHistory` is categorized `replace` (using
+   the current approved brief value) instead of `strengthen`.
+
+`priorityChanges` is built in that same order: `avoid` entries, then the
+`requiredWording` entry (wherever it landed), then remaining
+`customerRequestedChanges`, then remaining `evaluationDrivenChanges` — each
+tier internally sorted by a fixed canonical section order so the result is
+identical regardless of input array ordering.
+
+### Purity and determinism
+
+`buildRegenerationPlan` (the standalone pure function backing the
+capability, exported for direct unit testing the same way
+`describeConceptStatus` is) reads no clock, no environment variable, and no
+external state. The same input always produces a `deepEqual`
+`RegenerationPlan`; calling it repeatedly with unchanged input never
+accumulates or drifts.
+
+### Not yet wired
+
+`RegenerationIntelligenceCapability` is not part of `CapabilityGraph`
+(`composition.ts`), not called by `GenerationWorkerCapability`, and not
+reachable from any route. Composing it — deciding when a regeneration
+attempt collects a `RevisionImpact` history and calls
+`planNextGeneration`, and how `PromptTranslationCapability` consumes a
+`RegenerationPlan` — is out of scope for Sprint 2J Phase 1 and belongs to a
+future phase (see §25).
+
+---
+
 ## 14. Background Worker Architecture
 
 Capabilities:
@@ -1276,6 +1480,12 @@ Verified against the implementation:
   signed image URLs in the UI
 - Optional interview sections `production` / `layoutPreference` are policy-
   reserved without full extraction/rule backing
+- `RegenerationIntelligenceCapability` (Sprint 2J Phase 1) is implemented
+  and tested but not composed into `CapabilityGraph`, not called by
+  `GenerationWorkerCapability`, and not reachable from any route — no
+  `RegenerationPlan` is produced or consumed by the live pipeline; there is
+  no automatic regeneration, no automatic concept rejection, and no
+  customer-visible recommendation derived from it yet
 
 Do not treat future work as completed architecture.
 
@@ -1288,6 +1498,7 @@ Describe attachment points only — not a delivery plan:
 | Extension | Attach where |
 |---|---|
 | ConceptEvaluationCapability | **Phase 1 (architecture) + Phase 2 (first real evaluator) done.** Phase 3+: gating/ranking/regeneration decisions driven by evaluation results; never mutate brief |
+| RegenerationIntelligenceCapability | **Phase 1 (architecture: contracts, priority rules, tests) done — see §13a.** Phase 2+: compose into `GenerationWorkerCapability`/a regeneration route so a `RegenerationPlan` is actually produced per attempt and threaded through `RevisionImpact` accumulation; Phase 3+: `PromptTranslationCapability` consumes a `RegenerationPlan` to build the next `GenerationPromptRequest`. Never generate artwork itself; never re-score Concept Evaluation; never mutate the brief |
 | PrintValidationCapability | Replace stub; validate artwork against approved brief; never mutate brief; never confuse with Concept Evaluation |
 | Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider` (e.g. a dedicated OCR specialist, a different vision model); no domain change |
 | Production file generation | New assets linked via `printAssetId` / dedicated kinds |
