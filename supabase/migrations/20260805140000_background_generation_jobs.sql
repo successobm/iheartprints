@@ -1,6 +1,12 @@
 -- Sprint 2H Part 2A: background generation jobs + real Supabase Storage
 -- backend. Additive only. Does not edit or rename any previously applied
 -- migration.
+--
+-- NOTE: The new enum value 'recoverable' is added here but must NOT be
+-- referenced by indexes/constraints/data in this same transaction.
+-- PostgreSQL rejects that with SQLSTATE 55P04 until the ADD VALUE
+-- transaction commits. The partial index that filters on 'recoverable'
+-- lives in the immediately following migration.
 
 -- A "running" job whose worker went silent is recoverable, not failed —
 -- nothing about generation itself failed.
@@ -22,16 +28,12 @@ alter table public.generation_jobs
 -- historical row; new inserts always specify kind explicitly.
 alter table public.generation_jobs alter column kind drop default;
 
-create index generation_jobs_status_created_at_idx
-  on public.generation_jobs (status, created_at)
-  where status in ('queued', 'recoverable');
-
-create index generation_jobs_running_heartbeat_idx
+create index if not exists generation_jobs_running_heartbeat_idx
   on public.generation_jobs (heartbeat_at)
   where status = 'running';
 
 -- Private bucket for generated artwork bytes. The application talks to it
--- exclusively through the service-role key (server-side only), so no
+-- exclusively via the service-role key (server-side only), so no
 -- public/anon storage.objects policy is required for this bucket — the
 -- deny-by-default RLS Supabase Storage ships with already blocks anon/auth
 -- access; this INSERT just registers the bucket itself.

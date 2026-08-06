@@ -1,6 +1,10 @@
 import { getCapabilityGraph } from "@/capabilities/composition";
 import type { DesignBriefDecisionAction } from "@/capabilities/conversation";
-import type { ConceptStatusView } from "@/capabilities/shared/contracts";
+import {
+  toCustomerArtworkVersion,
+  toCustomerConceptStatusView,
+  type CustomerConceptStatusView,
+} from "@/capabilities/shared/contracts";
 import type { ProjectSnapshot, ProjectStatus } from "@/lib/domain/types";
 
 /**
@@ -12,10 +16,16 @@ import type { ProjectSnapshot, ProjectStatus } from "@/lib/domain/types";
  * `ConceptGenerationCapability.describeConceptStatus`, not a new capability
  * dependency — so the UI's persistent concept-status action reflects
  * reality on every fetch, not only right after a revision turn.
+ *
+ * Sprint 2K Phase 1: this is also the one place that shapes `ArtworkVersion`
+ * into the browser-safe `CustomerArtworkVersion` (see contracts.ts) before
+ * it leaves the server — every route funnels through the functions below,
+ * so there is a single choke point rather than per-route sanitization.
  */
 
-export type ApiProjectSnapshot = ProjectSnapshot & {
-  conceptStatus: ConceptStatusView;
+export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
+  artworkVersions: ReturnType<typeof toCustomerArtworkVersion>[];
+  conceptStatus: CustomerConceptStatusView;
 };
 
 function withConceptStatus(snapshot: ProjectSnapshot): ApiProjectSnapshot {
@@ -24,7 +34,11 @@ function withConceptStatus(snapshot: ProjectSnapshot): ApiProjectSnapshot {
     snapshot.artworkVersions,
     snapshot.designBriefVersions,
   );
-  return { ...snapshot, conceptStatus };
+  return {
+    ...snapshot,
+    artworkVersions: snapshot.artworkVersions.map(toCustomerArtworkVersion),
+    conceptStatus: toCustomerConceptStatusView(conceptStatus),
+  };
 }
 
 export async function startConversation(): Promise<ApiProjectSnapshot> {
@@ -126,4 +140,35 @@ export async function getGenerationStatus(
   const snapshot = await getCapabilityGraph().conversation.get(projectId);
   if (!snapshot) return null;
   return toGenerationStatusView(snapshot.project.status);
+}
+
+export interface ConceptImageView {
+  /** Short-lived signed URL from `AssetCapability.getSignedUrl` — never a raw object key. */
+  url: string;
+}
+
+/**
+ * Sprint 2K Phase 1: the only path from a browser-visible `artworkVersionId`
+ * to a real, renderable image. Looks the concept up in the internal
+ * (unsanitized) snapshot purely to find its `primaryAssetId`, then asks
+ * `AssetCapability` for a fresh signed URL — the asset id itself never
+ * leaves the server. Returns `null` whenever the project, the concept, or a
+ * generated image doesn't exist, so callers can render a uniform 404
+ * without leaking which case applied.
+ */
+export async function getConceptImageUrl(
+  projectId: string,
+  artworkVersionId: string,
+): Promise<ConceptImageView | null> {
+  const graph = getCapabilityGraph();
+  const snapshot = await graph.conversation.get(projectId);
+  if (!snapshot) return null;
+
+  const artwork = snapshot.artworkVersions.find(
+    (version) => version.id === artworkVersionId && version.projectId === projectId,
+  );
+  if (!artwork || !artwork.primaryAssetId) return null;
+
+  const url = await graph.assets.getSignedUrl(artwork.primaryAssetId);
+  return url ? { url } : null;
 }

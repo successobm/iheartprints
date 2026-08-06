@@ -4,12 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   BriefSectionKey,
-  ConceptStatusView,
   DeferredDecisionView,
   DesignSummaryView,
   RecommendationAction,
 } from "@/capabilities/shared/contracts";
-import type { ProjectSnapshot } from "@/lib/domain/types";
+import type { ApiProjectSnapshot } from "@/lib/services/conversation-service";
 import {
   CHAT_PROJECT_STORAGE_KEY,
   planSessionBootstrap,
@@ -25,9 +24,8 @@ import { buildRevisionTimeline } from "./revision-timeline";
 import { RevisionTimeline } from "./RevisionTimeline";
 import { useIsClient } from "./use-is-client";
 
-type ApiSnapshot = ProjectSnapshot & {
+type ApiSnapshot = ApiProjectSnapshot & {
   persistenceMode?: "supabase" | "local";
-  conceptStatus: ConceptStatusView;
 };
 
 export function ChatApp() {
@@ -471,6 +469,7 @@ export function ChatApp() {
                   showConcepts ? (
                     <ConceptCards
                       concepts={currentArtworkVersions}
+                      projectId={snapshot.project.id}
                       selectedId={snapshot.project.selectedArtworkVersionId}
                       selectable={phase === "concepts_ready"}
                       busy={sending}

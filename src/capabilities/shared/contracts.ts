@@ -441,3 +441,59 @@ export interface ConceptStatusView {
   /** Older batches, most recent first. Never deleted — Constitution §6.11. */
   previousBatches: ArtworkVersion[][];
 }
+
+/**
+ * Sprint 2K Phase 1: customer-facing projection of `ArtworkVersion`. Keeps
+ * `ArtworkVersion`'s shape (so it stays a drop-in `ProjectSnapshot` —
+ * `test-support` helpers and existing capability signatures that expect a
+ * plain `ArtworkVersion`/`ProjectSnapshot` keep working unchanged) but
+ * redacts every internal-only field to `null`: `generationJobId`,
+ * `primaryAssetId`, `thumbnailAssetId`, `providerKey`, `evaluation*`, and
+ * `printValidationStatus` — none of that is customer-facing (ARCHITECTURE.md
+ * §8, §13, §23). `hasImage` is the only *new* signal the browser gets,
+ * telling it whether to ask the image endpoint for a short-lived signed URL
+ * by `artworkVersionId`; it never needs the underlying asset id to do that.
+ */
+export type CustomerArtworkVersion = ArtworkVersion & {
+  /** Whether a generated image exists for this concept — not the asset id itself. */
+  hasImage: boolean;
+};
+
+export function toCustomerArtworkVersion(
+  version: ArtworkVersion,
+): CustomerArtworkVersion {
+  return {
+    ...version,
+    generationJobId: null,
+    primaryAssetId: null,
+    thumbnailAssetId: null,
+    providerKey: null,
+    evaluationStatus: null,
+    evaluation: null,
+    evaluationEvaluatedAt: null,
+    evaluationProviderKey: null,
+    printValidationStatus: null,
+    hasImage: version.primaryAssetId !== null,
+  };
+}
+
+/** Customer-facing projection of `ConceptStatusView` — see `CustomerArtworkVersion`. */
+export type CustomerConceptStatusView = Omit<
+  ConceptStatusView,
+  "currentConcepts" | "previousBatches"
+> & {
+  currentConcepts: CustomerArtworkVersion[];
+  previousBatches: CustomerArtworkVersion[][];
+};
+
+export function toCustomerConceptStatusView(
+  status: ConceptStatusView,
+): CustomerConceptStatusView {
+  return {
+    ...status,
+    currentConcepts: status.currentConcepts.map(toCustomerArtworkVersion),
+    previousBatches: status.previousBatches.map((batch) =>
+      batch.map(toCustomerArtworkVersion),
+    ),
+  };
+}

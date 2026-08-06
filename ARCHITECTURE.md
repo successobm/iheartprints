@@ -669,13 +669,15 @@ Primary types live in `src/lib/domain/types.ts`.
 | `TShirtDesignBrief` | Mutable working Design Brief |
 | `DesignBriefVersion` | Immutable approved snapshot (`content` + version metadata) |
 | `GenerationJob` | Durable generation attempt (internal; not in customer snapshot) |
-| `ArtworkVersion` | Concept (or future revision/final) with brief/job/asset/evaluation provenance |
+| `ArtworkVersion` | Concept (or future revision/final) with brief/job/asset/evaluation provenance (internal) |
+| `CustomerArtworkVersion` | Customer-safe projection of `ArtworkVersion` (Sprint 2K Phase 1) |
 | `AssetRecord` | File metadata + opaque `storageKey` (internal; not in snapshot) |
 | `ConceptEvaluation` | Provider-neutral brief-alignment evaluation payload on an artwork version |
 | `RevisionImpact` | Capability contract describing brief-change consequences |
 | `BriefEvaluation` | Objective evaluation of the working brief |
 | `IntelligenceAssessment` | Recommendations + readiness derived for interview |
-| `ProjectSnapshot` | Customer/API aggregate: project, brief, conversation, messages, artwork, brief versions |
+| `ProjectSnapshot` | Internal aggregate: project, brief, conversation, messages, artwork, brief versions |
+| `ApiProjectSnapshot` | Customer/API aggregate: same shape with sanitized `CustomerArtworkVersion[]` |
 
 ### Key relationships
 
@@ -691,7 +693,10 @@ Primary types live in `src/lib/domain/types.ts`.
 - Conversation lifecycle: new projects use phase `interviewing`; legacy phases remain readable
 
 `ProjectSnapshot` intentionally excludes generation jobs and assets so
-customer responses do not carry storage/job internals.
+internal aggregates do not treat those as customer payload. Customer API
+responses go further: `conversation-service` is the single sanitization
+choke point that maps every `ArtworkVersion` to `CustomerArtworkVersion`
+before leaving the server (see §19).
 
 ### Relationship diagram
 
@@ -1192,6 +1197,34 @@ Deployment details: `docs/deployment/generation-worker.md`.
 - Raw object keys remain internal
 - Cleanup deletes storage bytes if DB persist fails after upload
 
+### Customer-safe concept-image read path (Sprint 2K Phase 1)
+
+The browser never receives asset ids, object keys, or persisted signed URLs.
+It asks for a short-lived URL by `artworkVersionId` only:
+
+```
+Browser
+  → GET /api/projects/{projectId}/concepts/{artworkVersionId}/image
+  → conversation-service.getConceptImageUrl
+  → AssetCapability.getSignedUrl(primaryAssetId)
+  → short-lived { url }
+```
+
+- Signed URLs are minted on demand per request
+- Signed URLs are never persisted (not in snapshots, artwork rows, messages,
+  or client storage as authority)
+- Raw object keys and asset ids remain internal; only `{ url }` leaves the
+  image endpoint
+- Cross-project artwork lookups are rejected (`artwork.projectId` must match
+  the route `projectId`; missing project/concept/image all yield the same
+  generic 404)
+- After reload, the UI refetches a fresh signed URL via the same endpoint
+  (`ConceptCards` — see §20)
+
+Worker-side evaluation uses the same `AssetCapability.getSignedUrl` minting
+path (§13); that URL is request-path only and must never be copied into
+persisted evaluation payloads.
+
 Orphan risk: if the process hard-crashes after bytes land in storage and
 before the asset row is written, automatic cleanup cannot run. Soft
 failures after upload are cleaned up in-process.
@@ -1207,7 +1240,7 @@ Production-oriented implemented: `supabase_storage`. Reserved:
 - Private Supabase bucket `design-assets` (`public = false`); no public-read
   policies
 - Service-role server boundary for storage access
-- Customer access via signed URLs only
+- Customer access via signed URLs only (minted on demand; never persisted)
 - Bounded expiration
 - Canonical object-key validation and traversal protection
   (`filesystem-paths.ts`: reject `..`, absolutes, backslashes, null bytes,
@@ -1215,8 +1248,8 @@ Production-oriented implemented: `supabase_storage`. Reserved:
 - Filesystem root containment under `.data/assets`
 - Encoded-path rejection (iterative decode)
 - Filesystem signing via `ASSET_SIGNING_SECRET` (dev fallback when unset)
-- Customer snapshots contain asset ids on artwork rows at most — not raw
-  storage keys as UX
+- Customer snapshots never expose raw storage keys, asset ids, or signed
+  URLs — only `hasImage` plus public concept presentation fields (§19)
 
 Do not document or commit actual secrets.
 
@@ -1260,11 +1293,36 @@ delegation to composed capabilities.
 | `POST /api/projects/[projectId]/messages` | Handle user message |
 | `POST /api/projects/[projectId]/brief/decision` | Approve / edit / continue on Design Summary |
 | `POST /api/projects/[projectId]/concepts/regenerate` | Explicit updated-concept enqueue |
+| `GET /api/projects/[projectId]/concepts/[artworkVersionId]/image` | Mint short-lived concept image URL (Sprint 2K Phase 1) |
 | `GET /api/projects/[projectId]/generation/status` | Read-only generation status |
 | `POST /api/projects/[projectId]/select` | Select concept |
 | `POST /api/projects/[projectId]/undo` | One-level undo |
 | `GET /api/assets/[...objectKey]` | Serve filesystem signed assets |
 | `POST /api/worker/generation` | Independent worker batch (secret-protected) |
+
+### Customer snapshot sanitization (Sprint 2K Phase 1)
+
+`conversation-service` is the single choke point that shapes internal
+`ArtworkVersion` into browser-safe `CustomerArtworkVersion` before any
+snapshot leaves the server (`toCustomerArtworkVersion` /
+`toCustomerConceptStatusView` in `shared/contracts.ts`).
+
+Excluded from customer responses (redacted to `null`):
+
+- generation provenance (`generationJobId`)
+- asset references (`primaryAssetId`, `thumbnailAssetId`)
+- provider identity (`providerKey`)
+- Concept Evaluation fields (`evaluationStatus`, `evaluation`,
+  `evaluationEvaluatedAt`, `evaluationProviderKey`)
+- Print Validation fields (`printValidationStatus`)
+
+The only added customer-facing image signal is `hasImage` (whether a
+generated primary asset exists). The browser uses `artworkVersionId` +
+`hasImage` to call the concept-image route; it never needs an asset id.
+
+Image route rules: mint on demand via `getConceptImageUrl` →
+`AssetCapability.getSignedUrl`; return `{ url }` only; never persist the
+URL; reject cross-project lookups; uniform 404 on every miss.
 
 Rules:
 
@@ -1275,6 +1333,8 @@ Rules:
 - Worker invocation is independent of customer traffic
 - Brief decision and regenerate routes enqueue only; they do not run the
   worker inline
+- Snapshot-returning routes must not bypass `conversation-service`
+  sanitization
 
 ---
 
@@ -1292,7 +1352,7 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 | `RecommendationCard` | Advisory actions → normal chat replies |
 | `DesignerDecisionCard` | Deferred “designer will determine” display |
 | `RevisionTimeline` | Plain-language design history chips |
-| `ConceptCards` | Concept selection grid (placeholder visuals today; no customer-facing provider/settings) |
+| `ConceptCards` | Concept selection grid: loading state, real signed image, or safe placeholder fallback (Sprint 2K Phase 1); no customer-facing provider/settings |
 | `Composer` | Message input |
 | `chat-session.ts` | localStorage project id restore/create |
 | `use-is-client.ts` | Hydration gate |
@@ -1300,12 +1360,25 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 Polling: while `project.status === "generating"`, poll generation status
 every few seconds; on exit from generating, refresh full snapshot.
 
+`ConceptCards` (Sprint 2K Phase 1) fetches signed image URLs only for
+concepts with `hasImage: true`, via
+`GET /api/projects/{projectId}/concepts/{artworkVersionId}/image`. It
+renders:
+
+- **loading** — `hasImage` true and URL not yet fetched
+- **real signed image** — short-lived URL from the image endpoint
+- **safe placeholder fallback** — `hasImage` false, fetch failure, or
+  exhausted silent renew after a stale/expired URL
+
+After reload, cards refetch a fresh signed URL; signed URLs are never
+treated as durable client state.
+
 The client renders capability-produced facts. It does not decide domain
 readiness, approval validity, concept staleness, or generation
 eligibility.
 
-Customer-safe terminology only — never model names, job ids, or storage
-modes.
+Customer-safe terminology only — never model names, job ids, asset ids,
+object keys, or storage modes.
 
 ---
 
@@ -1404,6 +1477,11 @@ Summarized:
 - No provider information in customer responses
 - No raw internal errors in public APIs
 - No public job or queue details
+- Customer snapshots sanitize artwork through `conversation-service` (no
+  asset ids, evaluation, provider, or print-validation fields; `hasImage`
+  only)
+- Concept images served via on-demand signed URLs; never persisted; never
+  cross-project
 - Configuration fails closed in production for misconfigured real generation
   and missing worker secret
 
@@ -1441,8 +1519,9 @@ Verified against the implementation:
 - Ownership/licensing enforcement is not implemented
 - Artwork-level `RevisionCapability` is not implemented (conversational
   revision intelligence is)
-- Concept cards currently use placeholder visuals rather than rendering
-  signed image URLs in the UI
+- Concept cards render real signed images when `hasImage` is true (Sprint
+  2K Phase 1); placeholder fallback remains for concepts without images or
+  when minting fails
 - Optional interview sections `production` / `layoutPreference` are policy-
   reserved without full extraction/rule backing
 - Sprint 2J Phase 3 activates Regeneration Intelligence on the explicit
