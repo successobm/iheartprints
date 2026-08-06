@@ -1,26 +1,21 @@
 /**
- * Sprint 2J Phase 1: provider-neutral Regeneration Intelligence contracts.
+ * Sprint 2J Phase 2: provider-neutral Regeneration Intelligence contracts.
  *
  * Regeneration Intelligence answers one question only: "what should change
  * in the NEXT generation attempt?" It does not generate artwork (that is
  * Prompt Translation + a `ConceptGenerationProvider`), and it does not
  * evaluate artwork (that is Concept Evaluation). It reads the approved
- * Design Brief, the most recent Concept Evaluation, and the revision
- * history since that brief was approved, and produces a `RegenerationPlan`
- * — a provider-neutral instruction set. The provider (via Prompt
- * Translation) later decides *how* to realize that plan; this module must
- * never contain prompt dialect or quality-boosting language of any kind
- * ("masterpiece", "8k", "highly detailed", etc.).
+ * Design Brief, the most recent Concept Evaluation, and a derived
+ * `RevisionTimeline` (never a persisted RevisionHistory), and produces a
+ * `RegenerationPlan` — a provider-neutral instruction set.
  *
  * Pure and deterministic: same inputs in, same `RegenerationPlan` out. No
  * repository, no provider, no UI, no persistence, no clock reads. Plans are
  * always recomputed, never stored.
  */
 
-import type {
-  BriefSectionKey,
-  RevisionImpact,
-} from "@/capabilities/shared/contracts";
+import type { BriefSectionKey } from "@/capabilities/shared/contracts";
+import type { RevisionTimeline } from "@/capabilities/revision-timeline";
 import type {
   ConceptEvaluation,
   ConceptEvaluationStatus,
@@ -40,19 +35,34 @@ export interface RegenerationConceptEvaluationInput {
 
 /**
  * Bookkeeping about the generation attempt a plan is being built for.
- * Supplied by the caller — this capability never counts attempts itself
- * (no repository access) and never remembers anything between calls (no
- * persistence).
+ *
+ * ## GenerationAttempt authority
+ *
+ * `attemptNumber` MUST be derived from `GenerationJob` records via
+ * `resolveGenerationAttemptNumber` (completed jobs + 1). `GenerationJob`
+ * is the sole authoritative source. Do not maintain a parallel counter.
+ *
+ * Note: `GenerationJob.attempts` is a different field — the per-job
+ * claim/retry budget used by the worker. It must not be copied into
+ * `attemptNumber`.
+ *
+ * ## Rejected concepts (future)
+ *
+ * `rejectedSections` comes from `RejectedConceptMemory` when a future
+ * sprint adds rejection capture. Until then, omit it or pass `[]` —
+ * Regeneration Intelligence operates correctly with no rejection memory.
  */
 export interface CurrentGenerationMetadata {
-  /** 1-based count of generation attempts already made for this approved brief version. */
+  /**
+   * 1-based ordinal of the generation attempt being planned, derived from
+   * completed `GenerationJob` rows (see `resolveGenerationAttemptNumber`).
+   */
   attemptNumber: number;
   /**
    * Sections whose prior direction the customer has already explicitly
-   * rejected (e.g. asked to move away from), across any point in this
-   * design's history. Supplied by the caller — Regeneration Intelligence
-   * has no persistence of its own to derive this. Always routed to
-   * `avoid[]`, regardless of what the brief or evaluation currently say.
+   * rejected. Supplied by the caller from `RejectedConceptMemory` when
+   * available — Regeneration Intelligence has no persistence of its own.
+   * Always routed to `avoid[]` when present. Gracefully ignored when empty.
    */
   rejectedSections?: BriefSectionKey[];
 }
@@ -64,12 +74,11 @@ export interface RegenerationIntelligenceInput {
   /** Concept Evaluation for the current (most recent) concept batch, if any exists yet. */
   latestEvaluation: RegenerationConceptEvaluationInput | null;
   /**
-   * Chronological (oldest → newest) `RevisionImpact` entries produced by
-   * Revision Intelligence since the approved brief was generated against.
-   * A section appearing in more than one entry means a later customer
-   * revision superseded an earlier one for that section.
+   * Ephemeral timeline derived by RevisionTimelineCapability from immutable
+   * records. Customer-revision events drive touch counts; older revisions
+   * never override newer ones. Never a persisted RevisionHistory.
    */
-  revisionHistory: RevisionImpact[];
+  revisionTimeline: RevisionTimeline;
   currentGeneration: CurrentGenerationMetadata;
 }
 
@@ -92,9 +101,9 @@ export interface RegenerationChange {
 }
 
 /**
- * Provider-neutral regeneration plan. Prompt Translation consumes this
- * (in a later sprint) to build the next `GenerationPromptRequest` — this
- * module never touches Prompt Translation or a provider directly.
+ * Provider-neutral regeneration plan. Prompt Translation consumes this to
+ * build the next `GenerationPromptRequest` — this module never touches a
+ * provider directly.
  */
 export interface RegenerationPlan {
   /** Confirmed-working elements to carry forward unchanged. */
@@ -107,7 +116,7 @@ export interface RegenerationPlan {
   replace: RegenerationChange[];
   /** Elements that must never appear — exclusions and previously rejected directions. */
   avoid: RegenerationChange[];
-  /** Deterministically ordered subset of the above — see priority rules in the capability module doc. */
+  /** Deterministically ordered subset — see priority rules in the capability module doc. */
   priorityChanges: RegenerationChange[];
   /** Regeneration-relevant sections with no signal to act on either way. */
   unchangedSections: BriefSectionKey[];
@@ -115,6 +124,10 @@ export interface RegenerationPlan {
   customerRequestedChanges: RegenerationChange[];
   /** Regeneration-relevant sections evaluation flagged as failed, that the customer did not already request a change to. */
   evaluationDrivenChanges: RegenerationChange[];
+  /**
+   * Copied from `currentGeneration.attemptNumber`, which must itself be
+   * derived from GenerationJob (see GenerationAttempt authority).
+   */
   generationAttempt: number;
   /** Plain-language, provider-neutral summary of why this plan looks the way it does. */
   reason: string;

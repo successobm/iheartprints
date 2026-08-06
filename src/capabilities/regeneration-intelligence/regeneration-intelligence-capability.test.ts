@@ -10,10 +10,12 @@ import type {
 } from "@/lib/domain/types";
 import { CONCEPT_EVALUATION_CRITERION_KEYS } from "@/capabilities/concept-evaluation";
 import type { BriefSectionKey, RevisionImpact } from "@/capabilities/shared/contracts";
+import type { RevisionTimeline } from "@/capabilities/revision-timeline";
 
 import {
   buildRegenerationPlan,
   createRegenerationIntelligenceCapability,
+  resolveGenerationAttemptNumber,
   type RegenerationConceptEvaluationInput,
   type RegenerationIntelligenceInput,
 } from "./index";
@@ -79,13 +81,31 @@ function impact(changedSections: BriefSectionKey[]): RevisionImpact {
   };
 }
 
+
+/** Minimal timeline whose customer_revision events mirror a former RevisionImpact history. */
+function timelineFromImpacts(
+  impacts: RevisionImpact[],
+): RevisionTimeline {
+  return {
+    events: impacts
+      .filter((entry) => !entry.isNoOp && entry.changedSections.length > 0)
+      .map((entry, index) => ({
+        kind: "customer_revision" as const,
+        label: `Customer changed ${entry.changedSections.join(", ")}`,
+        occurredAt: `2026-01-01T00:00:${String(index).padStart(2, "0")}Z`,
+        sequenceKey: `customer_revision:test-${index}`,
+        sections: entry.changedSections,
+      })),
+  };
+}
+
 function baseInput(
   overrides: Partial<RegenerationIntelligenceInput> = {},
 ): RegenerationIntelligenceInput {
   return {
     approvedBrief: brief(),
     latestEvaluation: null,
-    revisionHistory: [],
+    revisionTimeline: { events: [] },
     currentGeneration: { attemptNumber: 1 },
     ...overrides,
   };
@@ -172,7 +192,7 @@ describe("RegenerationIntelligenceCapability — customer revisions", () => {
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ designStyle: "Modern" }),
-        revisionHistory: [impact(["style"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"])]),
       }),
     );
 
@@ -186,7 +206,7 @@ describe("RegenerationIntelligenceCapability — customer revisions", () => {
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ additionalInstructions: null, designDescription: "" }),
-        revisionHistory: [impact(["graphics"])],
+        revisionTimeline: timelineFromImpacts([impact(["graphics"])]),
       }),
     );
 
@@ -198,7 +218,7 @@ describe("RegenerationIntelligenceCapability — customer revisions", () => {
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ designStyle: "Modern" }),
-        revisionHistory: [impact(["style"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"])]),
         latestEvaluation: evaluation({ style: { passed: false, score: 10 } }),
       }),
     );
@@ -220,7 +240,7 @@ describe("RegenerationIntelligenceCapability — customer revisions", () => {
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ designStyle: "Modern" }),
-        revisionHistory: [impact(["style"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"])]),
         latestEvaluation: evaluation({ style: { passed: true, score: 95 } }),
       }),
     );
@@ -237,7 +257,7 @@ describe("RegenerationIntelligenceCapability — conflicting revisions", () => {
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ designStyle: "Bold graffiti" }),
-        revisionHistory: [impact(["style"]), impact(["style"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"]), impact(["style"])]),
       }),
     );
 
@@ -253,7 +273,7 @@ describe("RegenerationIntelligenceCapability — conflicting revisions", () => {
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ designStyle: "Modern" }),
-        revisionHistory: [impact(["style"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"])]),
       }),
     );
     assert.ok(plan.strengthen.some((c) => c.section === "style"));
@@ -289,7 +309,7 @@ describe("RegenerationIntelligenceCapability — exclusions", () => {
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ exclusions: "No skulls", designStyle: "Modern" }),
-        revisionHistory: [impact(["style"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"])]),
         latestEvaluation: evaluation({ graphics: { passed: false, score: 5 } }),
       }),
     );
@@ -313,7 +333,7 @@ describe("RegenerationIntelligenceCapability — exclusions", () => {
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ designStyle: "Bold graffiti" }),
-        revisionHistory: [impact(["style"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"])]),
         currentGeneration: { attemptNumber: 3, rejectedSections: ["style"] },
       }),
     );
@@ -351,7 +371,7 @@ describe("RegenerationIntelligenceCapability — required wording preservation",
     const plan = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ exactText: "" }),
-        revisionHistory: [impact(["requiredWording"])],
+        revisionTimeline: timelineFromImpacts([impact(["requiredWording"])]),
       }),
     );
 
@@ -381,7 +401,7 @@ describe("RegenerationIntelligenceCapability — priority ordering", () => {
           exactText: "Strike First",
           designStyle: "Modern",
         }),
-        revisionHistory: [impact(["style"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"])]),
         latestEvaluation: evaluation({
           required_wording: { passed: false, score: 0 },
           graphics: { passed: false, score: 10 },
@@ -400,13 +420,13 @@ describe("RegenerationIntelligenceCapability — priority ordering", () => {
     const planA = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ designStyle: "Modern", shirtColor: "Black" }),
-        revisionHistory: [impact(["productColor", "style"])],
+        revisionTimeline: timelineFromImpacts([impact(["productColor", "style"])]),
       }),
     );
     const planB = buildRegenerationPlan(
       baseInput({
         approvedBrief: brief({ designStyle: "Modern", shirtColor: "Black" }),
-        revisionHistory: [impact(["style", "productColor"])],
+        revisionTimeline: timelineFromImpacts([impact(["style", "productColor"])]),
       }),
     );
 
@@ -425,7 +445,7 @@ describe("RegenerationIntelligenceCapability — determinism", () => {
   it("the same input always produces a deepEqual plan", () => {
     const input = baseInput({
       approvedBrief: brief({ designStyle: "Modern", exclusions: "No skulls" }),
-      revisionHistory: [impact(["style"]), impact(["colors"])],
+      revisionTimeline: timelineFromImpacts([impact(["style"]), impact(["colors"])]),
       latestEvaluation: evaluation({ graphics: { passed: false, score: 15 } }),
       currentGeneration: { attemptNumber: 2, rejectedSections: ["printLocation"] },
     });
@@ -440,7 +460,7 @@ describe("RegenerationIntelligenceCapability — idempotency", () => {
   it("calling planNextGeneration repeatedly with identical input never accumulates or drifts", () => {
     const input = baseInput({
       approvedBrief: brief({ designStyle: "Modern" }),
-      revisionHistory: [impact(["style"])],
+      revisionTimeline: timelineFromImpacts([impact(["style"])]),
       latestEvaluation: evaluation({ style: { passed: true, score: 90 } }),
     });
 
@@ -481,7 +501,7 @@ describe("RegenerationIntelligenceCapability — provider neutrality", () => {
           designStyle: "Modern",
           exactText: "Strike First",
         }),
-        revisionHistory: [impact(["style"]), impact(["style"]), impact(["colors"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"]), impact(["style"]), impact(["colors"])]),
         latestEvaluation: evaluation({
           required_wording: { passed: false, score: 0 },
           graphics: { passed: false, score: 5 },
@@ -512,7 +532,7 @@ describe("RegenerationIntelligenceCapability — regression scenarios", () => {
           designStyle: "Vintage",
           shirtColor: "Black",
         }),
-        revisionHistory: [impact(["style"]), impact(["style"]), impact(["productColor"])],
+        revisionTimeline: timelineFromImpacts([impact(["style"]), impact(["style"]), impact(["productColor"])]),
         latestEvaluation: evaluation({
           graphics: { passed: false, score: 20 },
           color_palette: { passed: true, score: 88 },
@@ -532,27 +552,84 @@ describe("RegenerationIntelligenceCapability — regression scenarios", () => {
     assert.equal(plan.unchangedSections.includes("product"), true);
   });
 
-  it("does not mutate the input brief, evaluation, or revision history objects", () => {
+  it("does not mutate the input brief, evaluation, or revision timeline objects", () => {
     const approvedBrief = brief({ exclusions: "No skulls", designStyle: "Modern" });
     const latestEvaluation = evaluation({ style: { passed: false, score: 10 } });
-    const revisionHistory = [impact(["style"])];
-    const before = JSON.stringify({ approvedBrief, latestEvaluation, revisionHistory });
+    const revisionTimeline = timelineFromImpacts([impact(["style"])]);
+    const before = JSON.stringify({ approvedBrief, latestEvaluation, revisionTimeline });
 
     buildRegenerationPlan(
-      baseInput({ approvedBrief, latestEvaluation, revisionHistory }),
+      baseInput({ approvedBrief, latestEvaluation, revisionTimeline }),
     );
 
     assert.equal(
-      JSON.stringify({ approvedBrief, latestEvaluation, revisionHistory }),
+      JSON.stringify({ approvedBrief, latestEvaluation, revisionTimeline }),
       before,
     );
   });
 
-  it("an empty revision history with an evaluation-only signal never invents a customer-requested change", () => {
+  it("an empty revision timeline with an evaluation-only signal never invents a customer-requested change", () => {
     const plan = buildRegenerationPlan(
       baseInput({ latestEvaluation: evaluation({ style: { passed: false, score: 5 } }) }),
     );
     assert.deepEqual(plan.customerRequestedChanges, []);
     assert.ok(plan.evaluationDrivenChanges.some((c) => c.section === "style"));
+  });
+});
+
+describe("RegenerationIntelligenceCapability — GenerationAttempt authority", () => {
+  it("resolveGenerationAttemptNumber derives the next attempt solely from completed GenerationJobs", () => {
+    assert.equal(resolveGenerationAttemptNumber([]), 1);
+    assert.equal(
+      resolveGenerationAttemptNumber([
+        {
+          id: "j1",
+          projectId: "p",
+          designBriefVersionId: "v",
+          status: "completed",
+          kind: "initial",
+          conceptCount: 3,
+          providerKey: "placeholder",
+          idempotencyKey: "k1",
+          attempts: 1,
+          lastError: null,
+          startedAt: "2026-01-01T00:00:00Z",
+          completedAt: "2026-01-01T00:01:00Z",
+          heartbeatAt: null,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:01:00Z",
+        },
+        {
+          id: "j2",
+          projectId: "p",
+          designBriefVersionId: "v",
+          status: "failed",
+          kind: "regeneration",
+          conceptCount: 3,
+          providerKey: "placeholder",
+          idempotencyKey: "k2",
+          attempts: 3,
+          lastError: "x",
+          startedAt: null,
+          completedAt: null,
+          heartbeatAt: null,
+          createdAt: "2026-01-02T00:00:00Z",
+          updatedAt: "2026-01-02T00:00:00Z",
+        },
+      ]),
+      2,
+    );
+  });
+
+  it("plan.generationAttempt mirrors currentGeneration.attemptNumber from GenerationJob-derived metadata", () => {
+    const plan = buildRegenerationPlan(
+      baseInput({ currentGeneration: { attemptNumber: 4 } }),
+    );
+    assert.equal(plan.generationAttempt, 4);
+  });
+
+  it("operates without RejectedConceptMemory (no rejectedSections)", () => {
+    const plan = buildRegenerationPlan(baseInput());
+    assert.deepEqual(plan.avoid, []);
   });
 });

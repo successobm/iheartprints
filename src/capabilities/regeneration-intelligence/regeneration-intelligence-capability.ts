@@ -6,6 +6,7 @@ import type {
 } from "@/lib/domain/types";
 import { CONCEPT_RELEVANT_SECTIONS } from "@/capabilities/shared/concept-relevance";
 import type { BriefSectionKey } from "@/capabilities/shared/contracts";
+import type { RevisionTimeline } from "@/capabilities/revision-timeline";
 
 import type {
   RegenerationChange,
@@ -15,51 +16,40 @@ import type {
 } from "./contracts";
 
 /**
- * Regeneration Intelligence (Sprint 2J Phase 1).
+ * Regeneration Intelligence (Sprint 2J Phase 2).
  *
  * Determines what should change in the NEXT generation attempt. It does not
  * generate artwork, does not evaluate artwork, does not re-score concepts,
  * and does not mutate the Design Brief. See the module doc in `contracts.ts`
  * for the full pipeline placement and purity guarantees.
  *
- * ## Priority order (deterministic; documented per Sprint 2J requirements)
+ * Consumes a `RevisionTimeline` (derived, ephemeral) — never a persisted
+ * RevisionHistory.
  *
- * 1. **Explicit exclusions override everything.** `approvedBrief.exclusions`
- *    — and any evaluation-confirmed exclusion violation — always lands in
- *    `avoid[]` first, ahead of every other signal.
- * 2. **Previously rejected ideas are never reintroduced.**
- *    `currentGeneration.rejectedSections` always routes to `avoid[]`,
- *    regardless of what the brief or evaluation currently say about that
- *    section.
- * 3. **Required wording is never removed.** Whenever `requiredWording` has
- *    any action at all (preserve/strengthen/remove/replace), it is
- *    surfaced at the front of `priorityChanges` — a provider can never miss
- *    it. "Removed" here only ever means the customer themselves explicitly
- *    cleared it; Regeneration Intelligence never drops present wording on
- *    its own initiative.
- * 4. **Customer revisions always override evaluation suggestions.** A
- *    section the customer touched (per `revisionHistory`) is decided from
- *    the customer's side only; Evaluation is not consulted a second time to
- *    produce a competing suggestion for that same section.
- * 5. **Evaluation failures produce regeneration actions.** Any
- *    regeneration-relevant section evaluation marked failed, that the
- *    customer did not already touch, becomes an entry in
- *    `evaluationDrivenChanges` / `strengthen`.
- * 6. **Satisfied requirements become preservation actions.** A
- *    customer-touched section already confirmed by evaluation, or an
- *    untouched section evaluation confirmed passed, moves to `preserve`
- *    rather than being re-requested.
- * 7. **Later customer revisions supersede earlier ones.** A section touched
- *    more than once across `revisionHistory` is categorized `replace`
- *    (using the current approved brief value — the latest one) rather than
- *    `strengthen`.
+ * ## Priority order (deterministic; Sprint 2J Phase 2)
  *
- * Only sections in `CONCEPT_RELEVANT_SECTIONS` (the same shared policy
- * `RevisionIntelligenceCapability` and `ConceptGenerationCapability` use to
- * decide what actually changes generated artwork) produce plan entries.
- * Sections like audience/purpose/notes matter to the brief but do not
- * change what a provider generates, so they are intentionally out of scope
- * here — exactly as they are out of scope for concept staleness today.
+ * 1. **Explicit exclusions** — `approvedBrief.exclusions` and any
+ *    evaluation-confirmed exclusion violation always land in `avoid[]`
+ *    first.
+ * 2. **Required wording** — whenever `requiredWording` has any action, it
+ *    is surfaced immediately after avoid in `priorityChanges`.
+ * 3. **Latest customer revisions** — sections touched on the timeline
+ *    (customer_revision events); older revisions never override newer ones
+ *    (touch count > 1 ⇒ `replace`).
+ * 4. **Evaluation failures** — failed criteria the customer did not already
+ *    touch become `evaluationDrivenChanges` / `strengthen`.
+ * 5. **Product Intelligence** — reserved slot; no signal in Phase 2 (empty).
+ * 6. **Design Intelligence** — reserved slot; no signal in Phase 2 (empty).
+ * 7. **Preserve already-satisfied requirements** — confirmed-working
+ *    sections land in `preserve` and trail `priorityChanges`.
+ *
+ * Previously rejected directions (`currentGeneration.rejectedSections` from
+ * optional `RejectedConceptMemory`) still route to `avoid[]` when supplied,
+ * but rejection persistence is not invented in this sprint — empty/absent
+ * memory is the normal path.
+ *
+ * Only sections in `CONCEPT_RELEVANT_SECTIONS` produce plan entries (plus
+ * `exclusions` as an unconditional avoid source).
  */
 export interface RegenerationIntelligenceCapability {
   planNextGeneration(input: RegenerationIntelligenceInput): RegenerationPlan;
@@ -98,9 +88,7 @@ const REGENERATION_SECTIONS: BriefSectionKey[] = SECTION_ORDER.filter((section) 
 /**
  * Which Concept Evaluation criterion (if any) speaks to a given brief
  * section. Sections with no natural criterion (e.g. `product`,
- * `printLocation` — the garment/placement themselves, not an artwork
- * quality) never produce evaluation-driven entries; that is a deliberate
- * scope limit, not an oversight.
+ * `printLocation`) never produce evaluation-driven entries.
  */
 const SECTION_TO_CRITERION: Partial<
   Record<BriefSectionKey, ConceptEvaluationCriterionKey>
@@ -175,10 +163,29 @@ function findCriterion(
   return evaluation.result.criteria.find((c) => c.key === key) ?? null;
 }
 
+/**
+ * Touch counts from chronological customer_revision timeline events.
+ * A section appearing in more than one event means a later customer
+ * revision superseded an earlier one for that section.
+ */
+function customerTouchCounts(
+  timeline: RevisionTimeline,
+): Map<BriefSectionKey, number> {
+  const touchCounts = new Map<BriefSectionKey, number>();
+  for (const event of timeline.events) {
+    if (event.kind !== "customer_revision") continue;
+    for (const section of event.sections ?? []) {
+      if (!REGENERATION_SECTIONS.includes(section)) continue;
+      touchCounts.set(section, (touchCounts.get(section) ?? 0) + 1);
+    }
+  }
+  return touchCounts;
+}
+
 export function buildRegenerationPlan(
   input: RegenerationIntelligenceInput,
 ): RegenerationPlan {
-  const { approvedBrief, latestEvaluation, revisionHistory, currentGeneration } =
+  const { approvedBrief, latestEvaluation, revisionTimeline, currentGeneration } =
     input;
   const rejected = new Set(
     (currentGeneration.rejectedSections ?? []).filter((section) =>
@@ -214,7 +221,7 @@ export function buildRegenerationPlan(
     });
   }
 
-  // Priority 2: previously rejected ideas are never reintroduced.
+  // Optional RejectedConceptMemory — graceful no-op when empty/absent.
   for (const section of sortBySection(
     [...rejected].map((section) => ({
       section,
@@ -226,18 +233,9 @@ export function buildRegenerationPlan(
     avoid.push(section);
   }
 
-  // Which sections the customer touched since approval, and how many times
-  // (more than once ⇒ a later revision supersedes an earlier one).
-  const touchCounts = new Map<BriefSectionKey, number>();
-  for (const impact of revisionHistory) {
-    for (const section of impact.changedSections) {
-      if (!REGENERATION_SECTIONS.includes(section)) continue;
-      touchCounts.set(section, (touchCounts.get(section) ?? 0) + 1);
-    }
-  }
+  const touchCounts = customerTouchCounts(revisionTimeline);
 
-  // Priority 4/6/7: customer-touched sections — decided from the customer's
-  // side only; evaluation is not consulted again for these sections below.
+  // Priority 3: latest customer revisions (older never override newer).
   for (const section of REGENERATION_SECTIONS) {
     const count = touchCounts.get(section);
     if (!count || rejected.has(section)) continue;
@@ -283,8 +281,7 @@ export function buildRegenerationPlan(
     customerRequestedChanges.push(change);
   }
 
-  // Priority 5/6: evaluation-driven signal, but only for sections the
-  // customer did not already touch this cycle (customer override).
+  // Priority 4 / 7: evaluation-driven signal; satisfied → preserve.
   if (latestEvaluation) {
     for (const section of REGENERATION_SECTIONS) {
       if (touchCounts.has(section) || rejected.has(section)) continue;
@@ -315,7 +312,10 @@ export function buildRegenerationPlan(
     }
   }
 
-  // Sections regeneration cares about that had no signal either way.
+  // Priority 5 / 6: Product Intelligence / Design Intelligence — reserved,
+  // no signals in Phase 2. Intentionally empty so priorityChanges stays
+  // stable when those capabilities later feed regeneration.
+
   const touchedOrAssessed = new Set<BriefSectionKey>([
     ...touchCounts.keys(),
     ...rejected,
@@ -325,10 +325,18 @@ export function buildRegenerationPlan(
     (section) => !touchedOrAssessed.has(section),
   );
 
-  // Priority 3: required wording, whichever bucket it landed in, is always
+  // Priority 2: required wording, whichever bucket it landed in, is always
   // surfaced first in priorityChanges (right after avoid).
   const requiredWordingChange = [...preserve, ...strengthen, ...remove, ...replace].find(
     (c) => c.section === "requiredWording",
+  );
+
+  // Priority 7: evaluation-confirmed preserves trail priorityChanges.
+  // Customer-sourced preserves stay in the customer-revision tier above.
+  const preserveForPriority = sortBySection(
+    preserve.filter(
+      (c) => c.section !== "requiredWording" && c.source === "evaluation",
+    ),
   );
 
   const priorityChanges: RegenerationChange[] = [
@@ -340,6 +348,8 @@ export function buildRegenerationPlan(
     ...sortBySection(
       evaluationDrivenChanges.filter((c) => c.section !== "requiredWording"),
     ),
+    // Priority 5–6 reserved (Product / Design Intelligence) — empty.
+    ...preserveForPriority,
   ];
 
   return {

@@ -5,7 +5,8 @@
  * Sprint 2G Part 2, real generation infrastructure Sprint 2H Part 1,
  * Concept Evaluation architecture Sprint 2I Phase 1, first real Concept
  * Evaluation provider Sprint 2I Phase 2, Regeneration Intelligence
- * architecture Sprint 2J Phase 1).
+ * architecture Sprint 2J Phase 1, Regeneration pipeline integration
+ * Sprint 2J Phase 2).
  *
  * Pipeline (Sprint 2G Part 2):
  *   Conversation → IntentExtraction → DesignBrief
@@ -15,23 +16,37 @@
  *                → DesignSummary → Approval → ConceptGeneration
  *                  (± RevisionIntelligence-driven concept regeneration)
  *
- * Regeneration pipeline (Sprint 2J Phase 1 — architecture only, not yet
- * wired into the live worker):
- *   Approved Design Brief + Concept Evaluation + Revision History (a
- *   chronological sequence of RevisionImpact) → RegenerationIntelligence
- *   → provider-neutral RegenerationPlan → (future) PromptTranslation →
- *   (future) ConceptGenerationProvider. RegenerationIntelligence never
- *   generates artwork, never evaluates artwork, never re-scores concepts,
- *   and never mutates the Design Brief — it only decides what the *next*
- *   generation attempt should preserve, strengthen, remove, replace, or
- *   avoid. Its output is never persisted; it is cheap and pure enough to
- *   recompute on demand from an approved brief snapshot + the latest
- *   evaluation + revision history.
+ * Regeneration pipeline (Sprint 2J Phase 2 — architecture integrated;
+ * still not auto-wired into the live worker / customer routes):
+ *   RevisionIntelligence (RevisionImpact per change)
+ *        ↓
+ *   RevisionTimelineCapability (derive ephemeral RevisionTimeline from
+ *     DesignBriefVersions + GenerationJobs + ConceptEvaluations on
+ *     ArtworkVersions + RevisionImpacts — never persisted)
+ *        ↓
+ *   RegenerationIntelligenceCapability (RevisionTimeline + approved brief
+ *     + latest evaluation → provider-neutral RegenerationPlan)
+ *        ↓
+ *   PromptTranslationCapability (ApprovedBrief + optional RegenerationPlan
+ *     → GenerationPromptRequest; without a plan, identical to Phase 1)
+ *        ↓
+ *   GenerationWorkerCapability → ConceptGenerationProvider
+ *
+ * RegenerationIntelligence never generates artwork, never evaluates
+ * artwork, never re-scores concepts, and never mutates the Design Brief.
+ * RevisionTimeline and RegenerationPlan are always ephemeral and
+ * recomputed — there is no revision_history table and no stored plans.
+ *
+ * GenerationAttempt authority: `GenerationJob` completed-job ordinal
+ * (`resolveGenerationAttemptNumber`) is the sole source for
+ * `RegenerationPlan.generationAttempt`. Do not confuse with
+ * `GenerationJob.attempts` (per-job claim/retry budget).
  *
  * Generation pipeline (Sprint 2H Part 1 + Sprint 2I Phase 1):
  *   ConceptGeneration → PromptTranslation (approved brief snapshot →
  *                  provider-neutral GenerationPromptRequest; pure, no
- *                  provider knowledge) → ConceptGenerationProvider
+ *                  provider knowledge; optional RegenerationPlan merge
+ *                  in Sprint 2J Phase 2) → ConceptGenerationProvider
  *                  (interface; a provider adapter owns 100% of its own
  *                  prompt dialect and quality-boosting language internally
  *                  — never exported, never persisted) → AssetCapability
@@ -69,6 +84,12 @@
  *                  mutates the brief and never decides what to do about a
  *                  change — only what it means downstream (see
  *                  `RevisionImpact`).
+ *   RevisionTimeline → DesignBriefVersions, GenerationJobs, ArtworkVersions
+ *                  (ConceptEvaluations on those rows), and caller-supplied
+ *                  TimedRevisionImpact entries only. Pure and deterministic:
+ *                  derives an ephemeral RevisionTimeline; never persists;
+ *                  never invents a RevisionHistory model; never emits
+ *                  provider/prompt language.
  *   DesignIntelligence → ProductIntelligence (interface), Design Brief data,
  *                  BriefEvaluation (consumes it — does not recreate it),
  *                  optionally a RevisionImpact (to scope which
@@ -90,9 +111,11 @@
  *                  after a revision still requires an approved Design
  *                  Brief version — never generates from an unapproved
  *                  working brief, revision or not.
- *   PromptTranslation → Design Brief snapshot data only. Pure and
- *                  deterministic: no I/O, no provider knowledge, no
- *                  quality-boosting/prompt-dialect language of any kind.
+ *   PromptTranslation → Design Brief snapshot data + optional
+ *                  RegenerationPlan. Pure and deterministic: no I/O, no
+ *                  provider knowledge, no quality-boosting/prompt-dialect
+ *                  language of any kind. Without a plan, identical to the
+ *                  brief-only translation (live worker path unchanged).
  *   ConceptEvaluation → approved Design Brief snapshot content + concept
  *                  presentation fields + opaque asset references only.
  *                  Provider-neutral: never knows OpenAI/GPT/Vision vendors.
@@ -128,21 +151,15 @@
  *                  return ConceptEvaluationResult; no repository writes.
  *   RegenerationIntelligence → approved Design Brief snapshot content, the
  *                  persisted Concept Evaluation for the current concept
- *                  batch (or `null` before one exists), a chronological
- *                  RevisionImpact history, and caller-supplied generation
- *                  attempt bookkeeping only. Reuses
- *                  `shared/concept-relevance` (the same policy Revision
- *                  Intelligence and Concept Generation already use) to
- *                  scope itself to sections that actually change generated
- *                  artwork. Pure and deterministic: no Conversation, no
- *                  persistence, no repository, no provider, no UI, no
- *                  clock reads. Never re-scores a concept (that is Concept
- *                  Evaluation's job, consumed only as input here), never
- *                  regenerates artwork itself, never mutates the Design
- *                  Brief, and never emits provider prompt dialect or
- *                  quality-boosting language — its `RegenerationPlan`
- *                  output is provider-neutral, exactly like
- *                  `GenerationPromptRequest`.
+ *                  batch (or `null` before one exists), a derived
+ *                  RevisionTimeline (never a persisted RevisionHistory),
+ *                  and caller-supplied generation attempt bookkeeping
+ *                  derived from GenerationJob via
+ *                  `resolveGenerationAttemptNumber`. Optional
+ *                  `RejectedConceptMemory` for future rejection support —
+ *                  graceful when absent. Reuses `shared/concept-relevance`.
+ *                  Pure and deterministic: no Conversation, no persistence,
+ *                  no repository, no provider, no UI, no clock reads.
  *
  * `shared/interview-coverage-policy`, `shared/question-phrasing`, and
  * `shared/product-rule-packs` are pure, side-effect-free data/phrasing
@@ -164,6 +181,10 @@
  *   RevisionIntelligence deciding *what* to do about a change (asking a
  *     question, regenerating concepts) — only Conversation, orchestrating
  *     Interview Intelligence and Concept Generation, may act on its output
+ *   RevisionTimeline persisting a timeline or inventing a RevisionHistory
+ *     table / mutable history model
+ *   RevisionTimeline emitting provider prompt dialect or quality-boosting
+ *     keywords
  *   Design Intelligence knowing providers, asking questions, or recomputing
  *     objective evaluation BriefEvaluation already produced
  *   Interview Intelligence inspecting the Design Brief directly for completeness
@@ -183,10 +204,14 @@
  *     Conversation, persistence, a repository, or UI
  *   Regeneration Intelligence persisting a RegenerationPlan — plans are
  *     always ephemeral and recomputed, never stored
+ *   Regeneration Intelligence inventing a parallel generationAttempt
+ *     counter — GenerationJob is authoritative
  *   Regeneration Intelligence emitting provider prompt dialect or
  *     quality-boosting keywords ("masterpiece", "8k", etc.) — that
  *     vocabulary belongs exclusively to a provider adapter, several
  *     capabilities removed from this one
+ *   PromptTranslation emitting provider prompt dialect or quality-boosting
+ *     keywords when merging a RegenerationPlan
  *   Print Validation modifying Design Briefs
  *   Print Validation depending on Concept Evaluation internals (share
  *     ArtworkVersion fields only)
@@ -200,4 +225,4 @@
  *     Sprint 2I Phase 1)
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2J1" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2J2" as const;

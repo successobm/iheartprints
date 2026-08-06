@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { createPromptTranslationCapability } from "./prompt-translation-capability";
 import type { DesignBriefSnapshotContent } from "@/lib/domain/types";
+import type { RegenerationPlan } from "@/capabilities/regeneration-intelligence";
 
 function content(
   overrides: Partial<DesignBriefSnapshotContent> = {},
@@ -20,6 +21,23 @@ function content(
     purpose: "Fundraiser",
     exclusions: "No cartoon animals",
     deferredSections: [],
+    ...overrides,
+  };
+}
+
+function plan(overrides: Partial<RegenerationPlan> = {}): RegenerationPlan {
+  return {
+    preserve: [],
+    strengthen: [],
+    remove: [],
+    replace: [],
+    avoid: [],
+    priorityChanges: [],
+    unchangedSections: [],
+    customerRequestedChanges: [],
+    evaluationDrivenChanges: [],
+    generationAttempt: 2,
+    reason: "test plan",
     ...overrides,
   };
 }
@@ -75,5 +93,128 @@ describe("PromptTranslationCapability", () => {
       content({ exactText: 'Camp "Wildwood" — Est. 1987' }),
     );
     assert.equal(result.requiredWording, 'Camp "Wildwood" — Est. 1987');
+  });
+});
+
+describe("PromptTranslationCapability — optional RegenerationPlan", () => {
+  const translation = createPromptTranslationCapability();
+
+  it("without a plan, output matches the brief-only translation exactly", () => {
+    const brief = content();
+    assert.deepEqual(translation.translate(brief), translation.translate(brief, null));
+    assert.deepEqual(translation.translate(brief), translation.translate(brief, undefined));
+  });
+
+  it("merges plan priorityChanges into notes in priority order without provider dialect", () => {
+    const result = translation.translate(
+      content(),
+      plan({
+        avoid: [
+          {
+            section: "exclusions",
+            description: "No cartoon animals",
+            source: "brief",
+            reason: "exclusions",
+          },
+        ],
+        strengthen: [
+          {
+            section: "style",
+            description: "Make sure the design style reflects the customer's requested change.",
+            source: "customer_revision",
+            reason: "customer",
+          },
+        ],
+        evaluationDrivenChanges: [
+          {
+            section: "graphics",
+            description: "Strengthen the graphics so it clearly matches the brief.",
+            source: "evaluation",
+            reason: "evaluation",
+          },
+        ],
+        priorityChanges: [
+          {
+            section: "exclusions",
+            description: "No cartoon animals",
+            source: "brief",
+            reason: "exclusions",
+          },
+          {
+            section: "requiredWording",
+            description: "Make sure the required wording reflects the customer's requested change.",
+            source: "customer_revision",
+            reason: "customer",
+          },
+          {
+            section: "style",
+            description: "Make sure the design style reflects the customer's requested change.",
+            source: "customer_revision",
+            reason: "customer",
+          },
+          {
+            section: "graphics",
+            description: "Strengthen the graphics so it clearly matches the brief.",
+            source: "evaluation",
+            reason: "evaluation",
+          },
+        ],
+      }),
+    );
+
+    assert.equal(result.exclusions, "No cartoon animals");
+    assert.equal(result.requiredWording, "Camp Wildwood 2026");
+    assert.match(result.notes ?? "", /Keep it simple/);
+    assert.match(result.notes ?? "", /required wording/);
+    assert.match(result.notes ?? "", /design style/);
+    assert.match(result.notes ?? "", /graphics/);
+    // Exclusions description is not duplicated into notes.
+    assert.equal((result.notes ?? "").includes("No cartoon animals"), false);
+    assert.doesNotMatch(
+      JSON.stringify(result),
+      /masterpiece|8k|openai|photorealistic/i,
+    );
+  });
+
+  it("applies remove actions by clearing the corresponding request fields", () => {
+    const result = translation.translate(
+      content({ exactText: "" }),
+      plan({
+        remove: [
+          {
+            section: "requiredWording",
+            description: "Customer removed the required wording",
+            source: "customer_revision",
+            reason: "removed",
+          },
+          {
+            section: "style",
+            description: "Customer removed the design style",
+            source: "customer_revision",
+            reason: "removed",
+          },
+        ],
+        priorityChanges: [],
+      }),
+    );
+    assert.equal(result.requiredWording, null);
+    assert.equal(result.style, null);
+  });
+
+  it("is deterministic and idempotent for the same brief + plan", () => {
+    const brief = content();
+    const regenerationPlan = plan({
+      priorityChanges: [
+        {
+          section: "style",
+          description: "Strengthen the design style so it clearly matches the brief.",
+          source: "evaluation",
+          reason: "failed",
+        },
+      ],
+    });
+    const a = translation.translate(brief, regenerationPlan);
+    const b = translation.translate(brief, regenerationPlan);
+    assert.deepEqual(a, b);
   });
 });
