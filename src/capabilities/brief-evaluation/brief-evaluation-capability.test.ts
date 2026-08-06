@@ -344,6 +344,95 @@ describe("BriefEvaluationCapability — determinism and overall metrics", () => 
     assert.equal(evaluation.overall.confidence, expected);
     assert.equal(evaluation.overall.knownSectionCount, 2);
   });
+});
+
+describe("BriefEvaluationCapability — Sprint 2K Phase 2: malformed field detection (Workstream B)", () => {
+  const capability = createBriefEvaluationCapability();
+
+  it("a product containing multiple sentences is treated as unresolved, not provided", () => {
+    const evaluation = capability.evaluate(
+      fullBrief({
+        productSummary: "I need a t-shirt. It should be black and soft.",
+      }),
+    );
+    const product = section(evaluation, "product");
+    assert.equal(product.resolution, "unknown");
+    assert.equal(product.known, false);
+  });
+
+  it("audience containing a design description is treated as unresolved", () => {
+    const evaluation = capability.evaluate(
+      fullBrief({
+        audience: "A retro bowling logo design inspired by an old sitcom",
+      }),
+    );
+    const audience = section(evaluation, "audience");
+    assert.equal(audience.resolution, "unknown");
+  });
+
+  it('required wording that is an explanatory paragraph is treated as unresolved', () => {
+    const evaluation = capability.evaluate(
+      fullBrief({
+        exactText:
+          "This design should say a whole paragraph describing our entire camp mission and history in detail.",
+      }),
+    );
+    const wording = section(evaluation, "requiredWording");
+    assert.equal(wording.resolution, "unknown");
+  });
+
+  it('preferred colors equal to "no" is treated as unresolved, not a color preference', () => {
+    const evaluation = capability.evaluate(
+      fullBrief({ preferredColors: ["no"] }),
+    );
+    const colors = section(evaluation, "colors");
+    assert.equal(colors.resolution, "unknown");
+  });
+
+  it("a malformed required field blocks approval readiness even when every other section is resolved", () => {
+    const evaluation = capability.evaluate(
+      fullBrief({
+        productSummary: "I need a t-shirt. It should be black and soft.",
+        purpose: "Summer camp fundraiser",
+        audience: "Camp families",
+        designStyle: "Rustic outdoors",
+        preferredColors: ["Forest Green", "Cream"],
+        printPlacement: "full_front",
+      }),
+    );
+    assert.equal(evaluation.approvalReadiness.ready, false);
+    assert.ok(evaluation.approvalReadiness.blockingSections.includes("product"));
+  });
+
+  it("a malformed high-value field blocks summary readiness even when required fields are clean", () => {
+    const evaluation = capability.evaluate(
+      fullBrief({
+        purpose: "Summer camp fundraiser",
+        audience: "A retro bowling logo design inspired by an old sitcom",
+        designStyle: "Rustic outdoors",
+        preferredColors: ["Forest Green", "Cream"],
+        printPlacement: "full_front",
+      }),
+    );
+    assert.equal(evaluation.summaryReadiness.ready, false);
+  });
+
+  it("a clean brief with the same shape remains approval-ready (no false positives)", () => {
+    const evaluation = capability.evaluate(
+      fullBrief({
+        purpose: "Summer camp fundraiser",
+        audience: "Camp families",
+        designStyle: "Rustic outdoors",
+        preferredColors: ["Forest Green", "Cream"],
+        printPlacement: "full_front",
+      }),
+    );
+    assert.equal(evaluation.approvalReadiness.ready, true);
+  });
+});
+
+describe("BriefEvaluationCapability — overall metrics (continued)", () => {
+  const capability = createBriefEvaluationCapability();
 
   it("counts deferred sections as resolved (not missing) toward completeness", () => {
     const withoutDefer = capability.evaluate(brief());

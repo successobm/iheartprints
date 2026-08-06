@@ -326,7 +326,8 @@ describe("ConversationCapability — adaptive post-concept revisions", () => {
         projectId,
         "Make the shirt black.",
       );
-      assert.equal(afterSecond.brief.shirtColor, "black");
+      // Sprint 2K Phase 3 (Goal 2): color fields are normalized to Title Case.
+      assert.equal(afterSecond.brief.shirtColor, "Black");
       assert.match(afterSecond.brief.productSummary ?? "", /hoodie/i);
 
       // Undo only reverts the *second* change (shirt color), not the first.

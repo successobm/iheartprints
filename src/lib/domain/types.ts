@@ -169,6 +169,26 @@ export interface GenerationPromptRequest {
   purpose: string | null;
   exclusions: string | null;
   notes: string | null;
+  /**
+   * Sprint 2K Phase 3 (Goal 4): stylistic/reference touchpoints the customer
+   * mentioned — era, mood, pop-culture cues such as "inspired by a 1960s
+   * sitcom" or "like an old travel poster" — pulled out of `subject`/`style`
+   * by `PromptTranslationCapability` so they never read as literal content.
+   * These inform visual language only (typography, composition, era,
+   * graphic language, palette) and must never be translated into an
+   * instruction to depict real people, characters, logos, or copyrighted
+   * material from the referenced work. Empty when the customer gave no such
+   * reference.
+   */
+  inspirationReferences: string[];
+  /**
+   * Sprint 2K Phase 3 (Goal 7): whether the generated artwork may include
+   * text beyond `requiredWording`. Always `false` today — generation must
+   * not invent slogans, dates, or other wording the brief never asked for.
+   * Represented here (provider-neutral) rather than left to each adapter's
+   * own prompt phrasing.
+   */
+  allowAdditionalText: boolean;
 }
 
 /**

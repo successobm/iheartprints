@@ -4,6 +4,11 @@ import type {
   ConceptGenerationResult,
   GeneratedConceptDraft,
 } from "@/capabilities/shared/contracts";
+import {
+  CONCEPT_DIRECTIONS,
+  describeConceptDirection,
+  type ConceptDirection,
+} from "@/lib/domain/concept-directions";
 import type { GenerationPromptRequest } from "@/lib/domain/types";
 import type { ConceptGenerationProvider } from "./concept-generation-provider";
 import { isRetryableProviderError, ProviderError } from "./provider-error";
@@ -11,42 +16,6 @@ import { isRetryableProviderError, ProviderError } from "./provider-error";
 const MAX_ATTEMPTS_PER_IMAGE = 3;
 const IMAGE_SIZE = "1024x1024";
 const OPENAI_IMAGES_ENDPOINT = "https://api.openai.com/v1/images/generations";
-
-interface ConceptVariant {
-  title: string;
-  placeholderLabel: string;
-  accentColor: string;
-  /**
-   * Internal, provider-specific creative direction. Quality-boosting
-   * keywords and generation dialect belong exclusively here — never on the
-   * Design Brief, never in the provider-neutral `GenerationPromptRequest`.
-   */
-  directive: string;
-}
-
-const CONCEPT_VARIANTS: ConceptVariant[] = [
-  {
-    title: "Bold & Direct",
-    placeholderLabel: "Concept A",
-    accentColor: "#1f6f5b",
-    directive:
-      "a bold, high-contrast composition with a strong central silhouette",
-  },
-  {
-    title: "Soft & Illustrated",
-    placeholderLabel: "Concept B",
-    accentColor: "#3d5a80",
-    directive:
-      "a warm, illustrated composition with softer edges and a friendly poster feel",
-  },
-  {
-    title: "Minimal Badge",
-    placeholderLabel: "Concept C",
-    accentColor: "#7a4e2d",
-    directive:
-      "a compact badge-style layout with clean, centered typography and iconography",
-  },
-];
 
 export interface OpenAIProviderConfig {
   apiKey: string;
@@ -88,11 +57,11 @@ export class OpenAIConceptGenerationProvider
   async generate(
     request: ConceptGenerationRequest,
   ): Promise<ConceptGenerationResult> {
-    const variants = CONCEPT_VARIANTS.slice(0, request.conceptCount);
+    const directions = CONCEPT_DIRECTIONS.slice(0, request.conceptCount);
     const concepts: GeneratedConceptDraft[] = [];
 
-    for (const [index, variant] of variants.entries()) {
-      const prompt = buildPrompt(request.prompt, variant);
+    for (const [index, direction] of directions.entries()) {
+      const prompt = buildPrompt(request.prompt, direction);
       const image = await withRetry(() => this.requestImage(prompt), {
         attempts: MAX_ATTEMPTS_PER_IMAGE,
         isRetryable: isRetryableProviderError,
@@ -102,10 +71,10 @@ export class OpenAIConceptGenerationProvider
 
       concepts.push({
         versionNumber: index + 1,
-        title: variant.title,
-        summary: buildSummary(request.prompt, variant),
-        placeholderLabel: variant.placeholderLabel,
-        accentColor: variant.accentColor,
+        title: direction.title,
+        summary: describeConceptDirection(direction, request.prompt),
+        placeholderLabel: direction.placeholderLabel,
+        accentColor: direction.accentColor,
         kind: "concept",
         asset: {
           imageBytes: image.bytes,
@@ -216,15 +185,27 @@ function defaultSleep(ms: number): Promise<void> {
 /**
  * Provider-specific prompt dialect lives only here. Never exported, never
  * persisted, never shown to a customer.
+ *
+ * Sprint 2K Phase 3: `direction` supplies the plain-language differentiation
+ * content (Goal 5 — composition/typography/illustration density/iconography
+ * /layout/hierarchy) from the shared, provider-neutral catalog; only the
+ * OpenAI-dialect phrasing that stitches it together lives here.
+ * `prompt.inspirationReferences` and `prompt.allowAdditionalText` carry the
+ * Goal 4/7 guardrails through from Prompt Translation.
  */
 function buildPrompt(
   prompt: GenerationPromptRequest,
-  variant: ConceptVariant,
+  direction: ConceptDirection,
 ): string {
   const parts = [
     `Print-ready apparel graphic for ${prompt.product}.`,
     `Subject: ${prompt.subject}.`,
-    `${variant.directive}.`,
+    `Creative direction — ${direction.title}: ${direction.composition}.`,
+    `Typography: ${direction.typographyEmphasis}.`,
+    `Illustration density: ${direction.illustrationDensity}.`,
+    `Iconography: ${direction.iconography}.`,
+    `Layout: ${direction.layout}.`,
+    `Visual hierarchy: ${direction.visualHierarchy}.`,
   ];
   if (prompt.style) parts.push(`Style: ${prompt.style}.`);
   if (prompt.colors.length > 0) {
@@ -237,7 +218,24 @@ function buildPrompt(
   }
   if (prompt.requiredWording) {
     parts.push(
-      `Include this exact wording, spelled correctly: "${prompt.requiredWording}".`,
+      `Include this exact wording, spelled correctly, and no other wording: "${prompt.requiredWording}".`,
+    );
+  }
+  // Sprint 2K Phase 3 (Goal 7): explicit, deterministic instruction against
+  // inventing text — driven by the provider-neutral `allowAdditionalText`
+  // flag rather than being a one-off OpenAI-only afterthought.
+  if (!prompt.allowAdditionalText) {
+    parts.push(
+      "Do not add any other text, letters, words, dates, or slogans beyond the exact wording specified above.",
+    );
+  }
+  // Sprint 2K Phase 3 (Goal 4): a stylistic/era/pop-culture reference the
+  // customer gave is inspiration for visual language only — never an
+  // instruction to depict the referenced people, characters, or logos.
+  if (prompt.inspirationReferences.length > 0) {
+    parts.push(
+      `Style inspiration only (do not depict as literal content): ${prompt.inspirationReferences.join("; ")}.`,
+      "Do not depict recognizable real people, TV/movie characters, sports mascots, band members, or any copyrighted logo or artwork from a referenced work — reinterpret only the general era, mood, and graphic language.",
     );
   }
   if (prompt.exclusions) {
@@ -247,17 +245,6 @@ function buildPrompt(
     "Clean vector-style illustration, transparent background, centered composition, no watermark, no mockup, no photograph of a shirt — artwork only.",
   );
   return parts.join(" ");
-}
-
-function buildSummary(
-  prompt: GenerationPromptRequest,
-  variant: ConceptVariant,
-): string {
-  const shirt = prompt.productColor?.trim() || "the shirt";
-  const text = prompt.requiredWording
-    ? `Featuring the text "${prompt.requiredWording}".`
-    : "No text lockup — graphic-led.";
-  return `${variant.title} direction for ${prompt.subject}. ${text} Designed for a ${shirt} shirt.`;
 }
 
 function extractImage(payload: unknown): { b64: string } | null {

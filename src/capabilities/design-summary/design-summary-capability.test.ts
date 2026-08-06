@@ -74,10 +74,35 @@ describe("DesignSummaryCapability", () => {
     assert.equal(summary.colors, undefined);
 
     const formatted = capability.formatForCustomer(summary);
-    assert.match(formatted, /Product: Camp shirts/);
-    assert.match(formatted, /Required Wording: None/);
+    // Sprint 2K Phase 3 (Goal 3): product/color/print location collapse
+    // into one compact header line instead of a "Label: value" row.
+    assert.match(formatted, /Camp shirts/);
+    assert.match(formatted, /Required wording:\nNone/);
     assert.doesNotMatch(formatted, /Style:/);
     assert.doesNotMatch(formatted, /Audience:/);
+  });
+
+  it("quotes required wording so it reads unmistakably as literal print text (Goal 3)", () => {
+    const summary = summaryFor(
+      brief({
+        productSummary: "T-shirt",
+        exactText: "My 3 Sons",
+      }),
+    );
+    const formatted = capability.formatForCustomer(summary);
+    assert.match(formatted, /Required wording:\n"My 3 Sons"/);
+  });
+
+  it("groups product, product color, and print location into one header line (Goal 3)", () => {
+    const summary = summaryFor(
+      brief({
+        productSummary: "T-shirt",
+        shirtColor: "Black",
+        printPlacement: "full_back",
+      }),
+    );
+    const formatted = capability.formatForCustomer(summary);
+    assert.match(formatted, /T-shirt · Black · Full back/);
   });
 
   it("renders audience, purpose, and print location once actually resolved", () => {
@@ -91,7 +116,8 @@ describe("DesignSummaryCapability", () => {
 
     assert.equal(summary.audience, "Camp families");
     assert.equal(summary.purpose, "Summer fundraiser");
-    assert.equal(summary.printLocation, "left chest");
+    // Sprint 2K Phase 3 (Goal 2): capitalized for customer-facing display.
+    assert.equal(summary.printLocation, "Left chest");
   });
 
   it("Sprint 2G Part 3: deferred sections are excluded from the regular field list entirely", () => {

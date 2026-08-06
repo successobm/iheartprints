@@ -240,6 +240,26 @@ function nonEmpty(value: string | null | undefined): string | null {
 }
 
 /**
+ * Normalizes for a strict-but-forgiving text comparison: lowercase,
+ * punctuation collapsed to spaces, whitespace collapsed. Deliberately not a
+ * fuzzy/substring match — required wording must appear exactly, so "My 3
+ * Sons" and "My 3 Son" (missing the plural) must NOT be treated as equal,
+ * and "My 3 Sons Bowling Club" (invented extra wording) must NOT either.
+ */
+function normalizeWordingText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function wordingMatches(required: string, detected: string): boolean {
+  const normalizedRequired = normalizeWordingText(required);
+  if (!normalizedRequired) return true;
+  return normalizedRequired === normalizeWordingText(detected);
+}
+
+/**
  * Prefers the primary (non-thumbnail) asset; falls back to a thumbnail only
  * if that's all that exists. Never fabricates a URL — `null` when nothing
  * is fetchable, which routes to `noImageResult` instead of a network call.
@@ -412,17 +432,34 @@ function normalizeRawEvaluation(
     const signal = readSignal(raw, "requiredWording");
     const found = readBool(signal?.found);
     const confidence = clampScore(signal?.confidence) ?? 0;
+    const detectedText = sanitizeNote(signal?.detectedText) ?? "";
+
+    // Sprint 2K Phase 2 (Workstream E): the model's own `found` boolean is
+    // not trusted blindly. `detectedText` is what the model actually read
+    // off the image — cross-checking it against the brief's required
+    // wording, in code, catches a lenient model claiming "found: true" for
+    // text that is actually missing, misspelled, partial, or has invented
+    // extra wording tacked on. Required wording must print exactly as
+    // specified (Constitution §6.12): a near-match is still a miss.
+    const textMismatch =
+      found === true &&
+      detectedText.length > 0 &&
+      !wordingMatches(applicability.requiredWording, detectedText);
+    const effectiveFound = textMismatch ? false : found;
+
     criteria.push({
       key: "required_wording",
-      score: found === true ? 100 : found === false ? 0 : null,
-      passed: found,
+      score: effectiveFound === true ? 100 : effectiveFound === false ? 0 : null,
+      passed: effectiveFound,
       confidence,
       notes: sanitizeNote(signal?.notes) ?? "assessed",
     });
-    if (found === true) {
+    if (effectiveFound === true) {
       matchedRequirements.push("required wording");
-    } else if (found === false) {
-      if (confidence >= CONFIDENCE_DECISION_THRESHOLD) {
+    } else if (effectiveFound === false) {
+      // A code-verified text mismatch is decisive on its own — it does not
+      // need the model's own confidence to also clear the threshold.
+      if (textMismatch || confidence >= CONFIDENCE_DECISION_THRESHOLD) {
         missingRequirements.push("required wording");
         requiredWordingFailed = true;
       }

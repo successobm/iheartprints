@@ -27,7 +27,7 @@ interface DesignSummaryCardProps {
 
 const FIELD_LABELS: Array<[keyof DesignSummaryView, string]> = [
   ["product", "Product"],
-  ["graphics", "Design Description"],
+  ["graphics", "Design direction"],
   ["productColor", "Product Color"],
   ["printLocation", "Print Location"],
   ["requiredWording", "Required Wording"],
@@ -65,23 +65,33 @@ export function DesignSummaryCard({
           {rows.map(([key, label]) => {
             const isUpdated = updatedSet.has(key);
             const transition = fieldTransitions[key];
+            // Required wording gets the most explicit treatment of any
+            // field: a spelling mistake here propagates directly into
+            // generated artwork (Constitution §6.12), so it is quoted and
+            // bolded rather than rendered as plain text like every other
+            // field.
+            const isRequiredWording = key === "requiredWording";
             return (
               <div
                 key={key}
                 className={[
                   "flex flex-wrap items-baseline gap-x-2 gap-y-1 rounded-lg px-2 py-1 text-sm transition-colors",
                   isUpdated ? "bg-amber-50 ring-1 ring-amber-200" : "",
+                  isRequiredWording && !isUpdated ? "bg-black/[0.03]" : "",
                 ].join(" ")}
               >
                 <dt className="w-36 shrink-0 font-medium text-ink">{label}</dt>
-                <dd className="text-muted">
+                <dd className={isRequiredWording ? "font-semibold text-ink" : "text-muted"}>
                   {transition?.from ? (
                     <span>
                       <span className="text-muted/70 line-through">
                         {transition.from}
                       </span>{" "}
-                      <span aria-hidden="true">→</span> {transition.to}
+                      <span aria-hidden="true">→</span>{" "}
+                      {isRequiredWording ? `"${transition.to}"` : transition.to}
                     </span>
+                  ) : isRequiredWording && summary[key] !== "None" ? (
+                    `"${summary[key]}"`
                   ) : (
                     summary[key]
                   )}

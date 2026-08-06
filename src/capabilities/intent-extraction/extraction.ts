@@ -2,6 +2,10 @@ import { appendNote } from "@/lib/domain/conversation";
 import { EXPLICIT_NO_WORDING_VALUE } from "@/lib/domain/required-wording";
 import type { PrintPlacement, TShirtDesignBrief } from "@/lib/domain/types";
 import { isDeferrable } from "@/capabilities/shared/interview-coverage-policy";
+import {
+  normalizeColorAnswer,
+  normalizeProductAnswer,
+} from "@/capabilities/shared/field-normalization";
 import type {
   BriefSectionKey,
   DetectedIntent,
@@ -170,15 +174,48 @@ const DEFERRAL_PATTERNS = [
   /^(?:i\s+)?don'?t know\.?$/i,
   /^no idea\.?$/i,
   /\banything\s+(?:is fine|works)\b/i,
+  // A bare negative reply to a *deferrable* question (e.g. "Any color
+  // preference?" / "no.") reads as "no preference, you decide" — never as
+  // literal content. Sprint 2K Phase 2: this is the fix for "no" leaking
+  // into `preferredColors` as if it were a color name. Required sections
+  // never reach this branch (`isDeferrable` gates it above), so a bare "no"
+  // answering the required-wording question is untouched here and still
+  // handled by `EXPLICIT_NO_WORDING_PATTERN` below.
+  /^(?:no|nope|nah|no thanks|not really)\.?$/i,
 ];
 
 const CORRECTION_CUE_PATTERN =
-  /\b(actually|instead|change (?:it|that|the \w+)? ?to|forget|no longer|scratch that)\b/i;
+  /\b(actually|instead|change (?:it|that|the \w+)? ?to|forgot|forget|no longer|scratch that)\b/i;
 
 const EXPLICIT_NO_WORDING_PATTERN =
-  /^(?:none|no text|no wording|n\/a|na|nothing)$/i;
+  /^(?:none|no|nope|no text|no wording|n\/a|na|nothing)$/i;
 const NO_WORDING_PHRASE_PATTERN =
   /\bno (?:text|wording)(?: needed| required)?\b/i;
+
+/* ------------------------------------------------------------------ */
+/* Named entities — team/company/event/organization names, recognized  */
+/* as required wording independent of the generic "should say" cue.    */
+/* ------------------------------------------------------------------ */
+
+const ENTITY_NOUNS =
+  "team|company|business|group|club|organization|non-?profit|event|league|school|shop|store|brand";
+
+// Tried in order; the first match wins. Ordered most-specific ("name is X")
+// before the bare "name X" variant so "team name is My 3 Sons" never
+// captures the leading "is" as part of the name.
+const ENTITY_NAME_PATTERNS: RegExp[] = [
+  new RegExp(`\\b(?:${ENTITY_NOUNS})(?:'s)?\\s+name\\s+is\\s+([^.,;!?\\n]+)`, "i"),
+  new RegExp(`\\b(?:${ENTITY_NOUNS})\\s+(?:is\\s+)?(?:called|named)\\s+([^.,;!?\\n]+)`, "i"),
+  new RegExp(`\\b(?:${ENTITY_NOUNS})\\s+name\\s*[:\\-]?\\s+([^.,;!?\\n]+)`, "i"),
+  new RegExp(`\\bour\\s+(?:${ENTITY_NOUNS})\\s+is\\s+([^.,;!?\\n]+)`, "i"),
+  /\bcall\s+it\s+([^.,;!?\n]+)/i,
+];
+
+// Used to strip a trailing name-cue clause out of an *audience* match so
+// "bowling team name My 3 Sons" / "bowling team called My 3 Sons" resolves
+// to audience "bowling team" instead of absorbing the required wording.
+const NAME_CUE_BOUNDARY_PATTERN =
+  /\s+(?:name\s+is|name|is\s+called|is\s+named|named|called)\b.*$/i;
 
 /* ------------------------------------------------------------------ */
 /* Entry point                                                         */
@@ -218,8 +255,16 @@ export function extractAdaptive(context: ExtractionContext): ExtractionOutcome {
   if (wording !== undefined) fields.exactText = wording;
 
   const colors = extractColors(positiveText, context.pendingSection);
-  if (colors.productColor) fields.shirtColor = colors.productColor;
-  if (colors.artworkColors.length > 0) fields.preferredColors = colors.artworkColors;
+  // Sprint 2K Phase 3 (Goal 2): normalize here, at the point the Design
+  // Brief field is actually written, so every downstream reader (Brief
+  // Evaluation, Design Summary, Prompt Translation) sees the canonical
+  // form without duplicating the lookup. Required wording is deliberately
+  // exempt (see `extractRequiredWording`) — only product/color fields are
+  // normalized, never the literal text to print.
+  if (colors.productColor) fields.shirtColor = normalizeColorAnswer(colors.productColor);
+  if (colors.artworkColors.length > 0) {
+    fields.preferredColors = colors.artworkColors.map(normalizeColorAnswer);
+  }
 
   const style = extractStyle(positiveText);
   if (style) fields.designStyle = style;
@@ -227,8 +272,22 @@ export function extractAdaptive(context: ExtractionContext): ExtractionOutcome {
   const graphics = extractGraphics(positiveText);
   if (graphics) fields.designDescription = graphics;
 
-  const product = extractProduct(positiveText);
-  if (product) fields.productSummary = product;
+  // Sprint 2K Phase 3 (Goal 1): a short, single-clause reply is a direct
+  // answer to whatever question is actually pending — a generic product
+  // noun that merely appears inside it ("bowling league team **shirts**"
+  // answering *purpose*) must not be reinterpreted as a spontaneous product
+  // update. An already-resolved Product additionally can never be silently
+  // overwritten by an unrelated answer regardless of clause count. See
+  // `isDedicatedToADifferentPendingSection` below.
+  const product = isDedicatedToADifferentPendingSection(
+    context,
+    positiveText,
+    "product",
+    Boolean(context.brief.productSummary?.trim()),
+  )
+    ? null
+    : extractProduct(positiveText);
+  if (product) fields.productSummary = normalizeProductAnswer(product);
 
   const printPlacement = extractPrintLocation(positiveText);
   if (printPlacement) fields.printPlacement = printPlacement;
@@ -294,6 +353,55 @@ function detectMentionedDeferral(trimmed: string): BriefSectionKey | null {
 }
 
 /* ------------------------------------------------------------------ */
+/* Cross-field contamination guard (Sprint 2K Phase 3, Goal 1)         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * True when `positiveText` is a reply to a *different* pending question
+ * than `ownSection` and should NOT be allowed to opportunistically
+ * (re-)populate `ownSection` — the general boundary a pattern-based
+ * extractor (e.g. `extractProduct`, whose vocabulary is generic nouns like
+ * "shirts" that show up in all kinds of unrelated sentences) must respect
+ * so it never reinterprets a direct answer to one question as an update to
+ * a different field.
+ *
+ * Two independent conditions each suppress, since they catch two different
+ * shapes of the same contamination bug:
+ *   - `alreadyResolved` — `ownSection` already has a real value. A later,
+ *     unrelated answer must never silently overwrite an already-resolved
+ *     field just because it happens to contain a matching word, no matter
+ *     how many clauses that reply has (e.g. a *graphics* answer mentioning
+ *     "chef's hat" must not overwrite an already-resolved Product of
+ *     "T-shirt" just because "hat" is also a recognized product noun).
+ *   - single-clause reply — a short, single-topic reply to a *different*
+ *     question is presumptively "owned" by that question even before
+ *     `ownSection` has any value yet (e.g. "bowling league team shirts"
+ *     answering *purpose* must not become Product).
+ *
+ * Both are skipped by an explicit correction cue ("actually", "instead",
+ * ...) — the customer is deliberately steering to a different field, so
+ * cross-field extraction still applies — and by there being no pending
+ * question at all (an opener/free-flowing reply with nothing specific
+ * pending may always fill in any field it can).
+ */
+function isDedicatedToADifferentPendingSection(
+  context: ExtractionContext,
+  positiveText: string,
+  ownSection: BriefSectionKey,
+  alreadyResolved: boolean,
+): boolean {
+  const pending = context.pendingSection;
+  if (!pending || pending === ownSection) return false;
+  if (CORRECTION_CUE_PATTERN.test(positiveText)) return false;
+  if (alreadyResolved) return true;
+  const clauses = positiveText
+    .split(/[.!?,;]/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+  return clauses.length <= 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Corrections — strip negated clauses so "actually navy, not black"    */
 /* doesn't extract "black" as a positive value.                        */
 /* ------------------------------------------------------------------ */
@@ -330,6 +438,16 @@ function extractRequiredWording(
     /\b(?:say|should say|it should say|the text is|wording should be|should read|print the words?|change (?:the )?(?:wording|text) to)\s*[:\-]?\s*"?([^".!?\n]+)"?/i,
   );
   if (cued?.[1]?.trim()) return cued[1].trim();
+
+  // Explicit team/company/event/organization names — "our team is called My
+  // 3 Sons", "the team name is My 3 Sons", "call it My 3 Sons". These are
+  // required wording just as much as an explicit "it should say" cue; a
+  // print shop treats a team/company/event name the customer gives as text
+  // that must appear on the design.
+  for (const pattern of ENTITY_NAME_PATTERNS) {
+    const match = positiveText.match(pattern);
+    if (match?.[1]?.trim()) return match[1].trim();
+  }
 
   return undefined;
 }
@@ -435,23 +553,52 @@ const PRODUCT_ATTRIBUTE_CHANGE_PATTERN = new RegExp(
   "i",
 );
 
+// Up to two descriptor words (color or style) immediately preceding a
+// product word, plus the product word itself — e.g. "black t-shirts",
+// "vintage hoodies". Deliberately does NOT allow arbitrary preceding words
+// (an unrestricted `\S+\s+` would recapture the "explanatory sentence"
+// problem this function exists to avoid).
+const PRODUCT_DESCRIPTOR_WORDS = [...COLOR_WORDS, ...STYLE_WORDS, "custom", "new"];
+const PRODUCT_PHRASE_PATTERN = new RegExp(
+  `((?:(?:${PRODUCT_DESCRIPTOR_WORDS.join("|")})\\s+){0,2}(?:${PRODUCT_WORDS.join("|")}))`,
+  "i",
+);
+
 function extractProduct(positiveText: string): string | null {
   if (!PRODUCT_PATTERN.test(positiveText)) return null;
-  // Use the clause containing the product word rather than the full,
-  // possibly multi-sentence reply. A clause about the product's *color*
-  // (mentions "color"/"colour", or reads as "make the shirt <word>") is
-  // not a product description — skip it so a color correction never
-  // overwrites the product description just because it names the garment.
-  const clause = positiveText
-    .split(/[.!?]/)
+
+  // Splitting on commas too (not just sentence punctuation) keeps a
+  // trailing clause like ", name is My 3 Sons" out of the product clause
+  // even when it shares a sentence with the product word.
+  const clauses = positiveText
+    .split(/[.!?,;]/)
     .map((c) => c.trim())
-    .find(
-      (c) =>
-        PRODUCT_PATTERN.test(c) &&
-        !/\bcolou?r\b/i.test(c) &&
-        !PRODUCT_ATTRIBUTE_CHANGE_PATTERN.test(c),
-    );
-  return clause || null;
+    .filter(Boolean);
+
+  // A clause about the product's *color* (mentions "color"/"colour", or
+  // reads as "make the shirt <word>") is not a product description — skip
+  // it so a color correction never overwrites the product description just
+  // because it names the garment.
+  const clause = clauses.find(
+    (c) =>
+      PRODUCT_PATTERN.test(c) &&
+      !/\bcolou?r\b/i.test(c) &&
+      !PRODUCT_ATTRIBUTE_CHANGE_PATTERN.test(c),
+  );
+  if (!clause) return null;
+
+  // Only tighten the clause down to a phrase around the product word(s)
+  // when the reply actually had more than one clause to begin with — that
+  // is the real "absorbed an explanatory sentence" shape: a product clause
+  // sitting alongside an unrelated clause (team name, design description,
+  // ...) in the same reply. A reply that is just a single clause, however
+  // many words, is the customer's one direct answer and is kept exactly as
+  // written ("A T-shirt for the school fair" stays as-is — Sprint 1
+  // parity). Falls back to the full clause if the phrase pattern somehow
+  // doesn't match (defensive; PRODUCT_PATTERN already matched).
+  if (clauses.length <= 1) return clause;
+  const phrase = clause.match(PRODUCT_PHRASE_PATTERN);
+  return phrase?.[1]?.trim() ?? clause;
 }
 
 /* ------------------------------------------------------------------ */
@@ -498,8 +645,13 @@ function extractAudiencePurpose(positiveText: string): {
   const match = positiveText.match(
     /\bfor\s+(?:our|my|the)\s+([a-z0-9][^.,;!?]*)/i,
   );
-  const phrase = match?.[1]?.trim();
-  if (!phrase) return { audience: null, purpose: null };
+  const rawPhrase = match?.[1]?.trim();
+  if (!rawPhrase) return { audience: null, purpose: null };
+
+  // Strip a trailing name-cue clause so "bowling team name My 3 Sons" /
+  // "bowling team called My 3 Sons" resolves to "bowling team" — the team
+  // name itself is required wording, not part of the audience description.
+  const phrase = rawPhrase.replace(NAME_CUE_BOUNDARY_PATTERN, "").trim() || rawPhrase;
 
   if (AUDIENCE_CUES.test(phrase)) return { audience: phrase, purpose: null };
   if (PURPOSE_CUES.test(phrase)) return { audience: null, purpose: phrase };
@@ -525,6 +677,42 @@ const SECTION_FIELD_KEY: Partial<Record<BriefSectionKey, keyof BriefFieldPatch>>
   additionalNotes: "additionalInstructions",
 };
 
+/**
+ * A reply that reads as an explanatory sentence/paragraph rather than a
+ * short, direct answer — multiple sentences, or more than `maxWords` words.
+ * Used to stop the pending-section fallback from stuffing a whole rich
+ * reply into a single structured field just because that field happened to
+ * be the pending question (Sprint 2K Phase 2: "Product extraction must
+ * never absorb explanatory sentences" / "Audience extraction must never
+ * absorb design descriptions").
+ */
+const MULTI_SENTENCE_PATTERN = /[.!?]\s*\S/;
+
+function looksLikeExplanatorySentence(text: string, maxWords = 10): boolean {
+  return MULTI_SENTENCE_PATTERN.test(text) || wordCount(text) > maxWords;
+}
+
+/** A 4-digit year, characteristic of event/reunion/session names ("Fun Run 2026"). */
+const YEAR_PATTERN = /\b(?:19|20)\d{2}\b/;
+
+/**
+ * Sprint 2K Phase 3 (Goal 1): a genuine product answer is a short noun
+ * phrase ("T-shirts", "black hoodies") — it is never event/audience/purpose
+ * -shaped. This is what stops the very first message of a conversation
+ * (naturally short, and the *first* pending question defaults to "product"
+ * before anything else is known) from being swallowed whole as the product
+ * just because it doesn't happen to trip the generic multi-sentence/
+ * word-count heuristic — e.g. "Johnson Family Reunion 2026,
+ * outdoors/camping theme." is 6 words with no sentence break, but is
+ * obviously an event description, not a product name.
+ */
+function looksLikeADirectProductAnswer(text: string): boolean {
+  if (looksLikeExplanatorySentence(text, 6)) return false;
+  if (YEAR_PATTERN.test(text)) return false;
+  if (AUDIENCE_CUES.test(text) || PURPOSE_CUES.test(text)) return false;
+  return true;
+}
+
 function applyPendingSectionFallback(
   context: ExtractionContext,
   trimmed: string,
@@ -538,13 +726,20 @@ function applyPendingSectionFallback(
 
   switch (section) {
     case "product":
-      fields.productSummary = trimmed;
+      // A rich, multi-clause reply almost always contains more than the
+      // product name (team/company name, design description, ...) — those
+      // belong in their own fields (already extracted above, if
+      // recognized), not folded into the product summary verbatim. Nor is
+      // an event/audience/purpose-shaped reply a product name, even when
+      // short — see `looksLikeADirectProductAnswer`.
+      if (!looksLikeADirectProductAnswer(trimmed)) return;
+      fields.productSummary = normalizeProductAnswer(trimmed);
       return;
     case "graphics":
       fields.designDescription = trimmed;
       return;
     case "productColor":
-      fields.shirtColor = trimmed;
+      fields.shirtColor = normalizeColorAnswer(trimmed);
       return;
     case "requiredWording":
       fields.exactText = trimmed;
@@ -556,11 +751,15 @@ function applyPendingSectionFallback(
       fields.preferredColors = dedupeCaseInsensitive(
         trimmed
           .split(/,|&|\band\b/i)
-          .map((c) => c.trim())
+          .map((c) => normalizeColorAnswer(c.trim()))
           .filter(Boolean),
       );
       return;
     case "audience":
+      // Same reasoning as "product" above — a rich reply's audience clause
+      // is extracted (with name-cue stripping) by extractAudiencePurpose
+      // when it can be; a whole explanatory sentence must not be forced in.
+      if (looksLikeExplanatorySentence(trimmed)) return;
       fields.audience = trimmed;
       return;
     case "purpose":

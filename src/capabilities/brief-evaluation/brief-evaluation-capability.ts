@@ -13,6 +13,13 @@ import {
   ALL_SECTIONS_IN_POLICY_ORDER,
   tierOf,
 } from "@/capabilities/shared/interview-coverage-policy";
+import {
+  checkAudienceQuality,
+  checkPreferredColorsQuality,
+  checkPrintLocationQuality,
+  checkProductQuality,
+  checkRequiredWordingQuality,
+} from "@/capabilities/shared/brief-field-quality";
 
 /**
  * Brief Evaluation Engine (Sprint 2E, tiered policy Sprint 2F).
@@ -138,11 +145,26 @@ const FREE_TEXT_GETTERS: Partial<
   graphics: (b) => b.designDescription,
   productColor: (b) => b.shirtColor,
   style: (b) => b.designStyle,
-  colors: (b) => (b.preferredColors.length > 0 ? b.preferredColors.join(", ") : null),
   audience: (b) => b.audience,
   purpose: (b) => b.purpose,
   exclusions: (b) => b.exclusions,
   additionalNotes: (b) => b.additionalInstructions,
+};
+
+/**
+ * Sprint 2K Phase 2 — Workstream B: deterministic, rule-based semantic
+ * validation. A section with content that trips one of these checks is
+ * evaluated as "unknown" (not "provided") — exactly the same bucket an
+ * unanswered section falls into — so a corrupted field can never satisfy
+ * summary/approval readiness or reach the customer-facing Design Summary.
+ * Scoped to the sections Workstream B calls out explicitly; sections
+ * without a checker here are unaffected.
+ */
+const QUALITY_CHECKERS: Partial<
+  Record<BriefSectionKey, (value: string) => { reason: string } | null>
+> = {
+  product: checkProductQuality,
+  audience: checkAudienceQuality,
 };
 
 function evaluateSection(
@@ -156,12 +178,20 @@ function evaluateSection(
   if (section === "printLocation") {
     return evaluatePrintLocation(brief, deferredSet);
   }
+  if (section === "colors") {
+    return evaluateColors(brief, deferredSet);
+  }
 
   const tier = tierOf(section);
   const getValue = FREE_TEXT_GETTERS[section] ?? (() => null);
   const trimmed = getValue(brief)?.trim() ?? "";
 
   if (trimmed.length > 0) {
+    const malformed = QUALITY_CHECKERS[section]?.(trimmed);
+    if (malformed) {
+      return build(section, tier, "unknown", { reason: malformed.reason });
+    }
+
     const { confidence, ambiguous } = scoreConfidence(trimmed);
     return build(section, tier, "provided", {
       confidence,
@@ -185,6 +215,36 @@ function evaluateSection(
   });
 }
 
+function evaluateColors(
+  brief: TShirtDesignBrief,
+  deferredSet: Set<string>,
+): BriefSectionEvaluation {
+  const tier = tierOf("colors"); // "high_value"
+
+  if (brief.preferredColors.length > 0) {
+    const malformed = checkPreferredColorsQuality(brief.preferredColors);
+    if (malformed) {
+      return build("colors", tier, "unknown", { reason: malformed.reason });
+    }
+
+    const trimmed = brief.preferredColors.join(", ");
+    const { confidence, ambiguous } = scoreConfidence(trimmed);
+    return build("colors", tier, "provided", {
+      confidence,
+      ambiguous,
+      reason: ambiguous
+        ? `Customer said "${trimmed}" — known, but too vague to treat as high confidence.`
+        : `Customer specified "${trimmed}".`,
+    });
+  }
+
+  if (deferredSet.has("colors")) {
+    return build("colors", tier, "deferred_to_designer", { reason: DEFERRED_REASON });
+  }
+
+  return build("colors", tier, "unknown", { reason: NOT_YET_ASKED_REASON });
+}
+
 function evaluateRequiredWording(brief: TShirtDesignBrief): BriefSectionEvaluation {
   const tier = tierOf("requiredWording"); // always "required"
   const wording = deriveRequiredWording(brief);
@@ -198,6 +258,11 @@ function evaluateRequiredWording(brief: TShirtDesignBrief): BriefSectionEvaluati
   }
 
   if (wording.mode === "provided" && wording.text) {
+    const malformed = checkRequiredWordingQuality(wording.text);
+    if (malformed) {
+      return build("requiredWording", tier, "unknown", { reason: malformed.reason });
+    }
+
     const { confidence, ambiguous } = scoreConfidence(wording.text);
     return build("requiredWording", tier, "provided", {
       confidence,
@@ -222,6 +287,16 @@ function evaluatePrintLocation(
   const label = printPlacementLabel(brief.printPlacement);
 
   if (label) {
+    // Defense in depth: `printPlacement` is a closed enum at the type
+    // level, so this can only trip on data that bypassed that guarantee
+    // (e.g. legacy/untrusted persisted data) — see brief-field-quality.ts.
+    const malformed = brief.printPlacement
+      ? checkPrintLocationQuality(brief.printPlacement)
+      : null;
+    if (malformed) {
+      return build("printLocation", tier, "unknown", { reason: malformed.reason });
+    }
+
     return build("printLocation", tier, "provided", {
       confidence: 95,
       ambiguous: false,

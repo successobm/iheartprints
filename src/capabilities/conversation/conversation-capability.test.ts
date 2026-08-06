@@ -59,7 +59,9 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
       | undefined;
     assert.ok(summary);
 
-    assert.equal(summary?.product, "Camp shirts");
+    // Sprint 2K Phase 3 (Goal 2): short product answers are normalized to
+    // Title Case for display.
+    assert.equal(summary?.product, "Camp Shirts");
     assert.equal(summary?.graphics, "A friendly bear logo");
     assert.equal(summary?.productColor, "Navy");
     assert.equal(summary?.requiredWording, "Camp Wildwood 2026");
@@ -241,7 +243,8 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
     );
 
     assert.equal(updated.conversation.phase, "awaiting_summary_confirmation");
-    assert.equal(updated.brief.shirtColor, "forest green");
+    // Sprint 2K Phase 3 (Goal 2): color fields are normalized to Title Case.
+    assert.equal(updated.brief.shirtColor, "Forest Green");
 
     const summary = updated.messages.at(-1)?.metadata.summary as
       | Record<string, unknown>

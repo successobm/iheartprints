@@ -86,7 +86,12 @@
  *   ConceptGeneration → enqueue only; never calls providers
  *   PromptTranslation → GenerationIntent only. Pure and deterministic.
  *                  Without regenerationPlan, identical to historical
- *                  brief-only translation.
+ *                  brief-only translation. Sprint 2K Phase 3: also splits
+ *                  reference/inspiration language out of the free-text
+ *                  description/style (`creative-reference-extraction.ts`)
+ *                  into `GenerationPromptRequest.inspirationReferences` —
+ *                  still provider-neutral, plain-language content, never
+ *                  dialect.
  *   ConceptEvaluation → approved brief + concept presentation + asset refs
  *   AssetCapability → persistence only
  *   GenerationWorker → PromptTranslation, providers, assets, concept
@@ -114,6 +119,37 @@
  *   Design Brief storing prompt syntax / provider dialect
  *   GenerationIntent, job ids, asset ids, evaluation scores, or provider
  *     identity reaching customer-facing messages
+ *   Provider adapters inventing their own concept-direction catalog instead
+ *     of `lib/domain/concept-directions.ts` (the one shared, provider-
+ *     neutral source of composition/typography/iconography/layout
+ *     differentiation content — see Sprint 2K Phase 3 below)
+ *
+ * Sprint 2K Phase 3 additions (quality/generation-fidelity sprint; no new
+ * capabilities, no architecture redesign):
+ *   - `lib/domain/concept-directions.ts` — the single, provider-neutral
+ *     catalog of the three concept creative directions (composition,
+ *     typography emphasis, illustration density, iconography, layout,
+ *     visual hierarchy) plus `describeConceptDirection` (the one place a
+ *     customer-facing concept description is built). Both
+ *     `PlaceholderConceptProvider` (via `lib/domain/concepts.ts`) and
+ *     `OpenAIConceptGenerationProvider` consume it — no per-provider
+ *     duplicate catalog. Provider dialect (keyword phrasing) still lives
+ *     only inside each adapter's own prompt-building function.
+ *   - `GenerationPromptRequest` gained two provider-neutral fields:
+ *     `inspirationReferences: string[]` (style/era/pop-culture references
+ *     split out of free text — never treated as literal content to depict)
+ *     and `allowAdditionalText: boolean` (always `false` today — no
+ *     invented wording beyond `requiredWording`).
+ *   - `shared/field-normalization.ts` — deterministic product/color/print-
+ *     location normalization applied at the point Intent Extraction writes
+ *     a Design Brief field (not a presentation-only pass), so every
+ *     downstream reader sees the canonical form. Required wording is never
+ *     touched by this module.
+ *   - Intent Extraction gained a general (non-bowling-specific) guard,
+ *     `isDedicatedToADifferentPendingSection`, so a short single-clause
+ *     reply answering one pending question is never opportunistically
+ *     reinterpreted as an update to a different field just because it
+ *     contains a generic word (e.g. "shirts" inside a purpose answer).
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2J3" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2K3" as const;

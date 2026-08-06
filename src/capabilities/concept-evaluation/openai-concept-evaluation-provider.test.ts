@@ -239,6 +239,58 @@ describe("OpenAIConceptEvaluationProvider — response normalization", () => {
     assert.ok(result.missingRequirements.includes("required wording"));
   });
 
+  it("Sprint 2K Phase 2: does not blindly trust found:true when detectedText doesn't actually match the required wording (typo/incorrect)", async () => {
+    const fetchImpl = (async () =>
+      chatResponse(
+        fullMatchPayload({
+          // Model says "found" but the text it actually read is wrong
+          // (missing the final "s") — a real customer-visible defect.
+          requiredWording: { found: true, detectedText: "Camp Wildwood 202", confidence: 92, notes: "close enough?" },
+        }),
+      )) as typeof fetch;
+    const provider = new OpenAIConceptEvaluationProvider({ apiKey: "sk-test", model: "m", fetchImpl });
+
+    const result = await provider.evaluate(request());
+    const wording = result.criteria.find((c) => c.key === "required_wording")!;
+    assert.equal(wording.passed, false);
+    assert.equal(result.status, "failed");
+    assert.ok(result.missingRequirements.includes("required wording"));
+  });
+
+  it("Sprint 2K Phase 2: catches invented extra wording even when the model reports found:true", async () => {
+    const fetchImpl = (async () =>
+      chatResponse(
+        fullMatchPayload({
+          requiredWording: {
+            found: true,
+            detectedText: "Camp Wildwood 2026 Est. 1985",
+            confidence: 90,
+            notes: "text present, plus a founding year",
+          },
+        }),
+      )) as typeof fetch;
+    const provider = new OpenAIConceptEvaluationProvider({ apiKey: "sk-test", model: "m", fetchImpl });
+
+    const result = await provider.evaluate(request());
+    assert.equal(result.status, "failed");
+    assert.ok(result.missingRequirements.includes("required wording"));
+  });
+
+  it("Sprint 2K Phase 2: a case/punctuation-only difference in detectedText is still treated as a match", async () => {
+    const fetchImpl = (async () =>
+      chatResponse(
+        fullMatchPayload({
+          requiredWording: { found: true, detectedText: "CAMP WILDWOOD, 2026!", confidence: 90, notes: "clear" },
+        }),
+      )) as typeof fetch;
+    const provider = new OpenAIConceptEvaluationProvider({ apiKey: "sk-test", model: "m", fetchImpl });
+
+    const result = await provider.evaluate(request());
+    const wording = result.criteria.find((c) => c.key === "required_wording")!;
+    assert.equal(wording.passed, true);
+    assert.notEqual(result.status, "failed");
+  });
+
   it("detects requested graphics being reasonably represented", async () => {
     const fetchImpl = (async () =>
       chatResponse(

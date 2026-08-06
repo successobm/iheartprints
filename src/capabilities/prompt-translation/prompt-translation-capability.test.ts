@@ -116,6 +116,42 @@ describe("PromptTranslationCapability — GenerationIntent", () => {
     );
     assert.equal(result.requiredWording, 'Camp "Wildwood" — Est. 1987');
   });
+
+  it("never allows additional text beyond the required wording (Goal 7)", () => {
+    const result = translation.translate(createInitialGenerationIntent(content()));
+    assert.equal(result.allowAdditionalText, false);
+  });
+
+  it("no inspiration references when the description carries no reference cue", () => {
+    const result = translation.translate(createInitialGenerationIntent(content()));
+    assert.deepEqual(result.inspirationReferences, []);
+  });
+
+  it("splits a pop-culture reference out of the description into inspirationReferences, never into subject (Goal 4)", () => {
+    const result = translation.translate(
+      createInitialGenerationIntent(
+        content({
+          designDescription:
+            "its a retro design spin off from the old tv show my 3 sons, but i want it bowling themed",
+        }),
+      ),
+    );
+    assert.match(result.subject, /retro design/i);
+    assert.match(result.subject, /bowling themed/i);
+    assert.doesNotMatch(result.subject, /tv show/i);
+    assert.equal(result.inspirationReferences.length, 1);
+    assert.match(result.inspirationReferences[0]!, /tv show my 3 sons/i);
+  });
+
+  it("splits a style reference into inspirationReferences too", () => {
+    const result = translation.translate(
+      createInitialGenerationIntent(
+        content({ designStyle: "inspired by mid-century travel posters" }),
+      ),
+    );
+    assert.doesNotMatch(result.style ?? "", /travel posters/i);
+    assert.equal(result.inspirationReferences.length, 1);
+  });
 });
 
 describe("PromptTranslationCapability — RegenerationPlan via GenerationIntent", () => {

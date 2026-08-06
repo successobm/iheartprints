@@ -3,6 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { CustomerArtworkVersion } from "@/capabilities/shared/contracts";
+import {
+  createConceptImageFetchController,
+  type ConceptImageState,
+} from "./concept-image-fetch-controller";
 
 interface ConceptCardsProps {
   concepts: CustomerArtworkVersion[];
@@ -20,7 +24,6 @@ interface ConceptCardsProps {
  * no entry yet is implicitly "loading"; `"ready"` renders the real
  * generated image; `"unavailable"` falls back to the same placeholder.
  */
-type ConceptImageState = { status: "ready"; url: string } | { status: "unavailable" };
 
 async function fetchConceptImageUrl(
   projectId: string,
@@ -47,9 +50,11 @@ export function ConceptCards({
   onSelect,
 }: ConceptCardsProps) {
   const [images, setImages] = useState<Record<string, ConceptImageState>>({});
-  // Fetches already in flight — avoids re-triggering a request every render
-  // while we're still waiting on the previous one for the same concept.
-  const pendingRef = useRef<Set<string>>(new Set());
+  // Persists across Strict Mode's mount → cleanup → mount double-invoke in
+  // development (and across ordinary re-renders) — see
+  // concept-image-fetch-controller.ts for why this can't just be `useRef`
+  // of a plain `Set` managed inline in the effect anymore (Workstream D).
+  const controllerRef = useRef(createConceptImageFetchController());
   // A signed URL can go stale (expiry, or a worker retry that replaced the
   // asset) — allow exactly one silent re-fetch per concept before settling
   // on the fallback placeholder, so refresh/renewal stays automatic without
@@ -57,26 +62,12 @@ export function ConceptCards({
   const retriedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    let cancelled = false;
-
-    for (const concept of concepts) {
-      if (!concept.hasImage) continue;
-      if (images[concept.id] || pendingRef.current.has(concept.id)) continue;
-
-      pendingRef.current.add(concept.id);
-      void fetchConceptImageUrl(projectId, concept.id).then((url) => {
-        pendingRef.current.delete(concept.id);
-        if (cancelled) return;
-        setImages((prev) => ({
-          ...prev,
-          [concept.id]: url ? { status: "ready", url } : { status: "unavailable" },
-        }));
-      });
-    }
-
-    return () => {
-      cancelled = true;
-    };
+    return controllerRef.current.start(
+      concepts,
+      (id) => images[id],
+      (id, state) => setImages((prev) => ({ ...prev, [id]: state })),
+      (id) => fetchConceptImageUrl(projectId, id),
+    );
     // Re-run only when the actual set of concepts (and their image
     // readiness) changes — not on every unrelated snapshot/selection update.
     // eslint-disable-next-line react-hooks/exhaustive-deps

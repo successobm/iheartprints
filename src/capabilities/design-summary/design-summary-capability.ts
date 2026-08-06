@@ -1,6 +1,7 @@
 import { deriveRequiredWording } from "@/lib/domain/required-wording";
 import { printPlacementLabel } from "@/lib/domain/print-placement";
 import type { TShirtDesignBrief } from "@/lib/domain/types";
+import { capitalizeFirst } from "@/capabilities/shared/field-normalization";
 import type {
   BriefEvaluation,
   BriefSectionKey,
@@ -38,18 +39,32 @@ export interface DesignSummaryCapability {
   ): string;
 }
 
+/**
+ * Sprint 2K Phase 3 (Goal 3): section order and labels for the plain-text
+ * chat rendering of the summary — reads like a concise creative brief a
+ * designer would hand a customer, not a dump of database fields. Product /
+ * color / print location are pulled out into their own compact header line
+ * in `formatForCustomer` instead of appearing here; everything else keeps
+ * its own labeled block. `requiredWording` gets the most explicit
+ * treatment of any field — a spelling mistake there propagates directly
+ * into artwork (Constitution §6.12).
+ */
 const FIELD_LABELS: Array<[keyof DesignSummaryView, string]> = [
-  ["product", "Product"],
-  ["graphics", "Design Description"],
-  ["productColor", "Product Color"],
-  ["printLocation", "Print Location"],
-  ["requiredWording", "Required Wording"],
+  ["graphics", "Design direction"],
+  ["requiredWording", "Required wording"],
   ["style", "Style"],
-  ["colors", "Preferred Colors"],
+  ["colors", "Preferred colors"],
   ["audience", "Audience"],
   ["purpose", "Purpose"],
   ["exclusions", "Exclusions"],
-  ["additionalNotes", "Additional Notes"],
+  ["additionalNotes", "Additional notes"],
+];
+
+/** Product / color / print location — shown together as one compact header line. */
+const HEADER_FIELDS: ReadonlyArray<keyof DesignSummaryView> = [
+  "product",
+  "productColor",
+  "printLocation",
 ];
 
 /**
@@ -84,10 +99,15 @@ export function createDesignSummaryCapability(): DesignSummaryCapability {
       setIfProvided("product", "product", brief.productSummary);
       setIfProvided("graphics", "graphics", brief.designDescription);
       setIfProvided("productColor", "productColor", brief.shirtColor);
+      // Sprint 2K Phase 3 (Goal 2): capitalized for display ("full back" →
+      // "Full back") — the shared label stays lowercase because it's also
+      // used mid-sentence elsewhere (Brief Evaluation reasons, Product
+      // Intelligence advisories).
+      const printLocationLabel = printPlacementLabel(brief.printPlacement);
       setIfProvided(
         "printLocation",
         "printLocation",
-        printPlacementLabel(brief.printPlacement),
+        printLocationLabel ? capitalizeFirst(printLocationLabel) : null,
       );
       setIfProvided("style", "style", brief.designStyle);
       setIfProvided(
@@ -127,15 +147,32 @@ export function createDesignSummaryCapability(): DesignSummaryCapability {
     },
 
     formatForCustomer(summary, deferredDecisions = []) {
+      // Sprint 2K Phase 3 (Goal 3): read like a concise creative brief, not
+      // a dump of "Label: value" database fields. Product / color / print
+      // location collapse into one compact header line ("T-shirt · Black ·
+      // Full back"); everything else gets its own short, labeled block.
+      const headerLine = HEADER_FIELDS.map((key) => summary[key]?.toString().trim())
+        .filter((value): value is string => Boolean(value))
+        .join(" · ");
+
       const knownRows = FIELD_LABELS.filter(([key]) =>
         Boolean(summary[key]?.toString().trim()),
       );
 
-      const lines = [
-        "Here's my understanding of your design so far:",
-        "",
-        ...knownRows.map(([key, label]) => `${label}: ${summary[key]}`),
-      ];
+      const lines = ["Design Brief"];
+      if (headerLine) lines.push("", headerLine);
+
+      for (const [key, label] of knownRows) {
+        // Required wording is the one field where a spelling mistake
+        // propagates directly into artwork (Constitution §6.12) — quoted
+        // on its own line so it reads unmistakably as literal print text,
+        // never paraphrased or blended into a sentence.
+        const value =
+          key === "requiredWording" && summary[key] !== "None"
+            ? `"${summary[key]}"`
+            : summary[key];
+        lines.push("", `${label}:`, String(value));
+      }
 
       if (deferredDecisions.length > 0) {
         lines.push(

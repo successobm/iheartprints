@@ -409,6 +409,45 @@ Does not invoke providers. Workers do.
 Without a `regenerationPlan`, output is byte-for-byte equivalent to the
 historical brief-only translator (initial generation regression).
 
+Sprint 2K Phase 3 adds two provider-neutral fields to `GenerationPromptRequest`
+(both computed here, not by a provider adapter):
+
+- `inspirationReferences: string[]` — stylistic/era/pop-culture reference
+  language (`creative-reference-extraction.ts`, cue phrases like "inspired
+  by", "spin off from", "like an old …") is split out of the free-text
+  description/style so it is never handed to a provider as literal content.
+  A provider adapter must treat these as visual-language guidance only —
+  never as an instruction to depict real people, characters, or copyrighted
+  material from the referenced work.
+- `allowAdditionalText: boolean` — always `false` today; an explicit,
+  provider-neutral instruction that generation must not invent wording
+  beyond `requiredWording`, rather than an ad hoc prompt hack living inside
+  one adapter.
+
+### Concept-direction differentiation (Sprint 2K Phase 3)
+
+`lib/domain/concept-directions.ts` is the single, provider-neutral catalog
+for how the three concepts a customer sees differ from one another (Bold &
+Direct / Soft & Illustrated / Minimal Badge) — composition, typography
+emphasis, illustration density, iconography, layout, and visual hierarchy,
+each described in plain language, never provider dialect. It also owns
+`describeConceptDirection`, the one function that builds a concept's
+customer-facing title/summary — truthful to the actual creative direction
+sent to the provider (Constitution §13: "options for human review", never a
+fabricated pixel-level claim).
+
+Both `PlaceholderConceptProvider` (via `lib/domain/concepts.ts`) and
+`OpenAIConceptGenerationProvider` consume this one catalog instead of each
+maintaining its own copy. A provider adapter still owns 100% of its own
+prompt dialect/keyword phrasing when turning a direction's plain-language
+fields into an actual request — the catalog supplies content, never syntax.
+
+Because the catalog is a pure function of `GenerationPromptRequest` only —
+independent of the approved brief and of any `RegenerationPlan` — the three
+directions are applied identically on every generation attempt. Concept
+differentiation therefore survives regeneration automatically; no separate
+regeneration-specific direction logic exists or is needed.
+
 ### GenerationWorkerCapability — Active
 
 | | |
@@ -546,6 +585,14 @@ Not capabilities; pure data/phrasing imported by multiple capabilities:
 - `shared/question-phrasing.ts`
 - `shared/generation-retry-policy.ts`
 - `shared/retry.ts`
+- `shared/field-normalization.ts` (Sprint 2K Phase 3) — deterministic
+  product/color/print-location display normalization applied where a
+  Design Brief field is written; required wording is never touched by it
+- `lib/domain/concept-directions.ts` (Sprint 2K Phase 3) — provider-neutral
+  concept-direction catalog + customer-facing description builder, shared
+  by every `ConceptGenerationProvider` adapter (domain module, not
+  `capabilities/shared`, matching the existing `lib/domain/concepts.ts`
+  placement and dependency direction)
 
 ---
 
@@ -1530,6 +1577,21 @@ Verified against the implementation:
   `regenerationPlan: null`. No automatic regeneration, ranking, retries,
   evaluation gating, or UI changes. Timeline / plan / intent are never
   persisted.
+- Sprint 2K Phase 3: inspiration-vs-content detection
+  (`creative-reference-extraction.ts`) is deterministic cue-phrase matching,
+  not language understanding — it recognizes a fixed set of reference cues
+  ("inspired by", "spin off from", "like an old …", "in the style of", …).
+  A reference phrased without one of these cues stays in `subject` as
+  ordinary content; the OpenAI adapter's blanket "do not depict real
+  people/characters/logos" guardrail (independent of whether a phrase was
+  actually captured as an inspiration reference) is the defense-in-depth
+  backstop for that gap.
+- Sprint 2K Phase 3: no per-phase generation latency instrumentation exists
+  (provider call vs. asset upload vs. thumbnail vs. evaluation vs.
+  persistence). `GenerationJob.createdAt`/`completedAt` and heartbeat
+  timestamps allow only a coarse total-attempt duration, not a phase
+  breakdown — see the Sprint 2K Phase 3 report for what was and wasn't
+  determinable from existing instrumentation.
 
 Do not treat future work as completed architecture.
 
