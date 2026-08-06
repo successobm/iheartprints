@@ -8,6 +8,7 @@ import type {
 import { diffBriefSections } from "@/capabilities/shared/brief-diff";
 import { isConceptRelevantChange } from "@/capabilities/shared/concept-relevance";
 import type { ConceptStatusView } from "@/capabilities/shared/contracts";
+import { MAX_GENERATION_ATTEMPTS } from "@/capabilities/shared/generation-retry-policy";
 
 /**
  * Sprint 2H Part 1: a job that has failed this many times gives up asking
@@ -15,8 +16,12 @@ import type { ConceptStatusView } from "@/capabilities/shared/contracts";
  * (ask again, or press the same button) rather than the platform looping
  * silently. Chosen small so a genuinely broken provider fails fast instead
  * of stalling the conversation across several turns.
+ *
+ * Sprint 2H Part 2B: the budget itself now lives in
+ * `shared/generation-retry-policy` so `GenerationWorkerCapability`'s
+ * recovery path enforces the exact same cap — see that module's doc
+ * comment for why a single shared constant matters here.
  */
-const MAX_GENERATION_ATTEMPTS = 3;
 
 export interface ConceptGenerationCapability {
   /**

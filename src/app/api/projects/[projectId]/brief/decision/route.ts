@@ -1,10 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getPersistenceMode } from "@/lib/db";
-import {
-  submitDesignBriefDecision,
-  triggerGenerationWorker,
-} from "@/lib/services/conversation-service";
+import { submitDesignBriefDecision } from "@/lib/services/conversation-service";
 import { briefDecisionBodySchema } from "./schema";
 
 type RouteContext = {
@@ -26,10 +23,12 @@ export async function POST(request: Request, context: RouteContext) {
       parsed.data.action,
     );
 
-    // Sprint 2H Part 2A: an "approve" may have just enqueued a generation
-    // job — kick the worker without making the customer wait on it. A
-    // no-op for edit/continue, where nothing was enqueued.
-    triggerGenerationWorker();
+    // Sprint 2H Part 2B: an "approve" may have just enqueued a generation
+    // job, but this route never dispatches it — that would put generation
+    // back on the customer's request/HTTP lifecycle. The independent
+    // worker (protected endpoint, scheduled trigger, or standalone
+    // process — see `capabilities/worker-scheduler/`) picks it up on its
+    // own schedule.
 
     return NextResponse.json({
       ...snapshot,

@@ -8,11 +8,15 @@ import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-interview";
 
 /**
- * Sprint 2H Part 2A: polling status facade + fire-and-forget worker
- * dispatch. `submitDesignBriefDecision`/`regenerateConcepts` themselves are
- * already covered elsewhere (design-brief-decision.test.ts,
- * conversation-revision.test.ts) — this file is scoped to the new
- * `getGenerationStatus`/`triggerGenerationWorker` additions.
+ * Sprint 2H Part 2A/2B: polling status facade.
+ * `submitDesignBriefDecision`/`regenerateConcepts` themselves are already
+ * covered elsewhere (design-brief-decision.test.ts,
+ * conversation-revision.test.ts) — this file is scoped to
+ * `getGenerationStatus`, which Sprint 2H Part 2B made strictly read-only:
+ * it no longer dispatches a worker (removed along with
+ * `triggerGenerationWorker`) and no longer recovers abandoned jobs as a
+ * side effect of being polled — see `capabilities/worker-scheduler/` for
+ * where that responsibility now lives.
  */
 describe("conversation-service — generation status polling (Sprint 2H Part 2A)", () => {
   let tempDir = "";
@@ -69,15 +73,13 @@ describe("conversation-service — generation status polling (Sprint 2H Part 2A)
     assert.deepEqual(await getGenerationStatus(projectId), { status: "ready" });
   });
 
-  it("triggerGenerationWorker is fire-and-forget and safe to call with nothing queued", async () => {
-    const { resetCapabilityGraphForTests } = await import("@/capabilities/composition");
-    resetCapabilityGraphForTests();
-    const { triggerGenerationWorker } = await import("./conversation-service");
-    // Must not throw and must not require awaiting.
-    triggerGenerationWorker();
+  it("no longer exports triggerGenerationWorker or drainGenerationWorkersForTests — generation is never dispatched from this module", async () => {
+    const conversationService = await import("./conversation-service");
+    assert.equal("triggerGenerationWorker" in conversationService, false);
+    assert.equal("drainGenerationWorkersForTests" in conversationService, false);
   });
 
-  it("triggerGenerationWorker actually advances a queued job without the caller awaiting completion", async () => {
+  it("polling never recovers an abandoned job — that stays 'generating', unresolved, until the independent worker runs", async () => {
     const { resetCapabilityGraphForTests } = await import("@/capabilities/composition");
     resetCapabilityGraphForTests();
     const { startConversation, handleUserMessage, submitDesignBriefDecision, getGenerationStatus } =
@@ -89,61 +91,30 @@ describe("conversation-service — generation status polling (Sprint 2H Part 2A)
     });
     await submitDesignBriefDecision(projectId, "approve");
 
-    // `triggerGenerationWorker` is deliberately fire-and-forget — the
-    // caller (an API route, in production) never awaits it. Since the
-    // underlying claim is exclusive, there's no reliable second call this
-    // test could make to force completion without racing the dispatched
-    // one; poll the same way a real client would instead.
-    const { triggerGenerationWorker } = await import("./conversation-service");
-    triggerGenerationWorker();
-
-    const deadline = Date.now() + 2000;
-    let status = await getGenerationStatus(projectId);
-    while (status?.status === "generating" && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      status = await getGenerationStatus(projectId);
-    }
-
-    assert.deepEqual(status, { status: "ready" });
-  });
-
-  it("recovers an abandoned job's status on poll without a caller having to know jobs exist", async () => {
-    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
-      "@/capabilities/composition"
-    );
-    resetCapabilityGraphForTests();
-    const { startConversation, handleUserMessage, submitDesignBriefDecision, getGenerationStatus } =
-      await import("./conversation-service");
-
-    const { projectId } = await runAdaptiveInterviewToSummary({
-      start: startConversation,
-      handleUserMessage,
-    });
-    await submitDesignBriefDecision(projectId, "approve");
-
-    const graph = getCapabilityGraph();
-    const jobs = await (
-      await import("@/lib/db")
-    ).getProjectRepository().listGenerationJobs(projectId);
-    const [job] = jobs;
+    const repo = (await import("@/lib/db")).getProjectRepository();
+    const [job] = await repo.listGenerationJobs(projectId);
     assert.ok(job);
 
     const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const repo = (await import("@/lib/db")).getProjectRepository();
     await repo.updateGenerationJob(job.id, {
       status: "running",
       startedAt: longAgo,
       heartbeatAt: longAgo,
     });
 
-    // Polling alone (no explicit recovery call from the caller) flags the
-    // job recoverable — status stays "generating" until it's actually
-    // reprocessed, but it's no longer silently stuck as "running" forever.
+    // Polling repeatedly must never flip the stale job to "recoverable" —
+    // recovery is exclusively the independent worker's job now.
     await getGenerationStatus(projectId);
-    const afterPoll = await repo.getGenerationJob(job.id);
-    assert.equal(afterPoll?.status, "recoverable");
+    await getGenerationStatus(projectId);
+    await getGenerationStatus(projectId);
 
-    await graph.generationWorker.processNextJob();
+    const stillRunning = await repo.getGenerationJob(job.id);
+    assert.equal(stillRunning?.status, "running");
+    assert.deepEqual(await getGenerationStatus(projectId), { status: "generating" });
+
+    // Only once the independent worker actually runs does the job resolve.
+    const { getCapabilityGraph } = await import("@/capabilities/composition");
+    await getCapabilityGraph().workerScheduler.runBatch();
     assert.deepEqual(await getGenerationStatus(projectId), { status: "ready" });
   });
 });

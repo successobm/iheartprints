@@ -97,46 +97,15 @@ export async function undoLastChange(
 }
 
 /**
- * Sprint 2H Part 2A: fire-and-forget dispatch of the next queued generation
- * job. Call this right after an action that enqueues generation (approve,
- * regenerate) — never awaited by the caller, so the customer's HTTP
- * request returns as soon as the job is enqueued, not after a provider
- * call finishes. Safe to call even when nothing is queued (a no-op) and
- * safe to call more than once (the underlying claim is optimistic — at
- * most one caller ever actually runs a given job).
- *
- * In-flight promises are tracked only so tests can drain them before
- * deleting a temp workspace — callers still must not await this function.
- */
-let inFlightGenerationWorkers: Promise<void> = Promise.resolve();
-
-export function triggerGenerationWorker(): void {
-  const run = getCapabilityGraph()
-    .generationWorker.processNextJob()
-    .then(
-      () => undefined,
-      () => undefined,
-    );
-  inFlightGenerationWorkers = inFlightGenerationWorkers.then(
-    () => run,
-    () => run,
-  );
-}
-
-/** Test-only: wait for every fire-and-forget `triggerGenerationWorker` run to settle. */
-export async function drainGenerationWorkersForTests(): Promise<void> {
-  await inFlightGenerationWorkers;
-}
-
-/**
- * Sprint 2H Part 2A: provider-neutral generation status, safe for the
+ * Sprint 2H Part 2B: provider-neutral generation status, safe for the
  * conversation to poll every few seconds — no job id, no provider name, no
- * queue detail. Cheap: no provider call, just a status read plus an
- * opportunistic (also cheap) sweep for abandoned jobs so a stuck
- * "generating" state gets flagged recoverable instead of hanging silently.
- * Recovering a job only changes its status here — actually resuming it
- * still goes through `triggerGenerationWorker` the next time generation is
- * (re-)enqueued.
+ * queue detail. Purely read-only: a status read and nothing else. It never
+ * recovers abandoned jobs, never claims work, and never runs generation —
+ * that all belongs to the independent worker (the protected worker
+ * endpoint, a scheduled trigger, or a standalone worker process; see
+ * `capabilities/worker-scheduler/`), never to a customer's browser polling
+ * this endpoint. Polling only answers "what does the customer see right
+ * now" — it must never be a hidden way to make progress happen.
  */
 export type GenerationStatus = "idle" | "generating" | "ready" | "failed";
 
@@ -154,9 +123,7 @@ function toGenerationStatusView(status: ProjectStatus): GenerationStatusView {
 export async function getGenerationStatus(
   projectId: string,
 ): Promise<GenerationStatusView | null> {
-  const graph = getCapabilityGraph();
-  await graph.generationWorker.recoverAbandonedJobs();
-  const snapshot = await graph.conversation.get(projectId);
+  const snapshot = await getCapabilityGraph().conversation.get(projectId);
   if (!snapshot) return null;
   return toGenerationStatusView(snapshot.project.status);
 }

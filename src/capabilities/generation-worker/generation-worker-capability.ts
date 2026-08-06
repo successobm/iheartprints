@@ -10,7 +10,9 @@ import type {
   ConceptGenerationResult,
   GeneratedAssetPayload,
 } from "@/capabilities/shared/contracts";
+import { MAX_GENERATION_ATTEMPTS } from "@/capabilities/shared/generation-retry-policy";
 import { logConceptGenerationUnavailable } from "@/lib/config/generation-provider-logging";
+import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
 
 /**
  * Sprint 2H Part 2A: a "running" job with no heartbeat for this long is
@@ -75,6 +77,81 @@ export function createGenerationWorkerCapability(
     };
   }
 
+  /**
+   * Sprint 2H Part 2B: keeps `job`'s heartbeat fresh for the whole duration
+   * of `fn`, not just at the fixed call sites already sprinkled through
+   * `runClaimedJob` — a slow provider call between two of those fixed
+   * points would otherwise still be able to look abandoned to
+   * `recoverAbandonedJobs` well before it actually is. Best-effort: a
+   * missed tick just means recovery leans on the next successful one, and
+   * never aborts the generation call itself.
+   */
+  async function withPeriodicHeartbeat<T>(
+    jobId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const intervalMs = getWorkerHeartbeatIntervalMs();
+    const timer = setInterval(() => {
+      void repo.touchGenerationJobHeartbeat(jobId).catch(() => {
+        /* best-effort — see doc comment above */
+      });
+    }, intervalMs);
+    timer.unref?.();
+    try {
+      return await fn();
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  /**
+   * Shared failure path for both a genuine provider failure and a
+   * retry-budget exhaustion (Sprint 2H Part 2B) — same job bookkeeping,
+   * same customer messaging rules (never take away concepts the customer
+   * can already see, per Constitution §14).
+   */
+  async function failClaimedJob(
+    job: GenerationJob,
+    designId: string,
+    lastError: string,
+    unavailable: boolean,
+  ): Promise<void> {
+    await repo.updateGenerationJob(job.id, { status: "failed", lastError });
+
+    if (job.kind === "initial") {
+      await repo.setProjectStatus(designId, "failed");
+      await repo.addMessage(designId, {
+        role: "assistant",
+        content: unavailable
+          ? "Concept generation is temporarily unavailable. Please try again shortly."
+          : "We ran into a problem creating your concepts. Let's give it another try — just ask me to try again whenever you're ready.",
+        metadata: {
+          phase: "generating",
+          act: "generation_failed",
+          ...(unavailable ? { reason: "provider_unavailable" } : {}),
+        },
+      });
+    } else {
+      // Unlike the very first generation, concepts already exist here —
+      // a failed regeneration should never take away what the customer
+      // could already see (Constitution §14: revisions continue the
+      // same design relationship, they don't restart it).
+      await repo.setProjectStatus(designId, "concepts_ready");
+      await repo.updateConversationPhase(designId, "concepts_ready");
+      await repo.addMessage(designId, {
+        role: "assistant",
+        content: unavailable
+          ? "Updating concepts is temporarily unavailable. Your current concepts are still available — please try again shortly."
+          : "We ran into a problem updating your concepts. Your current concepts are still available — you can try again anytime.",
+        metadata: {
+          phase: "concepts_ready",
+          act: "generation_failed",
+          ...(unavailable ? { reason: "provider_unavailable" } : {}),
+        },
+      });
+    }
+  }
+
   async function runClaimedJob(job: GenerationJob): Promise<void> {
     const designId = job.projectId;
     const approvedVersion = await repo.getDesignBriefVersionById(
@@ -107,17 +184,38 @@ export function createGenerationWorkerCapability(
       return;
     }
 
+    if (job.attempts > MAX_GENERATION_ATTEMPTS) {
+      // Sprint 2H Part 2B: closes the recovery retry-budget gap — a job
+      // that keeps crashing its worker mid-attempt (not just a job that
+      // keeps failing at the provider) would otherwise recover and reclaim
+      // forever, since `claimNextQueuedJob` increments `attempts` on every
+      // claim regardless of how the job got back to "queued"/"recoverable".
+      // This is the same budget `ConceptGenerationCapability.enqueue` uses
+      // for customer-initiated retries — see `shared/generation-retry-policy`.
+      await failClaimedJob(
+        job,
+        designId,
+        `Exceeded maximum generation attempts (${MAX_GENERATION_ATTEMPTS}) after repeated recovery.`,
+        false,
+      );
+      return;
+    }
+
     try {
       const promptRequest = promptTranslation.translate(approvedVersion.content);
       await repo.touchGenerationJobHeartbeat(job.id);
 
-      const result: ConceptGenerationResult = await provider.generate({
-        designId,
-        designBriefId: approvedVersion.id,
-        conceptCount: job.conceptCount,
-        prompt: promptRequest,
-        idempotencyKey: job.idempotencyKey,
-      });
+      const result: ConceptGenerationResult = await withPeriodicHeartbeat(
+        job.id,
+        () =>
+          provider.generate({
+            designId,
+            designBriefId: approvedVersion.id,
+            conceptCount: job.conceptCount,
+            prompt: promptRequest,
+            idempotencyKey: job.idempotencyKey,
+          }),
+      );
 
       const startingVersionNumber = current.artworkVersions.length;
       // Sequential, not `Promise.all` — asset registration is a
@@ -170,11 +268,6 @@ export function createGenerationWorkerCapability(
         metadata: { phase: "concepts_ready" },
       });
     } catch (error) {
-      await repo.updateGenerationJob(job.id, {
-        status: "failed",
-        lastError: describeGenerationError(error),
-      });
-
       const unavailable = error instanceof GenerationUnavailableError;
       if (unavailable) {
         // Sprint 2H Part 1A/2A: the one failure class worth a structured
@@ -191,38 +284,7 @@ export function createGenerationWorkerCapability(
         });
       }
 
-      if (job.kind === "initial") {
-        await repo.setProjectStatus(designId, "failed");
-        await repo.addMessage(designId, {
-          role: "assistant",
-          content: unavailable
-            ? "Concept generation is temporarily unavailable. Please try again shortly."
-            : "We ran into a problem creating your concepts. Let's give it another try — just ask me to try again whenever you're ready.",
-          metadata: {
-            phase: "generating",
-            act: "generation_failed",
-            ...(unavailable ? { reason: "provider_unavailable" } : {}),
-          },
-        });
-      } else {
-        // Unlike the very first generation, concepts already exist here —
-        // a failed regeneration should never take away what the customer
-        // could already see (Constitution §14: revisions continue the
-        // same design relationship, they don't restart it).
-        await repo.setProjectStatus(designId, "concepts_ready");
-        await repo.updateConversationPhase(designId, "concepts_ready");
-        await repo.addMessage(designId, {
-          role: "assistant",
-          content: unavailable
-            ? "Updating concepts is temporarily unavailable. Your current concepts are still available — please try again shortly."
-            : "We ran into a problem updating your concepts. Your current concepts are still available — you can try again anytime.",
-          metadata: {
-            phase: "concepts_ready",
-            act: "generation_failed",
-            ...(unavailable ? { reason: "provider_unavailable" } : {}),
-          },
-        });
-      }
+      await failClaimedJob(job, designId, describeGenerationError(error), unavailable);
     }
   }
 

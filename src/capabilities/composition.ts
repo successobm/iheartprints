@@ -24,6 +24,7 @@ import { createPromptTranslationCapability } from "@/capabilities/prompt-transla
 import { resolveConceptGenerationProvider } from "@/capabilities/providers";
 import { createRevisionCapability } from "@/capabilities/revision";
 import { createRevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
+import { createGenerationSchedulerCapability } from "@/capabilities/worker-scheduler";
 
 export interface CapabilityGraph {
   conversation: ConversationCapability;
@@ -40,6 +41,13 @@ export interface CapabilityGraph {
   conceptGeneration: ReturnType<typeof createConceptGenerationCapability>;
   /** Sprint 2H Part 2A: background job runner — see `generation-worker/`. */
   generationWorker: ReturnType<typeof createGenerationWorkerCapability>;
+  /**
+   * Sprint 2H Part 2B: provider-neutral scheduler that decides when/how many
+   * times to call `generationWorker` — see `worker-scheduler/`. Driven by
+   * the protected worker endpoint, a standalone worker process, or (in
+   * tests) directly; never by a customer request.
+   */
+  workerScheduler: ReturnType<typeof createGenerationSchedulerCapability>;
   printValidation: ReturnType<typeof createPrintValidationCapability>;
   revision: ReturnType<typeof createRevisionCapability>;
   printVault: ReturnType<typeof createPrintVaultCapability>;
@@ -82,6 +90,7 @@ export function createCapabilityGraph(
     promptTranslation,
     assets,
   );
+  const workerScheduler = createGenerationSchedulerCapability(generationWorker);
 
   const conversation = createConversationCapability({
     repo,
@@ -108,6 +117,7 @@ export function createCapabilityGraph(
     promptTranslation,
     conceptGeneration,
     generationWorker,
+    workerScheduler,
     printValidation: createPrintValidationCapability(),
     revision: createRevisionCapability(),
     printVault: createPrintVaultCapability(),

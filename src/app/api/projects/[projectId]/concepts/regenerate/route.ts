@@ -1,10 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getPersistenceMode } from "@/lib/db";
-import {
-  regenerateConcepts,
-  triggerGenerationWorker,
-} from "@/lib/services/conversation-service";
+import { regenerateConcepts } from "@/lib/services/conversation-service";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
@@ -21,8 +18,9 @@ export async function POST(_request: Request, context: RouteContext) {
     const { projectId } = await context.params;
     const snapshot = await regenerateConcepts(projectId);
 
-    // Sprint 2H Part 2A: kick the worker without making the customer wait.
-    triggerGenerationWorker();
+    // Sprint 2H Part 2B: this route never dispatches the worker — the
+    // independent worker (protected endpoint, scheduled trigger, or
+    // standalone process) picks the newly-enqueued job up on its own.
 
     return NextResponse.json({
       ...snapshot,

@@ -20,6 +20,7 @@ export type { DesignSummaryCapability } from "./design-summary";
 export type { PromptTranslationCapability } from "./prompt-translation";
 export type { ConceptGenerationCapability } from "./concept-generation";
 export type { GenerationWorkerCapability } from "./generation-worker";
+export type { GenerationSchedulerCapability } from "./worker-scheduler";
 export type { PrintValidationCapability } from "./print-validation";
 export type { RevisionCapability } from "./revision";
 export type { PrintVaultCapability } from "./print-vault";

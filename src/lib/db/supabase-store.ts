@@ -29,6 +29,8 @@ import type {
   ProjectRepository,
   UpdateGenerationJobInput,
 } from "./repository";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import { UniqueConstraintViolationError } from "./repository";
 import { getSupabaseServiceClient, isSupabaseConfigured } from "./supabase-client";
 
@@ -293,7 +295,18 @@ const POSTGRES_UNIQUE_VIOLATION = "23505";
 export { isSupabaseConfigured };
 
 export class SupabaseProjectRepository implements ProjectRepository {
-  private client = getSupabaseServiceClient();
+  private client: SupabaseClient;
+
+  /**
+   * Sprint 2H Part 2B: accepts an injectable client (mirroring
+   * `SupabaseStorageAssetProvider`) so `claimNextQueuedJob` /
+   * `recoverAbandonedJobs`'s atomic-claim query shape can be unit-tested
+   * against a fake Postgrest client without live Supabase infrastructure.
+   * Production call sites never pass an argument.
+   */
+  constructor(client: SupabaseClient = getSupabaseServiceClient()) {
+    this.client = client;
+  }
 
   async createProject(): Promise<ProjectSnapshot> {
     const { data: projectRow, error: projectError } = await this.client
@@ -805,31 +818,30 @@ export class SupabaseProjectRepository implements ProjectRepository {
   async recoverAbandonedJobs(staleAfterMs: number): Promise<GenerationJob[]> {
     const staleBefore = new Date(Date.now() - staleAfterMs).toISOString();
 
-    // A job that was claimed but never got a heartbeat is treated as stale
-    // from `started_at`; one that did heartbeat is judged on that instead.
+    // Sprint 2H Part 2B: a single atomic conditional UPDATE — no
+    // select-then-write gap. The earlier version selected stale candidates
+    // first and then unconditionally flipped exactly those row IDs to
+    // "recoverable", which meant a job that legitimately heartbeated (or
+    // even completed) in the gap between the SELECT and the UPDATE would
+    // still get recovered — a second worker could then claim and re-run a
+    // job that was never actually abandoned, producing a duplicate
+    // concept batch. Folding the staleness filter directly into the
+    // UPDATE's WHERE clause means Postgres evaluates it against each row's
+    // *current* state at commit time, so a job is recovered "only once":
+    // any legitimate heartbeat or completion between when this query was
+    // issued and when it executes excludes that row from the update,
+    // exactly like `claimNextQueuedJob`'s conditional claim.
     const { data, error } = await this.client
       .from("generation_jobs")
-      .select("*")
+      .update({ status: "recoverable", updated_at: new Date().toISOString() })
       .eq("status", "running")
       .or(
         `and(heartbeat_at.is.null,started_at.lt.${staleBefore}),heartbeat_at.lt.${staleBefore}`,
-      );
-    if (error) throw error;
-
-    const stale = (data as DbGenerationJob[]) ?? [];
-    if (stale.length === 0) return [];
-
-    const { data: updated, error: updateError } = await this.client
-      .from("generation_jobs")
-      .update({ status: "recoverable", updated_at: new Date().toISOString() })
-      .in(
-        "id",
-        stale.map((job) => job.id),
       )
       .select("*");
-    if (updateError) throw updateError;
+    if (error) throw error;
 
-    return ((updated as DbGenerationJob[]) ?? []).map(mapGenerationJob);
+    return ((data as DbGenerationJob[]) ?? []).map(mapGenerationJob);
   }
 
   // --- Sprint 2H Part 1: assets ---------------------------------------
