@@ -9,6 +9,12 @@ When a roadmap item, specification, implementation choice, or feature conflicts
 with the Constitution, the Constitution takes precedence unless it is formally
 amended.
 
+## System Architecture
+
+The current domain boundaries, capability relationships, generation runtime,
+persistence model, and security architecture are documented in
+[ARCHITECTURE.md](./ARCHITECTURE.md).
+
 ## Concept Generation & Asset Storage (Production Safety)
 
 Real (OpenAI) concept generation must stay **disabled** in production until a
