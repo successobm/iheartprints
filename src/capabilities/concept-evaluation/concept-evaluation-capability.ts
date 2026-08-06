@@ -30,13 +30,19 @@ export interface ConceptEvaluationInput {
  * vendor API. Never writes repositories, mutates briefs, or produces
  * customer-facing copy. Persistence is the caller's responsibility
  * (GenerationWorkerCapability).
+ *
+ * Sprint 2I Phase 2 boundary enforcement: before a result is treated as
+ * persistable, `providerMetadata` is allowlisted and every persisted string
+ * field is scrubbed of URLs so ephemeral `sourceUrl` values (and any other
+ * http(s) links) cannot land in `ArtworkVersion.evaluation` /
+ * `ProjectSnapshot`.
  */
 export interface ConceptEvaluationCapability {
   evaluate(input: ConceptEvaluationInput): Promise<ConceptEvaluationResult>;
   /**
    * Maps a provider result into the persistable ArtworkVersion evaluation
-   * fields. Strips nothing structural; `providerMetadata` stays internal on
-   * the persisted payload (never rendered as customer copy).
+   * fields. Sanitizes `providerMetadata` (allowlist only) and redacts URLs
+   * from string fields. Never customer-facing copy.
    */
   toPersistedEvaluation(result: ConceptEvaluationResult): {
     evaluation: PersistedConceptEvaluation;
@@ -47,6 +53,21 @@ export interface ConceptEvaluationCapability {
   evaluationFailureFallback(error: unknown): ConceptEvaluationResult;
   readonly providerKey: string;
 }
+
+/** Keys allowed on persisted `providerMetadata`. Everything else is dropped. */
+const PROVIDER_METADATA_ALLOWLIST = new Set([
+  "mode",
+  "model",
+  "assetCount",
+  "hasRequiredWording",
+  "hasStyle",
+  "hasExclusions",
+  "errorClass",
+  "errorSummary",
+]);
+
+/** Matches http(s) URLs — used to scrub ephemeral signed URLs from persisted text. */
+const HTTP_URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
 
 export function createConceptEvaluationCapability(
   provider: ConceptEvaluationProvider,
@@ -92,7 +113,7 @@ export function createConceptEvaluationCapability(
         error && typeof error === "object" && "message" in error
           ? String((error as { message?: unknown }).message ?? "unknown")
           : "unknown";
-      return {
+      return normalizeResult({
         overallScore: null,
         passed: null,
         confidence: 0,
@@ -113,10 +134,10 @@ export function createConceptEvaluationCapability(
         providerMetadata: {
           mode: "failure_fallback",
           errorClass: error instanceof Error ? error.name : "unknown",
-          // Sanitized — never stack traces or secrets.
+          // Sanitized — never stack traces, secrets, or signed URLs.
           errorSummary: message.slice(0, 200),
         },
-      };
+      });
     },
   };
 }
@@ -135,15 +156,54 @@ function normalizeResult(result: ConceptEvaluationResult): ConceptEvaluationResu
         score: clampScore(found?.score ?? null),
         passed: found?.passed ?? null,
         confidence: clampScore(found?.confidence ?? 0) ?? 0,
-        notes: found?.notes ?? null,
+        notes: redactUrls(found?.notes ?? null),
       };
     }),
-    warnings: [...result.warnings],
-    recommendations: [...result.recommendations],
-    missingRequirements: [...result.missingRequirements],
-    matchedRequirements: [...result.matchedRequirements],
-    providerMetadata: { ...result.providerMetadata },
+    warnings: result.warnings.map((w) => redactUrls(w) ?? "").filter(Boolean),
+    recommendations: result.recommendations
+      .map((r) => redactUrls(r) ?? "")
+      .filter(Boolean),
+    missingRequirements: result.missingRequirements
+      .map((r) => redactUrls(r) ?? "")
+      .filter(Boolean),
+    matchedRequirements: result.matchedRequirements
+      .map((r) => redactUrls(r) ?? "")
+      .filter(Boolean),
+    providerMetadata: sanitizeProviderMetadata(result.providerMetadata),
   };
+}
+
+/**
+ * Sprint 2I Phase 2: persist only known-safe, non-secret metadata keys.
+ * Drops `sourceUrl` / URL-bearing values so ephemeral signed URLs cannot
+ * reach ArtworkVersion.evaluation or ProjectSnapshot.
+ */
+function sanitizeProviderMetadata(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!PROVIDER_METADATA_ALLOWLIST.has(key)) continue;
+    if (typeof value === "string") {
+      const scrubbed = redactUrls(value);
+      if (scrubbed !== null) sanitized[key] = scrubbed.slice(0, 200);
+      continue;
+    }
+    if (
+      typeof value === "number" ||
+      typeof value === "boolean" ||
+      value === null
+    ) {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
+
+function redactUrls(value: string | null): string | null {
+  if (value === null) return null;
+  const scrubbed = value.replace(HTTP_URL_PATTERN, "[redacted]").trim();
+  return scrubbed.length > 0 ? scrubbed : null;
 }
 
 function clampScore(value: number | null | undefined): number | null {

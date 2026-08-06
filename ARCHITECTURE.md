@@ -174,7 +174,8 @@ Conversation
   → Prompt Translation
   → Generation Provider
   → Asset Storage
-  → Concept Evaluation (persisted; does not block presentation in Phase 1)
+  → Concept Evaluation (real vision-based scoring when configured, otherwise
+    placeholder; persisted; still does not block presentation)
   → Concepts Ready
   → Customer Review
   → Revision Intelligence
@@ -197,9 +198,10 @@ Real provider generation is guarded by configuration
 mode uses the placeholder provider.
 
 Generated concepts are options for human review. They are **not**
-print-ready production assets. Concept Evaluation (Phase 1) records whether
-each concept aligns with the approved Design Brief but does **not** block
-customer presentation. Print Validation is not implemented.
+print-ready production assets. Concept Evaluation (Phase 1 architecture;
+Phase 2 first real evaluator) records whether each concept aligns with the
+approved Design Brief but does **not** block customer presentation. Print
+Validation is not implemented.
 
 ---
 
@@ -406,6 +408,14 @@ Provider adapters (placeholder today; vision/OCR later)
 Default adapter: `PlaceholderConceptEvaluationProvider` — deterministic
 `needs_review` with every criterion marked `not_assessed`. No vision, OCR,
 or color analysis.
+
+Sprint 2I Phase 2 adds the first real adapter,
+`OpenAIConceptEvaluationProvider` — a vision-capable chat model scores a
+generated concept's image against the requirements actually present on the
+approved brief snapshot. Composition resolves between the two via
+`resolveConceptEvaluationProvider` / `getConceptEvaluationConfig`
+(`CONCEPT_EVALUATION_PROVIDER=placeholder|openai`, default `placeholder`).
+See §13 for the full evaluation contract and §21 for configuration.
 
 ### GenerationSchedulerCapability — Active
 
@@ -832,16 +842,19 @@ Providers:
 - keep provider-specific prompt language inside the adapter — never in the
   Design Brief or `GenerationPromptRequest`
 
-### Concept Evaluation architecture (Sprint 2I Phase 1)
+### Concept Evaluation architecture (Sprint 2I Phase 1 + Phase 2)
 
 Mirrors Prompt Translation / generation: provider-neutral contracts,
 replaceable evaluators, deterministic orchestration.
 
 ```
 Generation Worker
-  → AssetCapability
+  → AssetCapability (persist bytes; also mints a short-lived signed URL
+                      per asset for the evaluation step below)
   → ConceptEvaluationCapability
         → ConceptEvaluationProvider
+              (placeholder, deterministic — or —
+               OpenAIConceptEvaluationProvider, vision-based)
   → Persist evaluation on ArtworkVersion
   → Conversation update (unchanged customer copy)
 ```
@@ -850,21 +863,94 @@ Generation Worker
 |---|---|---|
 | Question | Does this concept match the approved Design Brief? | Is this artwork production-/print-ready? |
 | Criteria | wording, style, graphics, palette, composition, readability, exclusions, product compatibility, overall alignment | DPI, transparency, vector/raster quality, print size, embroidery limits |
-| Phase 1 | Architecture + persistence; no UI gating | Reserved stub |
+| Phase 1/2 | Architecture, persistence, and a real evaluator; still no UI gating | Reserved stub |
 
-Persistence on `ArtworkVersion` (provider-neutral):
+Persistence on `ArtworkVersion` (provider-neutral, unchanged since Phase 1):
 
 - `evaluationStatus`: `pending` | `passed` | `needs_review` | `failed`
 - `evaluation`: `ConceptEvaluation` JSON payload
 - `evaluationEvaluatedAt`
 - `evaluationProviderKey`
 
+**Evaluation lifecycle / state transitions** (see also §8's `ArtworkVersion`
+diagram — unchanged shape, now driven by a real evaluator when configured):
+
+```
+(concept generated, asset(s) persisted)
+        │
+        ▼
+GenerationWorkerCapability mints a short-lived signed URL per asset
+(AssetCapability.getSignedUrl) and calls ConceptEvaluationCapability.evaluate
+        │
+        ├─ provider succeeds ──► toPersistedEvaluation()
+        │                             ├─► "passed"        (high alignment,
+        │                             │                     high confidence,
+        │                             │                     no violations)
+        │                             ├─► "needs_review"   (low confidence,
+        │                             │                     uncertain signal,
+        │                             │                     or no fetchable
+        │                             │                     image)
+        │                             └─► "failed"         (confidently
+        │                                                    missing required
+        │                                                    wording, or a
+        │                                                    confidently
+        │                                                    violated
+        │                                                    exclusion)
+        │
+        └─ provider throws / times out ──► evaluationFailureFallback()
+                                                  └─► "needs_review"
+        │
+        ▼
+Persisted on ArtworkVersion — concept always still presented to the
+customer in Phase 1/2 regardless of status (advisory only; no gating,
+hiding, ranking, or regeneration decisions are made from it yet).
+```
+
 Security: evaluation providers receive only approved brief snapshot content,
 concept presentation fields, and opaque asset references — never customer
 ids, conversation ids, generation job ids, secrets, or repository handles.
+`ConceptEvaluationAssetReference.sourceUrl` (Phase 2) is the one exception
+worth calling out explicitly: it is a short-lived, expiring URL from the
+same `AssetCapability.getSignedUrl` mechanism the browser uses — not a raw
+storage key, not a repository handle, and never a long-lived link. A
+provider adapter that needs pixels (only `OpenAIConceptEvaluationProvider`
+today) fetches it directly; the capability layer never reads image bytes on
+the provider's behalf. `sourceUrl` is request-path only: it must never be
+copied into persisted `ArtworkVersion.evaluation`, `providerMetadata`,
+conversation messages, logs, or customer UI. `ConceptEvaluationCapability`
+allowlists `providerMetadata` and redacts http(s) URLs from persisted
+string fields as a defensive boundary.
 
-Default provider: `PlaceholderConceptEvaluationProvider` (`needs_review`,
-criteria `not_assessed`). No vision, OCR, or color analysis in Phase 1.
+Providers: `PlaceholderConceptEvaluationProvider` (default; deterministic
+`needs_review`, criteria `not_assessed`; no vision, OCR, or color analysis)
+and `OpenAIConceptEvaluationProvider` (Sprint 2I Phase 2 — a vision-capable
+chat model). The real provider:
+
+- verifies required wording via OCR-style reading of the image, returning a
+  confidence alongside `found` rather than failing on small uncertainty
+- verifies stated exclusions are not obviously violated
+- uses broad semantic color/style/graphics matching (e.g. "forest green" /
+  "olive" both satisfy a "green" request; "vintage" is judged as a broad
+  direction, not ranked subjectively)
+- never invents a requirement the brief did not state — any criterion
+  without a corresponding brief field is forced to `not_assessed` in code,
+  regardless of what the provider's raw response contains
+- only reaches `failed` when a negative signal (missing wording, violated
+  exclusion) carries high confidence; otherwise `needs_review`
+- degrades to an honest `needs_review` (no network call) when no asset has
+  a usable image URL, and to the shared `evaluationFailureFallback` on any
+  network/timeout/rate-limit/malformed-response failure after its own
+  bounded retries — the pipeline's failure handling (never discard
+  concepts) is unchanged from Phase 1
+
+Configuration (composition layer only — see §21): `CONCEPT_EVALUATION_PROVIDER`
+(`placeholder` default, or `openai`), reusing `OPENAI_API_KEY`, plus optional
+`OPENAI_EVALUATION_MODEL` (default `gpt-4o-mini`). Unlike concept
+*generation*, a misconfigured `openai` evaluation request never fails
+closed — it always falls back to the placeholder evaluator, in every
+environment including production, because evaluation is advisory-only and
+every failure path already degrades to `needs_review` without discarding or
+misrepresenting anything to a customer.
 
 ---
 
@@ -1062,8 +1148,10 @@ Relevant environment variables (names only; never commit secrets):
 |---|---|
 | `CONCEPT_GENERATION_PROVIDER` | `placeholder` (default) or `openai` |
 | `CONCEPT_GENERATION_ENABLE_REAL` | Kill switch; must be `true` to allow OpenAI adapter even when otherwise configured |
-| `OPENAI_API_KEY` | Real provider credential (server-only) |
-| `OPENAI_IMAGE_MODEL` | Defaults to `gpt-image-1` |
+| `OPENAI_API_KEY` | Real provider credential (server-only); shared by concept generation and Concept Evaluation |
+| `OPENAI_IMAGE_MODEL` | Defaults to `gpt-image-1` (concept generation) |
+| `CONCEPT_EVALUATION_PROVIDER` | `placeholder` (default) or `openai` — Sprint 2I Phase 2, advisory-only (see §13) |
+| `OPENAI_EVALUATION_MODEL` | Defaults to `gpt-4o-mini` (Concept Evaluation only; no kill switch — see §13) |
 | `ASSET_STORAGE_MODE` | `data_uri` (default), `filesystem`, `supabase_storage`, `s3` |
 | `ASSET_SIGNING_SECRET` | Filesystem signed-URL HMAC (dev fallback if unset) |
 | `WORKER_SECRET` | Worker endpoint auth (required in production) |
@@ -1094,6 +1182,12 @@ CONCEPT_GENERATION_ENABLE_REAL=false
 ```
 
 OpenAI is not treated as enabled unless configuration explicitly unlocks it.
+
+Concept Evaluation's own resolution (`resolveConceptEvaluationProvider`) is
+deliberately simpler and has no `unavailable`/kill-switch state: requesting
+`openai` without `OPENAI_API_KEY` set falls back to the placeholder
+evaluator in every environment, including production — see §13 for why that
+asymmetry with concept generation is safe.
 
 ---
 
@@ -1168,8 +1262,10 @@ Verified against the implementation:
 - S3 adapter is reserved but not implemented
 - Orphan asset cleanup cannot recover from a hard process crash after
   upload and before DB persist
-- Concept Evaluation Phase 1 persists results but does not block, reject,
-  or hide concepts from customers; no UI scoring yet
+- Concept Evaluation (Phase 1 + Phase 2) persists results — now from a real
+  vision-based evaluator when configured — but still does not block, reject,
+  rank, or hide concepts from customers; no UI scoring yet. Remains
+  advisory-only until a future phase decides to act on it
 - Print Validation is stub-only (`overall: "not_run"`)
 - Generated concepts are not print-ready production assets
 - Print Vault behavior is not implemented
@@ -1191,9 +1287,9 @@ Describe attachment points only — not a delivery plan:
 
 | Extension | Attach where |
 |---|---|
-| ConceptEvaluationCapability | **Phase 1 done (architecture).** Phase 2+: real evaluators, gating, regeneration decisions; never mutate brief |
+| ConceptEvaluationCapability | **Phase 1 (architecture) + Phase 2 (first real evaluator) done.** Phase 3+: gating/ranking/regeneration decisions driven by evaluation results; never mutate brief |
 | PrintValidationCapability | Replace stub; validate artwork against approved brief; never mutate brief; never confuse with Concept Evaluation |
-| Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider`; no domain change |
+| Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider` (e.g. a dedicated OCR specialist, a different vision model); no domain change |
 | Production file generation | New assets linked via `printAssetId` / dedicated kinds |
 | Vector output | `vectorAssetId` / SVG asset kinds |
 | Mockups | Presentation layer consuming artwork + product context |

@@ -53,6 +53,7 @@ function evaluationInput(
         widthPx: 1024,
         heightPx: 1024,
         isThumbnail: false,
+        sourceUrl: "https://assets.example.test/signed/asset-1",
       },
     ],
     idempotencyKey: overrides.idempotencyKey ?? "eval-key-1",
@@ -287,5 +288,116 @@ describe("provider neutrality and future replacement", () => {
     assert.equal("conversationId" in seen!, false);
     assert.equal("generationJobId" in seen!, false);
     assert.equal("projectId" in seen!, false);
+  });
+});
+
+describe("Sprint 2I Phase 2 — sourceUrl and providerMetadata boundaries", () => {
+  const signedUrl = "https://assets.example.test/signed/secret-asset?token=abc";
+
+  it("never persists sourceUrl even when a provider puts it in providerMetadata", async () => {
+    const leaky: ConceptEvaluationProvider = {
+      providerKey: "leaky",
+      async evaluate(): Promise<ConceptEvaluationResult> {
+        return {
+          overallScore: 50,
+          passed: null,
+          confidence: 40,
+          status: "needs_review",
+          criteria: CONCEPT_EVALUATION_CRITERION_KEYS.map((key) => ({
+            key,
+            score: null,
+            passed: null,
+            confidence: 0,
+            notes: `see ${signedUrl}`,
+          })),
+          warnings: [`fetch failed for ${signedUrl}`],
+          recommendations: [],
+          missingRequirements: [],
+          matchedRequirements: [],
+          providerMetadata: {
+            mode: "openai_vision",
+            model: "gpt-4o-mini",
+            sourceUrl: signedUrl,
+            imageUrl: signedUrl,
+            prompt: "secret dialect",
+            dialect: "should-drop",
+          },
+        };
+      },
+    };
+
+    const capability = createConceptEvaluationCapability(leaky);
+    const persisted = capability.toPersistedEvaluation(
+      await capability.evaluate(evaluationInput()),
+    );
+    const serialized = JSON.stringify(persisted.evaluation);
+
+    assert.equal(serialized.includes(signedUrl), false);
+    assert.equal(serialized.includes("sourceUrl"), false);
+    assert.equal(serialized.includes("imageUrl"), false);
+    assert.equal(serialized.includes("secret dialect"), false);
+    assert.equal(serialized.includes("should-drop"), false);
+    assert.deepEqual(Object.keys(persisted.evaluation.providerMetadata).sort(), [
+      "mode",
+      "model",
+    ]);
+    assert.match(persisted.evaluation.warnings[0] ?? "", /\[redacted\]/);
+    assert.match(persisted.evaluation.criteria[0]?.notes ?? "", /\[redacted\]/);
+  });
+
+  it("redacts signed URLs from failure-fallback errorSummary", () => {
+    const capability = createConceptEvaluationCapability(
+      new PlaceholderConceptEvaluationProvider(),
+    );
+    const fallback = capability.evaluationFailureFallback(
+      new Error(`vision fetch failed: ${signedUrl}`),
+    );
+    const summary = String(fallback.providerMetadata.errorSummary ?? "");
+    assert.equal(summary.includes(signedUrl), false);
+    assert.match(summary, /\[redacted\]/);
+    assert.deepEqual(Object.keys(fallback.providerMetadata).sort(), [
+      "errorClass",
+      "errorSummary",
+      "mode",
+    ]);
+  });
+
+  it("keeps request-path sourceUrl ephemeral — never copied onto the result", async () => {
+    let seenRequest: ConceptEvaluationRequest | null = null;
+    const provider: ConceptEvaluationProvider = {
+      providerKey: "echo",
+      async evaluate(request) {
+        seenRequest = request;
+        return {
+          overallScore: null,
+          passed: null,
+          confidence: 0,
+          status: "needs_review",
+          criteria: CONCEPT_EVALUATION_CRITERION_KEYS.map((key) => ({
+            key,
+            score: null,
+            passed: null,
+            confidence: 0,
+            notes: null,
+          })),
+          warnings: [],
+          recommendations: [],
+          missingRequirements: [],
+          matchedRequirements: [],
+          providerMetadata: { mode: "echo" },
+        };
+      },
+    };
+
+    const capability = createConceptEvaluationCapability(provider);
+    const result = await capability.evaluate(
+      evaluationInput({
+        // evaluationInput already includes a signed sourceUrl on assets
+      }),
+    );
+
+    assert.equal(seenRequest?.assets[0]?.sourceUrl, "https://assets.example.test/signed/asset-1");
+    assert.equal(JSON.stringify(result).includes("assets.example.test"), false);
+    assert.equal("sourceUrl" in result.providerMetadata, false);
   });
 });

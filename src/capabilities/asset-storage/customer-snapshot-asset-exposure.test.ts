@@ -42,6 +42,7 @@ describe("customer snapshot asset exposure (Sprint 2H Part 2A security)", () => 
 
     assert.equal("assets" in snapshot, false);
     assert.equal("storageKey" in snapshot.artworkVersions[0]!, false);
+    assert.equal("sourceUrl" in snapshot.artworkVersions[0]!, false);
     assert.equal(snapshot.artworkVersions[0]!.primaryAssetId, "asset-1");
     assert.equal(snapshot.artworkVersions[0]!.thumbnailAssetId, "asset-2");
   });

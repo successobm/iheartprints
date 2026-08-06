@@ -19,6 +19,7 @@ import { createConceptGenerationCapability } from "@/capabilities/concept-genera
 
 import {
   createConceptEvaluationCapability,
+  OpenAIConceptEvaluationProvider,
   PlaceholderConceptEvaluationProvider,
   type ConceptEvaluationProvider,
   type ConceptEvaluationResult,
@@ -257,5 +258,283 @@ describe("Concept Evaluation — generation integration (Sprint 2I Phase 1)", ()
     const found = reloaded!.artworkVersions.find((a) => a.id === art.id);
     assert.equal(found?.evaluationStatus, "passed");
     assert.equal(found?.evaluationEvaluatedAt, "2026-08-06T00:00:00.000Z");
+  });
+});
+
+describe("Concept Evaluation — real (OpenAI) provider generation-worker integration (Sprint 2I Phase 2)", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-concept-eval-openai-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function freshRepo() {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    return new LocalProjectRepository();
+  }
+
+  async function approvedProject(repo: Awaited<ReturnType<typeof freshRepo>>) {
+    const created = await repo.createProject();
+    await repo.updateBrief(created.project.id, {
+      productSummary: "Camp t-shirts",
+      designDescription: "A friendly bear mascot",
+      exactText: "Camp Wildwood 2026",
+      shirtColor: "Navy",
+      designStyle: "Rustic",
+      preferredColors: ["Gold"],
+      exclusions: "No cartoon weapons",
+    });
+    const designBrief = createDesignBriefCapability(repo);
+    const version = await designBrief.approveWorkingBrief(created.project.id);
+    return { projectId: created.project.id, version };
+  }
+
+  function fullMatchPayload() {
+    return {
+      requiredWording: { found: true, detectedText: "Camp Wildwood 2026", confidence: 92, notes: "clear" },
+      exclusions: { violated: false, details: "none seen", confidence: 88 },
+      style: { matches: true, score: 82, confidence: 78, notes: "rustic hand-drawn feel" },
+      graphics: { matches: true, score: 85, confidence: 80, notes: "bear mascot present" },
+      colorPalette: { matches: true, score: 80, confidence: 75, notes: "gold used" },
+      productCompatibility: { matches: true, score: 90, confidence: 70, notes: "fits a t-shirt" },
+      composition: { score: 82, confidence: 75, notes: "balanced" },
+      readability: { score: 88, confidence: 80, notes: "legible" },
+      overallAlignment: { score: 85, confidence: 80, notes: "strong alignment" },
+      warnings: [],
+      recommendations: [],
+    };
+  }
+
+  it("evaluates real generated concepts against the approved brief via image URLs derived from AssetCapability", async () => {
+    const repo = await freshRepo();
+    const requestedImageUrls: string[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init!.body)) as {
+        messages: Array<{ role: string; content: unknown }>;
+      };
+      const userMessage = body.messages.find((m) => m.role === "user")!;
+      const content = userMessage.content as Array<Record<string, unknown>>;
+      const image = content.find((p) => p.type === "image_url") as {
+        image_url: { url: string };
+      };
+      requestedImageUrls.push(image.image_url.url);
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(fullMatchPayload()) } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const evaluationProvider = new OpenAIConceptEvaluationProvider({
+      apiKey: "sk-test",
+      model: "gpt-4o-mini",
+      fetchImpl,
+      sleepImpl: async () => {},
+    });
+
+    const generationProvider = new InstantProvider();
+    const promptTranslation = createPromptTranslationCapability();
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const capability = createConceptGenerationCapability(repo, generationProvider.providerKey);
+    const conceptEvaluation = createConceptEvaluationCapability(evaluationProvider);
+    const worker = createGenerationWorkerCapability(
+      repo,
+      generationProvider,
+      promptTranslation,
+      assets,
+      conceptEvaluation,
+    );
+
+    const { projectId, version } = await approvedProject(repo);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+
+    const snapshot = await repo.getProject(projectId);
+    assert.equal(snapshot?.artworkVersions.length, 3);
+    // InstantProvider produces no real image bytes, so no asset — and
+    // therefore no source URL — exists per concept. The adapter must
+    // degrade to its honest no-image result rather than fabricate one.
+    for (const art of snapshot!.artworkVersions) {
+      assert.equal(art.evaluationStatus, "needs_review");
+      assert.equal(art.evaluation?.providerMetadata.mode, "no_image_available");
+      assert.equal(art.evaluationProviderKey, "openai_vision_concept_evaluation");
+    }
+    assert.equal(requestedImageUrls.length, 0);
+
+    // Customer-facing copy never mentions provider internals.
+    const readyMessage = snapshot!.messages.filter((m) => m.role === "assistant").at(-1);
+    assert.doesNotMatch(readyMessage?.content ?? "", /openai|vision|gpt|score/i);
+  });
+
+  it("passes AssetCapability-issued signed URLs through to the provider when real image bytes exist", async () => {
+    const repo = await freshRepo();
+    const requestedImageUrls: string[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init!.body)) as {
+        messages: Array<{ role: string; content: unknown }>;
+      };
+      const userMessage = body.messages.find((m) => m.role === "user")!;
+      const content = userMessage.content as Array<Record<string, unknown>>;
+      const image = content.find((p) => p.type === "image_url") as {
+        image_url: { url: string };
+      };
+      requestedImageUrls.push(image.image_url.url);
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(fullMatchPayload()) } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const evaluationProvider = new OpenAIConceptEvaluationProvider({
+      apiKey: "sk-test",
+      model: "gpt-4o-mini",
+      fetchImpl,
+      sleepImpl: async () => {},
+    });
+
+    class RealBytesProvider implements ConceptGenerationProvider {
+      readonly providerKey = "real-bytes";
+      async generate(req: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
+        return {
+          jobId: req.idempotencyKey,
+          providerKey: this.providerKey,
+          concepts: Array.from({ length: req.conceptCount }, (_, index) => ({
+            versionNumber: index + 1,
+            title: `Concept ${index + 1}`,
+            summary: "x",
+            placeholderLabel: `Concept ${index}`,
+            accentColor: "#000",
+            kind: "concept" as const,
+            asset: {
+              imageBytes: Buffer.from("fake-png-bytes"),
+              contentType: "image/png",
+              widthPx: 1024,
+              heightPx: 1024,
+              hasTransparency: true,
+              providerMetadata: {},
+            },
+          })),
+        };
+      }
+    }
+
+    const generationProvider = new RealBytesProvider();
+    const promptTranslation = createPromptTranslationCapability();
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const capability = createConceptGenerationCapability(repo, generationProvider.providerKey);
+    const conceptEvaluation = createConceptEvaluationCapability(evaluationProvider);
+    const worker = createGenerationWorkerCapability(
+      repo,
+      generationProvider,
+      promptTranslation,
+      assets,
+      conceptEvaluation,
+    );
+
+    const { projectId, version } = await approvedProject(repo);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+
+    const snapshot = await repo.getProject(projectId);
+    assert.equal(snapshot?.artworkVersions.length, 3);
+    // One image URL was requested per concept, each a data: URI (the
+    // DataUriAssetStorageProvider's "signed URL") — never a raw storage key.
+    assert.equal(requestedImageUrls.length, 3);
+    for (const url of requestedImageUrls) {
+      assert.match(url, /^data:image\/png;base64,/);
+    }
+    for (const art of snapshot!.artworkVersions) {
+      assert.equal(art.evaluationStatus, "passed");
+      assert.equal(art.evaluation?.overallScore, 85);
+      assert.equal(art.evaluationProviderKey, "openai_vision_concept_evaluation");
+    }
+  });
+
+  it("falls back to needs_review and never discards concepts when the real provider fails", async () => {
+    const repo = await freshRepo();
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ error: "down" }), { status: 503 })) as typeof fetch;
+
+    const evaluationProvider = new OpenAIConceptEvaluationProvider({
+      apiKey: "sk-test",
+      model: "gpt-4o-mini",
+      fetchImpl,
+      sleepImpl: async () => {},
+    });
+
+    class RealBytesProvider implements ConceptGenerationProvider {
+      readonly providerKey = "real-bytes";
+      async generate(req: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
+        return {
+          jobId: req.idempotencyKey,
+          providerKey: this.providerKey,
+          concepts: Array.from({ length: req.conceptCount }, (_, index) => ({
+            versionNumber: index + 1,
+            title: `Concept ${index + 1}`,
+            summary: "x",
+            placeholderLabel: `Concept ${index}`,
+            accentColor: "#000",
+            kind: "concept" as const,
+            asset: {
+              imageBytes: Buffer.from("fake-png-bytes"),
+              contentType: "image/png",
+              widthPx: 1024,
+              heightPx: 1024,
+              hasTransparency: true,
+              providerMetadata: {},
+            },
+          })),
+        };
+      }
+    }
+
+    const generationProvider = new RealBytesProvider();
+    const promptTranslation = createPromptTranslationCapability();
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const capability = createConceptGenerationCapability(repo, generationProvider.providerKey);
+    const conceptEvaluation = createConceptEvaluationCapability(evaluationProvider);
+    const worker = createGenerationWorkerCapability(
+      repo,
+      generationProvider,
+      promptTranslation,
+      assets,
+      conceptEvaluation,
+    );
+
+    const { projectId, version } = await approvedProject(repo);
+    await capability.generatePlaceholders(projectId, version.id);
+    await worker.processNextJob();
+
+    const snapshot = await repo.getProject(projectId);
+    // Failure never discards concepts — all 3 still exist, presented to the
+    // customer, just internally marked needs_review.
+    assert.equal(snapshot?.artworkVersions.length, 3);
+    assert.equal(snapshot?.project.status, "concepts_ready");
+    for (const art of snapshot!.artworkVersions) {
+      assert.equal(art.evaluationStatus, "needs_review");
+      assert.equal(art.evaluation?.providerMetadata.mode, "failure_fallback");
+    }
   });
 });

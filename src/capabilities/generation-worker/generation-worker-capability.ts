@@ -124,6 +124,11 @@ export function createGenerationWorkerCapability(
           widthPx: primary.widthPx,
           heightPx: primary.heightPx,
           isThumbnail: false,
+          // Sprint 2I Phase 2: same short-lived, expiring URL the browser
+          // would use — never a raw storage key. `getSignedUrl` already
+          // returns `null` when there is nothing to sign; evaluation
+          // proceeds either way (see failure fallback).
+          sourceUrl: await assets.getSignedUrl(primary.id),
         });
       }
     }
@@ -136,6 +141,7 @@ export function createGenerationWorkerCapability(
           widthPx: thumb.widthPx,
           heightPx: thumb.heightPx,
           isThumbnail: true,
+          sourceUrl: await assets.getSignedUrl(thumb.id),
         });
       }
     }

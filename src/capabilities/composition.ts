@@ -9,7 +9,7 @@ import {
 import { createBriefEvaluationCapability } from "@/capabilities/brief-evaluation";
 import {
   createConceptEvaluationCapability,
-  PlaceholderConceptEvaluationProvider,
+  resolveConceptEvaluationProvider,
 } from "@/capabilities/concept-evaluation";
 import { createConceptGenerationCapability } from "@/capabilities/concept-generation";
 import { createConversationCapability } from "@/capabilities/conversation";
@@ -90,10 +90,11 @@ export function createCapabilityGraph(
     repo,
     provider.providerKey,
   );
-  // Sprint 2I Phase 1: placeholder only — no vision/OCR provider yet.
-  // Composition owns selection; conversation/UI never inspect env vars.
+  // Sprint 2I Phase 2: resolves to a real (OpenAI vision) evaluator when
+  // configured, otherwise the deterministic placeholder. Composition owns
+  // selection; conversation/UI never inspect env vars.
   const conceptEvaluation = createConceptEvaluationCapability(
-    new PlaceholderConceptEvaluationProvider(),
+    resolveConceptEvaluationProvider(),
   );
   const generationWorker = createGenerationWorkerCapability(
     repo,

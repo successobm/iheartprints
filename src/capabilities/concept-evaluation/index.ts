@@ -6,6 +6,11 @@ export {
 export type { ConceptEvaluationProvider } from "./concept-evaluation-provider";
 export { PlaceholderConceptEvaluationProvider } from "./placeholder-concept-evaluation-provider";
 export {
+  OpenAIConceptEvaluationProvider,
+  type OpenAIConceptEvaluationProviderConfig,
+} from "./openai-concept-evaluation-provider";
+export { resolveConceptEvaluationProvider } from "./resolve-concept-evaluation-provider";
+export {
   CONCEPT_EVALUATION_CRITERION_KEYS,
   CONCEPT_EVALUATION_STATUSES,
   type ConceptEvaluationAssetReference,

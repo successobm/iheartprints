@@ -3,7 +3,8 @@
  * These are conventions enforced by composition and code review (Sprint 2C,
  * refined Sprint 2E, adaptive interview Sprint 2F, adaptive revisions
  * Sprint 2G Part 2, real generation infrastructure Sprint 2H Part 1,
- * Concept Evaluation architecture Sprint 2I Phase 1).
+ * Concept Evaluation architecture Sprint 2I Phase 1, first real Concept
+ * Evaluation provider Sprint 2I Phase 2).
  *
  * Pipeline (Sprint 2G Part 2):
  *   Conversation → IntentExtraction → DesignBrief
@@ -87,6 +88,17 @@
  *                  Provider adapters receive ConceptEvaluationRequest only —
  *                  never customer ids, conversation ids, generation job ids,
  *                  provider secrets, or repository handles.
+ *                  Sprint 2I Phase 2: `ConceptEvaluationAssetReference.sourceUrl`
+ *                  — when present — is a short-lived, expiring URL that
+ *                  `GenerationWorkerCapability` mints via
+ *                  `AssetCapability.getSignedUrl` before calling
+ *                  `ConceptEvaluationCapability.evaluate`. This is the same
+ *                  customer-safe mechanism the browser uses for asset
+ *                  access, not a raw storage key or repository handle — a
+ *                  vision-capable provider adapter fetches it directly
+ *                  (never through the capability layer). Still `null`-safe:
+ *                  a missing/unmintable URL routes to an honest
+ *                  "not assessed" result rather than a network call.
  *   AssetCapability → persistence only. Called by ConceptGeneration after a
  *                  provider has already returned its result — never by a
  *                  provider adapter directly.
@@ -145,4 +157,4 @@
  *     Sprint 2I Phase 1)
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2I1" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2I2" as const;

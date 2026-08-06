@@ -17,8 +17,17 @@ import type {
 
 /**
  * Opaque asset references a provider may use to fetch bytes via its own
- * adapter wiring. Never includes storage keys, signed URLs, customer ids,
+ * adapter wiring. Never includes raw storage keys, customer ids,
  * conversation ids, generation job ids, or repository handles.
+ *
+ * Sprint 2I Phase 2: `sourceUrl`, when present, is a short-lived, expiring
+ * URL produced by `AssetCapability.getSignedUrl` (the same customer-safe
+ * mechanism the browser uses) — never a raw object key, never a
+ * long-lived link. A provider adapter that needs pixels (e.g. for vision
+ * analysis) fetches this URL itself; the capability layer never reads
+ * image bytes on the provider's behalf. `null` when no asset exists or the
+ * caller could not mint a URL (evaluation still proceeds — see failure
+ * fallback).
  */
 export interface ConceptEvaluationAssetReference {
   assetId: string;
@@ -26,6 +35,7 @@ export interface ConceptEvaluationAssetReference {
   widthPx: number | null;
   heightPx: number | null;
   isThumbnail: boolean;
+  sourceUrl: string | null;
 }
 
 /**
@@ -52,8 +62,10 @@ export interface ConceptEvaluationRequest {
 
 /**
  * What a ConceptEvaluationProvider returns. Includes internal-only
- * `providerMetadata`. Capability orchestration strips/sanitizes before
- * persistence and never forwards provider-specific payloads to customers.
+ * `providerMetadata`. Capability orchestration allowlists and scrubbing
+ * URLs from `providerMetadata` (and other persisted string fields) before
+ * the result is treated as persistable — ephemeral `sourceUrl` values must
+ * never reach `ArtworkVersion.evaluation` or `ProjectSnapshot`.
  */
 export interface ConceptEvaluationResult {
   overallScore: number | null;
