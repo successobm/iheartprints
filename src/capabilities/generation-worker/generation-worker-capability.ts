@@ -1,8 +1,18 @@
 import { randomUUID } from "crypto";
 
 import type { ProjectRepository } from "@/lib/db/repository";
-import type { GenerationJob } from "@/lib/domain/types";
+import type {
+  ConceptEvaluation,
+  ConceptEvaluationStatus,
+  DesignBriefSnapshotContent,
+  GenerationJob,
+} from "@/lib/domain/types";
 import type { AssetCapability } from "@/capabilities/assets";
+import type { ConceptEvaluationCapability } from "@/capabilities/concept-evaluation";
+import {
+  createConceptEvaluationCapability,
+  PlaceholderConceptEvaluationProvider,
+} from "@/capabilities/concept-evaluation";
 import type { PromptTranslationCapability } from "@/capabilities/prompt-translation";
 import { GenerationUnavailableError } from "@/capabilities/providers";
 import type { ConceptGenerationProvider } from "@/capabilities/providers";
@@ -50,6 +60,14 @@ export function createGenerationWorkerCapability(
   provider: ConceptGenerationProvider,
   promptTranslation: PromptTranslationCapability,
   assets: AssetCapability,
+  /**
+   * Sprint 2I Phase 1: Concept Evaluation runs after assets are persisted
+   * and before conversation completion. Defaults to the placeholder
+   * evaluator so existing tests remain valid without wiring changes.
+   */
+  conceptEvaluation: ConceptEvaluationCapability = createConceptEvaluationCapability(
+    new PlaceholderConceptEvaluationProvider(),
+  ),
 ): GenerationWorkerCapability {
   async function persistConceptAsset(
     designId: string,
@@ -74,6 +92,74 @@ export function createGenerationWorkerCapability(
     return {
       primaryAssetId: primary.id,
       thumbnailAssetId: thumbnail?.id ?? null,
+    };
+  }
+
+  /**
+   * Sprint 2I Phase 1: evaluate one concept against the approved brief.
+   * Evaluation failure never discards the concept — a needs_review fallback
+   * is persisted instead. Customer presentation is unchanged.
+   */
+  async function evaluateConcept(input: {
+    brief: DesignBriefSnapshotContent;
+    title: string;
+    summary: string;
+    placeholderLabel: string;
+    primaryAssetId: string | null;
+    thumbnailAssetId: string | null;
+    idempotencyKey: string;
+  }): Promise<{
+    evaluationStatus: ConceptEvaluationStatus;
+    evaluation: ConceptEvaluation;
+    evaluationEvaluatedAt: string;
+    evaluationProviderKey: string;
+  }> {
+    const assetRefs = [];
+    if (input.primaryAssetId) {
+      const primary = await repo.getAssetById(input.primaryAssetId);
+      if (primary) {
+        assetRefs.push({
+          assetId: primary.id,
+          contentType: primary.contentType,
+          widthPx: primary.widthPx,
+          heightPx: primary.heightPx,
+          isThumbnail: false,
+        });
+      }
+    }
+    if (input.thumbnailAssetId) {
+      const thumb = await repo.getAssetById(input.thumbnailAssetId);
+      if (thumb) {
+        assetRefs.push({
+          assetId: thumb.id,
+          contentType: thumb.contentType,
+          widthPx: thumb.widthPx,
+          heightPx: thumb.heightPx,
+          isThumbnail: true,
+        });
+      }
+    }
+
+    let result;
+    try {
+      result = await conceptEvaluation.evaluate({
+        brief: input.brief,
+        concept: {
+          title: input.title,
+          summary: input.summary,
+          placeholderLabel: input.placeholderLabel,
+        },
+        assets: assetRefs,
+        idempotencyKey: input.idempotencyKey,
+      });
+    } catch (error) {
+      result = conceptEvaluation.evaluationFailureFallback(error);
+    }
+
+    const persisted = conceptEvaluation.toPersistedEvaluation(result);
+    return {
+      ...persisted,
+      evaluationEvaluatedAt: new Date().toISOString(),
     };
   }
 
@@ -176,7 +262,27 @@ export function createGenerationWorkerCapability(
     );
     if (alreadyGenerated) {
       // Idempotent: a previous run already succeeded (e.g. this run is a
-      // recovered duplicate claim that lost the race) — nothing left to do.
+      // recovered duplicate claim that lost the race) — nothing left to do
+      // for generation. Sprint 2I: backfill evaluation only when a prior
+      // run left concepts without evaluationStatus.
+      for (const artwork of current.artworkVersions) {
+        if (
+          artwork.designBriefVersionId === approvedVersion.id &&
+          artwork.evaluationStatus === null
+        ) {
+          await repo.touchGenerationJobHeartbeat(job.id);
+          const evaluated = await evaluateConcept({
+            brief: approvedVersion.content,
+            title: artwork.title,
+            summary: artwork.summary,
+            placeholderLabel: artwork.placeholderLabel,
+            primaryAssetId: artwork.primaryAssetId,
+            thumbnailAssetId: artwork.thumbnailAssetId,
+            idempotencyKey: `${artwork.id}:${approvedVersion.id}`,
+          });
+          await repo.updateArtworkEvaluation(artwork.id, evaluated);
+        }
+      }
       await repo.updateGenerationJob(job.id, {
         status: "completed",
         completedAt: new Date().toISOString(),
@@ -233,6 +339,18 @@ export function createGenerationWorkerCapability(
           provider.providerKey,
           concept.asset,
         );
+        // Sprint 2I Phase 1 pipeline:
+        // Generation → Asset → Concept Evaluation → Persist evaluation.
+        // Evaluation failure never discards the concept.
+        const evaluated = await evaluateConcept({
+          brief: approvedVersion.content,
+          title: concept.title,
+          summary: concept.summary,
+          placeholderLabel: concept.placeholderLabel,
+          primaryAssetId: assetIds.primaryAssetId,
+          thumbnailAssetId: assetIds.thumbnailAssetId,
+          idempotencyKey: `${job.idempotencyKey}:concept:${index}`,
+        });
         versionsInput.push({
           versionNumber: startingVersionNumber + index + 1,
           kind: concept.kind,
@@ -245,6 +363,10 @@ export function createGenerationWorkerCapability(
           primaryAssetId: assetIds.primaryAssetId,
           thumbnailAssetId: assetIds.thumbnailAssetId,
           providerKey: provider.providerKey,
+          evaluationStatus: evaluated.evaluationStatus,
+          evaluation: evaluated.evaluation,
+          evaluationEvaluatedAt: evaluated.evaluationEvaluatedAt,
+          evaluationProviderKey: evaluated.evaluationProviderKey,
         });
       }
 

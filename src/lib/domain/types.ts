@@ -275,6 +275,57 @@ export interface AssetRecord {
   createdAt: string;
 }
 
+/**
+ * Sprint 2I Phase 1: internal ArtworkVersion workflow state for Concept
+ * Evaluation. Never invents customer-visible wording — UI must not render
+ * these labels as product language.
+ */
+export type ConceptEvaluationStatus =
+  | "pending"
+  | "passed"
+  | "needs_review"
+  | "failed";
+
+export type ConceptEvaluationCriterionKey =
+  | "required_wording"
+  | "style"
+  | "graphics"
+  | "color_palette"
+  | "product_compatibility"
+  | "composition"
+  | "readability"
+  | "exclusions"
+  | "overall_alignment";
+
+export interface ConceptEvaluationCriterionScore {
+  key: ConceptEvaluationCriterionKey;
+  /** 0–100, or null when the criterion was not assessed. */
+  score: number | null;
+  /** null when the provider could not determine pass/fail. */
+  passed: boolean | null;
+  /** 0–100 confidence for this criterion alone. */
+  confidence: number;
+  /** Internal notes — never customer-facing copy. */
+  notes: string | null;
+}
+
+/**
+ * Provider-neutral Concept Evaluation payload persisted on ArtworkVersion.
+ * Distinct from Print Validation (DPI, transparency, print size, etc.).
+ */
+export interface ConceptEvaluation {
+  overallScore: number | null;
+  passed: boolean | null;
+  confidence: number;
+  criteria: ConceptEvaluationCriterionScore[];
+  warnings: string[];
+  recommendations: string[];
+  missingRequirements: string[];
+  matchedRequirements: string[];
+  /** Internal provider envelope — never customer-facing. */
+  providerMetadata: Record<string, unknown>;
+}
+
 export interface ArtworkVersion {
   id: string;
   projectId: string;
@@ -301,8 +352,17 @@ export interface ArtworkVersion {
   providerKey: string | null;
   /** Reserved for a future customer rating feature. Always null until implemented. */
   customerRating: number | null;
-  /** Reserved for future automated concept evaluation. Always null until implemented. */
-  evaluationStatus: string | null;
+  /**
+   * Sprint 2I Phase 1: Concept Evaluation workflow state. Internal only —
+   * never blocks customer presentation in this phase.
+   */
+  evaluationStatus: ConceptEvaluationStatus | null;
+  /** Sprint 2I Phase 1: provider-neutral evaluation payload, if any. */
+  evaluation: ConceptEvaluation | null;
+  /** Sprint 2I Phase 1: when evaluation was last written. */
+  evaluationEvaluatedAt: string | null;
+  /** Sprint 2I Phase 1: which evaluation provider produced `evaluation`. */
+  evaluationProviderKey: string | null;
   /** Reserved for future print validation. Always null until implemented. */
   printValidationStatus: string | null;
   createdAt: string;

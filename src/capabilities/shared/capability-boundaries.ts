@@ -2,7 +2,8 @@
  * Documented dependency directions for the capability architecture.
  * These are conventions enforced by composition and code review (Sprint 2C,
  * refined Sprint 2E, adaptive interview Sprint 2F, adaptive revisions
- * Sprint 2G Part 2, real generation infrastructure Sprint 2H Part 1).
+ * Sprint 2G Part 2, real generation infrastructure Sprint 2H Part 1,
+ * Concept Evaluation architecture Sprint 2I Phase 1).
  *
  * Pipeline (Sprint 2G Part 2):
  *   Conversation → IntentExtraction → DesignBrief
@@ -12,7 +13,7 @@
  *                → DesignSummary → Approval → ConceptGeneration
  *                  (± RevisionIntelligence-driven concept regeneration)
  *
- * Generation pipeline (Sprint 2H Part 1):
+ * Generation pipeline (Sprint 2H Part 1 + Sprint 2I Phase 1):
  *   ConceptGeneration → PromptTranslation (approved brief snapshot →
  *                  provider-neutral GenerationPromptRequest; pure, no
  *                  provider knowledge) → ConceptGenerationProvider
@@ -20,14 +21,17 @@
  *                  prompt dialect and quality-boosting language internally
  *                  — never exported, never persisted) → AssetCapability
  *                  (persists any real image/asset a provider returned) →
+ *                  ConceptEvaluationCapability (approved brief + concept
+ *                  asset refs → provider-neutral ConceptEvaluationResult;
+ *                  never blocks or discards concepts in Phase 1) →
  *                  durable GenerationJob record (queued → running →
  *                  completed/failed/cancelled, deterministic
  *                  idempotencyKey so a retried job never duplicates
  *                  concepts) → ArtworkVersion ("Concept") rows referencing
- *                  the job/assets/provider internally. None of
- *                  job id / asset id / provider key / prompt language is
- *                  ever placed in a customer-facing message or
- *                  `ProjectSnapshot` field the UI renders as such.
+ *                  the job/assets/provider/evaluation internally. None of
+ *                  job id / asset id / provider key / prompt language /
+ *                  evaluation scores is ever placed in a customer-facing
+ *                  message or `ProjectSnapshot` field the UI renders as such.
  *
  * Allowed (high level):
  *   Conversation → IntentExtraction, DesignBrief, BriefEvaluation,
@@ -74,16 +78,28 @@
  *   PromptTranslation → Design Brief snapshot data only. Pure and
  *                  deterministic: no I/O, no provider knowledge, no
  *                  quality-boosting/prompt-dialect language of any kind.
+ *   ConceptEvaluation → approved Design Brief snapshot content + concept
+ *                  presentation fields + opaque asset references only.
+ *                  Provider-neutral: never knows OpenAI/GPT/Vision vendors.
+ *                  Never writes repositories itself; never mutates briefs;
+ *                  never produces customer-facing copy; never performs Print
+ *                  Validation (DPI, transparency, print size, etc.).
+ *                  Provider adapters receive ConceptEvaluationRequest only —
+ *                  never customer ids, conversation ids, generation job ids,
+ *                  provider secrets, or repository handles.
  *   AssetCapability → persistence only. Called by ConceptGeneration after a
  *                  provider has already returned its result — never by a
  *                  provider adapter directly.
- *   PrintValidation → brief/artwork data (read-only); never mutates briefs
+ *   PrintValidation → brief/artwork data (read-only); never mutates briefs;
+ *                  never confuses itself with Concept Evaluation
  *   Provider adapters → generation DTOs only (a `ConceptGenerationRequest`
  *                  carrying a provider-neutral `GenerationPromptRequest`,
  *                  never a raw Design Brief); never mutate domain objects,
  *                  never write to a repository, never touch a conversation.
  *                  A provider's own prompt dialect/quality keywords are
  *                  private to that provider's file.
+ *   ConceptEvaluationProvider adapters → ConceptEvaluationRequest only;
+ *                  return ConceptEvaluationResult; no repository writes.
  *
  * `shared/interview-coverage-policy`, `shared/question-phrasing`, and
  * `shared/product-rule-packs` are pure, side-effect-free data/phrasing
@@ -111,14 +127,22 @@
  *   Interview Intelligence depending on Design Intelligence's internals
  *     beyond IntelligenceAssessment, or vice versa (both depend on the
  *     shared phrasing/policy modules instead of on each other)
+ *   Concept Evaluation performing Print Validation concerns (DPI,
+ *     transparency, vector quality, embroidery limits, raster quality)
+ *   Concept Evaluation blocking or discarding concepts in Phase 1
+ *   Concept Evaluation provider adapters receiving customer/conversation/
+ *     job ids, secrets, or repository handles
  *   Print Validation modifying Design Briefs
+ *   Print Validation depending on Concept Evaluation internals (share
+ *     ArtworkVersion fields only)
  *   Provider adapters mutating Design Briefs, writing directly to a
  *     repository, or receiving a raw Design Brief instead of a
  *     PromptTranslation-produced GenerationPromptRequest
  *   Design Brief storing prompt syntax / provider dialect
- *   Provider identity, generation job ids, asset ids, or any provider
- *     error detail reaching a customer-facing message or ProjectSnapshot
- *     field the UI renders as such (Sprint 2H Part 1)
+ *   Provider identity, generation job ids, asset ids, evaluation scores, or
+ *     any provider error detail reaching a customer-facing message or
+ *     ProjectSnapshot field the UI renders as such (Sprint 2H Part 1 /
+ *     Sprint 2I Phase 1)
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2H1" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2I1" as const;

@@ -28,6 +28,7 @@ import type {
   CreateGenerationJobInput,
   CreateMessageInput,
   ProjectRepository,
+  UpdateArtworkEvaluationInput,
   UpdateGenerationJobInput,
 } from "./repository";
 import { UniqueConstraintViolationError } from "./repository";
@@ -103,6 +104,9 @@ async function readDb(): Promise<LocalDatabase> {
         providerKey: artwork.providerKey ?? null,
         customerRating: artwork.customerRating ?? null,
         evaluationStatus: artwork.evaluationStatus ?? null,
+        evaluation: artwork.evaluation ?? null,
+        evaluationEvaluatedAt: artwork.evaluationEvaluatedAt ?? null,
+        evaluationProviderKey: artwork.evaluationProviderKey ?? null,
         printValidationStatus: artwork.printValidationStatus ?? null,
       })),
       designBriefVersions: parsed.designBriefVersions ?? [],
@@ -407,9 +411,11 @@ export class LocalProjectRepository implements ProjectRepository {
       primaryAssetId: version.primaryAssetId ?? null,
       thumbnailAssetId: version.thumbnailAssetId ?? null,
       providerKey: version.providerKey ?? null,
-      // Reserved for future sprints — always null until implemented.
       customerRating: null,
-      evaluationStatus: null,
+      evaluationStatus: version.evaluationStatus ?? null,
+      evaluation: version.evaluation ?? null,
+      evaluationEvaluatedAt: version.evaluationEvaluatedAt ?? null,
+      evaluationProviderKey: version.evaluationProviderKey ?? null,
       printValidationStatus: null,
       createdAt: timestamp,
     }));
@@ -417,6 +423,23 @@ export class LocalProjectRepository implements ProjectRepository {
     db.artworkVersions.push(...created);
     await writeDb(db);
     return created;
+  }
+
+  async updateArtworkEvaluation(
+    artworkVersionId: string,
+    input: UpdateArtworkEvaluationInput,
+  ): Promise<ArtworkVersion> {
+    const db = await readDb();
+    const artwork = db.artworkVersions.find((item) => item.id === artworkVersionId);
+    if (!artwork) throw new Error("Artwork version not found");
+
+    artwork.evaluationStatus = input.evaluationStatus;
+    artwork.evaluation = input.evaluation;
+    artwork.evaluationEvaluatedAt = input.evaluationEvaluatedAt;
+    artwork.evaluationProviderKey = input.evaluationProviderKey;
+
+    await writeDb(db);
+    return artwork;
   }
 
   async selectArtworkVersion(

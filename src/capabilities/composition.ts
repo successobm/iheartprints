@@ -7,6 +7,10 @@ import {
   PngThumbnailGenerator,
 } from "@/capabilities/assets";
 import { createBriefEvaluationCapability } from "@/capabilities/brief-evaluation";
+import {
+  createConceptEvaluationCapability,
+  PlaceholderConceptEvaluationProvider,
+} from "@/capabilities/concept-evaluation";
 import { createConceptGenerationCapability } from "@/capabilities/concept-generation";
 import { createConversationCapability } from "@/capabilities/conversation";
 import type { ConversationCapability } from "@/capabilities/conversation";
@@ -39,6 +43,8 @@ export interface CapabilityGraph {
   designSummary: ReturnType<typeof createDesignSummaryCapability>;
   promptTranslation: ReturnType<typeof createPromptTranslationCapability>;
   conceptGeneration: ReturnType<typeof createConceptGenerationCapability>;
+  /** Sprint 2I Phase 1: Concept Evaluation — provider-neutral brief alignment. */
+  conceptEvaluation: ReturnType<typeof createConceptEvaluationCapability>;
   /** Sprint 2H Part 2A: background job runner — see `generation-worker/`. */
   generationWorker: ReturnType<typeof createGenerationWorkerCapability>;
   /**
@@ -84,11 +90,17 @@ export function createCapabilityGraph(
     repo,
     provider.providerKey,
   );
+  // Sprint 2I Phase 1: placeholder only — no vision/OCR provider yet.
+  // Composition owns selection; conversation/UI never inspect env vars.
+  const conceptEvaluation = createConceptEvaluationCapability(
+    new PlaceholderConceptEvaluationProvider(),
+  );
   const generationWorker = createGenerationWorkerCapability(
     repo,
     provider,
     promptTranslation,
     assets,
+    conceptEvaluation,
   );
   const workerScheduler = createGenerationSchedulerCapability(generationWorker);
 
@@ -116,6 +128,7 @@ export function createCapabilityGraph(
     designSummary,
     promptTranslation,
     conceptGeneration,
+    conceptEvaluation,
     generationWorker,
     workerScheduler,
     printValidation: createPrintValidationCapability(),

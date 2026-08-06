@@ -7,6 +7,8 @@ import type {
   ArtworkVersion,
   AssetKind,
   AssetRecord,
+  ConceptEvaluation,
+  ConceptEvaluationStatus,
   ConversationMessage,
   ConversationPhase,
   DesignBriefVersion,
@@ -27,6 +29,7 @@ import type {
   CreateGenerationJobInput,
   CreateMessageInput,
   ProjectRepository,
+  UpdateArtworkEvaluationInput,
   UpdateGenerationJobInput,
 } from "./repository";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -100,7 +103,10 @@ type DbArtwork = {
   thumbnail_asset_id: string | null;
   provider_key: string | null;
   customer_rating: number | null;
-  evaluation_status: string | null;
+  evaluation_status: ConceptEvaluationStatus | null;
+  evaluation: ConceptEvaluation | null;
+  evaluation_evaluated_at: string | null;
+  evaluation_provider_key: string | null;
   print_validation_status: string | null;
   created_at: string;
 };
@@ -231,6 +237,9 @@ function mapArtwork(row: DbArtwork): ArtworkVersion {
     providerKey: row.provider_key ?? null,
     customerRating: row.customer_rating ?? null,
     evaluationStatus: row.evaluation_status ?? null,
+    evaluation: row.evaluation ?? null,
+    evaluationEvaluatedAt: row.evaluation_evaluated_at ?? null,
+    evaluationProviderKey: row.evaluation_provider_key ?? null,
     printValidationStatus: row.print_validation_status ?? null,
     createdAt: row.created_at,
   };
@@ -578,12 +587,35 @@ export class SupabaseProjectRepository implements ProjectRepository {
           primary_asset_id: version.primaryAssetId ?? null,
           thumbnail_asset_id: version.thumbnailAssetId ?? null,
           provider_key: version.providerKey ?? null,
+          evaluation_status: version.evaluationStatus ?? null,
+          evaluation: version.evaluation ?? null,
+          evaluation_evaluated_at: version.evaluationEvaluatedAt ?? null,
+          evaluation_provider_key: version.evaluationProviderKey ?? null,
         })),
       )
       .select("*")
       .order("version_number", { ascending: true });
     if (error) throw error;
     return ((data as DbArtwork[]) ?? []).map(mapArtwork);
+  }
+
+  async updateArtworkEvaluation(
+    artworkVersionId: string,
+    input: UpdateArtworkEvaluationInput,
+  ): Promise<ArtworkVersion> {
+    const { data, error } = await this.client
+      .from("artwork_versions")
+      .update({
+        evaluation_status: input.evaluationStatus,
+        evaluation: input.evaluation,
+        evaluation_evaluated_at: input.evaluationEvaluatedAt,
+        evaluation_provider_key: input.evaluationProviderKey,
+      })
+      .eq("id", artworkVersionId)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapArtwork(data as DbArtwork);
   }
 
   async selectArtworkVersion(

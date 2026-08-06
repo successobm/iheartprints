@@ -147,6 +147,9 @@ Next.js Application
                     +--> PromptTranslationCapability
                     +--> ConceptGenerationProvider
                     +--> AssetCapability
+                    +--> ConceptEvaluationCapability
+                    |         |
+                    |         +--> ConceptEvaluationProvider
                     +--> ProjectRepository
 ```
 
@@ -171,6 +174,7 @@ Conversation
   → Prompt Translation
   → Generation Provider
   → Asset Storage
+  → Concept Evaluation (persisted; does not block presentation in Phase 1)
   → Concepts Ready
   → Customer Review
   → Revision Intelligence
@@ -183,7 +187,7 @@ Conversation
 |---|---|
 | Message handling, intent extraction, brief patch, evaluation, intelligence, interview act, summary presentation | Synchronous within the customer request |
 | Design Brief approval (version snapshot + enqueue job) | Synchronous request; generation itself is not |
-| Concept generation (provider call, asset upload, artwork rows) | Asynchronous via independent worker |
+| Concept generation (provider call, asset upload, concept evaluation, artwork rows) | Asynchronous via independent worker |
 | Generation status | Read-only browser polling; never claims or runs jobs |
 | Post-approval revisions | Synchronous brief update; regeneration is enqueue-only |
 
@@ -193,7 +197,9 @@ Real provider generation is guarded by configuration
 mode uses the placeholder provider.
 
 Generated concepts are options for human review. They are **not**
-print-ready production assets. Print Validation is not implemented.
+print-ready production assets. Concept Evaluation (Phase 1) records whether
+each concept aligns with the approved Design Brief but does **not** block
+customer presentation. Print Validation is not implemented.
 
 ---
 
@@ -355,12 +361,51 @@ Does not invoke providers. Workers do.
 
 | | |
 |---|---|
-| **Responsibility** | Claim job → translate → provider → assets → artwork → assistant message |
+| **Responsibility** | Claim job → translate → provider → assets → concept evaluation → artwork → assistant message |
 | **Inputs** | Claimed `GenerationJob` |
-| **Outputs** | Completed/failed job; artwork versions; assets; customer-safe messages |
-| **Dependencies** | ProjectRepository, PromptTranslation, ConceptGenerationProvider, AssetCapability |
+| **Outputs** | Completed/failed job; artwork versions (with evaluation); assets; customer-safe messages |
+| **Dependencies** | ProjectRepository, PromptTranslation, ConceptGenerationProvider, AssetCapability, ConceptEvaluationCapability |
 | **Owns** | Generation runtime business logic |
 | **Must never own** | HTTP auth, cron scheduling, browser lifecycle |
+
+Evaluation failure never discards concepts and never changes customer-facing
+copy in Phase 1.
+
+### ConceptEvaluationCapability — Active (architecture only)
+
+| | |
+|---|---|
+| **Responsibility** | Provider-neutral evaluation of whether a generated concept matches the approved Design Brief |
+| **Inputs** | Approved `DesignBriefSnapshotContent`, concept presentation fields, opaque asset references |
+| **Outputs** | `ConceptEvaluationResult` (scores, criteria, status, warnings) |
+| **Dependencies** | `ConceptEvaluationProvider` interface only |
+| **Owns** | Request construction, result normalization, failure fallback |
+| **Must never own** | Repository writes; brief mutation; customer copy; Print Validation; vendor APIs |
+
+Answers (product quality):
+
+- Did the concept follow the Design Brief?
+- Did it respect exclusions?
+- Is required wording present?
+- Does requested style / color palette / composition appear?
+- Should the customer see this concept? *(Phase 1 always says yes — results are persisted only.)*
+
+Does **not** answer: DPI, transparency, vector quality, print size, embroidery
+limits, raster quality — those belong exclusively to PrintValidationCapability.
+
+Provider model (mirrors generation):
+
+```
+ConceptEvaluationCapability
+       ↓
+ConceptEvaluationProvider
+       ↓
+Provider adapters (placeholder today; vision/OCR later)
+```
+
+Default adapter: `PlaceholderConceptEvaluationProvider` — deterministic
+`needs_review` with every criterion marked `not_assessed`. No vision, OCR,
+or color analysis.
 
 ### GenerationSchedulerCapability — Active
 
@@ -408,9 +453,16 @@ Resolution: `resolveConceptGenerationProvider` in composition/config layer.
 ### PrintValidationCapability — Reserved
 
 Stub: `validateArtwork` returns `{ checks: [], overall: "not_run" }`.
-Must never mutate Design Briefs. Distinct from Concept Evaluation (not
-implemented at all — no capability yet; `ArtworkVersion.evaluationStatus`
-is reserved null).
+Must never mutate Design Briefs. Distinct from Concept Evaluation:
+
+| Concern | Concept Evaluation | Print Validation |
+|---|---|---|
+| Brief alignment / exclusions / wording / style / palette | Yes | No |
+| DPI / transparency / print size / embroidery / raster | No | Yes |
+| Phase 1 status | Active architecture; results persisted; does not block UI | Stub only |
+
+`ArtworkVersion.evaluationStatus` / `evaluation` hold Concept Evaluation.
+`ArtworkVersion.printValidationStatus` remains reserved null.
 
 ### PrintVaultCapability — Reserved
 
@@ -463,6 +515,9 @@ GenerationSchedulerCapability
               |         |
               |         +--> AssetStorageProvider
               |         +--> ProjectRepository
+              +--> ConceptEvaluationCapability
+              |         |
+              |         +--> ConceptEvaluationProvider (interface)
               +--> ProjectRepository
 
 Shared pure modules (not capabilities):
@@ -481,8 +536,10 @@ Do not introduce:
 - InterviewIntelligence → Design Brief completeness inspection
 - InterviewIntelligence ↔ DesignIntelligence internals (share contracts/phrasing instead)
 - Provider adapters → repositories, conversations, or raw Design Briefs
+- ConceptEvaluationProvider → customer/conversation/job ids, secrets, repositories
+- Concept Evaluation ↔ Print Validation capability dependency (share ArtworkVersion fields only)
 - Design Brief storage of provider prompt dialect
-- Customer-facing exposure of provider keys, job ids, asset ids, or storage modes
+- Customer-facing exposure of provider keys, job ids, asset ids, evaluation scores, or storage modes
 - ProductIntelligence ↔ RevisionIntelligence capability dependency (share `product-rule-packs`)
 
 ---
@@ -500,9 +557,10 @@ Wiring highlights:
 1. Repository from `getProjectRepository()` unless injected
 2. Asset storage from `resolveAssetStorageProvider()`
 3. Concept provider from `resolveConceptGenerationProvider()`
-4. Thumbnails via `PngThumbnailGenerator`
-5. Conversation receives peer capabilities by interface, not by constructing them itself
-6. Worker scheduler wraps generation worker; neither is invoked from customer message routes
+4. Concept evaluation provider (placeholder in Phase 1) wired into `ConceptEvaluationCapability`
+5. Thumbnails via `PngThumbnailGenerator`
+6. Conversation receives peer capabilities by interface, not by constructing them itself
+7. Worker scheduler wraps generation worker; neither is invoked from customer message routes
 
 Routes and `src/lib/services/conversation-service.ts` receive composed
 capabilities. They must not construct domain logic or select providers.
@@ -540,8 +598,9 @@ Primary types live in `src/lib/domain/types.ts`.
 | `TShirtDesignBrief` | Mutable working Design Brief |
 | `DesignBriefVersion` | Immutable approved snapshot (`content` + version metadata) |
 | `GenerationJob` | Durable generation attempt (internal; not in customer snapshot) |
-| `ArtworkVersion` | Concept (or future revision/final) with brief/job/asset provenance |
+| `ArtworkVersion` | Concept (or future revision/final) with brief/job/asset/evaluation provenance |
 | `AssetRecord` | File metadata + opaque `storageKey` (internal; not in snapshot) |
+| `ConceptEvaluation` | Provider-neutral brief-alignment evaluation payload on an artwork version |
 | `RevisionImpact` | Capability contract describing brief-change consequences |
 | `BriefEvaluation` | Objective evaluation of the working brief |
 | `IntelligenceAssessment` | Recommendations + readiness derived for interview |
@@ -580,8 +639,28 @@ PrintProject
    |      +-- designBriefVersionId
    |      +-- generationJobId?
    |      +-- primaryAssetId? / thumbnailAssetId?
+   |      +-- evaluationStatus? / evaluation? / evaluationEvaluatedAt?
+   |      +-- evaluationProviderKey?
    +-- AssetRecord* (internal)
 ```
+
+### Concept Evaluation state transitions (ArtworkVersion)
+
+Internal workflow states only — never customer-visible product language:
+
+```
+(null / pending)
+       │
+       ▼
+  evaluate via ConceptEvaluationProvider
+       │
+       ├──► passed
+       ├──► needs_review   (placeholder / inconclusive / provider failure fallback)
+       └──► failed         (concept did not match brief — Phase 2+ gating)
+```
+
+Phase 1 always presents concepts to the customer regardless of status.
+Evaluation failure falls back to `needs_review` and never discards artwork.
 
 Internal database ids are implementation details. Customer UX must not
 expose them as product language.
@@ -700,7 +779,7 @@ Concept-relevance sections (`shared/concept-relevance.ts`) currently
 include product, productColor, colors, graphics, requiredWording, style,
 printLocation. Audience/purpose/exclusions/notes/references do not, by
 themselves, mark concepts stale under today’s generation implementation.
-These rules may expand once Concept Evaluation exists.
+These rules may expand once Concept Evaluation gating exists (Phase 2+).
 
 `RevisionCapability` remains a future artwork-level lifecycle stub and is
 not the live revision path.
@@ -719,8 +798,10 @@ Pipeline:
 5. Provider adapter receives request DTO only
 6. Provider returns drafts + optional raw image bytes
 7. AssetCapability stores bytes and metadata
-8. Artwork versions persist with brief/job/asset provenance
-9. Assistant message announces concepts ready (customer-safe)
+8. ConceptEvaluationCapability evaluates each concept against the approved
+   brief (provider-neutral; results persisted; never blocks Phase 1)
+9. Artwork versions persist with brief/job/asset/evaluation provenance
+10. Assistant message announces concepts ready (customer-safe)
 
 ### Providers
 
@@ -750,6 +831,40 @@ Providers:
 - never mutate conversations
 - keep provider-specific prompt language inside the adapter — never in the
   Design Brief or `GenerationPromptRequest`
+
+### Concept Evaluation architecture (Sprint 2I Phase 1)
+
+Mirrors Prompt Translation / generation: provider-neutral contracts,
+replaceable evaluators, deterministic orchestration.
+
+```
+Generation Worker
+  → AssetCapability
+  → ConceptEvaluationCapability
+        → ConceptEvaluationProvider
+  → Persist evaluation on ArtworkVersion
+  → Conversation update (unchanged customer copy)
+```
+
+| | Concept Evaluation | Print Validation |
+|---|---|---|
+| Question | Does this concept match the approved Design Brief? | Is this artwork production-/print-ready? |
+| Criteria | wording, style, graphics, palette, composition, readability, exclusions, product compatibility, overall alignment | DPI, transparency, vector/raster quality, print size, embroidery limits |
+| Phase 1 | Architecture + persistence; no UI gating | Reserved stub |
+
+Persistence on `ArtworkVersion` (provider-neutral):
+
+- `evaluationStatus`: `pending` | `passed` | `needs_review` | `failed`
+- `evaluation`: `ConceptEvaluation` JSON payload
+- `evaluationEvaluatedAt`
+- `evaluationProviderKey`
+
+Security: evaluation providers receive only approved brief snapshot content,
+concept presentation fields, and opaque asset references — never customer
+ids, conversation ids, generation job ids, secrets, or repository handles.
+
+Default provider: `PlaceholderConceptEvaluationProvider` (`needs_review`,
+criteria `not_assessed`). No vision, OCR, or color analysis in Phase 1.
 
 ---
 
@@ -862,14 +977,16 @@ Interface: `ProjectRepository` (`src/lib/db/repository.ts`)
 | `SupabaseProjectRepository` | `NEXT_PUBLIC_SUPABASE_URL` + service-role or anon key |
 
 Parity expectations: both implement the same repository contract including
-atomic job claim/heartbeat/recovery and asset CRUD.
+atomic job claim/heartbeat/recovery, asset CRUD, and Concept Evaluation
+updates (`updateArtworkEvaluation`).
 
 Other notes:
 
 - Forward-only SQL migrations under `supabase/migrations/` (see
   `docs/database/MIGRATION_WORKFLOW.md`)
 - Local mutex serializes store access; Supabase uses conditional updates
-- Interview state, approved versions, generation jobs, and assets persist
+- Interview state, approved versions, generation jobs, assets, and concept
+  evaluation fields on artwork versions persist
 - Derived values recomputed rather than stored as authority: concept
   status batches, brief evaluation, intelligence assessment, revision
   impact, summary views
@@ -1051,7 +1168,8 @@ Verified against the implementation:
 - S3 adapter is reserved but not implemented
 - Orphan asset cleanup cannot recover from a hard process crash after
   upload and before DB persist
-- Concept Evaluation is not implemented (`evaluationStatus` reserved null)
+- Concept Evaluation Phase 1 persists results but does not block, reject,
+  or hide concepts from customers; no UI scoring yet
 - Print Validation is stub-only (`overall: "not_run"`)
 - Generated concepts are not print-ready production assets
 - Print Vault behavior is not implemented
@@ -1073,8 +1191,9 @@ Describe attachment points only — not a delivery plan:
 
 | Extension | Attach where |
 |---|---|
-| ConceptEvaluationCapability | After concepts exist; write `ArtworkVersion.evaluationStatus`; never mutate brief |
-| PrintValidationCapability | Replace stub; validate artwork against approved brief; never mutate brief |
+| ConceptEvaluationCapability | **Phase 1 done (architecture).** Phase 2+: real evaluators, gating, regeneration decisions; never mutate brief |
+| PrintValidationCapability | Replace stub; validate artwork against approved brief; never mutate brief; never confuse with Concept Evaluation |
+| Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider`; no domain change |
 | Production file generation | New assets linked via `printAssetId` / dedicated kinds |
 | Vector output | `vectorAssetId` / SVG asset kinds |
 | Mockups | Presentation layer consuming artwork + product context |

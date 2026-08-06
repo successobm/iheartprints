@@ -1,6 +1,8 @@
 import type {
   ArtworkVersion,
   AssetRecord,
+  ConceptEvaluation,
+  ConceptEvaluationStatus,
   ConversationMessage,
   ConversationPhase,
   DesignBriefSnapshotContent,
@@ -39,6 +41,22 @@ export interface CreateArtworkVersionInput {
   primaryAssetId?: string | null;
   thumbnailAssetId?: string | null;
   providerKey?: string | null;
+  /**
+   * Sprint 2I Phase 1: optional Concept Evaluation fields written at
+   * concept persistence time. Default null when omitted.
+   */
+  evaluationStatus?: ConceptEvaluationStatus | null;
+  evaluation?: ConceptEvaluation | null;
+  evaluationEvaluatedAt?: string | null;
+  evaluationProviderKey?: string | null;
+}
+
+/** Sprint 2I Phase 1: update Concept Evaluation fields on an existing concept. */
+export interface UpdateArtworkEvaluationInput {
+  evaluationStatus: ConceptEvaluationStatus;
+  evaluation: ConceptEvaluation;
+  evaluationEvaluatedAt: string;
+  evaluationProviderKey: string;
 }
 
 /** Sprint 2H Part 1: input for creating a durable generation job record. */
@@ -122,6 +140,15 @@ export interface ProjectRepository {
     projectId: string,
     versions: CreateArtworkVersionInput[],
   ): Promise<ArtworkVersion[]>;
+  /**
+   * Sprint 2I Phase 1: persist Concept Evaluation on an existing artwork
+   * version. Idempotent callers should skip when evaluationStatus is already
+   * set. Never deletes or replaces the concept itself.
+   */
+  updateArtworkEvaluation(
+    artworkVersionId: string,
+    input: UpdateArtworkEvaluationInput,
+  ): Promise<ArtworkVersion>;
   selectArtworkVersion(
     projectId: string,
     artworkVersionId: string,
