@@ -10,7 +10,7 @@
  */
 
 import type { ProjectRepository } from "@/lib/db/repository";
-import type { AssetKind, AssetRecord } from "@/lib/domain/types";
+import type { AssetKind, AssetRecord, ProductionAssetRole } from "@/lib/domain/types";
 import type { AssetStorageProvider } from "@/capabilities/asset-storage";
 import type { ThumbnailGenerator } from "./thumbnail-generator";
 
@@ -53,6 +53,21 @@ export interface UploadConceptAssetResult {
   thumbnail: AssetRecord | null;
 }
 
+/** Sprint 2M Phase 2C: input for persisting one production-stage deliverable. */
+export interface UploadProductionAssetInput {
+  /** Internal storage-grouping id — see `AssetStorageProvider`'s `UploadAssetInput.conceptId` doc. */
+  conceptId: string;
+  bytes: Buffer;
+  contentType: string;
+  widthPx: number | null;
+  heightPx: number | null;
+  hasTransparency: boolean | null;
+  finalArtworkJobId: string;
+  productionRole: ProductionAssetRole;
+  /** Sanitized transformation provenance only — never prompt text or credentials. */
+  metadata: Record<string, unknown>;
+}
+
 export interface AssetCapability {
   listAssets(designId: string): Promise<AssetRecord[]>;
   registerAsset(
@@ -73,6 +88,19 @@ export interface AssetCapability {
     input: UploadConceptAssetInput,
   ): Promise<UploadConceptAssetResult>;
   /**
+   * Sprint 2M Phase 2C: uploads a production-stage deliverable
+   * (`finalArtworkJobId` + `productionRole` set — never a concept-stage
+   * asset). No thumbnail: production assets are never rendered directly to
+   * the customer (Goal 14 — a future download boundary would mint its own
+   * signed URL). Same orphan-cleanup guarantee as `uploadConceptImage`: a
+   * metadata-persist failure after bytes land in storage cleans up the
+   * upload and rethrows.
+   */
+  uploadProductionAsset(
+    designId: string,
+    input: UploadProductionAssetInput,
+  ): Promise<AssetRecord>;
+  /**
    * A short-lived, expiring URL a browser can fetch directly — never a raw
    * object key. Returns `null` if the asset doesn't exist or has no stored
    * bytes.
@@ -81,6 +109,16 @@ export interface AssetCapability {
     assetId: string,
     expiresInSeconds?: number,
   ): Promise<string | null>;
+  /**
+   * Sprint 2M Phase 2C: fetches an asset's raw bytes server-side — distinct
+   * from `getSignedUrl` (a browser-facing URL). Needed by
+   * `FinalArtworkWorkerCapability` to decode and resample a source
+   * concept's real pixels locally, never sent anywhere external. Returns
+   * `null` if the asset doesn't exist or has no stored bytes.
+   */
+  downloadAssetBytes(
+    assetId: string,
+  ): Promise<{ bytes: Buffer; contentType: string } | null>;
   /** Cleanup only — see `ProjectRepository.deleteAsset`'s doc. */
   deleteAsset(assetId: string): Promise<void>;
 }
@@ -124,6 +162,7 @@ export function createAssetCapability(
           vectorAssetId: null,
           printAssetId: null,
           finalArtworkJobId: null,
+          productionRole: null,
         });
       } catch (error) {
         // Asset Cleanup: bytes landed in storage but the record that would
@@ -143,6 +182,39 @@ export function createAssetCapability(
       return { primary, thumbnail };
     },
 
+    async uploadProductionAsset(designId, input) {
+      const uploaded = await storage.upload({
+        projectId: designId,
+        conceptId: input.conceptId,
+        fileName: `production${extensionForContentType(input.contentType)}`,
+        bytes: input.bytes,
+        contentType: input.contentType,
+      });
+
+      try {
+        return await repo.createAsset(designId, {
+          kind: "generated_artwork",
+          storageKey: uploaded.objectKey,
+          contentType: input.contentType,
+          isThumbnail: false,
+          widthPx: input.widthPx,
+          heightPx: input.heightPx,
+          hasTransparency: input.hasTransparency,
+          providerKey: null,
+          generationJobId: null,
+          metadata: input.metadata,
+          vectorAssetId: null,
+          printAssetId: null,
+          finalArtworkJobId: input.finalArtworkJobId,
+          productionRole: input.productionRole,
+        });
+      } catch (error) {
+        // Same orphan-cleanup guarantee as uploadConceptImage.
+        await safeDelete(storage, uploaded.objectKey);
+        throw error;
+      }
+    },
+
     async getSignedUrl(assetId, expiresInSeconds) {
       const asset = await repo.getAssetById(assetId);
       if (!asset || !asset.storageKey) return null;
@@ -150,6 +222,13 @@ export function createAssetCapability(
         asset.storageKey,
         clampSignedUrlExpirySeconds(expiresInSeconds),
       );
+    },
+
+    async downloadAssetBytes(assetId) {
+      const asset = await repo.getAssetById(assetId);
+      if (!asset || !asset.storageKey) return null;
+      const bytes = await storage.download(asset.storageKey);
+      return { bytes, contentType: asset.contentType ?? "application/octet-stream" };
     },
 
     async deleteAsset(assetId) {
@@ -207,6 +286,7 @@ async function tryCreateThumbnail(
         vectorAssetId: null,
         printAssetId: null,
         finalArtworkJobId: null,
+        productionRole: null,
       });
     } catch (error) {
       await safeDelete(storage, uploadedThumb.objectKey);

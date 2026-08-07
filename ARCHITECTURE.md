@@ -829,7 +829,7 @@ scenario driven end-to-end through the real worker pipeline, confirming
   customer-visible behavior change: the result is logged (whitelisted
   fields only — see `print-validation-logging.ts`) and otherwise discarded.
 
-### FinalArtworkCapability — Active (approval + idempotent enqueue only, Sprint 2M Phase 2B)
+### FinalArtworkCapability — Active (approval + enqueue + retry revival; production execution lives in FinalArtworkWorkerCapability, Sprint 2M Phase 2C)
 
 The lifecycle boundary Phase 2A's report explicitly reserved: the sole
 owner of the customer's explicit, durable **Final Direction Approval** —
@@ -859,26 +859,40 @@ FinalArtworkJob (new, durable; "queued" — Phase 2B never claims/runs it)
         ↓
 PrintProject.status = "finalizing"
         ↓
-(Reserved, not implemented in Phase 2B) a future worker claims the job,
-performs production transformations per
-PrintValidationReport.requiredTransformations, produces production
-AssetRecord(s), and re-runs PrintValidationCapability against that real
-asset — only THAT later, authoritative run may ever justify
-PrintProject.status = "print_ready"
+FinalArtworkWorkerCapability claims the job (Sprint 2M Phase 2C — see §13c
+for the full pipeline), performs the chosen honest raster transformation,
+produces a production AssetRecord, and re-runs PrintValidationCapability
+against that real asset — only THAT later, authoritative run may ever
+justify PrintProject.status = "print_ready"
 ```
 
 | | |
 |---|---|
-| **Responsibility** | Persist the customer's explicit final-direction decision; idempotently enqueue the resulting production-finalization request |
+| **Responsibility** | Persist the customer's explicit final-direction decision; idempotently enqueue the resulting production-finalization request; revive a failed job on retry |
 | **Inputs** | `designId` + an exact `artworkVersionId`, already decided by the caller |
 | **Outputs** | `FinalDirectionApproval`, `FinalArtworkJob`, `PrintProject.status = "finalizing"` |
 | **Dependencies** | `ProjectRepository`; `shared/brief-diff` + `shared/concept-relevance` (the same staleness check `ConceptGenerationCapability.describeConceptStatus` uses, reused as pure data rather than a capability→capability dependency) |
-| **Owns** | `FinalDirectionApproval` lifecycle (create/supersede/query); `FinalArtworkJob` idempotent enqueue; cross-project/staleness/selection validation |
-| **Must never own** | Selecting concepts; interpreting conversation; deciding customer intent (the caller already decided — this capability only validates and persists); evaluating creative quality; performing Print Validation internally by duplicating its rules; marking artwork print-ready without a real, authoritative validation run against a real production asset |
+| **Owns** | `FinalDirectionApproval` lifecycle (create/supersede/query); `FinalArtworkJob` idempotent enqueue + failed-job retry revival; cross-project/staleness/selection validation; resolving the current print-ready production asset id (`getCurrentProductionAssetId`, Goal 14) |
+| **Must never own** | Selecting concepts; interpreting conversation; deciding customer intent (the caller already decided — this capability only validates and persists); evaluating creative quality; performing Print Validation internally by duplicating its rules; marking artwork print-ready without a real, authoritative validation run against a real production asset (that authority lives in `FinalArtworkWorkerCapability`) |
 
-Phase 2B performs **no production transformation**. `requestFinalArtwork`
-only ever produces a `FinalArtworkJob` in status `"queued"` — no worker
-exists yet to claim or run it. See §13b for the full design rationale.
+`requestFinalArtwork` still only ever produces/reuses a `FinalArtworkJob` —
+it never performs production transformation itself. See §13b for the
+approval-lifecycle design rationale and §13c for what now actually claims
+and runs the job.
+
+### FinalArtworkWorkerCapability — Active (Sprint 2M Phase 2C)
+
+| | |
+|---|---|
+| **Responsibility** | Claim `FinalArtworkJob` → resolve exact approved input → raster transformation → production asset → authoritative Print Validation → print-ready transition |
+| **Inputs** | Claimed `FinalArtworkJob` |
+| **Outputs** | Production `AssetRecord`, `ProductionAssetValidation`, updated job status, `PrintProject.status` (`print_ready` / `finalization_required`) |
+| **Dependencies** | `ProjectRepository`, `AssetCapability`, `FinalArtworkProvider`, `PrintValidationCapability` |
+| **Owns** | Final-artwork worker business logic; idempotent asset reuse; stale-job recovery; the sole authority for `PrintProject.status = "print_ready"` |
+| **Must never own** | HTTP auth, cron scheduling, browser lifecycle; selecting concepts; duplicating `PrintValidationCapability`'s rules; persisting timeline/plan/intent-style ephemeral state |
+
+See §13c for the full pipeline, the "Upscaling Truthfulness" honesty
+mechanism, and every goal-by-goal design decision.
 
 ### PrintVaultCapability — Reserved
 
@@ -2205,49 +2219,328 @@ internal, or approval id ever reaches a customer response —
 
 ---
 
+## 13c. Final Artwork Production Pipeline (Sprint 2M Phase 2C)
+
+### Why
+
+Phase 2B built the entire lifecycle up to a `FinalArtworkJob` sitting
+`"queued"` forever. Phase 2C is the first sprint that actually claims and
+runs it — proving, honestly, whether iHeartPrints can turn an approved
+~1024x1024 concept into real raster apparel production artwork today.
+
+### The upscaling-truthfulness question
+
+Before writing any transformation code, this sprint had to answer: *if we
+take a 1024x1024 concept and produce a 3600x3600 PNG via ordinary
+interpolation, is that acceptable production artwork?* **No.** Simple
+interpolation increases pixel count without restoring real detail. The
+audit that follows is what shaped every downstream decision.
+
+**Audit findings:**
+
+- The only image-processing dependency in this codebase is `pngjs` (pure
+  JS PNG codec) — no `sharp`, no native binary, no ML upscaler.
+- `OPENAI_IMAGE_MODEL` (`gpt-image-1`) supports at most `1024x1024`,
+  `1024x1536`, or `1536x1024` — there is no larger size to request. Even a
+  best-case provider regeneration cannot reach the 3600x4200px a full-back
+  print needs at 300 PPI, and cannot reach the 1200x1200px a left-chest
+  print needs in both dimensions simultaneously (a 1536x1024 landscape
+  image is short on its 1024 axis).
+- A concept's native ~1024x1024px pixels, however, already exceed the
+  900x900px minimum a **sleeve** placement (3x3in @ 300 PPI) requires —
+  with zero transformation. This is the one placement where a real,
+  unfabricated "ready" result is achievable today.
+
+**Conclusion:** neither the existing local tooling nor the existing
+provider can genuinely manufacture full-back/left-chest production detail
+from a 1024x1024 source. Phase 2C therefore implements the full worker and
+production-asset lifecycle (Goal 5's "smallest honest implementation"), but
+teaches `PrintValidationCapability` to tell the difference between pixels
+that carry real detail and pixels that were merely stretched to fill a
+frame — see "Resolution provenance" below — rather than architecting
+validation to pass merely because a file got bigger.
+
+### Pipeline
+
+```
+FinalDirectionApproval ("active")
+        ↓
+FinalArtworkJob ("queued")
+        ↓
+FinalArtworkWorkerCapability.processNextJob   ← independent worker; never
+        │                                       invoked from a customer
+        │                                       request; atomic claim
+        │                                       mirrors GenerationWorker
+        ↓
+Resolve exact input: active approval, exact ArtworkVersion, approved
+DesignBriefVersion, source concept AssetRecord — reject a superseded
+approval, a cross-project asset, or a missing source asset
+        ↓
+deriveProductionRequirements (reused, unchanged, from PrintValidationCapability)
+        │  unsupported production method or unknown print location →
+        │  job completes honestly WITHOUT producing an asset
+        │  (PrintProject.status = "finalization_required")
+        ↓
+FinalArtworkProvider.produce           ← provider-neutral boundary
+        │  (LocalRasterInterpolationProvider: local, deterministic,
+        │   pure-JS "contain" resample + transparent padding — no
+        │   network call, no paid provider)
+        ↓
+AssetCapability.uploadProductionAsset  ← finalArtworkJobId + explicit
+        │                                productionRole set
+        ↓
+PrintValidationCapability.validateArtwork   ← AUTHORITATIVE this time —
+        │   same pure capability as Phase 1/2A, given the real production
+        │   asset via assembleAuthoritativeProductionPrintValidationInput
+        ↓
+ProductionAssetValidation persisted (append-only, per production asset)
+        ↓
+PrintProject.status = "print_ready"  ⟺  report.status === "ready"
+                     = "finalization_required"  otherwise
+```
+
+### Target physical size policy (Goal 4)
+
+No new sizing table was invented. `deriveProductionRequirements` (Sprint
+2M Phase 1) already resolves target dimensions from
+`shared/print-placement-dimensions.ts`, keyed by the existing
+`PrintPlacement` enum:
+
+| Placement | Target size | @300 PPI minimum |
+|---|---|---|
+| `full_front` / `full_back` | 12x14in | 3600x4200px |
+| `left_chest` | 4x4in | 1200x1200px |
+| `sleeve` | 3x3in | 900x900px |
+
+When `printPlacement` is unknown, or the production category isn't
+`apparel_raster`, the worker refuses to guess — it completes the job with
+an honest internal reason and `PrintProject.status = "finalization_required"`,
+never a fabricated size (Goal 4).
+
+### Raster production strategy (Goal 5/6)
+
+`LocalRasterInterpolationProvider` (`capabilities/final-artwork/local-raster-provider.ts`,
+math in `raster-transform.ts`) resamples the source concept to "contain"
+fit — preserving aspect ratio, never cropping — within the target canvas,
+inset by `ProductionRequirements.artworkBoundaryMarginPercent`, padded with
+verified-transparent pixels. It never redraws, regenerates, or reinterprets
+content (Goal 7 — the approved design is preserved exactly, just
+resampled), which is what lets required-wording verification honestly
+transfer from Concept Evaluation (see below) rather than needing fresh OCR
+infrastructure this sprint doesn't have.
+
+`FinalArtworkProvider` (`capabilities/final-artwork/provider.ts`) is the
+replaceable boundary: domain code (`FinalArtworkWorkerCapability`) depends
+only on this interface, never on `pngjs` or any transformation detail. A
+future provider-hosted reconstruction adapter would implement the same
+interface behind its own explicit, default-off opt-in (mirrors
+`CONCEPT_GENERATION_ENABLE_REAL` — Goal 20); `resolveFinalArtworkProvider()`
+is the one composition-owned resolution point.
+
+### Resolution provenance — the honesty mechanism (Goal 5/9, "Upscaling Truthfulness")
+
+`PrintValidationAssetSummary` (`print-validation/contracts.ts`) gained:
+
+- `resolutionProvenance: "native" | "interpolated_upscale" | "unknown"`
+- `nativeWidthPx` / `nativeHeightPx` — the true, pre-transformation source
+  pixel dimensions
+
+`FinalArtworkProviderOutput` always reports these honestly:
+`resolutionProvenance` is `"native"` only when the source content was
+shrunk or kept at 1:1 to fit the frame (no pixel fabricated);
+`"interpolated_upscale"` when the content had to be stretched beyond its
+native pixel density to fill the target canvas.
+
+`print-validation-capability.ts`'s `effective_resolution` and
+`minimum_raster_dimensions` checks now judge sufficiency against
+`nativeWidthPx`/`nativeHeightPx` whenever provenance is
+`"interpolated_upscale"` (or `"unknown"`) — **never** the enlarged file's
+literal pixel count. Since an upscale only ever happens because the native
+source didn't already meet the target, this means an interpolated
+production asset can never accidentally validate `"ready"` merely because
+its file dimensions look big enough. A concept whose native resolution
+already meets a placement's target (the sleeve case above) validates
+`"ready"` with zero fabricated detail — the one genuinely-achievable honest
+pass this sprint proves, and exactly what `PrintValidationCapability` was
+built to be honest about.
+
+A new `resolution_provenance` check (info severity — never itself
+blocking) records which path was used, purely for internal/print-shop
+diagnostics (Goal 13).
+
+### Required-wording verification (Goal 8)
+
+Never assumed to transfer automatically. `FinalArtworkProviderOutput`
+carries `preservesApprovedContent: boolean`, declared by the provider
+itself — `true` for a pure geometric resample (this sprint's only
+provider), and the explicit gate a future content-altering
+reconstruction/regeneration provider would have to declare `false`.
+`FinalArtworkWorkerCapability` only passes the source concept's already-
+persisted Concept Evaluation (and its `required_wording` criterion) into
+authoritative Print Validation when `preservesApprovedContent === true`;
+otherwise it passes `null`, which correctly resolves
+`required_wording_verification` to `"unknown"` → `finalization_required`
+rather than silently inheriting a verdict that may no longer be true.
+
+### Transparency verification (Goal 9)
+
+`hasAnyTransparentPixel` (`raster-transform.ts`) scans the actual encoded
+output's alpha channel — never assumes transparency from provider intent
+or from padding having been requested. An opaque result is reported as
+such and flows into Print Validation's existing `transparency` check
+exactly like any other asset.
+
+### Production asset persistence & classification (Goal 10)
+
+`AssetCapability.uploadProductionAsset` sets `finalArtworkJobId` (already
+reserved since Phase 2B) and a new, explicit `AssetRecord.productionRole`
+(`"production_png"` today; `"production_svg"`/`"production_pdf"` reserved)
+— Goal 10's requirement that the FK alone not be the only signal once one
+job can eventually own more than one production asset. No thumbnail is
+generated for a production asset (never rendered directly to a customer).
+
+### Authoritative validation persistence (Goal 12)
+
+A new, append-only `production_asset_validations` table/`ProductionAssetValidation`
+domain type — never a single status column on `ArtworkVersion` (Phase
+2A/2B both audited and rejected that; unchanged reasoning, sharper now that
+a real production asset exists: one job may eventually own multiple
+production assets, each independently valid or not). A revalidation
+inserts a new row; history stays queryable per job.
+
+### Print-ready transition authority (Goal 11)
+
+Only `FinalArtworkWorkerCapability`, after a real
+`PrintValidationCapability.validateArtwork` call against a real production
+asset, may ever set `PrintProject.status = "print_ready"`. It also guards
+against a stale/recovered job stomping a newer direction's status: it only
+transitions status when the job's authorizing approval is still the
+project's current *active* one (`maybeTransitionProjectStatus`).
+
+### Idempotency (Goal 16)
+
+Deterministic key: `(finalArtworkJobId, productionRole)`. Before
+transforming anything, the worker checks whether a production asset
+already exists for this job with `productionRole === "production_png"`; if
+so, it reuses that asset (never re-downloads, re-transforms, or
+re-uploads) and proceeds straight to (re)validation. A retried/recovered
+attempt may insert one additional harmless `ProductionAssetValidation` row
+— acceptable, mirroring how a retried provisional-validation log line is
+tolerated elsewhere.
+
+### Job claim & recovery model (Goal 2)
+
+`final_artwork_jobs` mirrors `generation_jobs`' worker-lifecycle shape
+exactly: `queued → running → recoverable → completed | failed | cancelled`,
+with `attempts`/`startedAt`/`completedAt`/`heartbeatAt` columns and the
+same atomic-claim contract (`claimNextQueuedFinalArtworkJob`, optimistic
+conditional update; `recoverAbandonedFinalArtworkJobs`, single atomic
+conditional UPDATE, no select-then-write gap). `"cancelled"` means the
+job's approval was superseded before it ran (not a pipeline error);
+`"failed"` means an infrastructure problem (storage/transformation
+failure) — `FinalArtworkCapability.requestFinalArtwork` revives a
+`"failed"` job back to `"queued"` on retry, so the customer's existing
+"Prepare Print-Ready Artwork" action is the retry path (Goal 21 — no
+PowerShell required). A `"completed"` job that landed on
+`finalization_required` is never revived — that is a real, honest verdict.
+
+### Deployment (Goal 21)
+
+A second, independent worker — its own protected endpoint
+(`POST /api/worker/final-artwork`, same `WORKER_SECRET`) and its own
+standalone process (`npm run worker:final-artwork`) — never folded into the
+generation worker's endpoint/process. See
+`docs/deployment/final-artwork-worker.md`.
+
+### Download boundary (Goal 14)
+
+`GET /api/projects/[projectId]/production-artwork/image` →
+`conversation-service.getProductionArtworkUrl` →
+`FinalArtworkCapability.getCurrentProductionAssetId` →
+`AssetCapability.getSignedUrl`. Only ever returns a signed URL once
+`PrintProject.status === "print_ready"`; every other case (not found, not
+ready yet) returns a uniform 404. Not linked from any UI — this proves the
+secure boundary exists ahead of a future purchasing/download product, per
+Goal 14's explicit scope limit.
+
+### Customer-safe finalization states (Goal 13)
+
+`CustomerFinalizationStatus` gained `"needs_review"` (→ "We need to review
+your artwork before it can be finalized"), derived purely from
+`PrintProject.status === "finalization_required"` at the same
+`conversation-service.ts` choke point as `"preparing"`/`"print_ready"`. No
+PPI, dimensions, provider, storage, or validation rule ever reaches this
+view.
+
+### Unsupported methods (Goal 17)
+
+Phase 2C supports **raster apparel production PNG only**. SVG, PDF,
+embroidery, screen-print separations, banner/sign production, CMYK, and
+vector logos are all explicitly out of scope — `requirements.category !==
+"apparel_raster"` completes the job honestly without an asset and without
+ever reaching `"print_ready"`.
+
+---
+
 ## 14. Background Worker Architecture
 
-Capabilities:
+Two independent job queues, two independent workers — deliberately never
+merged into one "run everything" scheduler (Sprint 2M Phase 2C, Goal 21):
 
-- `GenerationSchedulerCapability` — recover, then bounded claim loop
-- `GenerationWorkerCapability` — business logic per job
+| | Concept generation | Final artwork production |
+|---|---|---|
+| Job table | `generation_jobs` | `final_artwork_jobs` |
+| Scheduler | `GenerationSchedulerCapability` | `FinalArtworkSchedulerCapability` |
+| Worker | `GenerationWorkerCapability` | `FinalArtworkWorkerCapability` |
+| Claim method | `claimNextQueuedJob` | `claimNextQueuedFinalArtworkJob` |
+| Endpoint | `POST /api/worker/generation` | `POST /api/worker/final-artwork` |
+| Standalone script | `npm run worker` | `npm run worker:final-artwork` |
 
-Job states: `queued` → `running` → `completed` | `failed` | `cancelled`;
-abandoned `running` → `recoverable` (claimable again).
+Job states (both queues, identical shape): `queued` → `running` →
+`completed` | `failed` | `cancelled`; abandoned `running` → `recoverable`
+(claimable again).
 
-Mechanics:
+Mechanics (both queues, identical shape):
 
-- Atomic claim (`claimNextQueuedJob`) — local mutex or Supabase conditional
-  update
-- Batch size: `MAX_GENERATION_JOBS_PER_RUN` (default 5)
-- Heartbeats during provider work; stale threshold default 15 minutes
+- Atomic claim — local mutex or Supabase conditional update
+- Batch size: `MAX_GENERATION_JOBS_PER_RUN` (default 5; shared config knob
+  — the two worker types are never mixed in the same batch)
+- Heartbeats during work; stale threshold default 15 minutes
+  (`DEFAULT_STALE_JOB_MS` / `DEFAULT_FINAL_ARTWORK_STALE_JOB_MS`)
 - Stale-job recovery → `recoverable`
-- Shared retry budget
-- Idempotent completion (`alreadyGenerated` short-circuit)
-- Protected endpoint: `POST /api/worker/generation`
-- Standalone script: `npm run worker` → `scripts/run-generation-worker.ts`
-- Browser polling: `GET .../generation/status` is read-only
+- Shared retry budget (`MAX_GENERATION_ATTEMPTS` / `MAX_FINAL_ARTWORK_ATTEMPTS`)
+- Idempotent completion (`alreadyGenerated` short-circuit / existing
+  production-asset short-circuit — see §13c)
+- Browser polling (generation status) is read-only; there is no equivalent
+  browser polling for final-artwork status in Phase 2C — the customer sees
+  only the derived `finalization.status` on the ordinary snapshot poll
 
 ### Deployment topologies
 
 1. **Protected scheduled worker endpoint** — external cron/Function hits
-   `POST /api/worker/generation` with `WORKER_SECRET` (documented for
-   DigitalOcean App Platform-style hosting)
-2. **Standalone worker process** — `npm run worker`
+   `POST /api/worker/generation` and/or `POST /api/worker/final-artwork`
+   with `WORKER_SECRET` (documented for DigitalOcean App Platform-style
+   hosting)
+2. **Standalone worker process** — `npm run worker` and/or
+   `npm run worker:final-artwork`, run as separate processes
 3. **Future external queue** — only scheduler topology should need to
    change; worker business logic stays put
 
-See `docs/deployment/generation-worker.md`.
+See `docs/deployment/generation-worker.md` and
+`docs/deployment/final-artwork-worker.md`.
 
-Business logic remains inside `GenerationWorkerCapability` regardless of
-topology.
+Business logic remains inside `GenerationWorkerCapability` /
+`FinalArtworkWorkerCapability` regardless of topology.
 
 ---
 
 ## 15. Worker Security
 
-Implemented in `src/capabilities/worker-scheduler/worker-auth.ts` and
-`src/app/api/worker/generation/route.ts`.
+Implemented in `src/capabilities/worker-scheduler/worker-auth.ts`, shared
+by both `src/app/api/worker/generation/route.ts` and (Sprint 2M Phase 2C)
+`src/app/api/worker/final-artwork/route.ts` — one auth module, one shared
+`WORKER_SECRET`, one shared in-memory rate limiter; the two endpoints
+differ only in which scheduler they call.
 
 - `WORKER_SECRET` via `Authorization: Bearer …` or `X-Worker-Secret`
 - Constant-time comparison (SHA-256 digest + `timingSafeEqual`)
@@ -2357,6 +2650,13 @@ Other notes:
   `(project_id, final_direction_approval_id)`) persist; `assets` gained a
   reserved, nullable `final_artwork_job_id` — see
   `supabase/migrations/20260806190000_final_artwork_lifecycle.sql`
+- Sprint 2M Phase 2C: `final_artwork_jobs` gained `attempts`/`started_at`/
+  `completed_at`/`heartbeat_at` and a `"recoverable"` status (mirrors
+  `generation_jobs`' worker-lifecycle columns exactly); `assets` gained
+  `production_role`; a new append-only `production_asset_validations`
+  table persists authoritative Print Validation runs; `project_status`
+  gained `"finalization_required"` — see
+  `supabase/migrations/20260807140000_final_artwork_production_pipeline.sql`
 - Derived values recomputed rather than stored as authority: concept
   status batches, brief evaluation, intelligence assessment, revision
   impact, summary views, customer-facing `finalization` status
@@ -2379,9 +2679,11 @@ delegation to composed capabilities.
 | `GET /api/projects/[projectId]/generation/status` | Read-only generation status |
 | `POST /api/projects/[projectId]/select` | Select concept |
 | `POST /api/projects/[projectId]/finalize` | Sprint 2M Phase 2B: explicit final-direction approval + idempotent finalization request |
+| `GET /api/projects/[projectId]/production-artwork/image` | Sprint 2M Phase 2C: mint short-lived production-PNG URL once print-ready (Goal 14 — not linked from any UI) |
 | `POST /api/projects/[projectId]/undo` | One-level undo |
 | `GET /api/assets/[...objectKey]` | Serve filesystem signed assets |
-| `POST /api/worker/generation` | Independent worker batch (secret-protected) |
+| `POST /api/worker/generation` | Independent concept-generation worker batch (secret-protected) |
+| `POST /api/worker/final-artwork` | Sprint 2M Phase 2C: independent final-artwork worker batch (secret-protected) |
 
 ### Customer snapshot sanitization (Sprint 2K Phase 1)
 
@@ -2735,16 +3037,36 @@ Verified against the implementation:
   before an unrelated, non-regenerating brief edit remains active. This is
   a deliberate scope boundary (Goal 4 talks about invalidating approval
   when "artwork changes," not any brief text edit), not an oversight.
-- Sprint 2M Phase 2B: `AssetRecord.finalArtworkJobId` and the
-  `final_artwork_jobs`/`final_direction_approvals` tables exist and are
-  exercised by tests, but nothing ever writes a non-null
-  `finalArtworkJobId` yet — no production asset can exist until a future
-  phase implements real transformations.
-- Sprint 2M Phase 2B does not implement upscaling, vectorization,
-  background removal, font outlining, PDF/SVG/production-PNG generation,
-  CMYK conversion, embroidery digitization, or any paid provider call for
-  final artwork. See §13b for the reserved contract (`FinalArtworkInput`)
-  a future phase's real orchestration would consume.
+- Sprint 2M Phase 2C: the only implemented production transformation is
+  local, deterministic geometric resampling (`LocalRasterInterpolationProvider`)
+  — no provider-hosted reconstruction/regeneration exists, and the current
+  concept-generation provider (`gpt-image-1`, max `1536x1024`) cannot
+  natively reach full-back (3600x4200px) or left-chest (1200x1200px)
+  production resolution regardless. A full-back or left-chest concept
+  therefore honestly resolves `finalization_required`, not `print_ready`,
+  under Phase 2C — this is the system correctly refusing to fabricate
+  readiness, not a bug. Only a sleeve-placement concept (whose native
+  ~1024x1024px source already exceeds the 900x900px target) can
+  genuinely reach `print_ready` today without any future work.
+- Sprint 2M Phase 2C's raster transformation never crops content and never
+  distorts aspect ratio in the padding direction, but the "contain" resample
+  does not attempt any smarter aspect-ratio-aware composition (e.g.
+  re-flowing a square concept to a non-square target) — the customer
+  approved a square-ish concept and the production canvas is simply
+  centered within the target's margin-inset box.
+- Sprint 2M Phase 2C does not implement vectorization, embroidery
+  digitization, screen-print separations, banner/sign production, PDF/SVG
+  production output, CMYK conversion, or any paid/network provider call for
+  final artwork (Goal 17/20) — `FinalArtworkProvider` is replaceable
+  (`resolveFinalArtworkProvider`), but no second implementation exists yet.
+- Sprint 2M Phase 2C's secure production-asset download boundary
+  (`GET /api/projects/[projectId]/production-artwork/image`) exists and is
+  tested but is not linked from any UI — no purchasing/download product
+  exists yet (Goal 14's explicit scope limit).
+- Sprint 2M Phase 2C's `FinalArtworkCapability.getCurrentProductionAssetId`
+  resolves only the *current* active approval's job's production asset —
+  there is no customer-facing history of prior production attempts from a
+  superseded approval.
 
 Do not treat future work as completed architecture.
 
@@ -2760,8 +3082,8 @@ Describe attachment points only — not a delivery plan:
 | RegenerationIntelligenceCapability | **Phase 1–3 done — see §13a.** Live on explicit regeneration only. Future: richer evaluation-driven guidance / RejectedConceptMemory population; never auto-retry; never generate artwork itself; never mutate the brief |
 | RevisionTimelineCapability | **Phase 2–3 done.** Derive ephemeral timelines on regeneration only; never persist |
 | GenerationIntent | **Phase 3 done.** Sole PromptTranslation input; immutable; never persisted; never customer-facing |
-| PrintValidationCapability | **Sprint 2M Phase 1 (architecture) + Phase 2A (wired as provisional intelligence into `GenerationWorkerCapability`) done — see §5.** Still not called by any route or UI on the concept path, and still never persisted there. **Phase 2B adds the customer-facing approval flow that will one day trigger the authoritative call** (§13b) — no route calls `validateArtwork` yet, since no production asset exists. Future: persist authoritative status on a production-asset-scoped record (never `ArtworkVersion.printValidationStatus` — see §13b); never mutate brief; never confuse with Concept Evaluation |
-| **FinalArtworkCapability** | **Sprint 2M Phase 2B (approval + idempotent enqueue) done — see §13b.** Owns `FinalDirectionApproval` + `FinalArtworkJob` persistence and validation. Still reserved: no worker claims a `FinalArtworkJob`, no transformation runs, `FinalArtworkInput` (`capabilities/final-artwork/contracts.ts`) is defined but never constructed. Future: a worker that takes a `PrintValidationReport` with `status !== "ready"`, performs the transformations named in `requiredTransformations` (upscale, remove background, vectorize, outline fonts, verify/recreate text, produce final PNG/SVG/PDF), produces a new production asset (`AssetRecord.finalArtworkJobId` set), and re-validates via `PrintValidationCapability`. Must never generate/transform anything Print Validation itself decided; Print Validation must remain pure validation (Goal 17) |
+| PrintValidationCapability | **Sprint 2M Phase 1 (architecture) + Phase 2A (provisional intelligence) + Phase 2C (authoritative, production-asset-scoped run) done — see §5/§13c.** Authoritative status now persists on `ProductionAssetValidation`, never `ArtworkVersion.printValidationStatus` (confirmed correct across three sprints of audit). Future: extend `resolutionProvenance` to a real provider-reconstruction path once one exists; never mutate brief; never confuse with Concept Evaluation |
+| **FinalArtworkCapability** / **FinalArtworkWorkerCapability** | **Sprint 2M Phase 2B (approval + idempotent enqueue) + Phase 2C (real worker, raster production, authoritative validation, print-ready transition) done — see §13b/§13c.** Phase 2C supports raster apparel PNG only via one local, deterministic provider. Future: a provider-hosted reconstruction/regeneration `FinalArtworkProvider` (gated behind its own default-off env var, mirroring `CONCEPT_GENERATION_ENABLE_REAL`) that can genuinely exceed native source detail for full-back/left-chest placements; vector/PDF production (`"production_svg"`/`"production_pdf"` `ProductionAssetRole` values are reserved); embroidery digitization; a purchasing/download product built on the existing secure read boundary (§13c "Download boundary"). Must never generate/transform anything Print Validation itself decided; Print Validation must remain pure validation |
 | Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider` (e.g. a dedicated OCR specialist, a different vision model); no domain change |
 | Production file generation | New assets linked via `printAssetId` / dedicated kinds |
 | Vector output | `vectorAssetId` / SVG asset kinds |
@@ -2822,6 +3144,7 @@ prevails until intentionally amended.
 - [`IHEARTPRINTS_CONSTITUTION.md`](./IHEARTPRINTS_CONSTITUTION.md)
 - [`AGENTS.md`](./AGENTS.md)
 - [`docs/deployment/generation-worker.md`](./docs/deployment/generation-worker.md)
+- [`docs/deployment/final-artwork-worker.md`](./docs/deployment/final-artwork-worker.md)
 - [`docs/database/MIGRATION_WORKFLOW.md`](./docs/database/MIGRATION_WORKFLOW.md)
 - [`README.md`](./README.md)
 - `.env.example`

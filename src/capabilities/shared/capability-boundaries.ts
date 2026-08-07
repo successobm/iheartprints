@@ -511,8 +511,105 @@
  *     (the caller already decided; this capability only validates and
  *     persists), duplicate Print Validation's rules, or mark anything
  *     print-ready without a real, authoritative validation run against a
- *     real production asset — impossible in Phase 2B since no
- *     transformation runs and no production asset can exist yet.
+ *     real production asset.
+ *
+ * Sprint 2M Phase 2C additions (First Real Production Artwork Pipeline —
+ * Raster Apparel; the gap every prior 2M phase explicitly reserved):
+ *   Pipeline:
+ *     FinalDirectionApproval ("active")
+ *          ↓
+ *     FinalArtworkJob ("queued")
+ *          ↓
+ *     FinalArtworkWorkerCapability.processNextJob  (new — independent
+ *     worker, never invoked from a customer request; atomic claim mirrors
+ *     GenerationWorkerCapability exactly, own table/own claim methods)
+ *          → resolves the exact active approval, its exact ArtworkVersion,
+ *            approved DesignBriefVersion, source concept AssetRecord —
+ *            rejects a superseded approval, a cross-project asset, or a
+ *            missing source asset rather than guessing
+ *          → deriveProductionRequirements (reused, unchanged, from
+ *            PrintValidationCapability) resolves target physical size from
+ *            the existing PrintPlacement policy table — an unsupported
+ *            production method or unknown print location completes the job
+ *            honestly without ever producing an asset (Goal 4/17)
+ *          ↓
+ *     FinalArtworkProvider.produce  (new provider-neutral boundary;
+ *     Phase 2C's only implementation, LocalRasterInterpolationProvider, is
+ *     a local, deterministic, pure-JS geometric resample — no network call,
+ *     no paid provider, Goal 20)
+ *          → always reports true native (pre-transform) source dimensions
+ *            and honest `resolutionProvenance` ("native" vs
+ *            "interpolated_upscale") and `preservesApprovedContent`
+ *          ↓
+ *     AssetCapability.uploadProductionAsset  (new — production-stage
+ *     upload; `finalArtworkJobId` + explicit `productionRole` set; never a
+ *     concept-stage asset)
+ *          ↓
+ *     PrintValidationCapability.validateArtwork  (same pure capability as
+ *     Phase 1/2A — AUTHORITATIVE this time: input is the real production
+ *     asset via `assembleAuthoritativeProductionPrintValidationInput`, new
+ *     alongside the existing provisional assembler)
+ *          ↓
+ *     ProductionAssetValidation persisted  (new, append-only, per-asset —
+ *     never a single status column on ArtworkVersion)
+ *          ↓
+ *     PrintProject.status = "print_ready" ONLY IF report.status === "ready"
+ *     — otherwise "finalization_required" (new project status). No other
+ *     code path may ever set "print_ready".
+ *   - **Upscaling Truthfulness (the sprint's central design question):**
+ *     `PrintValidationAssetSummary` gained `resolutionProvenance` /
+ *     `nativeWidthPx` / `nativeHeightPx`. `effective_resolution` and
+ *     `minimum_raster_dimensions` checks now judge sufficiency against the
+ *     TRUE pre-upscale source dimensions whenever provenance is
+ *     `"interpolated_upscale"` (or `"unknown"`) — never the enlarged file's
+ *     literal pixel count. This is what stops "resize 1024px to 3600px"
+ *     from ever reading as "production-quality artwork" merely because the
+ *     file got bigger. A concept whose native resolution already meets a
+ *     placement's target (e.g. a 1024x1024 concept against a 900x900
+ *     sleeve target) can validate `"ready"` with zero fabricated detail —
+ *     this is the one genuinely-achievable honest pass Phase 2C proves.
+ *   - Required-wording verification (Goal 8) is never assumed to transfer
+ *     from Concept Evaluation to a production asset. It transfers only when
+ *     `FinalArtworkProviderOutput.preservesApprovedContent === true` — true
+ *     for a pure geometric resample (same pixels, only resampled), and the
+ *     explicit gate a future content-altering provider (reconstruction/
+ *     regeneration) would have to declare `false`, which forces
+ *     `required_wording_verification` to resolve `"unknown"` →
+ *     `finalization_required` rather than silently inheriting a stale
+ *     verdict.
+ *   - `FinalArtworkWorkerCapability` must never: process an approval that
+ *     is not currently `"active"` (a superseded one is `"cancelled"`, not
+ *     processed); create a second production asset for the same job on
+ *     retry (Goal 16 — idempotent via `finalArtworkJobId` +
+ *     `productionRole` lookup); transition `PrintProject.status` for a job
+ *     whose approval is no longer the project's current active one (a
+ *     stale recovered job must never stomp a newer direction's status);
+ *     call `PrintValidationCapability` with anything but the real
+ *     production asset it just created/reused; duplicate
+ *     `PrintValidationCapability`'s rules internally.
+ *   - `FinalArtworkCapability.requestFinalArtwork` gained one behavior:
+ *     retrying an already-`"failed"` job (an infrastructure problem, never
+ *     a print-readiness verdict) revives it to `"queued"` rather than
+ *     returning a permanent dead end — the customer's existing "Prepare
+ *     Print-Ready Artwork" action is the retry path (Goal 21 — no
+ *     PowerShell required). A `"completed"` job (even one that landed on
+ *     `finalization_required`) is never revived — that is a real, honest
+ *     verdict, not a hiccup.
+ *   - `AssetStorageProvider` gained `download(objectKey): Promise<Buffer>` —
+ *     distinct from `getSignedUrl` (a browser-facing URL); needed because a
+ *     local raster transformation must decode real bytes in-process, unlike
+ *     Concept Evaluation which only ever needed a URL. Only
+ *     `AssetCapability.downloadAssetBytes` calls it.
+ *   - New customer-safe finalization status `"needs_review"` (`conversation-service.ts`),
+ *     derived purely from `PrintProject.status === "finalization_required"`
+ *     — same sanitization choke point as `"preparing"`/`"print_ready"`, no
+ *     new job/asset/validation detail added to the customer view.
+ *   - New secure read boundary (Goal 14, not wired into any UI):
+ *     `GET /api/projects/[projectId]/production-artwork/image` →
+ *     `conversation-service.getProductionArtworkUrl` →
+ *     `FinalArtworkCapability.getCurrentProductionAssetId` →
+ *     `AssetCapability.getSignedUrl` — only ever returns a URL once
+ *     `PrintProject.status === "print_ready"`.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2M2b" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2M2c" as const;

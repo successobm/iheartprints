@@ -24,16 +24,20 @@ import type { ProjectSnapshot, ProjectStatus } from "@/lib/domain/types";
  */
 
 /**
- * Sprint 2M Phase 2B: customer-safe finalization state, derived entirely
+ * Sprint 2M Phase 2B/2C: customer-safe finalization state, derived entirely
  * from `PrintProject.status` — never a raw job/approval id, internal job
- * status string, or other detail (Goal 16). `"preparing"` is deliberately
- * not `"print_ready"`: Phase 2B never performs a real production
- * transformation, so nothing may ever claim readiness it hasn't earned
- * (Constitution §15).
+ * status string, validation rule id, or other detail (Goal 13/16).
+ * `"preparing"` covers both "still in progress" and, honestly, "genuinely
+ * unfinished infrastructure state" — it is never claimed until authoritative
+ * Print Validation actually returns `ready` (Constitution §15).
+ * `"needs_review"` (Sprint 2M Phase 2C) is the truthful third state Phase 2B
+ * could not yet produce: the worker ran to completion and a real production
+ * asset exists, but it honestly is not print-ready yet.
  */
 export type CustomerFinalizationStatus =
   | "not_requested"
   | "preparing"
+  | "needs_review"
   | "print_ready";
 
 export interface CustomerFinalizationView {
@@ -44,6 +48,7 @@ function toCustomerFinalizationView(
   status: ProjectStatus,
 ): CustomerFinalizationView {
   if (status === "finalizing") return { status: "preparing" };
+  if (status === "finalization_required") return { status: "needs_review" };
   if (status === "print_ready") return { status: "print_ready" };
   return { status: "not_requested" };
 }
@@ -212,5 +217,34 @@ export async function getConceptImageUrl(
   if (!artwork || !artwork.primaryAssetId) return null;
 
   const url = await graph.assets.getSignedUrl(artwork.primaryAssetId);
+  return url ? { url } : null;
+}
+
+export interface ProductionArtworkView {
+  /** Short-lived signed URL — never a raw object key, asset id, or job/approval id. */
+  url: string;
+}
+
+/**
+ * Sprint 2M Phase 2C (Goal 14): the secure read boundary for a future
+ * download feature — not wired into any UI yet. Returns a fresh, short-lived
+ * signed URL for the project's current print-ready production PNG, or
+ * `null` on any miss (project not found, not print-ready yet, or no
+ * production asset resolvable) — every miss is deliberately
+ * indistinguishable so a caller can render a uniform 404 (mirrors
+ * `getConceptImageUrl`). Only ever exposes a URL once `PrintProject.status
+ * === "print_ready"` — never while merely "preparing" or "needs_review".
+ */
+export async function getProductionArtworkUrl(
+  projectId: string,
+): Promise<ProductionArtworkView | null> {
+  const graph = getCapabilityGraph();
+  const snapshot = await graph.conversation.get(projectId);
+  if (!snapshot || snapshot.project.status !== "print_ready") return null;
+
+  const assetId = await graph.finalArtwork.getCurrentProductionAssetId(projectId);
+  if (!assetId) return null;
+
+  const url = await graph.assets.getSignedUrl(assetId);
   return url ? { url } : null;
 }

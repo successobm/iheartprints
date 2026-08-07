@@ -1,6 +1,8 @@
 /**
- * Sprint 2M Phase 2B: provider-neutral contracts for the reserved Final
- * Artwork / production-transformation orchestration boundary.
+ * Sprint 2M Phase 2B: provider-neutral contracts for the Final Artwork /
+ * production-transformation orchestration boundary. Sprint 2M Phase 2C is
+ * the first phase that actually constructs and consumes `FinalArtworkInput`
+ * — see `final-artwork-worker/build-final-artwork-input.ts`.
  *
  * `FinalDirectionApproval` and `FinalArtworkJob` are durable, persisted
  * records — their shape lives in `@/lib/domain/types` alongside
@@ -8,12 +10,10 @@
  * persisted entity in this codebase is defined once, in the domain layer,
  * and re-used by whichever capability owns writing to it).
  *
- * `FinalArtworkInput` below is the one new thing this module defines: an
- * ephemeral, never-persisted, provider-neutral input contract for a future
- * production-transformation provider. Nothing in Phase 2B constructs or
- * consumes it yet — no transformation runs — but the shape exists now so a
- * later phase's real orchestration doesn't have to invent it under
- * pressure, and so nothing downstream is tempted to pass a raw
+ * `FinalArtworkInput` below is an ephemeral, never-persisted, provider-
+ * neutral input contract — the caller (`FinalArtworkWorkerCapability`)
+ * resolves every field from already-persisted, immutable records before
+ * constructing one; nothing downstream is tempted to pass a raw
  * `AssetRecord`/`TShirtDesignBrief` into a provider instead.
  */
 
@@ -25,17 +25,18 @@ import type {
 import type { DesignBriefSnapshotContent } from "@/lib/domain/types";
 
 /**
- * Reserved — not constructed or consumed anywhere in Phase 2B.
- *
- * Everything a future production-transformation provider would need,
- * already resolved by the caller (mirrors `PrintValidationInput` and
- * `GenerationPromptRequest`'s "caller does I/O, the contract only carries
- * validated data" shape). Never a raw customer/API object; never a storage
- * key or other implementation detail (Goal 7) — IDs and validated domain
- * snapshots only.
+ * Everything the Final Artwork orchestration needs, already resolved by the
+ * caller (mirrors `PrintValidationInput` and `GenerationPromptRequest`'s
+ * "caller does I/O, the contract only carries validated data" shape).
+ * Never a raw customer/API object; never a storage key or other
+ * implementation detail (Goal 7) — IDs and validated domain snapshots only.
  */
 export interface FinalArtworkInput {
   readonly projectId: string;
+  /** Sprint 2M Phase 2C addition: the exact job this input was resolved for — never "whatever is currently active" (Goal 3). */
+  readonly finalArtworkJobId: string;
+  /** Sprint 2M Phase 2C addition: the exact, active approval that authorized this job — resolved once, never re-derived mid-job. */
+  readonly finalDirectionApprovalId: string;
   readonly artworkVersionId: string;
   readonly designBriefVersionId: string;
   readonly approvedBrief: DesignBriefSnapshotContent;

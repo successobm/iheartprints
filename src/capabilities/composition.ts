@@ -21,7 +21,11 @@ import {
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import { createDesignIntelligenceCapability } from "@/capabilities/design-intelligence";
 import { createDesignSummaryCapability } from "@/capabilities/design-summary";
-import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
+import {
+  createFinalArtworkCapability,
+  resolveFinalArtworkProvider,
+} from "@/capabilities/final-artwork";
+import { createFinalArtworkWorkerCapability } from "@/capabilities/final-artwork-worker";
 import { createGenerationWorkerCapability } from "@/capabilities/generation-worker";
 import { createIntentExtractionCapability } from "@/capabilities/intent-extraction";
 import { createInterviewIntelligenceCapability } from "@/capabilities/interview-intelligence";
@@ -33,7 +37,10 @@ import { createPromptTranslationCapability } from "@/capabilities/prompt-transla
 import { resolveConceptGenerationProvider } from "@/capabilities/providers";
 import { createRevisionCapability } from "@/capabilities/revision";
 import { createRevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
-import { createGenerationSchedulerCapability } from "@/capabilities/worker-scheduler";
+import {
+  createGenerationSchedulerCapability,
+  createFinalArtworkSchedulerCapability,
+} from "@/capabilities/worker-scheduler";
 
 export interface CapabilityGraph {
   conversation: ConversationCapability;
@@ -62,8 +69,12 @@ export interface CapabilityGraph {
    */
   workerScheduler: ReturnType<typeof createGenerationSchedulerCapability>;
   printValidation: ReturnType<typeof createPrintValidationCapability>;
-  /** Sprint 2M Phase 2B: final-direction approval + reserved production orchestration boundary. */
+  /** Sprint 2M Phase 2B: final-direction approval + production orchestration boundary. */
   finalArtwork: ReturnType<typeof createFinalArtworkCapability>;
+  /** Sprint 2M Phase 2C: independent worker that claims and runs `FinalArtworkJob`s — see `final-artwork-worker/`. */
+  finalArtworkWorker: ReturnType<typeof createFinalArtworkWorkerCapability>;
+  /** Sprint 2M Phase 2C: provider-neutral scheduler for `finalArtworkWorker` — mirrors `workerScheduler`. */
+  finalArtworkScheduler: ReturnType<typeof createFinalArtworkSchedulerCapability>;
   revision: ReturnType<typeof createRevisionCapability>;
   printVault: ReturnType<typeof createPrintVaultCapability>;
   assets: ReturnType<typeof createAssetCapability>;
@@ -133,6 +144,17 @@ export function createCapabilityGraph(
   // dependency beyond the repository itself — mirrors DesignBriefCapability's
   // shape ("sole mutation path" for its own record).
   const finalArtwork = createFinalArtworkCapability(repo);
+  // Sprint 2M Phase 2C: the independent worker that actually claims and
+  // runs FinalArtworkJob rows — never invoked from a customer route (same
+  // rule as generationWorker/workerScheduler below).
+  const finalArtworkProvider = resolveFinalArtworkProvider();
+  const finalArtworkWorker = createFinalArtworkWorkerCapability(
+    repo,
+    assets,
+    finalArtworkProvider,
+    printValidation,
+  );
+  const finalArtworkScheduler = createFinalArtworkSchedulerCapability(finalArtworkWorker);
 
   const conversation = createConversationCapability({
     repo,
@@ -166,6 +188,8 @@ export function createCapabilityGraph(
     workerScheduler,
     printValidation,
     finalArtwork,
+    finalArtworkWorker,
+    finalArtworkScheduler,
     revision: createRevisionCapability(),
     printVault: createPrintVaultCapability(),
     assets,

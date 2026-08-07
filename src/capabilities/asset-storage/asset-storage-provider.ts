@@ -44,6 +44,15 @@ export interface AssetStorageProvider {
    * asset (Constitution §6.11, Version Everything).
    */
   delete(objectKey: string): Promise<void>;
+  /**
+   * Sprint 2M Phase 2C: fetches raw bytes server-side. Distinct from
+   * `getSignedUrl` — a vision provider only ever needed a URL it fetches
+   * itself; a local raster transformation (`FinalArtworkProvider`) needs
+   * the actual bytes in-process to decode and resample. Only
+   * `AssetCapability` (via `downloadAssetBytes`) ever calls this — no other
+   * caller is allowed to know a storage backend exists.
+   */
+  download(objectKey: string): Promise<Buffer>;
 }
 
 /** `AssetStorageProvider.upload`'s bucket/path convention, shared by every implementation. */

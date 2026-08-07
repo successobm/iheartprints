@@ -32,4 +32,12 @@ export class DataUriAssetStorageProvider implements AssetStorageProvider {
     // Nothing external to remove — the bytes only ever lived inline in
     // whatever already-deleted database row referenced them.
   }
+
+  async download(objectKey: string): Promise<Buffer> {
+    const match = /^data:[^;]*;base64,([\s\S]*)$/.exec(objectKey);
+    if (!match) {
+      throw new Error("Object key is not a data URI — cannot download bytes.");
+    }
+    return Buffer.from(match[1], "base64");
+  }
 }

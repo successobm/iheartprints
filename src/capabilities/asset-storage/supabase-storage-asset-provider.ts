@@ -59,4 +59,12 @@ export class SupabaseStorageAssetProvider implements AssetStorageProvider {
     const { error } = await this.client.storage.from(BUCKET).remove([objectKey]);
     if (error) throw error;
   }
+
+  async download(objectKey: string): Promise<Buffer> {
+    const { data, error } = await this.client.storage.from(BUCKET).download(objectKey);
+    if (error) throw error;
+    if (!data) throw new Error("Supabase Storage returned no data for download");
+    const arrayBuffer = await data.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  }
 }

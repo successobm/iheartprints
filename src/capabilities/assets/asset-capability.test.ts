@@ -60,6 +60,7 @@ describe("AssetCapability", () => {
       vectorAssetId: null,
       printAssetId: null,
       finalArtworkJobId: null,
+      productionRole: null,
     });
 
     assert.ok(registered);
@@ -94,6 +95,7 @@ describe("AssetCapability", () => {
       vectorAssetId: null,
       printAssetId: null,
       finalArtworkJobId: null,
+      productionRole: null,
     });
 
     const listForSecond = await assets.listAssets(second.project.id);
@@ -120,6 +122,7 @@ describe("AssetCapability", () => {
       vectorAssetId: null,
       printAssetId: null,
       finalArtworkJobId: null,
+      productionRole: null,
     });
 
     const serialized = JSON.stringify(registered?.metadata ?? {});
@@ -199,6 +202,7 @@ describe("AssetCapability", () => {
           deleted.push(objectKey);
           return storage.delete(objectKey);
         },
+        download: storage.download.bind(storage),
       };
 
       const failingRepo = new Proxy(repo, {
@@ -255,6 +259,7 @@ describe("AssetCapability", () => {
           storageKey: "broken",
           upload: async () => ({ objectKey: "projects/x/concepts/y/original.png" }),
           getSignedUrl: async (objectKey: string) => objectKey,
+          download: async () => Buffer.from([]),
           delete: async () => {
             throw new Error("cleanup also failed");
           },
@@ -317,6 +322,7 @@ describe("AssetCapability", () => {
         vectorAssetId: null,
         printAssetId: null,
         finalArtworkJobId: null,
+        productionRole: null,
       });
       assert.ok(registered);
 
@@ -350,6 +356,7 @@ describe("AssetCapability", () => {
           return `signed://${expiresInSeconds}`;
         },
         delete: async () => undefined,
+        download: async () => Buffer.from([]),
       };
 
       const assets = createAssetCapability(repo, storage, new PngThumbnailGenerator());
@@ -367,6 +374,7 @@ describe("AssetCapability", () => {
         vectorAssetId: null,
         printAssetId: null,
         finalArtworkJobId: null,
+        productionRole: null,
       });
       assert.ok(registered);
 

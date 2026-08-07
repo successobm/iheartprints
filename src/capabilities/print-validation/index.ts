@@ -12,6 +12,9 @@ export {
   assembleProvisionalPrintValidationInput,
   type AssembleProvisionalPrintValidationInputParams,
   type ProvisionalAssetSummaryInput,
+  assembleAuthoritativeProductionPrintValidationInput,
+  type AssembleAuthoritativeProductionPrintValidationInputParams,
+  type ProductionAssetSummaryInput,
 } from "./assemble-input";
 export {
   calculateEffectiveResolution,
@@ -37,4 +40,5 @@ export {
   type PrintValidationReport,
   type PrintValidationAssetSummary,
   type PrintValidationInput,
+  type ResolutionProvenance,
 } from "./contracts";

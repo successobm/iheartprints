@@ -54,4 +54,9 @@ export class FilesystemAssetStorageProvider implements AssetStorageProvider {
       if (err.code !== "ENOENT") throw error;
     }
   }
+
+  async download(objectKey: string): Promise<Buffer> {
+    const filePath = resolveAssetPath(objectKey);
+    return fs.readFile(filePath);
+  }
 }

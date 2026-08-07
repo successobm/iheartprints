@@ -19,6 +19,7 @@ import type {
   GenerationJob,
   InterviewStateData,
   PrintProject,
+  ProductionAssetValidation,
   ProjectSnapshot,
   ProjectStatus,
   TShirtDesignBrief,
@@ -31,8 +32,10 @@ import type {
   CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
   CreateMessageInput,
+  CreateProductionAssetValidationInput,
   ProjectRepository,
   UpdateArtworkEvaluationInput,
+  UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
 } from "./repository";
 import { UniqueConstraintViolationError } from "./repository";
@@ -50,6 +53,8 @@ interface LocalDatabase {
   /** Sprint 2M Phase 2B. */
   finalDirectionApprovals: FinalDirectionApproval[];
   finalArtworkJobs: FinalArtworkJob[];
+  /** Sprint 2M Phase 2C. */
+  productionAssetValidations: ProductionAssetValidation[];
 }
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -71,6 +76,7 @@ function emptyDb(): LocalDatabase {
     assets: [],
     finalDirectionApprovals: [],
     finalArtworkJobs: [],
+    productionAssetValidations: [],
   };
 }
 
@@ -128,14 +134,24 @@ async function readDb(): Promise<LocalDatabase> {
         completedAt: job.completedAt ?? null,
         heartbeatAt: job.heartbeatAt ?? null,
       })),
-      // Sprint 2M Phase 2B: default the new reserved field for on-disk data
-      // written before it existed, so resume never crashes.
+      // Sprint 2M Phase 2B/2C: default the new reserved fields for on-disk
+      // data written before they existed, so resume never crashes.
       assets: (parsed.assets ?? []).map((asset) => ({
         ...asset,
         finalArtworkJobId: asset.finalArtworkJobId ?? null,
+        productionRole: asset.productionRole ?? null,
       })),
       finalDirectionApprovals: parsed.finalDirectionApprovals ?? [],
-      finalArtworkJobs: parsed.finalArtworkJobs ?? [],
+      // Sprint 2M Phase 2C: default new worker-lifecycle fields for on-disk
+      // data written before they existed, so resume never crashes.
+      finalArtworkJobs: (parsed.finalArtworkJobs ?? []).map((job) => ({
+        ...job,
+        attempts: job.attempts ?? 0,
+        startedAt: job.startedAt ?? null,
+        completedAt: job.completedAt ?? null,
+        heartbeatAt: job.heartbeatAt ?? null,
+      })),
+      productionAssetValidations: parsed.productionAssetValidations ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -794,7 +810,11 @@ export class LocalProjectRepository implements ProjectRepository {
       finalDirectionApprovalId: input.finalDirectionApprovalId,
       artworkVersionId: input.artworkVersionId,
       status: "queued",
+      attempts: 0,
       lastError: null,
+      startedAt: null,
+      completedAt: null,
+      heartbeatAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -815,5 +835,120 @@ export class LocalProjectRepository implements ProjectRepository {
           item.finalDirectionApprovalId === finalDirectionApprovalId,
       ) ?? null
     );
+  }
+
+  async getFinalDirectionApprovalById(
+    id: string,
+  ): Promise<FinalDirectionApproval | null> {
+    const db = await readDb();
+    return db.finalDirectionApprovals.find((item) => item.id === id) ?? null;
+  }
+
+  // --- Sprint 2M Phase 2C: final artwork worker ------------------------
+
+  async getFinalArtworkJob(jobId: string): Promise<FinalArtworkJob | null> {
+    const db = await readDb();
+    return db.finalArtworkJobs.find((job) => job.id === jobId) ?? null;
+  }
+
+  async updateFinalArtworkJob(
+    jobId: string,
+    patch: UpdateFinalArtworkJobInput,
+  ): Promise<FinalArtworkJob> {
+    const db = await readDb();
+    const job = db.finalArtworkJobs.find((item) => item.id === jobId);
+    if (!job) throw new Error("Final artwork job not found");
+
+    Object.assign(job, patch, { updatedAt: nowIso() });
+    await writeDb(db);
+    return job;
+  }
+
+  async claimNextQueuedFinalArtworkJob(): Promise<FinalArtworkJob | null> {
+    const db = await readDb();
+    const candidates = db.finalArtworkJobs
+      .filter((job) => job.status === "queued" || job.status === "recoverable")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const job = candidates[0];
+    if (!job) return null;
+
+    // Mirrors `claimNextQueuedJob`'s comment: a single-process local store
+    // has no real concurrent-claim race, but the shape mirrors the Supabase
+    // optimistic-claim contract exactly.
+    const timestamp = nowIso();
+    job.status = "running";
+    job.attempts += 1;
+    job.startedAt = timestamp;
+    job.heartbeatAt = timestamp;
+    job.updatedAt = timestamp;
+    await writeDb(db);
+    return job;
+  }
+
+  async touchFinalArtworkJobHeartbeat(jobId: string): Promise<void> {
+    const db = await readDb();
+    const job = db.finalArtworkJobs.find((item) => item.id === jobId);
+    if (!job) return;
+    job.heartbeatAt = nowIso();
+    await writeDb(db);
+  }
+
+  async recoverAbandonedFinalArtworkJobs(
+    staleAfterMs: number,
+  ): Promise<FinalArtworkJob[]> {
+    const db = await readDb();
+    const now = Date.now();
+    const recovered: FinalArtworkJob[] = [];
+
+    for (const job of db.finalArtworkJobs) {
+      if (job.status !== "running") continue;
+      const lastHeartbeat = job.heartbeatAt
+        ? Date.parse(job.heartbeatAt)
+        : Date.parse(job.startedAt ?? job.updatedAt);
+      if (now - lastHeartbeat < staleAfterMs) continue;
+
+      job.status = "recoverable";
+      job.updatedAt = nowIso();
+      recovered.push(job);
+    }
+
+    if (recovered.length > 0) await writeDb(db);
+    return recovered;
+  }
+
+  async createProductionAssetValidation(
+    projectId: string,
+    input: CreateProductionAssetValidationInput,
+  ): Promise<ProductionAssetValidation> {
+    const db = await readDb();
+    const timestamp = nowIso();
+    const validation: ProductionAssetValidation = {
+      id: randomUUID(),
+      projectId,
+      finalArtworkJobId: input.finalArtworkJobId,
+      assetId: input.assetId,
+      status: input.status,
+      report: input.report,
+      validatedAt: timestamp,
+      createdAt: timestamp,
+    };
+    db.productionAssetValidations.push(validation);
+    await writeDb(db);
+    return validation;
+  }
+
+  async getLatestProductionAssetValidationForJob(
+    projectId: string,
+    finalArtworkJobId: string,
+  ): Promise<ProductionAssetValidation | null> {
+    const db = await readDb();
+    const matches = db.productionAssetValidations
+      .filter(
+        (item) =>
+          item.projectId === projectId &&
+          item.finalArtworkJobId === finalArtworkJobId,
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return matches.at(-1) ?? null;
   }
 }

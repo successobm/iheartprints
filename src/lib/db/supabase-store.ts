@@ -22,6 +22,8 @@ import type {
   GenerationJobStatus,
   InterviewStateData,
   PrintProject,
+  ProductionAssetRole,
+  ProductionAssetValidation,
   ProjectSnapshot,
   ProjectStatus,
   TShirtDesignBrief,
@@ -34,8 +36,10 @@ import type {
   CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
   CreateMessageInput,
+  CreateProductionAssetValidationInput,
   ProjectRepository,
   UpdateArtworkEvaluationInput,
+  UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
 } from "./repository";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -151,6 +155,7 @@ type DbAsset = {
   vector_asset_id: string | null;
   print_asset_id: string | null;
   final_artwork_job_id: string | null;
+  production_role: ProductionAssetRole | null;
   created_at: string;
 };
 
@@ -171,9 +176,24 @@ type DbFinalArtworkJob = {
   final_direction_approval_id: string;
   artwork_version_id: string;
   status: FinalArtworkJobStatus;
+  attempts: number;
   last_error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  heartbeat_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+type DbProductionAssetValidation = {
+  id: string;
+  project_id: string;
+  final_artwork_job_id: string;
+  asset_id: string;
+  status: string;
+  report: Record<string, unknown>;
+  validated_at: string;
+  created_at: string;
 };
 
 type DbDesignBriefVersion = {
@@ -311,6 +331,7 @@ function mapAsset(row: DbAsset): AssetRecord {
     vectorAssetId: row.vector_asset_id,
     printAssetId: row.print_asset_id,
     finalArtworkJobId: row.final_artwork_job_id ?? null,
+    productionRole: row.production_role ?? null,
     createdAt: row.created_at,
   };
 }
@@ -337,9 +358,28 @@ function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
     finalDirectionApprovalId: row.final_direction_approval_id,
     artworkVersionId: row.artwork_version_id,
     status: row.status,
+    attempts: row.attempts,
     lastError: row.last_error,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    heartbeatAt: row.heartbeat_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapProductionAssetValidation(
+  row: DbProductionAssetValidation,
+): ProductionAssetValidation {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    finalArtworkJobId: row.final_artwork_job_id,
+    assetId: row.asset_id,
+    status: row.status,
+    report: row.report ?? {},
+    validatedAt: row.validated_at,
+    createdAt: row.created_at,
   };
 }
 
@@ -957,6 +997,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
         vector_asset_id: input.vectorAssetId,
         print_asset_id: input.printAssetId,
         final_artwork_job_id: input.finalArtworkJobId,
+        production_role: input.productionRole,
       })
       .select("*")
       .single();
@@ -1088,5 +1129,157 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .maybeSingle();
     if (error) throw error;
     return data ? mapFinalArtworkJob(data as DbFinalArtworkJob) : null;
+  }
+
+  async getFinalDirectionApprovalById(
+    id: string,
+  ): Promise<FinalDirectionApproval | null> {
+    const { data, error } = await this.client
+      .from("final_direction_approvals")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data
+      ? mapFinalDirectionApproval(data as DbFinalDirectionApproval)
+      : null;
+  }
+
+  // --- Sprint 2M Phase 2C: final artwork worker -------------------------
+
+  async getFinalArtworkJob(jobId: string): Promise<FinalArtworkJob | null> {
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .select("*")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapFinalArtworkJob(data as DbFinalArtworkJob) : null;
+  }
+
+  async updateFinalArtworkJob(
+    jobId: string,
+    patch: UpdateFinalArtworkJobInput,
+  ): Promise<FinalArtworkJob> {
+    const payload: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+    if (patch.status !== undefined) payload.status = patch.status;
+    if (patch.attempts !== undefined) payload.attempts = patch.attempts;
+    if (patch.lastError !== undefined) payload.last_error = patch.lastError;
+    if (patch.startedAt !== undefined) payload.started_at = patch.startedAt;
+    if (patch.completedAt !== undefined) payload.completed_at = patch.completedAt;
+    if (patch.heartbeatAt !== undefined) payload.heartbeat_at = patch.heartbeatAt;
+
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .update(payload)
+      .eq("id", jobId)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapFinalArtworkJob(data as DbFinalArtworkJob);
+  }
+
+  async claimNextQueuedFinalArtworkJob(): Promise<FinalArtworkJob | null> {
+    // Same optimistic-claim shape as `claimNextQueuedJob` — read the oldest
+    // due candidate, then update it conditioned on it still being in the
+    // status we read; a lost race touches zero rows and reports "nothing
+    // claimed" rather than retrying.
+    const { data: candidate, error: candidateError } = await this.client
+      .from("final_artwork_jobs")
+      .select("*")
+      .in("status", ["queued", "recoverable"])
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (candidateError) throw candidateError;
+    if (!candidate) return null;
+
+    const row = candidate as DbFinalArtworkJob;
+    const timestamp = new Date().toISOString();
+
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .update({
+        status: "running",
+        attempts: row.attempts + 1,
+        started_at: timestamp,
+        heartbeat_at: timestamp,
+        updated_at: timestamp,
+      })
+      .eq("id", row.id)
+      .eq("status", row.status)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapFinalArtworkJob(data as DbFinalArtworkJob) : null;
+  }
+
+  async touchFinalArtworkJobHeartbeat(jobId: string): Promise<void> {
+    const { error } = await this.client
+      .from("final_artwork_jobs")
+      .update({ heartbeat_at: new Date().toISOString() })
+      .eq("id", jobId);
+    if (error) throw error;
+  }
+
+  async recoverAbandonedFinalArtworkJobs(
+    staleAfterMs: number,
+  ): Promise<FinalArtworkJob[]> {
+    const staleBefore = new Date(Date.now() - staleAfterMs).toISOString();
+
+    // Single atomic conditional UPDATE — same reasoning as
+    // `recoverAbandonedJobs`: folding the staleness filter into the WHERE
+    // clause means a job that legitimately heartbeats or completes between
+    // issuing and executing this query is never double-recovered.
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .update({ status: "recoverable", updated_at: new Date().toISOString() })
+      .eq("status", "running")
+      .or(
+        `and(heartbeat_at.is.null,started_at.lt.${staleBefore}),heartbeat_at.lt.${staleBefore}`,
+      )
+      .select("*");
+    if (error) throw error;
+
+    return ((data as DbFinalArtworkJob[]) ?? []).map(mapFinalArtworkJob);
+  }
+
+  async createProductionAssetValidation(
+    projectId: string,
+    input: CreateProductionAssetValidationInput,
+  ): Promise<ProductionAssetValidation> {
+    const { data, error } = await this.client
+      .from("production_asset_validations")
+      .insert({
+        project_id: projectId,
+        final_artwork_job_id: input.finalArtworkJobId,
+        asset_id: input.assetId,
+        status: input.status,
+        report: input.report,
+      })
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapProductionAssetValidation(data as DbProductionAssetValidation);
+  }
+
+  async getLatestProductionAssetValidationForJob(
+    projectId: string,
+    finalArtworkJobId: string,
+  ): Promise<ProductionAssetValidation | null> {
+    const { data, error } = await this.client
+      .from("production_asset_validations")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("final_artwork_job_id", finalArtworkJobId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data
+      ? mapProductionAssetValidation(data as DbProductionAssetValidation)
+      : null;
   }
 }

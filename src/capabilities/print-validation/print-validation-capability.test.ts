@@ -54,10 +54,89 @@ function baseInput(overrides: Partial<PrintValidationInput> = {}): PrintValidati
       heightPx: 1024,
       hasTransparency: true,
       vectorAssetId: null,
+      resolutionProvenance: "native",
+      nativeWidthPx: 1024,
+      nativeHeightPx: 1024,
     },
     ...overrides,
   };
 }
+
+describe("PrintValidationCapability — Upscaling Truthfulness (Sprint 2M Phase 2C)", () => {
+  const printValidation = createPrintValidationCapability();
+
+  it("an interpolated-upscale asset never passes effective_resolution merely because its file dimensions look big enough", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        printPlacement: "full_back",
+        primaryAsset: {
+          contentType: "image/png",
+          // File dimensions exactly match the 3600x4200 target...
+          widthPx: 3600,
+          heightPx: 4200,
+          hasTransparency: true,
+          vectorAssetId: null,
+          // ...but they were manufactured by interpolation from a much
+          // smaller real source — the check must judge against the native
+          // dimensions, not the enlarged file.
+          resolutionProvenance: "interpolated_upscale",
+          nativeWidthPx: 1024,
+          nativeHeightPx: 1024,
+        },
+      }),
+    );
+
+    assert.notEqual(report.status, "ready");
+    const resolutionCheck = report.checks.find((c) => c.check === "effective_resolution");
+    assert.equal(resolutionCheck?.status, "fail");
+    const minDimensionsCheck = report.checks.find(
+      (c) => c.check === "minimum_raster_dimensions",
+    );
+    assert.equal(minDimensionsCheck?.status, "fail");
+  });
+
+  it("a native-resolution asset whose pixels already meet the target validates ready with zero fabricated detail", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        printPlacement: "sleeve",
+        primaryAsset: {
+          contentType: "image/png",
+          widthPx: 1024,
+          heightPx: 1024,
+          hasTransparency: true,
+          vectorAssetId: null,
+          resolutionProvenance: "native",
+          nativeWidthPx: 1024,
+          nativeHeightPx: 1024,
+        },
+      }),
+    );
+
+    assert.equal(report.status, "ready");
+  });
+
+  it("unknown resolution provenance is treated conservatively — never assumed native", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        printPlacement: "full_back",
+        primaryAsset: {
+          contentType: "image/png",
+          widthPx: 3600,
+          heightPx: 4200,
+          hasTransparency: true,
+          vectorAssetId: null,
+          resolutionProvenance: "unknown",
+          nativeWidthPx: null,
+          nativeHeightPx: null,
+        },
+      }),
+    );
+
+    assert.notEqual(report.status, "ready");
+    const resolutionCheck = report.checks.find((c) => c.check === "effective_resolution");
+    assert.equal(resolutionCheck?.status, "unknown");
+  });
+});
 
 describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
   const printValidation = createPrintValidationCapability();
@@ -84,6 +163,9 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
           heightPx: 1536,
           hasTransparency: true,
           vectorAssetId: null,
+          resolutionProvenance: "native",
+          nativeWidthPx: 1536,
+          nativeHeightPx: 1536,
         },
       }),
     );
@@ -104,6 +186,9 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
           heightPx: 1536,
           hasTransparency: false,
           vectorAssetId: null,
+          resolutionProvenance: "native",
+          nativeWidthPx: 1536,
+          nativeHeightPx: 1536,
         },
       }),
     );
@@ -209,6 +294,9 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
           heightPx: 1536,
           hasTransparency: true,
           vectorAssetId: null,
+          resolutionProvenance: "native",
+          nativeWidthPx: 1536,
+          nativeHeightPx: 1536,
         },
         conceptEvaluation: conceptEvaluation({
           criteria: [
@@ -243,6 +331,9 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
           heightPx: 1536,
           hasTransparency: true,
           vectorAssetId: null,
+          resolutionProvenance: "native",
+          nativeWidthPx: 1536,
+          nativeHeightPx: 1536,
         },
         conceptEvaluationStatus: "failed",
       }),
@@ -262,6 +353,9 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
           heightPx: null,
           hasTransparency: null,
           vectorAssetId: null,
+          resolutionProvenance: "native",
+          nativeWidthPx: null,
+          nativeHeightPx: null,
         },
       }),
     );

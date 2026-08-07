@@ -125,6 +125,14 @@ export const PRINT_VALIDATION_CHECK_CODES = [
   "required_wording_verification",
   "print_location_known",
   "production_method_known",
+  /**
+   * Sprint 2M Phase 2C: info-only diagnostic recording whether
+   * `effective_resolution`/`minimum_raster_dimensions` were judged against
+   * the asset's literal pixel dimensions ("native") or its true pre-upscale
+   * source dimensions ("interpolated_upscale"/"unknown") — never itself
+   * blocking, since its effect already flows through those two checks.
+   */
+  "resolution_provenance",
 ] as const;
 
 export type PrintValidationCheckCode =
@@ -179,6 +187,32 @@ export interface PrintValidationReport {
 // ---------------------------------------------------------------------------
 
 /**
+ * Sprint 2M Phase 2C — the "Upscaling Truthfulness" honesty mechanism.
+ *
+ * `widthPx`/`heightPx` describe the asset's actual, literal pixel
+ * dimensions. Those are not, by themselves, trustworthy evidence of
+ * production-quality detail: a 1024x1024 concept resized to 3600x3600 via
+ * ordinary interpolation has 3600x3600 *pixels* without gaining any real
+ * detail. `resolutionProvenance` records the difference so
+ * `effective_resolution`/`minimum_raster_dimensions` checks can never be
+ * fooled by pixel count alone (see `print-validation-capability.ts`'s use
+ * of `nativeWidthPx`/`nativeHeightPx`):
+ *
+ *   - `"native"` — every pixel genuinely carries source detail (as-generated,
+ *     or only ever downsized, never enlarged beyond native density). Checks
+ *     may trust `widthPx`/`heightPx` directly.
+ *   - `"interpolated_upscale"` — some or all of the asset's pixels were
+ *     manufactured by resampling beyond the source's native density. Checks
+ *     must evaluate sufficiency against `nativeWidthPx`/`nativeHeightPx`
+ *     (the true pre-upscale source dimensions) instead, which — by
+ *     definition of why an upscale was needed — will correctly fail to meet
+ *     a target the native asset didn't already meet.
+ *   - `"unknown"` — provenance was not determined. Treated exactly like
+ *     `"interpolated_upscale"` for validation purposes (never assumed safe).
+ */
+export type ResolutionProvenance = "native" | "interpolated_upscale" | "unknown";
+
+/**
  * Opaque, already-sanitized summary of the concept's primary generated
  * asset. Deliberately excludes `storageKey` and any other internal storage
  * detail — mirrors `ConceptEvaluationAssetReference` (Goal 13: no raw
@@ -191,6 +225,16 @@ export interface PrintValidationAssetSummary {
   hasTransparency: boolean | null;
   /** Reserved: populated once a future Final Artwork capability produces a vector companion asset. Always `null` today. */
   vectorAssetId: string | null;
+  /** See `ResolutionProvenance`'s doc. Provisional (concept-stage) validation always passes `"native"` — a generated concept is never itself a resize of anything. */
+  resolutionProvenance: ResolutionProvenance;
+  /**
+   * The true, pre-transformation source pixel dimensions this asset's
+   * detail is actually derived from. Only load-bearing when
+   * `resolutionProvenance === "interpolated_upscale"` (or `"unknown"`);
+   * ignored otherwise. `null` when not applicable/not known.
+   */
+  nativeWidthPx: number | null;
+  nativeHeightPx: number | null;
 }
 
 /**

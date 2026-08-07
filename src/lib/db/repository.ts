@@ -14,6 +14,7 @@ import type {
   InterviewStateData,
   MessageRole,
   PrintProject,
+  ProductionAssetValidation,
   ProjectSnapshot,
   ProjectStatus,
   TShirtDesignBrief,
@@ -105,6 +106,22 @@ export interface CreateFinalDirectionApprovalInput {
 export interface CreateFinalArtworkJobInput {
   finalDirectionApprovalId: string;
   artworkVersionId: string;
+}
+
+/** Sprint 2M Phase 2C: mirrors `UpdateGenerationJobInput`. */
+export type UpdateFinalArtworkJobInput = Partial<
+  Pick<
+    FinalArtworkJob,
+    "status" | "attempts" | "lastError" | "startedAt" | "completedAt" | "heartbeatAt"
+  >
+>;
+
+/** Sprint 2M Phase 2C: input for persisting one authoritative Print Validation run against a production asset. */
+export interface CreateProductionAssetValidationInput {
+  finalArtworkJobId: string;
+  assetId: string;
+  status: string;
+  report: Record<string, unknown>;
 }
 
 /**
@@ -281,4 +298,43 @@ export interface ProjectRepository {
     projectId: string,
     finalDirectionApprovalId: string,
   ): Promise<FinalArtworkJob | null>;
+  /** Sprint 2M Phase 2C. Also needed to re-resolve `designBriefVersionId` (via the approval, not denormalized on the job) once the worker claims a job. */
+  getFinalDirectionApprovalById(
+    id: string,
+  ): Promise<FinalDirectionApproval | null>;
+
+  // --- Sprint 2M Phase 2C: final artwork worker -------------------------
+
+  getFinalArtworkJob(jobId: string): Promise<FinalArtworkJob | null>;
+  updateFinalArtworkJob(
+    jobId: string,
+    patch: UpdateFinalArtworkJobInput,
+  ): Promise<FinalArtworkJob>;
+  /**
+   * The worker's entry point — mirrors `claimNextQueuedJob` exactly (same
+   * atomic-claim contract: optimistic conditional update, "only one caller
+   * ever wins", real Supabase row-conditional update or the local store's
+   * mutex-serialized equivalent).
+   */
+  claimNextQueuedFinalArtworkJob(): Promise<FinalArtworkJob | null>;
+  touchFinalArtworkJobHeartbeat(jobId: string): Promise<void>;
+  /** Mirrors `recoverAbandonedJobs` — single atomic conditional update, no select-then-write gap. */
+  recoverAbandonedFinalArtworkJobs(
+    staleAfterMs: number,
+  ): Promise<FinalArtworkJob[]>;
+
+  /**
+   * Sprint 2M Phase 2C (Goal 12): persists one authoritative Print
+   * Validation run against a real production asset. Append-only — a
+   * revalidation always inserts a new row, never overwrites the last one.
+   */
+  createProductionAssetValidation(
+    projectId: string,
+    input: CreateProductionAssetValidationInput,
+  ): Promise<ProductionAssetValidation>;
+  /** Most recent validation for a given job, if any — used for idempotent retry (Goal 16). */
+  getLatestProductionAssetValidationForJob(
+    projectId: string,
+    finalArtworkJobId: string,
+  ): Promise<ProductionAssetValidation | null>;
 }

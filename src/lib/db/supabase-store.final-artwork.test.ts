@@ -33,9 +33,24 @@ interface FakeJobRow {
   final_direction_approval_id: string;
   artwork_version_id: string;
   status: string;
+  attempts: number;
   last_error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  heartbeat_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface FakeValidationRow {
+  id: string;
+  project_id: string;
+  final_artwork_job_id: string;
+  asset_id: string;
+  status: string;
+  report: Record<string, unknown>;
+  validated_at: string;
+  created_at: string;
 }
 
 function createFakeClient() {
@@ -107,12 +122,27 @@ function createFakeClient() {
 
   class JobBuilder {
     private eqFilters: Array<{ col: string; val: unknown }> = [];
+    private inFilters: Array<{ col: string; vals: unknown[] }> = [];
+    private ordered = false;
+    private limitCount: number | null = null;
     constructor(
-      private readonly op: "select" | "insert",
+      private readonly op: "select" | "insert" | "update",
       private readonly payload: Record<string, unknown> | null = null,
     ) {}
     eq(col: string, val: unknown) {
       this.eqFilters.push({ col, val });
+      return this;
+    }
+    in(col: string, vals: unknown[]) {
+      this.inFilters.push({ col, vals });
+      return this;
+    }
+    order() {
+      this.ordered = true;
+      return this;
+    }
+    limit(count: number) {
+      this.limitCount = count;
       return this;
     }
     select() {
@@ -125,13 +155,24 @@ function createFakeClient() {
       return this.run();
     }
     private matches(row: FakeJobRow): boolean {
-      return this.eqFilters.every(
+      const eqOk = this.eqFilters.every(
         (f) => (row as unknown as Record<string, unknown>)[f.col] === f.val,
       );
+      const inOk = this.inFilters.every((f) =>
+        f.vals.includes((row as unknown as Record<string, unknown>)[f.col]),
+      );
+      return eqOk && inOk;
     }
     private async run() {
       if (this.op === "select") {
+        let matched = jobs.filter((r) => this.matches(r));
+        if (this.ordered) matched = [...matched].sort((a, b) => a.created_at.localeCompare(b.created_at));
+        if (this.limitCount !== null) matched = matched.slice(0, this.limitCount);
+        return { data: matched[0] ?? null, error: null };
+      }
+      if (this.op === "update") {
         const matched = jobs.filter((r) => this.matches(r));
+        for (const row of matched) Object.assign(row, this.payload);
         return { data: matched[0] ?? null, error: null };
       }
       const payload = this.payload!;
@@ -152,7 +193,11 @@ function createFakeClient() {
         final_direction_approval_id: payload.final_direction_approval_id as string,
         artwork_version_id: payload.artwork_version_id as string,
         status: "queued",
+        attempts: 0,
         last_error: null,
+        started_at: null,
+        completed_at: null,
+        heartbeat_at: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -160,6 +205,75 @@ function createFakeClient() {
       return { data: row, error: null };
     }
   }
+
+  let validationInsertCounter = 0;
+
+  /** Minimal select/insert-only builder for `production_asset_validations` — no update/claim semantics needed. */
+  class ValidationBuilder {
+    private eqFilters: Array<{ col: string; val: unknown }> = [];
+    private ordered = false;
+    private limitCount: number | null = null;
+    constructor(
+      private readonly op: "select" | "insert",
+      private readonly payload: Record<string, unknown> | null = null,
+    ) {}
+    eq(col: string, val: unknown) {
+      this.eqFilters.push({ col, val });
+      return this;
+    }
+    order() {
+      this.ordered = true;
+      return this;
+    }
+    limit(count: number) {
+      this.limitCount = count;
+      return this;
+    }
+    select() {
+      return this;
+    }
+    async maybeSingle() {
+      return this.run();
+    }
+    async single() {
+      return this.run();
+    }
+    private matches(row: FakeValidationRow): boolean {
+      return this.eqFilters.every(
+        (f) => (row as unknown as Record<string, unknown>)[f.col] === f.val,
+      );
+    }
+    private async run() {
+      if (this.op === "select") {
+        let matched = validations.filter((r) => this.matches(r));
+        if (this.ordered) {
+          matched = [...matched].sort((a, b) => b.created_at.localeCompare(a.created_at));
+        }
+        if (this.limitCount !== null) matched = matched.slice(0, this.limitCount);
+        return { data: matched[0] ?? null, error: null };
+      }
+      const payload = this.payload!;
+      // A monotonic suffix guarantees `created_at` sorts correctly even
+      // when two rows are inserted within the same millisecond (a real
+      // risk in a fast-running test, unlike production traffic).
+      validationInsertCounter += 1;
+      const timestamp = `${new Date().toISOString()}.${String(validationInsertCounter).padStart(6, "0")}`;
+      const row: FakeValidationRow = {
+        id: randomUUID(),
+        project_id: payload.project_id as string,
+        final_artwork_job_id: payload.final_artwork_job_id as string,
+        asset_id: payload.asset_id as string,
+        status: payload.status as string,
+        report: (payload.report as Record<string, unknown>) ?? {},
+        validated_at: timestamp,
+        created_at: timestamp,
+      };
+      validations.push(row);
+      return { data: row, error: null };
+    }
+  }
+
+  const validations: FakeValidationRow[] = [];
 
   const client = {
     from(table: string) {
@@ -184,13 +298,26 @@ function createFakeClient() {
           insert(payload: Record<string, unknown>) {
             return new JobBuilder("insert", payload);
           },
+          update(payload: Record<string, unknown>) {
+            return new JobBuilder("update", payload);
+          },
+        };
+      }
+      if (table === "production_asset_validations") {
+        return {
+          select() {
+            return new ValidationBuilder("select");
+          },
+          insert(payload: Record<string, unknown>) {
+            return new ValidationBuilder("insert", payload);
+          },
         };
       }
       throw new Error(`fake client does not support table ${table}`);
     },
   } as unknown as SupabaseClient;
 
-  return { client, approvals, jobs };
+  return { client, approvals, jobs, validations };
 }
 
 describe("SupabaseProjectRepository — final direction approval + final artwork job (Sprint 2M Phase 2B)", () => {
@@ -271,5 +398,80 @@ describe("SupabaseProjectRepository — final direction approval + final artwork
 
     const fetched = await repo.getFinalArtworkJobByApprovalId("project-1", approval.id);
     assert.equal(fetched?.id, job.id);
+  });
+});
+
+describe("SupabaseProjectRepository — final artwork worker (Sprint 2M Phase 2C)", () => {
+  async function createQueuedJob(repo: SupabaseProjectRepository) {
+    const approval = await repo.createFinalDirectionApproval("project-1", {
+      artworkVersionId: "artwork-1",
+      designBriefVersionId: "version-1",
+    });
+    return repo.createFinalArtworkJob("project-1", {
+      finalDirectionApprovalId: approval.id,
+      artworkVersionId: "artwork-1",
+    });
+  }
+
+  it("claimNextQueuedFinalArtworkJob atomically claims the oldest queued job and bumps attempts", async () => {
+    const { client } = createFakeClient();
+    const repo = new SupabaseProjectRepository(client);
+    const job = await createQueuedJob(repo);
+
+    const claimed = await repo.claimNextQueuedFinalArtworkJob();
+    assert.equal(claimed?.id, job.id);
+    assert.equal(claimed?.status, "running");
+    assert.equal(claimed?.attempts, 1);
+    assert.ok(claimed?.startedAt);
+    assert.ok(claimed?.heartbeatAt);
+
+    // Nothing left to claim.
+    const second = await repo.claimNextQueuedFinalArtworkJob();
+    assert.equal(second, null);
+  });
+
+  it("touchFinalArtworkJobHeartbeat and updateFinalArtworkJob mutate the expected fields", async () => {
+    const { client } = createFakeClient();
+    const repo = new SupabaseProjectRepository(client);
+    const job = await createQueuedJob(repo);
+    await repo.claimNextQueuedFinalArtworkJob();
+
+    await repo.touchFinalArtworkJobHeartbeat(job.id);
+    const updated = await repo.updateFinalArtworkJob(job.id, {
+      status: "completed",
+      lastError: null,
+      completedAt: new Date().toISOString(),
+    });
+    assert.equal(updated.status, "completed");
+    assert.equal(updated.lastError, null);
+
+    const fetched = await repo.getFinalArtworkJob(job.id);
+    assert.equal(fetched?.status, "completed");
+  });
+
+  it("createProductionAssetValidation persists a row, and getLatestProductionAssetValidationForJob returns the most recent one", async () => {
+    const { client } = createFakeClient();
+    const repo = new SupabaseProjectRepository(client);
+    const job = await createQueuedJob(repo);
+
+    const first = await repo.createProductionAssetValidation("project-1", {
+      finalArtworkJobId: job.id,
+      assetId: "asset-1",
+      status: "finalization_required",
+      report: { status: "finalization_required", checks: [] },
+    });
+    assert.equal(first.status, "finalization_required");
+
+    const second = await repo.createProductionAssetValidation("project-1", {
+      finalArtworkJobId: job.id,
+      assetId: "asset-1",
+      status: "ready",
+      report: { status: "ready", checks: [] },
+    });
+
+    const latest = await repo.getLatestProductionAssetValidationForJob("project-1", job.id);
+    assert.equal(latest?.id, second.id);
+    assert.equal(latest?.status, "ready");
+    assert.notEqual(latest?.id, first.id);
   });
 });

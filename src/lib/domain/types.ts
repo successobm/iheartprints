@@ -6,6 +6,18 @@ export const PROJECT_STATUSES = [
   "revision_requested",
   "approved",
   "finalizing",
+  /**
+   * Sprint 2M Phase 2C: a `FinalArtworkJob` ran to completion — a real
+   * production asset was created — but authoritative Print Validation did
+   * not return `"ready"` (blocked, or genuinely needs review). Distinct
+   * from `"finalizing"` (still in progress) and `"failed"` (the pipeline
+   * itself errored, e.g. storage/transformation failure): this status means
+   * the pipeline succeeded at producing *something*, and that something
+   * honestly isn't print-ready yet. Never set without a real, authoritative
+   * `PrintValidationCapability.validateArtwork` run against a real
+   * production asset (Constitution §15 — no fabricated readiness).
+   */
+  "finalization_required",
   "print_ready",
   "failed",
   "archived",
@@ -293,19 +305,42 @@ export interface AssetRecord {
   /** Reserved for a future print-ready production asset. */
   printAssetId: string | null;
   /**
-   * Sprint 2M Phase 2B: set only on a production asset a future
-   * `FinalArtworkCapability` transformation produces for a given
-   * `FinalArtworkJob` — never set on a concept-stage asset. This is the
-   * unambiguous, non-filename, non-path way to tell a concept source image
-   * apart from a production deliverable (Goal 8): `generationJobId !== null`
-   * means "concept asset"; `finalArtworkJobId !== null` means "production
-   * asset". One `FinalArtworkJob` may eventually own multiple production
-   * assets (PNG + SVG + PDF), since this is a foreign key, not a 1:1 slot.
-   * Always `null` in Phase 2B — no production transformation runs yet.
+   * Sprint 2M Phase 2B: set only on a production asset a
+   * `FinalArtworkCapability`/`FinalArtworkWorkerCapability` transformation
+   * produces for a given `FinalArtworkJob` — never set on a concept-stage
+   * asset. This is the unambiguous, non-filename, non-path way to tell a
+   * concept source image apart from a production deliverable (Goal 8):
+   * `generationJobId !== null` means "concept asset"; `finalArtworkJobId
+   * !== null` means "production asset". One `FinalArtworkJob` may
+   * eventually own multiple production assets (PNG + SVG + PDF), since
+   * this is a foreign key, not a 1:1 slot. Always `null` until Sprint 2M
+   * Phase 2C's worker runs.
    */
   finalArtworkJobId: string | null;
+  /**
+   * Sprint 2M Phase 2C: explicit production-deliverable classification —
+   * Goal 10 requires this because the `finalArtworkJobId` foreign key alone
+   * cannot distinguish a future PNG from an SVG from a PDF once one job
+   * owns more than one production asset. `null` for every concept-stage
+   * asset (`generationJobId !== null`). Never inferred from `contentType`
+   * or a filename — always set explicitly by whichever capability creates
+   * the row.
+   */
+  productionRole: ProductionAssetRole | null;
   createdAt: string;
 }
+
+/**
+ * Sprint 2M Phase 2C (Goal 10): explicit production-asset kind. Phase 2C
+ * only ever produces `"production_png"` (Goal 17 — raster apparel PNG is
+ * the only supported production output); `"production_svg"`/
+ * `"production_pdf"` are reserved for a future vector/PDF production
+ * pipeline, not implemented here.
+ */
+export type ProductionAssetRole =
+  | "production_png"
+  | "production_svg"
+  | "production_pdf";
 
 /**
  * Sprint 2I Phase 1: internal ArtworkVersion workflow state for Concept
@@ -494,13 +529,17 @@ export interface FinalDirectionApproval {
  * approval, not brief approval), different idempotency authority (the
  * approval id, not `(project, approvedBriefVersion)`), different output
  * (production `AssetRecord`s + an eventual authoritative
- * `PrintValidationReport`, not concept `ArtworkVersion`s). Phase 2B never
- * claims, runs, or completes this job — it only ever sits `"queued"`; see
- * `FinalArtworkCapability`.
+ * `PrintValidationReport`, not concept `ArtworkVersion`s).
+ *
+ * Sprint 2M Phase 2C: `FinalArtworkWorkerCapability` now claims and runs
+ * this job — `"recoverable"` and the claim/heartbeat fields below mirror
+ * `GenerationJob`'s own worker lifecycle exactly (same atomic-claim,
+ * stale-recovery shape, different table).
  */
 export type FinalArtworkJobStatus =
   | "queued"
   | "running"
+  | "recoverable"
   | "completed"
   | "failed"
   | "cancelled";
@@ -512,7 +551,56 @@ export interface FinalArtworkJob {
   /** Denormalized for convenient querying — always the same artwork the approval references. */
   artworkVersionId: string;
   status: FinalArtworkJobStatus;
+  /**
+   * Sprint 2M Phase 2C: mirrors `GenerationJob.attempts` — bumped on every
+   * claim, backing the same shared-retry-budget shape
+   * (`MAX_GENERATION_ATTEMPTS`-style ceiling) so a job whose worker keeps
+   * dying mid-attempt eventually fails permanently instead of recovering
+   * forever.
+   */
+  attempts: number;
   lastError: string | null;
+  /** Sprint 2M Phase 2C: set each time a worker claims this job. */
+  startedAt: string | null;
+  /** Sprint 2M Phase 2C: set once, when the job reaches a terminal status. */
+  completedAt: string | null;
+  /** Sprint 2M Phase 2C: bumped periodically while a worker is actively running this job — same stale-recovery signal as `GenerationJob.heartbeatAt`. */
+  heartbeatAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Sprint 2M Phase 2C (Goal 12): authoritative Print Validation's persisted
+ * home. Deliberately its own record — never a single status column on
+ * `ArtworkVersion` (Phase 2A/2B both audited and rejected that; see
+ * ARCHITECTURE.md) — because one `FinalArtworkJob` may eventually produce
+ * more than one production asset (PNG today; SVG/PDF reserved for later),
+ * and each asset's readiness is independently true or false. Append-only:
+ * a revalidation creates a new row rather than overwriting the last one, so
+ * validation history stays auditable (Constitution §6.11).
+ */
+export interface ProductionAssetValidation {
+  id: string;
+  projectId: string;
+  finalArtworkJobId: string;
+  /** The production `AssetRecord` this validation run evaluated — never a concept-stage asset. */
+  assetId: string;
+  /**
+   * Loosely typed as `string` (mirrors `TShirtDesignBrief.deferredSections`)
+   * to avoid a domain → capabilities import cycle; narrowed to
+   * `PrintValidationStatus` at the capability boundary that writes it
+   * (`FinalArtworkWorkerCapability`).
+   */
+  status: string;
+  /**
+   * The full, internal `PrintValidationReport` this run produced — check
+   * reasons, requirements, required transformations. Print-shop/internal
+   * diagnostics only; never surfaced to the customer as-is (Goal 13).
+   * Serialized as a plain object (mirrors `AssetRecord.metadata`) for the
+   * same domain-layer-independence reason `status` is loosely typed.
+   */
+  report: Record<string, unknown>;
+  validatedAt: string;
+  createdAt: string;
 }

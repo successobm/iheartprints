@@ -107,6 +107,8 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     requiredTransformations.add("remove_background");
   }
 
+  checks.push(checkResolutionProvenance(asset));
+
   const resolutionCheck = checkEffectiveResolution(requirements, asset);
   checks.push(resolutionCheck.check);
   if (resolutionCheck.check.status === "fail") {
@@ -259,6 +261,59 @@ function checkTransparency(
   };
 }
 
+/**
+ * Sprint 2M Phase 2C ("Upscaling Truthfulness"): the dimensions checks must
+ * judge sufficiency against. When the asset's pixels are genuinely native
+ * (as-generated, or only ever downsized), the asset's own literal
+ * dimensions are trustworthy. When some/all of those pixels were
+ * manufactured by interpolation beyond the source's native density (or
+ * provenance is simply unknown), only the true pre-upscale source
+ * dimensions may be trusted — using the inflated post-upscale dimensions
+ * here is exactly the self-deception this sprint exists to prevent ("resize
+ * a 1024px image to 3600px" must never read as "production-quality
+ * artwork").
+ */
+function honestDimensionsFor(
+  asset: NonNullable<PrintValidationInput["primaryAsset"]>,
+): { widthPx: number | null; heightPx: number | null; interpolated: boolean } {
+  if (asset.resolutionProvenance === "native") {
+    return { widthPx: asset.widthPx, heightPx: asset.heightPx, interpolated: false };
+  }
+  return {
+    widthPx: asset.nativeWidthPx,
+    heightPx: asset.nativeHeightPx,
+    interpolated: true,
+  };
+}
+
+function checkResolutionProvenance(
+  asset: NonNullable<PrintValidationInput["primaryAsset"]>,
+): PrintValidationCheck {
+  if (asset.resolutionProvenance === "native") {
+    return {
+      check: "resolution_provenance",
+      status: "pass",
+      severity: "info",
+      reason: "Asset pixel dimensions genuinely reflect source detail (no interpolated upscale).",
+    };
+  }
+  if (asset.resolutionProvenance === "interpolated_upscale") {
+    return {
+      check: "resolution_provenance",
+      status: "warning",
+      severity: "info",
+      reason:
+        "Asset dimensions include an interpolated upscale — resolution sufficiency was judged against the true, smaller source dimensions, not the enlarged pixel count.",
+    };
+  }
+  return {
+    check: "resolution_provenance",
+    status: "unknown",
+    severity: "info",
+    reason: "Resolution provenance is not recorded for this asset; treated conservatively (never assumed native).",
+  };
+}
+
 function checkEffectiveResolution(
   requirements: ProductionRequirements,
   asset: NonNullable<PrintValidationInput["primaryAsset"]>,
@@ -274,31 +329,37 @@ function checkEffectiveResolution(
       effectivePpi: null,
     };
   }
-  if (asset.widthPx === null || asset.heightPx === null) {
+  const honest = honestDimensionsFor(asset);
+  if (honest.widthPx === null || honest.heightPx === null) {
     return {
       check: {
         check: "effective_resolution",
         status: "unknown",
         severity: "blocking",
-        reason: "Cannot compute effective resolution without known pixel dimensions.",
+        reason: honest.interpolated
+          ? "Cannot compute effective resolution — this asset is an interpolated upscale and its true source dimensions are not recorded."
+          : "Cannot compute effective resolution without known pixel dimensions.",
       },
       effectivePpi: null,
     };
   }
 
   const { effectivePpi } = calculateEffectiveResolution(
-    { widthPx: asset.widthPx, heightPx: asset.heightPx },
+    { widthPx: honest.widthPx, heightPx: honest.heightPx },
     requirements.targetDimensions,
   );
   const sufficient = effectivePpi >= requirements.targetPpi;
+  const provenanceNote = honest.interpolated
+    ? " (measured against true source detail, not the enlarged file dimensions)"
+    : "";
   return {
     check: {
       check: "effective_resolution",
       status: sufficient ? "pass" : "fail",
       severity: "blocking",
       reason: sufficient
-        ? `Effective resolution is ~${Math.round(effectivePpi)} PPI, meeting the ${requirements.targetPpi} PPI target.`
-        : `Effective resolution is ~${Math.round(effectivePpi)} PPI, below the ${requirements.targetPpi} PPI target for the intended print size.`,
+        ? `Effective resolution is ~${Math.round(effectivePpi)} PPI, meeting the ${requirements.targetPpi} PPI target${provenanceNote}.`
+        : `Effective resolution is ~${Math.round(effectivePpi)} PPI, below the ${requirements.targetPpi} PPI target for the intended print size${provenanceNote}.`,
     },
     effectivePpi,
   };
@@ -316,24 +377,30 @@ function checkMinimumRasterDimensions(
       reason: "No minimum raster size applies to this production method.",
     };
   }
-  if (asset.widthPx === null || asset.heightPx === null) {
+  const honest = honestDimensionsFor(asset);
+  if (honest.widthPx === null || honest.heightPx === null) {
     return {
       check: "minimum_raster_dimensions",
       status: "unknown",
       severity: "blocking",
-      reason: "Cannot compare against the minimum raster size without known pixel dimensions.",
+      reason: honest.interpolated
+        ? "Cannot compare against the minimum raster size — this asset is an interpolated upscale and its true source dimensions are not recorded."
+        : "Cannot compare against the minimum raster size without known pixel dimensions.",
     };
   }
   const meets =
-    asset.widthPx >= requirements.minRasterDimensionsPx.widthPx &&
-    asset.heightPx >= requirements.minRasterDimensionsPx.heightPx;
+    honest.widthPx >= requirements.minRasterDimensionsPx.widthPx &&
+    honest.heightPx >= requirements.minRasterDimensionsPx.heightPx;
+  const provenanceNote = honest.interpolated
+    ? " (measured against true source detail, not the enlarged file dimensions)"
+    : "";
   return {
     check: "minimum_raster_dimensions",
     status: meets ? "pass" : "fail",
     severity: "blocking",
     reason: meets
-      ? `Asset meets the minimum ${requirements.minRasterDimensionsPx.widthPx}x${requirements.minRasterDimensionsPx.heightPx}px requirement.`
-      : `Asset is ${asset.widthPx}x${asset.heightPx}px, below the minimum ${requirements.minRasterDimensionsPx.widthPx}x${requirements.minRasterDimensionsPx.heightPx}px requirement.`,
+      ? `Asset meets the minimum ${requirements.minRasterDimensionsPx.widthPx}x${requirements.minRasterDimensionsPx.heightPx}px requirement${provenanceNote}.`
+      : `Asset is ${honest.widthPx}x${honest.heightPx}px${provenanceNote}, below the minimum ${requirements.minRasterDimensionsPx.widthPx}x${requirements.minRasterDimensionsPx.heightPx}px requirement.`,
   };
 }
 

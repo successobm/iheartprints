@@ -50,6 +50,14 @@ export function PrepareForPrintAction({
     );
   }
 
+  if (finalizationStatus === "needs_review") {
+    return (
+      <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 shadow-sm">
+        We need to review your artwork before it can be finalized.
+      </div>
+    );
+  }
+
   if (!canRequest) return null;
 
   return (

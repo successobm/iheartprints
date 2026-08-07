@@ -73,6 +73,20 @@ export interface FinalArtworkCapability {
     projectId: string,
     artworkVersionId: string,
   ): Promise<RequestFinalArtworkResult>;
+  /**
+   * Sprint 2M Phase 2C (Goal 14): resolves the project's current
+   * print-ready production PNG asset id, if any — the one piece of
+   * repository knowledge a future secure download boundary needs, kept
+   * inside this capability rather than exposed to a route or
+   * `conversation-service` directly (Goal 15 — no raw storage keys, no
+   * asset ids, no job/approval internals reach a caller outside this
+   * layer). Resolves only via the project's currently *active*
+   * `FinalDirectionApproval` — a superseded approval's production asset,
+   * if one somehow still existed, is never returned. Returns `null` for
+   * any miss (no active approval, no job, no production asset yet) —
+   * callers must not distinguish those cases.
+   */
+  getCurrentProductionAssetId(projectId: string): Promise<string | null>;
 }
 
 export function createFinalArtworkCapability(
@@ -149,6 +163,22 @@ export function createFinalArtworkCapability(
 
       return { approval, job, alreadyRequested };
     },
+
+    async getCurrentProductionAssetId(projectId) {
+      const activeApproval = await repo.getActiveFinalDirectionApproval(projectId);
+      if (!activeApproval) return null;
+
+      const job = await repo.getFinalArtworkJobByApprovalId(projectId, activeApproval.id);
+      if (!job) return null;
+
+      const assets = await repo.listAssets(projectId);
+      const productionAsset = assets.find(
+        (asset) =>
+          asset.finalArtworkJobId === job.id &&
+          asset.productionRole === "production_png",
+      );
+      return productionAsset?.id ?? null;
+    },
   };
 }
 
@@ -179,14 +209,36 @@ async function createApprovalToleratingRace(
   }
 }
 
-/** Same race-tolerance as `createApprovalToleratingRace`, for the job's own unique key. */
+/**
+ * Same race-tolerance as `createApprovalToleratingRace`, for the job's own
+ * unique key.
+ *
+ * Sprint 2M Phase 2C (Goal 15/21): an already-existing job for this
+ * approval that ended `"failed"` (an infrastructure problem —
+ * storage/transformation failure, never a print-readiness verdict) is
+ * revived back to `"queued"` rather than returned as a permanent dead end.
+ * This is the customer's retry path: the same "Prepare Print-Ready
+ * Artwork" action that got them here the first time. A `"completed"` job
+ * (even one that landed on `finalization_required`) is returned as-is —
+ * that is a real, honest verdict about *this* artwork, not an
+ * infrastructure hiccup, and retrying it without anything having changed
+ * would just recompute the same answer.
+ */
 async function createJobToleratingRace(
   repo: ProjectRepository,
   projectId: string,
   approval: FinalDirectionApproval,
 ): Promise<FinalArtworkJob> {
   const existing = await repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
-  if (existing) return existing;
+  if (existing) {
+    if (existing.status === "failed") {
+      return repo.updateFinalArtworkJob(existing.id, {
+        status: "queued",
+        lastError: null,
+      });
+    }
+    return existing;
+  }
 
   try {
     return await repo.createFinalArtworkJob(projectId, {

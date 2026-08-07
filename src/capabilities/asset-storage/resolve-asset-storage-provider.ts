@@ -36,6 +36,12 @@ class UnimplementedAssetStorageProvider implements AssetStorageProvider {
       `Asset storage backend "${this.storageKey}" is not implemented yet.`,
     );
   }
+
+  async download(): Promise<never> {
+    throw new Error(
+      `Asset storage backend "${this.storageKey}" is not implemented yet.`,
+    );
+  }
 }
 
 /**
