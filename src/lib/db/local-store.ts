@@ -150,6 +150,11 @@ async function readDb(): Promise<LocalDatabase> {
         startedAt: job.startedAt ?? null,
         completedAt: job.completedAt ?? null,
         heartbeatAt: job.heartbeatAt ?? null,
+        // Sprint 2M Phase 2E: default the new paid-call idempotency fields
+        // for on-disk data written before they existed.
+        providerKey: job.providerKey ?? null,
+        providerRequestId: job.providerRequestId ?? null,
+        providerStatus: job.providerStatus ?? null,
       })),
       productionAssetValidations: parsed.productionAssetValidations ?? [],
     };
@@ -815,6 +820,9 @@ export class LocalProjectRepository implements ProjectRepository {
       startedAt: null,
       completedAt: null,
       heartbeatAt: null,
+      providerKey: null,
+      providerRequestId: null,
+      providerStatus: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };

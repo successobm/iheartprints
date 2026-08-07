@@ -14,10 +14,126 @@ import {
   createFinalArtworkCapability,
   LocalRasterInterpolationProvider,
 } from "@/capabilities/final-artwork";
+import type {
+  FinalArtworkProvider,
+  FinalArtworkProviderInput,
+  FinalArtworkProviderOutput,
+} from "@/capabilities/final-artwork/provider";
+import {
+  createConceptEvaluationCapability,
+  type ConceptEvaluationProvider,
+  type ConceptEvaluationRequest,
+  type ConceptEvaluationResult,
+} from "@/capabilities/concept-evaluation";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import type { ConceptEvaluation, PrintPlacement } from "@/lib/domain/types";
 
 import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capability";
+
+/**
+ * Sprint 2M Phase 2E: a fake RECONSTRUCTION provider (never a real Topaz
+ * call) that exercises the paid-call idempotency contract
+ * (`existingProviderRequest` / `onProviderRequestSubmitted`) and always
+ * reports `preservesApprovedContent: false` — exactly like the real Topaz
+ * adapter — so it exercises the independent production-verification path.
+ */
+class FakeReconstructionProvider implements FinalArtworkProvider {
+  readonly providerKey = "fake_topaz_reconstruction";
+  submitCount = 0;
+  resumeCount = 0;
+
+  constructor(
+    public behavior: {
+      hasTransparency?: boolean;
+      crashAfterSubmit?: boolean;
+    } = {},
+  ) {}
+
+  async produce(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput> {
+    const resumed = input.existingProviderRequest?.providerKey === this.providerKey;
+    let requestId: string;
+    if (resumed) {
+      this.resumeCount += 1;
+      requestId = input.existingProviderRequest!.providerRequestId;
+    } else {
+      this.submitCount += 1;
+      requestId = `fake-request-${this.submitCount}`;
+      await input.onProviderRequestSubmitted?.(requestId);
+      if (this.behavior.crashAfterSubmit) {
+        throw new Error("simulated worker crash after paid submission");
+      }
+    }
+
+    const source = PNG.sync.read(input.sourceBytes);
+    const hasTransparency = this.behavior.hasTransparency ?? true;
+    const canvas = new PNG({ width: input.targetWidthPx, height: input.targetHeightPx });
+    for (let i = 0; i < canvas.data.length; i += 4) {
+      canvas.data[i] = 5;
+      canvas.data[i + 1] = 5;
+      canvas.data[i + 2] = 5;
+      canvas.data[i + 3] = hasTransparency ? 128 : 255;
+    }
+
+    return {
+      bytes: PNG.sync.write(canvas),
+      contentType: "image/png",
+      widthPx: input.targetWidthPx,
+      heightPx: input.targetHeightPx,
+      hasTransparency,
+      nativeWidthPx: source.width,
+      nativeHeightPx: source.height,
+      reconstructedWidthPx: source.width * 4,
+      reconstructedHeightPx: source.height * 4,
+      resolutionProvenance: "reconstructed",
+      transformationMethod: "fake_topaz_reconstruction_v1",
+      preservesApprovedContent: false,
+      providerRequestId: requestId,
+    };
+  }
+}
+
+/** Fake `ConceptEvaluationProvider` used to control PRODUCTION-asset re-verification independently of the source concept's own persisted evaluation. */
+class FakeProductionEvaluationProvider implements ConceptEvaluationProvider {
+  readonly providerKey = "fake_production_evaluation";
+  constructor(private readonly result: ConceptEvaluationResult) {}
+  async evaluate(_request: ConceptEvaluationRequest): Promise<ConceptEvaluationResult> {
+    return this.result;
+  }
+}
+
+function passingProductionEvaluationResult(): ConceptEvaluationResult {
+  return {
+    overallScore: 95,
+    passed: true,
+    confidence: 95,
+    status: "passed",
+    criteria: [
+      { key: "required_wording", score: 100, passed: true, confidence: 95, notes: null },
+    ],
+    warnings: [],
+    recommendations: [],
+    missingRequirements: [],
+    matchedRequirements: [],
+    providerMetadata: {},
+  };
+}
+
+function failingProductionEvaluationResult(): ConceptEvaluationResult {
+  return {
+    overallScore: 20,
+    passed: false,
+    confidence: 90,
+    status: "failed",
+    criteria: [
+      { key: "required_wording", score: 0, passed: false, confidence: 90, notes: "missing on reconstructed output" },
+    ],
+    warnings: [],
+    recommendations: [],
+    missingRequirements: ["required wording"],
+    matchedRequirements: [],
+    providerMetadata: {},
+  };
+}
 
 /**
  * Sprint 2M Phase 2C — Goal 19 acceptance coverage. Uses a real, valid PNG
@@ -82,7 +198,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     return new LocalProjectRepository();
   }
 
-  function buildPipeline(repo: Awaited<ReturnType<typeof freshRepo>>) {
+  function buildPipeline(
+    repo: Awaited<ReturnType<typeof freshRepo>>,
+    provider: FinalArtworkProvider = new LocalRasterInterpolationProvider(),
+    conceptEvaluationProvider?: ConceptEvaluationProvider,
+  ) {
     const assets = createAssetCapability(
       repo,
       new DataUriAssetStorageProvider(),
@@ -90,12 +210,15 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     );
     const finalArtwork = createFinalArtworkCapability(repo);
     const printValidation = createPrintValidationCapability();
-    const worker = createFinalArtworkWorkerCapability(
-      repo,
-      assets,
-      new LocalRasterInterpolationProvider(),
-      printValidation,
-    );
+    const worker = conceptEvaluationProvider
+      ? createFinalArtworkWorkerCapability(
+          repo,
+          assets,
+          provider,
+          printValidation,
+          createConceptEvaluationCapability(conceptEvaluationProvider),
+        )
+      : createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
     return { assets, finalArtwork, worker };
   }
 
@@ -584,6 +707,314 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     assert.equal(serialized.includes(productionAsset.id), false);
     assert.equal(serialized.includes(productionAsset.storageKey ?? " "), false);
     assert.equal(serialized.includes("finalArtworkJobId"), false);
+    assert.deepEqual(Object.keys(snapshot!.finalization), ["status"]);
+  });
+});
+
+describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider (Sprint 2M Phase 2E)", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-final-artwork-worker-topaz-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function freshRepo() {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    return new LocalProjectRepository();
+  }
+
+  function buildPipeline(
+    repo: Awaited<ReturnType<typeof freshRepo>>,
+    provider: FinalArtworkProvider,
+    conceptEvaluationProvider?: ConceptEvaluationProvider,
+  ) {
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const printValidation = createPrintValidationCapability();
+    const worker = conceptEvaluationProvider
+      ? createFinalArtworkWorkerCapability(
+          repo,
+          assets,
+          provider,
+          printValidation,
+          createConceptEvaluationCapability(conceptEvaluationProvider),
+        )
+      : createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
+    return { assets, finalArtwork, worker };
+  }
+
+  async function setupFullBackConcept(
+    repo: Awaited<ReturnType<typeof freshRepo>>,
+    assets: ReturnType<typeof buildPipeline>["assets"],
+    evaluationOverrides: Partial<ConceptEvaluation> = {},
+  ) {
+    const created = await repo.createProject();
+    const projectId = created.project.id;
+    await repo.updateBrief(projectId, {
+      productSummary: "T-shirt",
+      designDescription: "A bear mascot",
+      exactText: "My 3 Sons",
+      shirtColor: "Navy",
+      printPlacement: "full_back",
+    });
+    const designBrief = createDesignBriefCapability(repo);
+    const version = await designBrief.approveWorkingBrief(projectId);
+
+    const { primary } = await assets.uploadConceptImage(projectId, {
+      conceptId: randomUUID(),
+      bytes: buildFixturePng(1024),
+      contentType: "image/png",
+      widthPx: 1024,
+      heightPx: 1024,
+      hasTransparency: true,
+      providerKey: "test",
+      generationJobId: null,
+      metadata: {},
+    });
+
+    const [artwork] = await repo.addArtworkVersions(projectId, [
+      {
+        versionNumber: 1,
+        kind: "concept",
+        title: "Concept 1",
+        summary: "A bear mascot design",
+        placeholderLabel: "Concept 1",
+        accentColor: "#000000",
+        designBriefVersionId: version.id,
+        generationJobId: null,
+        primaryAssetId: primary.id,
+        thumbnailAssetId: null,
+        providerKey: "test",
+        evaluationStatus: "passed",
+        evaluation: conceptEvaluationFixture(evaluationOverrides),
+        evaluationEvaluatedAt: new Date().toISOString(),
+        evaluationProviderKey: "test",
+      },
+    ]);
+    await repo.selectArtworkVersion(projectId, artwork!.id);
+
+    return { projectId, artworkId: artwork!.id };
+  }
+
+  // --- K/L: reconstructed provenance + three distinct dimensions -----------
+  it("K/L: reports reconstructed provenance truthfully, keeping source/reconstructed/final-canvas as three distinct measurements", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(
+      repo,
+      reconstructionProvider,
+      new FakeProductionEvaluationProvider(passingProductionEvaluationResult()),
+    );
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const asset = (await repo.listAssets(projectId)).find(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.ok(asset);
+    const meta = asset!.metadata as Record<string, unknown>;
+    assert.equal(meta.resolutionProvenance, "reconstructed");
+    assert.equal(meta.nativeWidthPx, 1024);
+    assert.equal(meta.nativeHeightPx, 1024);
+    assert.equal(meta.reconstructedWidthPx, 4096);
+    assert.equal(meta.reconstructedHeightPx, 4096);
+    // Full-back production canvas — distinct from both source (1024) and
+    // reconstructed (4096) dimensions.
+    assert.equal(asset!.widthPx, 3600);
+    assert.equal(asset!.heightPx, 4200);
+  });
+
+  // --- M: source eligibility gate prevents a paid call --------------------
+  it("M: a source concept that already failed required-wording evaluation is rejected BEFORE any provider call", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, reconstructionProvider);
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets, {
+      criteria: [
+        { key: "required_wording", score: 0, passed: false, confidence: 90, notes: "missing" },
+      ],
+    });
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    assert.equal(reconstructionProvider.submitCount, 0, "never spends a paid call on an ineligible source");
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed?.status, "completed");
+    assert.match(completed?.lastError ?? "", /already found required wording missing/i);
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalization_required");
+    assert.notEqual(project?.project.status, "print_ready");
+
+    const productionAssets = (await repo.listAssets(projectId)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(productionAssets.length, 0);
+  });
+
+  // --- N/U: crash after paid submission never causes a duplicate paid call --
+  it("N/U: a worker crash immediately after paid submission is resumed on retry, never re-submitted", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider({ crashAfterSubmit: true });
+    const { assets, finalArtwork, worker } = buildPipeline(
+      repo,
+      reconstructionProvider,
+      new FakeProductionEvaluationProvider(passingProductionEvaluationResult()),
+    );
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+
+    await worker.processNextJob();
+    const failed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failed?.status, "failed");
+    // The paid request identity survived the crash — this is what makes
+    // resuming (rather than resubmitting) possible.
+    assert.equal(failed?.providerKey, "fake_topaz_reconstruction");
+    assert.equal(failed?.providerRequestId, "fake-request-1");
+    assert.equal(reconstructionProvider.submitCount, 1);
+
+    // Customer retries via the existing "Prepare Print-Ready Artwork" action.
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    reconstructionProvider.behavior = { crashAfterSubmit: false };
+    await worker.processNextJob();
+
+    assert.equal(reconstructionProvider.submitCount, 1, "exactly one paid submission across both attempts");
+    assert.equal(reconstructionProvider.resumeCount, 1, "the second attempt resumed the existing request");
+
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed?.status, "completed");
+  });
+
+  // --- O/S: production wording passes → authoritative ready → print_ready --
+  it("O/S: independent production wording verification passing reaches print_ready", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider({ hasTransparency: true });
+    const { assets, finalArtwork, worker } = buildPipeline(
+      repo,
+      reconstructionProvider,
+      new FakeProductionEvaluationProvider(passingProductionEvaluationResult()),
+    );
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "print_ready");
+  });
+
+  // --- P/T: production wording fails → finalization_required, never inherited from the source concept's own (passing) evaluation --
+  it("P/T: independent production wording verification failing blocks print_ready even though the SOURCE concept's own evaluation passed", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider({ hasTransparency: true });
+    const { assets, finalArtwork, worker } = buildPipeline(
+      repo,
+      reconstructionProvider,
+      new FakeProductionEvaluationProvider(failingProductionEvaluationResult()),
+    );
+    // The source concept's OWN evaluation passes required wording — proving
+    // this is never inherited across reconstruction (Goal 7).
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalization_required");
+    assert.notEqual(project?.project.status, "print_ready");
+  });
+
+  // --- R: production alpha failure blocks print_ready ------------------------
+  it("R: an opaque reconstructed output blocks print_ready even when wording verification passes", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider({ hasTransparency: false });
+    const { assets, finalArtwork, worker } = buildPipeline(
+      repo,
+      reconstructionProvider,
+      new FakeProductionEvaluationProvider(passingProductionEvaluationResult()),
+    );
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalization_required");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    const report = validation!.report as { checks: { check: string; status: string }[] };
+    const transparency = report.checks.find((c) => c.check === "transparency");
+    assert.equal(transparency?.status, "fail");
+  });
+
+  // --- X: production validation persisted against the production asset -----
+  it("X: authoritative validation is persisted against the production asset, never the source concept asset", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider({ hasTransparency: true });
+    const { assets, finalArtwork, worker } = buildPipeline(
+      repo,
+      reconstructionProvider,
+      new FakeProductionEvaluationProvider(passingProductionEvaluationResult()),
+    );
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const productionAsset = (await repo.listAssets(projectId)).find(
+      (a) => a.productionRole === "production_png",
+    )!;
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation?.assetId, productionAsset.id);
+    assert.equal(validation?.status, "ready");
+  });
+
+  // --- W: stale/superseded approval never becomes print_ready even with a reconstruction provider --
+  it("W: a superseded approval never reaches print_ready even after a completed reconstruction", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider({ hasTransparency: true });
+    const { assets, finalArtwork, worker } = buildPipeline(
+      repo,
+      reconstructionProvider,
+      new FakeProductionEvaluationProvider(passingProductionEvaluationResult()),
+    );
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+
+    await repo.supersedeActiveFinalDirectionApproval(projectId);
+    await worker.processNextJob();
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project?.project.status, "print_ready");
+  });
+
+  // --- Y: customer snapshot never exposes provider request ids -------------
+  it("Y: the customer snapshot never contains the provider request id or provider key", async () => {
+    const repo = await freshRepo();
+    const reconstructionProvider = new FakeReconstructionProvider({ hasTransparency: true });
+    const { assets, finalArtwork, worker } = buildPipeline(
+      repo,
+      reconstructionProvider,
+      new FakeProductionEvaluationProvider(passingProductionEvaluationResult()),
+    );
+    const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const conversationService = await import("@/lib/services/conversation-service");
+    const snapshot = await conversationService.getConversation(projectId);
+    const serialized = JSON.stringify(snapshot);
+    assert.equal(serialized.includes("fake-request-1"), false);
+    assert.equal(serialized.includes("fake_topaz_reconstruction"), false);
+    assert.equal(serialized.includes("providerRequestId"), false);
     assert.deepEqual(Object.keys(snapshot!.finalization), ["status"]);
   });
 });

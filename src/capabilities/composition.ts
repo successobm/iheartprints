@@ -148,11 +148,17 @@ export function createCapabilityGraph(
   // runs FinalArtworkJob rows — never invoked from a customer route (same
   // rule as generationWorker/workerScheduler below).
   const finalArtworkProvider = resolveFinalArtworkProvider();
+  // Sprint 2M Phase 2E: shared with the concept-generation pipeline's own
+  // Concept Evaluation wiring — a reconstruction provider that cannot
+  // declare `preservesApprovedContent: true` (Topaz never does) needs the
+  // exact same OCR/evaluation infrastructure to independently re-verify the
+  // production asset (Goal 7/9), never a bespoke second implementation.
   const finalArtworkWorker = createFinalArtworkWorkerCapability(
     repo,
     assets,
     finalArtworkProvider,
     printValidation,
+    conceptEvaluation,
   );
   const finalArtworkScheduler = createFinalArtworkSchedulerCapability(finalArtworkWorker);
 

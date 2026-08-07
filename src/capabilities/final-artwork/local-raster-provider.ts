@@ -74,6 +74,12 @@ export class LocalRasterInterpolationProvider implements FinalArtworkProvider {
       hasTransparency: hasAnyTransparentPixel(result.image),
       nativeWidthPx: source.width,
       nativeHeightPx: source.height,
+      // Sprint 2M Phase 2E: this provider never performs a distinct
+      // reconstruction stage — it resamples straight from source to the
+      // final canvas, so there is no separate "reconstructed" size to
+      // report (see `FinalArtworkProviderOutput`'s doc).
+      reconstructedWidthPx: null,
+      reconstructedHeightPx: null,
       // `contentScale <= 1` means the source content was only ever shrunk
       // or kept 1:1 to fit the frame — no pixel was fabricated. `> 1` means
       // the content had to be stretched beyond native density.
@@ -82,6 +88,8 @@ export class LocalRasterInterpolationProvider implements FinalArtworkProvider {
       // A pure geometric resample never redraws content — always true for
       // this provider (see class doc comment's Goal 7/8 reasoning).
       preservesApprovedContent: true,
+      // Sprint 2M Phase 2E: no paid/network request — nothing to identify.
+      providerRequestId: null,
     };
   }
 }

@@ -1,5 +1,11 @@
 /**
  * Sprint 2M Phase 2C: the first real production-artwork execution path.
+ * Sprint 2M Phase 2E: integrates Topaz Transparency Upscale as the first
+ * real production reconstruction provider behind `FinalArtworkProvider`,
+ * plus the honesty/verification machinery a genuine reconstruction provider
+ * requires that a pure local resample never did — source eligibility,
+ * independent production verification, paid-call idempotency, and
+ * reconstruction-lifecycle observability.
  *
  * Independent worker for `FinalArtworkJob` — never runs inside a customer
  * API request (mirrors `GenerationWorkerCapability`'s architecture; see
@@ -15,15 +21,22 @@
  *   - fabricate print-readiness — a transformation that cannot honestly
  *     satisfy production requirements must surface as
  *     `PrintProject.status = "finalization_required"`, never `"print_ready"`
- *   - execute a paid/network provider call (Phase 2C's only provider is a
- *     local, deterministic raster resample — Goal 20)
+ *   - spend a paid provider call on a concept already known to be wrong
+ *     (Sprint 2M Phase 2E Goal 6 — the source eligibility gate)
+ *   - inherit a paid reconstruction provider's production-wording or
+ *     fidelity verdict from the source concept's own Concept Evaluation
+ *     (Sprint 2M Phase 2E Goal 7/9 — independent production verification)
  *   - duplicate a production asset on retry/recovery (Goal 16)
+ *   - duplicate a PAID provider request on retry/recovery/worker races
+ *     (Sprint 2M Phase 2E Goal 3)
  */
 
 import type { ProjectRepository } from "@/lib/db/repository";
 import type {
   ArtworkVersion,
   AssetRecord,
+  ConceptEvaluation,
+  ConceptEvaluationStatus,
   FinalArtworkJob,
 } from "@/lib/domain/types";
 import type { AssetCapability } from "@/capabilities/assets";
@@ -35,7 +48,20 @@ import {
 } from "@/capabilities/print-validation";
 import type { PrintValidationReport, ResolutionProvenance } from "@/capabilities/print-validation/contracts";
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
-import type { FinalArtworkProvider } from "@/capabilities/final-artwork/provider";
+import type { FinalArtworkProvider, FinalArtworkProviderResumeContext } from "@/capabilities/final-artwork/provider";
+import {
+  createConceptEvaluationCapability,
+  resolveConceptEvaluationProvider,
+  type ConceptEvaluationCapability,
+} from "@/capabilities/concept-evaluation";
+import { ProviderError } from "@/capabilities/providers/provider-error";
+
+import { checkSourceEligibleForFinalization } from "./source-eligibility";
+import { verifyProductionArtwork } from "./production-verification";
+import {
+  logFinalArtworkPaidCallDecision,
+  logFinalArtworkReconstructionOutcome,
+} from "./final-artwork-observability";
 
 /** Mirrors `DEFAULT_STALE_JOB_MS` — a "running" job with no heartbeat for this long is presumed abandoned. */
 export const DEFAULT_FINAL_ARTWORK_STALE_JOB_MS = 15 * 60 * 1000;
@@ -60,7 +86,10 @@ interface ProductionProvenanceMeta {
   resolutionProvenance: ResolutionProvenance;
   nativeWidthPx: number | null;
   nativeHeightPx: number | null;
+  reconstructedWidthPx: number | null;
+  reconstructedHeightPx: number | null;
   preservesApprovedContent: boolean;
+  providerRequestId: string | null;
 }
 
 export function createFinalArtworkWorkerCapability(
@@ -68,6 +97,9 @@ export function createFinalArtworkWorkerCapability(
   assets: AssetCapability,
   provider: FinalArtworkProvider,
   printValidation: PrintValidationCapability = createPrintValidationCapability(),
+  conceptEvaluation: ConceptEvaluationCapability = createConceptEvaluationCapability(
+    resolveConceptEvaluationProvider(),
+  ),
 ): FinalArtworkWorkerCapability {
   async function withPeriodicHeartbeat<T>(
     jobId: string,
@@ -118,9 +150,11 @@ export function createFinalArtworkWorkerCapability(
   /**
    * The worker reached a definitive, honest conclusion without ever
    * producing a production asset — an unsupported production method (Goal
-   * 17) or a genuinely unknown target physical size (Goal 4). This is a
-   * successfully *completed* determination, not a failure: nothing crashed,
-   * the truth is simply "this cannot be auto-finalized."
+   * 17), a genuinely unknown target physical size (Goal 4), or (Sprint 2M
+   * Phase 2E) a source concept that already failed its own required-wording
+   * evaluation (Goal 6 — never worth spending a paid reconstruction call
+   * on). This is a successfully *completed* determination, not a failure:
+   * nothing crashed, the truth is simply "this cannot be auto-finalized."
    */
   async function completeWithoutAsset(
     job: FinalArtworkJob,
@@ -140,6 +174,10 @@ export function createFinalArtworkWorkerCapability(
    * after the customer moved on (revised, regenerated, approved a
    * different direction) must never stomp a newer direction's status with
    * a decision about an artwork that is no longer "the current direction".
+   * This is also what keeps a Topaz reconstruction that finishes AFTER the
+   * customer's approval was superseded mid-flight from ever making the
+   * project honestly appear print_ready for a stale result (Sprint 2M
+   * Phase 2E Goal 12/W).
    */
   async function maybeTransitionProjectStatus(
     job: FinalArtworkJob,
@@ -166,14 +204,22 @@ export function createFinalArtworkWorkerCapability(
   function provenanceFromExistingAsset(asset: AssetRecord): ProductionProvenanceMeta {
     const meta = asset.metadata as Record<string, unknown>;
     const provenance =
-      meta.resolutionProvenance === "native" || meta.resolutionProvenance === "interpolated_upscale"
+      meta.resolutionProvenance === "native" ||
+      meta.resolutionProvenance === "interpolated_upscale" ||
+      meta.resolutionProvenance === "reconstructed"
         ? (meta.resolutionProvenance as ResolutionProvenance)
         : "unknown";
     return {
       resolutionProvenance: provenance,
       nativeWidthPx: typeof meta.nativeWidthPx === "number" ? meta.nativeWidthPx : null,
       nativeHeightPx: typeof meta.nativeHeightPx === "number" ? meta.nativeHeightPx : null,
+      reconstructedWidthPx:
+        typeof meta.reconstructedWidthPx === "number" ? meta.reconstructedWidthPx : null,
+      reconstructedHeightPx:
+        typeof meta.reconstructedHeightPx === "number" ? meta.reconstructedHeightPx : null,
       preservesApprovedContent: meta.preservesApprovedContent === true,
+      providerRequestId:
+        typeof meta.providerRequestId === "string" ? meta.providerRequestId : null,
     };
   }
 
@@ -232,6 +278,16 @@ export function createFinalArtworkWorkerCapability(
       return;
     }
 
+    // --- Sprint 2M Phase 2E (Goal 6): source eligibility gate. Runs before
+    // ANY provider call — local or paid — so a concept already known to be
+    // wrong is never treated as finalizable, and a paid reconstruction call
+    // is never spent on it.
+    const eligibility = checkSourceEligibleForFinalization(artwork.evaluation);
+    if (!eligibility.eligible) {
+      await completeWithoutAsset(job, eligibility.reason ?? "Source concept is not eligible for finalization.");
+      return;
+    }
+
     // Goal 4: the bounded apparel-placement policy already established by
     // `shared/print-placement-dimensions.ts` (full_front/full_back,
     // left_chest, sleeve) via `deriveProductionRequirements` — no new
@@ -265,6 +321,7 @@ export function createFinalArtworkWorkerCapability(
     // asset for this exact job rather than transforming/uploading again.
     let productionAsset = await resolveExistingProductionAsset(job);
     let provenance: ProductionProvenanceMeta;
+    let providerLatencyMs: number | null = null;
 
     if (productionAsset) {
       provenance = provenanceFromExistingAsset(productionAsset);
@@ -283,6 +340,21 @@ export function createFinalArtworkWorkerCapability(
         return;
       }
 
+      // --- Sprint 2M Phase 2E (Goal 3): resume a prior paid request for
+      // THIS exact job when one exists and belongs to THIS exact provider —
+      // never resubmit while a paid reconstruction may still be in flight
+      // or already complete server-side.
+      const existingProviderRequest: FinalArtworkProviderResumeContext | null =
+        job.providerKey === provider.providerKey && job.providerRequestId
+          ? {
+              providerKey: job.providerKey,
+              providerRequestId: job.providerRequestId,
+              providerStatus: job.providerStatus,
+            }
+          : null;
+
+      let submittedNewPaidRequest = false;
+      const providerStartedAt = Date.now();
       let output;
       try {
         output = await withPeriodicHeartbeat(job.id, () =>
@@ -292,12 +364,49 @@ export function createFinalArtworkWorkerCapability(
             targetWidthPx: requirements.minRasterDimensionsPx!.widthPx,
             targetHeightPx: requirements.minRasterDimensionsPx!.heightPx,
             marginFraction: requirements.artworkBoundaryMarginPercent / 100,
+            existingProviderRequest,
+            onProviderRequestSubmitted: async (providerRequestId) => {
+              submittedNewPaidRequest = true;
+              // Persisted BEFORE the provider polls/downloads anything
+              // further — the entire point of this hook (Goal 3): a crash
+              // any time after this write is resumable without a second
+              // paid submission.
+              await repo.updateFinalArtworkJob(job.id, {
+                providerKey: provider.providerKey,
+                providerRequestId,
+                providerStatus: "submitted",
+              });
+            },
           }),
         );
       } catch (error) {
+        // Sprint 2M Phase 2E (Goal 3/12): a request that reached a terminal
+        // failure state AT THE PROVIDER (not merely a local/network hiccup)
+        // is provably dead — clearing the persisted request identity here
+        // is what allows a future retry to submit a fresh paid request
+        // instead of resuming a request that can never succeed.
+        // Every other failure classification intentionally leaves the
+        // persisted request identity alone, so a retry resumes (never
+        // resubmits) whatever may still be in flight or already complete.
+        if (error instanceof ProviderError && error.classification === "provider_job_failed") {
+          await repo.updateFinalArtworkJob(job.id, {
+            providerKey: null,
+            providerRequestId: null,
+            providerStatus: null,
+          });
+        }
         await failJob(job, describeFinalArtworkError(error));
         return;
       }
+      providerLatencyMs = Date.now() - providerStartedAt;
+
+      logFinalArtworkPaidCallDecision({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        providerKey: provider.providerKey,
+        submittedNewPaidRequest,
+        providerRequestId: output.providerRequestId,
+      });
 
       try {
         productionAsset = await assets.uploadProductionAsset(job.projectId, {
@@ -318,7 +427,10 @@ export function createFinalArtworkWorkerCapability(
             resolutionProvenance: output.resolutionProvenance,
             nativeWidthPx: output.nativeWidthPx,
             nativeHeightPx: output.nativeHeightPx,
+            reconstructedWidthPx: output.reconstructedWidthPx,
+            reconstructedHeightPx: output.reconstructedHeightPx,
             preservesApprovedContent: output.preservesApprovedContent,
+            providerRequestId: output.providerRequestId,
             sourceAssetId: sourceAsset.id,
           },
         });
@@ -330,12 +442,62 @@ export function createFinalArtworkWorkerCapability(
         return;
       }
 
+      // Explicit completion marker for the paid-request identity — never
+      // load-bearing for correctness (the production asset's own existence
+      // is what idempotency actually keys off), purely for internal
+      // diagnostics (Goal 13/14).
+      if (output.providerRequestId) {
+        await repo.updateFinalArtworkJob(job.id, { providerStatus: "completed" });
+      }
+
       provenance = {
         resolutionProvenance: output.resolutionProvenance,
         nativeWidthPx: output.nativeWidthPx,
         nativeHeightPx: output.nativeHeightPx,
+        reconstructedWidthPx: output.reconstructedWidthPx,
+        reconstructedHeightPx: output.reconstructedHeightPx,
         preservesApprovedContent: output.preservesApprovedContent,
+        providerRequestId: output.providerRequestId,
       };
+    }
+
+    // --- Sprint 2M Phase 2E (Goal 7/9): independent production
+    // verification. A provider that cannot honestly declare
+    // `preservesApprovedContent: true` (Topaz never does — see
+    // `provider.ts`) must never let the source concept's own Concept
+    // Evaluation stand in for verification of the actual reconstructed
+    // OUTPUT — required wording and design fidelity are both re-checked
+    // against the real production asset, against the exact approved brief
+    // snapshot this job was built from (never a newer working brief).
+    let conceptEvaluationStatusForValidation: ConceptEvaluationStatus | null;
+    let conceptEvaluationForValidation: ConceptEvaluation | null;
+
+    if (provenance.preservesApprovedContent) {
+      // Unchanged Phase 2C behavior — a pure geometric resample (local
+      // interpolation) never redraws content, so the source concept's own
+      // already-persisted evaluation honestly still applies.
+      conceptEvaluationStatusForValidation = artwork.evaluationStatus;
+      conceptEvaluationForValidation = artwork.evaluation;
+    } else {
+      const signedUrl = await assets.getSignedUrl(productionAsset.id);
+      const verification = await verifyProductionArtwork(conceptEvaluation, {
+        brief: briefVersion.content,
+        concept: {
+          title: artwork.title,
+          summary: artwork.summary,
+          placeholderLabel: artwork.placeholderLabel,
+        },
+        productionAsset: {
+          assetId: productionAsset.id,
+          contentType: productionAsset.contentType,
+          widthPx: productionAsset.widthPx,
+          heightPx: productionAsset.heightPx,
+          sourceUrl: signedUrl,
+        },
+        idempotencyKey: `production-verification:${job.id}:${productionAsset.id}`,
+      });
+      conceptEvaluationStatusForValidation = verification.evaluationStatus;
+      conceptEvaluationForValidation = verification.evaluation;
     }
 
     // --- Goal 11: authoritative Print Validation against the real
@@ -355,12 +517,8 @@ export function createFinalArtworkWorkerCapability(
         nativeWidthPx: provenance.nativeWidthPx,
         nativeHeightPx: provenance.nativeHeightPx,
       },
-      // Goal 8: Concept Evaluation's wording verdict transfers only when
-      // the provider declared the transformation content-preserving.
-      conceptEvaluationStatus: provenance.preservesApprovedContent
-        ? artwork.evaluationStatus
-        : null,
-      conceptEvaluation: provenance.preservesApprovedContent ? artwork.evaluation : null,
+      conceptEvaluationStatus: conceptEvaluationStatusForValidation,
+      conceptEvaluation: conceptEvaluationForValidation,
     });
 
     const report = printValidation.validateArtwork(validationInput);
@@ -379,6 +537,27 @@ export function createFinalArtworkWorkerCapability(
       status: "completed",
       lastError: report.status === "ready" ? null : summarizeReportForInternalLog(report),
       completedAt: new Date().toISOString(),
+    });
+
+    logFinalArtworkReconstructionOutcome({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      artworkVersionId: artwork.id,
+      providerKey: provider.providerKey,
+      providerRequestId: provenance.providerRequestId,
+      sourceWidthPx: provenance.nativeWidthPx ?? sourceAsset.widthPx ?? 0,
+      sourceHeightPx: provenance.nativeHeightPx ?? sourceAsset.heightPx ?? 0,
+      reconstructedWidthPx: provenance.reconstructedWidthPx,
+      reconstructedHeightPx: provenance.reconstructedHeightPx,
+      finalCanvasWidthPx: productionAsset.widthPx ?? 0,
+      finalCanvasHeightPx: productionAsset.heightPx ?? 0,
+      requiredWordingVerification:
+        report.checks.find((c) => c.check === "required_wording_verification")?.status ?? "unknown",
+      conceptEvaluationAlignment:
+        report.checks.find((c) => c.check === "concept_evaluation_alignment")?.status ?? "unknown",
+      transparencyCheck: report.checks.find((c) => c.check === "transparency")?.status ?? "unknown",
+      finalValidationStatus: report.status,
+      providerLatencyMs,
     });
 
     // Goal 11/Q: only a "ready" authoritative report may ever justify

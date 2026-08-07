@@ -276,7 +276,11 @@ function checkTransparency(
 function honestDimensionsFor(
   asset: NonNullable<PrintValidationInput["primaryAsset"]>,
 ): { widthPx: number | null; heightPx: number | null; interpolated: boolean } {
-  if (asset.resolutionProvenance === "native") {
+  // Sprint 2M Phase 2E: "reconstructed" pixels are genuine provider-produced
+  // detail (e.g. Topaz Transparency Upscale), never fabricated local
+  // interpolation — trusted exactly like "native", never penalized down to
+  // the tiny pre-reconstruction source dimensions.
+  if (asset.resolutionProvenance === "native" || asset.resolutionProvenance === "reconstructed") {
     return { widthPx: asset.widthPx, heightPx: asset.heightPx, interpolated: false };
   }
   return {
@@ -304,6 +308,15 @@ function checkResolutionProvenance(
       severity: "info",
       reason:
         "Asset dimensions include an interpolated upscale — resolution sufficiency was judged against the true, smaller source dimensions, not the enlarged pixel count.",
+    };
+  }
+  if (asset.resolutionProvenance === "reconstructed") {
+    return {
+      check: "resolution_provenance",
+      status: "pass",
+      severity: "info",
+      reason:
+        "Asset dimensions include genuine provider-side reconstruction (not fabricated local interpolation) — resolution sufficiency was judged against the reconstructed pixel dimensions directly.",
     };
   }
   return {

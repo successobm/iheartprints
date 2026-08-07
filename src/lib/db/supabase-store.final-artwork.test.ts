@@ -38,6 +38,9 @@ interface FakeJobRow {
   started_at: string | null;
   completed_at: string | null;
   heartbeat_at: string | null;
+  provider_key: string | null;
+  provider_request_id: string | null;
+  provider_status: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -198,6 +201,9 @@ function createFakeClient() {
         started_at: null,
         completed_at: null,
         heartbeat_at: null,
+        provider_key: null,
+        provider_request_id: null,
+        provider_status: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -447,6 +453,36 @@ describe("SupabaseProjectRepository — final artwork worker (Sprint 2M Phase 2C
 
     const fetched = await repo.getFinalArtworkJob(job.id);
     assert.equal(fetched?.status, "completed");
+  });
+
+  // Sprint 2M Phase 2E (Goal 3): the paid-call idempotency triple round-trips.
+  it("updateFinalArtworkJob persists and round-trips the paid-call idempotency triple", async () => {
+    const { client } = createFakeClient();
+    const repo = new SupabaseProjectRepository(client);
+    const job = await createQueuedJob(repo);
+    assert.equal(job.providerKey, null);
+    assert.equal(job.providerRequestId, null);
+    assert.equal(job.providerStatus, null);
+
+    const updated = await repo.updateFinalArtworkJob(job.id, {
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: "topaz-process-id-123",
+      providerStatus: "submitted",
+    });
+    assert.equal(updated.providerKey, "topaz_transparency_upscale");
+    assert.equal(updated.providerRequestId, "topaz-process-id-123");
+    assert.equal(updated.providerStatus, "submitted");
+
+    const fetched = await repo.getFinalArtworkJob(job.id);
+    assert.equal(fetched?.providerRequestId, "topaz-process-id-123");
+
+    // Clearing (the "provider_job_failed" recovery path) round-trips too.
+    const cleared = await repo.updateFinalArtworkJob(job.id, {
+      providerKey: null,
+      providerRequestId: null,
+      providerStatus: null,
+    });
+    assert.equal(cleared.providerRequestId, null);
   });
 
   it("createProductionAssetValidation persists a row, and getLatestProductionAssetValidationForJob returns the most recent one", async () => {

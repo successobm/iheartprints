@@ -181,6 +181,10 @@ type DbFinalArtworkJob = {
   started_at: string | null;
   completed_at: string | null;
   heartbeat_at: string | null;
+  /** Sprint 2M Phase 2E (Goal 3): paid-call idempotency triple — see `FinalArtworkJob`'s domain doc. */
+  provider_key: string | null;
+  provider_request_id: string | null;
+  provider_status: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -363,6 +367,9 @@ function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
     startedAt: row.started_at,
     completedAt: row.completed_at,
     heartbeatAt: row.heartbeat_at,
+    providerKey: row.provider_key ?? null,
+    providerRequestId: row.provider_request_id ?? null,
+    providerStatus: row.provider_status ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1170,6 +1177,9 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.startedAt !== undefined) payload.started_at = patch.startedAt;
     if (patch.completedAt !== undefined) payload.completed_at = patch.completedAt;
     if (patch.heartbeatAt !== undefined) payload.heartbeat_at = patch.heartbeatAt;
+    if (patch.providerKey !== undefined) payload.provider_key = patch.providerKey;
+    if (patch.providerRequestId !== undefined) payload.provider_request_id = patch.providerRequestId;
+    if (patch.providerStatus !== undefined) payload.provider_status = patch.providerStatus;
 
     const { data, error } = await this.client
       .from("final_artwork_jobs")

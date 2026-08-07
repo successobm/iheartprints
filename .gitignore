@@ -45,3 +45,7 @@ yarn-error.log*
 next-env.d.ts
 
 supabase/.temp/
+
+# Sprint 2M Phase 2D research bake-off artifacts (local only)
+research/phase-2d-bakeoff/outputs/
+research/phase-2d-bakeoff/reports/

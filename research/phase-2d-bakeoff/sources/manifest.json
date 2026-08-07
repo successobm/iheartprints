@@ -1,0 +1,49 @@
+{
+  "requiredWordingCanonical": "My 3 Sons",
+  "notes": "Sources are read-only copies of real Supabase concept originals for the My 3 Sons bowling theme. Visual text is typically all-caps MY 3 SONS; wordingMatches normalizes case. Alpha measured with pngjs at download time.",
+  "createdAt": "2026-08-07T18:19:49.493Z",
+  "sources": [
+    {
+      "category": "A_typography",
+      "assetId": "3024ba9e-f808-421a-9fce-4498b53a8a90",
+      "label": "bold_direct_my3sons",
+      "requiredWording": "My 3 Sons",
+      "sourcePath": "research\\phase-2d-bakeoff\\sources\\A_typography__bold_direct_my3sons.png",
+      "projectId": "8e01284a-5208-4b31-b9cd-a6788fd6d31f",
+      "widthPx": 1024,
+      "heightPx": 1024,
+      "hasTransparency": true,
+      "contentType": "image/png",
+      "storageKey": "projects/8e01284a-5208-4b31-b9cd-a6788fd6d31f/concepts/2f6ed38e-abf2-47ed-85b1-3df923a9cd2b/original.png",
+      "bytes": 1658340
+    },
+    {
+      "category": "B_illustrated",
+      "assetId": "e0cef668-b0b6-43a5-9a9a-a8db1ea7b74e",
+      "label": "soft_illustrated_my3sons",
+      "requiredWording": "My 3 Sons",
+      "sourcePath": "research\\phase-2d-bakeoff\\sources\\B_illustrated__soft_illustrated_my3sons.png",
+      "projectId": "8e01284a-5208-4b31-b9cd-a6788fd6d31f",
+      "widthPx": 1024,
+      "heightPx": 1024,
+      "hasTransparency": true,
+      "contentType": "image/png",
+      "storageKey": "projects/8e01284a-5208-4b31-b9cd-a6788fd6d31f/concepts/9fdcc09f-8bfb-4bb9-9644-5185191dc4ad/original.png",
+      "bytes": 2171528
+    },
+    {
+      "category": "C_transparent",
+      "assetId": "ad8f9da3-98c3-4339-9ec6-41e57d1ffac3",
+      "label": "minimal_badge_my3sons",
+      "requiredWording": "My 3 Sons",
+      "sourcePath": "research\\phase-2d-bakeoff\\sources\\C_transparent__minimal_badge_my3sons.png",
+      "projectId": "8e01284a-5208-4b31-b9cd-a6788fd6d31f",
+      "widthPx": 1024,
+      "heightPx": 1024,
+      "hasTransparency": true,
+      "contentType": "image/png",
+      "storageKey": "projects/8e01284a-5208-4b31-b9cd-a6788fd6d31f/concepts/94ef9af4-ebae-4a14-8064-419875b4a6ca/original.png",
+      "bytes": 1682949
+    }
+  ]
+}

@@ -3,6 +3,7 @@ import {
   type ConceptEvaluationConfig,
 } from "@/lib/config/concept-evaluation-provider-config";
 import { logConceptEvaluationFallback } from "@/lib/config/concept-evaluation-provider-logging";
+import { isAutomatedTestEnvironment } from "@/lib/config/automated-test-safety";
 
 import type { ConceptEvaluationProvider } from "./concept-evaluation-provider";
 import { OpenAIConceptEvaluationProvider } from "./openai-concept-evaluation-provider";
@@ -22,19 +23,36 @@ import { PlaceholderConceptEvaluationProvider } from "./placeholder-concept-eval
  *
  * Accepts an explicit `config` (default: the live environment) so it can be
  * unit-tested without mutating `process.env`.
+ *
+ * Release-blocker hotfix: when `config` is omitted (the live-environment
+ * default `getCapabilityGraph()`/`createCapabilityGraph()` always uses),
+ * `isAutomatedTestEnvironment()` unconditionally forces
+ * `PlaceholderConceptEvaluationProvider` — no network call is possible — no
+ * matter what `CONCEPT_EVALUATION_PROVIDER`/`OPENAI_API_KEY` happen to be
+ * set to in the ambient environment. A caller that passes an explicit
+ * `config` (this module's own resolver unit tests) is unaffected — see
+ * `lib/config/automated-test-safety.ts`. This matters beyond concept
+ * evaluation's own pipeline: Sprint 2M Phase 2E's
+ * `FinalArtworkWorkerCapability` also depends on this same resolver for
+ * independent production-asset re-verification.
  */
 export function resolveConceptEvaluationProvider(
-  config: ConceptEvaluationConfig = getConceptEvaluationConfig(),
+  config?: ConceptEvaluationConfig,
 ): ConceptEvaluationProvider {
-  switch (config.mode) {
+  if (config === undefined && isAutomatedTestEnvironment()) {
+    return new PlaceholderConceptEvaluationProvider();
+  }
+  const resolvedConfig = config ?? getConceptEvaluationConfig();
+
+  switch (resolvedConfig.mode) {
     case "openai":
       return new OpenAIConceptEvaluationProvider({
-        apiKey: config.apiKey,
-        model: config.model,
+        apiKey: resolvedConfig.apiKey,
+        model: resolvedConfig.model,
       });
 
     case "placeholder":
-      if (config.reason === "fallback") {
+      if (resolvedConfig.reason === "fallback") {
         logConceptEvaluationFallback({
           requestedProvider: "openai",
           environment: process.env.NODE_ENV ?? "development",

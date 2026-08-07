@@ -566,6 +566,24 @@ export interface FinalArtworkJob {
   completedAt: string | null;
   /** Sprint 2M Phase 2C: bumped periodically while a worker is actively running this job — same stale-recovery signal as `GenerationJob.heartbeatAt`. */
   heartbeatAt: string | null;
+  /**
+   * Sprint 2M Phase 2E (Goal 3): durable paid-provider request identity for
+   * this job, so a worker crash/race between submitting a paid
+   * reconstruction request (e.g. Topaz) and persisting its resulting
+   * production asset never causes a second paid request on retry/recovery.
+   * `providerKey` records which provider the in-flight/completed request
+   * belongs to (a job whose provider changed between attempts is never
+   * resumed against a stale request from a different provider).
+   * `providerRequestId` is the provider's own request/job id — internal
+   * only, never customer-facing. `providerStatus` is the last known raw
+   * provider status string, for internal diagnostics only. All three are
+   * `null` until a provider that performs a real paid submission actually
+   * submits one, and stay `null` forever for a provider with no paid
+   * request concept (e.g. local raster interpolation).
+   */
+  providerKey: string | null;
+  providerRequestId: string | null;
+  providerStatus: string | null;
   createdAt: string;
   updatedAt: string;
 }

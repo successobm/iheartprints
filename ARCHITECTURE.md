@@ -880,19 +880,22 @@ it never performs production transformation itself. See §13b for the
 approval-lifecycle design rationale and §13c for what now actually claims
 and runs the job.
 
-### FinalArtworkWorkerCapability — Active (Sprint 2M Phase 2C)
+### FinalArtworkWorkerCapability — Active (Sprint 2M Phase 2C; Topaz reconstruction integrated Sprint 2M Phase 2E)
 
 | | |
 |---|---|
-| **Responsibility** | Claim `FinalArtworkJob` → resolve exact approved input → raster transformation → production asset → authoritative Print Validation → print-ready transition |
+| **Responsibility** | Claim `FinalArtworkJob` → resolve exact approved input → source eligibility gate → raster transformation/reconstruction → production asset → independent production verification → authoritative Print Validation → print-ready transition |
 | **Inputs** | Claimed `FinalArtworkJob` |
-| **Outputs** | Production `AssetRecord`, `ProductionAssetValidation`, updated job status, `PrintProject.status` (`print_ready` / `finalization_required`) |
-| **Dependencies** | `ProjectRepository`, `AssetCapability`, `FinalArtworkProvider`, `PrintValidationCapability` |
-| **Owns** | Final-artwork worker business logic; idempotent asset reuse; stale-job recovery; the sole authority for `PrintProject.status = "print_ready"` |
-| **Must never own** | HTTP auth, cron scheduling, browser lifecycle; selecting concepts; duplicating `PrintValidationCapability`'s rules; persisting timeline/plan/intent-style ephemeral state |
+| **Outputs** | Production `AssetRecord`, `ProductionAssetValidation`, updated job status (incl. paid-call idempotency triple), `PrintProject.status` (`print_ready` / `finalization_required`) |
+| **Dependencies** | `ProjectRepository`, `AssetCapability`, `FinalArtworkProvider`, `PrintValidationCapability`, `ConceptEvaluationCapability` (Sprint 2M Phase 2E — independent production wording/fidelity re-verification only; see §13d) |
+| **Owns** | Final-artwork worker business logic; idempotent asset reuse; paid-call idempotency (Sprint 2M Phase 2E); stale-job recovery; the sole authority for `PrintProject.status = "print_ready"` |
+| **Must never own** | HTTP auth, cron scheduling, browser lifecycle; selecting concepts; duplicating `PrintValidationCapability`'s rules; persisting timeline/plan/intent-style ephemeral state; re-scoring a source concept's own Concept Evaluation (only re-verifies the production asset, and only when the provider cannot declare `preservesApprovedContent: true`) |
 
-See §13c for the full pipeline, the "Upscaling Truthfulness" honesty
-mechanism, and every goal-by-goal design decision.
+See §13c for the Phase 2C pipeline and the "Upscaling Truthfulness" honesty
+mechanism, and §13d for Sprint 2M Phase 2E's Topaz reconstruction
+integration — provider resolution, paid-call idempotency, source
+eligibility, independent production verification, and reconstruction
+provenance.
 
 ### PrintVaultCapability — Reserved
 
@@ -1034,6 +1037,21 @@ Do not introduce:
 - A prior `FinalDirectionApproval` silently continuing to authorize a
   *new* `ArtworkVersion` batch produced by regeneration — the
   regeneration-completion path must supersede it
+- Sprint 2M Phase 2E: `FinalArtworkWorkerCapability`'s new
+  `ConceptEvaluationCapability` dependency re-scoring or persisting a
+  source concept's OWN Concept Evaluation — it is used exclusively to
+  independently re-verify a PRODUCTION asset (never `artwork.evaluation`
+  itself), and only when the resolved `FinalArtworkProvider` reports
+  `preservesApprovedContent: false` (see §13d)
+- Sprint 2M Phase 2E: Topaz-specific concepts (request/response shape,
+  process ids, model names) leaking past `TopazTransparencyUpscaleProvider`
+  into `FinalArtworkWorkerCapability` or any customer-facing surface —
+  domain orchestration only ever sees the provider-neutral
+  `FinalArtworkProvider` contract
+- Sprint 2M Phase 2E: any code path treating a paid provider's HTTP 200 /
+  "Completed" status as evidence of print readiness — provider success and
+  `PrintValidationCapability.validateArtwork` returning `"ready"` remain
+  two entirely separate facts
 
 ---
 
@@ -2479,6 +2497,242 @@ embroidery, screen-print separations, banner/sign production, CMYK, and
 vector logos are all explicitly out of scope — `requirements.category !==
 "apparel_raster"` completes the job honestly without an asset and without
 ever reaching `"print_ready"`.
+
+---
+
+## 13d. Topaz Production Reconstruction (Sprint 2M Phase 2E)
+
+### Why
+
+Phase 2C proved the full production lifecycle but was honest that its only
+provider (`LocalRasterInterpolationProvider`) cannot genuinely manufacture
+full-back/left-chest production detail from a 1024x1024 concept — it only
+resamples existing pixels. Phase 2D controlled-bake-off (see
+`research/phase-2d-bakeoff/BAKEOFF_REPORT.md`) proved Topaz Labs'
+"Transparency Upscale" model performs genuine 4x super-resolution
+reconstruction while preserving approved wording/composition and PNG alpha
+better than its "Text Refine" sibling. Phase 2E integrates that one proven
+mode behind the existing `FinalArtworkProvider` boundary — provider-hosted
+reconstruction is a new *implementation* of an existing interface, not a new
+architectural layer.
+
+### Provider-independent orchestration
+
+`FinalArtworkWorkerCapability` still depends only on `FinalArtworkProvider`
+— it has zero Topaz-specific knowledge. `resolveFinalArtworkProvider()`
+(composition-owned, mirrors `resolveConceptGenerationProvider`) resolves
+`FINAL_ARTWORK_PROVIDER=local | topaz` (`src/lib/config/final-artwork-provider-config.ts`)
+to one of three implementations:
+
+- `LocalRasterInterpolationProvider` — unchanged Phase 2C behavior, the
+  default.
+- `TopazTransparencyUpscaleProvider` — real Topaz Transparency Upscale
+  adapter, selected only when `FINAL_ARTWORK_PROVIDER=topaz` AND
+  `TOPAZ_API_KEY` is set.
+- `UnavailableFinalArtworkProvider` — `FINAL_ARTWORK_PROVIDER=topaz` without
+  `TOPAZ_API_KEY`; `produce()` always throws a typed, safe
+  `FinalArtworkUnavailableError`. Never silently falls back to local
+  interpolation (see "Local interpolation is never equivalent" below).
+
+Deliberately **not** coupled to `OPENAI_API_KEY`, `CONCEPT_GENERATION_PROVIDER`,
+`CONCEPT_GENERATION_ENABLE_REAL`, or `CONVERSATION_UNDERSTANDING_PROVIDER` —
+final-artwork reconstruction is its own independent provider boundary with
+its own credential and its own explicit opt-in.
+
+### Source vs. reconstructed vs. final-canvas dimensions (Goal 4/5)
+
+Three distinct, never-collapsed measurements flow through the pipeline for
+a Topaz-produced asset:
+
+| Measurement | Example | Where it lives |
+|---|---|---|
+| Source / native | 1024x1024 | `FinalArtworkProviderOutput.nativeWidthPx/HeightPx` — the true, pre-reconstruction concept pixels |
+| Reconstructed | 4096x4096 | `FinalArtworkProviderOutput.reconstructedWidthPx/HeightPx` — Topaz's own genuine output, before canvas fit; `null` for a provider with no distinct reconstruction stage (local) |
+| Final production canvas | 3600x4200 | `widthPx`/`heightPx` — after deterministic contain + transparent pad |
+
+`TopazTransparencyUpscaleProvider.produce()` performs reconstruction and
+canvas-fit as two internal, sequential steps — it calls Topaz once (a
+proportional 4x request derived from the source's own dimensions, capped to
+sane bounds, `crop_to_fill=false`, PNG output — the exact Phase 2D-tested
+configuration) and then reuses the SAME local, deterministic
+`resampleContainWithTransparentPadding` (`raster-transform.ts`)
+`LocalRasterInterpolationProvider` uses, never a second paid Topaz call
+merely to reach the production canvas size. Domain code
+(`FinalArtworkWorkerCapability`) never sees this internal two-step shape —
+it only ever calls `provider.produce()` once per attempt.
+
+### Reconstruction provenance (Goal 4/9)
+
+`ResolutionProvenance` (`print-validation/contracts.ts`) gained a third
+value: `"reconstructed"`, alongside the existing `"native"` and
+`"interpolated_upscale"`. It is never collapsed into either:
+
+- Never `"native"` — a Topaz output is not the customer's untouched pixels.
+- Never `"interpolated_upscale"` — Topaz performs genuine provider-side
+  super-resolution, not local geometric resampling; treating it as
+  fabricated interpolation would be equally dishonest in the other
+  direction, and would incorrectly fail effective-resolution/minimum-
+  dimensions checks a real reconstruction actually satisfies.
+
+`PrintValidationCapability`'s `honestDimensionsFor()` trusts a
+`"reconstructed"` asset's literal `widthPx`/`heightPx` directly — exactly
+like `"native"` — because genuine provider-manufactured detail is real
+detail, not stretched pixels. `nativeWidthPx`/`nativeHeightPx` are still
+recorded (and stay the true pre-reconstruction source size) for audit/log
+honesty even though they are not load-bearing for this provenance value.
+`checkResolutionProvenance` reports an info-severity `"pass"` for
+`"reconstructed"`, distinct from both other cases' wording.
+
+### Source eligibility gate (Goal 6)
+
+Phase 2D exposed a real defect class: an approved concept whose required
+wording was not actually present in the source pixels, even though the
+brief required it — reconstruction cannot repair an already-invalid
+concept. `checkSourceEligibleForFinalization()`
+(`final-artwork-worker/source-eligibility.ts`) runs before ANY provider call
+(local or paid) and blocks — completing the job honestly without an asset,
+`PrintProject.status = "finalization_required"` — only when the source
+concept's own, already-persisted Concept Evaluation explicitly resolved
+`required_wording.passed === false`. Every softer state (no evaluation yet,
+`passed: null`, still `"pending"`) is treated as insufficient evidence to
+block spending and lets the job proceed; independent production
+verification (next section) remains the backstop. This is deliberately the
+smallest gate that satisfies "don't spend money on Topaz reconstructing
+artwork already known to be wrong" without inventing a second evaluation
+pipeline.
+
+### Independent production verification (Goal 7/9)
+
+A reconstruction provider that cannot honestly declare
+`preservesApprovedContent: true` (Topaz never does — a Phase 2D-proven
+faithful reconstruction is still not a mathematically-verified one) must
+never let the source concept's own Concept Evaluation stand in for
+verification of the actual reconstructed OUTPUT. `verifyProductionArtwork()`
+(`final-artwork-worker/production-verification.ts`) re-runs the *existing*
+`ConceptEvaluationCapability`/`ConceptEvaluationProvider` infrastructure —
+never a bespoke OCR implementation, never a new capability — against the
+real production asset (via a short-lived signed URL, exactly like
+`AssetCapability.getSignedUrl` already provides elsewhere), compared
+against the exact approved Design Brief snapshot tied to the
+`FinalDirectionApproval` (never a newer, possibly-mutated working brief).
+
+One re-evaluation serves two goals deliberately, rather than inventing two
+mechanisms:
+
+- **Required-wording verification (Goal 7):** the resulting
+  `required_wording` criterion flows into `PrintValidationCapability`'s
+  existing `required_wording_verification` check unchanged.
+- **Design-fidelity / review escape hatch (Goal 9):** the resulting overall
+  alignment/style/graphics/exclusions criteria flow into the existing
+  `concept_evaluation_alignment` check. A reconstruction that visibly
+  redrew or lost content is caught the same way a misaligned generated
+  concept always has been. `needs_review`/`failed` here is a real,
+  persisted verdict — provider success (Topaz returning HTTP 200) is never
+  confused with print readiness. A full, separate
+  `ArtworkFidelityEvaluationCapability` was deliberately NOT built —
+  Phase 2D's n=3 sample and lack of a mathematically-verified fidelity
+  detector mean that would be premature; this reuse is the smallest honest
+  mechanism available today, and the clean seam for a future dedicated
+  capability if evidence ever justifies one.
+
+Safe by construction: when `ConceptEvaluationProvider` resolves to the
+deterministic placeholder (the default, no `OPENAI_API_KEY`), every
+criterion — including `required_wording` — resolves `passed: null`, which
+`checkRequiredWordingVerification` already treats as `"unknown"` → blocking
+→ `finalization_required`. Nothing here can fabricate a pass.
+
+`LocalRasterInterpolationProvider`'s path is completely unchanged: since it
+always declares `preservesApprovedContent: true`, the worker still honestly
+reuses the source concept's own already-persisted Concept Evaluation — no
+new re-verification call, no new cost.
+
+### Alpha verification (Goal 8)
+
+Unchanged mechanism, extended honestly: `hasTransparency` on
+`FinalArtworkProviderOutput` is always computed by scanning the FINAL,
+canvas-fit bytes' actual alpha channel (`hasAnyTransparentPixel`) — never
+assumed from provider intent or request parameters — for both providers.
+`PrintValidationCapability`'s existing `transparency` check (already tied
+to `ProductionRequirements.transparencyRequired`, never an unconditional
+"every PNG must be transparent" rule) blocks `print_ready` on an opaque
+result exactly as it already did for local interpolation.
+
+### Paid-call idempotency (Goal 3)
+
+`FinalArtworkJob` gained a durable triple (`providerKey`, `providerRequestId`,
+`providerStatus` — migration `20260807150000_topaz_provider_idempotency.sql`),
+populated via a new `FinalArtworkProviderInput.onProviderRequestSubmitted`
+hook that a paid provider calls synchronously the INSTANT it submits a new
+request — before any polling. `FinalArtworkWorkerCapability` persists this
+immediately, so a worker crash, a lost race between two workers, or a
+recovered/stale job retry never causes a second paid submission: on the
+next attempt, if `job.providerKey` matches the resolved provider's own
+`providerKey`, the worker passes the recorded request as
+`existingProviderRequest`, and `TopazTransparencyUpscaleProvider` resumes
+(polls/downloads) it instead of submitting again. A request from a
+*different* provider (e.g. `FINAL_ARTWORK_PROVIDER` changed between
+attempts) is never resumed — a fresh submission happens instead. Only a
+`"provider_job_failed"` classification (the provider's own request reached
+a terminal Failed/Cancelled state — provably dead) clears the persisted
+triple, which is what allows a genuinely-necessary fresh paid submission on
+the next retry; every other failure (network blip, timeout, download
+hiccup) leaves it alone so a retry resumes rather than resubmits. The
+production asset's own existence (`AssetRecord.finalArtworkJobId` +
+`productionRole`) remains the primary, already-existing idempotency
+boundary from Phase 2C for a job whose provider call already succeeded —
+this triple only closes the earlier gap (submitted but not yet
+downloaded/persisted).
+
+### Failure/review semantics (Goal 12)
+
+`ProviderError` (`capabilities/providers/provider-error.ts`) gained three
+classifications for this sprint: `"auth"` (401/403 — non-retryable, never
+logs the key), `"insufficient_credits"` (412 — non-retryable, fails closed,
+no retry storm), and `"timeout"` (bounded polling exceeded its budget —
+leaves the request resumable). Every provider/infrastructure failure
+(auth, credits, timeout, malformed response, download failure, invalid
+bytes, unexpected dimensions) fails the `FinalArtworkJob` exactly like a
+Phase 2C storage/transformation failure always did — retryable via the
+customer's existing "Prepare Print-Ready Artwork" action, never
+`print_ready`. An artwork-verification failure (wording mismatch, alpha
+failure, fidelity `needs_review`/`failed`) is explicitly **not** treated as
+an infrastructure failure — it is a real, persisted `ProductionAssetValidation`
+result and `PrintProject.status = "finalization_required"`, exactly like
+Phase 2C's honest verdicts. `maybeTransitionProjectStatus`'s existing
+active-approval re-check (unchanged from Phase 2C) is what keeps a stale
+Topaz result that completes after the customer supersedes their approval
+mid-flight from ever making the project appear `print_ready`.
+
+### Local interpolation is never equivalent (Goal 16)
+
+`LocalRasterInterpolationProvider` remains available for tests, development,
+and deterministic non-network fallback — but `resolveFinalArtworkProvider()`
+never silently substitutes it for a misconfigured/failed Topaz request. If
+`FINAL_ARTWORK_PROVIDER=topaz` and Topaz is unavailable or fails, the job
+fails honestly; nothing in this pipeline automatically re-runs local
+interpolation and reports the same production quality.
+
+### Cost control and observability (Goal 13/14)
+
+At most one NEW paid submission per job attempt (idempotency above ensures
+no hidden duplicate). `logFinalArtworkPaidCallDecision` logs, every attempt,
+whether a new paid request was actually submitted this run — never inferred
+after the fact. `logFinalArtworkReconstructionOutcome` logs the full
+lifecycle (project/job/artwork ids, provider key + request id, source/
+reconstructed/final-canvas dimensions, verification check statuses, final
+validation status, provider latency) — server-side only. Neither function
+ever logs `TOPAZ_API_KEY`, signed storage URLs, or raw provider response
+bodies.
+
+### Customer/provider privacy boundary (Goal 15/17)
+
+Unchanged customer-facing contract from Phase 2C: **Preparing your
+print-ready artwork…** / **Your print-ready artwork is ready** / **We need
+to review your artwork before it can be finalized**. "Topaz" never appears
+in any customer-facing string. `providerRequestId`, `providerKey`, and
+`providerStatus` live only on the internal `FinalArtworkJob` row — never
+`ProjectSnapshot`, never `conversation-service.ts`'s `finalization` view
+(still exactly `{ status }`).
 
 ---
 

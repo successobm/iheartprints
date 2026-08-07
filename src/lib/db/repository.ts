@@ -108,11 +108,23 @@ export interface CreateFinalArtworkJobInput {
   artworkVersionId: string;
 }
 
-/** Sprint 2M Phase 2C: mirrors `UpdateGenerationJobInput`. */
+/**
+ * Sprint 2M Phase 2C: mirrors `UpdateGenerationJobInput`. Sprint 2M Phase 2E
+ * adds the paid-call idempotency triple (Goal 3) — see `FinalArtworkJob`'s
+ * doc.
+ */
 export type UpdateFinalArtworkJobInput = Partial<
   Pick<
     FinalArtworkJob,
-    "status" | "attempts" | "lastError" | "startedAt" | "completedAt" | "heartbeatAt"
+    | "status"
+    | "attempts"
+    | "lastError"
+    | "startedAt"
+    | "completedAt"
+    | "heartbeatAt"
+    | "providerKey"
+    | "providerRequestId"
+    | "providerStatus"
   >
 >;
 

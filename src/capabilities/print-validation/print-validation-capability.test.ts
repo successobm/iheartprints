@@ -136,6 +136,40 @@ describe("PrintValidationCapability — Upscaling Truthfulness (Sprint 2M Phase 
     const resolutionCheck = report.checks.find((c) => c.check === "effective_resolution");
     assert.equal(resolutionCheck?.status, "unknown");
   });
+
+  // Sprint 2M Phase 2E: genuine provider-side reconstruction (Topaz
+  // Transparency Upscale) is real, provider-manufactured detail — never
+  // fabricated local interpolation — so it is trusted exactly like
+  // "native", not penalized down to the tiny pre-reconstruction source.
+  it("a reconstructed asset is trusted like native — genuine provider detail is never penalized down to the pre-reconstruction source size", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        printPlacement: "full_back",
+        primaryAsset: {
+          contentType: "image/png",
+          // The final production canvas — distinct from both the true
+          // 1024x1024 source and the provider's 4096x4096 reconstruction.
+          widthPx: 3600,
+          heightPx: 4200,
+          hasTransparency: true,
+          vectorAssetId: null,
+          resolutionProvenance: "reconstructed",
+          nativeWidthPx: 1024,
+          nativeHeightPx: 1024,
+        },
+      }),
+    );
+
+    assert.equal(report.status, "ready");
+    const resolutionCheck = report.checks.find((c) => c.check === "effective_resolution");
+    assert.equal(resolutionCheck?.status, "pass");
+    const minDimensionsCheck = report.checks.find(
+      (c) => c.check === "minimum_raster_dimensions",
+    );
+    assert.equal(minDimensionsCheck?.status, "pass");
+    const provenanceCheck = report.checks.find((c) => c.check === "resolution_provenance");
+    assert.equal(provenanceCheck?.status, "pass");
+  });
 });
 
 describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {

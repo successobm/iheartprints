@@ -31,7 +31,11 @@ Atomic Job Claim               (ProjectRepository.claimNextQueuedFinalArtworkJob
         ↓
 Final Artwork Worker           (capabilities/final-artwork-worker)
         ↓
-Raster Transformation           (capabilities/final-artwork — FinalArtworkProvider)
+Source Eligibility Gate         (Sprint 2M Phase 2E — skip paid reconstruction
+        ↓                        on an already-known-invalid source)
+Raster Transformation/          (capabilities/final-artwork — FinalArtworkProvider:
+Reconstruction                   LocalRasterInterpolationProvider or, since
+        ↓                        Sprint 2M Phase 2E, TopazTransparencyUpscaleProvider)
         ↓
 Production Asset Upload         (capabilities/assets — uploadProductionAsset)
         ↓
@@ -143,8 +147,27 @@ different direction) can never stomp a newer direction's status.
 
 ## Live provider safety
 
-`LocalRasterInterpolationProvider` makes no network call and no paid
-request — there is nothing to gate behind a kill switch today.
-`resolveFinalArtworkProvider()` is the one composition-owned resolution
-point a future real provider adapter would extend; it must default off,
-mirroring `CONCEPT_GENERATION_ENABLE_REAL`.
+Sprint 2M Phase 2E integrated the first real, paid provider — Topaz
+Transparency Upscale — behind `FinalArtworkProvider`. See ARCHITECTURE.md
+§13d for the full design. Deployment-relevant summary:
+
+- `FINAL_ARTWORK_PROVIDER=local` (default, safe everywhere) —
+  `LocalRasterInterpolationProvider`, no network call, no paid request.
+- `FINAL_ARTWORK_PROVIDER=topaz` + `TOPAZ_API_KEY` — real Topaz
+  reconstruction. Latency is provider-bound: the Sprint 2M Phase 2D
+  bake-off observed ~70–130s per call; the worker's existing periodic
+  heartbeat (`WORKER_HEARTBEAT_INTERVAL`) keeps a long-running job from
+  looking abandoned to the stale-job recovery sweep.
+- `FINAL_ARTWORK_PROVIDER=topaz` without `TOPAZ_API_KEY` fails the job
+  safely (`UnavailableFinalArtworkProvider`) — never a silent fallback to
+  local interpolation, never `print_ready`.
+- Paid-call idempotency (`FinalArtworkJob.providerKey`/`providerRequestId`/
+  `providerStatus`) means a crash mid-poll resumes the same paid request on
+  retry rather than submitting a second one — see §13d "Paid-call
+  idempotency". This is why nothing in this worker's normal operation
+  (scheduled endpoint, standalone process, or a customer's read-only status
+  poll) should ever be expected to spend more than one Topaz credit per
+  `FinalArtworkJob` under normal conditions.
+- `TOPAZ_API_KEY` is server-only: never logged, never returned from an API
+  route, never included in a customer snapshot. `providerRequestId` is
+  internal-only diagnostics, same rule.

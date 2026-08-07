@@ -610,6 +610,36 @@
  *     `FinalArtworkCapability.getCurrentProductionAssetId` →
  *     `AssetCapability.getSignedUrl` — only ever returns a URL once
  *     `PrintProject.status === "print_ready"`.
+ *
+ * Sprint 2M Phase 2E — Topaz production reconstruction integration.
+ * `FinalArtworkProvider` gains its first real, paid, network-backed
+ * implementation (`TopazTransparencyUpscaleProvider`) alongside the
+ * unchanged `LocalRasterInterpolationProvider`, resolved by
+ * `resolveFinalArtworkProvider()` from `FINAL_ARTWORK_PROVIDER=local|topaz`
+ * — its own independent provider boundary, never coupled to
+ * `OPENAI_API_KEY`/`CONCEPT_GENERATION_*`/`CONVERSATION_UNDERSTANDING_PROVIDER`.
+ * See ARCHITECTURE.md §13d for the full design. Boundary changes worth
+ * repeating here:
+ *   - `FinalArtworkWorkerCapability` gains a `ConceptEvaluationCapability`
+ *     dependency, used ONLY to independently re-verify a PRODUCTION asset
+ *     (never a source concept's own evaluation) when the resolved provider
+ *     reports `preservesApprovedContent: false` — Topaz always does.
+ *   - `ResolutionProvenance` gains `"reconstructed"`, trusted like
+ *     `"native"` (genuine provider detail, not fabricated interpolation)
+ *     but never collapsed into it.
+ *   - `FinalArtworkJob` gains a durable `(providerKey, providerRequestId,
+ *     providerStatus)` triple — paid-call idempotency across worker
+ *     crashes/races/retries. Never customer-facing.
+ *   - `checkSourceEligibleForFinalization` runs before ANY provider call
+ *     (local or paid) and blocks spending on a source concept whose own
+ *     Concept Evaluation already found required wording definitively
+ *     missing/incorrect.
+ *   - Topaz-specific request/response shape, model names, and process ids
+ *     never leak past `TopazTransparencyUpscaleProvider` — domain code sees
+ *     only the provider-neutral `FinalArtworkProvider` contract.
+ *   - A paid provider's HTTP success is never treated as evidence of print
+ *     readiness — only `PrintValidationCapability.validateArtwork`
+ *     returning `"ready"` against the real production asset may.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2M2c" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2M2e" as const;

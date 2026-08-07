@@ -4,3 +4,12 @@ export {
   MAX_FINAL_ARTWORK_ATTEMPTS,
   type FinalArtworkWorkerCapability,
 } from "./final-artwork-worker-capability";
+export {
+  checkSourceEligibleForFinalization,
+  type SourceEligibilityResult,
+} from "./source-eligibility";
+export {
+  verifyProductionArtwork,
+  type ProductionVerificationInput,
+  type ProductionVerificationResult,
+} from "./production-verification";

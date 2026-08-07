@@ -207,10 +207,25 @@ export interface PrintValidationReport {
  *     (the true pre-upscale source dimensions) instead, which — by
  *     definition of why an upscale was needed — will correctly fail to meet
  *     a target the native asset didn't already meet.
+ *   - `"reconstructed"` (Sprint 2M Phase 2E) — pixels were produced by a
+ *     genuine provider-hosted reconstruction (e.g. Topaz Transparency
+ *     Upscale's super-resolution), never local geometric interpolation. This
+ *     is real, provider-manufactured detail — checks trust `widthPx`/
+ *     `heightPx` directly, exactly like `"native"`. It is still recorded as
+ *     its own distinct value (never collapsed into `"native"`) so it is
+ *     always possible to tell "the customer's original pixels" apart from
+ *     "a provider's reconstruction of those pixels" in logs, diagnostics,
+ *     and any future audit — see `nativeWidthPx`/`nativeHeightPx`, which
+ *     continue to carry the true pre-reconstruction source dimensions even
+ *     when `resolutionProvenance === "reconstructed"`.
  *   - `"unknown"` — provenance was not determined. Treated exactly like
  *     `"interpolated_upscale"` for validation purposes (never assumed safe).
  */
-export type ResolutionProvenance = "native" | "interpolated_upscale" | "unknown";
+export type ResolutionProvenance =
+  | "native"
+  | "interpolated_upscale"
+  | "reconstructed"
+  | "unknown";
 
 /**
  * Opaque, already-sanitized summary of the concept's primary generated

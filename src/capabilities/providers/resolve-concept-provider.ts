@@ -3,6 +3,7 @@ import {
   type ConceptGenerationConfig,
 } from "@/lib/config/generation-provider-config";
 import { logConceptGenerationDevelopmentFallback } from "@/lib/config/generation-provider-logging";
+import { isAutomatedTestEnvironment } from "@/lib/config/automated-test-safety";
 import type { ConceptGenerationProvider } from "./concept-generation-provider";
 import { OpenAIConceptGenerationProvider } from "./openai-concept-provider";
 import { PlaceholderConceptProvider } from "./placeholder-concept-provider";
@@ -37,11 +38,25 @@ function isRealGenerationEnabled(): boolean {
  *
  * Accepts an explicit `config` (default: the live environment) so it can
  * be unit-tested without mutating `process.env`.
+ *
+ * Release-blocker hotfix: when `config` is omitted (the live-environment
+ * default `getCapabilityGraph()`/`createCapabilityGraph()` always uses),
+ * `isAutomatedTestEnvironment()` unconditionally forces
+ * `PlaceholderConceptProvider` — no network call is possible — no matter
+ * what `CONCEPT_GENERATION_PROVIDER`/`CONCEPT_GENERATION_ENABLE_REAL`/
+ * `OPENAI_API_KEY` happen to be set to in the ambient environment. A caller
+ * that passes an explicit `config` (this module's own resolver unit tests)
+ * is unaffected — see `lib/config/automated-test-safety.ts`.
  */
 export function resolveConceptGenerationProvider(
-  config: ConceptGenerationConfig = getConceptGenerationConfig(),
+  config?: ConceptGenerationConfig,
 ): ConceptGenerationProvider {
-  if (config.mode === "openai" && !isRealGenerationEnabled()) {
+  if (config === undefined && isAutomatedTestEnvironment()) {
+    return new PlaceholderConceptProvider();
+  }
+  const resolvedConfig = config ?? getConceptGenerationConfig();
+
+  if (resolvedConfig.mode === "openai" && !isRealGenerationEnabled()) {
     return new UnavailableConceptGenerationProvider(
       "REAL_GENERATION_NOT_YET_ENABLED",
       "openai",
@@ -49,15 +64,15 @@ export function resolveConceptGenerationProvider(
     );
   }
 
-  switch (config.mode) {
+  switch (resolvedConfig.mode) {
     case "openai":
       return new OpenAIConceptGenerationProvider({
-        apiKey: config.apiKey,
-        model: config.model,
+        apiKey: resolvedConfig.apiKey,
+        model: resolvedConfig.model,
       });
 
     case "placeholder":
-      if (config.reason === "development_fallback") {
+      if (resolvedConfig.reason === "development_fallback") {
         logConceptGenerationDevelopmentFallback({
           requestedProvider: "openai",
           environment: process.env.NODE_ENV ?? "development",
@@ -67,9 +82,9 @@ export function resolveConceptGenerationProvider(
 
     case "unavailable":
       return new UnavailableConceptGenerationProvider(
-        config.safeErrorCode,
+        resolvedConfig.safeErrorCode,
         "openai",
-        config.internalReason,
+        resolvedConfig.internalReason,
       );
   }
 }
