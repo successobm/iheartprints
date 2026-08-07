@@ -178,12 +178,19 @@ describe("Regression — general-purpose scenarios beyond bowling (Goal 10)", ()
         /fundraiser|reunion|crew|customers|families/i,
       );
 
-      // --- Audience / purpose isolation -------------------------------
-      if (scenario.expectedAudiencePattern) {
-        assert.match(afterSummary.brief.audience ?? "", scenario.expectedAudiencePattern);
+      // --- Audience / purpose isolation ---------------------------------
+      // Sprint 2L Phase 1B: audience/purpose are optional-tier — never
+      // proactively asked (see interview-coverage-policy.ts), so these
+      // short openers alone do not necessarily establish them. When
+      // present at all (customer-volunteered or contextually inferred),
+      // they must still stay correctly isolated from each other and from
+      // product; when absent, that is itself the expected, non-blocking
+      // behavior (Goal 3: Brief Completeness ≠ Generation Readiness).
+      if (scenario.expectedAudiencePattern && afterSummary.brief.audience) {
+        assert.match(afterSummary.brief.audience, scenario.expectedAudiencePattern);
       }
-      if (scenario.expectedPurposePattern) {
-        assert.match(afterSummary.brief.purpose ?? "", scenario.expectedPurposePattern);
+      if (scenario.expectedPurposePattern && afterSummary.brief.purpose) {
+        assert.match(afterSummary.brief.purpose, scenario.expectedPurposePattern);
       }
       // Audience and purpose must never collapse into each other.
       if (afterSummary.brief.audience && afterSummary.brief.purpose) {
@@ -193,13 +200,13 @@ describe("Regression — general-purpose scenarios beyond bowling (Goal 10)", ()
       // --- Required wording: exact, never paraphrased -----------------
       assert.equal(summary!.requiredWording, scenario.expectedRequiredWording);
 
-      // --- Deferred colors: "no preference" never becomes literal -----
+      // --- Artwork colors: never asked, never invented -----------------
+      // Sprint 2L Phase 1B: colors is optional-tier — since none of these
+      // openers volunteer a color preference, it simply never gets asked
+      // or resolved, with no forced "you choose" deferral required to
+      // reach an approvable summary.
       assert.equal(summary!.colors, undefined);
       assert.deepEqual(afterSummary.brief.preferredColors, []);
-      const deferredDecisions = (lastMessage?.metadata.deferredDecisions ?? []) as Array<{
-        section: string;
-      }>;
-      assert.ok(deferredDecisions.some((d) => d.section === "colors"));
 
       // --- Approve and confirm concept-direction differentiation -------
       const approved = await conversation.submitDesignBriefDecision(projectId, "approve");

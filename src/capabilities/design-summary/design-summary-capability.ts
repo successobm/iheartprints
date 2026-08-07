@@ -182,9 +182,16 @@ export function createDesignSummaryCapability(): DesignSummaryCapability {
         );
       }
 
+      // Sprint 2L Phase 1B removed the "Continue" action from the Design
+      // Summary UI (Approve / Edit only — see ARCHITECTURE.md §10b), but
+      // left this hardcoded prose line still describing three options,
+      // including a phantom "tell me more before we continue." Fixed
+      // Sprint 2L Phase 1C: this line is the one place customer-facing
+      // copy describes the approval-state actions, so it must always match
+      // `DesignSummaryCard`'s actual two buttons.
       lines.push(
         "",
-        "Would you like to approve this, make an edit, or tell me more before we continue?",
+        "Review the design brief below. Approve it to create concepts, or edit anything you'd like to change.",
       );
 
       return lines.join("\n");

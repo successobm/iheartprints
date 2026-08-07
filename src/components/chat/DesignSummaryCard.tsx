@@ -22,7 +22,6 @@ interface DesignSummaryCardProps {
   busy: boolean;
   onApprove: () => void;
   onEdit: () => void;
-  onContinue: () => void;
 }
 
 const FIELD_LABELS: Array<[keyof DesignSummaryView, string]> = [
@@ -47,7 +46,6 @@ export function DesignSummaryCard({
   busy,
   onApprove,
   onEdit,
-  onContinue,
 }: DesignSummaryCardProps) {
   const rows = FIELD_LABELS.filter(([key]) =>
     Boolean(summary[key]?.toString().trim()),
@@ -142,14 +140,6 @@ export function DesignSummaryCard({
           className="rounded-full border border-black/10 px-4 py-2 text-sm font-medium text-ink transition enabled:hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40"
         >
           Edit
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onContinue}
-          className="rounded-full border border-black/10 px-4 py-2 text-sm font-medium text-ink transition enabled:hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Continue
         </button>
       </div>
     </div>

@@ -6,7 +6,7 @@ import { createElement } from "react";
 import { DesignSummaryCard } from "./DesignSummaryCard";
 
 describe("DesignSummaryCard", () => {
-  it("renders only known fields and all three decision actions", () => {
+  it("renders only known fields and both decision actions", () => {
     const html = renderToString(
       createElement(DesignSummaryCard, {
         summary: {
@@ -16,7 +16,6 @@ describe("DesignSummaryCard", () => {
         busy: false,
         onApprove: () => {},
         onEdit: () => {},
-        onContinue: () => {},
       }),
     );
 
@@ -33,7 +32,8 @@ describe("DesignSummaryCard", () => {
 
     assert.match(html, /Approve and Create Concepts/);
     assert.match(html, /Edit/);
-    assert.match(html, /Continue/);
+    // Sprint 2L Phase 1B (Goal 12): "Continue" removed as redundant with Edit.
+    assert.doesNotMatch(html, /Continue/);
   });
 
   it("disables all actions while busy", () => {
@@ -43,12 +43,12 @@ describe("DesignSummaryCard", () => {
         busy: true,
         onApprove: () => {},
         onEdit: () => {},
-        onContinue: () => {},
       }),
     );
 
     const disabledCount = html.split("disabled=\"\"").length - 1;
-    assert.equal(disabledCount, 3);
+    // Sprint 2L Phase 1B (Goal 12): two actions now — Approve, Edit.
+    assert.equal(disabledCount, 2);
   });
 
   it("omits the summary detail list entirely when nothing is known yet", () => {
@@ -58,7 +58,6 @@ describe("DesignSummaryCard", () => {
         busy: false,
         onApprove: () => {},
         onEdit: () => {},
-        onContinue: () => {},
       }),
     );
 
@@ -73,7 +72,6 @@ describe("DesignSummaryCard", () => {
         busy: false,
         onApprove: () => {},
         onEdit: () => {},
-        onContinue: () => {},
       }),
     );
     assert.match(html, /Updated/); // the badge itself has visible text, not just color
@@ -89,7 +87,6 @@ describe("DesignSummaryCard", () => {
         busy: false,
         onApprove: () => {},
         onEdit: () => {},
-        onContinue: () => {},
       }),
     );
     assert.match(html, /Black/);
@@ -104,7 +101,6 @@ describe("DesignSummaryCard", () => {
         busy: false,
         onApprove: () => {},
         onEdit: () => {},
-        onContinue: () => {},
       }),
     );
     assert.doesNotMatch(html, /aria-label="Product was just updated"/);
@@ -121,7 +117,6 @@ describe("DesignSummaryCard", () => {
         busy: false,
         onApprove: () => {},
         onEdit: () => {},
-        onContinue: () => {},
       }),
     );
     assert.match(html, /Designer will determine/);
@@ -138,7 +133,6 @@ describe("DesignSummaryCard", () => {
         busy: false,
         onApprove: () => {},
         onEdit: () => {},
-        onContinue: () => {},
       }),
     );
     assert.doesNotMatch(html, /Designer will determine/);

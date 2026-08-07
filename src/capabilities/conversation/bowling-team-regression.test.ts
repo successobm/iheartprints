@@ -108,7 +108,7 @@ describe("Regression — bowling team ('My 3 Sons') conversation (Workstream F)"
     assert.equal(afterOpener.brief.productSummary, null);
   });
 
-  it("reaches an approvable Design Summary matching the expected brief, with 'no' resolving to designer-determined colors", async () => {
+  it("reaches an approvable Design Summary matching the expected brief without ever asking about artwork colors or purpose (Sprint 2L Phase 1B)", async () => {
     const conversation = await freshConversation();
     const started = await conversation.start();
     const projectId = started.project.id;
@@ -129,22 +129,18 @@ describe("Regression — bowling team ('My 3 Sons') conversation (Workstream F)"
     // --- Expected Design Brief (Workstream F) ---------------------------
     assert.match(summary!.product ?? "", /t-?shirts?/i);
     assert.equal(afterSummary.brief.audience, "bowling team");
-    assert.equal(afterSummary.brief.purpose, "Team apparel");
     assert.equal(summary!.requiredWording, "My 3 Sons");
     assert.match(summary!.graphics ?? "", /retro bowling logo/i);
     assert.equal(summary!.productColor, "Black");
     assert.match(summary!.printLocation ?? "", /full back/i);
 
-    // "no" to artwork colors must never appear as a literal color — it
-    // must resolve to the deferred "designer determined" state instead
-    // (Workstream A/B), never show up in the regular field list, and
-    // never leak the literal word "no" anywhere in the summary text.
+    // Sprint 2L Phase 1B: artwork colors and purpose are optional-tier —
+    // never proactively asked, never blocking summary readiness, and
+    // (since this conversation's ANSWERS map is never consulted for them)
+    // simply absent here rather than requiring an explicit customer
+    // deferral to reach this state.
     assert.equal(summary!.colors, undefined);
-    const deferredDecisions = (lastMessage?.metadata.deferredDecisions ?? []) as Array<{
-      section: string;
-      label: string;
-    }>;
-    assert.ok(deferredDecisions.some((d) => d.section === "colors"));
+    assert.equal(summary!.purpose, undefined);
     assert.deepEqual(afterSummary.brief.preferredColors, []);
 
     // No malformed/paragraph-shaped values anywhere in the confirmed brief

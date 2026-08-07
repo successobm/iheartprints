@@ -1,4 +1,4 @@
-import type { BriefConflict, BriefSectionKey } from "./contracts";
+import type { BriefConflict, BriefSectionKey, DesignSummaryView } from "./contracts";
 
 /**
  * Centralized, provider-neutral customer-facing phrasing (Sprint 2F).
@@ -198,6 +198,114 @@ export function acknowledgeRevision(changedSections: BriefSectionKey[]): string 
 /** Asked once, after a revision, only when concepts already exist and are now stale. */
 export function conceptRegenerationPrompt(): string {
   return "Your changes affect the current concepts. Would you like me to generate updated concepts?";
+}
+
+/**
+ * Sprint 2L Phase 1A: a natural, value-bearing acknowledgement of exactly
+ * what was just resolved — "Got it — I have the bowling team, the name
+ * My 3 Sons, and the T-shirt." — instead of a generic count-only
+ * acknowledgement ("I've made those changes") that reads as if
+ * *everything* asked about was captured even when it wasn't. Built only
+ * from `summary` (the already-computed `DesignSummaryView` of the
+ * *updated* brief) restricted to `changedSections` — it can only ever
+ * mention a field that is both (a) something this turn actually changed
+ * and (b) something Design Summary itself would show as resolved, so it
+ * can never claim a field that failed reconciliation/validation this turn
+ * (e.g. a rejected Product proposal) was captured.
+ *
+ * Returns `null` when nothing in `changedSections` has a displayable
+ * value (e.g. the only change was a deferral) — callers should fall back
+ * to `acknowledgeRevision` in that case, which is still truthful ("I've
+ * made those changes") because a deferral is itself a real, applied
+ * change.
+ */
+const RESOLVED_FIELD_ORDER: BriefSectionKey[] = [
+  "product",
+  "requiredWording",
+  "audience",
+  "purpose",
+  "productColor",
+  "printLocation",
+  "style",
+  "colors",
+  "graphics",
+  "exclusions",
+  "additionalNotes",
+];
+
+const MAX_ACKNOWLEDGED_FIELDS = 4;
+
+const RESOLVED_FIELD_PHRASE: Partial<Record<BriefSectionKey, (value: string) => string>> = {
+  product: (v) => `the ${withoutLeadingArticle(v)}`,
+  audience: (v) => `the ${lowerFirst(withoutLeadingArticle(v))}`,
+  purpose: (v) => `the ${lowerFirst(withoutLeadingArticle(v))}`,
+  requiredWording: (v) => (v === "None" ? "no required wording" : `the name "${v}"`),
+  productColor: (v) => `${v} as the shirt color`,
+  printLocation: (v) => `${lowerFirst(v)} placement`,
+  style: (v) => `a ${lowerFirst(withoutLeadingArticle(v))} style`,
+  colors: (v) => `${v} in the artwork`,
+  graphics: () => "the design direction",
+  exclusions: () => "what to avoid",
+  additionalNotes: () => "your notes",
+};
+
+/**
+ * Sprint 2L Phase 1B (Goal 7): a single low-salience field answer ("black",
+ * "full back") does not deserve the full "Got it — I have Black as the
+ * shirt color." treatment — repeated every turn, that reads as database-
+ * mutation reporting, not conversation. A short, natural confirmation
+ * still tells the customer their answer registered without parroting it
+ * back as a labeled field. Reserved for the single-field case — a
+ * multi-field turn uses `acknowledgeResolvedFields` instead, where the
+ * fuller synthesis earns its place by demonstrating real understanding of
+ * a richer message.
+ */
+export function shortAcknowledgement(
+  section: BriefSectionKey,
+  value: string | null,
+): string {
+  if (section === "productColor" && value) return `${value} works.`;
+  return "Got it.";
+}
+
+export function acknowledgeResolvedFields(
+  summary: DesignSummaryView,
+  changedSections: BriefSectionKey[],
+): string | null {
+  const changed = new Set(changedSections);
+  const phrases: string[] = [];
+
+  for (const section of RESOLVED_FIELD_ORDER) {
+    if (phrases.length >= MAX_ACKNOWLEDGED_FIELDS) break;
+    if (!changed.has(section)) continue;
+    const value = summary[section as keyof DesignSummaryView];
+    if (!value) continue;
+    const phrase = RESOLVED_FIELD_PHRASE[section]?.(String(value));
+    if (phrase) phrases.push(phrase);
+  }
+
+  if (phrases.length === 0) return null;
+  return `Got it — I have ${joinNaturally(phrases)}.`;
+}
+
+function joinNaturally(items: string[]): string {
+  if (items.length === 1) return items[0]!;
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+function lowerFirst(value: string): string {
+  if (!value) return value;
+  return value[0]!.toLowerCase() + value.slice(1);
+}
+
+/**
+ * Strips a leading "the"/"a"/"an" before this module prepends its own
+ * article — otherwise a value a customer or provider already phrased with
+ * one (e.g. "The crew") would read as "the the crew" once templated.
+ */
+function withoutLeadingArticle(value: string): string {
+  return value.replace(/^(the|a|an)\s+/i, "");
 }
 
 /**

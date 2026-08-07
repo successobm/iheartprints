@@ -334,6 +334,56 @@ describe("IntentExtractionCapability — Sprint 2K Phase 2: entity names as requ
   });
 });
 
+describe("IntentExtractionCapability — Sprint 2L Phase 1C: entity-name clause-boundary fix", () => {
+  /**
+   * Root cause: a punctuation-free run-on message gives
+   * `ENTITY_NAME_PATTERNS`'s `[^.,;!?\n]+` capture group nothing to stop
+   * at, so it silently swallows an unrelated trailing clause into what
+   * should have been just the entity's name — this is exactly what leaked
+   * "My 3 Sons help me create a design for team t-shirts" into a
+   * customer-facing question in the live acceptance test. General fix
+   * (`boundEntityCapture` / `CLAUSE_BOUNDARY_PATTERN` in extraction.ts):
+   * a small set of clause-continuation markers ("help", "and I", "we're",
+   * "can you", ...) terminate the capture early, the same way a comma
+   * would. Not entity-specific — the exact live opener is one case among
+   * several unrelated domains below.
+   */
+  it('the exact live opener bounds required wording to exactly "My 3 Sons" — never the greedy run-on clause', () => {
+    const fields = fieldsFrom(
+      "I'm in a bowling league and our team is called My 3 Sons help me create a design for team t-shirts",
+    );
+    assert.equal(fields.exactText, "My 3 Sons");
+    assert.notEqual(fields.exactText, "My 3 Sons help me create a design for team t-shirts");
+  });
+
+  const multiDomainCases: Array<[reply: string, expectedWording: string]> = [
+    ["Our company is Rivera Plumbing and I need staff t-shirts.", "Rivera Plumbing"],
+    ["Our school is Lincoln Elementary we're making fun run tees.", "Lincoln Elementary"],
+    [
+      "The event is Johnson Family Reunion 2026 can you make shirts for everyone?",
+      "Johnson Family Reunion 2026",
+    ],
+    ["Our softball team is Bad News Bears and we need jerseys.", "Bad News Bears"],
+  ];
+
+  for (const [reply, expected] of multiDomainCases) {
+    it(`"${reply}" bounds the entity name to exactly "${expected}"`, () => {
+      const fields = fieldsFrom(reply);
+      assert.equal(fields.exactText, expected);
+    });
+  }
+
+  it('a legitimate name containing "and" survives intact — the boundary trim requires "and" + a pronoun, not bare "and"', () => {
+    const fields = fieldsFrom("Our company is Smith and Sons.");
+    assert.equal(fields.exactText, "Smith and Sons");
+  });
+
+  it('a bare, ambiguous entity mention stays ambiguous — "Make something cool for My 3 Sons" does not resolve required wording (regression)', () => {
+    const fields = fieldsFrom("Make something cool for My 3 Sons.");
+    assert.equal(fields.exactText, undefined);
+  });
+});
+
 describe('IntentExtractionCapability — Sprint 2K Phase 2: "no" never becomes a preferred color', () => {
   it('a bare "no" answering a colors question defers the section instead of becoming a color', () => {
     const result = capability.extract({

@@ -13,6 +13,7 @@ import type {
 } from "@/lib/domain/types";
 import type { BriefEvaluationCapability } from "@/capabilities/brief-evaluation";
 import type { ConceptGenerationCapability } from "@/capabilities/concept-generation";
+import type { ConversationUnderstandingCapability } from "@/capabilities/conversation-understanding";
 import type { DesignBriefCapability } from "@/capabilities/design-brief";
 import type { DesignIntelligenceCapability } from "@/capabilities/design-intelligence";
 import type { DesignSummaryCapability } from "@/capabilities/design-summary";
@@ -21,11 +22,14 @@ import type { InterviewIntelligenceCapability } from "@/capabilities/interview-i
 import type { RevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
 import { ALL_SECTIONS_IN_POLICY_ORDER } from "@/capabilities/shared/interview-coverage-policy";
 import {
+  acknowledgeResolvedFields,
   acknowledgeRevision,
   conceptRegenerationPrompt,
   describeUndo,
   designerDecisionMessage,
+  shortAcknowledgement,
 } from "@/capabilities/shared/question-phrasing";
+import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
 import type {
   BriefSectionKey,
   DesignSummaryView,
@@ -34,11 +38,19 @@ import type {
   RevisionImpact,
 } from "@/capabilities/shared/contracts";
 
-export type DesignBriefDecisionAction = "approve" | "edit" | "continue";
+/** Sprint 2L Phase 1B (Goal 12): "continue" removed — see schema.ts. */
+export type DesignBriefDecisionAction = "approve" | "edit";
 
 export interface ConversationCapabilityDeps {
   repo: ProjectRepository;
   intentExtraction: IntentExtractionCapability;
+  /**
+   * Sprint 2L Phase 1: best-effort semantic interpretation of the customer's
+   * message, consumed by `intentExtraction.extract` as an optional hint —
+   * see `reconcile-understanding.ts` for precedence. Never mutates the
+   * brief itself.
+   */
+  conversationUnderstanding: ConversationUnderstandingCapability;
   designBrief: DesignBriefCapability;
   briefEvaluation: BriefEvaluationCapability;
   designIntelligence: DesignIntelligenceCapability;
@@ -141,6 +153,7 @@ export function createConversationCapability(
   const {
     repo,
     intentExtraction,
+    conversationUnderstanding,
     designBrief,
     briefEvaluation,
     designIntelligence,
@@ -149,6 +162,33 @@ export function createConversationCapability(
     designSummary,
     conceptGeneration,
   } = deps;
+
+  /**
+   * Sprint 2L Phase 1: builds the bounded, provider-neutral interpretation
+   * of `reply` in context — never the raw brief, ids, or full history (see
+   * `ConversationUnderstandingCapability`'s own bounding/sanitization).
+   * Never throws (the capability itself degrades to
+   * `EMPTY_UNDERSTANDING_RESULT` on any provider failure — Goal 10).
+   */
+  async function interpretReply(
+    snapshot: ProjectSnapshot,
+    brief: TShirtDesignBrief,
+    pendingSection: BriefSectionKey | null,
+    reply: string,
+  ) {
+    const evaluation = briefEvaluation.evaluate(brief);
+    const knownBrief = designSummary.createSummary(brief, evaluation);
+    const unresolvedSections = evaluation.sections
+      .filter((s) => s.resolution === "unknown")
+      .map((s) => s.section);
+    return conversationUnderstanding.interpret({
+      message: reply,
+      knownBrief,
+      unresolvedSections,
+      pendingSection,
+      recentMessages: snapshot.messages,
+    });
+  }
 
   /**
    * Takes the (already-fetched, post-mutation) brief and interview state
@@ -377,11 +417,13 @@ export function createConversationCapability(
       return performUndo(designId, current);
     }
 
+    const understanding = await interpretReply(current, current.brief, pendingSection, trimmed);
     const extraction = intentExtraction.extract({
       brief: current.brief,
       phase,
       reply: trimmed,
       pendingSection,
+      understanding,
     });
     for (const proposal of extraction.proposals) {
       await designBrief.applyProposal(designId, proposal);
@@ -393,6 +435,13 @@ export function createConversationCapability(
     const assessment = designIntelligence.assess(workingBrief, evaluation, impact);
     const deferredDecision = computeDeferredDecision(current.brief, workingBrief);
 
+    traceConversationUnderstanding({
+      stage: "brief_updated",
+      resolvedSections: evaluation.sections
+        .filter((s) => s.resolution === "provided" || s.resolution === "deferred_to_designer")
+        .map((s) => s.section),
+    });
+
     const act = interviewIntelligence.selectNextAct({
       evaluation,
       assessment,
@@ -401,6 +450,13 @@ export function createConversationCapability(
         askCounts: state.askCounts,
         dismissedAdvisories: state.dismissedAdvisories,
       },
+    });
+
+    traceConversationUnderstanding({
+      stage: "next_act",
+      actType: act.type,
+      section: actSection(act) ?? null,
+      pendingSection,
     });
 
     const stateWithUndo: InterviewStateData = impact.isNoOp
@@ -428,9 +484,15 @@ export function createConversationCapability(
     await repo.updateConversationInterviewState(designId, nextState);
 
     if (act.type !== "await_customer") {
+      const summaryForAck = designSummary.createSummary(workingBrief, evaluation);
       await repo.addMessage(designId, {
         role: "assistant",
-        content: act.message,
+        content: withResolvedAcknowledgement(
+          act,
+          impact.changedSections,
+          summaryForAck,
+          naturalizeQuestion(act, summaryForAck),
+        ),
         metadata: {
           phase: "interviewing",
           act: act.type,
@@ -498,11 +560,13 @@ export function createConversationCapability(
     const previousBrief = current.brief;
     const pendingSection = narrowSection(state.pendingSection);
 
+    const understanding = await interpretReply(current, previousBrief, pendingSection, trimmed);
     const extraction = intentExtraction.extract({
       brief: previousBrief,
       phase,
       reply: trimmed,
       pendingSection,
+      understanding,
     });
     for (const proposal of extraction.proposals) {
       await designBrief.applyProposal(designId, proposal);
@@ -699,21 +763,14 @@ export function createConversationCapability(
         );
       }
 
-      if (action === "edit") {
-        await repo.updateConversationPhase(designId, "edit_requested");
-        await repo.addMessage(designId, {
-          role: "assistant",
-          content: "What would you like to change about the design?",
-          metadata: { phase: "edit_requested" },
-        });
-      } else {
-        await repo.updateConversationPhase(designId, "continue_requested");
-        await repo.addMessage(designId, {
-          role: "assistant",
-          content: "What else would you like the designer to know?",
-          metadata: { phase: "continue_requested" },
-        });
-      }
+      // "edit" is the only remaining non-approve action (Sprint 2L Phase
+      // 1B, Goal 12 — "continue" removed as redundant; see schema.ts).
+      await repo.updateConversationPhase(designId, "edit_requested");
+      await repo.addMessage(designId, {
+        role: "assistant",
+        content: "What would you like to change or add?",
+        metadata: { phase: "edit_requested" },
+      });
 
       const snapshot = await repo.getProject(designId);
       if (!snapshot) throw new Error("Project not found");
@@ -737,6 +794,117 @@ export function createConversationCapability(
       return performUndo(designId, current);
     },
   };
+}
+
+/**
+ * Sprint 2L Phase 1 (Goal 13), refined Sprint 2L Phase 1A, refined again
+ * Sprint 2L Phase 1B (Goal 7): when this turn resolved one or more brief
+ * sections before asking/clarifying the next one, lead with a short,
+ * deterministic acknowledgement instead of asking as if nothing had been
+ * said. The acknowledgement's *shape* now depends on how much actually
+ * happened this turn:
+ *
+ *   - A single low-salience field answer ("black" → product color) gets a
+ *     short, natural confirmation (`shortAcknowledgement` — "Black
+ *     works.") — the full "Got it — I have Black as the shirt color."
+ *     treatment reads as database-mutation reporting when it repeats
+ *     every single turn (the live acceptance test's core complaint).
+ *   - A multi-field turn (a rich customer message resolved several things
+ *     at once) still earns the fuller `acknowledgeResolvedFields`
+ *     synthesis — demonstrating real understanding of a complex message
+ *     is exactly when that detail is worth showing.
+ *
+ * `acknowledgeResolvedFields` only ever names a section that both changed
+ * this turn AND has a real, resolved value in `summary` (the Design
+ * Summary of the post-patch brief) — a field a provider proposed but that
+ * reconciliation rejected (failed grounding, ambiguous confidence,
+ * unsupported section, ...) never appears here, because it was never
+ * applied and therefore never changed the brief. Falls back to the terser
+ * `acknowledgeRevision` only when nothing changed has a displayable value
+ * (e.g. the sole change was a deferral) — that generic phrasing remains
+ * truthful in that case. Never applied to "advise" acts (an advisory
+ * already has its own framing) or when nothing changed this turn.
+ */
+function withResolvedAcknowledgement(
+  act: InterviewAct,
+  changedSections: BriefSectionKey[],
+  summary: DesignSummaryView,
+  /** Already-naturalized question text for "ask" acts (see `naturalizeQuestion`) — falls back to `act.message` for every other act type. */
+  questionMessage: string,
+): string {
+  if (act.type !== "ask" && act.type !== "clarify") {
+    // Only "advise" reaches here in practice (the caller already returned
+    // early for "summarize" and skips "await_customer" entirely) — the
+    // `"message" in act` guard keeps this exhaustive/type-safe without a
+    // cast rather than assuming that.
+    return "message" in act ? act.message : "";
+  }
+  if (changedSections.length === 0) return questionMessage;
+
+  if (changedSections.length === 1) {
+    const [section] = changedSections;
+    const value = (summary[section as keyof DesignSummaryView] as string | undefined) ?? null;
+    return `${shortAcknowledgement(section, value)} ${questionMessage}`;
+  }
+
+  const ack =
+    acknowledgeResolvedFields(summary, changedSections) ?? acknowledgeRevision(changedSections);
+  return `${ack} ${questionMessage}`;
+}
+
+/**
+ * Sprint 2L Phase 1B (Goal 9), corrected Sprint 2L Phase 1C: a light,
+ * deterministic naturalization of the next question using only
+ * already-CONFIRMED brief values — never a new LLM call, never an
+ * invented fact. Scoped to the two questions a live acceptance test
+ * called out as reading generically once real context is already known
+ * ("What color garment..." → "What color T-shirts...", "Tell me about
+ * the design..." → "What direction do you want for the My 3 Sons
+ * design?"). Every other question keeps its existing, already-tested
+ * phrasing untouched. `InterviewIntelligenceCapability` itself stays
+ * brief-unaware (capability-boundaries.ts forbids it inspecting the
+ * brief) — this naturalization happens here, in Conversation
+ * orchestration, which already has full brief access for other reasons
+ * (building the acknowledgement, the understanding request).
+ *
+ * Sprint 2L Phase 1C fix: takes the already-computed `DesignSummaryView`
+ * (the same `summaryForAck` the acknowledgement uses), never the raw
+ * `TShirtDesignBrief`. A live acceptance test found that a raw brief field
+ * can hold a value `BriefEvaluation` has already rejected as malformed
+ * (e.g. a punctuation-free run-on sentence a deterministic extractor
+ * greedily over-captured into `exactText`) — quality-rejected, so it
+ * correctly stays `"unknown"` for readiness purposes and never reaches
+ * the customer-facing Design Summary, but the *raw field* is never
+ * cleared, only its evaluation status is. Reading the raw field here
+ * bypassed that quality gate entirely and leaked the rejected value
+ * straight into a customer-facing question
+ * ("What direction do you want for the My 3 Sons help me create a
+ * design for team t-shirts design?"). `DesignSummaryView` is exactly the
+ * quality-gated projection — a field only appears in it when
+ * `BriefEvaluation` has already confirmed `resolution === "provided"` —
+ * so this naturalization can never surface a value the customer wouldn't
+ * also see reflected in the Design Summary itself.
+ */
+function naturalizeQuestion(act: InterviewAct, summary: DesignSummaryView): string {
+  if (act.type !== "ask") return "message" in act ? act.message : "";
+
+  if (act.section === "productColor" && summary.product?.trim()) {
+    const product = summary.product.trim();
+    const plural = /s$/i.test(product) ? product : `${product}s`;
+    return `What color ${plural} will these print on?`;
+  }
+
+  if (act.section === "graphics") {
+    const subject = summary.requiredWording?.trim();
+    // "None" is DesignSummaryView's own sentinel for an explicit,
+    // confirmed "no required wording" — never a usable subject phrase.
+    const wordingSubject = subject && subject !== "None" ? subject : null;
+    const audienceSubject = summary.audience?.trim();
+    const finalSubject = wordingSubject || audienceSubject;
+    if (finalSubject) return `What direction do you want for the ${finalSubject} design?`;
+  }
+
+  return act.message;
 }
 
 function narrowSection(pending: string | null): BriefSectionKey | null {

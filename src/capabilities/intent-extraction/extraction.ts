@@ -207,9 +207,42 @@ const ENTITY_NAME_PATTERNS: RegExp[] = [
   new RegExp(`\\b(?:${ENTITY_NOUNS})(?:'s)?\\s+name\\s+is\\s+([^.,;!?\\n]+)`, "i"),
   new RegExp(`\\b(?:${ENTITY_NOUNS})\\s+(?:is\\s+)?(?:called|named)\\s+([^.,;!?\\n]+)`, "i"),
   new RegExp(`\\b(?:${ENTITY_NOUNS})\\s+name\\s*[:\\-]?\\s+([^.,;!?\\n]+)`, "i"),
-  new RegExp(`\\bour\\s+(?:${ENTITY_NOUNS})\\s+is\\s+([^.,;!?\\n]+)`, "i"),
+  // Allows up to two descriptor words between "our"/"the" and the entity
+  // noun ("our softball team is...", "our local school is...") — the
+  // greedy `{0,2}` still resolves correctly because what follows must be
+  // one of the specific `ENTITY_NOUNS`, so the engine backtracks to
+  // whatever descriptor count actually lines up.
+  new RegExp(`\\b(?:our|the)\\s+(?:\\w+\\s+){0,2}(?:${ENTITY_NOUNS})\\s+is\\s+([^.,;!?\\n]+)`, "i"),
   /\bcall\s+it\s+([^.,;!?\n]+)/i,
 ];
+
+/**
+ * Sprint 2L Phase 1C: a punctuation-free run-on message ("our team is
+ * called My 3 Sons help me create a design for team t-shirts") has no
+ * comma/period for `[^.,;!?\n]+` to stop at, so an `ENTITY_NAME_PATTERNS`
+ * capture can run all the way to the end of the string, silently pulling
+ * an unrelated following clause into what should have been just the
+ * entity's name.
+ *
+ * General fix, not message-specific: a small set of clause-continuation
+ * markers — a bare imperative ("help", "please"), a new subject + verb
+ * ("and I need", "we're making"), or a new question ("can you...") — never
+ * legitimately appear *inside* a team/company/event name, so the first
+ * occurrence of one of these terminates the capture early, exactly like a
+ * comma would if the customer had typed one. Deliberately narrow (e.g.
+ * bare "and" alone does NOT trigger this — "Smith and Sons" must survive
+ * intact) so it only fires on an actual new clause, not a normal
+ * conjunction inside a real name.
+ */
+const CLAUSE_BOUNDARY_PATTERN =
+  /\b(?:help|please|let'?s|so\s+(?:i|we)\b|and\s+(?:i|we|you)\b|can\s+you\b|could\s+you\b|would\s+you\b|will\s+you\b|i\s+(?:need|want)\b|we\s+(?:need|want)\b|we(?:'re|\s+are)\b|you\s+(?:choose|decide|can)\b)/i;
+
+function boundEntityCapture(raw: string): string {
+  const trimmed = raw.trim();
+  const match = trimmed.match(CLAUSE_BOUNDARY_PATTERN);
+  if (!match || match.index === undefined) return trimmed;
+  return trimmed.slice(0, match.index).trim();
+}
 
 // Used to strip a trailing name-cue clause out of an *audience* match so
 // "bowling team name My 3 Sons" / "bowling team called My 3 Sons" resolves
@@ -230,14 +263,23 @@ export function extractAdaptive(context: ExtractionContext): ExtractionOutcome {
   // it: answering the pending question with a deferral phrase (the
   // interview case), or spontaneously naming a section to defer (the
   // revision case, where there is no pending question — "Actually, you
-  // choose the print placement" said out of nowhere).
+  // choose the print placement" said out of nowhere; also, since Sprint 2L
+  // Phase 1B, the ordinary case for an optional-tier section like colors,
+  // which is never itself the pending section).
+  //
+  // An explicit section mention always wins over the ambient pending
+  // section when they disagree — "No preference, choose whatever colors
+  // work best." must defer *colors*, not whatever unrelated section
+  // happens to be pending at that moment (e.g. print location), even
+  // though the reply also reads as a generic deferral phrase.
+  const mentionedDeferral = detectMentionedDeferral(trimmed);
   const pendingDeferral =
     context.pendingSection &&
     isDeferrable(context.pendingSection) &&
     isDeferralReply(trimmed)
       ? context.pendingSection
       : null;
-  const deferredTarget = pendingDeferral ?? detectMentionedDeferral(trimmed);
+  const deferredTarget = mentionedDeferral ?? pendingDeferral;
 
   if (deferredTarget) {
     const next = new Set(context.brief.deferredSections);
@@ -437,16 +479,24 @@ function extractRequiredWording(
   const cued = positiveText.match(
     /\b(?:say|should say|it should say|the text is|wording should be|should read|print the words?|change (?:the )?(?:wording|text) to)\s*[:\-]?\s*"?([^".!?\n]+)"?/i,
   );
-  if (cued?.[1]?.trim()) return cued[1].trim();
+  if (cued?.[1]?.trim()) {
+    const bounded = boundEntityCapture(cued[1]);
+    if (bounded) return bounded;
+  }
 
   // Explicit team/company/event/organization names — "our team is called My
   // 3 Sons", "the team name is My 3 Sons", "call it My 3 Sons". These are
   // required wording just as much as an explicit "it should say" cue; a
   // print shop treats a team/company/event name the customer gives as text
-  // that must appear on the design.
+  // that must appear on the design. `boundEntityCapture` protects against a
+  // punctuation-free run-on sentence carrying an unrelated trailing clause
+  // into the name — see its doc comment.
   for (const pattern of ENTITY_NAME_PATTERNS) {
     const match = positiveText.match(pattern);
-    if (match?.[1]?.trim()) return match[1].trim();
+    if (match?.[1]?.trim()) {
+      const bounded = boundEntityCapture(match[1]);
+      if (bounded) return bounded;
+    }
   }
 
   return undefined;

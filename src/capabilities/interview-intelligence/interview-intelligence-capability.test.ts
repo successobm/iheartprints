@@ -84,7 +84,10 @@ describe("InterviewIntelligenceCapability — priority order", () => {
     });
     const act = actFor(full);
     assert.equal(act.type, "ask");
-    assert.equal(act.type === "ask" ? act.section : null, "purpose");
+    // Sprint 2L Phase 1B: printLocation is the only remaining high-value/
+    // ask-worthy section — purpose/audience/style/colors moved to optional
+    // (never proactively asked; see interview-coverage-policy.ts).
+    assert.equal(act.type === "ask" ? act.section : null, "printLocation");
   });
 
   it("clarifies an ambiguous required section before moving to high-value sections", () => {
@@ -239,7 +242,7 @@ describe("InterviewIntelligenceCapability — production concerns (Sprint 2G)", 
     }
   });
 
-  it("dismissing a production advisory moves on to the next unresolved high-value section", () => {
+  it("dismissing a production advisory moves on to summarize once no high-value section remains unresolved", () => {
     const full = brief({
       productSummary: "Camp shirts",
       designDescription: "A friendly bear logo",
@@ -257,8 +260,10 @@ describe("InterviewIntelligenceCapability — production concerns (Sprint 2G)", 
       assessment,
       context: emptyContext({ dismissedAdvisories: [advisory.id] }),
     });
-    assert.equal(act.type, "ask");
-    assert.equal(act.type === "ask" ? act.section : null, "purpose");
+    // Sprint 2L Phase 1B: printLocation is already resolved (left_chest) and
+    // purpose/audience/style/colors no longer gate summary — nothing left
+    // to ask about once the advisory is dismissed.
+    assert.equal(act.type, "summarize");
   });
 
   it("an info-severity production finding is never surfaced as an advise act", () => {
@@ -284,9 +289,10 @@ describe("InterviewIntelligenceCapability — production concerns (Sprint 2G)", 
       assessment,
       context: emptyContext(),
     });
-    // Never consumes a turn — moves straight to the next unresolved high-value section.
-    assert.equal(act.type, "ask");
-    assert.equal(act.type === "ask" ? act.section : null, "purpose");
+    // Never consumes a turn — and with printLocation already resolved and
+    // purpose/audience/style/colors no longer gating summary (Sprint 2L
+    // Phase 1B), there is nothing left to ask about at all.
+    assert.equal(act.type, "summarize");
   });
 });
 

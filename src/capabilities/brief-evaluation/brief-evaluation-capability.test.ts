@@ -41,8 +41,15 @@ function section(
 }
 
 const REQUIRED = ["product", "graphics", "requiredWording", "productColor"];
-const HIGH_VALUE = ["purpose", "audience", "style", "colors", "printLocation"];
+// Sprint 2L Phase 1B: purpose/audience/style/colors moved from high_value to
+// optional — see `interview-coverage-policy.ts`'s `OPTIONAL_SECTIONS` doc
+// comment (Brief Completeness vs. Generation Readiness).
+const HIGH_VALUE = ["printLocation"];
 const OPTIONAL = [
+  "purpose",
+  "audience",
+  "style",
+  "colors",
   "references",
   "exclusions",
   "additionalNotes",
@@ -131,6 +138,21 @@ describe("BriefEvaluationCapability — coverage policy tiers", () => {
 
     // Optional sections remain unresolved without blocking readiness.
     assert.equal(section(evaluation, "references").resolution, "unknown");
+  });
+
+  it("Sprint 2L Phase 1B (Goal 3): becomes summary-ready with purpose/audience/style/colors left completely empty — Brief Completeness ≠ Generation Readiness", () => {
+    const evaluation = capability.evaluate(
+      fullBrief({ printPlacement: "full_back" }),
+    );
+
+    assert.equal(evaluation.summaryReadiness.ready, true);
+    assert.equal(evaluation.approvalReadiness.ready, true);
+    // Brief Completeness still honestly reports these as unresolved — they
+    // are simply never *blocking*.
+    for (const key of ["purpose", "audience", "style", "colors"]) {
+      assert.equal(section(evaluation, key).resolution, "unknown", key);
+    }
+    assert.ok(evaluation.overall.completeness < 100);
   });
 
   it("high-value deferral resolves the section without content and does not block summary", () => {
@@ -404,7 +426,7 @@ describe("BriefEvaluationCapability — Sprint 2K Phase 2: malformed field detec
     assert.ok(evaluation.approvalReadiness.blockingSections.includes("product"));
   });
 
-  it("a malformed high-value field blocks summary readiness even when required fields are clean", () => {
+  it("Sprint 2L Phase 1B: a malformed OPTIONAL field (audience) no longer blocks summary readiness — it simply stays unresolved, same as if nothing were said", () => {
     const evaluation = capability.evaluate(
       fullBrief({
         purpose: "Summer camp fundraiser",
@@ -414,7 +436,20 @@ describe("BriefEvaluationCapability — Sprint 2K Phase 2: malformed field detec
         printPlacement: "full_front",
       }),
     );
+    assert.equal(evaluation.summaryReadiness.ready, true);
+    assert.equal(section(evaluation, "audience").resolution, "unknown");
+  });
+
+  it("a malformed REQUIRED field (product) still blocks summary readiness", () => {
+    const evaluation = capability.evaluate(
+      fullBrief({
+        productSummary:
+          "I need something for the team. We are a bowling league and we meet on Tuesdays.",
+        printPlacement: "full_front",
+      }),
+    );
     assert.equal(evaluation.summaryReadiness.ready, false);
+    assert.equal(section(evaluation, "product").resolution, "unknown");
   });
 
   it("a clean brief with the same shape remains approval-ready (no false positives)", () => {

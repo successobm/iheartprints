@@ -89,24 +89,28 @@ describe("submitDesignBriefDecision (API facade)", () => {
 });
 
 describe("brief decision request schema", () => {
-  it("accepts approve, edit, and continue", async () => {
+  it("accepts approve and edit", async () => {
     const { briefDecisionBodySchema } = await import(
       "@/app/api/projects/[projectId]/brief/decision/schema"
     );
 
-    for (const action of ["approve", "edit", "continue"]) {
+    for (const action of ["approve", "edit"]) {
       const result = briefDecisionBodySchema.safeParse({ action });
       assert.equal(result.success, true);
     }
   });
 
-  it("rejects malformed actions", async () => {
+  it("rejects malformed actions, including the removed 'continue' action (Sprint 2L Phase 1B, Goal 12)", async () => {
     const { briefDecisionBodySchema } = await import(
       "@/app/api/projects/[projectId]/brief/decision/schema"
     );
 
     assert.equal(
       briefDecisionBodySchema.safeParse({ action: "generate" }).success,
+      false,
+    );
+    assert.equal(
+      briefDecisionBodySchema.safeParse({ action: "continue" }).success,
       false,
     );
     assert.equal(briefDecisionBodySchema.safeParse({}).success, false);

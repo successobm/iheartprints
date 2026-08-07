@@ -214,7 +214,7 @@ export function ChatApp() {
     }
   }
 
-  async function submitDecision(action: "approve" | "edit" | "continue") {
+  async function submitDecision(action: "approve" | "edit") {
     if (!snapshot || sending) return;
     setSending(true);
     setError(null);
@@ -335,11 +335,16 @@ export function ChatApp() {
       case "generating":
         return "Generating concepts...";
       case "awaiting_summary_confirmation":
-        return "Choose Approve, Edit, or Continue above";
+        return "Choose Approve or Edit above";
       case "brief_approved":
         return "Approved — generating concepts...";
       case "edit_requested":
-        return "What would you like to change?";
+        return "What would you like to change or add?";
+      // Sprint 2L Phase 1B (Goal 12): "continue_requested" is no longer
+      // reachable from the Design Summary (the Continue button was
+      // removed as redundant with Edit) — this case is kept only so a
+      // historical project still sitting in that phase renders a sensible
+      // placeholder rather than falling through to the generic default.
       case "continue_requested":
         return "Anything else the designer should know?";
       case "interviewing":
@@ -451,7 +456,15 @@ export function ChatApp() {
 
               return (
                 <div key={message.id}>
-                  <MessageBubble message={message} />
+                  {/* Sprint 2L Phase 1B (Goal 13): the structured
+                      DesignSummaryCard below is authoritative and renders
+                      every field this prose message would otherwise repeat
+                      — showing both is pure duplication for the one turn
+                      it's interactive. Once this message is no longer the
+                      latest (summary card no longer shown), the prose
+                      bubble renders normally as the durable transcript
+                      record, so conversation history is never lost. */}
+                  {!showSummaryCard ? <MessageBubble message={message} /> : null}
                   {deferredDecision ? (
                     <DesignerDecisionCard message={deferredDecision.message} />
                   ) : null}
@@ -497,7 +510,6 @@ export function ChatApp() {
                       busy={sending}
                       onApprove={() => void submitDecision("approve")}
                       onEdit={() => void submitDecision("edit")}
-                      onContinue={() => void submitDecision("continue")}
                     />
                   ) : null}
                 </div>

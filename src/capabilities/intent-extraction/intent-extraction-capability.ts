@@ -6,12 +6,15 @@ import type {
   ConversationPhase,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
+import type { ConversationUnderstandingResult } from "@/capabilities/conversation-understanding";
 import type {
   BriefSectionKey,
   DetectedIntent,
   IntentExtractionResult,
 } from "@/capabilities/shared/contracts";
-import { extractAdaptive } from "./extraction";
+import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
+import { extractAdaptive, type BriefFieldPatch } from "./extraction";
+import { reconcileUnderstanding } from "./reconcile-understanding";
 
 export interface IntentExtractionInput {
   brief: TShirtDesignBrief;
@@ -23,6 +26,15 @@ export interface IntentExtractionInput {
    * (the ladder already knows which single field each phase maps to).
    */
   pendingSection?: BriefSectionKey | null;
+  /**
+   * Sprint 2L Phase 1: the (already provider-agnostic, already sanitized)
+   * semantic interpretation of this same reply, if
+   * `ConversationUnderstandingCapability` produced one. `null`/omitted for
+   * legacy phases, when the provider was skipped, or on any provider
+   * failure — `extractAdaptive` alone then behaves exactly as before this
+   * sprint. See `reconcile-understanding.ts` for precedence.
+   */
+  understanding?: ConversationUnderstandingResult | null;
 }
 
 /**
@@ -42,7 +54,7 @@ export interface IntentExtractionCapability {
 
 export function createIntentExtractionCapability(): IntentExtractionCapability {
   return {
-    extract({ brief, phase, reply, pendingSection }) {
+    extract({ brief, phase, reply, pendingSection, understanding }) {
       if (isLegacyScriptedPhase(phase)) {
         const fields = applyUserReplyToBrief(brief, phase, reply);
         const intents = legacyIntents(phase, fields);
@@ -64,29 +76,88 @@ export function createIntentExtractionCapability(): IntentExtractionCapability {
         };
       }
 
-      const { fields, intents } = extractAdaptive({
+      const deterministic = extractAdaptive({
         brief,
         reply,
         pendingSection: pendingSection ?? null,
       });
+      traceConversationUnderstanding({
+        stage: "deterministic_extraction",
+        fields: Object.keys(deterministic.fields),
+        intents: deterministic.intents,
+      });
+
+      // Sprint 2L Phase 1: exactly one authoritative merge — never two
+      // independent systems fighting over the same brief (see
+      // `capability-boundaries.ts`). Per Design Brief field, a validated
+      // semantic-understanding value (when present) is authoritative;
+      // `extractAdaptive`'s deterministic pass fills every field
+      // understanding did not confidently resolve, and is the *only*
+      // source when `understanding` is absent (provider skipped/
+      // unconfigured/failed) — today's exact pre-Sprint-2L behavior.
+      const reconciled = reconcileUnderstanding(understanding ?? null, { brief });
+      const fields: BriefFieldPatch = {
+        ...deterministic.fields,
+        ...reconciled.fields,
+      };
+
+      const deferredSections = unionDeferredSections(
+        brief.deferredSections,
+        deterministic.fields.deferredSections,
+        reconciled.deferredSections,
+      );
+      if (deferredSections) fields.deferredSections = deferredSections;
+
+      const intents = new Set<DetectedIntent>(deterministic.intents);
+      if (reconciled.hadExplicitCorrection) intents.add("correct");
+      if (Object.keys(fields).length > 0) intents.delete("unknown");
+
+      traceConversationUnderstanding({
+        stage: "merged_patch",
+        fields: Object.keys(fields),
+      });
 
       if (Object.keys(fields).length === 0) {
-        return { intents, proposals: [] };
+        return { intents: [...intents], proposals: [] };
       }
 
       return {
-        intents,
+        intents: [...intents],
         proposals: [
           {
             fields,
             source: "intent_extraction",
             phase,
-            rationale: "sprint2f_adaptive",
+            rationale: understanding
+              ? "sprint2l_understanding_plus_adaptive"
+              : "sprint2f_adaptive",
           },
         ],
       };
     },
   };
+}
+
+/**
+ * Sprint 2L Phase 1: a section deferred by *either* source stays deferred —
+ * a plain per-key override (like every other field) would let whichever
+ * source ran second silently drop the other's deferral, or drop the
+ * brief's already-deferred sections entirely when only one source proposed
+ * something new this turn. `deterministicNew` (when present) already
+ * includes the brief's prior `deferredSections` (see `extractAdaptive`'s
+ * early-return deferral branch) — `existing` is the fallback baseline when
+ * it's absent. `understandingNew` is only ever the newly-deferred sections
+ * this turn.
+ */
+function unionDeferredSections(
+  existing: string[],
+  deterministicNew: string[] | undefined,
+  understandingNew: BriefSectionKey[],
+): string[] | undefined {
+  if (!deterministicNew && understandingNew.length === 0) return undefined;
+  const set = new Set(deterministicNew ?? existing);
+  for (const section of understandingNew) set.add(section);
+  return [...set];
 }
 
 function legacyIntents(

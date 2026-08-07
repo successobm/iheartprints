@@ -161,7 +161,8 @@ Currently implemented flow:
 
 ```
 Conversation
-  → Intent Extraction
+  → Conversation Understanding (best-effort semantic interpretation, Sprint 2L Phase 1)
+  → Intent Extraction (reconciles semantic + deterministic interpretation into one proposal)
   → Working Design Brief
   → Brief Evaluation
   → Design Intelligence
@@ -182,6 +183,18 @@ Conversation
   → Updated Working Brief / optional regeneration
 ```
 
+Sprint 2L Phase 1 introduces `ConversationUnderstandingCapability`, a
+provider-neutral semantic-interpretation layer that runs (when useful — see
+§10a) ahead of Intent Extraction on every pre-approval and post-approval
+revision turn. It never mutates the Design Brief and never decides what to
+ask next; it only proposes a structured, bounded interpretation of the
+customer's message. `IntentExtractionCapability` is still the sole producer
+of `BriefPatchProposal` — it validates, normalizes, and merges the semantic
+proposal with its own deterministic `extractAdaptive` pass per Design Brief
+field, so exactly one interpretation of each field ever reaches the brief
+per turn. See §10a for the full precedence contract, bounded-context
+policy, and security boundary.
+
 Sprint 2J Phase 3 activates Regeneration Intelligence on the customer's
 **explicit** regeneration path only (`Generate Updated Concepts` →
 `regenerateAfterRevision` → `GenerationJob.kind === "regeneration"`).
@@ -199,7 +212,7 @@ and intent remain ephemeral. See §5 and §13a.
 
 | Step | Timing |
 |---|---|
-| Message handling, intent extraction, brief patch, evaluation, intelligence, interview act, summary presentation | Synchronous within the customer request |
+| Message handling, conversation understanding, intent extraction, brief patch, evaluation, intelligence, interview act, summary presentation | Synchronous within the customer request (Conversation Understanding: at most one short-timeout provider call per turn — see §10a) |
 | Design Brief approval (version snapshot + enqueue job) | Synchronous request; generation itself is not |
 | Concept generation (provider call, asset upload, concept evaluation, artwork rows) | Asynchronous via independent worker |
 | Generation status | Read-only browser polling; never claims or runs jobs |
@@ -242,20 +255,36 @@ Status legend:
 | **Responsibility** | Customer-facing orchestration facade |
 | **Inputs** | User messages, brief decisions, concept selection, undo, regenerate |
 | **Outputs** | Updated `ProjectSnapshot`, assistant messages, interview progression |
-| **Dependencies** | IntentExtraction, DesignBrief, BriefEvaluation, DesignIntelligence, InterviewIntelligence, RevisionIntelligence, DesignSummary, ConceptGeneration, ProjectRepository |
-| **Owns** | Turn orchestration, conversation phase transitions, wiring revision/approval/enqueue flows |
+| **Dependencies** | IntentExtraction, ConversationUnderstanding, DesignBrief, BriefEvaluation, DesignIntelligence, InterviewIntelligence, RevisionIntelligence, DesignSummary, ConceptGeneration, ProjectRepository |
+| **Owns** | Turn orchestration, conversation phase transitions, wiring revision/approval/enqueue flows, building the bounded Conversation Understanding request |
 | **Must never own** | Direct brief field mutation, provider calls, storage uploads, job claiming |
+
+### ConversationUnderstandingCapability — Active (Sprint 2L Phase 1)
+
+| | |
+|---|---|
+| **Responsibility** | Provider-neutral semantic interpretation of one customer message in bounded conversational context |
+| **Inputs** | Current message, plain-language known-brief facts (`DesignSummaryView`), unresolved section list, pending section, a capped recent-turn window |
+| **Outputs** | `ConversationUnderstandingResult` (proposed field updates with `explicit`/`inferred`/`ambiguous` confidence, deferrals, ambiguities, customer intent, answered-pending-section) — ephemeral, never persisted raw |
+| **Dependencies** | `ConversationUnderstandingProvider` interface only |
+| **Owns** | Bounded-context request construction; the provider-call skip policy (single-token replies); defensive validation/clamping of whatever a provider returns; graceful degradation to an empty result on any failure |
+| **Must never own** | Design Brief mutation; deciding what to ask next; persistence; producing a `BriefPatchProposal` (that is `reconcile-understanding.ts`, inside Intent Extraction) |
+
+Never the sole interpreter of a message — `IntentExtractionCapability`'s
+deterministic `extractAdaptive` pass always also runs and is the sole
+source of truth whenever this capability's result is empty (provider
+unconfigured, call skipped, or provider failure). See §10a.
 
 ### IntentExtractionCapability — Active
 
 | | |
 |---|---|
-| **Responsibility** | Parse customer language into brief patch proposals and intents |
-| **Inputs** | Message text, conversation/brief context |
+| **Responsibility** | Parse customer language into brief patch proposals and intents — the sole authority reconciling semantic and deterministic interpretation |
+| **Inputs** | Message text, conversation/brief context, optional `ConversationUnderstandingResult` |
 | **Outputs** | `IntentExtractionResult` (`proposals`, `intents`) |
-| **Dependencies** | Brief data (read-only), `shared/interview-coverage-policy` |
-| **Owns** | Proposal shape; defer/correct/provide detection |
-| **Must never own** | Persisting the brief; asking; generating |
+| **Dependencies** | Brief data (read-only), `shared/interview-coverage-policy`, `ConversationUnderstandingResult` (type-only, via `reconcile-understanding.ts`) |
+| **Owns** | Proposal shape; defer/correct/provide detection; per-field precedence between a validated semantic proposal and deterministic extraction (Sprint 2L Phase 1 — see §10a) |
+| **Must never own** | Persisting the brief; asking; generating; calling a Conversation Understanding provider itself |
 
 ### DesignBriefCapability — Active
 
@@ -278,6 +307,12 @@ Status legend:
 | **Dependencies** | Brief data + `shared/interview-coverage-policy` |
 | **Owns** | Completeness/confidence math; contradiction detection |
 | **Must never own** | Recommendations, questions, generation, UI |
+
+`BriefEvaluation.overall` is the **Brief Completeness** view (all 14
+sections); `summaryReadiness`/`approvalReadiness` is the **Generation
+Readiness** view (gates only on `required` + `high_value` tier sections
+per `interview-coverage-policy.ts`) — see §10b. Both come from the same
+evaluation pass; there is no second capability or persisted status.
 
 ### DesignIntelligenceCapability — Active
 
@@ -601,7 +636,8 @@ Not capabilities; pure data/phrasing imported by multiple capabilities:
 ```
 ConversationCapability
     |
-    +--> IntentExtractionCapability
+    +--> ConversationUnderstandingCapability ---> ConversationUnderstandingProvider (interface)
+    +--> IntentExtractionCapability (consumes ConversationUnderstandingResult, type-only)
     +--> DesignBriefCapability ---------> ProjectRepository
     +--> BriefEvaluationCapability
     +--> DesignIntelligenceCapability
@@ -823,11 +859,15 @@ Clarifications:
 
 Policy: `src/capabilities/shared/interview-coverage-policy.ts`
 
-| Tier | Sections | Deferrable? |
-|---|---|---|
-| Required | product, graphics, requiredWording, productColor | No |
-| High-value | purpose, audience, style, colors, printLocation | Yes |
-| Optional | references, exclusions, additionalNotes, production, layoutPreference | Yes; never asked proactively |
+Sprint 2L Phase 1B re-scoped this table — see §10b "Brief Completeness vs.
+Generation Readiness" for the full rationale (Goal-directed orchestration:
+question necessity, not schema completeness):
+
+| Tier | Sections | Deferrable? | Proactively asked? |
+|---|---|---|---|
+| Required (blocking) | product, graphics, requiredWording, productColor | No | Yes, until resolved |
+| High-value (ask-worthy) | printLocation | Yes | Yes, until resolved or deferred |
+| Optional (delegable) | purpose, audience, style, colors, references, exclusions, additionalNotes, production, layoutPreference | Yes | Never |
 
 Notes:
 
@@ -847,6 +887,489 @@ Notes:
 
 Numeric confidence (0–100 and section confidence enums) is internal and
 not shown to customers.
+
+---
+
+## 10a. Conversation Understanding (Sprint 2L Phase 1)
+
+### Why
+
+The pre-Sprint-2L interview understood customer language field-by-field
+through pattern matching (`extraction.ts`'s `extractAdaptive`). That
+engine had grown increasingly capable but remained fundamentally a
+regex/heuristic system: a natural, run-on customer message ("I'm in a
+bowling league and our team is called My 3 Sons help me create a design
+for team t-shirts") could still be misread or only partially understood,
+producing repeated or out-of-order questions about facts the customer had
+already established. Sprint 2L introduces a provider-neutral semantic
+interpretation layer ahead of Intent Extraction, while keeping the
+deterministic engine as the safety net that makes the product work with
+zero configuration and degrade safely under any provider failure.
+
+### Pipeline placement
+
+```
+Customer message
+      ↓
+ConversationCapability builds a bounded, sanitized request
+      ↓
+ConversationUnderstandingCapability.interpret(request)
+      │
+      ├─ skip policy: single-token replies never call the provider
+      │  (deterministic extraction already resolves these confidently
+      │  and cheaply — see "Latency policy" below)
+      ↓
+ConversationUnderstandingProvider (none | openai)
+      ↓
+ConversationUnderstandingResult (defensively validated/clamped —
+  unsupported sections, invalid confidence values, and oversized
+  fields are dropped before this result is used for anything)
+      ↓
+IntentExtractionCapability.extract({ ..., understanding })
+      │
+      ├─ reconcile-understanding.ts validates + normalizes the semantic
+      │  proposal into the SAME BriefFieldPatch shape extractAdaptive
+      │  produces (reusing field-normalization.ts, appendNote,
+      │  isDeferrable, PrintPlacement parsing — never a second,
+      │  competing normalization path)
+      ├─ extractAdaptive (deterministic, unchanged) always also runs
+      ├─ merge, per Design Brief field: a validated understanding value
+      │  wins when present; extractAdaptive fills every field
+      │  understanding left unresolved; extractAdaptive alone is
+      │  authoritative when `understanding` is null/absent
+      ↓
+Exactly one BriefPatchProposal
+      ↓
+DesignBriefCapability.applyProposal (unchanged)
+      ↓
+BriefEvaluation → DesignIntelligence → InterviewIntelligence → next act
+```
+
+Only one capability (`IntentExtractionCapability`) ever produces a
+`BriefPatchProposal`. `ConversationUnderstandingCapability` never mutates
+the brief and never calls `DesignBriefCapability` — see
+`capability-boundaries.ts` for the full forbidden-dependency list. This
+answers the sprint's design question directly: Conversation Understanding
+does not compete with Intent Extraction or bolt on as a second brief-writer
+— it is a structured *input* Intent Extraction reconciles, exactly like it
+already reconciles corrections vs. provided values.
+
+### Precedence (authoritative order)
+
+1. Skip the provider entirely for a single-token reply (Goal 12) — the
+   deterministic pending-section fallback and color/product vocabularies
+   already resolve these.
+2. Otherwise, call the provider once. Any failure (timeout, network,
+   malformed JSON, non-2xx) is caught inside
+   `ConversationUnderstandingCapability` and degrades to an empty result —
+   the caller never sees a distinction between "skipped" and "failed."
+3. Defensively validate/clamp the result: unsupported sections, invalid
+   confidence enum values, non-string values, and oversized
+   lists/strings are dropped before reconciliation ever sees them.
+4. `reconcile-understanding.ts` rejects any `"ambiguous"`-confidence
+   proposal outright — it is never applied to a field. This is the
+   concrete mechanism behind "ask when uncertainty is real": the section
+   stays "unknown" in Brief Evaluation and Interview Intelligence asks
+   about it exactly as if nothing had been said.
+5. Grounding is field-specific, not one universal rule (Sprint 2L Phase 1A
+   — see "Field-specific grounding policy" below): required wording is
+   grounded by exact evidence containment; product is grounded by exact
+   containment OR a recognized product-noun synonym; every other field has
+   no additional grounding check beyond "not ambiguous confidence."
+6. Every accepted value is normalized exactly the way a direct customer
+   answer would be — `normalizeProductAnswer`, `normalizeColorAnswer`,
+   `appendNote`, `PrintPlacement` text parsing. Conversation Understanding
+   never bypasses deterministic normalization.
+7. Deferrals are only ever honored for a deferrable section
+   (`isDeferrable`) — a provider proposing a deferral for a required
+   section is silently rejected.
+8. Per Design Brief field, in the final merge: a validated understanding
+   value overrides the deterministic one; every field understanding did
+   not resolve keeps its deterministic value; `deferredSections` is a
+   *union* of both sources (never a per-key override) so a section
+   deferred by either is never silently un-deferred by the other.
+9. `BriefEvaluation` → `InterviewIntelligence` then run, unchanged, against
+   the single merged brief — this is what makes "don't re-ask a resolved
+   field" fall out of the existing architecture rather than requiring new
+   interview logic.
+
+### Field-specific grounding policy (Sprint 2L Phase 1A)
+
+A live acceptance test found that a customer message embedding a product
+mention inside a longer, run-on sentence ("...help me create a design for
+team t-shirts") could still leave Product unresolved even though
+Required Wording, Audience, and Purpose all resolved correctly from the
+same message. Root cause: `openai-conversation-understanding-provider.ts`'s
+prompt gave detailed, worked instructions for `requiredWording` but none
+for `product`, so a conservative model under-proposed or omitted embedded
+product mentions. Fixed at the prompt layer (general guidance + worked
+examples covering multiple domains, not one entity) — see the provider
+file's `buildMessages`.
+
+While auditing that path, grounding itself turned out to need one rule per
+field shape rather than one universal rule, since `product` and
+`requiredWording` have fundamentally different correctness requirements:
+
+| Field | Grounding rule | Why |
+|---|---|---|
+| `requiredWording` | Exact (normalized) containment of `value` in `evidence` only | The literal print text must never be paraphrased, re-spelled, or invented — Constitution §6.12 |
+| `product` | Exact containment **OR** `evidence` contains a recognized product-noun synonym (`PRODUCT_NOUN_CANONICAL`, `shared/field-normalization.ts`) that canonicalizes to the same value | Product is a *canonicalized* field — "team t-shirts" must be able to ground a proposed "T-shirt" even though the word "T-shirt" never appears verbatim. A synonym match still requires the synonym's own canonical form to agree with the proposed value, so "team t-shirts" evidence can never ground a proposed "Hoodie" |
+| Every other field | No additional check beyond "not ambiguous confidence" | Free-text fields with no fixed canonical vocabulary to check against; normalization (below) already keeps their shape consistent with a direct answer |
+
+Implemented in `reconcile-understanding.ts` (`productIsGrounded` /
+`requiredWordingIsGrounded`) — never in the provider adapter, which stays a
+thin, replaceable prompt/parsing layer.
+
+### Debugging / structured tracing (Sprint 2L Phase 1A)
+
+`CONVERSATION_UNDERSTANDING_DEBUG=true` (development-only; unset/false in
+every environment by default, including production) enables structured,
+allowlisted console tracing of exactly where a field was gained or lost
+across the pipeline:
+
+```
+Composition root construction
+  → config              (Sprint 2L Phase 1C: configured provider env value,
+                         resolved mode "openai"|"none", model, debugEnabled —
+                         proves whether CONVERSATION_UNDERSTANDING_PROVIDER
+                         is actually in effect for this server process)
+
+Customer message
+  → request            (pendingSection, unresolvedSections, message word
+                         count, willCallProvider: false when the single-
+                         token skip policy applies this turn)
+  → provider_result    (proposed sections + confidence category, deferrals,
+                         ambiguities, customerIntent, failed: boolean)
+  → reconciled          (accepted section names; rejected section names +
+                         a short rejection code, e.g. "product_not_grounded",
+                         "ambiguous_confidence", "wording_not_grounded")
+  → deterministic_extraction  (extractAdaptive's own field keys + intents)
+  → merged_patch        (final BriefPatchProposal field keys)
+  → brief_updated        (resolved section list per Brief Evaluation)
+  → next_act             (chosen act type + section + pending section)
+```
+
+The `config` event fires from `resolveConversationUnderstandingProvider`,
+which `getCapabilityGraph()`'s singleton typically calls once per server
+process — so a debugging session that never sees it at all is itself
+diagnostic (the composition root was already constructed, e.g. by an
+earlier request, before `CONVERSATION_UNDERSTANDING_DEBUG` was set; a full
+dev-server restart is required after changing either env var, since
+Next.js loads `.env.local` at process startup and the singleton persists
+across Fast Refresh).
+
+Implemented in `lib/debug/conversation-understanding-trace.ts` /
+`lib/config/conversation-understanding-debug.ts`. The event union itself
+*is* the allowlist enforcement — it has no field for an API key, a full
+prompt, a raw provider response, chain-of-thought, unrelated conversation
+history, or a signed URL, so none of those can be passed through it
+regardless of what a caller has in scope. Every value logged is a section
+name, a coarse confidence/intent category, a short rejection code, an act
+type, or a count — never customer free text.
+
+### Explicit vs. inferred vs. unknown vs. deferred
+
+Encoded directly in the contract rather than as a second, competing
+provenance system:
+
+| Customer language shape | Contract representation | Brief effect |
+|---|---|---|
+| Direct statement ("our team is called My 3 Sons") | `proposedUpdates[].confidence: "explicit"` | Applied |
+| Strongly implied by context ("I'm in a bowling league" → audience) | `confidence: "inferred"` | Applied |
+| Plausible but uncertain ("Make something cool for My 3 Sons") | `confidence: "ambiguous"`, or an `ambiguities[]` entry | Never applied — section stays genuinely unknown |
+| "No preference, you choose" | `deferrals[]` | `brief.deferredSections` (existing mechanism, reused) |
+| Nothing said | absent from `proposedUpdates`/`deferrals` | Unaffected — deterministic extraction (or nothing) decides |
+
+No new persisted provenance column was added — `deferredSections` already
+existed and is reused as-is; confidence and evidence are proposal-level
+(ephemeral) only, never written to the Design Brief.
+
+### Bounded-context strategy
+
+`ConversationUnderstandingRequest` is deliberately small and customer-safe:
+
+- `message` — the current customer message only, capped at 2000 chars.
+- `knownBrief` — a `DesignSummaryView` (the same plain-language shape the
+  customer sees in a Design Summary) of sections already resolved. No
+  brief ids, no timestamps, no internal fields.
+- `unresolvedSections` — the short list of still-unknown `BriefSectionKey`
+  values.
+- `pendingSection` — the one section, if any, the assistant most recently
+  asked/clarified.
+- `recentTurns` — at most the last 6 messages (~3 customer/assistant
+  pairs), each truncated to 300 chars, role + text only — no message ids,
+  metadata, or act/section/finding identifiers that live in message
+  metadata.
+
+Never sent: storage object keys, signed asset URLs, `GenerationJob`
+internals, provider metadata, Concept Evaluation internals, secrets, or
+any other project's data. `ConversationUnderstandingResult` itself carries
+no numeric confidence, no chain-of-thought/reasoning, and no raw provider
+response — the contract has no fields for any of those, so there is
+nothing to accidentally leak or persist. `providerMetadata`-style
+allowlisting (as Concept Evaluation does) was unnecessary here because the
+contract was designed without a metadata field in the first place.
+
+### Latency policy (Goal 12)
+
+- At most one provider call per customer turn — never zero for a
+  multi-word reply, never more than one.
+- The call is skipped entirely for a single-token reply (deterministic
+  extraction already covers these confidently).
+- `OpenAIConversationUnderstandingProvider` uses a short (8s default)
+  timeout — this happens synchronously inside a customer request, not on
+  the ~2-minute image-generation worker path. A slow/unavailable provider
+  degrades to the deterministic-only result quickly rather than stalling
+  the conversation.
+- Text-only chat completion — never an image model.
+
+### Provider resolution
+
+Mirrors `resolveConceptEvaluationProvider`'s asymmetry, not concept
+generation's fail-closed behavior: Conversation Understanding is a
+best-effort layer over an always-correct deterministic fallback, so a
+misconfigured or unavailable `openai` request never fails closed — it
+always resolves to `NoneConversationUnderstandingProvider` (an
+always-empty-result provider), in every environment including production.
+`CONVERSATION_UNDERSTANDING_PROVIDER` is independent of
+`CONCEPT_GENERATION_ENABLE_REAL` and of `CONCEPT_GENERATION_PROVIDER` —
+image generation and conversational understanding are unrelated
+capabilities that happen to both support OpenAI. See §21.
+
+### Deterministic safety net (IntentExtraction)
+
+`extractAdaptive` (`src/capabilities/intent-extraction/extraction.ts`) was
+not modified by Sprint 2L Phase 1/1A. It remains:
+
+- the sole interpreter when no provider is configured (the default in
+  every environment until intentionally turned on)
+- the sole interpreter when a provider call is skipped or fails
+- a genuine safety net even when a provider succeeds: any field
+  understanding did not confidently resolve still gets whatever
+  `extractAdaptive` itself finds
+
+Sprint 2L Phase 1B made one small, general precedence fix inside it (not a
+new regex, a reordering of two existing mechanisms): when a customer
+message both (a) explicitly names a deferrable section ("colors") and (b)
+reads as a generic deferral phrase while a *different* section happens to
+be pending, the explicit section mention now wins. This was needed once
+`colors`/`purpose`/`audience`/`style` stopped being proactively asked (see
+§10b) — a customer volunteering "no preference, choose whatever colors
+work best" mid-conversation, while some other question is pending, must
+defer colors, not whatever was pending at that moment.
+
+Sprint 2L Phase 1C found and fixed a real corruption in this safety net,
+traced from a live acceptance test that (unlike every fixture-driven
+regression test up to that point) actually exercised the deterministic-
+only path for a punctuation-free run-on message. `ENTITY_NAME_PATTERNS`'
+capture groups (`[^.,;!?\n]+`) have nothing to stop at when a sentence has
+no internal punctuation, so "our team is called My 3 Sons help me create a
+design for team t-shirts" captured everything after "called" —
+`boundEntityCapture`/`CLAUSE_BOUNDARY_PATTERN` now terminate the capture
+at the first clause-continuation marker ("help", "and I", "we're", "can
+you", ...), a general rule (not entity-specific) verified against four
+unrelated domains (Rivera Plumbing, Lincoln Elementary, Johnson Family
+Reunion, a softball team) — see `intent-extraction-capability.test.ts`.
+`BriefEvaluation`'s quality checks (`checkRequiredWordingQuality`,
+`checkProductQuality`) already correctly rejected the corrupted raw value
+for *readiness* purposes — this fix stops the corruption from being
+produced at all, rather than only being caught downstream.
+
+---
+
+## 10b. Brief Completeness vs. Generation Readiness — Goal-Directed
+     Orchestration (Sprint 2L Phase 1B)
+
+### Why
+
+A controlled browser acceptance test showed that even with Conversation
+Understanding correctly extracting multiple fields per message (Phase
+1/1A), the ORCHESTRATOR still behaved like a questionnaire: it walked
+every high-value Design Brief section in turn — purpose, audience, style,
+artwork colors, print location — asking about (or requiring an explicit
+"you choose" deferral for) each one before ever presenting a Design
+Summary, and acknowledged every single field mutation with a mechanical
+"Got it — I have Black as the shirt color." This happened regardless of
+whether the answer would have materially changed the generated artwork.
+
+Root cause (Goal 1 audit): `interview-coverage-policy.ts`'s `"high_value"`
+tier previously held five sections (`purpose`, `audience`, `style`,
+`colors`, `printLocation`) and `BriefEvaluationCapability.summaryReadiness`
+required *every* required-or-high-value section to be either `"provided"`
+or explicitly `"deferred_to_designer"` before summary/approval could be
+reached. `InterviewIntelligenceCapability.selectNextAct` then walked
+`HIGH_VALUE_TIE_BREAK` in order, generating exactly the ask-one-at-a-time
+pattern the acceptance test exposed. No single capability was "wrong" in
+isolation — `ConversationUnderstandingCapability` correctly proposed
+values, `IntentExtractionCapability` correctly reconciled them, `Brief
+Evaluation` correctly computed resolution — but the *policy* those
+capabilities were built to serve treated schema completeness as the goal,
+not artwork-generation readiness.
+
+### Brief Completeness vs. Generation Readiness
+
+Two different, both legitimate questions about the same Design Brief:
+
+| | Brief Completeness | Generation Readiness |
+|---|---|---|
+| Question | What do we know, section by section? | Do we know enough to generate useful concepts? |
+| Computed by | `BriefEvaluation.overall` (`completeness`, `confidence`, `knownSectionCount`) — covers all 14 sections regardless of tier | `BriefEvaluation.summaryReadiness` / `approvalReadiness` — gates only on `required` + `high_value` tier sections |
+| Empty optional field | Lowers completeness % | Never blocks |
+| Used by | Informational only — no capability gates on it | `InterviewIntelligenceCapability` (whether to ask or summarize); `ConceptGenerationCapability`'s approval gate (via `approvalReadiness`) |
+
+Both views are produced by the *same* `BriefEvaluationCapability` from the
+same section list — Generation Readiness is not a new persisted status or
+a second evaluation pass, just a different aggregation of the same
+per-section data, scoped by `interview-coverage-policy.ts`'s tiers. A
+brief can be Generation-Ready while still incomplete (most sections
+`"unknown"`) — that is the intended, common case now, not an edge case to
+special-case.
+
+### Section categories (Goal 2) and the re-scoped tier policy
+
+`interview-coverage-policy.ts` (`REQUIRED_SECTIONS` / `HIGH_VALUE_SECTIONS`
+/ `OPTIONAL_SECTIONS`) re-scoped from three roughly-even tiers to two
+sections in `required`, one in `high_value`, and everything else
+`optional`:
+
+| Tier | Sections | Rationale (Goal 2 category) |
+|---|---|---|
+| `required` (blocking) | `product`, `graphics`, `requiredWording`, `productColor` | (A) Generation would likely be wrong or unusable without any one of these — what's being printed, enough direction to know what to design, exact required wording (or explicit "none"), and the garment color the design must read against |
+| `high_value` (ask-worthy) | `printLocation` | (B) Contextually important: a physical production fact a print shop cannot safely guess, not a creative preference |
+| `optional` (delegable, never proactively asked) | `purpose`, `audience`, `style`, `colors`, plus the pre-existing `exclusions`/`additionalNotes`/`references`/`production`/`layoutPreference` | (C) `purpose`/`audience` are inferable/derivable from context most customers already give ("I'm in a bowling league and our team is called X" already establishes both); (D) `style`/`colors` are designer-delegatable once `graphics` establishes real creative direction |
+
+`questionNecessity(section)` (new, `interview-coverage-policy.ts`) is a
+thin, explicitly-named wrapper over `tierOf` — `"blocking"` /
+`"askWorthy"` / `"delegable"` — giving call sites and tests a
+self-documenting API for the same policy, per Goal 4. No capability
+signature changed: `InterviewIntelligenceCapability.selectNextAct` already
+only ever walked `REQUIRED_TIE_BREAK` then `HIGH_VALUE_TIE_BREAK` for
+proactive `ask`/`clarify` acts and never touched `OPTIONAL_TIE_BREAK` — so
+moving four sections into the optional tier was sufficient, on its own, to
+stop them from ever being proactively asked, with zero changes to
+`BriefEvaluationCapability` or `InterviewIntelligenceCapability`
+themselves (see `capability-boundaries.ts`).
+
+Un-asked does not mean un-tracked: `purpose`/`audience`/`style`/`colors`
+remain in `ALL_SECTIONS_IN_POLICY_ORDER`, `BriefEvaluation` still reports
+their resolution, and `DesignSummaryCapability` still shows them normally
+whenever they do have a value — customer-volunteered, or resolved via
+Conversation Understanding's contextual inference (§10a). When they
+genuinely have no value, they are simply absent from the Design Summary —
+exactly the way `exclusions`/`additionalNotes`/`references` have always
+behaved. No `deferredSections` entry is fabricated on the customer's
+behalf: that field's "Designer will determine" framing is reserved for a
+decision the customer *actually* made (an explicit "you choose" — Goal
+11), never a decision the system made unilaterally not to ask about
+something.
+
+### Required wording (Goal 6) — unchanged tier, richer resolution
+
+`requiredWording` stays in the `required`/blocking tier — every Design
+Brief still resolves it to either exact literal text or an explicit
+"none" before summary. What changed is only how readily it gets
+*resolved*: `OpenAIConversationUnderstandingProvider`'s prompt now
+explicitly instructs the model that a name-for-an-entity ("our team is
+called My 3 Sons") combined with design intent connected to that same
+entity ("I want to create a team logo") is enough to propose the name as
+required wording at `explicit`/`inferred` confidence, without a third,
+redundant confirmation round-trip — while a name mentioned only as
+passing context ("make something cool for My 3 Sons") still stays
+`ambiguous` and unapplied (§10a's grounding/confidence rules, unchanged).
+This is prompt guidance only; `reconcile-understanding.ts`'s exact-evidence
+grounding requirement for `requiredWording` is untouched.
+
+### Acknowledgement policy (Goal 7)
+
+`withResolvedAcknowledgement` (`conversation-capability.ts`) now branches
+on how much a turn actually resolved:
+
+- **Single low-salience field** (a terse direct answer — "black", "full
+  back") → `shortAcknowledgement` (`shared/question-phrasing.ts`): a short,
+  natural confirmation ("Black works." / "Got it.") — never the
+  per-field "Got it — I have Black as the shirt color." template, which
+  reads as database-mutation reporting when it repeats every turn.
+- **Multiple fields** (a rich message resolved several things at once) →
+  the existing `acknowledgeResolvedFields` synthesis (Phase 1A) — earning
+  its place by demonstrating real understanding of a complex message.
+- **Nothing displayable changed** (e.g. a deferral-only turn) → falls back
+  to the terser `acknowledgeRevision`, which stays truthful in that case.
+
+### Contextual question phrasing (Goal 9)
+
+`naturalizeQuestion` (`conversation-capability.ts`) lightly rewrites two
+specific questions using only already-CONFIRMED brief values — never a
+new LLM call, never an invented fact. **Sprint 2L Phase 1C correction:**
+"already-confirmed" means the already-quality-gated `DesignSummaryView`
+(the same projection `DesignSummaryCapability` builds — a field only
+appears in it once `BriefEvaluation` has confirmed `resolution ===
+"provided"`), never the raw `TShirtDesignBrief`. The original Phase 1B
+implementation read the raw brief directly; a live acceptance test found
+that a raw field can hold a value `BriefEvaluation` has already rejected
+as malformed (e.g. a deterministic extractor's greedy over-capture),
+correctly kept out of the Design Summary but never cleared from the raw
+field — reading it here leaked the rejected value into a customer-facing
+question. See §10a's "Deterministic safety net" for the companion
+extraction-side fix.
+
+- `productColor`'s question becomes "What color \{product\}s will these
+  print on?" once `product` is known, instead of the generic "What color
+  garment...".
+- `graphics`'s question becomes "What direction do you want for the
+  \{requiredWording or audience\} design?" once either is known, instead
+  of the generic "Tell me about the design...".
+
+`InterviewIntelligenceCapability` itself stays brief-unaware — this
+naturalization happens in Conversation orchestration, which already has
+full brief access for other reasons (building the understanding request,
+the acknowledgement). Every other question keeps its existing, tested
+phrasing untouched.
+
+### Design Summary synthesis (Goal 8)
+
+Handled entirely at the Conversation Understanding provider layer, not by
+adding a synthesis step downstream: the OpenAI prompt now explicitly
+instructs that, for every section except `requiredWording`, `value` must
+be a clean, normalized, plain-language synthesis of what the customer
+communicated — "that retro vibe" becomes `style: "Retro / mid-century"`,
+never the raw sentence fragment. `requiredWording` remains the one
+deliberate exception: exact literal text, never synthesized. Deterministic
+extraction (the fallback when no provider is configured) is unchanged and
+does not synthesize — this is a provider-only quality improvement,
+consistent with Conversation Understanding always being a best-effort
+layer over an always-correct deterministic base (§10a).
+
+### Continue button (Goal 12) — removed
+
+Audited `submitDesignBriefDecision`: "edit" and (the former) "continue"
+both transitioned into the identical adaptive pipeline (Intent Extraction
+→ Design Brief → Brief Evaluation → Interview Intelligence) — the *only*
+difference was which opening question got asked
+("What would you like to change...?" vs. "What else would you like the
+designer to know?"). Neither the API schema, the capability, nor any
+downstream behavior distinguished them beyond that string. "Continue" was
+removed: `DesignBriefDecisionAction` is now `"approve" | "edit"` only, the
+`briefDecisionBodySchema` enum dropped `"continue"`, and the Design
+Summary card shows two actions. The `edit_requested` phase's question was
+broadened to "What would you like to change or add?" to keep covering
+both prior use cases. `continue_requested` remains a readable historical
+`ConversationPhase` value (no migration; a project persisted mid-flow in
+that phase before this change still renders sensibly) but is no longer
+reachable from a fresh decision.
+
+### Redundant pre-summary prose (Goal 13) — removed
+
+Audited `ChatApp.tsx`: the same Design Summary turn rendered both the
+prose `formatForCustomer` message content (`MessageBubble`) and the
+structured, interactive `DesignSummaryCard` immediately below it — pure
+duplication for the one turn it matters. Fixed at the presentation layer
+only: the prose bubble is now suppressed exactly when the interactive
+summary card is shown for that message (`showSummaryCard`); once the
+conversation moves past that turn (the card stops rendering, since it
+only ever shows for the *latest* message), the prose bubble renders
+normally as the durable transcript record. No backend change — `content`
+is still generated and persisted on every summary message exactly as
+before, so conversation history and reload behavior are unaffected.
 
 ---
 
@@ -1338,7 +1861,7 @@ delegation to composed capabilities.
 | `POST /api/projects` | Start conversation/project |
 | `GET /api/projects/[projectId]` | Load snapshot |
 | `POST /api/projects/[projectId]/messages` | Handle user message |
-| `POST /api/projects/[projectId]/brief/decision` | Approve / edit / continue on Design Summary |
+| `POST /api/projects/[projectId]/brief/decision` | Approve / edit on Design Summary (Sprint 2L Phase 1B: "continue" removed — see §10b) |
 | `POST /api/projects/[projectId]/concepts/regenerate` | Explicit updated-concept enqueue |
 | `GET /api/projects/[projectId]/concepts/[artworkVersionId]/image` | Mint short-lived concept image URL (Sprint 2K Phase 1) |
 | `GET /api/projects/[projectId]/generation/status` | Read-only generation status |
@@ -1394,7 +1917,7 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 |---|---|
 | `ChatApp` | Session bootstrap, send, decisions, regenerate, undo, polling |
 | `MessageBubble` | Transcript rendering |
-| `DesignSummaryCard` | Approve / Edit / Continue |
+| `DesignSummaryCard` | Approve / Edit (Sprint 2L Phase 1B: "Continue" removed as redundant with Edit — §10b); the prose transcript message for this turn is suppressed while this card is the latest message (§10b) |
 | `ConceptStatusBanner` | Needs-update + regenerate / keep current |
 | `RecommendationCard` | Advisory actions → normal chat replies |
 | `DesignerDecisionCard` | Deferred “designer will determine” display |
@@ -1441,6 +1964,9 @@ Relevant environment variables (names only; never commit secrets):
 | `OPENAI_IMAGE_MODEL` | Defaults to `gpt-image-1` (concept generation) |
 | `CONCEPT_EVALUATION_PROVIDER` | `placeholder` (default) or `openai` — Sprint 2I Phase 2, advisory-only (see §13) |
 | `OPENAI_EVALUATION_MODEL` | Defaults to `gpt-4o-mini` (Concept Evaluation only; no kill switch — see §13) |
+| `CONVERSATION_UNDERSTANDING_PROVIDER` | `none` (default) or `openai` — Sprint 2L Phase 1, best-effort semantic interpretation (see §10a); independent of `CONCEPT_GENERATION_ENABLE_REAL` |
+| `CONVERSATION_UNDERSTANDING_MODEL` | Defaults to `gpt-4o-mini` (Conversation Understanding only; text-only chat model; no kill switch — see §10a) |
+| `CONVERSATION_UNDERSTANDING_DEBUG` | `false`/unset (default) or `true` — development-only structured pipeline tracing, allowlisted event shapes only, never enabled by default (see §10a "Debugging / structured tracing") |
 | `ASSET_STORAGE_MODE` | `data_uri` (default), `filesystem`, `supabase_storage`, `s3` |
 | `ASSET_SIGNING_SECRET` | Filesystem signed-URL HMAC (dev fallback if unset) |
 | `WORKER_SECRET` | Worker endpoint auth (required in production) |
@@ -1478,6 +2004,14 @@ deliberately simpler and has no `unavailable`/kill-switch state: requesting
 evaluator in every environment, including production — see §13 for why that
 asymmetry with concept generation is safe.
 
+Conversation Understanding's resolution
+(`resolveConversationUnderstandingProvider`) follows the same
+never-fail-closed pattern as Concept Evaluation: requesting `openai`
+without `OPENAI_API_KEY` set falls back to
+`NoneConversationUnderstandingProvider` (always an empty result) in every
+environment, including production — see §10a. Default is `none` in every
+environment until intentionally turned on.
+
 ---
 
 ## 22. Testing Architecture
@@ -1492,6 +2026,12 @@ Layers covered by `npm test` / `npm run verify`:
 - Migration validation (`npm run validate:migrations`)
 - Production build verification (`npm run build` inside `verify`)
 - Deterministic provider injection via composition overrides / env in tests
+- Conversation Understanding regression scenarios (Sprint 2L Phase 1) drive
+  the real `ConversationCapability` with peer capabilities from
+  `createCapabilityGraph` and a scripted `FakeConversationUnderstandingProvider`
+  (`src/test-support/fake-conversation-understanding-provider.ts`) standing
+  in for a real LLM — no network calls; the fixture plays the role of a
+  provider's already-parsed JSON response
 - Fake Supabase/PostgREST clients in storage and job tests
 - `cleanupTempWorkspace` + mutex drain for Windows temp directories
 - Worker tests await `runBatch` / `processNextJob` explicitly (no background
@@ -1592,6 +2132,38 @@ Verified against the implementation:
   timestamps allow only a coarse total-attempt duration, not a phase
   breakdown — see the Sprint 2K Phase 3 report for what was and wasn't
   determinable from existing instrumentation.
+- Sprint 2L Phase 1: `CONVERSATION_UNDERSTANDING_PROVIDER` defaults to
+  `none` in every environment, including production — real semantic
+  interpretation is opt-in and has not been enabled; the deterministic
+  engine alone drives every conversation until an operator turns it on.
+- Sprint 2L Phase 1: `ConversationUnderstandingCapability`'s skip policy
+  (single-token replies never call the provider) is a coarse heuristic,
+  not exhaustive language understanding — a two-word reply that is
+  actually trivial still costs one provider call.
+- Sprint 2L Phase 1: no in-repo evaluation harness scores real semantic
+  interpretation quality against a labeled dataset — regression coverage
+  is deterministic-fixture-based (scripted provider responses), matching
+  every other provider in this codebase; a live acceptance test (§ below)
+  is the current way to judge real-provider quality end to end.
+- Sprint 2L Phase 1 does not change Print Validation, Print Vault,
+  Ownership, purchasing/download, concept ranking, or automatic
+  regeneration — none of that was in scope.
+- Sprint 2L Phase 1B: `naturalizeQuestion`'s contextual rephrasing covers
+  only the `productColor` and `graphics` questions — every other question
+  keeps its Sprint 2F-era generic phrasing. Broader contextual phrasing
+  was deliberately out of scope to avoid a deep `InterviewIntelligence`
+  boundary change for this sprint.
+- Sprint 2L Phase 1B: `printLocation` is the only section still classified
+  `high_value`/ask-worthy. Whether garment color and placement should
+  ever become product-dependent (Goal 2 noted "whether these are blocking
+  may depend on product/context") is not implemented — both remain
+  unconditionally asked when unresolved, regardless of product type.
+- Sprint 2L Phase 1B: Design Summary synthesis quality (Goal 8) depends
+  entirely on the configured provider's prompt adherence — the
+  deterministic fallback (no provider configured, or provider failure)
+  does not synthesize and may still surface closer-to-verbatim values for
+  `graphics`/`style`/`purpose`/`audience` when a customer volunteers them
+  directly rather than through a rich, understood message.
 
 Do not treat future work as completed architecture.
 
@@ -1617,6 +2189,8 @@ Describe attachment points only — not a delivery plan:
 | Real queue/worker service | Replace scheduler topology only |
 | Additional product rule packs | `shared/product-rule-packs` + ProductIntelligence |
 | Ownership/licensing enforcement | Replace Ownership stub; gate vault/public surfaces |
+| ConversationUnderstandingCapability | **Phase 1 (architecture + first real provider) done — see §10a.** Future: expand the supported-section allowlist as new brief sections gain backing fields; richer bounded-context selection; a labeled-dataset evaluation harness; never let it write a `BriefPatchProposal` directly |
+| Additional conversation understanding providers | New adapter behind `ConversationUnderstandingProvider`; no domain change |
 
 ---
 

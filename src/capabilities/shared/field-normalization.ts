@@ -27,7 +27,14 @@ function isShortValue(text: string): boolean {
   return text.split(/\s+/).filter(Boolean).length <= MAX_NORMALIZABLE_WORDS;
 }
 
-const PRODUCT_NOUN_CANONICAL: Record<string, string> = {
+/**
+ * Exported (Sprint 2L Phase 1A) so `reconcile-understanding.ts` can build a
+ * generic "does this evidence contain a recognized product synonym"
+ * grounding check without maintaining a second copy of this vocabulary —
+ * the single source of truth for which words canonicalize to which
+ * product name.
+ */
+export const PRODUCT_NOUN_CANONICAL: Record<string, string> = {
   tshirt: "T-shirt",
   tshirts: "T-shirt",
   "t-shirt": "T-shirt",

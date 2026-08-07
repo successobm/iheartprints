@@ -66,19 +66,25 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
     assert.equal(summary?.productColor, "Navy");
     assert.equal(summary?.requiredWording, "Camp Wildwood 2026");
 
-    // High-value sections were all deferred ("You choose.") by the helper —
-    // Sprint 2G Part 3: they are excluded from the regular field list...
+    // Sprint 2L Phase 1B: printLocation is the only remaining high-value
+    // section — the helper defers it ("You choose.") and it appears as its
+    // own "Designer will determine" entry, never as raw internal state.
+    // purpose/audience/style/colors are optional now (never proactively
+    // asked, per interview-coverage-policy.ts) — they are simply absent
+    // from both the regular field list AND the deferred-decisions list,
+    // exactly like references/exclusions/additionalNotes always have been.
     for (const key of ["style", "colors", "printLocation", "purpose", "audience"]) {
       assert.equal(summary?.[key], undefined, key);
     }
 
-    // ...and instead appear as their own "Designer will determine" list,
-    // never as raw internal state.
     const deferredDecisions = lastMessage?.metadata.deferredDecisions as
       | Array<{ section: string; label: string }>
       | undefined;
     assert.ok(deferredDecisions);
-    assert.equal(deferredDecisions.length, 5);
+    assert.deepEqual(
+      deferredDecisions.map((d) => d.section),
+      ["printLocation"],
+    );
     for (const decision of deferredDecisions) {
       assert.doesNotMatch(decision.label, /deferred_to_designer|missing|unknown/i);
     }
@@ -261,15 +267,15 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
     assert.equal(updated.artworkVersions.length, 0);
   });
 
-  it("Continue preserves uncertain free text as a note and returns to the summary for approval", async () => {
+  it("Sprint 2L Phase 1B (Goal 12): Edit alone preserves uncertain free text as a note and returns to the summary for approval — 'Continue' was removed as redundant with it", async () => {
     const conversation = await freshConversation();
     const { projectId } = await runAdaptiveInterviewToSummary(conversation);
 
-    const continuing = await conversation.submitDesignBriefDecision(
+    const editing = await conversation.submitDesignBriefDecision(
       projectId,
-      "continue",
+      "edit",
     );
-    assert.equal(continuing.conversation.phase, "continue_requested");
+    assert.equal(editing.conversation.phase, "edit_requested");
 
     const updated = await conversation.handleUserMessage(
       projectId,
@@ -283,7 +289,7 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
     );
   });
 
-  it("rejects Edit or Continue outside the summary confirmation state", async () => {
+  it("rejects Edit outside the summary confirmation state", async () => {
     const conversation = await freshConversation();
     const { projectId } = await runAdaptiveInterviewToSummary(conversation);
     await conversation.submitDesignBriefDecision(projectId, "approve");
@@ -291,10 +297,6 @@ describe("ConversationCapability — adaptive interview + Design Summary approva
     await assert.rejects(
       () => conversation.submitDesignBriefDecision(projectId, "edit"),
       /Cannot edit the design brief/,
-    );
-    await assert.rejects(
-      () => conversation.submitDesignBriefDecision(projectId, "continue"),
-      /Cannot continue the design brief/,
     );
   });
 

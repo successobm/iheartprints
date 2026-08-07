@@ -14,6 +14,10 @@ import {
 import { createConceptGenerationCapability } from "@/capabilities/concept-generation";
 import { createConversationCapability } from "@/capabilities/conversation";
 import type { ConversationCapability } from "@/capabilities/conversation";
+import {
+  createConversationUnderstandingCapability,
+  resolveConversationUnderstandingProvider,
+} from "@/capabilities/conversation-understanding";
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import { createDesignIntelligenceCapability } from "@/capabilities/design-intelligence";
 import { createDesignSummaryCapability } from "@/capabilities/design-summary";
@@ -36,6 +40,8 @@ export interface CapabilityGraph {
   designBrief: ReturnType<typeof createDesignBriefCapability>;
   briefEvaluation: ReturnType<typeof createBriefEvaluationCapability>;
   intentExtraction: ReturnType<typeof createIntentExtractionCapability>;
+  /** Sprint 2L Phase 1: best-effort semantic interpretation feeding Intent Extraction — see `reconcile-understanding.ts`. */
+  conversationUnderstanding: ReturnType<typeof createConversationUnderstandingCapability>;
   designIntelligence: ReturnType<typeof createDesignIntelligenceCapability>;
   interviewIntelligence: ReturnType<typeof createInterviewIntelligenceCapability>;
   revisionIntelligence: ReturnType<typeof createRevisionIntelligenceCapability>;
@@ -73,6 +79,13 @@ export function createCapabilityGraph(
   const designBrief = createDesignBriefCapability(repo);
   const briefEvaluation = createBriefEvaluationCapability();
   const intentExtraction = createIntentExtractionCapability();
+  // Sprint 2L Phase 1: resolves to a real (OpenAI) semantic interpreter
+  // when configured, otherwise a deterministic-only no-op — composition
+  // owns selection; conversation/UI never inspect env vars. Independent of
+  // `resolveConceptGenerationProvider` / `CONCEPT_GENERATION_ENABLE_REAL`.
+  const conversationUnderstanding = createConversationUnderstandingCapability(
+    resolveConversationUnderstandingProvider(),
+  );
   const productIntelligence = createProductIntelligenceCapability();
   const designIntelligence =
     createDesignIntelligenceCapability(productIntelligence);
@@ -109,6 +122,7 @@ export function createCapabilityGraph(
   const conversation = createConversationCapability({
     repo,
     intentExtraction,
+    conversationUnderstanding,
     designBrief,
     briefEvaluation,
     designIntelligence,
@@ -123,6 +137,7 @@ export function createCapabilityGraph(
     designBrief,
     briefEvaluation,
     intentExtraction,
+    conversationUnderstanding,
     designIntelligence,
     interviewIntelligence,
     revisionIntelligence,
