@@ -49,3 +49,8 @@ supabase/.temp/
 # Sprint 2M Phase 2D research bake-off artifacts (local only)
 research/phase-2d-bakeoff/outputs/
 research/phase-2d-bakeoff/reports/
+
+# Phase 2D/2E local research artifacts
+research/phase-2d-bakeoff/sources/*.png
+research/phase-2e-acceptance/acceptance-*.json
+research/phase-2e-acceptance/run.log
