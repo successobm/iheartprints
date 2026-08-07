@@ -23,7 +23,16 @@ import type {
   GeneratedAssetPayload,
 } from "@/capabilities/shared/contracts";
 import { MAX_GENERATION_ATTEMPTS } from "@/capabilities/shared/generation-retry-policy";
+import type { PrintValidationCapability } from "@/capabilities/print-validation";
+import {
+  assembleProvisionalPrintValidationInput,
+  createPrintValidationCapability,
+} from "@/capabilities/print-validation";
 import { logConceptGenerationUnavailable } from "@/lib/config/generation-provider-logging";
+import {
+  logProvisionalPrintValidation,
+  logProvisionalPrintValidationFailure,
+} from "@/lib/config/print-validation-logging";
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
 
 import { buildGenerationIntentForJob } from "./build-generation-intent";
@@ -77,6 +86,15 @@ export function createGenerationWorkerCapability(
    * TimedRevisionImpact entries from consecutive approved brief versions.
    */
   revisionIntelligence: RevisionIntelligenceCapability = createRevisionIntelligenceCapability(),
+  /**
+   * Sprint 2M Phase 2A: runs PROVISIONAL print-readiness intelligence right
+   * after Concept Evaluation completes for a concept. Never authoritative,
+   * never persisted, never blocks or fails the job — see
+   * `runProvisionalPrintValidation` and ARCHITECTURE.md's "Provisional
+   * Print Readiness" section. Defaults to a fresh pure instance so existing
+   * call sites/tests need no wiring changes.
+   */
+  printValidation: PrintValidationCapability = createPrintValidationCapability(),
 ): GenerationWorkerCapability {
   async function persistConceptAsset(
     designId: string,
@@ -176,6 +194,74 @@ export function createGenerationWorkerCapability(
       ...persisted,
       evaluationEvaluatedAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Sprint 2M Phase 2A: PROVISIONAL print-readiness intelligence, run
+   * immediately after Concept Evaluation completes for one concept.
+   *
+   * This answers "what production work would eventually be required to
+   * make this concept print-ready?" — never "is this concept final
+   * production artwork?" (it is not; see ARCHITECTURE.md). The result is
+   * never persisted (see the Phase 2A report's persistence audit — writing
+   * it to `ArtworkVersion.printValidationStatus` today would ambiguously
+   * mix provisional concept-stage intelligence with a future authoritative
+   * production-validation meaning for the same column) and never changes
+   * `PrintProject.status`, never freezes the concept, and never executes
+   * `requiredTransformations`. It is deliberately swallow-on-error: a
+   * failure here must never destabilize a successful concept generation
+   * (Goal 9) — this is intelligence *about* the pipeline's output, not a
+   * step the pipeline depends on.
+   */
+  async function runProvisionalPrintValidation(input: {
+    projectId: string;
+    generationJobId: string;
+    artworkVersionId: string;
+    designBriefVersionId: string;
+    brief: DesignBriefSnapshotContent;
+    asset: {
+      contentType: string | null;
+      widthPx: number | null;
+      heightPx: number | null;
+      hasTransparency: boolean | null;
+    } | null;
+    evaluationStatus: ConceptEvaluationStatus;
+    evaluation: ConceptEvaluation;
+  }): Promise<void> {
+    try {
+      // Resolved fresh (never cached/threaded through from job start) so a
+      // brief re-approved while this job was running is detected honestly
+      // — `PrintValidationCapability`'s own `brief_provenance` check is
+      // exactly what surfaces that as `"blocked"` rather than a false
+      // `"ready"`.
+      const currentApproved = await repo.getLatestDesignBriefVersion(
+        input.projectId,
+      );
+      const printValidationInput = assembleProvisionalPrintValidationInput({
+        artworkVersionId: input.artworkVersionId,
+        designBriefVersionId: input.designBriefVersionId,
+        currentApprovedDesignBriefVersionId: currentApproved?.id ?? null,
+        brief: input.brief,
+        asset: input.asset,
+        conceptEvaluationStatus: input.evaluationStatus,
+        conceptEvaluation: input.evaluation,
+      });
+      const report = printValidation.validateArtwork(printValidationInput);
+      logProvisionalPrintValidation({
+        projectId: input.projectId,
+        artworkVersionId: input.artworkVersionId,
+        generationJobId: input.generationJobId,
+        status: report.status,
+        requiredTransformationCount: report.requiredTransformations.length,
+        blockingIssueCount: report.blockingIssues.length,
+      });
+    } catch (error) {
+      logProvisionalPrintValidationFailure({
+        projectId: input.projectId,
+        generationJobId: input.generationJobId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -296,6 +382,27 @@ export function createGenerationWorkerCapability(
             idempotencyKey: `${artwork.id}:${approvedVersion.id}`,
           });
           await repo.updateArtworkEvaluation(artwork.id, evaluated);
+
+          const primaryAsset = artwork.primaryAssetId
+            ? await repo.getAssetById(artwork.primaryAssetId)
+            : null;
+          await runProvisionalPrintValidation({
+            projectId: designId,
+            generationJobId: job.id,
+            artworkVersionId: artwork.id,
+            designBriefVersionId: approvedVersion.id,
+            brief: approvedVersion.content,
+            asset: primaryAsset
+              ? {
+                  contentType: primaryAsset.contentType,
+                  widthPx: primaryAsset.widthPx,
+                  heightPx: primaryAsset.heightPx,
+                  hasTransparency: primaryAsset.hasTransparency,
+                }
+              : null,
+            evaluationStatus: evaluated.evaluationStatus,
+            evaluation: evaluated.evaluation,
+          });
         }
       }
       await repo.updateGenerationJob(job.id, {
@@ -359,6 +466,20 @@ export function createGenerationWorkerCapability(
       // meaningful point to heartbeat between concepts.
       const versionsInput: Parameters<ProjectRepository["addArtworkVersions"]>[1] =
         [];
+      // Sprint 2M Phase 2A: per-concept data `runProvisionalPrintValidation`
+      // needs, captured in the same order as `versionsInput` — the real
+      // `artworkVersionId` only exists after `addArtworkVersions` returns,
+      // so provisional validation itself runs in a second pass below.
+      const provisionalInputs: Array<{
+        asset: {
+          contentType: string | null;
+          widthPx: number | null;
+          heightPx: number | null;
+          hasTransparency: boolean | null;
+        } | null;
+        evaluationStatus: ConceptEvaluationStatus;
+        evaluation: ConceptEvaluation;
+      }> = [];
       for (const [index, concept] of result.concepts.entries()) {
         await repo.touchGenerationJobHeartbeat(job.id);
         const assetIds = await persistConceptAsset(
@@ -396,9 +517,43 @@ export function createGenerationWorkerCapability(
           evaluationEvaluatedAt: evaluated.evaluationEvaluatedAt,
           evaluationProviderKey: evaluated.evaluationProviderKey,
         });
+        provisionalInputs.push({
+          // The just-uploaded asset's own metadata is already in scope —
+          // no extra repository round trip needed (`concept.asset` is
+          // `undefined` for the placeholder provider, which produces no
+          // real image bytes; provisional validation honestly reports
+          // that as a missing asset, not a failure).
+          asset: concept.asset
+            ? {
+                contentType: concept.asset.contentType,
+                widthPx: concept.asset.widthPx,
+                heightPx: concept.asset.heightPx,
+                hasTransparency: concept.asset.hasTransparency,
+              }
+            : null,
+          evaluationStatus: evaluated.evaluationStatus,
+          evaluation: evaluated.evaluation,
+        });
       }
 
-      await repo.addArtworkVersions(designId, versionsInput);
+      const createdVersions = await repo.addArtworkVersions(designId, versionsInput);
+      // Sprint 2M Phase 2A: PROVISIONAL print-readiness intelligence only —
+      // never authoritative, never persisted, never blocks this job. See
+      // `runProvisionalPrintValidation` and ARCHITECTURE.md.
+      for (const [index, artwork] of createdVersions.entries()) {
+        const provisional = provisionalInputs[index];
+        if (!provisional) continue;
+        await runProvisionalPrintValidation({
+          projectId: designId,
+          generationJobId: job.id,
+          artworkVersionId: artwork.id,
+          designBriefVersionId: approvedVersion.id,
+          brief: approvedVersion.content,
+          asset: provisional.asset,
+          evaluationStatus: provisional.evaluationStatus,
+          evaluation: provisional.evaluation,
+        });
+      }
       if (job.kind === "regeneration") {
         await repo.updateProject(designId, { selectedArtworkVersionId: null });
       }

@@ -324,6 +324,114 @@
  *   - New `"config"` debug trace stage (`resolveConversationUnderstandingProvider`)
  *     and a `willCallProvider` field on the `"request"` stage — both purely
  *     additive to the existing allowlisted trace event union from Phase 1A.
+ *
+ * Sprint 2M Phase 1 additions (Print Validation & Production Readiness
+ * Foundation; replaces the `PrintValidationCapability` stub — no other
+ * capability boundary changed):
+ *   Pipeline:
+ *     Selected / customer-approved concept (ArtworkVersion)
+ *          ↓
+ *     Caller resolves: asset summary, approved-brief provenance, Concept
+ *     Evaluation state — PrintValidation never fetches any of this itself
+ *          ↓
+ *     PrintValidationCapability.validateArtwork(PrintValidationInput)
+ *          → deriveProductionRequirements (pure; reads
+ *            `shared/print-placement-dimensions` for placement-driven
+ *            target size — never invents a second placement→size table)
+ *          → deterministic checks + `calculateEffectiveResolution`
+ *            (pixel ÷ physical dimensions only — never PNG DPI metadata)
+ *          ↓
+ *     PrintValidationReport { status: ready | finalization_required | blocked,
+ *                             requirements, checks, requiredTransformations,
+ *                             blockingIssues, warnings }
+ *          ↓
+ *     (Reserved) Future FinalArtworkCapability — transforms/upscales/
+ *     vectorizes/reconstructs based on `requiredTransformations`, then
+ *     revalidates. Not implemented in Phase 1.
+ *   - `PrintValidationCapability` is pure and synchronous, mirroring
+ *     `BriefEvaluationCapability`: no repository, no provider, no I/O,
+ *     `createPrintValidationCapability()` takes zero arguments. The caller
+ *     (a route, a future Final Artwork orchestrator, or a test) resolves an
+ *     `ArtworkVersion`'s primary asset, its `designBriefVersionId`
+ *     provenance against the design's current approved version, and its
+ *     already-persisted Concept Evaluation fields into a
+ *     `PrintValidationInput` — the same "caller does I/O, capability only
+ *     decides" shape as `ConceptEvaluationCapability.evaluate`.
+ *   - New pure modules: `print-validation/production-requirements.ts`
+ *     (deterministic keyword classification of product/production category
+ *     from already-collected brief text — never a customer-facing question,
+ *     Constitution §6.6), `print-validation/effective-resolution.ts`
+ *     (pixel ÷ physical-dimension math only), and
+ *     `shared/print-placement-dimensions.ts` (target physical dimensions
+ *     per `PrintPlacement`, shared so a future `ProductIntelligence`
+ *     placement-size rule would read the same table rather than a second
+ *     copy).
+ *   - `ArtworkVersion.printValidationStatus` remains reserved `null` in
+ *     Phase 1 — deliberately not written by anything yet. Like
+ *     `BriefEvaluation`/`ConceptStatusView`, a `PrintValidationReport` is
+ *     designed to be cheaply recomputed on demand rather than stored as
+ *     authority; persisting the top-level `status` onto the existing
+ *     (already migration-free, unconstrained `text null`) column is
+ *     deferred to whichever future phase actually needs to query/filter by
+ *     it. See ARCHITECTURE.md's Print Validation section for the full
+ *     audit.
+ *   - Old reserved stub contracts `ValidationReport`/`ValidationCheck`/
+ *     `ValidationSeverity` (`shared/contracts.ts`, Sprint 2C) are removed —
+ *     replaced by the real `PrintValidationReport`/`PrintValidationCheck`
+ *     contracts in `print-validation/contracts.ts`, matching how Concept
+ *     Evaluation's contracts live in `concept-evaluation/contracts.ts`
+ *     rather than the shared file.
+ *   - `PrintValidationCapability` never mutates a Design Brief, never calls
+ *     a generation/vision/OCR provider, and never transforms, upscales,
+ *     vectorizes, or regenerates artwork — Phase 1 determines the truth
+ *     about what is required; it does not act on it. Concept Evaluation and
+ *     Print Validation continue to share only `ArtworkVersion` fields, never
+ *     a capability dependency on each other (unchanged from Sprint 2I).
+ *
+ * Sprint 2M Phase 2A additions (Provisional Print Readiness Integration;
+ * no new capability, no migration, `PrintValidationCapability` itself
+ * unchanged from Phase 1):
+ *   - `GenerationWorkerCapability` now calls `PrintValidationCapability`
+ *     (`runProvisionalPrintValidation`) immediately after Concept
+ *     Evaluation completes for each concept — on both the fresh-generation
+ *     path and the idempotent `alreadyGenerated` evaluation-backfill path.
+ *     `PrintValidationCapability` itself gained zero new dependencies: the
+ *     worker resolves everything (asset metadata from the just-uploaded
+ *     `GeneratedAssetPayload` or a fetched `AssetRecord`; brief provenance
+ *     via a fresh `repo.getLatestDesignBriefVersion` call; Concept
+ *     Evaluation state already computed in the same code path) and passes
+ *     it through the new pure `assembleProvisionalPrintValidationInput`
+ *     (`print-validation/assemble-input.ts`) before calling
+ *     `validateArtwork`.
+ *   - This is **provisional intelligence about a generated concept**, never
+ *     authoritative validation of finished production artwork — see
+ *     ARCHITECTURE.md §5 "Provisional Print Readiness vs. Final Print
+ *     Validation". The result is logged only
+ *     (`lib/config/print-validation-logging.ts`, whitelisted fields —
+ *     status + counts, never check reasons, requirements, or asset detail)
+ *     and otherwise discarded: never written to
+ *     `ArtworkVersion.printValidationStatus` (re-audited, not merely
+ *     carried over from the Phase 1 report — see ARCHITECTURE.md §5 for
+ *     why persisting it there would be actively ambiguous, not just
+ *     redundant), never changes `PrintProject.status`, never freezes or
+ *     marks an `ArtworkVersion` as final, never executes
+ *     `requiredTransformations`.
+ *   - `runProvisionalPrintValidation` is deliberately swallow-on-error: any
+ *     failure inside it (including its own `getLatestDesignBriefVersion`
+ *     lookup) is caught and logged
+ *     (`logProvisionalPrintValidationFailure`), never rethrown — it must
+ *     never fail, retry, or alter a `GenerationJob`'s outcome. A
+ *     `PrintValidationReport.status === "blocked"` result (e.g. the
+ *     placeholder provider's concepts, which have no real image bytes) is
+ *     equally swallowed-into-a-log-line — "blocked" describes the concept's
+ *     print-readiness, not a concept-generation failure, and must never be
+ *     conflated with one.
+ *   - Idempotent under retry: `runProvisionalPrintValidation` only ever
+ *     runs against already-persisted, immutable `ArtworkVersion`/asset
+ *     data, so a retried/recovered job computes the same
+ *     `PrintValidationReport` (barring `evaluatedAt`) and produces at most
+ *     one additional harmless log line — never a duplicate artwork version,
+ *     asset, evaluation record, or lifecycle-state change.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2L1c" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2M2a" as const;

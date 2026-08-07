@@ -109,6 +109,12 @@ export function createCapabilityGraph(
   const conceptEvaluation = createConceptEvaluationCapability(
     resolveConceptEvaluationProvider(),
   );
+  // Sprint 2M Phase 1: pure, zero-dependency capability. Sprint 2M Phase 2A:
+  // shared with GenerationWorkerCapability so provisional print-readiness
+  // intelligence runs right after Concept Evaluation completes — see
+  // `runProvisionalPrintValidation` and ARCHITECTURE.md's "Provisional
+  // Print Readiness" section. Never authoritative; never persisted.
+  const printValidation = createPrintValidationCapability();
   const generationWorker = createGenerationWorkerCapability(
     repo,
     provider,
@@ -116,6 +122,7 @@ export function createCapabilityGraph(
     assets,
     conceptEvaluation,
     revisionIntelligence,
+    printValidation,
   );
   const workerScheduler = createGenerationSchedulerCapability(generationWorker);
 
@@ -148,7 +155,7 @@ export function createCapabilityGraph(
     conceptEvaluation,
     generationWorker,
     workerScheduler,
-    printValidation: createPrintValidationCapability(),
+    printValidation,
     revision: createRevisionCapability(),
     printVault: createPrintVaultCapability(),
     assets,

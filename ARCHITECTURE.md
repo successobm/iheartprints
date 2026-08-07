@@ -71,7 +71,7 @@ Derived from the Constitution and enforced by the current implementation:
 7. **Evaluation, recommendations, interviewing, generation, and validation
    are separate concerns.** Brief Evaluation does not recommend; Design
    Intelligence does not ask; Interview Intelligence does not generate;
-   Print Validation (reserved) does not mutate briefs.
+   Print Validation does not mutate briefs and does not transform artwork.
 8. **Customer complexity stays hidden.** Model names, DPI, formats,
    provider keys, job ids, object keys, and storage modes are not
    customer-facing.
@@ -584,19 +584,250 @@ Port + implementations:
 
 Resolution: `resolveConceptGenerationProvider` in composition/config layer.
 
-### PrintValidationCapability — Reserved
+### PrintValidationCapability — Active architecture, wired as provisional intelligence (Sprint 2M Phase 1 + Phase 2A)
 
-Stub: `validateArtwork` returns `{ checks: [], overall: "not_run" }`.
-Must never mutate Design Briefs. Distinct from Concept Evaluation:
+Real, deterministic, provider-neutral. Answers "can this artwork be
+produced correctly for the intended print application?" — never "did we
+generate the design the customer requested?" (Concept Evaluation). A
+concept can pass Concept Evaluation and fail Print Validation; this is
+documented, expected behavior, not a bug (Constitution §15).
+
+Sprint 2M Phase 2A wires it into `GenerationWorkerCapability`, run
+immediately after Concept Evaluation completes for each concept — but only
+as **provisional** intelligence about a generated concept, never as
+authoritative validation of finished production artwork. See "Provisional
+Print Readiness vs. Final Print Validation" below; that distinction is the
+entire point of Phase 2A and must not be lost in any future change to this
+capability.
+
+```
+Concept Generation (provider → asset)
+        ↓
+ConceptEvaluationCapability.evaluate  (per concept)
+        ↓
+runProvisionalPrintValidation          (GenerationWorkerCapability, Phase 2A)
+        │  assembleProvisionalPrintValidationInput (pure mapping — no I/O)
+        ↓
+PrintValidationCapability.validateArtwork(PrintValidationInput)
+        ↓
+PrintValidationReport { ready | finalization_required | blocked }
+        │  logged internally only (whitelisted fields; never persisted,
+        │  never customer-facing) — see `print-validation-logging.ts`
+        ↓
+Customer selects / approves a concept direction  (unchanged — still just
+concept selection, not "final artwork approval"; see the lifecycle audit)
+        ↓
+(Reserved, not implemented) Future FinalArtworkCapability /
+ProductionArtworkCapability — transforms/upscales/vectorizes/reconstructs
+per requiredTransformations, then produces authoritative production
+artwork and re-runs Print Validation against *that* — only that later run
+may ever justify `PrintProject.status = "print_ready"`
+```
+
+| | |
+|---|---|
+| **Responsibility** | Deterministic production-readiness validation of one concept/artwork |
+| **Inputs** | `PrintValidationInput` — artwork/brief-provenance ids, print placement, product text, already-persisted Concept Evaluation state, and an opaque primary-asset summary — all resolved by the caller |
+| **Outputs** | `PrintValidationReport` — `status` (`ready` / `finalization_required` / `blocked`), `requirements`, `checks[]`, `requiredTransformations[]`, `blockingIssues[]`, `warnings[]` |
+| **Dependencies** | None (pure data in, pure data out) — `production-requirements.ts`, `effective-resolution.ts`, and `shared/print-placement-dimensions.ts` only |
+| **Owns** | Deterministic production-category/method classification from already-collected brief text; effective-resolution math (pixel ÷ physical dimensions, never PNG DPI metadata); check/status aggregation |
+| **Must never own** | Brief mutation; provider calls (generation, vision, OCR); artwork transformation, upscaling, vectorization, or regeneration; repository I/O |
+
+`createPrintValidationCapability()` still takes zero arguments and
+`validateArtwork` is still synchronous — mirrors `BriefEvaluationCapability`,
+not `ConceptEvaluationCapability` (which is async only because it calls a
+provider), and Phase 2A did not change this. The caller does all I/O
+(mirrors `ConceptEvaluationCapability.evaluate`'s `ConceptEvaluationInput`
+— "caller resolves data, capability only decides"). As of Phase 2A,
+`GenerationWorkerCapability` is that caller — see
+`runProvisionalPrintValidation` — but the capability itself remains exactly
+as pure as Phase 1 left it: no repository, provider, or storage dependency
+was added to `PrintValidationCapability`, `production-requirements.ts`, or
+`effective-resolution.ts`. Only the orchestration layer changed.
 
 | Concern | Concept Evaluation | Print Validation |
 |---|---|---|
-| Brief alignment / exclusions / wording / style / palette | Yes | No |
-| DPI / transparency / print size / embroidery / raster | No | Yes |
-| Phase 1 status | Active architecture; results persisted; does not block UI | Stub only |
+| Brief alignment / exclusions / wording / style / palette | Yes | No (reads Concept Evaluation's already-persisted `required_wording` criterion and `evaluationStatus`, but never re-scores brief alignment itself) |
+| DPI / transparency / print size / embroidery / raster / vector | No | Yes |
+| Status | Active architecture; results persisted on `ArtworkVersion`; does not block UI | Active architecture; pure/recomputed; run automatically after generation (Phase 2A) but never persisted, never blocks UI, never authoritative |
 
-`ArtworkVersion.evaluationStatus` / `evaluation` hold Concept Evaluation.
-`ArtworkVersion.printValidationStatus` remains reserved null.
+#### Production Requirements (`ProductionRequirements`)
+
+`production-requirements.ts` deterministically classifies a
+`ProductionCategory` (`apparel_raster` / `apparel_vector` / `signage` /
+`logo_vector` / `unknown`) from `productSummary`/`designDescription` text
+the customer already gave in ordinary conversation — keyword matching only
+(apparel nouns reuse `field-normalization.ts`'s `PRODUCT_NOUN_CANONICAL`;
+method keywords like "embroidered", "screen print", "banner" are matched
+literally). This is never a customer-facing question (Constitution §6.6) —
+when the text does not support a confident method, `printMethodConfidence`
+is honestly `"unknown"` and a DTF-style raster profile is assumed as the
+one production path this product actually generates artwork for today
+(never marked `"confirmed"`).
+
+Target physical print dimensions come from `shared/print-placement-dimensions.ts`,
+keyed by `PrintPlacement` (`full_front`/`full_back`: 12×14in;
+`left_chest`: 4×4in; `sleeve`: 3×3in — chosen so the sprint's own worked
+example, a 1024×1024px concept at a 12×14in full-back target ≈ 85 PPI,
+reproduces exactly). Banners/signs use a fixed generic placeholder size
+(36×72in) since neither `PrintPlacement` nor the Design Brief currently
+capture a customer-specified sign size (see the audit finding below).
+Target resolution is 300 PPI for raster apparel methods (matching the
+Constitution's own 3600×4200px full-back example exactly) and not
+applicable (raster resolution is not the blocking factor) for any
+vector-required category.
+
+#### Effective resolution (Goal 7)
+
+`effective-resolution.ts`'s `calculateEffectiveResolution` computes
+`pixels ÷ physical target dimensions` only — PNG DPI metadata is never read
+or trusted (changing embedded DPI does not add image information).
+`minimumRasterDimensionsFor` derives the minimum acceptable pixel size from
+a target physical size × target PPI.
+
+#### Checks and status aggregation
+
+Twelve deterministic checks (`PRINT_VALIDATION_CHECK_CODES`): asset
+existence, content type, raster dimensions known, transparency, effective
+resolution, minimum raster dimensions, vector-source presence, Design Brief
+provenance, Concept Evaluation alignment, required-wording verification,
+print-location known, production-method known. Two checks
+(`asset_exists`, `brief_provenance`) are hard-block: their failure produces
+`status: "blocked"` immediately (nothing to finalize) without running the
+rest. Every other check is `"blocking"`, `"warning"`, or `"info"` severity;
+`status: "ready"` requires every `"blocking"`-severity check to be
+`"pass"` — an `"unknown"` check is never silently treated as a pass (Goal
+6/10), so it produces `"finalization_required"` exactly like a `"fail"`.
+
+`requiredTransformations` is a set of `FinalizationTransformation` string
+values (`regenerate_at_production_dimensions`, `upscale_raster_artwork`,
+`remove_background`, `create_vector_version`, `verify_or_recreate_text`,
+`convert_fonts_to_outlines`, `resize_to_final_dimensions`,
+`create_production_png`, `create_vector_or_pdf_asset`,
+`require_human_review`) — described, never executed. No upscaling,
+vectorization, SVG/PDF/PNG production, font outlining, embroidery
+digitization, or CMYK conversion happens in Phase 1.
+
+#### Provisional Print Readiness vs. Final Print Validation (Sprint 2M Phase 2A)
+
+Four distinct questions, answered at four distinct points in the lifecycle
+— conflating any two of them is the specific mistake Phase 2A exists to
+avoid:
+
+| Stage | Question | Capability | Status today |
+|---|---|---|---|
+| **Concept Evaluation** | Is this generated concept an acceptable design — does it match the approved Design Brief? | `ConceptEvaluationCapability` | Active; persisted on `ArtworkVersion.evaluationStatus`/`evaluation` |
+| **Provisional Print Readiness** | If we tried to produce *this generated concept* right now, what production work would be required? | `PrintValidationCapability`, run by `GenerationWorkerCapability` immediately after Concept Evaluation | Active (Phase 2A); computed and logged internally only; **never persisted, never authoritative** |
+| **Final Artwork / Production Artwork** *(not implemented)* | The customer has confirmed a design direction — produce the actual production-ready asset (upscale, vectorize, outline fonts, etc.) | Reserved `FinalArtworkCapability`/`ProductionArtworkCapability` | Not implemented — see §25 |
+| **Final Print Validation** *(not implemented)* | Is the *resulting production asset* actually print-ready? | Same `PrintValidationCapability`, re-run against the production asset once one exists | Not implemented — only this later run may ever justify `PrintProject.status = "print_ready"` |
+
+Provisional Print Readiness reuses the exact same `PrintValidationCapability`
+and `PrintValidationReport` shape a future Final Print Validation run would
+use — there is no second, parallel "provisional" contract. What makes a run
+provisional vs. authoritative is entirely *what it validates* (an
+as-generated ~1024×1024px concept vs. a would-be finished production
+asset) and *what happens with the result* (logged only, vs. gating a real
+lifecycle transition) — never a different code path. This is why Phase 2A
+requires no new types: `PrintValidationReport.status` already means "what
+would it take to make *this specific asset* print-ready," which is exactly
+as true of a freshly generated concept as it will be of a future production
+asset.
+
+Concretely, in Phase 2A:
+
+- A generated concept being `finalization_required` is **expected,
+  routine, logged-and-ignored intelligence** — not a failure, not a
+  customer-visible state, and not a reason to block concept selection,
+  revision, or anything else in the existing flow.
+- Nothing transitions `PrintProject.status` to `"finalizing"` or
+  `"print_ready"` in Phase 2A. Those remain unused, reserved for whenever
+  Final Artwork / Final Print Validation exist.
+- Nothing marks an `ArtworkVersion` as "final" — `isSelected` /
+  `selectedArtworkVersionId` (concept selection) are unchanged and remain
+  the closest existing mechanism to "customer picked a direction," which
+  is still not the same thing as "this is the confirmed final artwork" (see
+  the Phase 1 lifecycle audit below, unchanged in Phase 2A).
+- `requiredTransformations` is **never executed** — Phase 2A only computes
+  and logs it as intelligence for a future Final Artwork capability to
+  consume.
+
+#### Current concept behavior (Goal 10)
+
+A real ~1024×1024px generated concept intended for a full-back print
+(12×14in target, 300 PPI) computes an effective resolution of ≈73–85 PPI —
+well under target — and correctly reports `finalization_required` with
+`regenerate_at_production_dimensions`/`upscale_raster_artwork` required,
+even when Concept Evaluation reports `passed`/`needs_review` for the same
+concept. Verified by test at two levels: `print-validation-capability.test.ts`
+Scenario A (the pure capability) and
+`generation-worker-print-validation.test.ts` (Sprint 2M Phase 2A — the same
+scenario driven end-to-end through the real worker pipeline, confirming
+`PrintProject.status` and the persisted `ArtworkVersion` are unaffected).
+
+#### Artwork lifecycle audit (Goal 1)
+
+- **Selected concept** (`ArtworkVersion.isSelected`,
+  `PrintProject.selectedArtworkVersionId`, written by
+  `ConversationCapability.selectConcept`) and **final customer-approved
+  artwork direction** are **not currently distinct states**. Selecting a
+  concept only transitions the conversation to `ask_revisions`; it does not
+  change `PrintProject.status`, freeze the concept, or create any new
+  version. `ProjectStatus` reserves `"finalizing"` and `"print_ready"` values
+  that are defined but never assigned anywhere in the codebase today — the
+  natural (but not yet built) home for a real "customer confirmed this as
+  final" state, most likely produced by a future Final Artwork capability
+  rather than by Print Validation itself. Per Goal 1, Phase 1 does **not**
+  invent this new state — `PrintValidationCapability.validateArtwork`
+  accepts any `artworkVersionId`, selected or not, and does not require or
+  assume a "final approval" status that does not yet exist.
+- `ArtworkVersion.printValidationStatus` (`text null`, no CHECK constraint,
+  added in the Sprint 2H Part 1 migration) can represent the
+  `PrintValidationReport.status` lifecycle cleanly as-is — no migration is
+  needed if/when something starts writing it. **Phase 2A re-audited this
+  decision (rather than assuming the Phase 1 report's own suggestion to
+  wire persistence in next) and confirmed leaving it `null` is still
+  correct, for a sharper reason than Phase 1 had:** the column has exactly
+  one name and no documented distinction between "provisional concept-stage
+  reading" and "authoritative production-asset reading." If Phase 2A wrote
+  a provisional `finalization_required` into it, any future code (or
+  operator) reading that column would have no way to tell a provisional
+  reading from a future authoritative one without inventing a second
+  column or an enum-prefix convention anyway — an ambiguity worth avoiding
+  by simply not persisting the provisional signal at all, rather than
+  papering over it with a naming convention. Recomputation is cheap here in
+  a way it might not be for a genuine production-asset validation
+  (`BriefEvaluation`/`ConceptStatusView`/`RevisionImpact` precedent, §18)
+  since every input (`ArtworkVersion`, its asset, the approved brief
+  snapshot, its Concept Evaluation) is already durably persisted —
+  provisional readiness can always be recomputed later from those records
+  with zero data loss. `evaluationStatus`/`evaluation` (Concept Evaluation)
+  remain the only persisted per-concept fields this pipeline touches;
+  `printValidationStatus` stays reserved `null`. If a future phase
+  concludes persistence is genuinely required (e.g. to filter/query
+  provisional readiness at scale), it should introduce a distinctly named
+  column or an explicit `{ stage: "provisional" | "final", status }` shape
+  — never silently overload this one.
+- `TShirtDesignBrief.intendedPrintWidthIn` exists on the domain type but is
+  never populated by any extraction/interview path and is **not** carried
+  into `DesignBriefSnapshotContent` (the frozen approval snapshot) — so
+  even if a customer's intended print width were somehow captured, an
+  approved concept could not read it today. This is why target physical
+  dimensions in Phase 1 are derived from `PrintPlacement` (a coarse,
+  internal size table) rather than a customer-specified inch value. A
+  future sprint that wants a real customer-specified physical size needs to
+  both populate this field and add it to `DesignBriefSnapshotContent` — out
+  of scope for Phase 1.
+- **Sprint 2M Phase 2A:** `GenerationWorkerCapability` now calls
+  `PrintValidationCapability` — via `runProvisionalPrintValidation`,
+  immediately after Concept Evaluation completes for each concept, on both
+  the fresh-generation path and the idempotent `alreadyGenerated`
+  evaluation-backfill path. No route or any other capability calls it. The
+  call is wrapped so any failure inside it (including the internal
+  `repo.getLatestDesignBriefVersion` provenance lookup) is caught and
+  logged, never rethrown — a Print Validation problem can never fail, retry,
+  or alter a concept-generation job (Goal 9). Still introduces zero
+  customer-visible behavior change: the result is logged (whitelisted
+  fields only — see `print-validation-logging.ts`) and otherwise discarded.
 
 ### PrintVaultCapability — Reserved
 
@@ -667,11 +898,16 @@ GenerationSchedulerCapability
               +--> ConceptEvaluationCapability
               |         |
               |         +--> ConceptEvaluationProvider (interface)
+              +--> PrintValidationCapability (Sprint 2M Phase 2A —
+              |         provisional only; see runProvisionalPrintValidation)
+              |         |
+              |         +--> assembleProvisionalPrintValidationInput (pure)
               +--> ProjectRepository
 
 Shared pure modules (not capabilities):
   interview-coverage-policy, product-rule-packs, concept-relevance,
-  question-phrasing, brief-diff, generation-retry-policy
+  question-phrasing, brief-diff, generation-retry-policy,
+  print-placement-dimensions
 ```
 
 ### Prohibited reverse dependencies
@@ -695,6 +931,16 @@ Do not introduce:
 - Design Brief storage of provider prompt dialect
 - Customer-facing exposure of provider keys, job ids, asset ids, evaluation scores, or storage modes
 - ProductIntelligence ↔ RevisionIntelligence capability dependency (share `product-rule-packs`)
+- PrintValidationCapability gaining a repository, provider, or storage
+  dependency (Sprint 2M Phase 2A keeps it pure; `GenerationWorkerCapability`
+  does all I/O and calls it, not the other way around)
+- Treating a provisional Print Validation result (run against a generated
+  concept) as authoritative production validation — persisting it,
+  transitioning `PrintProject.status` to `"finalizing"`/`"print_ready"`,
+  freezing/marking an `ArtworkVersion` as final, or executing
+  `requiredTransformations` from it
+- A provisional Print Validation failure/error blocking, retrying, or
+  altering a `GenerationJob`'s outcome (must be caught and logged only)
 
 ---
 
@@ -1447,7 +1693,13 @@ Pipeline:
 8. ConceptEvaluationCapability evaluates each concept against the approved
    brief (provider-neutral; results persisted; never blocks Phase 1)
 9. Artwork versions persist with brief/job/asset/evaluation provenance
-10. Assistant message announces concepts ready (customer-safe)
+10. **Sprint 2M Phase 2A:** `runProvisionalPrintValidation` runs
+    `PrintValidationCapability.validateArtwork` per newly persisted
+    `ArtworkVersion` — provisional intelligence only, logged internally,
+    never persisted, never blocking; see §5's "Provisional Print Readiness
+    vs. Final Print Validation"
+11. Assistant message announces concepts ready (customer-safe) — unaffected
+    by step 10; provisional print-readiness never changes this message
 
 ### Providers
 
@@ -1499,7 +1751,7 @@ Generation Worker
 |---|---|---|
 | Question | Does this concept match the approved Design Brief? | Is this artwork production-/print-ready? |
 | Criteria | wording, style, graphics, palette, composition, readability, exclusions, product compatibility, overall alignment | DPI, transparency, vector/raster quality, print size, embroidery limits |
-| Phase 1/2 | Architecture, persistence, and a real evaluator; still no UI gating | Reserved stub |
+| Phase 1/2 | Architecture, persistence, and a real evaluator; still no UI gating | Sprint 2M Phase 1: real deterministic capability; pure/recomputed, not persisted, not wired into any pipeline yet — see §5 |
 
 Persistence on `ArtworkVersion` (provider-neutral, unchanged since Phase 1):
 
@@ -2100,7 +2352,44 @@ Verified against the implementation:
   vision-based evaluator when configured — but still does not block, reject,
   rank, or hide concepts from customers; no UI scoring yet. Remains
   advisory-only until a future phase decides to act on it
-- Print Validation is stub-only (`overall: "not_run"`)
+- Print Validation (Sprint 2M Phase 1) is real, tested, deterministic
+  architecture. **Sprint 2M Phase 2A** wires it into
+  `GenerationWorkerCapability`, run automatically after Concept Evaluation
+  for every generated concept — but only as provisional, logged-only
+  intelligence (see §5's "Provisional Print Readiness vs. Final Print
+  Validation"). No route or UI calls it. Nothing persists
+  `ArtworkVersion.printValidationStatus` — that decision was re-audited in
+  Phase 2A, not merely carried over, and remains `null` by design (§5).
+  There is still no Final Artwork / Production Artwork capability to act on
+  `requiredTransformations`, and no authoritative (post-finalization) Print
+  Validation run exists yet — see the Phase 2A report for what that would
+  require
+- Print Validation infers production category/method from free-text
+  Design Brief fields via deterministic keyword matching — not a
+  customer-collected production-method field (none exists; Constitution
+  §6.6 says it shouldn't). A product description that never uses a
+  recognized keyword (e.g. "embroider", "screen print", "banner") is
+  correctly classified `"unknown"`/`printMethodConfidence: "unknown"` and
+  assumed to be DTF-style raster (the one production path this product
+  actually generates artwork for today) rather than left unclassifiable
+  outright — this is a coarse heuristic, not language understanding
+- `TShirtDesignBrief.intendedPrintWidthIn` exists but is never populated by
+  any extraction/interview path and is not carried into
+  `DesignBriefSnapshotContent` — Print Validation's target physical
+  dimensions are derived from `PrintPlacement` only (a coarse internal size
+  table, `shared/print-placement-dimensions.ts`), never a real
+  customer-specified physical size
+- Banner/sign target dimensions are a single fixed placeholder size
+  (36×72in) — the Design Brief has no field for a customer-specified sign
+  size, and `PrintPlacement` does not model non-apparel placements at all
+- There is no distinct "customer confirmed this as final artwork
+  direction" state — `ArtworkVersion.isSelected` /
+  `PrintProject.selectedArtworkVersionId` (concept selection) is the
+  closest existing mechanism, but selecting a concept only starts the
+  revision conversation; it does not freeze or "approve" anything.
+  `ProjectStatus`'s `"finalizing"`/`"print_ready"` values are defined but
+  never assigned anywhere in the codebase. Print Validation Phase 1
+  deliberately does not invent a replacement for this gap (see §5's audit)
 - Generated concepts are not print-ready production assets
 - Print Vault behavior is not implemented
 - Ownership/licensing enforcement is not implemented
@@ -2179,7 +2468,8 @@ Describe attachment points only — not a delivery plan:
 | RegenerationIntelligenceCapability | **Phase 1–3 done — see §13a.** Live on explicit regeneration only. Future: richer evaluation-driven guidance / RejectedConceptMemory population; never auto-retry; never generate artwork itself; never mutate the brief |
 | RevisionTimelineCapability | **Phase 2–3 done.** Derive ephemeral timelines on regeneration only; never persist |
 | GenerationIntent | **Phase 3 done.** Sole PromptTranslation input; immutable; never persisted; never customer-facing |
-| PrintValidationCapability | Replace stub; validate artwork against approved brief; never mutate brief; never confuse with Concept Evaluation |
+| PrintValidationCapability | **Sprint 2M Phase 1 (architecture) + Phase 2A (wired as provisional intelligence into `GenerationWorkerCapability`) done — see §5.** Still not called by any route or UI, and still never persisted. Future: a customer-facing finalization flow; persist `printValidationStatus` (or a distinctly named/shaped column) only if a real query/filter need justifies it, and never in a way that conflates provisional with authoritative readings; never mutate brief; never confuse with Concept Evaluation |
+| **FinalArtworkCapability** (or **ProductionArtworkCapability**) — reserved, not implemented | Takes a `PrintValidationReport` with `status !== "ready"`, performs the transformations named in `requiredTransformations` (upscale, remove background, vectorize, outline fonts, verify/recreate text, produce final PNG/SVG/PDF), produces a new production asset, and re-validates. Must never generate/transform anything Print Validation itself decided; Print Validation must remain pure validation (Goal 17) |
 | Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider` (e.g. a dedicated OCR specialist, a different vision model); no domain change |
 | Production file generation | New assets linked via `printAssetId` / dedicated kinds |
 | Vector output | `vectorAssetId` / SVG asset kinds |

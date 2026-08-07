@@ -344,22 +344,17 @@ export interface DesignSummaryView {
   additionalNotes?: string | null;
 }
 
-export type ValidationSeverity = "info" | "warning" | "error";
-
-export interface ValidationCheck {
-  code: string;
-  label: string;
-  severity: ValidationSeverity;
-  passed: boolean | null;
-  message: string;
-}
-
-export interface ValidationReport {
-  artworkId: string;
-  designBriefVersionId?: string | null;
-  checks: ValidationCheck[];
-  overall: "pass" | "fail" | "needs_review" | "not_run";
-}
+/**
+ * Sprint 2M Phase 1: the reserved `ValidationReport`/`ValidationCheck` stub
+ * contracts (Sprint 2C) have been replaced by the real, richer
+ * `PrintValidationReport`/`PrintValidationCheck` contracts in
+ * `@/capabilities/print-validation/contracts` — see that module and
+ * ARCHITECTURE.md's Print Validation section. Kept out of this shared file
+ * (unlike most cross-capability DTOs here) because Print Validation's
+ * contracts are provider-neutral to this one capability only, matching how
+ * Concept Evaluation's contracts live in `@/capabilities/concept-evaluation/contracts`
+ * rather than here.
+ */
 
 export interface ConceptGenerationRequest {
   designId: string;
