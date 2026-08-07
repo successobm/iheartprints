@@ -8,6 +8,8 @@ import type {
   DesignBriefSnapshotContent,
   DesignBriefVersion,
   DesignConversation,
+  FinalArtworkJob,
+  FinalDirectionApproval,
   GenerationJob,
   InterviewStateData,
   MessageRole,
@@ -91,6 +93,18 @@ export interface ApproveDesignBriefInput {
   briefId: string;
   versionNumber: number;
   content: DesignBriefSnapshotContent;
+}
+
+/** Sprint 2M Phase 2B. */
+export interface CreateFinalDirectionApprovalInput {
+  artworkVersionId: string;
+  designBriefVersionId: string;
+}
+
+/** Sprint 2M Phase 2B. */
+export interface CreateFinalArtworkJobInput {
+  finalDirectionApprovalId: string;
+  artworkVersionId: string;
 }
 
 /**
@@ -226,4 +240,45 @@ export interface ProjectRepository {
    * Everything).
    */
   deleteAsset(assetId: string): Promise<void>;
+
+  // --- Sprint 2M Phase 2B: final direction approval + final artwork job ---
+
+  /**
+   * Inserts a new "active" `FinalDirectionApproval` row. Implementations
+   * must throw `UniqueConstraintViolationError` if another row for this
+   * project is already "active" (at most one active approval per project —
+   * `FinalArtworkCapability` is responsible for superseding the prior one
+   * first) rather than allowing two simultaneously-active approvals.
+   */
+  createFinalDirectionApproval(
+    projectId: string,
+    input: CreateFinalDirectionApprovalInput,
+  ): Promise<FinalDirectionApproval>;
+  getActiveFinalDirectionApproval(
+    projectId: string,
+  ): Promise<FinalDirectionApproval | null>;
+  /**
+   * Marks the project's current active approval (if any) as superseded.
+   * Idempotent no-op (returns `null`) when nothing is currently active —
+   * safe to call unconditionally from the regeneration-completion path.
+   */
+  supersedeActiveFinalDirectionApproval(
+    projectId: string,
+  ): Promise<FinalDirectionApproval | null>;
+
+  /**
+   * Idempotent production-finalization request, keyed 1:1 to one
+   * `FinalDirectionApproval`. Implementations must throw
+   * `UniqueConstraintViolationError` on a duplicate
+   * `(project_id, final_direction_approval_id)` insert rather than creating
+   * a second competing job. Phase 2B never claims or runs this job.
+   */
+  createFinalArtworkJob(
+    projectId: string,
+    input: CreateFinalArtworkJobInput,
+  ): Promise<FinalArtworkJob>;
+  getFinalArtworkJobByApprovalId(
+    projectId: string,
+    finalDirectionApprovalId: string,
+  ): Promise<FinalArtworkJob | null>;
 }

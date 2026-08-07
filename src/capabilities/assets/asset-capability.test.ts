@@ -59,6 +59,7 @@ describe("AssetCapability", () => {
       metadata: { generatedAt: "2026-08-05T00:00:00.000Z" },
       vectorAssetId: null,
       printAssetId: null,
+      finalArtworkJobId: null,
     });
 
     assert.ok(registered);
@@ -92,6 +93,7 @@ describe("AssetCapability", () => {
       metadata: {},
       vectorAssetId: null,
       printAssetId: null,
+      finalArtworkJobId: null,
     });
 
     const listForSecond = await assets.listAssets(second.project.id);
@@ -117,6 +119,7 @@ describe("AssetCapability", () => {
       metadata: { generatedAt: "2026-08-05T00:00:00.000Z", sizeRequested: "1024x1024" },
       vectorAssetId: null,
       printAssetId: null,
+      finalArtworkJobId: null,
     });
 
     const serialized = JSON.stringify(registered?.metadata ?? {});
@@ -313,6 +316,7 @@ describe("AssetCapability", () => {
         metadata: {},
         vectorAssetId: null,
         printAssetId: null,
+        finalArtworkJobId: null,
       });
       assert.ok(registered);
 
@@ -362,6 +366,7 @@ describe("AssetCapability", () => {
         metadata: {},
         vectorAssetId: null,
         printAssetId: null,
+        finalArtworkJobId: null,
       });
       assert.ok(registered);
 

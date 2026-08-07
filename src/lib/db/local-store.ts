@@ -14,6 +14,8 @@ import type {
   ConversationPhase,
   DesignBriefVersion,
   DesignConversation,
+  FinalArtworkJob,
+  FinalDirectionApproval,
   GenerationJob,
   InterviewStateData,
   PrintProject,
@@ -25,6 +27,8 @@ import type {
   ApproveDesignBriefInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
+  CreateFinalArtworkJobInput,
+  CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
   CreateMessageInput,
   ProjectRepository,
@@ -43,6 +47,9 @@ interface LocalDatabase {
   /** Sprint 2H Part 1. */
   generationJobs: GenerationJob[];
   assets: AssetRecord[];
+  /** Sprint 2M Phase 2B. */
+  finalDirectionApprovals: FinalDirectionApproval[];
+  finalArtworkJobs: FinalArtworkJob[];
 }
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -62,6 +69,8 @@ function emptyDb(): LocalDatabase {
     designBriefVersions: [],
     generationJobs: [],
     assets: [],
+    finalDirectionApprovals: [],
+    finalArtworkJobs: [],
   };
 }
 
@@ -119,7 +128,14 @@ async function readDb(): Promise<LocalDatabase> {
         completedAt: job.completedAt ?? null,
         heartbeatAt: job.heartbeatAt ?? null,
       })),
-      assets: parsed.assets ?? [],
+      // Sprint 2M Phase 2B: default the new reserved field for on-disk data
+      // written before it existed, so resume never crashes.
+      assets: (parsed.assets ?? []).map((asset) => ({
+        ...asset,
+        finalArtworkJobId: asset.finalArtworkJobId ?? null,
+      })),
+      finalDirectionApprovals: parsed.finalDirectionApprovals ?? [],
+      finalArtworkJobs: parsed.finalArtworkJobs ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -690,5 +706,114 @@ export class LocalProjectRepository implements ProjectRepository {
     if (index === -1) return;
     db.assets.splice(index, 1);
     await writeDb(db);
+  }
+
+  // --- Sprint 2M Phase 2B: final direction approval + final artwork job ---
+
+  async createFinalDirectionApproval(
+    projectId: string,
+    input: CreateFinalDirectionApprovalInput,
+  ): Promise<FinalDirectionApproval> {
+    const db = await readDb();
+    const existingActive = db.finalDirectionApprovals.find(
+      (item) => item.projectId === projectId && item.status === "active",
+    );
+    if (existingActive) {
+      // Every method on this store already runs behind `withLock`, so a
+      // second active row for the same project can only happen if a caller
+      // skipped `supersedeActiveFinalDirectionApproval` first — mirror the
+      // Supabase unique-partial-index behavior rather than silently
+      // allowing two active rows.
+      throw new UniqueConstraintViolationError(
+        "final_direction_approvals_active_per_project",
+      );
+    }
+
+    const timestamp = nowIso();
+    const approval: FinalDirectionApproval = {
+      id: randomUUID(),
+      projectId,
+      artworkVersionId: input.artworkVersionId,
+      designBriefVersionId: input.designBriefVersionId,
+      status: "active",
+      approvedAt: timestamp,
+      supersededAt: null,
+      createdAt: timestamp,
+    };
+    db.finalDirectionApprovals.push(approval);
+    await writeDb(db);
+    return approval;
+  }
+
+  async getActiveFinalDirectionApproval(
+    projectId: string,
+  ): Promise<FinalDirectionApproval | null> {
+    const db = await readDb();
+    return (
+      db.finalDirectionApprovals.find(
+        (item) => item.projectId === projectId && item.status === "active",
+      ) ?? null
+    );
+  }
+
+  async supersedeActiveFinalDirectionApproval(
+    projectId: string,
+  ): Promise<FinalDirectionApproval | null> {
+    const db = await readDb();
+    const active = db.finalDirectionApprovals.find(
+      (item) => item.projectId === projectId && item.status === "active",
+    );
+    if (!active) return null;
+
+    active.status = "superseded";
+    active.supersededAt = nowIso();
+    await writeDb(db);
+    return active;
+  }
+
+  async createFinalArtworkJob(
+    projectId: string,
+    input: CreateFinalArtworkJobInput,
+  ): Promise<FinalArtworkJob> {
+    const db = await readDb();
+    const duplicate = db.finalArtworkJobs.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.finalDirectionApprovalId === input.finalDirectionApprovalId,
+    );
+    if (duplicate) {
+      throw new UniqueConstraintViolationError(
+        "final_artwork_jobs_project_id_final_direction_approval_id",
+      );
+    }
+
+    const timestamp = nowIso();
+    const job: FinalArtworkJob = {
+      id: randomUUID(),
+      projectId,
+      finalDirectionApprovalId: input.finalDirectionApprovalId,
+      artworkVersionId: input.artworkVersionId,
+      status: "queued",
+      lastError: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.finalArtworkJobs.push(job);
+    await writeDb(db);
+    return job;
+  }
+
+  async getFinalArtworkJobByApprovalId(
+    projectId: string,
+    finalDirectionApprovalId: string,
+  ): Promise<FinalArtworkJob | null> {
+    const db = await readDb();
+    return (
+      db.finalArtworkJobs.find(
+        (item) =>
+          item.projectId === projectId &&
+          item.finalDirectionApprovalId === finalDirectionApprovalId,
+      ) ?? null
+    );
   }
 }

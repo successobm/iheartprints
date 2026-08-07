@@ -17,6 +17,7 @@ import type { ConversationUnderstandingCapability } from "@/capabilities/convers
 import type { DesignBriefCapability } from "@/capabilities/design-brief";
 import type { DesignIntelligenceCapability } from "@/capabilities/design-intelligence";
 import type { DesignSummaryCapability } from "@/capabilities/design-summary";
+import type { FinalArtworkCapability } from "@/capabilities/final-artwork";
 import type { IntentExtractionCapability } from "@/capabilities/intent-extraction";
 import type { InterviewIntelligenceCapability } from "@/capabilities/interview-intelligence";
 import type { RevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
@@ -58,6 +59,8 @@ export interface ConversationCapabilityDeps {
   revisionIntelligence: RevisionIntelligenceCapability;
   designSummary: DesignSummaryCapability;
   conceptGeneration: ConceptGenerationCapability;
+  /** Sprint 2M Phase 2B: owns final-direction approval persistence + idempotent finalization request. */
+  finalArtwork: FinalArtworkCapability;
 }
 
 /** Phases where free-text chat input is not the expected interaction. */
@@ -136,6 +139,17 @@ export interface ConversationCapability {
     designId: string,
     artworkVersionId: string,
   ): Promise<ProjectSnapshot>;
+  /**
+   * Sprint 2M Phase 2B: the customer's explicit "this is my final direction
+   * — prepare it for production" action. Distinct from `selectConcept` —
+   * selecting only means "I want to work with this direction" and may
+   * still be revised; this is the sole action that may authorize a
+   * `FinalArtworkJob`. Idempotent — see `FinalArtworkCapability`.
+   */
+  approveFinalDirection(
+    designId: string,
+    artworkVersionId: string,
+  ): Promise<ProjectSnapshot>;
   /** Approve / Edit / Continue in response to a presented Design Summary. */
   submitDesignBriefDecision(
     designId: string,
@@ -161,6 +175,7 @@ export function createConversationCapability(
     revisionIntelligence,
     designSummary,
     conceptGeneration,
+    finalArtwork,
   } = deps;
 
   /**
@@ -726,6 +741,34 @@ export function createConversationCapability(
         content: "What changes would you like to make to this concept?",
         metadata: { phase: "ask_revisions" },
       });
+
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new Error("Project not found");
+      return snapshot;
+    },
+
+    async approveFinalDirection(designId, artworkVersionId) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+
+      const result = await finalArtwork.requestFinalArtwork(
+        designId,
+        artworkVersionId,
+      );
+
+      // Idempotent retry (double-click, duplicate request, reload) never
+      // posts a second acknowledgement message.
+      if (!result.alreadyRequested) {
+        await repo.addMessage(designId, {
+          role: "assistant",
+          content:
+            "Thanks — I've noted this as your final direction. I'm preparing your print-ready artwork now.",
+          metadata: {
+            phase: current.conversation.phase,
+            act: "final_direction_approved",
+          },
+        });
+      }
 
       const snapshot = await repo.getProject(designId);
       if (!snapshot) throw new Error("Project not found");

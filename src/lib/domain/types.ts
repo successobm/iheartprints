@@ -292,6 +292,18 @@ export interface AssetRecord {
   vectorAssetId: string | null;
   /** Reserved for a future print-ready production asset. */
   printAssetId: string | null;
+  /**
+   * Sprint 2M Phase 2B: set only on a production asset a future
+   * `FinalArtworkCapability` transformation produces for a given
+   * `FinalArtworkJob` — never set on a concept-stage asset. This is the
+   * unambiguous, non-filename, non-path way to tell a concept source image
+   * apart from a production deliverable (Goal 8): `generationJobId !== null`
+   * means "concept asset"; `finalArtworkJobId !== null` means "production
+   * asset". One `FinalArtworkJob` may eventually own multiple production
+   * assets (PNG + SVG + PDF), since this is a foreign key, not a 1:1 slot.
+   * Always `null` in Phase 2B — no production transformation runs yet.
+   */
+  finalArtworkJobId: string | null;
   createdAt: string;
 }
 
@@ -430,4 +442,77 @@ export interface ProjectSnapshot {
   artworkVersions: ArtworkVersion[];
   /** Sprint 2D: append-only approved brief versions, most recent last. */
   designBriefVersions: DesignBriefVersion[];
+}
+
+/**
+ * Sprint 2M Phase 2B: the customer's explicit, durable "this is my final
+ * direction — prepare it for production" decision. Distinct from concept
+ * *selection* (`ArtworkVersion.isSelected` /
+ * `PrintProject.selectedArtworkVersionId`), which only means "I want to work
+ * with this direction" and may still be revised freely.
+ *
+ * Modeled as its own append-only, immutable record (never as a mutable
+ * boolean on `ArtworkVersion` or `PrintProject`) for the same reasons
+ * `DesignBriefVersion` is its own table rather than a flag on the working
+ * brief: auditability (who approved what, when), the ability to supersede
+ * without destroying history (Constitution §6.11 — Version Everything), and
+ * unambiguous idempotency (`status`, not a shared mutable field, decides
+ * what is currently authoritative). Internal only — never included in
+ * `ProjectSnapshot`, mirroring `GenerationJob`/`AssetRecord`; a customer-safe
+ * derived status is computed separately (see `conversation-service.ts`).
+ */
+export type FinalDirectionApprovalStatus = "active" | "superseded";
+
+export interface FinalDirectionApproval {
+  id: string;
+  projectId: string;
+  /** The exact, immutable concept this approval authorizes — never "whatever is currently selected". */
+  artworkVersionId: string;
+  /** The approved Design Brief version this artwork was generated against, at the moment of approval. */
+  designBriefVersionId: string;
+  /**
+   * At most one row per project may be "active" at a time. A newer approval
+   * (a different `artworkVersionId`) or a new concept batch produced by
+   * regeneration after this approval both supersede it — see
+   * `FinalArtworkCapability` and `GenerationWorkerCapability`'s
+   * regeneration-completion path. Superseding never deletes or rewrites this
+   * row; it only flips `status`/`supersededAt` going forward.
+   */
+  status: FinalDirectionApprovalStatus;
+  approvedAt: string;
+  supersededAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * Sprint 2M Phase 2B: customer-never-sees-this lifecycle for a single
+ * production-finalization attempt, keyed 1:1 to the `FinalDirectionApproval`
+ * that authorized it (never to a `PrintProject` or `ArtworkVersion` directly
+ * — that keying is what makes "double-click"/"duplicate request" naturally
+ * idempotent without a separate dedupe key). Deliberately its own table
+ * rather than a reuse of `GenerationJob`: different trigger (explicit
+ * approval, not brief approval), different idempotency authority (the
+ * approval id, not `(project, approvedBriefVersion)`), different output
+ * (production `AssetRecord`s + an eventual authoritative
+ * `PrintValidationReport`, not concept `ArtworkVersion`s). Phase 2B never
+ * claims, runs, or completes this job — it only ever sits `"queued"`; see
+ * `FinalArtworkCapability`.
+ */
+export type FinalArtworkJobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface FinalArtworkJob {
+  id: string;
+  projectId: string;
+  finalDirectionApprovalId: string;
+  /** Denormalized for convenient querying — always the same artwork the approval references. */
+  artworkVersionId: string;
+  status: FinalArtworkJobStatus;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
 }

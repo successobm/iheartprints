@@ -556,6 +556,12 @@ export function createGenerationWorkerCapability(
       }
       if (job.kind === "regeneration") {
         await repo.updateProject(designId, { selectedArtworkVersionId: null });
+        // Sprint 2M Phase 2B (Goal 4): a new concept batch means the
+        // artwork behind any prior final-direction approval no longer
+        // exists as "the current direction" — the prior approval can never
+        // silently authorize production of what just replaced it. Safe to
+        // call unconditionally: a no-op when nothing is currently active.
+        await repo.supersedeActiveFinalDirectionApproval(designId);
       }
       await repo.updateGenerationJob(job.id, {
         status: "completed",

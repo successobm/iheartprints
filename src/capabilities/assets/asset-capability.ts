@@ -123,6 +123,7 @@ export function createAssetCapability(
           metadata: input.metadata,
           vectorAssetId: null,
           printAssetId: null,
+          finalArtworkJobId: null,
         });
       } catch (error) {
         // Asset Cleanup: bytes landed in storage but the record that would
@@ -205,6 +206,7 @@ async function tryCreateThumbnail(
         metadata: {},
         vectorAssetId: null,
         printAssetId: null,
+        finalArtworkJobId: null,
       });
     } catch (error) {
       await safeDelete(storage, uploadedThumb.objectKey);

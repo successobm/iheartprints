@@ -14,6 +14,10 @@ import type {
   DesignBriefVersion,
   DesignBriefVersionStatus,
   DesignConversation,
+  FinalArtworkJob,
+  FinalArtworkJobStatus,
+  FinalDirectionApproval,
+  FinalDirectionApprovalStatus,
   GenerationJob,
   GenerationJobStatus,
   InterviewStateData,
@@ -26,6 +30,8 @@ import type {
   ApproveDesignBriefInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
+  CreateFinalArtworkJobInput,
+  CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
   CreateMessageInput,
   ProjectRepository,
@@ -144,7 +150,30 @@ type DbAsset = {
   metadata: Record<string, unknown> | null;
   vector_asset_id: string | null;
   print_asset_id: string | null;
+  final_artwork_job_id: string | null;
   created_at: string;
+};
+
+type DbFinalDirectionApproval = {
+  id: string;
+  project_id: string;
+  artwork_version_id: string;
+  design_brief_version_id: string;
+  status: FinalDirectionApprovalStatus;
+  approved_at: string;
+  superseded_at: string | null;
+  created_at: string;
+};
+
+type DbFinalArtworkJob = {
+  id: string;
+  project_id: string;
+  final_direction_approval_id: string;
+  artwork_version_id: string;
+  status: FinalArtworkJobStatus;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 type DbDesignBriefVersion = {
@@ -281,7 +310,36 @@ function mapAsset(row: DbAsset): AssetRecord {
     metadata: row.metadata ?? {},
     vectorAssetId: row.vector_asset_id,
     printAssetId: row.print_asset_id,
+    finalArtworkJobId: row.final_artwork_job_id ?? null,
     createdAt: row.created_at,
+  };
+}
+
+function mapFinalDirectionApproval(
+  row: DbFinalDirectionApproval,
+): FinalDirectionApproval {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    artworkVersionId: row.artwork_version_id,
+    designBriefVersionId: row.design_brief_version_id,
+    status: row.status,
+    approvedAt: row.approved_at,
+    supersededAt: row.superseded_at,
+    createdAt: row.created_at,
+  };
+}
+
+function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    finalDirectionApprovalId: row.final_direction_approval_id,
+    artworkVersionId: row.artwork_version_id,
+    status: row.status,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -898,6 +956,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
         metadata: input.metadata,
         vector_asset_id: input.vectorAssetId,
         print_asset_id: input.printAssetId,
+        final_artwork_job_id: input.finalArtworkJobId,
       })
       .select("*")
       .single();
@@ -928,5 +987,106 @@ export class SupabaseProjectRepository implements ProjectRepository {
   async deleteAsset(assetId: string): Promise<void> {
     const { error } = await this.client.from("assets").delete().eq("id", assetId);
     if (error) throw error;
+  }
+
+  // --- Sprint 2M Phase 2B: final direction approval + final artwork job ---
+
+  async createFinalDirectionApproval(
+    projectId: string,
+    input: CreateFinalDirectionApprovalInput,
+  ): Promise<FinalDirectionApproval> {
+    const { data, error } = await this.client
+      .from("final_direction_approvals")
+      .insert({
+        project_id: projectId,
+        artwork_version_id: input.artworkVersionId,
+        design_brief_version_id: input.designBriefVersionId,
+        status: "active",
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "final_direction_approvals_active_per_project",
+        );
+      }
+      throw error;
+    }
+
+    return mapFinalDirectionApproval(data as DbFinalDirectionApproval);
+  }
+
+  async getActiveFinalDirectionApproval(
+    projectId: string,
+  ): Promise<FinalDirectionApproval | null> {
+    const { data, error } = await this.client
+      .from("final_direction_approvals")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("status", "active")
+      .maybeSingle();
+    if (error) throw error;
+    return data
+      ? mapFinalDirectionApproval(data as DbFinalDirectionApproval)
+      : null;
+  }
+
+  async supersedeActiveFinalDirectionApproval(
+    projectId: string,
+  ): Promise<FinalDirectionApproval | null> {
+    const { data, error } = await this.client
+      .from("final_direction_approvals")
+      .update({ status: "superseded", superseded_at: new Date().toISOString() })
+      .eq("project_id", projectId)
+      .eq("status", "active")
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data
+      ? mapFinalDirectionApproval(data as DbFinalDirectionApproval)
+      : null;
+  }
+
+  async createFinalArtworkJob(
+    projectId: string,
+    input: CreateFinalArtworkJobInput,
+  ): Promise<FinalArtworkJob> {
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .insert({
+        project_id: projectId,
+        final_direction_approval_id: input.finalDirectionApprovalId,
+        artwork_version_id: input.artworkVersionId,
+        status: "queued",
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "final_artwork_jobs_project_id_final_direction_approval_id",
+        );
+      }
+      throw error;
+    }
+
+    return mapFinalArtworkJob(data as DbFinalArtworkJob);
+  }
+
+  async getFinalArtworkJobByApprovalId(
+    projectId: string,
+    finalDirectionApprovalId: string,
+  ): Promise<FinalArtworkJob | null> {
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("final_direction_approval_id", finalDirectionApprovalId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapFinalArtworkJob(data as DbFinalArtworkJob) : null;
   }
 }

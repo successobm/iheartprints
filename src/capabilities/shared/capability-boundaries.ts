@@ -432,6 +432,87 @@
  *     `PrintValidationReport` (barring `evaluatedAt`) and produces at most
  *     one additional harmless log line — never a duplicate artwork version,
  *     asset, evaluation record, or lifecycle-state change.
+ *
+ * Sprint 2M Phase 2B additions (Final Artwork Lifecycle & Production
+ * Approval Boundary — the gap Phase 2A's report explicitly reserved):
+ *   Pipeline:
+ *     Customer selects a concept (ArtworkVersion.isSelected /
+ *     PrintProject.selectedArtworkVersionId — unchanged, still just
+ *     "I want to work with this direction")
+ *          ↓
+ *     Revision / regeneration [optional, repeatable — unchanged]
+ *          ↓
+ *     Customer's EXPLICIT "prepare print-ready artwork" action
+ *          ↓
+ *     ConversationCapability.approveFinalDirection(designId, artworkVersionId)
+ *          ↓
+ *     FinalArtworkCapability.requestFinalArtwork  (new capability)
+ *          → validates artworkVersionId belongs to this project, is the
+ *            current (latest-batch) concept, is the project's currently
+ *            selected concept, and is not stale relative to the working
+ *            brief — throws otherwise
+ *          → idempotently persists a FinalDirectionApproval ("active";
+ *            at most one per project; a differing prior approval is
+ *            superseded first, never overwritten)
+ *          → idempotently persists a FinalArtworkJob (status "queued",
+ *            keyed 1:1 to the approval — a duplicate request finds the
+ *            same row, never a second one)
+ *          → sets PrintProject.status = "finalizing"
+ *          ↓
+ *     (Reserved, not implemented in Phase 2B) a future worker claims the
+ *     FinalArtworkJob, performs production transformations per
+ *     PrintValidationReport.requiredTransformations, produces production
+ *     AssetRecord(s) (assets.final_artwork_job_id set — never a filename/
+ *     bucket-path convention), and re-runs PrintValidationCapability
+ *     against that real production asset — only THAT later, authoritative
+ *     run may ever justify PrintProject.status = "print_ready".
+ *   - `FinalDirectionApproval` is a new, durable, append-only record —
+ *     never a mutable boolean on `ArtworkVersion` or `PrintProject`. Chosen
+ *     over both alternatives (see the Phase 2B report's "IMPORTANT DESIGN
+ *     QUESTION" analysis) for the same reasons `DesignBriefVersion` is its
+ *     own table rather than a flag on the working brief: auditability,
+ *     non-destructive supersession, and unambiguous idempotency via
+ *     `status`, not a shared mutable field.
+ *   - `FinalArtworkCapability` is the sole owner of `FinalDirectionApproval`
+ *     writes and `FinalArtworkJob` writes — mirrors `DesignBriefCapability`
+ *     ("sole mutation path for the working brief and approved versions").
+ *     Depends on `ProjectRepository` and the same shared pure modules
+ *     Concept Generation's staleness check uses
+ *     (`shared/brief-diff`, `shared/concept-relevance`) — never on
+ *     `ConceptGenerationCapability` itself, never on a provider, never on
+ *     `PrintValidationCapability` (Phase 2B has no production asset to
+ *     validate yet, so nothing calls it from this path).
+ *   - `GenerationWorkerCapability`'s regeneration-completion path now also
+ *     calls `repo.supersedeActiveFinalDirectionApproval` (alongside its
+ *     existing `selectedArtworkVersionId: null` reset) — a new concept
+ *     batch means any prior final-direction approval's artwork no longer
+ *     exists as "the current direction"; it can never silently authorize
+ *     production of what just replaced it. Safe/idempotent when nothing is
+ *     currently active.
+ *   - `AssetRecord.finalArtworkJobId` (new, reserved, always null in Phase
+ *     2B) is the explicit, non-filename, non-bucket-path way to tell a
+ *     concept-stage asset (`generationJobId` set) apart from a future
+ *     production deliverable (`finalArtworkJobId` set) — see
+ *     ARCHITECTURE.md.
+ *   - `ArtworkVersion.printValidationStatus` is unchanged, still reserved
+ *     `null` — Phase 2B re-confirms Phase 2A's audit with a sharper reason:
+ *     even once authoritative validation exists, it will never belong on
+ *     `ArtworkVersion` at all (one approved direction may yield multiple
+ *     production assets — PNG, SVG, PDF — each with its own readiness), so
+ *     its eventual home is a production-asset-scoped record, not this
+ *     column.
+ *   - No new customer-facing job/approval ids, internal statuses, or
+ *     storage details are exposed. `conversation-service.ts` derives a
+ *     customer-safe `CustomerFinalizationStatus` (`not_requested` /
+ *     `preparing` / `print_ready`) purely from `PrintProject.status` —
+ *     never from a raw `FinalDirectionApproval`/`FinalArtworkJob` row.
+ *   - `FinalArtworkCapability` must never select concepts, interpret
+ *     conversation, evaluate creative quality, decide customer intent
+ *     (the caller already decided; this capability only validates and
+ *     persists), duplicate Print Validation's rules, or mark anything
+ *     print-ready without a real, authoritative validation run against a
+ *     real production asset — impossible in Phase 2B since no
+ *     transformation runs and no production asset can exist yet.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2M2a" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2M2b" as const;

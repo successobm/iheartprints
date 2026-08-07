@@ -19,6 +19,7 @@ import { ConceptStatusBanner } from "./ConceptStatusBanner";
 import { DesignerDecisionCard } from "./DesignerDecisionCard";
 import { DesignSummaryCard, type FieldTransition } from "./DesignSummaryCard";
 import { MessageBubble } from "./MessageBubble";
+import { PrepareForPrintAction } from "./PrepareForPrintAction";
 import { RecommendationCard } from "./RecommendationCard";
 import { buildRevisionTimeline } from "./revision-timeline";
 import { RevisionTimeline } from "./RevisionTimeline";
@@ -267,6 +268,43 @@ export function ChatApp() {
     }
   }
 
+  /**
+   * Sprint 2M Phase 2B: the customer's explicit "this is my final direction"
+   * action — independent of chat, same shape as `selectConcept`/
+   * `regenerateConcepts`. Idempotent server-side, so a stray double click
+   * here is always safe.
+   */
+  async function approveFinalDirection() {
+    const artworkVersionId = snapshot?.project.selectedArtworkVersionId;
+    if (!snapshot || sending || !artworkVersionId) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/finalize`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ artworkVersionId }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to prepare print-ready artwork");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to prepare print-ready artwork",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
   /** Sprint 2G Part 3: undoes the most recent accepted revision, if any. */
   async function undoLastChange() {
     if (!snapshot || sending) return;
@@ -390,6 +428,18 @@ export function ChatApp() {
     !conceptBannerDismissed &&
     // Only meaningful once the customer can actually see concepts.
     (phase === "ask_revisions" || phase === "revision_received" || phase === "concepts_ready");
+
+  // Sprint 2M Phase 2B: same "concepts are visible" phase gate as the
+  // concept-status banner above — a selected, current concept can be
+  // approved for production once the customer is done revising it.
+  const showFinalizeAction =
+    !!snapshot &&
+    (phase === "ask_revisions" || phase === "revision_received" || phase === "concepts_ready");
+  const canRequestFinalArtwork =
+    !!snapshot &&
+    !!snapshot.project.selectedArtworkVersionId &&
+    snapshot.conceptStatus.status !== "needs_update" &&
+    snapshot.finalization.status === "not_requested";
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
@@ -543,6 +593,15 @@ export function ChatApp() {
                 busy={sending}
                 onRegenerate={() => void regenerateConcepts()}
                 onKeepCurrent={() => setConceptBannerDismissed(true)}
+              />
+            ) : null}
+
+            {showFinalizeAction && snapshot ? (
+              <PrepareForPrintAction
+                finalizationStatus={snapshot.finalization.status}
+                canRequest={canRequestFinalArtwork}
+                busy={sending}
+                onPrepare={() => void approveFinalDirection()}
               />
             ) : null}
 

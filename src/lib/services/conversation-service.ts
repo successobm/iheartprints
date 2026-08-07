@@ -23,9 +23,35 @@ import type { ProjectSnapshot, ProjectStatus } from "@/lib/domain/types";
  * so there is a single choke point rather than per-route sanitization.
  */
 
+/**
+ * Sprint 2M Phase 2B: customer-safe finalization state, derived entirely
+ * from `PrintProject.status` — never a raw job/approval id, internal job
+ * status string, or other detail (Goal 16). `"preparing"` is deliberately
+ * not `"print_ready"`: Phase 2B never performs a real production
+ * transformation, so nothing may ever claim readiness it hasn't earned
+ * (Constitution §15).
+ */
+export type CustomerFinalizationStatus =
+  | "not_requested"
+  | "preparing"
+  | "print_ready";
+
+export interface CustomerFinalizationView {
+  status: CustomerFinalizationStatus;
+}
+
+function toCustomerFinalizationView(
+  status: ProjectStatus,
+): CustomerFinalizationView {
+  if (status === "finalizing") return { status: "preparing" };
+  if (status === "print_ready") return { status: "print_ready" };
+  return { status: "not_requested" };
+}
+
 export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
   artworkVersions: ReturnType<typeof toCustomerArtworkVersion>[];
   conceptStatus: CustomerConceptStatusView;
+  finalization: CustomerFinalizationView;
 };
 
 function withConceptStatus(snapshot: ProjectSnapshot): ApiProjectSnapshot {
@@ -38,6 +64,7 @@ function withConceptStatus(snapshot: ProjectSnapshot): ApiProjectSnapshot {
     ...snapshot,
     artworkVersions: snapshot.artworkVersions.map(toCustomerArtworkVersion),
     conceptStatus: toCustomerConceptStatusView(conceptStatus),
+    finalization: toCustomerFinalizationView(snapshot.project.status),
   };
 }
 
@@ -68,6 +95,21 @@ export async function selectConcept(
   artworkVersionId: string,
 ): Promise<ApiProjectSnapshot> {
   const snapshot = await getCapabilityGraph().conversation.selectConcept(
+    projectId,
+    artworkVersionId,
+  );
+  return withConceptStatus(snapshot);
+}
+
+/**
+ * Sprint 2M Phase 2B: the customer's explicit "this is my final direction —
+ * prepare it for production" action. Idempotent — see `FinalArtworkCapability`.
+ */
+export async function approveFinalDirection(
+  projectId: string,
+  artworkVersionId: string,
+): Promise<ApiProjectSnapshot> {
+  const snapshot = await getCapabilityGraph().conversation.approveFinalDirection(
     projectId,
     artworkVersionId,
   );

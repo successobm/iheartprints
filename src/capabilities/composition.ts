@@ -21,6 +21,7 @@ import {
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import { createDesignIntelligenceCapability } from "@/capabilities/design-intelligence";
 import { createDesignSummaryCapability } from "@/capabilities/design-summary";
+import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
 import { createGenerationWorkerCapability } from "@/capabilities/generation-worker";
 import { createIntentExtractionCapability } from "@/capabilities/intent-extraction";
 import { createInterviewIntelligenceCapability } from "@/capabilities/interview-intelligence";
@@ -61,6 +62,8 @@ export interface CapabilityGraph {
    */
   workerScheduler: ReturnType<typeof createGenerationSchedulerCapability>;
   printValidation: ReturnType<typeof createPrintValidationCapability>;
+  /** Sprint 2M Phase 2B: final-direction approval + reserved production orchestration boundary. */
+  finalArtwork: ReturnType<typeof createFinalArtworkCapability>;
   revision: ReturnType<typeof createRevisionCapability>;
   printVault: ReturnType<typeof createPrintVaultCapability>;
   assets: ReturnType<typeof createAssetCapability>;
@@ -126,6 +129,11 @@ export function createCapabilityGraph(
   );
   const workerScheduler = createGenerationSchedulerCapability(generationWorker);
 
+  // Sprint 2M Phase 2B: pure repository-backed capability, no provider/I-O
+  // dependency beyond the repository itself — mirrors DesignBriefCapability's
+  // shape ("sole mutation path" for its own record).
+  const finalArtwork = createFinalArtworkCapability(repo);
+
   const conversation = createConversationCapability({
     repo,
     intentExtraction,
@@ -137,6 +145,7 @@ export function createCapabilityGraph(
     revisionIntelligence,
     designSummary,
     conceptGeneration,
+    finalArtwork,
   });
 
   return {
@@ -156,6 +165,7 @@ export function createCapabilityGraph(
     generationWorker,
     workerScheduler,
     printValidation,
+    finalArtwork,
     revision: createRevisionCapability(),
     printVault: createPrintVaultCapability(),
     assets,
