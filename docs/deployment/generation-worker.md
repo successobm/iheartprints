@@ -45,11 +45,30 @@ is aware of which of the three topologies below it's running under.
 The same code runs unmodified in all three — only what calls
 `workerScheduler.runBatch()` / `.start()` changes.
 
-### 1. Scheduled endpoint (recommended for production)
+### 1. Scheduled endpoint (recommended HTTP topology for production today)
 
 `POST /api/worker/generation`, protected by `WORKER_SECRET`, calls
-`workerScheduler.runBatch()` once per request and returns immediately.
-Point a scheduler at it:
+`workerScheduler.runBatch()` once per request.
+
+**Production (`NODE_ENV=production`):** the route **awaits** `runBatch()` and
+returns `{ ok: true }` only after that batch finishes (including real
+image-generation duration). Do **not** treat a fast HTTP `200` as
+acceptable here — a detached Promise after the response is **not**
+production-safe on DigitalOcean/Next request lifecycles.
+
+**Interactive local (`next dev`, not an automated test):** the route may
+return quickly after starting or joining a batch without awaiting
+provider-duration work, so manual curls are not blocked for minutes. Job
+rows / project status remain the source of truth for completion. This is
+developer convenience only.
+
+**Automated tests (`IHEARTPRINTS_AUTOMATED_TEST=1`):** always await the
+batch, even when `NODE_ENV` is not `production`. Detaching during
+`npm test` left local-store writes running past teardown and, with
+parallel test files sharing `process.chdir`, caused Windows `EBUSY`
+rmdir failures in unrelated suites.
+
+Point a scheduler at the production endpoint:
 
 **DigitalOcean App Platform — Scheduled Job:**
 
@@ -66,25 +85,29 @@ external cron: GitHub Actions scheduled workflow, `cron` on a small VM,
 Uptime-monitoring-style pingers) configured to:
 
 ```bash
-curl -sf -X POST "https://<app>/api/worker/generation" \
+# Production: await the full batch — allow several minutes for OpenAI image gen.
+curl -sf --max-time 600 -X POST "https://<app>/api/worker/generation" \
   -H "Authorization: Bearer $WORKER_SECRET" \
   -o /dev/null
 ```
 
-Run it roughly as often as `WORKER_HEARTBEAT_INTERVAL` (default: every
-15s–60s) — frequent enough that "Generating Concepts..." resolves quickly,
-infrequent enough not to spend a scheduled invocation on an empty queue
-constantly. A minute is a reasonable starting cadence for low volume.
+Cron/trigger **HTTP timeouts must accommodate real image-generation
+duration** (often multi-minute per job; up to `MAX_GENERATION_JOBS_PER_RUN`
+jobs per tick). A one-minute cadence is still reasonable for *how often*
+to tick an empty-or-busy queue; each tick's client timeout must be long
+enough for a full batch, not 10 seconds.
 
-### 2. Standalone worker process
+### 2. Standalone worker process (future / preferred long-running topology)
 
 `npm run worker` runs `scripts/run-generation-worker.ts` — no HTTP layer,
 no web framework, just the scheduler's `start()` on a timer inside its own
-process. This is the shape of a **future DigitalOcean "Worker" component**:
-a second component in the same App Platform app spec, same repo/build,
-different start command (`npm run worker` instead of `npm start`), running
-continuously alongside the web service. It stops cleanly on `SIGINT`/
-`SIGTERM` (App Platform sends `SIGTERM` on redeploy/scale-down).
+process. This remains the **preferred long-running** shape for a future
+DigitalOcean **Worker** component: a second component in the same App
+Platform app spec, same repo/build, different start command
+(`npm run worker` instead of `npm start`), running continuously alongside
+the web service so generation is not bound to an HTTP request lifetime. It
+stops cleanly on `SIGINT`/`SIGTERM` (App Platform sends `SIGTERM` on
+redeploy/scale-down).
 
 ```yaml
 # Future app spec addition — not required for this sprint.
@@ -119,6 +142,11 @@ Two options, either is fine:
     -H "X-Worker-Secret: iheartprints-local-dev-worker-secret-do-not-use-in-production"
   ```
 
+In `next dev`, that POST may return `{ ok: true }` quickly while generation
+continues in-process — poll project/generation status (or the job row) for
+completion. Do not copy that fast-return behavior into production cron or
+into automated tests.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -130,7 +158,7 @@ Two options, either is fine:
 All three are read fresh by `src/lib/config/worker-config.ts` — no
 restart-order dependency, no secret ever logged.
 
-## Atomic claim
+## Atomic claim (cross-instance concurrency authority)
 
 `ProjectRepository.claimNextQueuedJob()` is a single conditional
 update (`UPDATE ... WHERE id = ? AND status = ?`, or the local store's
@@ -142,6 +170,13 @@ same window a recovery sweep is evaluating it can never be double-claimed.
 See `src/capabilities/generation-worker/generation-worker-concurrency.test.ts`
 and `src/lib/db/supabase-store.generation-jobs.test.ts` for the tests that
 pin this down for both repositories.
+
+`GenerationSchedulerCapability.hasActiveBatch()` is **only** a
+process-local dedupe/observability flag (overlapping `runBatch()` calls in
+one Node process join the same in-flight Promise). It is **not** a
+distributed lock and is **not** required for claim correctness — another
+app instance has its own flag and still races safely at the database
+claim/recovery layer.
 
 ## Recovery & retries
 

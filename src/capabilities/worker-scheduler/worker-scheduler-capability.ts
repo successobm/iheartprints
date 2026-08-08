@@ -45,8 +45,25 @@ export interface GenerationSchedulerCapability {
    * the scheduler's concurrency limit within one process (the cross-process
    * limit comes from `ProjectRepository.claimNextQueuedJob`'s atomic
    * claim — see that module).
+   *
+   * Direct callers that `await` this promise wait for provider-duration
+   * work (image generation). Production `POST /api/worker/generation`
+   * awaits this; non-production may return after starting/joining without
+   * awaiting (local convenience only — never a production correctness
+   * strategy). Cross-instance concurrency is always
+   * `ProjectRepository.claimNextQueuedJob`, never this Promise.
    */
   runBatch(): Promise<GenerationSchedulerRunResult>;
+  /**
+   * `true` while a `runBatch()` is in flight **in this process** (including
+   * while it is inside a long provider call after claiming a job).
+   *
+   * Process-local dedupe/observability only — **not** a distributed lock.
+   * Another app instance has its own `hasActiveBatch()` and will still
+   * race at the database claim/recovery layer, which is the sole
+   * cross-instance concurrency authority.
+   */
+  hasActiveBatch(): boolean;
   /**
    * Wakes the worker on a fixed interval (default: `DEFAULT_SCHEDULER_TICK_MS`)
    * until `stop()` is called. Idempotent — calling `start()` while already
@@ -100,6 +117,10 @@ export function createGenerationSchedulerCapability(
     return activeBatch;
   }
 
+  function hasActiveBatch(): boolean {
+    return activeBatch !== null;
+  }
+
   function start(intervalMs: number = DEFAULT_SCHEDULER_TICK_MS): void {
     if (timer) return;
     timer = setInterval(() => {
@@ -120,5 +141,5 @@ export function createGenerationSchedulerCapability(
     return timer !== null;
   }
 
-  return { runBatch, start, stop, isRunning };
+  return { runBatch, hasActiveBatch, start, stop, isRunning };
 }

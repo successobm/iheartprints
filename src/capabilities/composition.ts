@@ -214,3 +214,23 @@ export function getCapabilityGraph(): CapabilityGraph {
 export function resetCapabilityGraphForTests(): void {
   graph = null;
 }
+
+/**
+ * Test teardown for the generation worker HTTP route: stop scheduler timers
+ * and await any in-flight `runBatch()` before dropping the singleton.
+ * Automated tests must not leave detached store writes running while
+ * `cleanupTempWorkspace` rmdirs a temp cwd (Windows EBUSY).
+ */
+export async function drainCapabilityGraphForTests(): Promise<void> {
+  if (!graph) return;
+  graph.workerScheduler.stop();
+  graph.finalArtworkScheduler.stop();
+  if (graph.workerScheduler.hasActiveBatch()) {
+    try {
+      await graph.workerScheduler.runBatch();
+    } catch {
+      /* batch already failed; still drop the singleton */
+    }
+  }
+  graph = null;
+}

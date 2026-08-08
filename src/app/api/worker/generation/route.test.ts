@@ -38,6 +38,10 @@ describe("POST /api/worker/generation (Sprint 2H Part 2B)", () => {
 
   after(async () => {
     restoreEnv(originalEnv);
+    const { drainCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    await drainCapabilityGraphForTests();
     await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
@@ -58,6 +62,50 @@ describe("POST /api/worker/generation (Sprint 2H Part 2B)", () => {
         }),
       ),
     );
+  }
+
+  async function installBlockedScheduler(): Promise<{
+    releaseProvider: () => void;
+    inFlight: Promise<unknown>;
+    hasActiveBatch: () => boolean;
+  }> {
+    const { createGenerationSchedulerCapability } = await import(
+      "@/capabilities/worker-scheduler"
+    );
+    let releaseProvider: (() => void) | undefined;
+    const slowWorker = {
+      async processNextJob() {
+        await new Promise<void>((resolve) => {
+          releaseProvider = resolve;
+        });
+        return { processedJobId: "slow-job" };
+      },
+      async recoverAbandonedJobs() {
+        return { recoveredCount: 0 };
+      },
+    };
+    const scheduler = createGenerationSchedulerCapability(slowWorker, {
+      maxJobsPerRun: 1,
+    });
+
+    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+    const graph = getCapabilityGraph();
+    (graph as { workerScheduler: typeof scheduler }).workerScheduler = scheduler;
+
+    const inFlight = scheduler.runBatch();
+    await new Promise<void>((resolve) => {
+      queueMicrotask(resolve);
+    });
+    assert.equal(scheduler.hasActiveBatch(), true);
+
+    return {
+      releaseProvider: () => releaseProvider?.(),
+      inFlight,
+      hasActiveBatch: () => scheduler.hasActiveBatch(),
+    };
   }
 
   it("rejects a request with no secret header", async () => {
@@ -105,6 +153,7 @@ describe("POST /api/worker/generation (Sprint 2H Part 2B)", () => {
 
   it("response body never includes a job id, provider name, or queue detail", async () => {
     process.env.WORKER_SECRET = "configured-secret";
+    process.env.NODE_ENV = "development";
 
     const { resetCapabilityGraphForTests } = await import(
       "@/capabilities/composition"
@@ -124,6 +173,7 @@ describe("POST /api/worker/generation (Sprint 2H Part 2B)", () => {
 
   it("actually processes a queued job when authenticated", async () => {
     process.env.WORKER_SECRET = "configured-secret";
+    process.env.NODE_ENV = "development";
 
     const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
       "@/capabilities/composition"
@@ -143,6 +193,94 @@ describe("POST /api/worker/generation (Sprint 2H Part 2B)", () => {
     const response = await post({ "x-worker-secret": "configured-secret" });
     assert.equal(response.status, 200);
 
+    // Automated tests await the batch — placeholder provider only (no paid calls).
+    const after = await getCapabilityGraph().conversation.get(projectId);
+    assert.equal(after?.project.status, "concepts_ready");
+  });
+
+  it("automated-test route awaits runBatch even when NODE_ENV is development", async () => {
+    process.env.WORKER_SECRET = "configured-secret";
+    process.env.NODE_ENV = "development";
+
+    const { shouldAwaitGenerationWorkerBatch } = await import("./route");
+    assert.equal(shouldAwaitGenerationWorkerBatch(), true);
+
+    const blocked = await installBlockedScheduler();
+    let responded = false;
+    const responsePromise = post({ "x-worker-secret": "configured-secret" }).then(
+      (response) => {
+        responded = true;
+        return response;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      responded,
+      false,
+      "automated tests must await the batch — must not detach",
+    );
+
+    blocked.releaseProvider();
+    const response = await responsePromise;
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    await blocked.inFlight;
+    assert.equal(blocked.hasActiveBatch(), false);
+  });
+
+  it("B/C: production route awaits runBatch completion and does not detach", async () => {
+    process.env.WORKER_SECRET = "configured-secret";
+    process.env.NODE_ENV = "production";
+
+    const { shouldAwaitGenerationWorkerBatch } = await import("./route");
+    assert.equal(shouldAwaitGenerationWorkerBatch(), true);
+
+    const blocked = await installBlockedScheduler();
+    let responded = false;
+    const responsePromise = post({ "x-worker-secret": "configured-secret" }).then(
+      (response) => {
+        responded = true;
+        return response;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      responded,
+      false,
+      "production must still be awaiting the blocked batch — must not detach",
+    );
+    assert.equal(blocked.hasActiveBatch(), true);
+
+    blocked.releaseProvider();
+    const response = await responsePromise;
+    assert.equal(responded, true);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    await blocked.inFlight;
+    assert.equal(blocked.hasActiveBatch(), false);
+  });
+
+  it("no detached batch remains after an automated worker-route POST (teardown-safe)", async () => {
+    process.env.WORKER_SECRET = "configured-secret";
+    process.env.NODE_ENV = "development";
+
+    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+    const { startConversation, handleUserMessage, submitDesignBriefDecision } =
+      await import("@/lib/services/conversation-service");
+    const { projectId } = await runAdaptiveInterviewToSummary({
+      start: startConversation,
+      handleUserMessage,
+    });
+    await submitDesignBriefDecision(projectId, "approve");
+
+    const response = await post({ "x-worker-secret": "configured-secret" });
+    assert.equal(response.status, 200);
+    assert.equal(getCapabilityGraph().workerScheduler.hasActiveBatch(), false);
     const after = await getCapabilityGraph().conversation.get(projectId);
     assert.equal(after?.project.status, "concepts_ready");
   });

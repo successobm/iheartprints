@@ -89,8 +89,10 @@ describe("GenerationSchedulerCapability (Sprint 2H Part 2B)", () => {
     };
     const scheduler = createGenerationSchedulerCapability(worker, { maxJobsPerRun: 5 });
 
+    assert.equal(scheduler.hasActiveBatch(), false);
     const first = scheduler.runBatch();
     const second = scheduler.runBatch();
+    assert.equal(scheduler.hasActiveBatch(), true);
 
     // Let the first claim resolve now that both calls have joined it.
     queueMicrotask(() => resolveFirstClaim?.());
@@ -98,10 +100,60 @@ describe("GenerationSchedulerCapability (Sprint 2H Part 2B)", () => {
     const [firstResult, secondResult] = await Promise.all([first, second]);
     assert.deepEqual(firstResult, secondResult);
     assert.deepEqual(firstResult.processedJobIds, ["only-job"]);
+    assert.equal(scheduler.hasActiveBatch(), false);
 
     // A batch that starts *after* the first one settles is independent.
     const third = await scheduler.runBatch();
     assert.deepEqual(third.processedJobIds, []);
+  });
+
+  it("D: hasActiveBatch reflects an in-flight local batch but is not a distributed lock / not required for claim correctness", async () => {
+    let releaseProvider: (() => void) | undefined;
+    const worker: GenerationWorkerCapability = {
+      async processNextJob() {
+        await new Promise<void>((resolve) => {
+          releaseProvider = resolve;
+        });
+        return { processedJobId: "slow-job" };
+      },
+      async recoverAbandonedJobs() {
+        return { recoveredCount: 0 };
+      },
+    };
+    const schedulerA = createGenerationSchedulerCapability(worker, { maxJobsPerRun: 1 });
+    // A second scheduler in the same process models "another instance" for
+    // hasActiveBatch purposes — each has its own flag; neither is a lock.
+    const schedulerB = createGenerationSchedulerCapability(
+      {
+        async processNextJob() {
+          return { processedJobId: null };
+        },
+        async recoverAbandonedJobs() {
+          return { recoveredCount: 0 };
+        },
+      },
+      { maxJobsPerRun: 1 },
+    );
+
+    const batch = schedulerA.runBatch();
+    await new Promise<void>((resolve) => {
+      queueMicrotask(resolve);
+    });
+    assert.equal(schedulerA.hasActiveBatch(), true);
+    assert.equal(
+      schedulerB.hasActiveBatch(),
+      false,
+      "hasActiveBatch is process-/instance-local — scheduler B must not see A's batch",
+    );
+
+    // Claim correctness does not consult hasActiveBatch: B can still run a
+    // batch (empty queue here). Cross-instance authority is DB claim/recovery.
+    const bResult = await schedulerB.runBatch();
+    assert.deepEqual(bResult.processedJobIds, []);
+
+    releaseProvider?.();
+    await batch;
+    assert.equal(schedulerA.hasActiveBatch(), false);
   });
 
   describe("start / stop lifecycle", () => {

@@ -9,11 +9,16 @@ import { removeTempDir } from "./remove-temp-dir";
  * 3. Drop capability-graph + repository singletons that reference that store.
  * 4. `removeTempDir` with bounded EBUSY/EPERM/ENOTEMPTY retries.
  *
- * Sprint 2H Part 2B: generation no longer runs as an in-process
- * fire-and-forget task (see `capabilities/worker-scheduler/`), so there is
- * nothing background left to drain before the local store is touched —
- * every test that needs a job to run now awaits it directly (a worker's
- * `processNextJob`/`runBatch`, or the worker route).
+ * Automated tests must await worker batches (see
+ * `shouldAwaitGenerationWorkerBatch` + `IHEARTPRINTS_AUTOMATED_TEST`).
+ * Interactive `next dev` may detach `runBatch()`; tests must not, or
+ * Windows teardown hits EBUSY on the temp cwd while the local store is
+ * still being written.
+ *
+ * This helper does not import `composition` — that module graph is heavy
+ * and evaluating it from unrelated suite teardowns (while cwd is a temp
+ * dir) can leave extra Windows handles. Worker-route tests drain the
+ * graph explicitly before calling this.
  *
  * Does not swallow persistent cleanup failures.
  */
