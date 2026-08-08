@@ -23,6 +23,10 @@ import { PrepareForPrintAction } from "./PrepareForPrintAction";
 import { RecommendationCard } from "./RecommendationCard";
 import { buildRevisionTimeline } from "./revision-timeline";
 import { RevisionTimeline } from "./RevisionTimeline";
+import {
+  createStatusPollController,
+  DEFAULT_STATUS_POLL_INTERVAL_MS,
+} from "./status-poll-controller";
 import { useIsClient } from "./use-is-client";
 
 type ApiSnapshot = ApiProjectSnapshot & {
@@ -63,53 +67,57 @@ export function ChatApp() {
     previousConceptStatusRef.current = currentStatus;
   }, [snapshot?.conceptStatus.status]);
 
-  // Sprint 2H Part 2A: concept generation now runs in the background —
-  // while the project is "generating", poll a lightweight status endpoint
-  // (never the full snapshot) until it flips, then refresh once for the
-  // real result. No manual reload, no reopening the conversation.
+  // Sprint 2H Part 2A: concept generation runs in the background — while
+  // the project is "generating", poll a lightweight status endpoint (never
+  // the full snapshot) until it flips, then refresh once for the real
+  // result. Same controller as finalization polling below.
   useEffect(() => {
     if (!isClient || !snapshot || snapshot.project.status !== "generating") {
       return;
     }
 
     const projectId = snapshot.project.id;
-    let cancelled = false;
-    const POLL_INTERVAL_MS = 3000;
-
-    const interval = setInterval(() => {
-      void (async () => {
-        if (cancelled) return;
-        try {
-          const response = await fetch(
-            `/api/projects/${projectId}/generation/status`,
-          );
-          if (!response.ok || cancelled) return;
-          const data = (await response.json()) as { status: string };
-          if (data.status !== "generating" && !cancelled) {
-            // Inlined rather than calling the component's `refresh` —
-            // keeps this effect's dependency list accurate (`projectId`
-            // above, captured once per poll cycle) instead of depending
-            // on a per-render function identity.
-            const full = await fetch(`/api/projects/${projectId}`);
-            if (full.ok && !cancelled) {
-              setSnapshot((await full.json()) as ApiSnapshot);
-            }
-          }
-        } catch {
-          // Transient polling error — the next tick tries again.
-        }
-      })();
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+    return createStatusPollController({
+      inProgressStatus: "generating",
+      intervalMs: DEFAULT_STATUS_POLL_INTERVAL_MS,
+      pollStatus: () =>
+        pollProjectStatus(`/api/projects/${projectId}/generation/status`),
+      refreshSnapshot: async () => {
+        const full = await loadProjectSnapshot(projectId);
+        if (!full) throw new Error("Failed to refresh project snapshot");
+        setSnapshot(full);
+      },
+    }).start();
     // Deliberately scoped to just status/id, not the whole snapshot object
     // — restarting this interval on every unrelated snapshot update (a new
     // message, a summary edit, ...) would fight the polling cadence below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isClient, snapshot?.project.status, snapshot?.project.id]);
+
+  // While customer-safe finalization status is "preparing", poll the
+  // lightweight finalization status endpoint until it reaches a terminal
+  // customer state (print_ready / needs_review / not_requested), then
+  // refresh the snapshot once. Never enqueues work and never calls a
+  // provider — same read-only contract as generation status polling.
+  useEffect(() => {
+    if (!isClient || !snapshot || snapshot.finalization.status !== "preparing") {
+      return;
+    }
+
+    const projectId = snapshot.project.id;
+    return createStatusPollController({
+      inProgressStatus: "preparing",
+      intervalMs: DEFAULT_STATUS_POLL_INTERVAL_MS,
+      pollStatus: () =>
+        pollProjectStatus(`/api/projects/${projectId}/finalization/status`),
+      refreshSnapshot: async () => {
+        const full = await loadProjectSnapshot(projectId);
+        if (!full) throw new Error("Failed to refresh project snapshot");
+        setSnapshot(full);
+      },
+    }).start();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isClient, snapshot?.finalization.status, snapshot?.project.id]);
 
   async function bootstrap() {
     setLoading(true);
@@ -627,6 +635,23 @@ export function ChatApp() {
       />
     </div>
   );
+}
+
+async function pollProjectStatus(url: string): Promise<string | null> {
+  const response = await fetch(url);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Failed to poll ${url}`);
+  const data = (await response.json()) as { status?: string };
+  if (typeof data.status !== "string") {
+    throw new Error(`Invalid status payload from ${url}`);
+  }
+  return data.status;
+}
+
+async function loadProjectSnapshot(projectId: string): Promise<ApiSnapshot | null> {
+  const response = await fetch(`/api/projects/${projectId}`);
+  if (!response.ok) return null;
+  return (await response.json()) as ApiSnapshot;
 }
 
 function LogoMark() {

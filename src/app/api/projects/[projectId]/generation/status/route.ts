@@ -11,6 +11,8 @@ type RouteContext = {
  * cheap enough for the conversation to check every few seconds while
  * generation runs in the background. Returns only `{ status }`: never a
  * job id, provider name, queue name, or any other internal detail.
+ * Production/tests remain read-only. Interactive `next dev` may recover a
+ * stranded queued attempts=0 job in conversation-service.
  */
 export async function GET(_request: Request, context: RouteContext) {
   try {

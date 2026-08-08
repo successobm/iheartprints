@@ -64,8 +64,9 @@ export interface CapabilityGraph {
   /**
    * Sprint 2H Part 2B: provider-neutral scheduler that decides when/how many
    * times to call `generationWorker` — see `worker-scheduler/`. Driven by
-   * the protected worker endpoint, a standalone worker process, or (in
-   * tests) directly; never by a customer request.
+   * the protected worker endpoint, a standalone worker process, tests that
+   * call it explicitly, or — interactive `next dev` only — the post-enqueue
+   * local trigger. Production customer requests never invoke it.
    */
   workerScheduler: ReturnType<typeof createGenerationSchedulerCapability>;
   printValidation: ReturnType<typeof createPrintValidationCapability>;

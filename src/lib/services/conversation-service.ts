@@ -6,6 +6,11 @@ import {
   type CustomerConceptStatusView,
 } from "@/capabilities/shared/contracts";
 import type { ProjectSnapshot, ProjectStatus } from "@/lib/domain/types";
+import {
+  maybeRecoverStrandedLocalGenerationJobs,
+  maybeTriggerLocalGenerationWorker,
+  type LocalGenerationTriggerReason,
+} from "@/lib/services/local-generation-trigger";
 
 /**
  * Stable facade for API routes and existing tests.
@@ -81,7 +86,12 @@ export async function getConversation(
   projectId: string,
 ): Promise<ApiProjectSnapshot | null> {
   const snapshot = await getCapabilityGraph().conversation.get(projectId);
-  return snapshot ? withConceptStatus(snapshot) : null;
+  if (!snapshot) return null;
+  const apiSnapshot = withConceptStatus(snapshot);
+  if (apiSnapshot.project.status === "generating") {
+    void maybeRecoverStrandedLocalGenerationJobs(projectId, "project_reload");
+  }
+  return apiSnapshot;
 }
 
 export async function handleUserMessage(
@@ -92,7 +102,9 @@ export async function handleUserMessage(
     projectId,
     content,
   );
-  return withConceptStatus(snapshot);
+  const apiSnapshot = withConceptStatus(snapshot);
+  maybeKickLocalGenerationWorker(projectId, apiSnapshot, "conversation_message");
+  return apiSnapshot;
 }
 
 export async function selectConcept(
@@ -134,7 +146,11 @@ export async function submitDesignBriefDecision(
     projectId,
     action,
   );
-  return withConceptStatus(snapshot);
+  const apiSnapshot = withConceptStatus(snapshot);
+  if (action === "approve") {
+    maybeKickLocalGenerationWorker(projectId, apiSnapshot, "approve_brief");
+  }
+  return apiSnapshot;
 }
 
 /** Sprint 2G Part 3: explicit action behind the persistent "Generate Updated Concepts" control. */
@@ -144,7 +160,9 @@ export async function regenerateConcepts(
   const snapshot = await getCapabilityGraph().conversation.regenerateConcepts(
     projectId,
   );
-  return withConceptStatus(snapshot);
+  const apiSnapshot = withConceptStatus(snapshot);
+  maybeKickLocalGenerationWorker(projectId, apiSnapshot, "regenerate_concepts");
+  return apiSnapshot;
 }
 
 /** Sprint 2G Part 3: explicit action behind an "Undo" control. */
@@ -158,15 +176,30 @@ export async function undoLastChange(
 }
 
 /**
+ * Interactive `next dev` only: after enqueue persistence, kick the in-process
+ * scheduler so local Approve/Create Concepts does not wait on a manual
+ * `POST /api/worker/generation`. Production and automated tests no-op — see
+ * `local-generation-trigger-policy.ts`. Never throws to the customer request.
+ */
+function maybeKickLocalGenerationWorker(
+  projectId: string,
+  snapshot: ApiProjectSnapshot,
+  reason: LocalGenerationTriggerReason,
+): void {
+  if (snapshot.project.status !== "generating") return;
+  maybeTriggerLocalGenerationWorker({ projectId, reason });
+}
+
+/**
  * Sprint 2H Part 2B: provider-neutral generation status, safe for the
  * conversation to poll every few seconds — no job id, no provider name, no
- * queue detail. Purely read-only: a status read and nothing else. It never
- * recovers abandoned jobs, never claims work, and never runs generation —
- * that all belongs to the independent worker (the protected worker
- * endpoint, a scheduled trigger, or a standalone worker process; see
- * `capabilities/worker-scheduler/`), never to a customer's browser polling
- * this endpoint. Polling only answers "what does the customer see right
- * now" — it must never be a hidden way to make progress happen.
+ * queue detail. Production and automated tests are purely read-only: a
+ * status read and nothing else. They never recover abandoned jobs, never
+ * claim work, and never run generation. Interactive `next dev` only may
+ * kick a stranded `queued`/`attempts=0` job (missed post-enqueue trigger
+ * or stale HMR) via `maybeRecoverStrandedLocalGenerationJobs`. Polling
+ * still never revives a running/failed job and never calls a provider
+ * itself.
  */
 export type GenerationStatus = "idle" | "generating" | "ready" | "failed";
 
@@ -186,7 +219,26 @@ export async function getGenerationStatus(
 ): Promise<GenerationStatusView | null> {
   const snapshot = await getCapabilityGraph().conversation.get(projectId);
   if (!snapshot) return null;
+  if (snapshot.project.status === "generating") {
+    void maybeRecoverStrandedLocalGenerationJobs(projectId, "status_poll");
+  }
   return toGenerationStatusView(snapshot.project.status);
+}
+
+/**
+ * Read-only customer-safe finalization status — the finalization counterpart
+ * of `getGenerationStatus`. Same sanitization choke point as the snapshot's
+ * `finalization` view (`toCustomerFinalizationView`): never a job id,
+ * provider name, queue detail, or storage key. Polling this must never
+ * recover abandoned jobs, claim work, revive a failed job, or call a
+ * provider.
+ */
+export async function getFinalizationStatus(
+  projectId: string,
+): Promise<CustomerFinalizationView | null> {
+  const snapshot = await getCapabilityGraph().conversation.get(projectId);
+  if (!snapshot) return null;
+  return toCustomerFinalizationView(snapshot.project.status);
 }
 
 export interface ConceptImageView {

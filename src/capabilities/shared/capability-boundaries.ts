@@ -604,6 +604,10 @@
  *     derived purely from `PrintProject.status === "finalization_required"`
  *     — same sanitization choke point as `"preparing"`/`"print_ready"`, no
  *     new job/asset/validation detail added to the customer view.
+ *   - Read-only `GET /api/projects/[projectId]/finalization/status` →
+ *     `conversation-service.getFinalizationStatus` returns that same
+ *     customer-safe view. Browser polling never claims, recovers, or
+ *     revives FinalArtworkJobs and never calls a provider.
  *   - New secure read boundary (Goal 14, not wired into any UI):
  *     `GET /api/projects/[projectId]/production-artwork/image` →
  *     `conversation-service.getProductionArtworkUrl` →

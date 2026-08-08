@@ -59,6 +59,11 @@ describe("GET /api/projects/[projectId]/generation/status (Sprint 2H Part 2A)", 
     assert.deepEqual(Object.keys(body), ["status"]);
     assert.equal(body.status, "generating");
 
+    const repo = (await import("@/lib/db")).getProjectRepository();
+    const [job] = await repo.listGenerationJobs(projectId);
+    assert.equal(job?.status, "queued");
+    assert.equal(job?.attempts, 0);
+
     await getCapabilityGraph().generationWorker.processNextJob();
 
     const secondResponse = await GET(

@@ -130,7 +130,13 @@ explicit, observable schedule).
 
 ## Local development
 
-Two options, either is fine:
+Interactive `next dev` auto-triggers the in-process scheduler after
+Approve / Create Concepts (or regenerate) enqueues a job. No second
+terminal and no manual PowerShell/`curl` is required for that path.
+Production never uses this trigger; automated tests
+(`IHEARTPRINTS_AUTOMATED_TEST=1`) never use it either.
+
+Optional alternatives still work:
 
 - Run `npm run worker` in a second terminal alongside `npm run dev`. It
   uses the same `WORKER_SECRET`-free dev fallback as everything else in
@@ -193,13 +199,17 @@ claim/recovery layer.
   before a stale sweep reclaims it short-circuits as already-done (see
   `runClaimedJob`'s idempotent `alreadyGenerated` check).
 
-## Polling stays read-only
+## Polling stays read-only in production
 
-`GET /api/projects/[projectId]/generation/status` (and the
-`ConversationCapability` layer behind it) only ever reads status. It never
-recovers a job, never claims work, and never triggers generation — that
-guarantee is enforced by `getGenerationStatus` and locked in by
-`conversation-service.test.ts`.
+`GET /api/projects/[projectId]/generation/status` never claims work, never
+revives a failed/running job, and never calls a provider. Automated tests
+keep that contract (`IHEARTPRINTS_AUTOMATED_TEST=1`).
+
+Interactive `next dev` only: if the project is `generating` and a job is
+still `queued` with `attempts=0` (missed post-enqueue kick or stale HMR),
+status poll / project reload may kick `workerScheduler.runBatch()`
+in-process. That does not change FIFO claim order and is not used in
+production.
 
 ## Future work (not built in this sprint)
 

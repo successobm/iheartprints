@@ -110,6 +110,24 @@ describe("conversation-service — final direction approval (Sprint 2M Phase 2B)
     assert.deepEqual(Object.keys(result.finalization), ["status"]);
   });
 
+  it("F: getConversation reconstructs persisted print_ready after a hard reload", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await reachSelectedConcept();
+
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    assert.equal(
+      (await conversationService.getConversation(projectId))?.finalization.status,
+      "preparing",
+    );
+
+    const { getProjectRepository } = await import("@/lib/db");
+    await getProjectRepository().setProjectStatus(projectId, "print_ready");
+
+    const reloaded = await conversationService.getConversation(projectId);
+    assert.equal(reloaded?.finalization.status, "print_ready");
+    assert.deepEqual(Object.keys(reloaded!.finalization), ["status"]);
+  });
+
   it("rejects approving a project's concept from another project's request", async () => {
     const { artworkVersionId } = await reachSelectedConcept();
     const { projectId: otherProjectId } = await reachSelectedConcept();

@@ -8,6 +8,8 @@ type RouteContext = {
 };
 
 export async function GET(_request: Request, context: RouteContext) {
+  // Snapshot load. Interactive `next dev` may recover a stranded
+  // queued/attempts=0 generation job via getConversation.
   try {
     const { projectId } = await context.params;
     const snapshot = await getConversation(projectId);

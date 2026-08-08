@@ -23,6 +23,8 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     const snapshot = await handleUserMessage(projectId, parsed.data.content);
+    // Chat may enqueue regeneration; the route still never awaits the
+    // worker. Interactive `next dev` kick lives in conversation-service.
     return NextResponse.json({
       ...snapshot,
       persistenceMode: getPersistenceMode(),

@@ -78,6 +78,12 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+Approve / Create Concepts in local `next dev` enqueues a generation job and
+auto-triggers the in-process worker — no second `npm run worker` terminal or
+manual `POST /api/worker/generation` is required. Production still uses a
+configured independent worker (item 4 above). Automated tests never take the
+local auto-trigger path.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

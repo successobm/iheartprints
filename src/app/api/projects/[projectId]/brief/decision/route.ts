@@ -23,12 +23,12 @@ export async function POST(request: Request, context: RouteContext) {
       parsed.data.action,
     );
 
-    // Sprint 2H Part 2B: an "approve" may have just enqueued a generation
-    // job, but this route never dispatches it — that would put generation
-    // back on the customer's request/HTTP lifecycle. The independent
-    // worker (protected endpoint, scheduled trigger, or standalone
-    // process — see `capabilities/worker-scheduler/`) picks it up on its
-    // own schedule.
+    // Sprint 2H Part 2B: this route never awaits generation. Production
+    // stays scheduler/worker driven. Automated tests stay isolated.
+    // Interactive `next dev` only: conversation-service may kick
+    // `workerScheduler.runBatch()` in-process after enqueue (see
+    // `local-generation-trigger.ts`) so local Approve/Create Concepts
+    // does not require a manual POST.
 
     return NextResponse.json({
       ...snapshot,

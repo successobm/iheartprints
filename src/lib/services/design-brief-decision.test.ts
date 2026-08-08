@@ -24,6 +24,10 @@ describe("submitDesignBriefDecision (API facade)", () => {
   });
 
   after(async () => {
+    const { drainCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    await drainCapabilityGraphForTests();
     await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
@@ -57,8 +61,14 @@ describe("submitDesignBriefDecision (API facade)", () => {
     const enqueued = await submitDesignBriefDecision(projectId, "approve");
     // Sprint 2H Part 2A: generation is enqueued, not run synchronously —
     // the customer's request returns before any provider call happens.
+    // Automated tests remain isolated: the interactive-dev local trigger
+    // must not start a batch here.
     assert.equal(enqueued.conversation.phase, "generating");
     assert.equal(enqueued.artworkVersions.length, 0);
+    assert.equal(getCapabilityGraph().workerScheduler.hasActiveBatch(), false);
+    const [job] = await (await import("@/lib/db")).getProjectRepository()
+      .listGenerationJobs(projectId);
+    assert.equal(job?.status, "queued");
 
     await getCapabilityGraph().generationWorker.processNextJob();
     const approved = await getConversation(projectId);

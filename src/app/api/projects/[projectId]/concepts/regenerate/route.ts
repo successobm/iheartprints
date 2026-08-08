@@ -18,9 +18,9 @@ export async function POST(_request: Request, context: RouteContext) {
     const { projectId } = await context.params;
     const snapshot = await regenerateConcepts(projectId);
 
-    // Sprint 2H Part 2B: this route never dispatches the worker — the
-    // independent worker (protected endpoint, scheduled trigger, or
-    // standalone process) picks the newly-enqueued job up on its own.
+    // This route never awaits generation. Production stays scheduler/
+    // worker driven. Interactive `next dev` only: conversation-service
+    // may kick the in-process scheduler after enqueue.
 
     return NextResponse.json({
       ...snapshot,

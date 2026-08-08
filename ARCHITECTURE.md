@@ -216,6 +216,7 @@ and intent remain ephemeral. See §5 and §13a.
 | Design Brief approval (version snapshot + enqueue job) | Synchronous request; generation itself is not |
 | Concept generation (provider call, asset upload, concept evaluation, artwork rows) | Asynchronous via independent worker |
 | Generation status | Read-only browser polling; never claims or runs jobs |
+| Finalization status | Read-only browser polling while `preparing`; never claims or runs jobs |
 | Post-approval revisions | Synchronous brief update; regeneration is enqueue-only |
 
 Real provider generation is guarded by configuration
@@ -1089,9 +1090,11 @@ Environment checks must not be scattered through conversation or UI code.
 
 Test helpers: `resetCapabilityGraphForTests`,
 `resetProjectRepositoryForTests`, `drainLocalStoreMutexForTests`, and
-`cleanupTempWorkspace` (Windows-safe temp cleanup). Generation is no longer
-an in-process fire-and-forget task; tests that need jobs to complete await
-`processNextJob` / `runBatch` or the worker route explicitly.
+`cleanupTempWorkspace` (Windows-safe temp cleanup). Automated tests that
+need jobs to complete await `processNextJob` / `runBatch` or the worker
+route explicitly — they never auto-trigger. Interactive `next dev` may
+kick `workerScheduler.runBatch()` in-process after enqueue (see
+`local-generation-trigger.ts`); production remains scheduler/worker driven.
 
 ---
 
@@ -2765,9 +2768,14 @@ Mechanics (both queues, identical shape):
 - Shared retry budget (`MAX_GENERATION_ATTEMPTS` / `MAX_FINAL_ARTWORK_ATTEMPTS`)
 - Idempotent completion (`alreadyGenerated` short-circuit / existing
   production-asset short-circuit — see §13c)
-- Browser polling (generation status) is read-only; there is no equivalent
-  browser polling for final-artwork status in Phase 2C — the customer sees
-  only the derived `finalization.status` on the ordinary snapshot poll
+- Browser polling (generation status and finalization status) is read-only
+  in production. While customer-safe `finalization.status === "preparing"`,
+  ChatApp polls `GET /api/projects/[projectId]/finalization/status` every
+  few seconds and refreshes the snapshot once it leaves `preparing`.
+  Polling never claims jobs, never revives failed/running jobs, and never
+  calls a provider. Interactive `next dev` only may kick an in-process
+  batch when a job is still `queued` with `attempts=0` (missed trigger /
+  stale HMR) — see `maybeRecoverStrandedLocalGenerationJobs`.
 
 ### Deployment topologies
 
@@ -2777,7 +2785,11 @@ Mechanics (both queues, identical shape):
    hosting)
 2. **Standalone worker process** — `npm run worker` and/or
    `npm run worker:final-artwork`, run as separate processes
-3. **Future external queue** — only scheduler topology should need to
+3. **Interactive local `next dev` only** — after enqueue,
+   `maybeTriggerLocalGenerationWorker` may call `runBatch()` in-process
+   so Approve/Create Concepts progresses without a manual worker POST.
+   Suppressed in production and when `IHEARTPRINTS_AUTOMATED_TEST=1`.
+4. **Future external queue** — only scheduler topology should need to
    change; worker business logic stays put
 
 See `docs/deployment/generation-worker.md` and
@@ -2931,6 +2943,7 @@ delegation to composed capabilities.
 | `POST /api/projects/[projectId]/concepts/regenerate` | Explicit updated-concept enqueue |
 | `GET /api/projects/[projectId]/concepts/[artworkVersionId]/image` | Mint short-lived concept image URL (Sprint 2K Phase 1) |
 | `GET /api/projects/[projectId]/generation/status` | Read-only generation status |
+| `GET /api/projects/[projectId]/finalization/status` | Read-only customer-safe finalization status (`not_requested` / `preparing` / `needs_review` / `print_ready`) |
 | `POST /api/projects/[projectId]/select` | Select concept |
 | `POST /api/projects/[projectId]/finalize` | Sprint 2M Phase 2B: explicit final-direction approval + idempotent finalization request |
 | `GET /api/projects/[projectId]/production-artwork/image` | Sprint 2M Phase 2C: mint short-lived production-PNG URL once print-ready (Goal 14 — not linked from any UI) |
@@ -2968,10 +2981,14 @@ Rules:
 - Routes validate/translate requests (often with zod)
 - Services/facades call capabilities
 - Routes must not implement product rules
-- Generation status polling is read-only and never dispatches work
-- Worker invocation is independent of customer traffic
-- Brief decision and regenerate routes enqueue only; they do not run the
-  worker inline
+- Generation status polling is read-only in production / automated tests;
+  interactive `next dev` may recover a stranded `queued`/`attempts=0` job
+- Finalization status polling is read-only and never dispatches work
+- Worker invocation is independent of customer traffic in production
+  (scheduler, protected endpoint, or standalone process)
+- Brief decision and regenerate routes never await generation; interactive
+  `next dev` only may kick `workerScheduler.runBatch()` after enqueue
+  (`local-generation-trigger.ts`). Automated tests stay isolated.
 - Snapshot-returning routes must not bypass `conversation-service`
   sanitization
 
@@ -2995,10 +3012,16 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 | `PrepareForPrintAction` | Sprint 2M Phase 2B: the one explicit "final direction approval" action + truthful "preparing"/"print ready" states; plain customer language only — never job/asset/validation terminology |
 | `Composer` | Message input |
 | `chat-session.ts` | localStorage project id restore/create |
+| `status-poll-controller.ts` | Shared read-only generation + finalization status poller |
 | `use-is-client.ts` | Hydration gate |
 
 Polling: while `project.status === "generating"`, poll generation status
-every few seconds; on exit from generating, refresh full snapshot.
+every few seconds; on exit from generating, refresh full snapshot. While
+customer-safe `finalization.status === "preparing"`, poll finalization
+status every few seconds; on a terminal customer state (`print_ready`,
+`needs_review`, or `not_requested`), refresh full snapshot and stop. Both
+pollers share `createStatusPollController` (cleanup on unmount / project
+change, Strict Mode safe, bounded consecutive errors).
 
 `ConceptCards` (Sprint 2K Phase 1) fetches signed image URLs only for
 concepts with `hasImage: true`, via

@@ -29,6 +29,10 @@ describe("conversation-service — generation status polling (Sprint 2H Part 2A)
   });
 
   after(async () => {
+    const { drainCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    await drainCapabilityGraphForTests();
     await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
@@ -68,6 +72,11 @@ describe("conversation-service — generation status polling (Sprint 2H Part 2A)
     const enqueued = await submitDesignBriefDecision(projectId, "approve");
     assert.equal(enqueued.conversation.phase, "generating");
     assert.deepEqual(await getGenerationStatus(projectId), { status: "generating" });
+    assert.equal(
+      getCapabilityGraph().workerScheduler.hasActiveBatch(),
+      false,
+      "automated tests must not auto-trigger the local worker after enqueue",
+    );
 
     await getCapabilityGraph().generationWorker.processNextJob();
     assert.deepEqual(await getGenerationStatus(projectId), { status: "ready" });
@@ -79,7 +88,31 @@ describe("conversation-service — generation status polling (Sprint 2H Part 2A)
     assert.equal("drainGenerationWorkersForTests" in conversationService, false);
   });
 
-  it("polling never recovers an abandoned job — that stays 'generating', unresolved, until the independent worker runs", async () => {
+  it("automated-test polling never starts a local batch for a queued attempts=0 job", async () => {
+    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+    const { startConversation, handleUserMessage, submitDesignBriefDecision, getGenerationStatus } =
+      await import("./conversation-service");
+
+    const { projectId } = await runAdaptiveInterviewToSummary({
+      start: startConversation,
+      handleUserMessage,
+    });
+    await submitDesignBriefDecision(projectId, "approve");
+
+    await getGenerationStatus(projectId);
+    await getGenerationStatus(projectId);
+
+    assert.equal(getCapabilityGraph().workerScheduler.hasActiveBatch(), false);
+    const repo = (await import("@/lib/db")).getProjectRepository();
+    const [job] = await repo.listGenerationJobs(projectId);
+    assert.equal(job?.status, "queued");
+    assert.equal(job?.attempts, 0);
+  });
+
+  it("polling never recovers an abandoned running job — that stays 'generating', unresolved, until the independent worker runs", async () => {
     const { resetCapabilityGraphForTests } = await import("@/capabilities/composition");
     resetCapabilityGraphForTests();
     const { startConversation, handleUserMessage, submitDesignBriefDecision, getGenerationStatus } =
@@ -116,5 +149,135 @@ describe("conversation-service — generation status polling (Sprint 2H Part 2A)
     const { getCapabilityGraph } = await import("@/capabilities/composition");
     await getCapabilityGraph().workerScheduler.runBatch();
     assert.deepEqual(await getGenerationStatus(projectId), { status: "ready" });
+  });
+});
+
+describe("conversation-service — finalization status polling", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-finalization-status-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    const { drainCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    await drainCapabilityGraphForTests();
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function projectWithSelectedConcept() {
+    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+    const conversationService = await import("./conversation-service");
+    const { startConversation, handleUserMessage, submitDesignBriefDecision, selectConcept } =
+      conversationService;
+
+    const { projectId } = await runAdaptiveInterviewToSummary({
+      start: startConversation,
+      handleUserMessage,
+    });
+    await submitDesignBriefDecision(projectId, "approve");
+    await getCapabilityGraph().generationWorker.processNextJob();
+
+    const generated = await conversationService.getConversation(projectId);
+    const [concept] = generated!.artworkVersions;
+    await selectConcept(projectId, concept!.id);
+
+    return { projectId, artworkVersionId: concept!.id, conversationService };
+  }
+
+  it("returns null for a project that does not exist", async () => {
+    const { resetCapabilityGraphForTests } = await import("@/capabilities/composition");
+    resetCapabilityGraphForTests();
+    const { getFinalizationStatus } = await import("./conversation-service");
+    assert.equal(
+      await getFinalizationStatus("00000000-0000-0000-0000-000000000000"),
+      null,
+    );
+  });
+
+  it("reports not_requested before finalization is requested", async () => {
+    const { projectId, conversationService } = await projectWithSelectedConcept();
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "not_requested",
+    });
+  });
+
+  it("reports preparing after approveFinalDirection, then print_ready once persisted", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "preparing",
+    });
+
+    const { getProjectRepository } = await import("@/lib/db");
+    await getProjectRepository().setProjectStatus(projectId, "print_ready");
+
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "print_ready",
+    });
+    const snapshot = await conversationService.getConversation(projectId);
+    assert.equal(snapshot?.finalization.status, "print_ready");
+  });
+
+  it("reports needs_review once PrintProject.status is finalization_required", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    const { getProjectRepository } = await import("@/lib/db");
+    await getProjectRepository().setProjectStatus(projectId, "finalization_required");
+
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "needs_review",
+    });
+  });
+
+  it("E: repeated polls never enqueue a second FinalArtworkJob or revive work", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+
+    const { getProjectRepository } = await import("@/lib/db");
+    const repo = getProjectRepository();
+    const approval = await repo.getActiveFinalDirectionApproval(projectId);
+    assert.ok(approval);
+    const job = await repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
+    assert.ok(job);
+    assert.equal(job.status, "queued");
+
+    await conversationService.getFinalizationStatus(projectId);
+    await conversationService.getFinalizationStatus(projectId);
+    await conversationService.getFinalizationStatus(projectId);
+
+    const stillQueued = await repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
+    assert.equal(stillQueued?.id, job.id);
+    assert.equal(stillQueued?.status, "queued");
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "preparing",
+    });
+  });
+
+  it("G: customer-safe status view never includes job/provider/storage internals", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+
+    const view = await conversationService.getFinalizationStatus(projectId);
+    assert.deepEqual(Object.keys(view ?? {}), ["status"]);
+    const serialized = JSON.stringify(view);
+    assert.equal(serialized.includes("finalArtworkJobId"), false);
+    assert.equal(serialized.includes("storageKey"), false);
+    assert.equal(serialized.includes("topaz"), false);
+    assert.equal(serialized.includes("provider"), false);
   });
 });
