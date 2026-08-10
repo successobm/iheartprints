@@ -177,6 +177,40 @@
  *     of `lib/domain/concept-directions.ts` (the one shared, provider-
  *     neutral source of composition/typography/iconography/layout
  *     differentiation content — see Sprint 2K Phase 3 below)
+ *   A concept direction, a provider default, or any other downstream
+ *     preference removing, replacing, or contradicting design content the
+ *     customer asked for — see "Detailed-Description Fidelity" below
+ *
+ * Detailed-Description Fidelity (Phase 1) — customer content is
+ * authoritative (ARCHITECTURE.md Principle 15 / §13f). Precedence, highest
+ * first, and no lower layer may contradict a higher one:
+ *
+ *     1. customer required wording and exclusions
+ *     2. customer design description (required content) and composition
+ *     3. customer style and color preferences
+ *     4. concept-direction treatment
+ *     5. provider defaults (e.g. centered composition)
+ *
+ *   - `lib/domain/design-content-contract.ts` — the single pure reader of a
+ *     design description (`requiresScene`, `hasExplicitComposition`,
+ *     `compositionStatements`, `requiredElementCount`,
+ *     `requestsRealWorldReference`). Derived, never persisted; it does NOT
+ *     introduce structured required-element schema, and
+ *     `DesignBrief.designDescription` remains the authoritative content
+ *     contract.
+ *   - `intent-extraction/preserve-design-detail.ts` — the deterministic
+ *     backstop that restores design-critical detail a Conversation
+ *     Understanding synthesis dropped. Applied on BOTH the semantic
+ *     (`reconcile-understanding.ts`) and deterministic (`extraction.ts`)
+ *     paths, so fidelity never depends on whether a Conversation
+ *     Understanding provider is configured. It must never append the raw
+ *     customer message, and never fold garment color, print placement,
+ *     required wording, or palette preference into the design description.
+ *   - `resolveDirectionTreatment` (`lib/domain/concept-directions.ts`) — the
+ *     one place a direction is resolved against the content contract.
+ *     Directions vary creative treatment only; the three concepts must stay
+ *     genuinely distinct (Constitution §13), so fidelity is never achieved
+ *     by making the three provider prompts converge.
  *
  * Sprint 2K Phase 3 additions (quality/generation-fidelity sprint; no new
  * capabilities, no architecture redesign):

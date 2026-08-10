@@ -312,6 +312,11 @@ function buildMessages(
     "You judge brief alignment only — never DPI, resolution, transparency, vector quality, or other print/production mechanics.",
     "Only evaluate a requirement listed under 'Brief requirements' below. If a requirement is not listed, set its field to null in your response — never invent or assume a requirement that was not stated.",
     "Use broad semantic matching, not exact matching. Example: if green is requested, forest green, dark green, or olive all satisfy it. Example: if the brief asks for 'a bowling ball smashing pins', an image with a bowling ball and pins scores highly even if not mid-impact.",
+    // Detailed-Description Fidelity (Phase 1): broad semantic matching is
+    // right for HOW something is drawn and wrong for WHETHER it is there. A
+    // richer, faithfully preserved design description is only useful if a
+    // missing named subject actually fails.
+    "Broad matching applies to how something is rendered, never to whether it is present. When the requested graphics description names several distinct subjects, gives a count, or states where things sit relative to each other, check each one: a named subject that is absent, a stated count that is wrong, or a stated relationship that is contradicted is a graphics MISMATCH — set graphics.matches to false and name what is missing in notes, rather than scoring it as a near-match. Simplified or stylized rendering of a subject that IS present is fine and must not be penalized.",
     "Judge style at a broad, high level only (e.g. vintage, minimalist, modern, retro, grunge, industrial) — never subjective artistic ranking.",
     "For required wording, read any visible text in the image. Minor uncertainty reading small or stylized text should lower your confidence, not automatically fail the match — report your actual confidence honestly.",
     "For exclusions, flag only obvious, clear violations (e.g. a skull when 'no skulls' was requested) — not speculative ones.",

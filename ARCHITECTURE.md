@@ -93,6 +93,14 @@ Derived from the Constitution and enforced by the current implementation:
     generation was requested.
 14. **Browser closure must not strand generation.** Customer requests only
     enqueue work; an independent worker claims and completes it.
+15. **Customer content is authoritative.** What the customer asked to see in
+    the artwork outranks every downstream preference. Conversation
+    Understanding may reword, tidy, and remove conversational filler, but it
+    must preserve design-critical objects, categories, counts, positions and
+    relationships. Concept directions control creative *treatment*, never
+    required subject matter. Provider defaults (for example a centered
+    composition) are the lowest priority in the system and must never
+    contradict an explicit customer composition. See §13f.
 
 ---
 
@@ -611,6 +619,15 @@ independent of the approved brief and of any `RegenerationPlan` — the three
 directions are applied identically on every generation attempt. Concept
 differentiation therefore survives regeneration automatically; no separate
 regeneration-specific direction logic exists or is needed.
+
+**Detailed-Description Fidelity (Phase 1) refinement.** A direction's fields
+are now its treatment for a single simple required subject; `sceneTreatment`
+and `customerComposedTreatment` state the same creative angle for content
+that requires several elements or that the customer has already positioned.
+`resolveDirectionTreatment(direction, contract)` is the one place they are
+resolved, against `DesignContentContract` (§13f). A direction may change how
+densely and how simply content is drawn; it may never remove required
+subject matter or assert a placement the customer already decided.
 
 ### GenerationWorkerCapability — Active
 
@@ -3504,6 +3521,122 @@ rather than re-affirming print-readiness for a canvas nobody measured.
 
 ---
 
+## 13f. Detailed-Description Fidelity (Phase 1)
+
+### The invariant
+
+**Customer content is authoritative** (Principle 15). Everything the customer
+asked to see — named subjects, secondary objects, distinct object
+categories, counts, positions, orientations, relationships, scene structure,
+place context, and explicit include/exclude language — must survive every
+deterministic layer between the chat message and the provider request.
+
+Three layer-level rules follow from it:
+
+1. **Conversation Understanding may synthesize language, never content.**
+   Rewording, grammar cleanup, and filler removal are in scope. Dropping an
+   object, collapsing distinct categories into one ("ski boats, cruiser
+   boats and jet skis" → "boats"), losing a count, or discarding a stated
+   position is not.
+2. **Concept directions control creative treatment, not required subject
+   matter.** A direction may simplify *how* something is drawn; it may never
+   decide *what* is drawn.
+3. **Provider defaults cannot contradict explicit customer composition.** A
+   default such as "centered composition" applies only where the customer
+   stated nothing.
+
+### Why it exists
+
+The Discovery Bay live acceptance audit established that fidelity was lost
+*before* any image model was called. The customer described a lighthouse on
+the left, T-shaped waterways, a marina and its position, homes and their
+position, and three distinct boat types. Conversation Understanding —
+correctly following an instruction to produce "a short phrase a designer
+would actually write on a brief" — reduced this to roughly "A design
+featuring the Discovery Bay California lighthouse, water shaped like a T,
+ski boats, cruiser boats, and jet skis." Every position, the marina, and the
+homes were gone. Concept directions then amplified the loss: "Minimal Badge"
+instructed "a single small icon or mark, no scene" for a brief that required
+a multi-element scene, and the provider prompt's trailing "centered
+composition" default competed with "lighthouse on the left".
+
+No provider or model change addresses any of that.
+
+### Precedence (authoritative order)
+
+Applied by `openai-concept-provider.ts`'s `buildPrompt`, stated explicitly
+inside the prompt itself, and enforced structurally by
+`resolveDirectionTreatment`:
+
+1. Customer required wording and exclusions
+2. Customer design description (required content) and stated composition
+3. Customer style and color preferences
+4. Concept-direction treatment
+5. Provider defaults
+
+A lower layer may never contradict a higher one.
+
+### Mechanism
+
+- `lib/domain/design-content-contract.ts` — the one pure reader of a design
+  description. Answers `requiresScene`, `hasExplicitComposition`,
+  `compositionStatements` (the customer's own clauses, selected, never
+  synthesized), `requiredElementCount`, and `requestsRealWorldReference`.
+  Deliberately **not** a schema: nothing here is persisted and nothing
+  replaces `DesignBrief.designDescription`, which remains the authoritative
+  content contract. There is no scene graph, no `requiredVisualElements[]`,
+  and no `compositionConstraints[]` — the audit established the free-text
+  description can carry the contract on its own.
+- `intent-extraction/preserve-design-detail.ts` — the deterministic backstop
+  for Conversation Understanding. A strengthened provider prompt is a
+  request, not a guarantee, and cannot be regression-tested without a paid
+  network call. This module compares the synthesized value against the
+  customer's own message and restores only the design-critical clauses that
+  genuinely did not survive. It never appends the raw message, and excludes
+  garment-color, print-placement, required-wording, and palette-preference
+  clauses by construction. Applied on both paths — semantic
+  (`reconcile-understanding.ts`) and deterministic (`extraction.ts`) — so
+  fidelity does not depend on whether a Conversation Understanding provider
+  is configured.
+- `lib/domain/concept-directions.ts` — each direction now carries its base
+  treatment (correct for a single simple subject, where "one restrained
+  icon" is genuinely the right instruction) plus `sceneTreatment` and
+  `customerComposedTreatment` overrides. `resolveDirectionTreatment` is the
+  one place they are resolved against the content contract. The three
+  directions still differ sharply: fidelity is achieved by constraining what
+  a direction may *remove*, never by making the three prompts converge
+  (Constitution §13 still requires three genuinely useful options).
+- `providers/openai-concept-provider.ts` — the initial-generation prompt is
+  sectioned by priority (`REQUIRED DESIGN CONTENT`, `COMPOSITION`,
+  `REQUIRED WORDING`, `STYLE / CREATIVE TREATMENT`, `DO NOT OMIT`,
+  `PRIORITY`, `CREATIVE FREEDOM`) rather than one flat sentence in which
+  "Subject:" carried no more weight than "Iconography:". The customer's
+  additional instructions are now consumed on this path too, instead of
+  only on the edit path.
+
+### Real-world geography
+
+Text-only generation **cannot** guarantee real-world geographic accuracy
+without reference grounding. When a customer asks for a real place
+("make it like the actual area", "look up an aerial view"), the request is
+preserved rather than dropped, and the provider prompt answers it honestly:
+approximate the arrangement from the customer's own description, no external
+map or aerial reference is available, do not invent landmarks, do not imply
+survey accuracy. Reference-image grounding is a later phase; nothing in
+Phase 1 may claim map accuracy.
+
+### What the automated tests do and do not prove
+
+The regressions in
+`intent-extraction/detailed-description-fidelity.test.ts` and
+`providers/concept-prompt-fidelity.test.ts` prove what iHeartPrints
+**sends** — that customer requirements survive every deterministic layer and
+appear in all three provider prompts, and that no direction's styling
+contradicts them. They make no network calls and prove nothing about image
+model compliance. That remains a live-acceptance question. See §24.
+
+---
+
 ## 14. Background Worker Architecture
 
 Two independent job queues, two independent workers — deliberately never
@@ -4032,6 +4165,34 @@ Verified against the implementation:
   `ProjectStatus`'s `"finalizing"`/`"print_ready"` values are defined but
   never assigned anywhere in the codebase. Print Validation Phase 1
   deliberately does not invent a replacement for this gap (see §5's audit)
+- Detailed-Description Fidelity (Phase 1) guarantees only what iHeartPrints
+  **sends**. Every regression proves that customer requirements survive the
+  deterministic layers and reach all three provider prompts; none proves an
+  image model obeys them. Model compliance is a live-acceptance question
+- Detailed-Description Fidelity (Phase 1) has no reference grounding, so
+  **text-only generation cannot guarantee real-world geographic accuracy**.
+  A request to reproduce a real place is preserved and answered honestly in
+  the provider prompt (approximate from the customer's description; no map
+  or aerial reference available; invent no landmarks; imply no survey
+  accuracy) — it is not fulfilled. Reference-image upload/generation is a
+  later phase
+- `preserve-design-detail.ts` restores lost detail by clause, using generic
+  structure (position words, shape words, short-noun-phrase enumeration,
+  conversational filler) — not language understanding. Two consequences:
+  a multi-element description that states no position and no list (e.g. "a
+  bowling ball smashing pins") does not register as `requiresScene`, so a
+  direction's minimal treatment still applies to it (the prompt's
+  `DO NOT OMIT` / `PRIORITY` sections remain the protection there); and a
+  partially-lossy synthesis can be restored with some redundancy — the
+  restored clause is appended in the customer's own words even when most of
+  it was already present. Restating a detail is deliberately preferred over
+  risking its loss
+- Concept Evaluation now instructs the vision model that a named subject
+  which is absent, a wrong stated count, or a contradicted stated
+  relationship is a graphics *mismatch*. That is a prompt-level
+  strengthening only — **the system still cannot reliably verify every
+  spatial relation in generated output**, and no structural
+  composition/spatial verifier exists. Evaluation remains advisory
 - Generated concepts are not print-ready production assets
 - Print Vault behavior is not implemented
 - Ownership/licensing enforcement is not implemented

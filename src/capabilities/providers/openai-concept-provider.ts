@@ -9,8 +9,10 @@ import {
   CONCEPT_DIRECTIONS,
   describeConceptDirection,
   resolveConceptDirection,
+  resolveDirectionTreatment,
   type ConceptDirection,
 } from "@/lib/domain/concept-directions";
+import { analyzeDesignContent } from "@/lib/domain/design-content-contract";
 import type { GenerationPromptRequest } from "@/lib/domain/types";
 import type { ConceptGenerationProvider } from "./concept-generation-provider";
 import { isRetryableProviderError, ProviderError } from "./provider-error";
@@ -371,45 +373,89 @@ function defaultSleep(ms: number): Promise<void> {
  * `prompt.inspirationReferences` and `prompt.allowAdditionalText` carry the
  * Goal 4/7 guardrails through from Prompt Translation.
  *
- * True Source-Image Targeted Revision: this is now the INITIAL-generation
- * dialect only (text-to-image, three directions). It is intentionally left
- * byte-for-byte as it was — a targeted revision uses `buildEditPrompt`,
- * which is a fundamentally different instruction ("edit this", not
- * "imagine this").
+ * True Source-Image Targeted Revision: this is the INITIAL-generation
+ * dialect only (text-to-image, three directions). A targeted revision uses
+ * `buildEditPrompt`, which is a fundamentally different instruction ("edit
+ * this", not "imagine this").
+ *
+ * Detailed-Description Fidelity (Phase 1), part C — the prompt is now
+ * SECTIONED by priority rather than being one flat run-on sentence, because
+ * the audit proved the flat form gave "Subject: …" no more weight than
+ * "Iconography: one simple, direct supporting graphic, not a scene". Those
+ * two are not peers, and the prompt never said so. Priority, highest first:
+ *
+ *   1. REQUIRED WORDING and exclusions   (exact, unnegotiable)
+ *   2. REQUIRED DESIGN CONTENT + COMPOSITION (the customer's description)
+ *   3. the customer's own style/color preferences
+ *   4. STYLE / CREATIVE TREATMENT        (this concept's direction)
+ *   5. provider defaults                 (e.g. centered composition)
+ *
+ * and the prompt states that ordering explicitly, so a direction can never
+ * be read as licence to drop a required element.
+ *
+ * The customer's `subject` — the faithfully preserved `designDescription` —
+ * is the authoritative content contract. There is no structured element
+ * list, and this function deliberately does not invent one: the COMPOSITION
+ * bullets are the customer's OWN clauses, selected, never synthesized.
  */
 function buildPrompt(
   prompt: GenerationPromptRequest,
   direction: ConceptDirection,
 ): string {
-  const parts = [
+  const contract = analyzeDesignContent(prompt.subject, {
+    additionalContext: prompt.notes,
+  });
+  const treatment = resolveDirectionTreatment(direction, contract);
+
+  const sections: string[] = [
     `Print-ready apparel graphic for ${prompt.product}.`,
-    `Subject: ${prompt.subject}.`,
-    `Creative direction — ${direction.title}: ${direction.composition}.`,
-    `Typography: ${direction.typographyEmphasis}.`,
-    `Illustration density: ${direction.illustrationDensity}.`,
-    `Iconography: ${direction.iconography}.`,
-    `Layout: ${direction.layout}.`,
-    `Visual hierarchy: ${direction.visualHierarchy}.`,
+    `REQUIRED DESIGN CONTENT — this is the customer's own description of what the artwork must show. Every subject, object, count, and relationship in it is a requirement, not inspiration: ${endWithPeriod(
+      prompt.subject,
+    )}`,
   ];
-  if (prompt.style) parts.push(`Style: ${prompt.style}.`);
+
+  if (contract.compositionStatements.length > 0) {
+    sections.push(
+      `COMPOSITION — the customer stated these placements and relationships. Honor them as written; they outrank any layout, framing, or centering guidance below:\n${contract.compositionStatements
+        .map((statement) => `- ${statement}`)
+        .join("\n")}`,
+    );
+  }
+
+  if (prompt.requiredWording) {
+    sections.push(
+      `REQUIRED WORDING — include this exact wording, spelled correctly, and no other wording: "${prompt.requiredWording}".`,
+    );
+  }
+
+  const styleLines = [
+    `Creative direction — ${direction.title}: ${treatment.composition}.`,
+    `Typography: ${treatment.typographyEmphasis}.`,
+    `Illustration density: ${treatment.illustrationDensity}.`,
+    `Iconography: ${treatment.iconography}.`,
+    `Layout: ${treatment.layout}.`,
+    `Visual hierarchy: ${treatment.visualHierarchy}.`,
+  ];
+  if (prompt.style) styleLines.push(`Style: ${prompt.style}.`);
   if (prompt.colors.length > 0) {
-    parts.push(`Preferred colors: ${prompt.colors.join(", ")}.`);
+    styleLines.push(`Preferred colors: ${prompt.colors.join(", ")}.`);
   }
   if (prompt.productColor) {
-    parts.push(
+    styleLines.push(
       `Will be printed on a ${prompt.productColor} garment — keep contrast strong against it.`,
     );
   }
-  if (prompt.requiredWording) {
-    parts.push(
-      `Include this exact wording, spelled correctly, and no other wording: "${prompt.requiredWording}".`,
-    );
-  }
+  sections.push(
+    `STYLE / CREATIVE TREATMENT — this governs HOW the required content is rendered, never what is included or left out:\n${styleLines.join(
+      "\n",
+    )}`,
+  );
+
   // Sprint 2K Phase 3 (Goal 7): explicit, deterministic instruction against
   // inventing text — driven by the provider-neutral `allowAdditionalText`
   // flag rather than being a one-off OpenAI-only afterthought.
   if (!prompt.allowAdditionalText) {
-    parts.push(
+    sections.push(
       "Do not add any other text, letters, words, dates, or slogans beyond the exact wording specified above.",
     );
   }
@@ -417,18 +463,50 @@ function buildPrompt(
   // customer gave is inspiration for visual language only — never an
   // instruction to depict the referenced people, characters, or logos.
   if (prompt.inspirationReferences.length > 0) {
-    parts.push(
+    sections.push(
       `Style inspiration only (do not depict as literal content): ${prompt.inspirationReferences.join("; ")}.`,
       "Do not depict recognizable real people, TV/movie characters, sports mascots, band members, or any copyrighted logo or artwork from a referenced work — reinterpret only the general era, mood, and graphic language.",
     );
   }
   if (prompt.exclusions) {
-    parts.push(`Avoid: ${prompt.exclusions}.`);
+    sections.push(`Avoid: ${prompt.exclusions}.`);
   }
-  parts.push(
-    "Clean vector-style illustration, transparent background, centered composition, no watermark, no mockup, no photograph of a shirt — artwork only.",
+  // Detailed-Description Fidelity (Phase 1): the customer's additional
+  // instructions used to be assembled by Prompt Translation and then dropped
+  // on this path (only the edit path consumed them). "Make it like the
+  // actual area" routinely lands here, and silently discarding it is exactly
+  // the pre-provider information loss this change exists to stop.
+  if (prompt.notes) {
+    sections.push(`Additional customer context: ${prompt.notes}`);
+  }
+  // Real-world geography, answered honestly. Phase 1 has no reference
+  // grounding, so the request is neither dropped nor over-claimed.
+  if (contract.requestsRealWorldReference) {
+    sections.push(
+      "The customer has asked for this to resemble a real place. Approximate the arrangement only from the customer's own description above — no map, aerial photograph, or other external geographic reference is available for this request. Do not invent landmarks that were not described, and do not attempt to imply survey or map accuracy.",
+    );
+  }
+
+  sections.push(
+    // "collapse … to one lone symbol" rather than "to an emblem": the
+    // Minimal Badge direction legitimately asks for an emblem, and an
+    // instruction that reads as forbidding its own creative direction is
+    // just a different contradiction.
+    "DO NOT OMIT: every subject, object, count, and spatial relationship named in REQUIRED DESIGN CONTENT and COMPOSITION must be present in the finished artwork. Do not drop a named element, merge several named elements into one, replace the described arrangement with a generic one, or reduce the design to one lone symbol in order to satisfy the creative direction.",
+    "PRIORITY when anything conflicts: required wording and exclusions first; then the required design content and composition; then the customer's stated style and colors; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one.",
+    "CREATIVE FREEDOM: typography treatment, illustration style, line weight, framing, decorative detail, texture, and palette treatment wherever the customer has not constrained them.",
   );
-  return parts.join(" ");
+
+  // Centered composition is a provider DEFAULT — the lowest priority thing
+  // in this prompt. When the customer has said where things go, asserting it
+  // anyway is a direct contradiction of a higher-priority requirement.
+  sections.push(
+    contract.hasExplicitComposition
+      ? "Clean vector-style illustration, transparent background, arranged to match the customer's stated composition above, no watermark, no mockup, no photograph of a shirt — artwork only."
+      : "Clean vector-style illustration, transparent background, centered composition, no watermark, no mockup, no photograph of a shirt — artwork only.",
+  );
+
+  return sections.join("\n\n");
 }
 
 /**
@@ -551,6 +629,12 @@ function buildEditPrompt(prompt: GenerationPromptRequest): string {
   );
 
   return sections.join("\n\n");
+}
+
+/** A faithfully preserved description usually already ends in a period. */
+function endWithPeriod(value: string): string {
+  const trimmed = value.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 function extractImage(payload: unknown): { b64: string } | null {

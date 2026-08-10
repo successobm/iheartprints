@@ -1,3 +1,7 @@
+import {
+  analyzeDesignContent,
+  type DesignContentContract,
+} from "./design-content-contract";
 import type { ConceptDirectionKey, GenerationPromptRequest } from "./types";
 
 // Re-exported for backward compatibility — the canonical definition now
@@ -35,12 +39,14 @@ export type { ConceptDirectionKey } from "./types";
  * request, exactly as it does on initial generation.
  */
 
-export interface ConceptDirection {
-  key: ConceptDirectionKey;
-  /** Customer-facing concept title (Constitution §13: layout/typography/hierarchy variation, not a different brief). */
-  title: string;
-  placeholderLabel: string;
-  accentColor: string;
+/**
+ * Detailed-Description Fidelity (Phase 1), part B: the six treatment fields
+ * a direction actually contributes to a provider prompt. Split out from
+ * `ConceptDirection` so a direction can express the SAME creative angle
+ * differently depending on what the approved content requires, without
+ * anyone downstream having to know which variant they were handed.
+ */
+export interface ConceptDirectionTreatment {
   /** Plain-language composition guidance — provider-neutral, not prompt dialect. */
   composition: string;
   typographyEmphasis: string;
@@ -50,6 +56,47 @@ export interface ConceptDirection {
   visualHierarchy: string;
 }
 
+export type ConceptDirectionTreatmentOverrides = Partial<ConceptDirectionTreatment>;
+
+export interface ConceptDirection extends ConceptDirectionTreatment {
+  key: ConceptDirectionKey;
+  /** Customer-facing concept title (Constitution §13: layout/typography/hierarchy variation, not a different brief). */
+  title: string;
+  placeholderLabel: string;
+  accentColor: string;
+  /**
+   * Applied when the approved design content requires more than one element
+   * or states a relationship between elements (`DesignContentContract.
+   * requiresScene`). Only the fields that would otherwise CONTRADICT the
+   * customer's content are overridden — the direction's creative angle is
+   * unchanged, only its licence to remove subject matter is withdrawn.
+   */
+  sceneTreatment?: ConceptDirectionTreatmentOverrides;
+  /**
+   * Applied when the customer stated where things go
+   * (`DesignContentContract.hasExplicitComposition`). A direction that
+   * prefers a centered/symmetrical arrangement may keep its framing
+   * character but must stop asserting a placement the customer already
+   * decided.
+   */
+  customerComposedTreatment?: ConceptDirectionTreatmentOverrides;
+}
+
+/**
+ * Detailed-Description Fidelity (Phase 1), part B — why the base entries
+ * below still contain minimal/icon language, and why that is now safe.
+ *
+ * The audit did not find that "single small icon, no scene" was wrong; it
+ * found that it was UNCONDITIONAL. For "a red 1988 Toyota MR2" it is exactly
+ * the right instruction, and deleting it everywhere would have destroyed the
+ * real creative difference between the three concepts — which is its own
+ * product failure (Constitution §13).
+ *
+ * So the base fields remain the direction's treatment for a single, simple
+ * required subject, and `sceneTreatment` states the same creative angle for
+ * content that genuinely requires several elements. What changes is never
+ * WHAT is depicted, only how densely and how simply it is drawn.
+ */
 export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
   {
     key: "bold_direct",
@@ -63,6 +110,20 @@ export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
     iconography: "one simple, direct supporting graphic, not a scene",
     layout: "centered, symmetrical layout with generous margins",
     visualHierarchy: "wording first, supporting graphic second — nothing competes with the text",
+    sceneTreatment: {
+      composition:
+        "a bold, high-contrast composition that renders the whole required subject in strong, simplified shapes with clear separation between elements",
+      illustrationDensity:
+        "simplified, high-impact illustration — reduce the detail drawn inside each element, never the number of required elements",
+      iconography:
+        "every required subject drawn as a bold, graphic shape; simplify how each one is rendered, and leave none of them out",
+      visualHierarchy:
+        "wording reads first, with the required subject matter rendered boldly beneath it — strong hierarchy, complete content",
+    },
+    customerComposedTreatment: {
+      layout:
+        "generous margins and a clear, uncluttered frame, arranged to follow the placements the customer stated rather than forcing a symmetrical center",
+    },
   },
   {
     key: "soft_illustrated",
@@ -76,6 +137,16 @@ export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
     iconography: "a small scene or grouped motifs that add personality without depending on any specific real character or person",
     layout: "asymmetrical or loosely balanced layout that feels hand-arranged, not gridded",
     visualHierarchy: "illustration and wording read as one integrated unit",
+    sceneTreatment: {
+      illustrationDensity:
+        "the richest, most detailed illustration of the three directions — full scenic treatment with visual texture and depth",
+      iconography:
+        "the complete required subject matter rendered as a warm, characterful illustrated scene, without depending on any specific real character or person",
+    },
+    customerComposedTreatment: {
+      layout:
+        "loosely balanced, hand-arranged framing that follows the placements the customer stated rather than a grid",
+    },
   },
   {
     key: "minimal_badge",
@@ -88,8 +159,56 @@ export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
     iconography: "one restrained icon representative of the subject, rendered simply",
     layout: "circular, shield, or crest-style contained layout with a defined edge",
     visualHierarchy: "badge shape first, wording and icon balanced evenly within it",
+    sceneTreatment: {
+      composition:
+        "a compact, emblem/badge-style composition contained within a simple border, whose interior holds the complete required subject matter drawn in a pared-back way",
+      illustrationDensity:
+        "very restrained linework and flat shapes — simplify how every element is drawn while keeping every required element present",
+      iconography:
+        "the required subject matter reduced to clean, emblematic shapes — simplified in rendering, complete in content",
+      visualHierarchy:
+        "badge shape first, with the required subject matter and the wording balanced evenly inside it",
+    },
+    customerComposedTreatment: {
+      layout:
+        "a contained badge shape with a defined edge, with the required elements arranged inside it according to the placements the customer stated",
+    },
   },
 ] as const;
+
+/**
+ * Detailed-Description Fidelity (Phase 1), part B — the ONE place a
+ * direction's treatment is resolved against what the approved content
+ * actually requires. Layered so a lower-priority preference can never
+ * survive a conflict with a higher-priority customer requirement:
+ *
+ *   base treatment (simple single subject)
+ *     ← overridden by `sceneTreatment` when the content requires several
+ *       elements or states a relationship between them
+ *     ← overridden by `customerComposedTreatment` when the customer stated
+ *       where things go
+ *
+ * The result still differs sharply between the three directions — that is
+ * the point. Fidelity is achieved by constraining what a direction may
+ * REMOVE, never by making the three prompts converge.
+ */
+export function resolveDirectionTreatment(
+  direction: ConceptDirection,
+  contract: Pick<DesignContentContract, "requiresScene" | "hasExplicitComposition">,
+): ConceptDirectionTreatment {
+  return {
+    composition: direction.composition,
+    typographyEmphasis: direction.typographyEmphasis,
+    illustrationDensity: direction.illustrationDensity,
+    iconography: direction.iconography,
+    layout: direction.layout,
+    visualHierarchy: direction.visualHierarchy,
+    ...(contract.requiresScene ? direction.sceneTreatment ?? {} : {}),
+    ...(contract.hasExplicitComposition
+      ? direction.customerComposedTreatment ?? {}
+      : {}),
+  };
+}
 
 /**
  * Sprint 2G Live Acceptance Corrective Pass: resolves one catalog direction
@@ -122,5 +241,13 @@ export function describeConceptDirection(
   const text = prompt.requiredWording
     ? `Featuring "${prompt.requiredWording}".`
     : "No text lockup — graphic-led.";
-  return `${direction.title}: ${direction.composition}. ${text} Designed for a ${shirt} shirt.`;
+  // Detailed-Description Fidelity (Phase 1): describe the treatment actually
+  // sent to the provider. Telling a customer their scenic request became "a
+  // strong central silhouette" when the prompt says otherwise would be the
+  // same fabrication this function exists to prevent.
+  const treatment = resolveDirectionTreatment(
+    direction,
+    analyzeDesignContent(prompt.subject, { additionalContext: prompt.notes }),
+  );
+  return `${direction.title}: ${treatment.composition}. ${text} Designed for a ${shirt} shirt.`;
 }

@@ -99,7 +99,13 @@ export function createIntentExtractionCapability(): IntentExtractionCapability {
       // understanding did not confidently resolve, and is the *only*
       // source when `understanding` is absent (provider skipped/
       // unconfigured/failed) — today's exact pre-Sprint-2L behavior.
-      const reconciled = reconcileUnderstanding(understanding ?? null, { brief });
+      const reconciled = reconcileUnderstanding(understanding ?? null, {
+        brief,
+        // Detailed-Description Fidelity (Phase 1): reconciliation needs the
+        // customer's own words to notice what a polished-but-lossy graphics
+        // synthesis dropped. Read-only — see `preserveDesignDetail`.
+        message: reply,
+      });
       const fields: BriefFieldPatch = {
         ...deterministic.fields,
         ...reconciled.fields,

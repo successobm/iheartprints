@@ -14,6 +14,7 @@ import type {
   BriefSectionKey,
   DetectedIntent,
 } from "@/capabilities/shared/contracts";
+import { preserveDesignDetail } from "./preserve-design-detail";
 
 /**
  * Deterministic multi-field extraction engine (Sprint 2F).
@@ -583,8 +584,17 @@ export function extractAdaptive(context: ExtractionContext): ExtractionOutcome {
   const style = extractStyle(positiveText);
   if (style) fields.designStyle = style;
 
+  // Detailed-Description Fidelity (Phase 1): `extractGraphics` is anchored
+  // at a cue phrase and bounded to one clause — deliberately, so an
+  // unrelated leading clause never contaminates the design description. The
+  // cost is that a multi-sentence spatial description ("… on the left. Homes
+  // behind it. Show canoes and kayaks.") keeps only the first clause.
+  // `preserveDesignDetail` restores the design-critical clauses that bound
+  // capture dropped, using the same rules that protect the semantic path.
   const graphics = extractGraphics(positiveText);
-  if (graphics) fields.designDescription = graphics;
+  if (graphics) {
+    fields.designDescription = preserveDesignDetail(graphics, positiveText);
+  }
 
   // Sprint 2K Phase 3 (Goal 1): a short, single-clause reply is a direct
   // answer to whatever question is actually pending — a generic product
