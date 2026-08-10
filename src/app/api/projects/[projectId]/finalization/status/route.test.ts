@@ -26,8 +26,13 @@ describe("GET /api/projects/[projectId]/finalization/status", () => {
       "@/capabilities/composition"
     );
     resetCapabilityGraphForTests();
-    const { startConversation, handleUserMessage, submitDesignBriefDecision, selectConcept } =
-      await import("@/lib/services/conversation-service");
+    const {
+      startConversation,
+      handleUserMessage,
+      submitDesignBriefDecision,
+      selectConcept,
+      confirmSelectedDirection,
+    } = await import("@/lib/services/conversation-service");
 
     const { projectId } = await runAdaptiveInterviewToSummary({
       start: startConversation,
@@ -40,6 +45,9 @@ describe("GET /api/projects/[projectId]/finalization/status", () => {
     const generated = await conversationService.getConversation(projectId);
     const [concept] = generated!.artworkVersions;
     await selectConcept(projectId, concept!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is
+    // never final approval — confirm by default here.
+    await confirmSelectedDirection(projectId, concept!.id);
 
     return { projectId, artworkVersionId: concept!.id };
   }

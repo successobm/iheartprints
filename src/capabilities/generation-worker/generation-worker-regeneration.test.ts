@@ -26,6 +26,7 @@ import { buildGenerationIntentForJob } from "./build-generation-intent";
 
 class CapturingProvider implements ConceptGenerationProvider {
   readonly providerKey = "capturing";
+  readonly editsSourceArtwork = false;
   lastPrompt: GenerationPromptRequest | null = null;
   prompts: GenerationPromptRequest[] = [];
 

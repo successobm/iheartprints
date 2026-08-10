@@ -19,6 +19,7 @@ import { createGenerationWorkerCapability } from "./generation-worker-capability
 
 class InstantProvider implements ConceptGenerationProvider {
   readonly providerKey = "instant";
+  readonly editsSourceArtwork = false;
   async generate(request: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
     return {
       jobId: request.idempotencyKey,

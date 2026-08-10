@@ -11,7 +11,10 @@ import {
 } from "./effective-resolution";
 import { classifyProduction, deriveProductionRequirements } from "./production-requirements";
 import { targetDimensionsForPlacement } from "@/capabilities/shared/print-placement-dimensions";
-import type { PrintValidationInput } from "./contracts";
+import type {
+  PrintValidationInput,
+  ProductionNormalizationSummary,
+} from "./contracts";
 
 function conceptEvaluation(
   overrides: Partial<ConceptEvaluation> = {},
@@ -61,6 +64,289 @@ function baseInput(overrides: Partial<PrintValidationInput> = {}): PrintValidati
     ...overrides,
   };
 }
+
+/**
+ * A correctly normalized full-back plate: 10.5in x 11.25in at 300 PPI
+ * (3150x3375px), trimmed tight to its artwork with only the small
+ * artwork-edge safety margin around it.
+ */
+function normalizedFullBackInput(
+  overrides: {
+    input?: Partial<PrintValidationInput>;
+    normalization?: Partial<ProductionNormalizationSummary>;
+    asset?: Partial<NonNullable<PrintValidationInput["primaryAsset"]>>;
+  } = {},
+): PrintValidationInput {
+  return baseInput({
+    printPlacement: "full_back",
+    primaryAsset: {
+      contentType: "image/png",
+      widthPx: 3150,
+      heightPx: 3375,
+      hasTransparency: true,
+      vectorAssetId: null,
+      resolutionProvenance: "reconstructed",
+      nativeWidthPx: 1024,
+      nativeHeightPx: 1024,
+      ...overrides.asset,
+    },
+    productionNormalization: {
+      strategy: "width_constrained_preserve_aspect",
+      alphaBBoxWidthPx: 3100,
+      alphaBBoxHeightPx: 3320,
+      trimmedWidthPx: 3128,
+      trimmedHeightPx: 3352,
+      artworkOccupancy: (3100 * 3320) / (3128 * 3352),
+      targetWidthIn: 10.5,
+      widthToleranceIn: 0.05,
+      targetPpi: 300,
+      intendedWidthIn: 10.5,
+      intendedHeightIn: 11.25,
+      constrainedBy: "width",
+      densityPixelsPerMetre: 11811,
+      ...overrides.normalization,
+    },
+    ...overrides.input,
+  });
+}
+
+describe("PrintValidationCapability — normalized production plates (Print-Ready Normalization Phase 1)", () => {
+  const printValidation = createPrintValidationCapability();
+
+  // --- N: a correctly normalized plate validates ready ----------------------
+  it("N: a plate trimmed to its artwork at 10.5in x 300 PPI validates ready", () => {
+    const report = printValidation.validateArtwork(normalizedFullBackInput());
+
+    assert.equal(report.status, "ready");
+    assert.deepEqual(report.blockingIssues, []);
+    for (const check of [
+      "production_normalization",
+      "alpha_bound_artwork",
+      "transparent_dead_canvas",
+      "physical_width_policy",
+      "aspect_ratio_preserved",
+      "effective_resolution",
+      "minimum_raster_dimensions",
+    ]) {
+      assert.equal(report.checks.find((c) => c.check === check)?.status, "pass", check);
+    }
+  });
+
+  // --- L: effective resolution is measured against intended physical size ---
+  it("L: effective resolution is pixels ÷ intended inches, and 3150px over 10.5in is exactly 300 PPI", () => {
+    const report = printValidation.validateArtwork(normalizedFullBackInput());
+    const check = report.checks.find((c) => c.check === "effective_resolution");
+    assert.equal(check?.status, "pass");
+    assert.match(check!.reason, /~300 PPI/);
+  });
+
+  it("a plate sized below the target PPI fails effective_resolution", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        asset: { widthPx: 1575, heightPx: 1688 },
+        normalization: { intendedWidthIn: 10.5, intendedHeightIn: 11.25 },
+      }),
+    );
+    assert.equal(
+      report.checks.find((c) => c.check === "effective_resolution")?.status,
+      "fail",
+    );
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("a wide plate is never failed for having fewer pixels than the placement ENVELOPE demands", () => {
+    // 10.5in x 5.25in at 300 PPI — legitimately only 1575px tall, far below
+    // the envelope's 4200px, and completely correct.
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        asset: { widthPx: 3150, heightPx: 1575 },
+        normalization: {
+          alphaBBoxWidthPx: 3120,
+          alphaBBoxHeightPx: 1550,
+          trimmedWidthPx: 3136,
+          trimmedHeightPx: 1568,
+          artworkOccupancy: (3120 * 1550) / (3136 * 1568),
+          intendedWidthIn: 10.5,
+          intendedHeightIn: 5.25,
+        },
+      }),
+    );
+    assert.equal(report.status, "ready");
+    assert.equal(
+      report.checks.find((c) => c.check === "minimum_raster_dimensions")?.status,
+      "pass",
+    );
+  });
+
+  // --- M: excessive transparent dead canvas fails --------------------------
+  it("M: a plate that is mostly transparent dead canvas fails validation", () => {
+    // The audited live shape: 2662x2861 of artwork inside a 3600x4200 plate.
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        asset: { widthPx: 3600, heightPx: 4200 },
+        normalization: {
+          alphaBBoxWidthPx: 2662,
+          alphaBBoxHeightPx: 2861,
+          trimmedWidthPx: 3600,
+          trimmedHeightPx: 4200,
+          artworkOccupancy: (2662 * 2861) / (3600 * 4200),
+          intendedWidthIn: 12,
+          intendedHeightIn: 14,
+        },
+      }),
+    );
+
+    assert.notEqual(report.status, "ready");
+    const deadCanvas = report.checks.find((c) => c.check === "transparent_dead_canvas");
+    assert.equal(deadCanvas?.status, "fail");
+    assert.match(deadCanvas!.reason, /dead canvas/i);
+    assert.ok(report.requiredTransformations.includes("resize_to_final_dimensions"));
+  });
+
+  it("the small artwork-edge safety margin never trips the dead-canvas rule", () => {
+    const report = printValidation.validateArtwork(normalizedFullBackInput());
+    assert.equal(
+      report.checks.find((c) => c.check === "transparent_dead_canvas")?.status,
+      "pass",
+    );
+  });
+
+  it("a plate with no meaningful alpha-bound artwork fails", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        normalization: { alphaBBoxWidthPx: 4, alphaBBoxHeightPx: 4 },
+      }),
+    );
+    assert.equal(
+      report.checks.find((c) => c.check === "alpha_bound_artwork")?.status,
+      "fail",
+    );
+    assert.notEqual(report.status, "ready");
+  });
+
+  // --- H/I: physical width policy, with an explicit tolerance ---------------
+  it("H/I: a plate printed at the placement's 10.5in target width passes the width policy", () => {
+    const report = printValidation.validateArtwork(normalizedFullBackInput());
+    assert.equal(
+      report.checks.find((c) => c.check === "physical_width_policy")?.status,
+      "pass",
+    );
+  });
+
+  it("width policy uses an explicit tolerance rather than exact equality", () => {
+    const within = printValidation.validateArtwork(
+      normalizedFullBackInput({ normalization: { intendedWidthIn: 10.53 } }),
+    );
+    assert.equal(
+      within.checks.find((c) => c.check === "physical_width_policy")?.status,
+      "pass",
+    );
+
+    const outside = printValidation.validateArtwork(
+      normalizedFullBackInput({ normalization: { intendedWidthIn: 12 } }),
+    );
+    assert.equal(
+      outside.checks.find((c) => c.check === "physical_width_policy")?.status,
+      "fail",
+    );
+  });
+
+  it("a tall artwork honestly reduced to the printable height passes the width policy", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        asset: { widthPx: 1050, heightPx: 4200 },
+        normalization: {
+          alphaBBoxWidthPx: 1030,
+          alphaBBoxHeightPx: 4170,
+          trimmedWidthPx: 1046,
+          trimmedHeightPx: 4184,
+          artworkOccupancy: (1030 * 4170) / (1046 * 4184),
+          intendedWidthIn: 3.5,
+          intendedHeightIn: 14,
+          constrainedBy: "max_height",
+        },
+      }),
+    );
+    const check = report.checks.find((c) => c.check === "physical_width_policy");
+    assert.equal(check?.status, "pass");
+    assert.match(check!.reason, /printable height/i);
+  });
+
+  // --- G: aspect ratio preservation ----------------------------------------
+  it("G: aspect ratio preserved through trim + resize passes; a distorted plate fails", () => {
+    const preserved = printValidation.validateArtwork(normalizedFullBackInput());
+    assert.equal(
+      preserved.checks.find((c) => c.check === "aspect_ratio_preserved")?.status,
+      "pass",
+    );
+
+    const stretched = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        // Trimmed artwork was square, but the plate is 10.5 x 11.25 — squashed.
+        normalization: { trimmedWidthPx: 3200, trimmedHeightPx: 3200 },
+      }),
+    );
+    const check = stretched.checks.find((c) => c.check === "aspect_ratio_preserved");
+    assert.equal(check?.status, "fail");
+    assert.match(check!.reason, /distorted/i);
+    assert.notEqual(stretched.status, "ready");
+  });
+
+  it("recorded pixel dimensions must agree with the recorded physical specification", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({ asset: { widthPx: 2000, heightPx: 3375 } }),
+    );
+    const check = report.checks.find((c) => c.check === "production_normalization");
+    assert.equal(check?.status, "fail");
+    assert.match(check!.reason, /resized after normalization/i);
+  });
+
+  // --- Density metadata is recorded, never authoritative --------------------
+  it("density metadata agreeing with 300 PPI is recorded as an informational pass", () => {
+    const report = printValidation.validateArtwork(normalizedFullBackInput());
+    const check = report.checks.find((c) => c.check === "density_metadata");
+    assert.equal(check?.status, "pass");
+    assert.equal(check?.severity, "info");
+  });
+
+  it("a plate with a WRONG density tag but correct pixel geometry is still ready — metadata never overrides geometry", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({ normalization: { densityPixelsPerMetre: 2835 } }), // ~72 PPI
+    );
+    assert.equal(report.status, "ready", "pixel geometry remains authoritative");
+    const check = report.checks.find((c) => c.check === "density_metadata");
+    assert.equal(check?.status, "warning");
+    assert.equal(check?.severity, "info");
+  });
+
+  it("a plate with a CORRECT density tag but insufficient pixels is never ready — metadata never substitutes for geometry", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        asset: { widthPx: 1050, heightPx: 1125 },
+        normalization: { densityPixelsPerMetre: 11811 },
+      }),
+    );
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("provisional concept validation is unaffected — no production checks are emitted", () => {
+    const report = printValidation.validateArtwork(baseInput());
+    for (const check of [
+      "production_normalization",
+      "alpha_bound_artwork",
+      "transparent_dead_canvas",
+      "physical_width_policy",
+      "aspect_ratio_preserved",
+      "density_metadata",
+    ]) {
+      assert.equal(
+        report.checks.find((c) => c.check === check),
+        undefined,
+        `${check} must not appear for a concept that was never normalized`,
+      );
+    }
+  });
+});
 
 describe("PrintValidationCapability — Upscaling Truthfulness (Sprint 2M Phase 2C)", () => {
   const printValidation = createPrintValidationCapability();
@@ -496,6 +782,18 @@ describe("classifyProduction / deriveProductionRequirements", () => {
     });
     assert.equal(requirements.targetDimensions, null);
     assert.equal(requirements.minRasterDimensionsPx, null);
+    assert.equal(requirements.sizing, null);
+  });
+
+  it("carries the placement's width-constrained sizing policy for apparel raster", () => {
+    const requirements = deriveProductionRequirements({
+      printPlacement: "full_front",
+      productSummary: "T-shirt",
+      designDescription: null,
+    });
+    assert.equal(requirements.sizing?.strategy, "width_constrained_preserve_aspect");
+    assert.equal(requirements.sizing?.targetWidthIn, 10.5);
+    assert.equal(requirements.sizing?.targetPpi, 300);
   });
 });
 
@@ -526,13 +824,16 @@ describe("effective-resolution (Goal 7)", () => {
 });
 
 describe("print placement target dimensions", () => {
-  it("full_back and full_front use the 12x14in reference size", () => {
+  // Print-Ready Normalization Phase 1: the envelope's width is the 10.5in
+  // production target; its height is the placement's printable BOUND, never a
+  // canvas height the deliverable is padded out to.
+  it("full_back and full_front use a 10.5in target width within a 14in printable height", () => {
     assert.deepEqual(targetDimensionsForPlacement("full_back"), {
-      widthIn: 12,
+      widthIn: 10.5,
       heightIn: 14,
     });
     assert.deepEqual(targetDimensionsForPlacement("full_front"), {
-      widthIn: 12,
+      widthIn: 10.5,
       heightIn: 14,
     });
   });

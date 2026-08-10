@@ -644,6 +644,242 @@
  *   - A paid provider's HTTP success is never treated as evidence of print
  *     readiness — only `PrintValidationCapability.validateArtwork`
  *     returning `"ready"` against the real production asset may.
+ *
+ * Sprint 2M Phase 2G — Revision lifecycle, exact wording semantics &
+ * finalization safety. See ARCHITECTURE.md §12a for the full design.
+ * Boundary changes worth repeating here:
+ *   - Rule clarified, not reversed: "automatic regeneration is forbidden"
+ *     means SYSTEM-initiated speculative regeneration — never a
+ *     CUSTOMER-requested conversational revision, which is customer
+ *     authority to enqueue regeneration automatically.
+ *     `ConversationCapability.triggerAutomaticRevision` is the one new
+ *     call site that enqueues generation from inside message handling
+ *     (previously only `regenerateConcepts`/the "regenerate" chat pattern
+ *     did) — gated by `shared/revision-intent.ts`'s
+ *     `isExplicitRevisionIntent`, never by Design/Revision/Regeneration
+ *     Intelligence's own judgment of what might help.
+ *   - `PrintProject.revisionPending` (new column) is the durable authority
+ *     for "a customer-requested change is not yet represented by the
+ *     artwork" — `status === "revision_requested"` remains too weak a
+ *     signal to gate finalization on (written on every revision-loop
+ *     message, not just ones with real concept-relevant impact).
+ *     Written by `ConversationCapability`, read authoritatively by
+ *     `FinalArtworkCapability.requestFinalArtwork` (refuses to create an
+ *     approval/job while `true`), cleared only by
+ *     `GenerationWorkerCapability` on regeneration completion.
+ *   - `ConversationCapability.triggerAutomaticRevision` now also calls
+ *     `repo.supersedeActiveFinalDirectionApproval` at the moment a
+ *     revision is understood (not only later, at regeneration completion,
+ *     as before this sprint) — closes the race where a still-running
+ *     `FinalArtworkJob` could complete after a newer revision and still
+ *     win, because `FinalArtworkWorkerCapability.maybeTransitionProjectStatus`
+ *     already refuses to write `print_ready`/`finalization_required`
+ *     unless its own approval is still active (pre-existing safeguard).
+ *   - `FinalArtworkCapability.requestFinalArtwork` gains one more refusal,
+ *     checked first: an active `revisionPending` rejects the request
+ *     safely (no approval, no job, customer-safe message) before any other
+ *     validation runs.
+ *   - `FinalArtworkCapability.requestFinalArtwork` no longer unconditionally
+ *     writes `PrintProject.status = "finalizing"` — only when the resolved
+ *     `FinalArtworkJob` is actually claimable
+ *     (`"queued"`/`"running"`/`"recoverable"`). A repeat request against an
+ *     already-`"completed"` job now returns the worker's own truthful
+ *     terminal status instead of stranding the project in `"finalizing"`
+ *     with no claimable job.
+ *   - `shared/concept-relevance.ts`'s `CONCEPT_RELEVANT_SECTIONS` gains
+ *     `exclusions` — a negative instruction ("this must not appear") is
+ *     exactly as concept-relevant as a positive one, and previously never
+ *     marked concepts stale or participated in the finalization staleness
+ *     check.
+ *   - `extraction.ts` (Intent Extraction) gains structural (not per-domain
+ *     keyword) recognition of the reversed entity-naming shape (`<entity>
+ *     is the/our/my <descriptor> name/title`) and of removal/correction
+ *     cues ("don't print X", "X shouldn't appear", "remove X", "use the
+ *     word Y", "I meant Y") updating `requiredWording`/`exclusions`
+ *     directly — never silently falling through to
+ *     `additionalInstructions`, which is not concept-relevant and
+ *     therefore invisible to staleness/regeneration/finalization gating.
+ *   - `ChatApp.tsx`'s `canRequestFinalArtwork` reflects `revisionPending`
+ *     for UI purposes only — `FinalArtworkCapability` remains the sole
+ *     authority; UI gating alone was never sufficient (this sprint's root
+ *     cause).
+ *
+ * Live Acceptance Corrective Pass — final direction confirmation,
+ * single-concept revision, lineage. See ARCHITECTURE.md §12b for the full
+ * design. Boundary changes worth repeating here:
+ *   - `PrintProject.finalDirectionConfirmed` (new) is independent of, and
+ *     strictly stronger than, `revisionPending`. Concept SELECTION
+ *     (`selectConcept`) is never, by itself, final APPROVAL — only
+ *     `ConversationCapability.confirmSelectedDirection` (or the narrow
+ *     `CONFIRM_FINAL_PATTERN` chat phrase set) may set it `true`;
+ *     `selectConcept` always resets it to `false`, including when
+ *     re-selecting a historical concept. `FinalArtworkCapability.requestFinalArtwork`
+ *     checks it as an independent, final gate — never inferred from
+ *     `revisionPending` being `false`.
+ *   - `ConversationCapability.selectConcept` is reachable from the
+ *     post-selection revision phases (`ask_revisions`/`revision_received`)
+ *     as well as `concepts_ready` — the customer may explicitly restore any
+ *     historical concept (original or a prior revision). `artworkVersions`
+ *     is never filtered to "current batch only" for this check.
+ *   - The default post-selection revision (`ConversationCapability.triggerAutomaticRevision`,
+ *     the manual "regenerate" chat pattern, and `regenerateConcepts()`) now
+ *     targets the ONE selected concept via the new
+ *     `ConceptGenerationCapability.reviseSelectedConcept` — never the
+ *     three-direction `regenerateAfterRevision`, which is now reserved for
+ *     initial exploration and an EXPLICIT "show me alternatives" request
+ *     (`ALTERNATIVES_REQUEST_PATTERN`, checked ahead of and independent
+ *     from the default single-concept path).
+ *   - `GenerationJob.targetArtworkVersionId` (new, nullable): when set,
+ *     `conceptCount` is forced to 1 and the resulting single `ArtworkVersion`
+ *     is tagged `sourceArtworkVersionId` = this value — the entire revision
+ *     lineage model, no parallel history table. `ArtworkVersion.conceptDirectionKey`
+ *     (new) records which catalog direction a concept used, so a later
+ *     targeted revision regenerates in the SAME direction, resolved via
+ *     `GenerationIntent.targetConceptDirectionKey` →
+ *     `GenerationPromptRequest.targetConceptDirectionKey` (provider-neutral,
+ *     `PromptTranslationCapability`-computed, same pattern as
+ *     `allowAdditionalText`) → `resolveConceptDirection`. Both provider
+ *     adapters (placeholder and OpenAI) honor this identically.
+ *   - `extraction.ts`'s `extractProduct` and entity-naming pattern set are
+ *     both generalized further (canonical product value regardless of
+ *     sentence shape; reversed "name of X" order, relative-clause
+ *     connectors, a generic non-noun-gated descriptor, and a bare
+ *     typographic imperative cue for required wording) — still structural,
+ *     never a per-phrase or per-domain patch.
+ *   - `ConceptPreviewModal.tsx` (new) is a pure, read-only client-side
+ *     viewer — no capability method or API route exists for "preview" at
+ *     all; the only server mutation path remains the pre-existing
+ *     `selectConcept`, called identically whether triggered from a card or
+ *     from inside the modal.
+ *
+ * ## True Source-Image Targeted Revision
+ *
+ * Generation has TWO modes, and they are different operations:
+ *
+ *   INITIAL GENERATION (and explicit "show me alternatives")
+ *     approved brief → text-to-image → 3 concept directions
+ *
+ *   TARGETED REVISION (the default post-selection revision)
+ *     selected source artwork + explicit delta + preservation contract
+ *       → image edit → 1 revised concept
+ *
+ * A targeted revision MUST NEVER silently degrade to text-to-image. That
+ * degradation returns an unrelated reinterpretation of the brief that looks
+ * like a successful revision, which is strictly worse than a visible
+ * failure. Boundary rules that enforce it:
+ *
+ *   - `ConceptGenerationRequest.sourceArtwork: SourceArtworkImage | null`
+ *     (new) carries the selected concept's REAL image bytes across the
+ *     provider boundary. Provider-neutral by construction — raw bytes,
+ *     content type, and a provenance id, never an `ArtworkVersion`, an
+ *     `AssetRecord`, a storage key, or a signed URL. Exactly mirrors the
+ *     OUTPUT side (`GeneratedAssetPayload`): resolving storage stays
+ *     `AssetCapability`'s job, never a provider adapter's.
+ *   - `GenerationWorkerCapability` owns that resolution
+ *     (`targetArtworkVersionId` → `ArtworkVersion.primaryAssetId` →
+ *     `AssetCapability.downloadAssetBytes`) and throws
+ *     `TargetedRevisionSourceError` when any link fails. The job fails;
+ *     `revisionPending` is deliberately NOT cleared (the requested revision
+ *     genuinely has not happened) and the customer keeps the concept they
+ *     already had.
+ *   - `ConceptGenerationProvider.editsSourceArtwork` (new) declares whether
+ *     an adapter performs a real edit. Any adapter that calls an image
+ *     model MUST declare `true` and MUST independently refuse a targeted
+ *     revision with no source artwork
+ *     (`ProviderError("invalid_request")`) — the guarantee never rests on
+ *     the worker alone. `false` is reserved for stubs that produce no image
+ *     bytes at all (placeholder/unavailable), which are unreachable in a
+ *     configured production environment.
+ *
+ * The requested DELTA is carried explicitly, because nothing else can carry
+ * it: the Design Brief records design STATE and `RegenerationPlan` knows
+ * only which brief SECTIONS were touched (its descriptions are canned
+ * section-level sentences).
+ *
+ *   customer message
+ *     → `GenerationJob.revisionInstruction` (new durable column, internal
+ *       only — never in `ProjectSnapshot`, never customer-facing)
+ *     → `GenerationIntent.revisionInstruction`
+ *     → `PromptTranslationCapability`
+ *     → `GenerationPromptRequest.revision: RevisionDirective`
+ *     → image-edit adapter
+ *
+ *   - `RevisionDirective` is plain customer language, never prompt syntax:
+ *     `requestedChanges[]` (discrete — "change the font to retro and remove
+ *     the sunset" arrives as TWO), `preserve[]`, `avoid[]`, `lockedWording`,
+ *     `wordingChangeRequested`. `RegenerationPlan` remains the source of
+ *     truth for preserve/avoid/wording and is the fallback for
+ *     `requestedChanges` when there is no literal instruction (the
+ *     "Generate Updated Concepts" button path).
+ *   - `shared/revision-delta.ts` owns the split into discrete changes and is
+ *     shared with the revision acknowledgement, so the customer is told back
+ *     the change they asked for rather than the brief fields extraction
+ *     happened to touch. Generic sentence-shape heuristics only — no
+ *     product/domain nouns, same rule as `shared/revision-intent.ts`.
+ *   - `lockedWording` protects the exact required wording unless the
+ *     customer's own delta is about the wording. A typography change is
+ *     deliberately NOT a wording change.
+ *   - An edit adapter owns 100% of the edit-prompt dialect internally, the
+ *     same way it always has for the text-to-image dialect. The edit prompt
+ *     is a genuinely different instruction ("edit this") and must not reuse
+ *     the three-direction concept prompt.
+ *
+ * ## Chat-input policy and post-generation phase
+ *
+ * "When may the customer type?" is ONE rule, in
+ * `shared/chat-input-policy.ts`, imported by both `ConversationCapability`
+ * (which refuses the message) and the chat UI (which greys out the
+ * composer). It was previously duplicated, and a drifted copy is
+ * indistinguishable to a customer from a broken product: either an input
+ * that throws on send, or a dead input the platform would have accepted.
+ *
+ * `concepts_ready` is one of those blocked phases, because it means "pick
+ * one of these three". A TARGETED REVISION has nothing to pick between —
+ * its single revised concept is auto-selected — so
+ * `GenerationWorkerCapability` returns a finished targeted revision to
+ * `ask_revisions` (success AND failure alike), where another change and
+ * an explicit confirmation are both reachable. Only initial generation
+ * and an explicit three-direction regeneration land in `concepts_ready`.
+ * The completion MESSAGE keeps `metadata.phase: "concepts_ready"`
+ * regardless: that marks the "here is artwork" anchor the concept grid
+ * renders against, which is a property of the event, not of the phase the
+ * conversation moves into next.
+ *
+ * ## Viewing artwork is never mutating it
+ *
+ * Any visible `ArtworkVersion` with a renderable asset opens in the same
+ * read-only `ConceptPreviewModal` — original, revision, or historical.
+ * The enlarge control is a SIBLING of the card's select button, never a
+ * descendant: nesting it made "preview does not select" depend on event
+ * propagation, and made previewing impossible entirely once the card was
+ * `disabled` (browsers do not dispatch clicks inside a disabled control),
+ * which is exactly the state every revised concept is in. Selection stays
+ * an explicit action — the card, or the modal's own "Select this concept"
+ * — and both call the same pre-existing `selectConcept`.
+ *
+ * ## Production normalization ownership (Print-Ready Normalization Phase 1)
+ *
+ * Dependency direction is unchanged; what changed is where production
+ * geometry is decided, and it is decided in exactly one place per concern:
+ *
+ *   - `shared/print-placement-dimensions.ts` owns the SIZING POLICY (target
+ *     physical print width, printable-height bound, target PPI, width
+ *     tolerance) and the pure resolver that turns an artwork's aspect ratio
+ *     into production pixels. Apparel dimensions are never re-derived in a
+ *     worker or a provider — `ProductionRequirements.sizing` carries the
+ *     policy through.
+ *   - `final-artwork/production-normalization.ts` owns the TRANSFORM (alpha
+ *     trim → safety margin → physical-width sizing → proportional resample →
+ *     PNG encode). Every `FinalArtworkProvider` runs its reconstructed raster
+ *     through this same module, so the printer's deliverable is one auditable
+ *     transform rather than per-provider geometry. A provider owns
+ *     reconstruction only.
+ *   - `PrintValidationCapability` owns the VERDICT and still depends on
+ *     nothing from `final-artwork` — it receives a provider-neutral
+ *     `ProductionNormalizationSummary` (declared in its own contracts) and
+ *     recomputes from it rather than trusting it.
+ *     `FinalArtworkWorkerCapability`, which legitimately knows both sides, is
+ *     the single place the provider's metadata is mapped onto that summary.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2M2e" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2M2i" as const;

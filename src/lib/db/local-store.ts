@@ -88,7 +88,14 @@ async function readDb(): Promise<LocalDatabase> {
     // artwork designBriefVersionId / Sprint 2F brief fields / interview
     // state so resume does not crash on older on-disk data.
     return {
-      projects: parsed.projects ?? [],
+      // Sprint 2M Phase 2G / Live Acceptance Corrective Pass: default the
+      // new lifecycle markers for on-disk data written before they existed,
+      // so resume never crashes.
+      projects: (parsed.projects ?? []).map((project) => ({
+        ...project,
+        revisionPending: project.revisionPending ?? false,
+        finalDirectionConfirmed: project.finalDirectionConfirmed ?? false,
+      })),
       briefs: (parsed.briefs ?? []).map((brief) => ({
         ...brief,
         audience: brief.audience ?? null,
@@ -123,6 +130,9 @@ async function readDb(): Promise<LocalDatabase> {
         evaluationEvaluatedAt: artwork.evaluationEvaluatedAt ?? null,
         evaluationProviderKey: artwork.evaluationProviderKey ?? null,
         printValidationStatus: artwork.printValidationStatus ?? null,
+        // Sprint 2G Live Acceptance Corrective Pass.
+        sourceArtworkVersionId: artwork.sourceArtworkVersionId ?? null,
+        conceptDirectionKey: artwork.conceptDirectionKey ?? null,
       })),
       designBriefVersions: parsed.designBriefVersions ?? [],
       // Sprint 2H Part 2A: default new job fields for on-disk data written
@@ -133,6 +143,8 @@ async function readDb(): Promise<LocalDatabase> {
         startedAt: job.startedAt ?? null,
         completedAt: job.completedAt ?? null,
         heartbeatAt: job.heartbeatAt ?? null,
+        targetArtworkVersionId: job.targetArtworkVersionId ?? null,
+        revisionInstruction: job.revisionInstruction ?? null,
       })),
       // Sprint 2M Phase 2B/2C: default the new reserved fields for on-disk
       // data written before they existed, so resume never crashes.
@@ -259,6 +271,8 @@ export class LocalProjectRepository implements ProjectRepository {
       name: "Untitled T-shirt design",
       status: "intake",
       selectedArtworkVersionId: null,
+      revisionPending: false,
+      finalDirectionConfirmed: false,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -336,7 +350,14 @@ export class LocalProjectRepository implements ProjectRepository {
   async updateProject(
     projectId: string,
     patch: Partial<
-      Pick<PrintProject, "name" | "status" | "selectedArtworkVersionId">
+      Pick<
+        PrintProject,
+        | "name"
+        | "status"
+        | "selectedArtworkVersionId"
+        | "revisionPending"
+        | "finalDirectionConfirmed"
+      >
     >,
   ): Promise<PrintProject> {
     const db = await readDb();
@@ -454,6 +475,8 @@ export class LocalProjectRepository implements ProjectRepository {
       evaluationEvaluatedAt: version.evaluationEvaluatedAt ?? null,
       evaluationProviderKey: version.evaluationProviderKey ?? null,
       printValidationStatus: null,
+      sourceArtworkVersionId: version.sourceArtworkVersionId ?? null,
+      conceptDirectionKey: version.conceptDirectionKey ?? null,
       createdAt: timestamp,
     }));
 
@@ -499,6 +522,29 @@ export class LocalProjectRepository implements ProjectRepository {
 
     project.selectedArtworkVersionId = artworkVersionId;
     project.status = "revision_requested";
+    project.updatedAt = nowIso();
+    await writeDb(db);
+
+    const result = snapshot(db, projectId);
+    if (!result) throw new Error("Project not found");
+    return result;
+  }
+
+  async clearArtworkSelection(projectId: string): Promise<ProjectSnapshot> {
+    const db = await readDb();
+    const project = db.projects.find((item) => item.id === projectId);
+    if (!project) throw new Error("Project not found");
+
+    for (const version of db.artworkVersions) {
+      if (version.projectId === projectId) version.isSelected = false;
+    }
+
+    project.selectedArtworkVersionId = null;
+    // Selection is a prerequisite for final-direction confirmation, so
+    // dropping the selection necessarily drops the confirmation with it —
+    // never leave a project "confirmed" with nothing selected.
+    project.finalDirectionConfirmed = false;
+    project.status = "concepts_ready";
     project.updatedAt = nowIso();
     await writeDb(db);
 
@@ -586,6 +632,8 @@ export class LocalProjectRepository implements ProjectRepository {
       conceptCount: input.conceptCount,
       providerKey: input.providerKey,
       idempotencyKey: input.idempotencyKey,
+      targetArtworkVersionId: input.targetArtworkVersionId ?? null,
+      revisionInstruction: input.revisionInstruction ?? null,
       attempts: 0,
       lastError: null,
       startedAt: null,

@@ -17,6 +17,7 @@ import type {
 import type {
   PrintValidationAssetSummary,
   PrintValidationInput,
+  ProductionNormalizationSummary,
   ResolutionProvenance,
 } from "./contracts";
 
@@ -40,6 +41,12 @@ export interface AssembleProvisionalPrintValidationInputParams {
   asset: ProvisionalAssetSummaryInput | null;
   conceptEvaluationStatus: ConceptEvaluationStatus | null;
   conceptEvaluation: ConceptEvaluation | null;
+  /**
+   * Live Acceptance Cleanup (Issue 5): the customer's chosen production
+   * print width, in inches. `null`/omitted resolves to the placement
+   * default. Passed through verbatim — this module never derives size.
+   */
+  intendedPrintWidthIn?: number | null;
 }
 
 /**
@@ -80,7 +87,12 @@ export function assembleProvisionalPrintValidationInput(
     designDescription: params.brief.designDescription,
     conceptEvaluationStatus: params.conceptEvaluationStatus,
     conceptEvaluation: params.conceptEvaluation,
+    intendedPrintWidthIn: params.intendedPrintWidthIn ?? null,
     primaryAsset,
+    // A generated concept has not been normalized for production at all —
+    // never claim production geometry for it (Print-Ready Normalization
+    // Phase 1).
+    productionNormalization: null,
   };
 }
 
@@ -117,6 +129,21 @@ export interface AssembleAuthoritativeProductionPrintValidationInputParams {
    */
   conceptEvaluationStatus: ConceptEvaluationStatus | null;
   conceptEvaluation: ConceptEvaluation | null;
+  /**
+   * Live Acceptance Cleanup (Issue 5): the customer's chosen production
+   * print width, in inches — the SAME value the production transform was
+   * sized from. Authoritative validation must judge the plate against the
+   * size actually intended, never the placement default.
+   */
+  intendedPrintWidthIn?: number | null;
+  /**
+   * Print-Ready Normalization Phase 1: what the production transform actually
+   * did to produce this plate. REQUIRED for an authoritative production
+   * validation — `print_ready` means "the normalized artwork itself is
+   * production-ready", which cannot be decided without the plate's own
+   * measured geometry.
+   */
+  normalization: ProductionNormalizationSummary;
 }
 
 /**
@@ -152,6 +179,8 @@ export function assembleAuthoritativeProductionPrintValidationInput(
     designDescription: params.brief.designDescription,
     conceptEvaluationStatus: params.conceptEvaluationStatus,
     conceptEvaluation: params.conceptEvaluation,
+    intendedPrintWidthIn: params.intendedPrintWidthIn ?? null,
     primaryAsset,
+    productionNormalization: params.normalization,
   };
 }

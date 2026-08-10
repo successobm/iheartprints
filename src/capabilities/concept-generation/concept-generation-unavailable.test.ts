@@ -23,6 +23,7 @@ import { createConceptGenerationCapability } from "./concept-generation-capabili
 /** A minimal always-succeeds provider, standing in for "configuration was fixed". */
 class WorkingProvider implements ConceptGenerationProvider {
   readonly providerKey = "working";
+  readonly editsSourceArtwork = false;
   async generate(request: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
     return {
       jobId: request.idempotencyKey,

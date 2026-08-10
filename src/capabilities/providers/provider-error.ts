@@ -42,7 +42,17 @@ export type ProviderErrorClassification =
    * server-side; a later retry should resume polling the same request
    * rather than submitting a duplicate paid one.
    */
-  | "timeout";
+  | "timeout"
+  /**
+   * True Source-Image Targeted Revision: the platform asked this provider
+   * for something it cannot honestly perform — specifically, a targeted
+   * revision with no source artwork image attached. Never retried (retrying
+   * an incomplete request cannot make it complete) and never degraded into
+   * a different operation: the whole point is that a revision without its
+   * source image must fail rather than silently become a fresh
+   * text-to-image generation.
+   */
+  | "invalid_request";
 
 export class ProviderError extends Error {
   readonly classification: ProviderErrorClassification;

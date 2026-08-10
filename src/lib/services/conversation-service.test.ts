@@ -189,6 +189,9 @@ describe("conversation-service — finalization status polling", () => {
     const generated = await conversationService.getConversation(projectId);
     const [concept] = generated!.artworkVersions;
     await selectConcept(projectId, concept!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is
+    // never final approval — confirm by default here.
+    await conversationService.confirmSelectedDirection(projectId, concept!.id);
 
     return { projectId, artworkVersionId: concept!.id, conversationService };
   }
@@ -242,7 +245,7 @@ describe("conversation-service — finalization status polling", () => {
     });
   });
 
-  it("E: repeated polls never enqueue a second FinalArtworkJob or revive work", async () => {
+  it("E/J: repeated polls never enqueue a second FinalArtworkJob (automated tests stay read-only)", async () => {
     const { projectId, artworkVersionId, conversationService } =
       await projectWithSelectedConcept();
     await conversationService.approveFinalDirection(projectId, artworkVersionId);

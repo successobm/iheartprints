@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { CustomerArtworkVersion } from "@/capabilities/shared/contracts";
+import { ConceptPreviewModal } from "./ConceptPreviewModal";
 import {
   createConceptImageFetchController,
   type ConceptImageState,
@@ -60,6 +61,11 @@ export function ConceptCards({
   // on the fallback placeholder, so refresh/renewal stays automatic without
   // ever retrying forever.
   const retriedRef = useRef<Set<string>>(new Set());
+  // Live Acceptance Corrective Pass (Section 6): purely local viewer
+  // state — which concept, if any, is being previewed full-size. Never
+  // read/written anywhere else; opening or closing it never calls
+  // `onSelect` or touches any server state.
+  const [previewId, setPreviewId] = useState<string | null>(null);
 
   useEffect(() => {
     return controllerRef.current.start(
@@ -98,72 +104,117 @@ export function ConceptCards({
     <div className="mt-3 grid gap-3 sm:grid-cols-3">
       {concepts.map((concept) => {
         const isSelected = selectedId === concept.id || concept.isSelected;
-        const canSelect = selectable && !busy && !selectedId;
+        const canSelect = selectable && !busy && !isSelected;
         const image = concept.hasImage ? images[concept.id] : undefined;
         const isLoading = concept.hasImage && image === undefined;
 
         return (
-          <button
-            key={concept.id}
-            type="button"
-            disabled={!canSelect}
-            onClick={() => onSelect(concept.id)}
-            className={[
-              "group relative overflow-hidden rounded-2xl border text-left transition",
-              isSelected
-                ? "border-ink bg-white shadow-sm"
-                : "border-black/8 bg-white hover:border-black/20",
-              canSelect ? "cursor-pointer" : "cursor-default",
-            ].join(" ")}
-          >
-            <div className="relative h-36 overflow-hidden bg-black/5">
-              {image?.status === "ready" ? (
-                // Signed, short-lived, per-request URL from AssetCapability —
-                // never a static path, so next/image's remote-pattern
-                // allowlisting doesn't apply here.
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={image.url}
-                  alt={concept.title}
-                  className="h-full w-full object-cover"
-                  onError={() => handleImageError(concept.id)}
-                />
-              ) : (
-                <div
-                  className="flex h-full items-center justify-center"
-                  style={{
-                    background: `linear-gradient(145deg, ${concept.accentColor}22, ${concept.accentColor}55)`,
-                  }}
-                >
-                  {isLoading ? (
-                    <span className="text-xs font-medium text-white/90">
-                      Loading…
-                    </span>
-                  ) : (
-                    <div
-                      className="flex h-20 w-20 items-center justify-center rounded-full text-sm font-semibold text-white shadow-sm"
-                      style={{ backgroundColor: concept.accentColor }}
-                    >
-                      {concept.placeholderLabel.replace("Concept ", "")}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-            <div className="space-y-1.5 p-3.5">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-ink">{concept.title}</p>
-                {isSelected ? (
-                  <span className="rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
-                    Selected
-                  </span>
-                ) : null}
+          <div key={concept.id} className="relative">
+            <button
+              type="button"
+              disabled={!canSelect}
+              onClick={() => onSelect(concept.id)}
+              className={[
+                "group relative block w-full overflow-hidden rounded-2xl border text-left transition",
+                isSelected
+                  ? "border-ink bg-white shadow-sm"
+                  : "border-black/8 bg-white hover:border-black/20",
+                canSelect ? "cursor-pointer" : "cursor-default",
+              ].join(" ")}
+            >
+              <div className="relative h-36 overflow-hidden bg-black/5">
+                {image?.status === "ready" ? (
+                  // Signed, short-lived, per-request URL from AssetCapability —
+                  // never a static path, so next/image's remote-pattern
+                  // allowlisting doesn't apply here.
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={image.url}
+                    alt={concept.title}
+                    className="h-full w-full object-cover"
+                    onError={() => handleImageError(concept.id)}
+                  />
+                ) : (
+                  <div
+                    className="flex h-full items-center justify-center"
+                    style={{
+                      background: `linear-gradient(145deg, ${concept.accentColor}22, ${concept.accentColor}55)`,
+                    }}
+                  >
+                    {isLoading ? (
+                      <span className="text-xs font-medium text-white/90">
+                        Loading…
+                      </span>
+                    ) : (
+                      <div
+                        className="flex h-20 w-20 items-center justify-center rounded-full text-sm font-semibold text-white shadow-sm"
+                        style={{ backgroundColor: concept.accentColor }}
+                      >
+                        {concept.placeholderLabel.replace("Concept ", "")}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-              <p className="text-xs leading-relaxed text-muted">{concept.summary}</p>
-            </div>
-          </button>
+              <div className="space-y-1.5 p-3.5">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-ink">{concept.title}</p>
+                  {isSelected ? (
+                    <span className="rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
+                      Selected
+                    </span>
+                  ) : null}
+                </div>
+                <p className="text-xs leading-relaxed text-muted">{concept.summary}</p>
+              </div>
+            </button>
+            {/* Live Acceptance Corrective Pass (Section 6): viewing the whole
+                design must never select it. This is a SIBLING of the card
+                button, never a child of it — nesting one button inside
+                another is invalid interactive content, and both ways it bit
+                us live are why this structure is load-bearing: the card's
+                own click handler could still fire from a click on the
+                expand control, and once the card was `disabled` (anything
+                already selected) the browser stopped dispatching clicks to
+                everything inside it, leaving the revised concept impossible
+                to enlarge. As a sibling, expanding is independent of
+                whether selection is currently allowed. */}
+            <button
+              type="button"
+              onClick={() => setPreviewId(concept.id)}
+              aria-label={`View ${concept.title} full size`}
+              // Always visible (not hover-only) so it's discoverable on
+              // touch devices, not just desktop hover.
+              className="absolute right-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-full bg-black/50 text-xs text-white transition hover:bg-black/70"
+            >
+              ⤢
+            </button>
+          </div>
         );
       })}
+
+      {previewId
+        ? (() => {
+            const previewConcept = concepts.find((c) => c.id === previewId);
+            if (!previewConcept) return null;
+            const isSelected = selectedId === previewId || previewConcept.isSelected;
+            const canSelect = selectable && !busy && !isSelected;
+            return (
+              <ConceptPreviewModal
+                concept={previewConcept}
+                image={previewConcept.hasImage ? images[previewConcept.id] : undefined}
+                isSelected={isSelected}
+                canSelect={canSelect}
+                busy={busy}
+                onSelect={(id) => {
+                  onSelect(id);
+                  setPreviewId(null);
+                }}
+                onClose={() => setPreviewId(null)}
+              />
+            );
+          })()
+        : null}
     </div>
   );
 }

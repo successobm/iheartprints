@@ -80,6 +80,10 @@ export function createIntentExtractionCapability(): IntentExtractionCapability {
         brief,
         reply,
         pendingSection: pendingSection ?? null,
+        // Sprint 2M Phase 2G (Goal 2): derived from `phase`, not a new
+        // public input — only the post-concept-selection revision loop
+        // gets the design-change-imperative → `designDescription` fallback.
+        isPostSelectionRevision: phase === "ask_revisions" || phase === "revision_received",
       });
       traceConversationUnderstanding({
         stage: "deterministic_extraction",

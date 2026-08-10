@@ -106,6 +106,9 @@ describe("GET /api/projects/[projectId]/production-artwork/image (Sprint 2M Phas
       },
     ]);
     await repo.selectArtworkVersion(projectId, artwork!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is
+    // never final approval — confirm by default here.
+    await repo.updateProject(projectId, { finalDirectionConfirmed: true });
 
     return { projectId, artworkId: artwork!.id, graph };
   }
@@ -162,9 +165,35 @@ describe("GET /api/projects/[projectId]/production-artwork/image (Sprint 2M Phas
 
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.deepEqual(Object.keys(body), ["url"]);
+    assert.deepEqual(
+      Object.keys(body).sort(),
+      [
+        "designLabel",
+        // Live Acceptance Cleanup (Issue 5): the plate's own physical size
+        // and resolution. Customer-safe figures read off the production
+        // normalization record — still no asset id, job id, or storage key.
+        "dpi",
+        "filename",
+        "heightIn",
+        "heightPx",
+        "mimeType",
+        "placementLabel",
+        "transparent",
+        "url",
+        "widthIn",
+        "widthPx",
+      ].sort(),
+    );
     assert.equal(typeof body.url, "string");
     assert.ok(body.url.length > 0);
+    assert.equal(body.mimeType, "image/png");
+    assert.equal(typeof body.filename, "string");
+    assert.match(body.filename, /print-ready\.png$/);
+    assert.doesNotMatch(body.filename, /production\.png/);
+    assert.doesNotMatch(
+      JSON.stringify(body),
+      /topaz|storageKey|FinalArtworkJob|providerRequest/i,
+    );
     // Never the raw asset id as a discoverable identifier in the response
     // (mirrors the concept-image route's equivalent check). The storage
     // key itself is deliberately not asserted here: in the default
@@ -175,6 +204,7 @@ describe("GET /api/projects/[projectId]/production-artwork/image (Sprint 2M Phas
     // (`filesystem`/`supabase_storage`), where `getSignedUrl` returns a
     // distinct, expiring URL.
     assert.equal(body.url.includes(productionAsset.id), false);
+    assert.equal(JSON.stringify(body).includes(productionAsset.id), false);
   });
 
   it("a different project cannot resolve another project's production artwork", async () => {

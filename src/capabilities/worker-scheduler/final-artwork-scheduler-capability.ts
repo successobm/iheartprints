@@ -38,6 +38,13 @@ export interface FinalArtworkSchedulerCapability {
    * batch already in flight rather than starting a second one.
    */
   runBatch(): Promise<FinalArtworkSchedulerRunResult>;
+  /**
+   * `true` while a `runBatch()` is in flight **in this process**. Process-
+   * local dedupe/observability only — mirrors
+   * `GenerationSchedulerCapability.hasActiveBatch`. Cross-instance
+   * concurrency remains `claimNextQueuedFinalArtworkJob`.
+   */
+  hasActiveBatch(): boolean;
   /** Wakes the worker on a fixed interval until `stop()` is called. Idempotent. */
   start(intervalMs?: number): void;
   /** Stops the interval cleanly. Safe to call even if not running. */
@@ -83,6 +90,10 @@ export function createFinalArtworkSchedulerCapability(
     return activeBatch;
   }
 
+  function hasActiveBatch(): boolean {
+    return activeBatch !== null;
+  }
+
   function start(intervalMs: number = DEFAULT_SCHEDULER_TICK_MS): void {
     if (timer) return;
     timer = setInterval(() => {
@@ -103,5 +114,5 @@ export function createFinalArtworkSchedulerCapability(
     return timer !== null;
   }
 
-  return { runBatch, start, stop, isRunning };
+  return { runBatch, hasActiveBatch, start, stop, isRunning };
 }

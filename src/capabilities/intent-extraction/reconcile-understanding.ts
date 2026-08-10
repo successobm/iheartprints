@@ -5,6 +5,10 @@ import {
   normalizeProductAnswer,
   PRODUCT_NOUN_CANONICAL,
 } from "@/capabilities/shared/field-normalization";
+import {
+  namesAPrintProduct,
+  stripDesignArtifactWords,
+} from "@/capabilities/shared/print-product-vocabulary";
 import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
 import type { ConversationUnderstandingResult } from "@/capabilities/conversation-understanding";
 import type { BriefSectionKey } from "@/capabilities/shared/contracts";
@@ -54,7 +58,12 @@ import type { BriefFieldPatch } from "./extraction";
  *          This still rejects a value with no relationship to the
  *          evidence at all (protects against outright hallucination)
  *          while allowing the exact normalization Sprint 2L Phase 1
- *          product regressions require.
+ *          product regressions require. Grounding alone is not enough,
+ *          though: it proves only that the value came from the customer's
+ *          own words, not that those words name something printable, so a
+ *          grounded value must additionally survive
+ *          `stripDesignArtifactWords` — see
+ *          `shared/print-product-vocabulary.ts`.
  *        - Every other field has no additional grounding check beyond
  *          "not ambiguous confidence" — they are free-text fields with no
  *          fixed canonical vocabulary to check against, and normalization
@@ -115,6 +124,7 @@ type RejectionCode =
   | "empty_value"
   | "wording_not_grounded"
   | "product_not_grounded"
+  | "product_not_a_print_product"
   | "empty_wording_requires_explicit"
   | "unresolvable_print_location";
 
@@ -145,7 +155,7 @@ export function reconcileUnderstanding(
     const reject = (code: RejectionCode) => rejected.push({ section: update.section, code });
 
     switch (update.section) {
-      case "product":
+      case "product": {
         if (!value) {
           reject("empty_value");
           continue;
@@ -154,9 +164,22 @@ export function reconcileUnderstanding(
           reject("product_not_grounded");
           continue;
         }
-        fields.productSummary = normalizeProductAnswer(value);
+        // Grounding proves the value came from what the customer said; it
+        // does not prove the value names something printable. "create a
+        // design of a red 1988 Toyota MR2" grounds "Design" perfectly
+        // well, and stored it as the Product. Stripping first also
+        // canonicalizes the common "t-shirt design" shape down to the
+        // product noun the customer actually named.
+        if (!namesAPrintProduct(value)) {
+          reject("product_not_a_print_product");
+          continue;
+        }
+        fields.productSummary = normalizeProductAnswer(
+          stripDesignArtifactWords(value),
+        );
         accepted.push("product");
         break;
+      }
       case "graphics":
         if (!value) {
           reject("empty_value");

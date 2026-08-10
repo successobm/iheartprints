@@ -55,6 +55,19 @@ export type MessageRole = "user" | "assistant" | "system";
 
 export type ArtworkKind = "concept" | "revision" | "final";
 
+/**
+ * Sprint 2G Live Acceptance Corrective Pass: the stable identity of one of
+ * the three catalog creative directions (`lib/domain/concept-directions.ts`
+ * — "Bold & Direct" / "Soft & Illustrated" / "Minimal Badge"). Defined here
+ * rather than in `concept-directions.ts` to avoid a circular import
+ * (`concept-directions.ts` already imports `GenerationPromptRequest` from
+ * this file); `concept-directions.ts` re-exports it for callers that only
+ * need the catalog. Persisted on `ArtworkVersion.conceptDirectionKey` so a
+ * later single-concept revision of that exact artwork can regenerate in the
+ * SAME direction rather than defaulting to a different one.
+ */
+export type ConceptDirectionKey = "bold_direct" | "soft_illustrated" | "minimal_badge";
+
 export type PrintPlacement =
   | "full_front"
   | "full_back"
@@ -66,6 +79,37 @@ export interface PrintProject {
   name: string;
   status: ProjectStatus;
   selectedArtworkVersionId: string | null;
+  /**
+   * Sprint 2M Phase 2G (Goal 3): the durable authority that "the customer
+   * requested a change that is not yet represented by the artwork." Kept
+   * as its own boolean rather than overloading `status` — the Revision
+   * Lifecycle Audit found `status === "revision_requested"` is written on
+   * every message in the revision loop (including ones that changed
+   * nothing) and is therefore too weak a signal to gate finalization on.
+   * `true` from the moment an explicit revision request is understood
+   * until a new `ArtworkVersion` batch produced by that revision exists
+   * (cleared on regeneration completion, never merely on enqueue). While
+   * `true`, `FinalArtworkCapability.requestFinalArtwork` refuses to create
+   * a `FinalDirectionApproval`/`FinalArtworkJob` for this project, and any
+   * previously-active approval is superseded immediately rather than left
+   * to be raced by a still-running finalization job.
+   */
+  revisionPending: boolean;
+  /**
+   * Sprint 2G Live Acceptance Corrective Pass: the explicit "this is my
+   * final direction, no more changes" confirmation — distinct from, and
+   * strictly stronger than, `selectedArtworkVersionId` (which only ever
+   * means "I want to work with this direction" and is immediately
+   * revisable). `false` from the moment a concept is selected (or a
+   * revision changes the current artwork) until the customer explicitly
+   * confirms via `ConversationCapability.confirmSelectedDirection` (or the
+   * equivalent "no changes" chat phrase). `FinalArtworkCapability.requestFinalArtwork`
+   * refuses to finalize while this is `false`, independent of
+   * `revisionPending` — a customer who has never been asked "does this
+   * look right?" must never be able to finalize just because nothing is
+   * currently pending.
+   */
+  finalDirectionConfirmed: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -201,6 +245,83 @@ export interface GenerationPromptRequest {
    * own prompt phrasing.
    */
   allowAdditionalText: boolean;
+  /**
+   * Sprint 2G Live Acceptance Corrective Pass: when set, generation must
+   * produce exactly ONE concept in this specific catalog direction — a
+   * targeted revision of a customer-selected concept, never a fresh
+   * three-direction exploration. `null` for initial exploration and for an
+   * explicit "show me alternatives" request, both of which still produce
+   * all three directions.
+   */
+  targetConceptDirectionKey?: ConceptDirectionKey | null;
+  /**
+   * True Source-Image Targeted Revision: present ONLY for a targeted
+   * revision of a customer-selected concept. When set, the generation
+   * contract changes shape entirely — the provider must EDIT the supplied
+   * source artwork rather than interpret the brief afresh:
+   *
+   *     REVISED ARTWORK = SELECTED SOURCE ARTWORK + REQUESTED DELTA
+   *
+   * `null` for initial generation and for a three-direction "show me
+   * alternatives" regeneration, both of which remain pure text-to-image.
+   */
+  revision?: RevisionDirective | null;
+}
+
+/**
+ * True Source-Image Targeted Revision: the provider-neutral delta for one
+ * targeted revision. Plain customer-facing language only — never prompt
+ * syntax, never a provider dialect, never a Design Brief entity.
+ *
+ * Built by `PromptTranslationCapability` from the customer's literal
+ * instruction plus the `RegenerationPlan`; consumed by an image-edit
+ * provider adapter, which owns 100% of the wording that expresses it.
+ */
+export interface RevisionDirective {
+  /**
+   * The distinct changes the customer actually asked for, in the order
+   * they asked for them. "change the font to retro and remove the sunset"
+   * arrives here as TWO entries — never as one blurred restatement of the
+   * whole design, and never collapsed into `notes`.
+   */
+  requestedChanges: string[];
+  /**
+   * Elements confirmed to be working that must survive the edit unchanged.
+   * The DEFAULT contract is "preserve everything not listed in
+   * `requestedChanges`"; this only adds specifics worth naming explicitly.
+   */
+  preserve: string[];
+  /** Elements that must not appear — exclusions and rejected directions. */
+  avoid: string[];
+  /**
+   * Exact wording that must come through the edit character-for-character.
+   * `null` when the design has no required wording, or when the customer's
+   * own requested delta is a wording change (in which case changing it is
+   * the point — see `wordingChangeRequested`).
+   */
+  lockedWording: string | null;
+  /**
+   * True when the customer explicitly asked to change the wording. Keeps
+   * "protect the exact wording" from silently overriding "change the
+   * wording to MR2 TURBO".
+   *
+   * Live Acceptance Cleanup: naming a text element while asking for an
+   * APPEARANCE change ("make the 3 SONS text the same color as the ball")
+   * is emphatically NOT this — see `shared/revision-delta.ts` and Prompt
+   * Translation's `requestsWordingChange`. Misclassifying it lifted the
+   * exact-wording lock and let an unrelated word be re-rendered.
+   */
+  wordingChangeRequested: boolean;
+  /**
+   * Live Acceptance Cleanup: the customer explicitly said "everything else
+   * stays the same" (or "don't change anything else" / "leave the rest
+   * alone"). The default contract is already "preserve everything not in
+   * `requestedChanges`"; this records that the customer stated it, so the
+   * adapter can express it as its own hard constraint rather than leaving
+   * it buried inside a change description. `false` when they simply didn't
+   * say it — never inferred, and never a weaker contract when absent.
+   */
+  preserveEverythingElse: boolean;
 }
 
 /**
@@ -250,6 +371,35 @@ export interface GenerationJob {
    * concepts (Sprint 2H Part 1 idempotency strategy).
    */
   idempotencyKey: string;
+  /**
+   * Sprint 2G Live Acceptance Corrective Pass: when set, this job is a
+   * targeted revision of ONE customer-selected `ArtworkVersion` — the
+   * worker produces exactly one new concept, tagged
+   * `sourceArtworkVersionId` = this value, in that source's own
+   * `conceptDirectionKey`. `null` for initial exploration and for an
+   * explicit "show me alternatives" regeneration, both of which still
+   * produce three independent directions with no source.
+   */
+  targetArtworkVersionId?: string | null;
+  /**
+   * True Source-Image Targeted Revision: the customer's literal revision
+   * instruction for this job ("make the border red and change it to a
+   * shield"), captured at enqueue time.
+   *
+   * A targeted revision is SOURCE ARTWORK + REQUESTED DELTA, and the delta
+   * only exists in the customer's own words: the Design Brief records
+   * design *state*, and `RegenerationPlan` only knows which brief sections
+   * were touched. Without this column the worker has no durable way to tell
+   * an image-edit provider what to change, which is exactly how a "targeted
+   * revision" degenerated into a fresh text-to-image generation.
+   *
+   * Internal only — never surfaced through `ProjectSnapshot`, never shown to
+   * the customer, never mistaken for prompt text (Prompt Translation, not
+   * this field, decides how it reaches a provider). `null` for initial
+   * generation, for a three-direction "show me alternatives" regeneration,
+   * and for jobs created before this column existed.
+   */
+  revisionInstruction?: string | null;
   attempts: number;
   /** Sanitized, non-secret description of the most recent failure, if any. */
   lastError: string | null;
@@ -403,6 +553,24 @@ export interface ArtworkVersion {
   placeholderLabel: string;
   accentColor: string;
   isSelected: boolean;
+  /**
+   * Sprint 2G Live Acceptance Corrective Pass: the artwork this one is a
+   * targeted revision of, if any. `null` for an original (initial
+   * exploration or explicit "show me alternatives") concept. Never
+   * destructive — the source artwork remains a separate, historical row.
+   * The durable lineage authority: a chain of `sourceArtworkVersionId`
+   * links, not a parallel history table.
+   */
+  sourceArtworkVersionId?: string | null;
+  /**
+   * Sprint 2G Live Acceptance Corrective Pass: which of the three catalog
+   * creative directions (`lib/domain/concept-directions.ts`) this concept
+   * used, when known. Lets a later single-concept revision of this exact
+   * artwork regenerate in the SAME direction instead of defaulting to a
+   * different one. `null` for historical rows generated before this field
+   * existed.
+   */
+  conceptDirectionKey?: ConceptDirectionKey | null;
   /** Sprint 2D: the approved Design Brief version that authorized this concept. */
   designBriefVersionId: string | null;
   /**

@@ -451,8 +451,9 @@ describe("Sprint 2L Phase 1 — Conversation Understanding regression scenarios"
       "A T-shirt for the school fair",
     );
 
-    // Deterministic extraction alone still resolves the reply.
-    assert.equal(afterReply.brief.productSummary, "A T-shirt for the school fair");
+    // Deterministic extraction alone still resolves the reply — canonical
+    // product value (Live Acceptance Corrective Pass), not the raw sentence.
+    assert.equal(afterReply.brief.productSummary, "T-shirt");
     assert.equal(afterReply.conversation.phase, "interviewing");
 
     const lastMessage = afterReply.messages.at(-1);

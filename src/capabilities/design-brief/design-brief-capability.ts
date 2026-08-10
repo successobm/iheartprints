@@ -24,6 +24,28 @@ export interface DesignBriefCapability {
     designId: string,
     proposal: BriefPatchProposal,
   ): Promise<TShirtDesignBrief>;
+  /**
+   * Live Acceptance Cleanup (Issue 5): records the customer's chosen
+   * PRODUCTION print width, in inches — authoritative production intent.
+   *
+   * Separate from `applyProposal` on purpose. This is not an Intent
+   * Extraction proposal about the design; it is a production specification,
+   * and it is deliberately the one brief field excluded from
+   * `DesignBriefSnapshotContent` (see `brief-snapshot.ts`) and from
+   * `diffBriefSections`. That exclusion is what guarantees the property the
+   * Constitution needs here: choosing a size can never approve a new brief
+   * version, mark concepts stale, trigger a creative revision, or reach an
+   * image provider. It only changes what the production pipeline is told to
+   * produce.
+   *
+   * The caller is responsible for resolving/clamping the value against the
+   * placement's printable band (`resolveProductionWidth`) — this boundary
+   * persists an already-decided figure.
+   */
+  setIntendedPrintWidth(
+    designId: string,
+    widthIn: number | null,
+  ): Promise<TShirtDesignBrief>;
   /** Most recent durable approval, if any. */
   getLatestApprovedVersion(
     designId: string,
@@ -55,6 +77,10 @@ export function createDesignBriefCapability(
         return this.getWorkingBrief(designId);
       }
       return repo.updateBrief(designId, proposal.fields);
+    },
+
+    async setIntendedPrintWidth(designId, widthIn) {
+      return repo.updateBrief(designId, { intendedPrintWidthIn: widthIn });
     },
 
     async getLatestApprovedVersion(designId) {

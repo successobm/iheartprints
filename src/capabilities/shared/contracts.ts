@@ -5,10 +5,13 @@
 
 import type {
   ArtworkVersion,
+  ConceptDirectionKey,
   ConversationPhase,
   GenerationPromptRequest,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
+
+import { assignConceptBatchOrdinals } from "./concept-batches";
 
 /** Confidence for a Design Brief section (Sprint 2B). */
 export type SectionConfidence =
@@ -373,6 +376,34 @@ export interface ConceptGenerationRequest {
    * guards duplicate persistence regardless.
    */
   idempotencyKey: string;
+  /**
+   * True Source-Image Targeted Revision: the actual pixels of the concept
+   * the customer selected, present ONLY for a targeted revision.
+   *
+   * A targeted revision is an EDIT of this image, never a fresh
+   * interpretation of the brief — so a provider that receives this must
+   * send these bytes to its edit endpoint. Absent for initial generation
+   * and for a three-direction "show me alternatives" regeneration.
+   *
+   * Provider-neutral by construction: raw bytes plus provenance identity,
+   * never an `ArtworkVersion`, an `AssetRecord`, a storage key, or a signed
+   * URL — resolving all of that is `GenerationWorkerCapability` +
+   * `AssetCapability`'s job, exactly as it is for the OUTPUT side
+   * (`GeneratedAssetPayload`). See `capability-boundaries.ts`.
+   */
+  sourceArtwork?: SourceArtworkImage | null;
+}
+
+/**
+ * True Source-Image Targeted Revision: the source concept's real image
+ * bytes, crossing the provider boundary for an image edit.
+ */
+export interface SourceArtworkImage {
+  /** Provenance only — the `ArtworkVersion` this image belongs to. */
+  sourceArtworkVersionId: string;
+  imageBytes: Buffer;
+  /** e.g. "image/png" — an edit provider needs the real type to upload it. */
+  contentType: string;
 }
 
 /**
@@ -402,9 +433,16 @@ export interface GeneratedConceptDraft {
   summary: string;
   placeholderLabel: string;
   accentColor: string;
-  kind: "concept";
+  kind: "concept" | "revision";
   /** Present only when the provider produced real image bytes (Sprint 2H Part 1). Absent for the placeholder provider. */
   asset?: GeneratedAssetPayload;
+  /**
+   * Sprint 2G Live Acceptance Corrective Pass: which catalog creative
+   * direction this concept used — every real/placeholder adapter now
+   * reports this so the worker can persist `ArtworkVersion.conceptDirectionKey`
+   * (needed so a later single-concept revision targets the same direction).
+   */
+  directionKey?: ConceptDirectionKey;
 }
 
 export interface ConceptGenerationResult {
@@ -452,6 +490,16 @@ export interface ConceptStatusView {
 export type CustomerArtworkVersion = ArtworkVersion & {
   /** Whether a generated image exists for this concept — not the asset id itself. */
   hasImage: boolean;
+  /**
+   * Live Acceptance Cleanup (Issue 3): which generation batch this concept
+   * came from (1, 2, 3, …), so presentation surfaces can tell "the first
+   * three concepts" from "the three new ones" now that one approved brief
+   * version may own more than one batch. An opaque ordinal — never the
+   * `generationJobId` it derives from, which is stripped like every other
+   * internal id. `null` when not computed by the caller (see
+   * `toCustomerArtworkVersions`).
+   */
+  conceptBatchOrdinal: number | null;
 };
 
 export function toCustomerArtworkVersion(
@@ -459,6 +507,7 @@ export function toCustomerArtworkVersion(
 ): CustomerArtworkVersion {
   return {
     ...version,
+    conceptBatchOrdinal: null,
     generationJobId: null,
     primaryAssetId: null,
     thumbnailAssetId: null,
@@ -470,6 +519,23 @@ export function toCustomerArtworkVersion(
     printValidationStatus: null,
     hasImage: version.primaryAssetId !== null,
   };
+}
+
+/**
+ * Live Acceptance Cleanup (Issue 3): the whole-project projection. Batch
+ * ordinals can only be assigned across the full set (a single version has no
+ * way to know which batch it belongs to), so this — not
+ * `toCustomerArtworkVersion` — is what callers holding every version should
+ * use.
+ */
+export function toCustomerArtworkVersions(
+  versions: ArtworkVersion[],
+): CustomerArtworkVersion[] {
+  const ordinals = assignConceptBatchOrdinals(versions);
+  return versions.map((version) => ({
+    ...toCustomerArtworkVersion(version),
+    conceptBatchOrdinal: ordinals.get(version.id) ?? null,
+  }));
 }
 
 /** Customer-facing projection of `ConceptStatusView` — see `CustomerArtworkVersion`. */

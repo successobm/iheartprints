@@ -29,6 +29,7 @@ import { createGenerationSchedulerCapability } from "@/capabilities/worker-sched
  */
 class InstantProvider implements ConceptGenerationProvider {
   readonly providerKey = "instant";
+  readonly editsSourceArtwork = false;
   async generate(request: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
     return {
       jobId: request.idempotencyKey,

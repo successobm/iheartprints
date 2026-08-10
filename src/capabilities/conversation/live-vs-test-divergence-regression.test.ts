@@ -260,7 +260,8 @@ describe("Sprint 2L Phase 1C — live-vs-test semantic divergence regression", (
         projectA.project.id,
         "A T-shirt for the school fair",
       );
-      assert.equal(afterA.brief.productSummary, "A T-shirt for the school fair");
+      // Canonical product value (Live Acceptance Corrective Pass), not the raw sentence.
+      assert.equal(afterA.brief.productSummary, "T-shirt");
 
       // A second, genuinely fresh project — never touched by the first
       // conversation's turn.

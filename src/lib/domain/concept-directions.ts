@@ -1,4 +1,9 @@
-import type { GenerationPromptRequest } from "./types";
+import type { ConceptDirectionKey, GenerationPromptRequest } from "./types";
+
+// Re-exported for backward compatibility — the canonical definition now
+// lives in `./types` (see its doc comment) to avoid a circular import,
+// since this module already imports `GenerationPromptRequest` from there.
+export type { ConceptDirectionKey } from "./types";
 
 /**
  * Sprint 2K Phase 3 (Goal 5) — the single, provider-neutral source of truth
@@ -29,8 +34,6 @@ import type { GenerationPromptRequest } from "./types";
  * composition/typography/iconography on top of that updated shared
  * request, exactly as it does on initial generation.
  */
-
-export type ConceptDirectionKey = "bold_direct" | "soft_illustrated" | "minimal_badge";
 
 export interface ConceptDirection {
   key: ConceptDirectionKey;
@@ -87,6 +90,20 @@ export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
     visualHierarchy: "badge shape first, wording and icon balanced evenly within it",
   },
 ] as const;
+
+/**
+ * Sprint 2G Live Acceptance Corrective Pass: resolves one catalog direction
+ * by its stable key — the lookup a targeted single-concept revision uses to
+ * regenerate in the SAME direction the customer already selected, instead
+ * of defaulting to the catalog's first entry. Falls back to the first
+ * direction for an unrecognized/missing key (defensive; every direction
+ * ever persisted comes from this same catalog).
+ */
+export function resolveConceptDirection(
+  key: ConceptDirectionKey | null | undefined,
+): ConceptDirection {
+  return CONCEPT_DIRECTIONS.find((d) => d.key === key) ?? CONCEPT_DIRECTIONS[0]!;
+}
 
 /**
  * Sprint 2K Phase 3 (Goal 8): the truthful, customer-facing description of

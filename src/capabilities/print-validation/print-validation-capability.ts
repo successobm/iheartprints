@@ -25,8 +25,31 @@ import type {
   PrintValidationInput,
   PrintValidationReport,
   PrintValidationStatus,
+  ProductionNormalizationSummary,
   ProductionRequirements,
 } from "./contracts";
+
+/**
+ * Print-Ready Normalization Phase 1 tolerances. Explicit, named, and always
+ * compared with an inequality — never floating-point equality.
+ */
+/**
+ * Minimum share of the production plate that must be actual artwork (alpha
+ * bounding box ÷ trimmed plate). A correctly normalized plate sits at ~0.97+
+ * (the small artwork-edge safety margin is the only thing below 1); the live
+ * audited plate that motivated this phase sat at ~0.50 (2662x2861 of artwork
+ * inside a 3600x4200 canvas), so this threshold separates the two by a wide
+ * margin rather than splitting hairs.
+ */
+const MIN_ARTWORK_OCCUPANCY = 0.8;
+/** Allowed relative deviation between the trimmed artwork's aspect ratio and the produced plate's. One pixel of rounding is far inside this. */
+const ASPECT_RATIO_TOLERANCE = 0.01;
+/** Allowed shortfall, in PPI, when comparing achieved effective resolution against the target — absorbs rounding only. */
+const EFFECTIVE_PPI_TOLERANCE = 0.5;
+/** Allowed relative deviation between embedded pHYs density and the intended production PPI (pHYs is an integer pixels-per-metre field, so it can never be exact). */
+const DENSITY_METADATA_TOLERANCE = 0.01;
+/** An alpha bounding box smaller than this on either axis is not meaningful artwork — it is a stray pixel or an encoding artifact. */
+const MIN_MEANINGFUL_ALPHA_BBOX_PX = 16;
 
 export interface PrintValidationCapability {
   /** Deterministic — the same input always produces the same report. Never mutates `input`. */
@@ -46,6 +69,7 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     printPlacement: input.printPlacement,
     productSummary: input.productSummary,
     designDescription: input.designDescription,
+    intendedPrintWidthIn: input.intendedPrintWidthIn ?? null,
   });
 
   const checks: PrintValidationCheck[] = [];
@@ -83,6 +107,10 @@ function validate(input: PrintValidationInput): PrintValidationReport {
   // would need to do, not a reason to discard the concept.
 
   const asset = input.primaryAsset;
+  // Print-Ready Normalization Phase 1: present only for an authoritative
+  // production-plate validation. When absent, every check below behaves
+  // exactly as it did for provisional concept-stage validation.
+  const normalization = input.productionNormalization ?? null;
 
   checks.push(checkContentType(asset));
   if (asset.contentType === null) {
@@ -109,17 +137,60 @@ function validate(input: PrintValidationInput): PrintValidationReport {
 
   checks.push(checkResolutionProvenance(asset));
 
-  const resolutionCheck = checkEffectiveResolution(requirements, asset);
+  const resolutionCheck = checkEffectiveResolution(requirements, asset, normalization);
   checks.push(resolutionCheck.check);
   if (resolutionCheck.check.status === "fail") {
     requiredTransformations.add("regenerate_at_production_dimensions");
     requiredTransformations.add("upscale_raster_artwork");
   }
 
-  const minDimensionsCheck = checkMinimumRasterDimensions(requirements, asset);
+  const minDimensionsCheck = checkMinimumRasterDimensions(
+    requirements,
+    asset,
+    normalization,
+  );
   checks.push(minDimensionsCheck);
   if (minDimensionsCheck.status === "fail") {
     requiredTransformations.add("regenerate_at_production_dimensions");
+  }
+
+  // --- Print-Ready Normalization Phase 1: production-plate-only checks -----
+  // `print_ready` must mean "the normalized artwork ITSELF is production
+  // ready", so these run against the real plate's own measured geometry.
+  if (normalization) {
+    const normalizationCheck = checkProductionNormalization(normalization, asset);
+    checks.push(normalizationCheck);
+    if (normalizationCheck.status !== "pass") {
+      requiredTransformations.add("require_human_review");
+    }
+
+    const alphaCheck = checkAlphaBoundArtwork(normalization);
+    checks.push(alphaCheck);
+    if (alphaCheck.status !== "pass") {
+      requiredTransformations.add("require_human_review");
+    }
+
+    const deadCanvasCheck = checkTransparentDeadCanvas(normalization);
+    checks.push(deadCanvasCheck);
+    if (deadCanvasCheck.status !== "pass") {
+      requiredTransformations.add("resize_to_final_dimensions");
+    }
+
+    const widthPolicyCheck = checkPhysicalWidthPolicy(normalization);
+    checks.push(widthPolicyCheck);
+    if (widthPolicyCheck.status !== "pass") {
+      requiredTransformations.add("resize_to_final_dimensions");
+    }
+
+    const aspectCheck = checkAspectRatioPreserved(normalization);
+    checks.push(aspectCheck);
+    if (aspectCheck.status !== "pass") {
+      requiredTransformations.add("require_human_review");
+    }
+
+    // Informational only — density metadata is never allowed to stand in for
+    // real pixel geometry (see `effective-resolution.ts`).
+    checks.push(checkDensityMetadata(normalization));
   }
 
   const vectorCheck = checkVectorSource(requirements, asset);
@@ -330,7 +401,48 @@ function checkResolutionProvenance(
 function checkEffectiveResolution(
   requirements: ProductionRequirements,
   asset: NonNullable<PrintValidationInput["primaryAsset"]>,
+  normalization: ProductionNormalizationSummary | null,
 ): { check: PrintValidationCheck; effectivePpi: number | null } {
+  // Print-Ready Normalization Phase 1: for a real production plate, effective
+  // resolution is measured against the size the plate is actually INTENDED to
+  // print at — never the placement envelope, and never a padded canvas.
+  if (normalization) {
+    const honest = honestDimensionsFor(asset);
+    if (honest.widthPx === null || honest.heightPx === null) {
+      return {
+        check: {
+          check: "effective_resolution",
+          status: "unknown",
+          severity: "blocking",
+          reason: honest.interpolated
+            ? "Cannot compute effective resolution — this production artwork is an interpolated upscale and its true source dimensions are not recorded."
+            : "Cannot compute effective resolution without known production pixel dimensions.",
+        },
+        effectivePpi: null,
+      };
+    }
+    const { effectivePpi } = calculateEffectiveResolution(
+      { widthPx: honest.widthPx, heightPx: honest.heightPx },
+      { widthIn: normalization.intendedWidthIn, heightIn: normalization.intendedHeightIn },
+    );
+    const sufficient =
+      effectivePpi >= normalization.targetPpi - EFFECTIVE_PPI_TOLERANCE;
+    const provenanceNote = honest.interpolated
+      ? " (measured against true source detail, not the enlarged file dimensions)"
+      : "";
+    return {
+      check: {
+        check: "effective_resolution",
+        status: sufficient ? "pass" : "fail",
+        severity: "blocking",
+        reason: sufficient
+          ? `Production artwork prints at ~${Math.round(effectivePpi)} PPI over its intended ${formatIn(normalization.intendedWidthIn)}x${formatIn(normalization.intendedHeightIn)}in size, meeting the ${normalization.targetPpi} PPI target${provenanceNote}.`
+          : `Production artwork prints at only ~${Math.round(effectivePpi)} PPI over its intended ${formatIn(normalization.intendedWidthIn)}x${formatIn(normalization.intendedHeightIn)}in size, below the ${normalization.targetPpi} PPI target${provenanceNote}.`,
+      },
+      effectivePpi,
+    };
+  }
+
   if (requirements.targetPpi === null || !requirements.targetDimensions) {
     return {
       check: {
@@ -381,7 +493,43 @@ function checkEffectiveResolution(
 function checkMinimumRasterDimensions(
   requirements: ProductionRequirements,
   asset: NonNullable<PrintValidationInput["primaryAsset"]>,
+  normalization: ProductionNormalizationSummary | null,
 ): PrintValidationCheck {
+  // Print-Ready Normalization Phase 1: a legitimately wide (or tall) plate has
+  // fewer pixels on its short axis than the placement ENVELOPE would demand —
+  // comparing it against the envelope would fail correct artwork purely for
+  // not being envelope-shaped. The real bar is the plate's own intended
+  // physical size at the target PPI.
+  if (normalization) {
+    const required = {
+      widthPx: Math.ceil(normalization.intendedWidthIn * normalization.targetPpi),
+      heightPx: Math.ceil(normalization.intendedHeightIn * normalization.targetPpi),
+    };
+    const honest = honestDimensionsFor(asset);
+    if (honest.widthPx === null || honest.heightPx === null) {
+      return {
+        check: "minimum_raster_dimensions",
+        status: "unknown",
+        severity: "blocking",
+        reason: honest.interpolated
+          ? "Cannot compare against the minimum production size — this production artwork is an interpolated upscale and its true source dimensions are not recorded."
+          : "Cannot compare against the minimum production size without known production pixel dimensions.",
+      };
+    }
+    const meets = honest.widthPx >= required.widthPx && honest.heightPx >= required.heightPx;
+    const provenanceNote = honest.interpolated
+      ? " (measured against true source detail, not the enlarged file dimensions)"
+      : "";
+    return {
+      check: "minimum_raster_dimensions",
+      status: meets ? "pass" : "fail",
+      severity: "blocking",
+      reason: meets
+        ? `Production artwork carries at least the ${required.widthPx}x${required.heightPx}px its intended physical size requires at ${normalization.targetPpi} PPI${provenanceNote}.`
+        : `Production artwork carries ${honest.widthPx}x${honest.heightPx}px${provenanceNote}, below the ${required.widthPx}x${required.heightPx}px its intended physical size requires at ${normalization.targetPpi} PPI.`,
+    };
+  }
+
   if (!requirements.minRasterDimensionsPx) {
     return {
       check: "minimum_raster_dimensions",
@@ -502,6 +650,176 @@ function checkRequiredWordingVerification(
       ? "Required wording was verified as present and correct."
       : "Required wording was not verified as present and correct on this concept.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Print-Ready Normalization Phase 1 — production-plate checks
+// ---------------------------------------------------------------------------
+
+/**
+ * Cross-checks the plate's recorded pixel dimensions against the physical
+ * specification the normalization claims for them. These are two independently
+ * persisted facts (the `AssetRecord`'s own dimensions and the transform's
+ * metadata); if they disagree, something resized or re-encoded the plate after
+ * normalization and no other check's arithmetic can be trusted.
+ */
+function checkProductionNormalization(
+  normalization: ProductionNormalizationSummary,
+  asset: NonNullable<PrintValidationInput["primaryAsset"]>,
+): PrintValidationCheck {
+  if (asset.widthPx === null || asset.heightPx === null) {
+    return {
+      check: "production_normalization",
+      status: "unknown",
+      severity: "blocking",
+      reason: "Production artwork pixel dimensions are not recorded, so its physical print specification cannot be verified.",
+    };
+  }
+
+  const expectedWidthPx = normalization.intendedWidthIn * normalization.targetPpi;
+  const expectedHeightPx = normalization.intendedHeightIn * normalization.targetPpi;
+  const agrees =
+    Math.abs(asset.widthPx - expectedWidthPx) <= 1 &&
+    Math.abs(asset.heightPx - expectedHeightPx) <= 1;
+
+  return {
+    check: "production_normalization",
+    status: agrees ? "pass" : "fail",
+    severity: "blocking",
+    reason: agrees
+      ? `Production artwork is ${asset.widthPx}x${asset.heightPx}px, intended to print at ${formatIn(normalization.intendedWidthIn)}x${formatIn(normalization.intendedHeightIn)}in (${normalization.strategy}, ${normalization.targetPpi} PPI).`
+      : `Production artwork is ${asset.widthPx}x${asset.heightPx}px, which does not match its recorded intended print size of ${formatIn(normalization.intendedWidthIn)}x${formatIn(normalization.intendedHeightIn)}in at ${normalization.targetPpi} PPI — the file may have been resized after normalization.`,
+  };
+}
+
+function checkAlphaBoundArtwork(
+  normalization: ProductionNormalizationSummary,
+): PrintValidationCheck {
+  const meaningful =
+    normalization.alphaBBoxWidthPx >= MIN_MEANINGFUL_ALPHA_BBOX_PX &&
+    normalization.alphaBBoxHeightPx >= MIN_MEANINGFUL_ALPHA_BBOX_PX;
+  return {
+    check: "alpha_bound_artwork",
+    status: meaningful ? "pass" : "fail",
+    severity: "blocking",
+    reason: meaningful
+      ? `Visible artwork occupies a ${normalization.alphaBBoxWidthPx}x${normalization.alphaBBoxHeightPx}px alpha-bound region of the production artwork.`
+      : `Visible artwork occupies only a ${normalization.alphaBBoxWidthPx}x${normalization.alphaBBoxHeightPx}px region — too small to be meaningful printable artwork.`,
+  };
+}
+
+/**
+ * The defect the Print-Ready Production Output Audit found: a plate whose
+ * artwork covered roughly half its pixels, with the rest transparent padding —
+ * which also inflated every resolution figure computed against the canvas.
+ */
+function checkTransparentDeadCanvas(
+  normalization: ProductionNormalizationSummary,
+): PrintValidationCheck {
+  const occupancy = normalization.artworkOccupancy;
+  const acceptable = occupancy >= MIN_ARTWORK_OCCUPANCY;
+  return {
+    check: "transparent_dead_canvas",
+    status: acceptable ? "pass" : "fail",
+    severity: "blocking",
+    reason: acceptable
+      ? `Artwork fills ${formatPercent(occupancy)} of the production artwork; transparent padding is limited to the intended artwork-edge safety margin.`
+      : `Artwork fills only ${formatPercent(occupancy)} of the production artwork — the rest is transparent dead canvas, which is not a print-ready deliverable.`,
+  };
+}
+
+function checkPhysicalWidthPolicy(
+  normalization: ProductionNormalizationSummary,
+): PrintValidationCheck {
+  // A tall/narrow artwork proportionally reduced to fit the placement's
+  // printable height is correct, intended behavior — its width is honestly
+  // below target rather than stretched or cropped to reach it.
+  if (normalization.constrainedBy === "max_height") {
+    return {
+      check: "physical_width_policy",
+      status: "pass",
+      severity: "blocking",
+      reason: `Production artwork prints ${formatIn(normalization.intendedWidthIn)}in wide — narrower than the ${formatIn(normalization.targetWidthIn)}in target because the artwork's own proportions reached the placement's printable height first.`,
+    };
+  }
+
+  const deviation = Math.abs(
+    normalization.intendedWidthIn - normalization.targetWidthIn,
+  );
+  const withinPolicy = deviation <= normalization.widthToleranceIn;
+  return {
+    check: "physical_width_policy",
+    status: withinPolicy ? "pass" : "fail",
+    severity: "blocking",
+    reason: withinPolicy
+      ? `Production artwork prints ${formatIn(normalization.intendedWidthIn)}in wide, matching the ${formatIn(normalization.targetWidthIn)}in target for this placement.`
+      : `Production artwork prints ${formatIn(normalization.intendedWidthIn)}in wide, outside the ${formatIn(normalization.targetWidthIn)}in ±${normalization.widthToleranceIn}in target for this placement.`,
+  };
+}
+
+function checkAspectRatioPreserved(
+  normalization: ProductionNormalizationSummary,
+): PrintValidationCheck {
+  const trimmedRatio = normalization.trimmedWidthPx / normalization.trimmedHeightPx;
+  const producedRatio = normalization.intendedWidthIn / normalization.intendedHeightIn;
+  if (!Number.isFinite(trimmedRatio) || !Number.isFinite(producedRatio) || producedRatio <= 0) {
+    return {
+      check: "aspect_ratio_preserved",
+      status: "unknown",
+      severity: "blocking",
+      reason: "Aspect ratio could not be compared — production geometry is incomplete.",
+    };
+  }
+  const relativeDeviation = Math.abs(producedRatio - trimmedRatio) / trimmedRatio;
+  const preserved = relativeDeviation <= ASPECT_RATIO_TOLERANCE;
+  return {
+    check: "aspect_ratio_preserved",
+    status: preserved ? "pass" : "fail",
+    severity: "blocking",
+    reason: preserved
+      ? `Artwork proportions survived normalization (${trimmedRatio.toFixed(4)} → ${producedRatio.toFixed(4)}, within ${ASPECT_RATIO_TOLERANCE * 100}%).`
+      : `Artwork proportions changed during normalization (${trimmedRatio.toFixed(4)} → ${producedRatio.toFixed(4)}) — the artwork has been distorted.`,
+  };
+}
+
+/**
+ * Records whether the file's own embedded density agrees with the intended
+ * production resolution. Deliberately INFO severity: rewriting a density tag
+ * adds no image information, so it can confirm — never establish —
+ * print-readiness.
+ */
+function checkDensityMetadata(
+  normalization: ProductionNormalizationSummary,
+): PrintValidationCheck {
+  if (normalization.densityPixelsPerMetre === null) {
+    return {
+      check: "density_metadata",
+      status: "unknown",
+      severity: "info",
+      reason: "Production artwork carries no embedded physical-resolution metadata; effective resolution was calculated from pixel geometry, which is authoritative regardless.",
+    };
+  }
+  const declaredPpi = normalization.densityPixelsPerMetre / 39.3700787402;
+  const agrees =
+    Math.abs(declaredPpi - normalization.targetPpi) / normalization.targetPpi <=
+    DENSITY_METADATA_TOLERANCE;
+  return {
+    check: "density_metadata",
+    status: agrees ? "pass" : "warning",
+    severity: "info",
+    reason: agrees
+      ? `Embedded physical-resolution metadata declares ~${Math.round(declaredPpi)} PPI, agreeing with the intended ${normalization.targetPpi} PPI production specification.`
+      : `Embedded physical-resolution metadata declares ~${Math.round(declaredPpi)} PPI, disagreeing with the intended ${normalization.targetPpi} PPI production specification (pixel geometry remains authoritative).`,
+  };
+}
+
+/** Compact inch formatting for internal report reasons — never customer-facing copy. */
+function formatIn(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0$/, "");
+}
+
+function formatPercent(fraction: number): string {
+  return `${Math.round(fraction * 100)}%`;
 }
 
 function aggregateStatus(checks: PrintValidationCheck[]): PrintValidationStatus {

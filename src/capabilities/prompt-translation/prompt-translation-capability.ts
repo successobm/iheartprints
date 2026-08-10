@@ -2,8 +2,11 @@ import type {
   DesignBriefSnapshotContent,
   GenerationPromptRequest,
   PrintPlacement,
+  RevisionDirective,
 } from "@/lib/domain/types";
 import type { RegenerationPlan } from "@/capabilities/regeneration-intelligence";
+import { COLOR_WORD_PATTERN } from "@/capabilities/shared/color-families";
+import { extractRevisionDelta } from "@/capabilities/shared/revision-delta";
 
 import { extractCreativeReferences } from "./creative-reference-extraction";
 import type { GenerationIntent } from "./generation-intent";
@@ -28,13 +31,27 @@ export interface PromptTranslationCapability {
 export function createPromptTranslationCapability(): PromptTranslationCapability {
   return {
     translate(generationIntent) {
-      const base = translateApprovedBrief(generationIntent.approvedBrief);
+      const base: GenerationPromptRequest = {
+        ...translateApprovedBrief(generationIntent.approvedBrief),
+        targetConceptDirectionKey: generationIntent.targetConceptDirectionKey,
+      };
       if (!generationIntent.regenerationPlan) return base;
-      return mergeRegenerationPlan(
+      const merged = mergeRegenerationPlan(
         base,
         generationIntent.approvedBrief,
         generationIntent.regenerationPlan,
       );
+      // True Source-Image Targeted Revision: only a TARGETED revision (one
+      // selected source concept) is an edit. A three-direction "show me
+      // alternatives" regeneration has no single artwork to apply a delta
+      // to and stays pure text-to-image, exactly as before.
+      if (!generationIntent.targetConceptDirectionKey) return merged;
+      merged.revision = buildRevisionDirective(
+        merged,
+        generationIntent.regenerationPlan,
+        generationIntent.revisionInstruction,
+      );
+      return merged;
     },
   };
 }
@@ -83,6 +100,12 @@ export function translateApprovedBrief(
     // text beyond the required wording, so this is always false — an
     // explicit, provider-neutral field rather than an OpenAI prompt hack.
     allowAdditionalText: false,
+    // Set by `translate()` itself from `GenerationIntent.targetConceptDirectionKey`
+    // — never known at this pure brief→request mapping stage.
+    targetConceptDirectionKey: null,
+    // True Source-Image Targeted Revision: a brief alone is never an edit.
+    // Only `translate()` can set this, and only for a targeted revision.
+    revision: null,
   };
 }
 
@@ -133,6 +156,176 @@ function mergeRegenerationPlan(
   merged.notes = parts.length > 0 ? parts.join(" ") : null;
 
   return merged;
+}
+
+/**
+ * Nouns that NAME the wording of a design. Naming the wording is not by
+ * itself a request to change it — see `requestsWordingChange`.
+ * `font`/`typeface` are deliberately absent: they name typography, not
+ * wording, so "change the font to something more retro" never unlocks it.
+ */
+const WORDING_NOUN_PATTERN =
+  /\b(text|wording|words?|letter(?:s|ing)?|caption|slogan|title|tagline|headline|name)\b/i;
+
+/**
+ * Cues that mean the wording ITSELF is changing — what the design SAYS.
+ * Independent of whether a wording noun is present ("make it say MR2
+ * TURBO", "fix the spelling").
+ */
+const WORDING_MUTATION_PATTERN =
+  /\b(spell(?:s|ed|ing)?|misspell\w*|says?|reads?|reword\w*|rephras\w*|renam\w*|retype\w*|typo|capitali[sz]\w*|uppercase|lowercase|all\s+caps)\b/i;
+
+/**
+ * Cues that a clause is about how something LOOKS rather than what it says
+ * — color, typography treatment, size, weight, position. Deliberately
+ * generic (no product nouns, no per-scenario keywords).
+ */
+const APPEARANCE_CHANGE_PATTERN =
+  /\b(colou?rs?|colou?red|shade|tint|hue|font|typeface|typography|bold(?:er)?|italic|weight|thick(?:er)?|thinner|outline|stroke|shadow|glow|gradient|chrome|metallic|matte|glossy|size|sizes|bigger|larger|smaller|enlarge|shrink|scale|position|placement|move|centre|center|align|spacing|kerning|match(?:es|ing)?|same\s+as)\b/i;
+
+/**
+ * A quoted string — how a customer states replacement wording
+ * (`change the text to "MR2 TURBO"`). Only real double/smart quotes: an
+ * apostrophe in "don't" must never read as a quoted replacement.
+ */
+const QUOTED_REPLACEMENT_PATTERN = /["“”][^"“”]{1,120}["“”]/;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True Source-Image Targeted Revision (required-wording protection):
+ * whether the customer's own delta is about the wording. Only then may the
+ * exact-wording lock be lifted — otherwise "change the font to retro" or
+ * "make the car larger" could quietly license a provider to reinterpret
+ * "1988 Toyota MR2".
+ *
+ * Live Acceptance Cleanup — the bug this rewrite fixes: the old rule
+ * unlocked wording on the bare NOUN "text", so "make the 3 SONS text the
+ * same color as the ball" was read as a wording change. That dropped the
+ * exact-wording lock and told the provider it was changing what the design
+ * says — a direct licence to re-render every word, which is how an
+ * untouched word ("MY") came back restyled. Naming a text element while
+ * asking for a COLOR/SIZE/WEIGHT/POSITION change is styling, never
+ * re-wording.
+ *
+ * A clause is a wording change when any of these hold — each grounded in
+ * what the customer actually said or did:
+ *   - it quotes the currently required wording (`change "1988 Toyota MR2"
+ *     to "MR2 TURBO"` is unambiguous);
+ *   - it carries an explicit wording-mutation cue (say / read / spell /
+ *     reword / rename / capitalize);
+ *   - it names the wording AND supplies quoted replacement text;
+ *   - it names the wording and asks for something that is NOT an
+ *     appearance change.
+ *
+ * The RegenerationPlan's own `requiredWording` entries count too — that is
+ * the structured form of the same instruction.
+ */
+function requestsWordingChange(
+  requestedChanges: string[],
+  plan: RegenerationPlan,
+  requiredWording: string | null,
+): boolean {
+  const planTouchedWording = [
+    ...plan.remove,
+    ...plan.replace,
+    ...plan.customerRequestedChanges,
+  ].some((change) => change.section === "requiredWording");
+  if (planTouchedWording) return true;
+
+  const wordingPattern = requiredWording?.trim()
+    ? new RegExp(escapeRegExp(requiredWording.trim()), "i")
+    : null;
+
+  return requestedChanges.some((change) =>
+    clauseRequestsWordingChange(change, wordingPattern),
+  );
+}
+
+function clauseRequestsWordingChange(
+  clause: string,
+  currentWordingPattern: RegExp | null,
+): boolean {
+  if (currentWordingPattern?.test(clause)) return true;
+  if (WORDING_MUTATION_PATTERN.test(clause)) return true;
+  if (!WORDING_NOUN_PATTERN.test(clause)) return false;
+  if (QUOTED_REPLACEMENT_PATTERN.test(clause)) return true;
+  // Names the wording, but only asks for how it LOOKS to change. A bare
+  // color name counts: customers say "make the word SALE red" far more
+  // often than they say the token "color", and reading that as a request to
+  // change what the design SAYS is exactly the live bug.
+  return !(
+    APPEARANCE_CHANGE_PATTERN.test(clause) || COLOR_WORD_PATTERN.test(clause)
+  );
+}
+
+function dedupeNonEmpty(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+/**
+ * True Source-Image Targeted Revision: assembles the provider-neutral
+ * delta for ONE targeted revision.
+ *
+ * `requestedChanges` prefers the customer's literal instruction, split into
+ * its distinct changes — that is the only representation that can say
+ * "change it to a shield" at all. The `RegenerationPlan` is the fallback
+ * (and always the source for preserve/avoid/wording): its descriptions are
+ * canned section-level sentences ("Make sure the graphics reflect the
+ * customer's requested change"), which are enough to know WHAT AREA
+ * changed but never enough to edit an image.
+ *
+ * Still provider-neutral: plain customer language, no prompt syntax. The
+ * adapter owns every word of how this is expressed.
+ */
+function buildRevisionDirective(
+  request: GenerationPromptRequest,
+  plan: RegenerationPlan,
+  revisionInstruction: string | null,
+): RevisionDirective {
+  const fromInstruction = revisionInstruction
+    ? extractRevisionDelta(revisionInstruction)
+    : { requestedChanges: [], preserveEverythingElse: false };
+  const fromPlan = (
+    plan.customerRequestedChanges.length > 0
+      ? plan.customerRequestedChanges
+      : plan.priorityChanges
+  ).map((change) => change.description);
+
+  const requestedChanges = dedupeNonEmpty(
+    fromInstruction.requestedChanges.length > 0
+      ? fromInstruction.requestedChanges
+      : fromPlan,
+  );
+
+  const wordingChangeRequested = requestsWordingChange(
+    requestedChanges,
+    plan,
+    request.requiredWording,
+  );
+
+  return {
+    requestedChanges,
+    preserve: dedupeNonEmpty(plan.preserve.map((change) => change.description)),
+    avoid: dedupeNonEmpty([
+      ...plan.avoid.map((change) => change.description),
+      ...(request.exclusions ? [request.exclusions] : []),
+    ]),
+    lockedWording: wordingChangeRequested ? null : request.requiredWording,
+    wordingChangeRequested,
+    preserveEverythingElse: fromInstruction.preserveEverythingElse,
+  };
 }
 
 function applyRemove(

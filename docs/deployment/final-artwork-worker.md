@@ -84,15 +84,25 @@ workers:
 ### 3. Inside the web process
 
 Same note as the generation worker's doc: topology (1) running against the
-web process's own container is not a separate code path.
+web process's own container is not a separate code path. Production must
+not treat the web process as the authoritative final-artwork worker.
 
 ## Local development
+
+Interactive `next dev` already mirrors generation: after a durable
+`FinalArtworkJob` enqueue (Prepare Print-Ready),
+`maybeTriggerLocalFinalArtworkWorker` kicks `finalArtworkScheduler.runBatch()`
+in-process. A stranded `queued`/`attempts=0` job behind an active approval
+is also recoverable from `GET .../finalization/status` or project reload
+via `maybeRecoverStrandedLocalFinalArtworkJobs`. Production and automated
+tests suppress both paths (`local-generation-trigger-policy.ts`).
+
+You can still run a second terminal or hit the endpoint by hand when you
+want the standalone-worker topology locally:
 
 ```bash
 npm run worker:final-artwork
 ```
-
-in a second terminal, or hit the endpoint by hand:
 
 ```bash
 curl -X POST http://localhost:3000/api/worker/final-artwork \
@@ -135,6 +145,31 @@ resolve to exactly one winner.
 - A `"completed"` job that honestly landed on `finalization_required` is
   never auto-retried — that is a real verdict about the artwork itself,
   not a hiccup worth re-running.
+
+## Production output contract
+
+The deliverable is a trimmed, physical-size-aware PNG: the production artwork
+itself defines the canvas. See ARCHITECTURE.md §13e for the full contract.
+Deployment-relevant summary:
+
+- Plates are sized by physical print WIDTH (10.5in for `full_front` /
+  `full_back`, 4in `left_chest`, 3in `sleeve`) at 300 PPI, with height derived
+  from the artwork's own aspect ratio. A full-front/full-back plate is 3150px
+  wide; its height varies per design. There is no fixed 3600x4200 canvas.
+- Each plate carries a `pHYs` density tag (11811 pixels per metre ≈ 300 PPI),
+  so it opens at roughly its intended physical size in production software.
+  That tag is a convenience for print shops only — readiness is always
+  computed from pixels ÷ intended inches, never from the tag.
+- Every production asset records its own normalization geometry (alpha
+  bounding box, safety margin, occupancy, intended physical size) in its
+  metadata. Authoritative validation recomputes from it; a retried or
+  recovered attempt re-validates the same plate against the same evidence.
+- A production asset created before this contract existed carries no such
+  geometry. It is never deleted or rewritten, but if its job is ever re-run
+  the worker honestly reports `finalization_required` rather than
+  re-confirming print-readiness for an un-normalized plate. Re-preparing that
+  project's artwork produces a correct plate (and, on `topaz`, spends one
+  credit).
 
 ## Print-ready transition safety
 

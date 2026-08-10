@@ -14,8 +14,11 @@ type RouteContext = {
  * `CustomerFinalizationStatus` vocabulary: never a job id, provider name,
  * queue name, storage key, or any other internal detail.
  *
- * Purely read-only. Polling never recovers abandoned jobs, never claims
- * work, never revives a failed job, and never calls a provider.
+ * Production and automated tests: purely read-only. Interactive `next dev`
+ * only may kick a stranded `queued`/`attempts=0` FinalArtworkJob via
+ * `maybeRecoverStrandedLocalFinalArtworkJobs` (missed post-enqueue trigger
+ * / stale HMR). Polling never revives failed/cancelled/completed jobs and
+ * never calls a provider itself.
  */
 export async function GET(_request: Request, context: RouteContext) {
   try {

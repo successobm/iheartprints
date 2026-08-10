@@ -43,7 +43,7 @@ describe("PrepareForPrintAction (Sprint 2M Phase 2B)", () => {
     assert.doesNotMatch(html, /is ready/i);
   });
 
-  it("B: print_ready updates the UI to the ready state", () => {
+  it("B: print_ready is owned by FinalArtworkDeliveryCard — this action renders nothing", () => {
     const html = renderToString(
       createElement(PrepareForPrintAction, {
         finalizationStatus: "print_ready",
@@ -52,9 +52,7 @@ describe("PrepareForPrintAction (Sprint 2M Phase 2B)", () => {
         onPrepare: () => {},
       }),
     );
-    assert.match(html, /Your print-ready artwork is ready/);
-    assert.doesNotMatch(html, /Preparing your print-ready artwork/);
-    assert.doesNotMatch(html, /Prepare Print-Ready Artwork/);
+    assert.equal(html, "");
   });
 
   it("C: needs_review updates the UI and does not claim print-ready", () => {

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { PNG } from "pngjs";
 
+import { PRINT_PLACEMENT_SIZING_POLICY } from "@/capabilities/shared/print-placement-dimensions";
+
 import { TopazTransparencyUpscaleProvider } from "./topaz-transparency-upscale-provider";
 import type { FinalArtworkProviderInput } from "./provider";
 
@@ -23,22 +25,20 @@ function buildFixturePng(size: number): Buffer {
 }
 
 /**
- * Deliberately a smaller (non-full-back) target canvas than the real
- * bake-off's 3600x4200 — these tests exercise submit/poll/download/error
- * handling, not the exact production-canvas math (that's covered at
- * realistic bake-off scale by the worker-level K/L test in
- * `final-artwork-worker-capability.test.ts`). Still distinct from both the
- * 1024px source and the 4096px reconstruction, which is all Goal 4/5's
- * "three distinct measurements" needs here. Keeps this file's `pngjs`
- * bilinear-resample cost low.
+ * Deliberately the smallest placement (sleeve, 3in at 300 PPI = 900px) rather
+ * than full-back — these tests exercise submit/poll/download/error handling,
+ * not the production sizing math (covered directly in
+ * `production-normalization.test.ts`, and end to end by the worker-level K/L
+ * test in `final-artwork-worker-capability.test.ts`). The resulting plate is
+ * still distinct from both the 1024px source and the 4096px reconstruction,
+ * which is all Goal 4/5's "three distinct measurements" needs here, and it
+ * keeps this file's `pngjs` resample cost low.
  */
 function baseInput(overrides: Partial<FinalArtworkProviderInput> = {}): FinalArtworkProviderInput {
   return {
     sourceBytes: buildFixturePng(1024),
     sourceContentType: "image/png",
-    targetWidthPx: 1200,
-    targetHeightPx: 1200,
-    marginFraction: 0.05,
+    sizing: PRINT_PLACEMENT_SIZING_POLICY.sleeve,
     existingProviderRequest: null,
     onProviderRequestSubmitted: async () => {},
     ...overrides,
@@ -127,10 +127,16 @@ describe("TopazTransparencyUpscaleProvider (Sprint 2M Phase 2E)", () => {
     assert.equal(output.nativeHeightPx, 1024);
     assert.equal(output.reconstructedWidthPx, 4096);
     assert.equal(output.reconstructedHeightPx, 4096);
-    // L: the final production canvas is a THIRD, distinct measurement —
+    // L: the normalized production plate is a THIRD, distinct measurement —
     // never collapsed into source or reconstructed dimensions.
-    assert.equal(output.widthPx, 1200);
-    assert.equal(output.heightPx, 1200);
+    assert.equal(output.widthPx, 900, "3in sleeve at 300 PPI");
+    assert.equal(output.heightPx, 900);
+    // Print-Ready Normalization Phase 1: the plate is normalized from the
+    // RECONSTRUCTED raster, and reports its own measured geometry.
+    assert.equal(output.normalization.sourceWidthPx, 4096);
+    assert.equal(output.normalization.intendedWidthIn, 3);
+    assert.equal(output.normalization.targetPpi, 300);
+    assert.ok(output.normalization.artworkOccupancy > 0.9);
     assert.equal(output.preservesApprovedContent, false);
     assert.equal(output.providerRequestId, "fake-process-id");
 

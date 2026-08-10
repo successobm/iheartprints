@@ -7,16 +7,11 @@ type RouteContext = {
 };
 
 /**
- * Sprint 2M Phase 2C (Goal 14): the secure read boundary for a future
- * production-artwork download feature. Not linked from any UI yet — this
- * exists to prove the boundary is real before a purchasing/download product
- * is built on top of it.
- *
- * Mints a short-lived signed URL for the project's current print-ready
- * production PNG through `AssetCapability` — never a raw storage key,
- * object path, or asset id. Every failure path (missing project, not
- * print-ready yet, no production asset resolvable) returns the same
- * generic 404 so this can't be used to probe internal state. Never cached.
+ * Secure read boundary for print-ready production artwork preview.
+ * Mints a short-lived signed URL plus customer-safe metadata through
+ * `conversation-service` — never a raw storage key, object path, asset id,
+ * job id, or provider detail. Every failure path returns the same generic
+ * 404. Never cached.
  */
 export async function GET(_request: Request, context: RouteContext) {
   try {

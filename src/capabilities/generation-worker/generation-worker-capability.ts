@@ -4,6 +4,7 @@ import type { ProjectRepository } from "@/lib/db/repository";
 import type {
   ConceptEvaluation,
   ConceptEvaluationStatus,
+  ConversationPhase,
   DesignBriefSnapshotContent,
   GenerationJob,
 } from "@/lib/domain/types";
@@ -21,6 +22,7 @@ import type { ConceptGenerationProvider } from "@/capabilities/providers";
 import type {
   ConceptGenerationResult,
   GeneratedAssetPayload,
+  SourceArtworkImage,
 } from "@/capabilities/shared/contracts";
 import { MAX_GENERATION_ATTEMPTS } from "@/capabilities/shared/generation-retry-policy";
 import type { PrintValidationCapability } from "@/capabilities/print-validation";
@@ -36,6 +38,10 @@ import {
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
 
 import { buildGenerationIntentForJob } from "./build-generation-intent";
+import {
+  isSupportedSourceContentType,
+  TargetedRevisionSourceError,
+} from "./targeted-revision-source-error";
 
 /**
  * Sprint 2H Part 2A: a "running" job with no heartbeat for this long is
@@ -45,6 +51,34 @@ import { buildGenerationIntentForJob } from "./build-generation-intent";
 export const DEFAULT_STALE_JOB_MS = 15 * 60 * 1000;
 
 const UNAVAILABLE_ERROR_PREFIX = "GENERATION_UNAVAILABLE:";
+
+/**
+ * True Source-Image Targeted Revision: stable, greppable prefix on
+ * `GenerationJob.lastError` when a targeted revision could not load its
+ * source artwork. Internal only — never customer-facing.
+ */
+export const TARGETED_REVISION_SOURCE_ERROR_PREFIX = "TARGETED_REVISION_SOURCE:";
+
+/**
+ * Which conversation phase a finished generation hands back to the
+ * customer — success or failure alike.
+ *
+ * `concepts_ready` means "pick one of these", and it deliberately blocks
+ * free-text chat (`CHAT_BLOCKED_PHASES` in `ConversationCapability`),
+ * which is right when three fresh directions are waiting to be chosen
+ * between. A TARGETED REVISION has nothing to choose between — its one
+ * revised concept is already selected — so leaving the conversation in
+ * `concepts_ready` stranded the customer at exactly the moment the
+ * assistant asked "how does this version look?": chat was refused
+ * server-side, and the Use This Design action (gated on the revision
+ * loop) never appeared. A targeted revision therefore returns to
+ * `ask_revisions`, where another change and an explicit confirmation are
+ * both available. The failure path needs the same phase for the same
+ * reason — its message invites the customer to try the change again.
+ */
+function phaseAfterGeneration(job: GenerationJob): ConversationPhase {
+  return job.targetArtworkVersionId ? "ask_revisions" : "concepts_ready";
+}
 
 export interface GenerationWorkerCapability {
   /**
@@ -119,6 +153,67 @@ export function createGenerationWorkerCapability(
     return {
       primaryAssetId: primary.id,
       thumbnailAssetId: thumbnail?.id ?? null,
+    };
+  }
+
+  /**
+   * True Source-Image Targeted Revision: resolves the ACTUAL pixels of the
+   * concept the customer selected, so the revision can be performed as an
+   * edit of that artwork rather than a fresh interpretation of the brief.
+   *
+   * Exactly the lookup chain the lineage already records:
+   *   GenerationJob.targetArtworkVersionId
+   *     → ArtworkVersion (that exact selected concept)
+   *     → ArtworkVersion.primaryAssetId
+   *     → AssetCapability.downloadAssetBytes  (the same server-side byte
+   *       fetch FinalArtworkWorkerCapability uses — never a signed URL,
+   *       never a storage key, and never an `AssetRecord` past this point).
+   *
+   * Every failure along that chain throws. There is deliberately no
+   * fallback: see `TargetedRevisionSourceError`.
+   */
+  async function loadSourceArtwork(
+    project: { artworkVersions: readonly { id: string; primaryAssetId: string | null }[] },
+    targetArtworkVersionId: string,
+  ): Promise<SourceArtworkImage> {
+    const source = project.artworkVersions.find(
+      (artwork) => artwork.id === targetArtworkVersionId,
+    );
+    if (!source) {
+      throw new TargetedRevisionSourceError(
+        "source_artwork_missing",
+        targetArtworkVersionId,
+        "The selected concept to revise no longer exists.",
+      );
+    }
+    if (!source.primaryAssetId) {
+      throw new TargetedRevisionSourceError(
+        "source_asset_missing",
+        targetArtworkVersionId,
+        "The selected concept has no stored artwork image to revise.",
+      );
+    }
+
+    const downloaded = await assets.downloadAssetBytes(source.primaryAssetId);
+    if (!downloaded || downloaded.bytes.length === 0) {
+      throw new TargetedRevisionSourceError(
+        "source_bytes_unavailable",
+        targetArtworkVersionId,
+        "The selected concept's artwork image could not be read from storage.",
+      );
+    }
+    if (!isSupportedSourceContentType(downloaded.contentType)) {
+      throw new TargetedRevisionSourceError(
+        "source_content_type_unsupported",
+        targetArtworkVersionId,
+        `The selected concept's artwork image type (${downloaded.contentType}) cannot be edited.`,
+      );
+    }
+
+    return {
+      sourceArtworkVersionId: targetArtworkVersionId,
+      imageBytes: downloaded.bytes,
+      contentType: downloaded.contentType,
     };
   }
 
@@ -318,25 +413,37 @@ export function createGenerationWorkerCapability(
           ...(unavailable ? { reason: "provider_unavailable" } : {}),
         },
       });
-    } else {
-      // Unlike the very first generation, concepts already exist here —
-      // a failed regeneration should never take away what the customer
-      // could already see (Constitution §14: revisions continue the
-      // same design relationship, they don't restart it).
-      await repo.setProjectStatus(designId, "concepts_ready");
-      await repo.updateConversationPhase(designId, "concepts_ready");
-      await repo.addMessage(designId, {
-        role: "assistant",
-        content: unavailable
+      return;
+    }
+
+    // Unlike the very first generation, concepts already exist here — a
+    // failed regeneration should never take away what the customer could
+    // already see (Constitution §14: revisions continue the same design
+    // relationship, they don't restart it). `revisionPending` and
+    // `finalDirectionConfirmed` are deliberately left untouched: the
+    // requested revision genuinely has not happened yet, so the pending
+    // authority must stay true, and nothing here may ever imply the
+    // (unrevised) prior artwork is now a confirmed final direction —
+    // that is what previously let "Prepare Print-Ready Artwork" appear
+    // right after a failure message (Sprint 2G Live Acceptance Corrective
+    // Pass, Goal 5).
+    await repo.setProjectStatus(designId, "concepts_ready");
+    await repo.updateConversationPhase(designId, phaseAfterGeneration(job));
+    await repo.addMessage(designId, {
+      role: "assistant",
+      content: job.targetArtworkVersionId
+        ? unavailable
+          ? "Updating this concept is temporarily unavailable. Your selected concept is still available — please try again shortly."
+          : "We ran into a problem updating this concept. Your selected concept is unchanged — you can try the change again anytime."
+        : unavailable
           ? "Updating concepts is temporarily unavailable. Your current concepts are still available — please try again shortly."
           : "We ran into a problem updating your concepts. Your current concepts are still available — you can try again anytime.",
-        metadata: {
-          phase: "concepts_ready",
-          act: "generation_failed",
-          ...(unavailable ? { reason: "provider_unavailable" } : {}),
-        },
-      });
-    }
+      metadata: {
+        phase: "concepts_ready",
+        act: "generation_failed",
+        ...(unavailable ? { reason: "provider_unavailable" } : {}),
+      },
+    });
   }
 
   async function runClaimedJob(job: GenerationJob): Promise<void> {
@@ -358,17 +465,25 @@ export function createGenerationWorkerCapability(
     const current = await repo.getProject(designId);
     if (!current) return;
 
+    // Idempotency is keyed on THIS JOB having already produced artwork, not
+    // on the approved brief version having any artwork at all.
+    //
+    // Live Acceptance Cleanup (Issue 3): those were the same question until
+    // "Show Me 3 New Concepts" made one approved brief version able to own
+    // more than one batch. Keying on the version would make every additional
+    // batch a silent no-op — a job that completes having generated nothing.
+    // Keying on the job is also the more precise statement of what this
+    // guard was always for: "a previous run of this exact job already
+    // succeeded and this claim lost the race."
     const alreadyGenerated = current.artworkVersions.some(
-      (artwork) => artwork.designBriefVersionId === approvedVersion.id,
+      (artwork) => artwork.generationJobId === job.id,
     );
     if (alreadyGenerated) {
-      // Idempotent: a previous run already succeeded (e.g. this run is a
-      // recovered duplicate claim that lost the race) — nothing left to do
-      // for generation. Sprint 2I: backfill evaluation only when a prior
-      // run left concepts without evaluationStatus.
+      // Sprint 2I: backfill evaluation only when a prior run left this job's
+      // concepts without evaluationStatus.
       for (const artwork of current.artworkVersions) {
         if (
-          artwork.designBriefVersionId === approvedVersion.id &&
+          artwork.generationJobId === job.id &&
           artwork.evaluationStatus === null
         ) {
           await repo.touchGenerationJobHeartbeat(job.id);
@@ -446,6 +561,17 @@ export function createGenerationWorkerCapability(
       const promptRequest = promptTranslation.translate(generationIntent);
       await repo.touchGenerationJobHeartbeat(job.id);
 
+      // True Source-Image Targeted Revision: a targeted revision is an EDIT
+      // of the selected concept, so its real pixels must cross the provider
+      // boundary. Resolved before the provider call and never optional —
+      // a failure here fails the job (see `TargetedRevisionSourceError`)
+      // rather than degrading to text-to-image. Initial generation and
+      // three-direction regeneration pass `null` and are untouched.
+      const sourceArtwork =
+        job.targetArtworkVersionId && provider.editsSourceArtwork
+          ? await loadSourceArtwork(current, job.targetArtworkVersionId)
+          : null;
+
       const result: ConceptGenerationResult = await withPeriodicHeartbeat(
         job.id,
         () =>
@@ -455,6 +581,7 @@ export function createGenerationWorkerCapability(
             conceptCount: job.conceptCount,
             prompt: promptRequest,
             idempotencyKey: job.idempotencyKey,
+            sourceArtwork,
           }),
       );
 
@@ -516,6 +643,10 @@ export function createGenerationWorkerCapability(
           evaluation: evaluated.evaluation,
           evaluationEvaluatedAt: evaluated.evaluationEvaluatedAt,
           evaluationProviderKey: evaluated.evaluationProviderKey,
+          // Sprint 2G Live Acceptance Corrective Pass: durable revision
+          // lineage + which catalog direction this concept used.
+          sourceArtworkVersionId: job.targetArtworkVersionId ?? null,
+          conceptDirectionKey: concept.directionKey ?? null,
         });
         provisionalInputs.push({
           // The just-uploaded asset's own metadata is already in scope —
@@ -555,12 +686,34 @@ export function createGenerationWorkerCapability(
         });
       }
       if (job.kind === "regeneration") {
-        await repo.updateProject(designId, { selectedArtworkVersionId: null });
+        // Sprint 2G Live Acceptance Corrective Pass: a targeted
+        // single-concept revision has exactly one candidate — auto-select
+        // it as the thing under review (there is nothing else to pick
+        // from), but `finalDirectionConfirmed` stays false regardless (set
+        // only by the customer's explicit confirmation) so this can never
+        // itself make finalization eligible. An ordinary three-direction
+        // "show me alternatives" regeneration still clears selection, same
+        // as before — the customer must pick one of the three.
+        const revisedArtwork = job.targetArtworkVersionId
+          ? createdVersions[0]
+          : undefined;
+        await repo.updateProject(designId, {
+          selectedArtworkVersionId: revisedArtwork?.id ?? null,
+          // Sprint 2M Phase 2G (Goal 3): the requested revision is now
+          // represented by a real ArtworkVersion batch — clear the pending
+          // authority here, at completion, never merely at enqueue time.
+          revisionPending: false,
+          finalDirectionConfirmed: false,
+        });
         // Sprint 2M Phase 2B (Goal 4): a new concept batch means the
         // artwork behind any prior final-direction approval no longer
         // exists as "the current direction" — the prior approval can never
         // silently authorize production of what just replaced it. Safe to
         // call unconditionally: a no-op when nothing is currently active.
+        // (Sprint 2M Phase 2G, Goal 7: the common case is now already a
+        // no-op here — `triggerAutomaticRevision` already superseded the
+        // active approval, if any, at the moment the revision was
+        // understood, not just now at completion.)
         await repo.supersedeActiveFinalDirectionApproval(designId);
       }
       await repo.updateGenerationJob(job.id, {
@@ -569,12 +722,17 @@ export function createGenerationWorkerCapability(
       });
 
       await repo.setProjectStatus(designId, "concepts_ready");
-      await repo.updateConversationPhase(designId, "concepts_ready");
+      await repo.updateConversationPhase(designId, phaseAfterGeneration(job));
       await repo.addMessage(designId, {
         role: "assistant",
-        content:
-          job.kind === "regeneration"
-            ? "Here are three updated concept directions. Pick the one that feels closest."
+        // The metadata phase stays "concepts_ready" on both paths: it marks
+        // this message as the "here is artwork" anchor the concept grid
+        // renders against, which is a property of the event, not of the
+        // phase the conversation moves into next.
+        content: job.targetArtworkVersionId
+          ? "Here's your revised concept. How does this version look?"
+          : job.kind === "regeneration"
+            ? "Here are three new directions to consider. Pick the one that feels closest."
             : "Here are three concept directions. Pick the one that feels closest.",
         metadata: { phase: "concepts_ready" },
       });
@@ -622,6 +780,12 @@ export function createGenerationWorkerCapability(
 function describeGenerationError(error: unknown): string {
   if (error instanceof GenerationUnavailableError) {
     return `${UNAVAILABLE_ERROR_PREFIX}${error.safeErrorCode}: ${error.message}`;
+  }
+  // True Source-Image Targeted Revision: an actionable internal failure —
+  // the revision could not be performed as an edit, and was NOT quietly
+  // downgraded to a fresh text-to-image generation.
+  if (error instanceof TargetedRevisionSourceError) {
+    return `${TARGETED_REVISION_SOURCE_ERROR_PREFIX}${error.reason}: ${error.message}`;
   }
   if (error && typeof error === "object" && "message" in error) {
     const message = (error as { message?: unknown }).message;

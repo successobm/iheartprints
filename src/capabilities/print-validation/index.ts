@@ -40,5 +40,6 @@ export {
   type PrintValidationReport,
   type PrintValidationAssetSummary,
   type PrintValidationInput,
+  type ProductionNormalizationSummary,
   type ResolutionProvenance,
 } from "./contracts";

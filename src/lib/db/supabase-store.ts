@@ -7,6 +7,7 @@ import type {
   ArtworkVersion,
   AssetKind,
   AssetRecord,
+  ConceptDirectionKey,
   ConceptEvaluation,
   ConceptEvaluationStatus,
   ConversationMessage,
@@ -52,6 +53,10 @@ type DbProject = {
   name: string;
   status: ProjectStatus;
   selected_artwork_version_id: string | null;
+  /** Sprint 2M Phase 2G (Goal 3). */
+  revision_pending: boolean | null;
+  /** Sprint 2G Live Acceptance Corrective Pass. */
+  final_direction_confirmed: boolean | null;
   created_at: string;
   updated_at: string;
 };
@@ -118,6 +123,9 @@ type DbArtwork = {
   evaluation_evaluated_at: string | null;
   evaluation_provider_key: string | null;
   print_validation_status: string | null;
+  /** Sprint 2G Live Acceptance Corrective Pass. */
+  source_artwork_version_id: string | null;
+  concept_direction_key: ConceptDirectionKey | null;
   created_at: string;
 };
 
@@ -130,6 +138,10 @@ type DbGenerationJob = {
   concept_count: number;
   provider_key: string;
   idempotency_key: string;
+  /** Sprint 2G Live Acceptance Corrective Pass. */
+  target_artwork_version_id: string | null;
+  /** True Source-Image Targeted Revision. */
+  revision_instruction: string | null;
   attempts: number;
   last_error: string | null;
   started_at: string | null;
@@ -217,6 +229,8 @@ function mapProject(row: DbProject): PrintProject {
     name: row.name,
     status: row.status,
     selectedArtworkVersionId: row.selected_artwork_version_id,
+    revisionPending: row.revision_pending ?? false,
+    finalDirectionConfirmed: row.final_direction_confirmed ?? false,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -294,6 +308,8 @@ function mapArtwork(row: DbArtwork): ArtworkVersion {
     evaluationEvaluatedAt: row.evaluation_evaluated_at ?? null,
     evaluationProviderKey: row.evaluation_provider_key ?? null,
     printValidationStatus: row.print_validation_status ?? null,
+    sourceArtworkVersionId: row.source_artwork_version_id ?? null,
+    conceptDirectionKey: row.concept_direction_key ?? null,
     createdAt: row.created_at,
   };
 }
@@ -308,6 +324,8 @@ function mapGenerationJob(row: DbGenerationJob): GenerationJob {
     conceptCount: row.concept_count,
     providerKey: row.provider_key,
     idempotencyKey: row.idempotency_key,
+    targetArtworkVersionId: row.target_artwork_version_id ?? null,
+    revisionInstruction: row.revision_instruction ?? null,
     attempts: row.attempts,
     lastError: row.last_error,
     startedAt: row.started_at,
@@ -543,7 +561,14 @@ export class SupabaseProjectRepository implements ProjectRepository {
   async updateProject(
     projectId: string,
     patch: Partial<
-      Pick<PrintProject, "name" | "status" | "selectedArtworkVersionId">
+      Pick<
+        PrintProject,
+        | "name"
+        | "status"
+        | "selectedArtworkVersionId"
+        | "revisionPending"
+        | "finalDirectionConfirmed"
+      >
     >,
   ): Promise<PrintProject> {
     const payload: Record<string, unknown> = {
@@ -553,6 +578,12 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.status !== undefined) payload.status = patch.status;
     if (patch.selectedArtworkVersionId !== undefined) {
       payload.selected_artwork_version_id = patch.selectedArtworkVersionId;
+    }
+    if (patch.revisionPending !== undefined) {
+      payload.revision_pending = patch.revisionPending;
+    }
+    if (patch.finalDirectionConfirmed !== undefined) {
+      payload.final_direction_confirmed = patch.finalDirectionConfirmed;
     }
 
     const { data, error } = await this.client
@@ -696,6 +727,8 @@ export class SupabaseProjectRepository implements ProjectRepository {
           evaluation: version.evaluation ?? null,
           evaluation_evaluated_at: version.evaluationEvaluatedAt ?? null,
           evaluation_provider_key: version.evaluationProviderKey ?? null,
+          source_artwork_version_id: version.sourceArtworkVersionId ?? null,
+          concept_direction_key: version.conceptDirectionKey ?? null,
         })),
       )
       .select("*")
@@ -742,6 +775,26 @@ export class SupabaseProjectRepository implements ProjectRepository {
     await this.updateProject(projectId, {
       selectedArtworkVersionId: artworkVersionId,
       status: "revision_requested",
+    });
+
+    const snapshot = await this.getProject(projectId);
+    if (!snapshot) throw new Error("Project not found");
+    return snapshot;
+  }
+
+  async clearArtworkSelection(projectId: string): Promise<ProjectSnapshot> {
+    const { error: clearError } = await this.client
+      .from("artwork_versions")
+      .update({ is_selected: false })
+      .eq("project_id", projectId);
+    if (clearError) throw clearError;
+
+    await this.updateProject(projectId, {
+      selectedArtworkVersionId: null,
+      // See the local store's identical note: a confirmation can never
+      // outlive the selection it was made about.
+      finalDirectionConfirmed: false,
+      status: "concepts_ready",
     });
 
     const snapshot = await this.getProject(projectId);
@@ -826,6 +879,8 @@ export class SupabaseProjectRepository implements ProjectRepository {
         concept_count: input.conceptCount,
         provider_key: input.providerKey,
         idempotency_key: input.idempotencyKey,
+        target_artwork_version_id: input.targetArtworkVersionId ?? null,
+        revision_instruction: input.revisionInstruction ?? null,
         attempts: 0,
       })
       .select("*")

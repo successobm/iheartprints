@@ -1,8 +1,8 @@
 /**
  * Sprint 2M Phase 2C: pure, dependency-light RGBA raster math — no I/O, no
- * PNG codec. `local-raster-provider.ts` is the only caller; it owns
- * decode/encode (pngjs) and calls this module for the actual pixel
- * transformation, keeping the geometry testable in isolation.
+ * PNG codec. `production-normalization.ts` is the only caller; the providers
+ * own decode/encode (pngjs) and normalization calls this module for the
+ * actual pixel transformation, keeping the geometry testable in isolation.
  *
  * Deliberately simple bilinear resampling — an honest, ordinary
  * interpolation, not an ML/AI upscaler. See ARCHITECTURE.md's "Upscaling
@@ -20,77 +20,50 @@ export interface RgbaImage {
   data: Buffer;
 }
 
-export interface ContainResampleResult {
+export interface ResampleResult {
   image: RgbaImage;
   /**
-   * `contentWidth (or height) ÷ source width (or height)` — the smaller of
-   * the two axis scales actually used (uniform "contain" fit). `<= 1` means
-   * the source was only ever shrunk or kept 1:1 (no fabricated detail);
-   * `> 1` means the source had to be stretched beyond its native pixel
-   * density to fill the frame (fabricated detail — an honest caller must
+   * `destWidth ÷ source width` (equal to the height ratio to within
+   * rounding, since callers only ever resample to the source's own aspect
+   * ratio). `<= 1` means the source was only ever shrunk or kept 1:1 (no
+   * fabricated detail); `> 1` means the source had to be stretched beyond
+   * its native pixel density (fabricated detail — an honest caller must
    * record this as `"interpolated_upscale"` provenance).
    */
   contentScale: number;
-  /** Pixel dimensions of the resampled content region, before centering/padding. */
-  contentWidthPx: number;
-  contentHeightPx: number;
 }
 
 /**
- * Resamples `source` to fit ("contain" — preserve aspect ratio, never crop)
- * within a `targetWidth`x`targetHeight` canvas, inset by `marginFraction` on
- * every edge, centered, and padded with fully transparent pixels
- * (`alpha = 0`) everywhere the content doesn't reach. Never distorts aspect
- * ratio and never crops source content — the whole approved design is
- * always preserved (Goal 7).
+ * Resamples `source` to exactly `destWidth`x`destHeight`.
+ *
+ * Print-Ready Normalization Phase 1: this deliberately does NOT centre,
+ * pad, or fit-into-a-frame. The production canvas IS the artwork, so the
+ * caller (`production-normalization.ts`) computes destination dimensions
+ * from the trimmed artwork's own aspect ratio and this function simply
+ * resamples to them — no transparent dead canvas is ever introduced here.
+ * Distortion is prevented by the caller deriving the destination from the
+ * source aspect ratio, and asserted independently by production validation's
+ * `aspect_ratio_preserved` check.
  */
-export function resampleContainWithTransparentPadding(
+export function resampleExact(
   source: RgbaImage,
-  targetWidth: number,
-  targetHeight: number,
-  marginFraction: number,
-): ContainResampleResult {
-  if (targetWidth <= 0 || targetHeight <= 0) {
+  destWidth: number,
+  destHeight: number,
+): ResampleResult {
+  if (destWidth <= 0 || destHeight <= 0) {
     throw new Error("Target dimensions must be positive.");
   }
   if (source.width <= 0 || source.height <= 0) {
     throw new Error("Source dimensions must be positive.");
   }
 
-  const clampedMargin = Math.min(Math.max(marginFraction, 0), 0.45);
-  const availableWidth = Math.max(1, Math.round(targetWidth * (1 - 2 * clampedMargin)));
-  const availableHeight = Math.max(1, Math.round(targetHeight * (1 - 2 * clampedMargin)));
-
-  const scaleX = availableWidth / source.width;
-  const scaleY = availableHeight / source.height;
-  const contentScale = Math.min(scaleX, scaleY);
-
-  const contentWidthPx = Math.max(1, Math.round(source.width * contentScale));
-  const contentHeightPx = Math.max(1, Math.round(source.height * contentScale));
-
-  const resampledContent = bilinearResample(source, contentWidthPx, contentHeightPx);
-
-  const canvas = Buffer.alloc(targetWidth * targetHeight * 4, 0); // fully transparent
-  const offsetX = Math.floor((targetWidth - contentWidthPx) / 2);
-  const offsetY = Math.floor((targetHeight - contentHeightPx) / 2);
-
-  for (let y = 0; y < contentHeightPx; y += 1) {
-    const destY = offsetY + y;
-    if (destY < 0 || destY >= targetHeight) continue;
-    for (let x = 0; x < contentWidthPx; x += 1) {
-      const destX = offsetX + x;
-      if (destX < 0 || destX >= targetWidth) continue;
-      const srcIdx = (y * contentWidthPx + x) * 4;
-      const destIdx = (destY * targetWidth + destX) * 4;
-      resampledContent.copy(canvas, destIdx, srcIdx, srcIdx + 4);
-    }
-  }
-
   return {
-    image: { width: targetWidth, height: targetHeight, data: canvas },
-    contentScale,
-    contentWidthPx,
-    contentHeightPx,
+    image: {
+      width: destWidth,
+      height: destHeight,
+      data: bilinearResample(source, destWidth, destHeight),
+    },
+    contentScale: destWidth / source.width,
   };
 }
 

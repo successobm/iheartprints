@@ -22,6 +22,7 @@ import type {
   PrintPlacement,
 } from "@/lib/domain/types";
 import type { ProductionMethod } from "@/capabilities/shared/contracts";
+import type { PlacementSizingPolicy } from "@/capabilities/shared/print-placement-dimensions";
 
 // ---------------------------------------------------------------------------
 // Production Requirements (Goal 2 / Goal 3 / Goal 8)
@@ -73,8 +74,24 @@ export interface ProductionRequirements {
   printMethod: ProductionMethod;
   printMethodConfidence: ProductionMethodConfidence;
   printLocation: PrintPlacement | null;
-  /** `null` when physical size is not the primary requirement (e.g. `logo_vector`). */
+  /**
+   * The placement's printable ENVELOPE (largest area artwork may occupy) —
+   * `null` when physical size is not the primary requirement (e.g.
+   * `logo_vector`). Print-Ready Normalization Phase 1: this is deliberately
+   * NOT the shape of the production deliverable. The deliverable is sized by
+   * `sizing` (target physical width, artwork-derived height); the envelope
+   * only bounds it and gives placement-level sufficiency intelligence about a
+   * not-yet-normalized concept.
+   */
   targetDimensions: PhysicalDimensions | null;
+  /**
+   * Print-Ready Normalization Phase 1: the explicit production sizing
+   * strategy for this placement (`width_constrained_preserve_aspect`), or
+   * `null` when raster physical sizing does not apply. The single source of
+   * "how big should the printed artwork be" — never re-derived inside a
+   * worker or provider.
+   */
+  sizing: PlacementSizingPolicy | null;
   requiredOutputType: RequiredOutputType;
   /**
    * Minimum acceptable production resolution for this method, in pixels per
@@ -88,7 +105,14 @@ export interface ProductionRequirements {
   colorMode: ColorModeExpectation;
   /** Internal file kinds acceptable for final production — never a customer-facing format picker. */
   allowedFileFormats: string[];
-  /** Simple safe-margin-from-edge guidance, expressed as a percent of the print area. */
+  /**
+   * Safe-margin-from-edge guidance for placing the print on the GARMENT,
+   * expressed as a percent of the print area. Print-Ready Normalization
+   * Phase 1: this no longer drives the production transform — the
+   * deliverable's own transparent breathing room is the small artwork-edge
+   * safety margin in `final-artwork/alpha-trim.ts`, not a percentage of a
+   * fixed canvas.
+   */
   artworkBoundaryMarginPercent: number;
   requiredWordingVerificationRequired: boolean;
   /** Internal rationale trail — never customer-facing copy. */
@@ -133,6 +157,22 @@ export const PRINT_VALIDATION_CHECK_CODES = [
    * blocking, since its effect already flows through those two checks.
    */
   "resolution_provenance",
+  // --- Print-Ready Normalization Phase 1 -----------------------------------
+  // Production-asset-only checks: each is emitted solely when a
+  // `productionNormalization` summary is present, so provisional
+  // (concept-stage) validation is unchanged.
+  /** The production transform actually recorded its own geometry — nothing about the plate is assumed. */
+  "production_normalization",
+  /** Meaningful alpha-bound artwork exists in the plate (never an empty or all-but-invisible deliverable). */
+  "alpha_bound_artwork",
+  /** The plate is not mostly transparent dead canvas — the exact defect the Print-Ready Production Output Audit found. */
+  "transparent_dead_canvas",
+  /** The plate's intended physical print width matches the placement policy, within tolerance. */
+  "physical_width_policy",
+  /** The artwork's aspect ratio survived trim + resize — never stretched, squashed, or letterboxed. */
+  "aspect_ratio_preserved",
+  /** Info-only: the PNG's embedded pHYs density agrees with the intended production PPI. Never authoritative. */
+  "density_metadata",
 ] as const;
 
 export type PrintValidationCheckCode =
@@ -253,6 +293,52 @@ export interface PrintValidationAssetSummary {
 }
 
 /**
+ * Print-Ready Normalization Phase 1: what the production transform actually
+ * did, as plain data. Present only for authoritative production-asset
+ * validation; `null` for provisional concept-stage validation (a concept has
+ * not been normalized for production at all).
+ *
+ * Print Validation RECOMPUTES from these measurements rather than trusting
+ * any readiness claim in them:
+ *
+ *   - effective resolution = `widthPx / intendedWidthIn` (real pixel
+ *     geometry ÷ real intended inches), never `densityPixelsPerMetre`
+ *   - dead-canvas detection = `artworkOccupancy`, so a plate whose artwork
+ *     covers half its pixels can never read as production-ready
+ *   - aspect preservation = trimmed vs. produced ratio, so a stretched or
+ *     letterboxed plate is caught even if every other number looks right
+ *
+ * Deliberately mirrors `final-artwork`'s `ProductionNormalizationMetadata`
+ * without importing it — Print Validation never depends on the Final Artwork
+ * capability (ARCHITECTURE.md dependency direction); the worker maps one to
+ * the other.
+ */
+export interface ProductionNormalizationSummary {
+  /** The sizing strategy the plate was produced under. Only `"width_constrained_preserve_aspect"` exists today. */
+  strategy: "width_constrained_preserve_aspect";
+  /** Alpha bounding box of the artwork inside the trimmed plate, in pixels. */
+  alphaBBoxWidthPx: number;
+  alphaBBoxHeightPx: number;
+  /** Dimensions after alpha trim + safety margin, before production resampling. */
+  trimmedWidthPx: number;
+  trimmedHeightPx: number;
+  /** Alpha-bbox area ÷ trimmed area. `1` is a perfectly tight crop. */
+  artworkOccupancy: number;
+  /** Policy target physical print width, in inches. */
+  targetWidthIn: number;
+  /** Allowed deviation from `targetWidthIn`, in inches — explicit tolerance, never float equality. */
+  widthToleranceIn: number;
+  targetPpi: number;
+  /** Intended physical print size of the plate's actual pixels, in inches. */
+  intendedWidthIn: number;
+  intendedHeightIn: number;
+  /** `"max_height"` when a tall/narrow artwork was proportionally reduced to fit the placement's printable height. */
+  constrainedBy: "width" | "max_height";
+  /** Embedded PNG pHYs density, in pixels per metre. `null` when the file carries no density tag. Informational only. */
+  densityPixelsPerMetre: number | null;
+}
+
+/**
  * Everything `PrintValidationCapability.validateArtwork` needs, already
  * resolved by the caller. Print Validation itself never reads a repository
  * (Goal 16/17 — "PrintValidation should remain pure validation"), mirroring
@@ -274,6 +360,19 @@ export interface PrintValidationInput {
   /** Concept Evaluation state already computed and persisted for this concept, if any (Goal 6, Goal 14 Scenario I). Read-only — never recomputed here. */
   conceptEvaluationStatus: ConceptEvaluationStatus | null;
   conceptEvaluation: ConceptEvaluation | null;
+  /**
+   * Live Acceptance Cleanup (Issue 5): the customer's chosen production
+   * print width, in inches — authoritative production intent. `null`/absent
+   * resolves to the placement default, exactly as before.
+   */
+  intendedPrintWidthIn?: number | null;
   /** `null` when no generated asset exists yet (Goal 14 Scenario G). */
   primaryAsset: PrintValidationAssetSummary | null;
+  /**
+   * Print-Ready Normalization Phase 1: present only when `primaryAsset` is a
+   * NORMALIZED PRODUCTION plate (authoritative validation). `null`/absent for
+   * provisional concept-stage validation, which then behaves exactly as it
+   * did before this phase.
+   */
+  productionNormalization?: ProductionNormalizationSummary | null;
 }

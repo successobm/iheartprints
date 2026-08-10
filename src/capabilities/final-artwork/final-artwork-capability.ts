@@ -97,6 +97,18 @@ export function createFinalArtworkCapability(
       const snapshot = await repo.getProject(projectId);
       if (!snapshot) throw new Error("Project not found");
 
+      // Sprint 2M Phase 2G (Goal 6): a pending revision means the customer
+      // has explicitly said the current artwork is not what they want —
+      // the server is the authoritative gate here, independent of whatever
+      // the UI shows (a stale browser tab, a race with an in-flight
+      // revision turn). Customer-safe language only; no internal lifecycle
+      // terminology, no artwork/job/approval id.
+      if (snapshot.project.revisionPending) {
+        throw new Error(
+          "Your revised design needs to be reviewed before it can be finalized",
+        );
+      }
+
       const artwork = snapshot.artworkVersions.find(
         (version) => version.id === artworkVersionId,
       );
@@ -137,6 +149,20 @@ export function createFinalArtworkCapability(
         );
       }
 
+      // Live Acceptance Corrective Pass (Section 2): concept SELECTION
+      // ("I want to work with this direction") is never, by itself, final
+      // APPROVAL ("no more changes, produce this"). Checked last, only
+      // once the artwork itself is confirmed valid/current/selected — a
+      // customer who has never been explicitly asked/answered "does this
+      // look right?" must never be able to finalize just because nothing
+      // currently happens to be pending (the independent, stronger gate
+      // `revisionPending` alone does not cover).
+      if (!snapshot.project.finalDirectionConfirmed) {
+        throw new Error(
+          "Please confirm this is your final direction before it can be finalized",
+        );
+      }
+
       const existingActive = await repo.getActiveFinalDirectionApproval(projectId);
 
       let approval: FinalDirectionApproval;
@@ -159,7 +185,19 @@ export function createFinalArtworkCapability(
 
       const job = await createJobToleratingRace(repo, projectId, approval);
 
-      await repo.setProjectStatus(projectId, "finalizing");
+      // Sprint 2M Phase 2G (Goal 8): only claimable work justifies
+      // "finalizing". A repeat Prepare against an already-`"completed"` job
+      // (double click, page reload, duplicate request) must return the
+      // worker's own truthful terminal state (`print_ready` /
+      // `finalization_required`, already written by
+      // `FinalArtworkWorkerCapability`) rather than stomping it back to
+      // "finalizing" with no claimable job left to move it forward — the
+      // exact stranding the Revision Lifecycle Audit found. A revived
+      // `"failed"` job is returned as `"queued"` by `createJobToleratingRace`
+      // above, so a legitimate retry still reaches this branch.
+      if (job.status === "queued" || job.status === "running" || job.status === "recoverable") {
+        await repo.setProjectStatus(projectId, "finalizing");
+      }
 
       return { approval, job, alreadyRequested };
     },

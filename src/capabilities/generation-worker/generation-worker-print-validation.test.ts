@@ -36,6 +36,7 @@ import { createGenerationWorkerCapability } from "./generation-worker-capability
 /** Produces real image bytes with controllable dimensions/transparency — unlike the placeholder provider, this exercises effective-resolution checks. */
 class FixedImageProvider implements ConceptGenerationProvider {
   readonly providerKey = "fixed-image-test";
+  readonly editsSourceArtwork = false;
   constructor(
     private readonly image: {
       widthPx: number;
@@ -71,6 +72,7 @@ class FixedImageProvider implements ConceptGenerationProvider {
 /** No real image bytes — mirrors the actual placeholder provider's shape. */
 class NoImageProvider implements ConceptGenerationProvider {
   readonly providerKey = "no-image-test";
+  readonly editsSourceArtwork = false;
   async generate(request: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
     return {
       jobId: request.idempotencyKey,
@@ -89,6 +91,7 @@ class NoImageProvider implements ConceptGenerationProvider {
 
 class FixedStatusConceptEvaluationProvider implements ConceptEvaluationProvider {
   readonly providerKey = "fixed-status-test";
+  readonly editsSourceArtwork = false;
   constructor(private readonly status: ConceptEvaluationStatus) {}
   async evaluate(request: ConceptEvaluationRequest): Promise<ConceptEvaluationResult> {
     const passed =

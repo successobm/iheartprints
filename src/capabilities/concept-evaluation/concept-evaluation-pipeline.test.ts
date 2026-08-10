@@ -28,6 +28,7 @@ import {
 
 class InstantProvider implements ConceptGenerationProvider {
   readonly providerKey = "instant";
+  readonly editsSourceArtwork = false;
   async generate(request: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
     return {
       jobId: request.idempotencyKey,
@@ -408,6 +409,7 @@ describe("Concept Evaluation — real (OpenAI) provider generation-worker integr
 
     class RealBytesProvider implements ConceptGenerationProvider {
       readonly providerKey = "real-bytes";
+      readonly editsSourceArtwork = false;
       async generate(req: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
         return {
           jobId: req.idempotencyKey,
@@ -482,6 +484,7 @@ describe("Concept Evaluation — real (OpenAI) provider generation-worker integr
 
     class RealBytesProvider implements ConceptGenerationProvider {
       readonly providerKey = "real-bytes";
+      readonly editsSourceArtwork = false;
       async generate(req: ConceptGenerationRequest): Promise<ConceptGenerationResult> {
         return {
           jobId: req.idempotencyKey,

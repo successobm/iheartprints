@@ -1,6 +1,7 @@
 import type {
   ArtworkVersion,
   AssetRecord,
+  ConceptDirectionKey,
   ConceptEvaluation,
   ConceptEvaluationStatus,
   ConversationMessage,
@@ -52,6 +53,13 @@ export interface CreateArtworkVersionInput {
   evaluation?: ConceptEvaluation | null;
   evaluationEvaluatedAt?: string | null;
   evaluationProviderKey?: string | null;
+  /**
+   * Sprint 2G Live Acceptance Corrective Pass: lineage — which artwork (if
+   * any) this one is a targeted revision of, and which catalog direction it
+   * used. Both optional so existing call sites/tests default to `null`.
+   */
+  sourceArtworkVersionId?: string | null;
+  conceptDirectionKey?: ConceptDirectionKey | null;
 }
 
 /** Sprint 2I Phase 1: update Concept Evaluation fields on an existing concept. */
@@ -70,6 +78,10 @@ export interface CreateGenerationJobInput {
   conceptCount: number;
   providerKey: string;
   idempotencyKey: string;
+  /** Sprint 2G Live Acceptance Corrective Pass — see `GenerationJob.targetArtworkVersionId`. */
+  targetArtworkVersionId?: string | null;
+  /** True Source-Image Targeted Revision — see `GenerationJob.revisionInstruction`. */
+  revisionInstruction?: string | null;
 }
 
 export type UpdateGenerationJobInput = Partial<
@@ -153,7 +165,14 @@ export interface ProjectRepository {
   updateProject(
     projectId: string,
     patch: Partial<
-      Pick<PrintProject, "name" | "status" | "selectedArtworkVersionId">
+      Pick<
+        PrintProject,
+        | "name"
+        | "status"
+        | "selectedArtworkVersionId"
+        | "revisionPending"
+        | "finalDirectionConfirmed"
+      >
     >,
   ): Promise<PrintProject>;
   updateBrief(
@@ -196,6 +215,21 @@ export interface ProjectRepository {
     projectId: string,
     artworkVersionId: string,
   ): Promise<ProjectSnapshot>;
+  /**
+   * Live Acceptance Cleanup (Issue 2): the exact inverse of
+   * `selectArtworkVersion` — returns the project to "no concept selected".
+   * Clears `PrintProject.selectedArtworkVersionId` AND every
+   * `ArtworkVersion.isSelected` in one place, so the two can never disagree
+   * (the same reason `selectArtworkVersion` owns both writes).
+   *
+   * Deliberately NOT expressible as `updateProject({ selectedArtworkVersionId:
+   * null })`: that would leave `isSelected` set on the artwork row, and a
+   * client-side visual reset would leave both. Selection is server state.
+   *
+   * Never deletes an artwork version, a batch, a job, or any history — the
+   * concepts themselves are untouched and remain selectable.
+   */
+  clearArtworkSelection(projectId: string): Promise<ProjectSnapshot>;
   setProjectStatus(
     projectId: string,
     status: ProjectStatus,

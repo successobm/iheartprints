@@ -9,6 +9,7 @@ import type {
   RecommendationAction,
 } from "@/capabilities/shared/contracts";
 import type { ApiProjectSnapshot } from "@/lib/services/conversation-service";
+import { deriveChatAffordances } from "./chat-affordances";
 import {
   CHAT_PROJECT_STORAGE_KEY,
   planSessionBootstrap,
@@ -17,12 +18,13 @@ import { Composer } from "./Composer";
 import { ConceptCards } from "./ConceptCards";
 import { ConceptStatusBanner } from "./ConceptStatusBanner";
 import { DesignerDecisionCard } from "./DesignerDecisionCard";
+import { buildDesignHistory } from "./design-history";
+import { DesignHistory } from "./DesignHistory";
 import { DesignSummaryCard, type FieldTransition } from "./DesignSummaryCard";
 import { MessageBubble } from "./MessageBubble";
+import { FinalArtworkDeliveryCard } from "./FinalArtworkDeliveryCard";
 import { PrepareForPrintAction } from "./PrepareForPrintAction";
 import { RecommendationCard } from "./RecommendationCard";
-import { buildRevisionTimeline } from "./revision-timeline";
-import { RevisionTimeline } from "./RevisionTimeline";
 import {
   createStatusPollController,
   DEFAULT_STATUS_POLL_INTERVAL_MS,
@@ -40,6 +42,12 @@ export function ChatApp() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conceptBannerDismissed, setConceptBannerDismissed] = useState(false);
+  /**
+   * Client-only delivery-mode reopen. Does not supersede the completed
+   * final approval by itself — that still happens only when the customer
+   * submits a real revision through the existing lifecycle.
+   */
+  const [deliveryEditingReopened, setDeliveryEditingReopened] = useState(false);
   const previousConceptStatusRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -118,6 +126,18 @@ export function ChatApp() {
     }).start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isClient, snapshot?.finalization.status, snapshot?.project.id]);
+
+  // Leaving print_ready clears the local reopen flag so a later delivery
+  // cycle starts clean. Adjust during render (React-supported props→state
+  // sync) — an effect here trips react-hooks/set-state-in-effect.
+  const finalizationStatusForDelivery =
+    snapshot?.finalization.status ?? "not_requested";
+  if (
+    finalizationStatusForDelivery !== "print_ready" &&
+    deliveryEditingReopened
+  ) {
+    setDeliveryEditingReopened(false);
+  }
 
   async function bootstrap() {
     setLoading(true);
@@ -251,6 +271,93 @@ export function ChatApp() {
     }
   }
 
+  /**
+   * Live Acceptance Cleanup (Issue 2): explicit "Change Selection". The
+   * server owns the state change — this never clears anything locally, so a
+   * failed request leaves the real selection intact rather than showing a
+   * selection the server doesn't have.
+   */
+  async function unselectConcept() {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/unselect`,
+        { method: "POST" },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to change your selection");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to change your selection",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /** Live Acceptance Cleanup (Issue 3): "Show Me 3 New Concepts". */
+  async function exploreNewConcepts() {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/concepts/explore`,
+        { method: "POST" },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to explore new concepts");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to explore new concepts",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /**
+   * Live Acceptance Cleanup (Issue 5): production-size change only. Never
+   * touches the artwork — see `ConversationCapability.setProductionPrintWidth`.
+   */
+  async function choosePrintWidth(widthIn: number) {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/print-size`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ widthIn }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to set the print size");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to set the print size",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
   /** Sprint 2G Part 3: explicit action, independent of chat — no message required. */
   async function regenerateConcepts() {
     if (!snapshot || sending) return;
@@ -271,6 +378,39 @@ export function ChatApp() {
       setError(
         err instanceof Error ? err.message : "Failed to generate updated concepts",
       );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /**
+   * Live Acceptance Corrective Pass (Section 2): the customer's explicit
+   * "no more changes, use this design" confirmation — independent of
+   * chat, same shape as `selectConcept`. Distinct from, and a
+   * prerequisite for, `approveFinalDirection` below.
+   */
+  async function confirmSelectedDirection() {
+    const artworkVersionId = snapshot?.project.selectedArtworkVersionId;
+    if (!snapshot || sending || !artworkVersionId) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/confirm-direction`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ artworkVersionId }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to confirm this direction");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to confirm this direction");
     } finally {
       setSending(false);
     }
@@ -351,16 +491,19 @@ export function ChatApp() {
   }
 
   const phase = snapshot?.conversation.phase;
-  const composerDisabled =
-    !isClient ||
-    loading ||
-    sending ||
-    !snapshot ||
-    phase === "generating" ||
-    phase === "skip_references" ||
-    phase === "concepts_ready" ||
-    phase === "awaiting_summary_confirmation" ||
-    phase === "brief_approved";
+  const affordances = deriveChatAffordances({
+    phase,
+    ready: isClient && !loading && !!snapshot,
+    busy: sending,
+    selectedArtworkVersionId: snapshot?.project.selectedArtworkVersionId ?? null,
+    revisionPending: snapshot?.project.revisionPending ?? false,
+    finalDirectionConfirmed: snapshot?.project.finalDirectionConfirmed ?? false,
+    conceptsNeedUpdate: snapshot?.conceptStatus.status === "needs_update",
+    finalizationRequested: snapshot?.finalization.status !== "not_requested",
+    finalizationStatus: snapshot?.finalization.status ?? "not_requested",
+    deliveryEditingReopened,
+  });
+  const composerDisabled = affordances.composerDisabled;
 
   const placeholder = useMemo(() => {
     if (!isClient || loading) return "Message iHeartPrints...";
@@ -404,28 +547,35 @@ export function ChatApp() {
 
   // Sprint 2G Part 2: a post-approval revision can regenerate concepts,
   // adding a newer batch alongside the old one (never deleting history —
-  // Constitution §6.11). Only the batch tied to the most recently approved
-  // Design Brief version is "current" and shown to the customer.
-  const latestApprovedVersionId = snapshot?.designBriefVersions.at(-1)?.id ?? null;
-  const currentArtworkVersions =
-    snapshot?.artworkVersions.filter(
-      (version) => version.designBriefVersionId === latestApprovedVersionId,
-    ) ?? [];
+  // Constitution §6.11).
+  //
+  // Live Acceptance Cleanup (Issue 3): "which concepts are current" is no
+  // longer a filter this component can perform, because one approved brief
+  // version may now own more than one batch ("Show Me 3 New Concepts"
+  // explores again without changing the brief). The server already computes
+  // it — reuse that rather than re-deriving batch identity client-side from
+  // fields the customer projection deliberately strips.
+  const currentArtworkVersions = snapshot?.conceptStatus.currentConcepts ?? [];
 
   const showConcepts =
-    !!snapshot &&
-    currentArtworkVersions.length > 0 &&
-    (phase === "concepts_ready" ||
-      phase === "ask_revisions" ||
-      phase === "revision_received");
+    currentArtworkVersions.length > 0 && affordances.showArtworkSurfaces;
 
   const lastConceptsReadyMessageId = [...(snapshot?.messages ?? [])]
     .reverse()
     .find((message) => message.metadata?.phase === "concepts_ready")?.id;
 
-  const timelineEntries = useMemo(
-    () => buildRevisionTimeline(snapshot?.messages ?? []),
-    [snapshot?.messages],
+  // Live Acceptance Corrective Pass (Section 2): one artwork-version-
+  // lineage-based history, replacing the old message-metadata-keyed
+  // timeline (which surfaced brief-field-only edits like "Changed Print
+  // Location" as if they were design milestones) and the separate
+  // "View design history" panel — see `design-history.ts`.
+  const designHistoryEntries = useMemo(
+    () =>
+      buildDesignHistory(
+        snapshot?.artworkVersions ?? [],
+        snapshot?.project.selectedArtworkVersionId ?? null,
+      ),
+    [snapshot?.artworkVersions, snapshot?.project.selectedArtworkVersionId],
   );
 
   const canUndo = Boolean(snapshot?.conversation.interviewState.lastRevision);
@@ -435,19 +585,14 @@ export function ChatApp() {
     snapshot.conceptStatus.status === "needs_update" &&
     !conceptBannerDismissed &&
     // Only meaningful once the customer can actually see concepts.
-    (phase === "ask_revisions" || phase === "revision_received" || phase === "concepts_ready");
+    affordances.showArtworkSurfaces;
 
-  // Sprint 2M Phase 2B: same "concepts are visible" phase gate as the
+  // Sprint 2M Phase 2B: same "concepts are visible" gate as the
   // concept-status banner above — a selected, current concept can be
   // approved for production once the customer is done revising it.
-  const showFinalizeAction =
-    !!snapshot &&
-    (phase === "ask_revisions" || phase === "revision_received" || phase === "concepts_ready");
-  const canRequestFinalArtwork =
-    !!snapshot &&
-    !!snapshot.project.selectedArtworkVersionId &&
-    snapshot.conceptStatus.status !== "needs_update" &&
-    snapshot.finalization.status === "not_requested";
+  const showFinalizeAction = affordances.showArtworkSurfaces;
+  const canRequestFinalArtwork = affordances.canRequestFinalArtwork;
+  const showUseThisDesignAction = affordances.showUseThisDesign;
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
@@ -604,17 +749,94 @@ export function ChatApp() {
               />
             ) : null}
 
-            {showFinalizeAction && snapshot ? (
+            {showUseThisDesignAction ? (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-black/8 bg-white p-4 shadow-sm">
+                <p className="text-sm text-ink">
+                  Any changes you&apos;d like, or is this the one?
+                </p>
+                <button
+                  type="button"
+                  disabled={sending}
+                  onClick={() => void confirmSelectedDirection()}
+                  className="shrink-0 rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Use This Design
+                </button>
+              </div>
+            ) : null}
+
+            {/* Live Acceptance Cleanup (Issues 2 & 3): the two ways out of
+                "I don't want to go forward with this" that are not Start
+                Over — change which concept is selected, or ask for three
+                genuinely different directions from the same brief. Both are
+                quiet secondary actions: neither should compete with Use
+                This Design for attention. */}
+            {affordances.showChangeSelection ||
+            affordances.showExploreNewConcepts ? (
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                {affordances.showChangeSelection ? (
+                  <button
+                    type="button"
+                    disabled={sending}
+                    onClick={() => void unselectConcept()}
+                    className="text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Change Selection
+                  </button>
+                ) : null}
+                {affordances.showExploreNewConcepts ? (
+                  <button
+                    type="button"
+                    disabled={sending}
+                    onClick={() => void exploreNewConcepts()}
+                    className="text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Show Me 3 New Concepts
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
+            {showFinalizeAction &&
+            snapshot &&
+            snapshot.finalization.status !== "print_ready" ? (
               <PrepareForPrintAction
                 finalizationStatus={snapshot.finalization.status}
                 canRequest={canRequestFinalArtwork}
                 busy={sending}
                 onPrepare={() => void approveFinalDirection()}
+                printReadySize={snapshot.printReadySize}
+                onChoosePrintWidth={(widthIn) => void choosePrintWidth(widthIn)}
               />
             ) : null}
 
-            {timelineEntries.length > 1 ? (
-              <RevisionTimeline entries={timelineEntries} />
+            {affordances.showDeliveryCard && snapshot ? (
+              <FinalArtworkDeliveryCard
+                projectId={snapshot.project.id}
+                onMakeAnotherChange={() => setDeliveryEditingReopened(true)}
+              />
+            ) : null}
+
+            {snapshot?.finalization.status === "print_ready" &&
+            deliveryEditingReopened ? (
+              <div className="mt-3 rounded-2xl border border-black/8 bg-white p-4 text-sm text-ink shadow-sm">
+                Describe the change you&apos;d like to make.
+              </div>
+            ) : null}
+
+            {snapshot ? (
+              <DesignHistory
+                entries={designHistoryEntries}
+                artworkVersions={snapshot.artworkVersions}
+                projectId={snapshot.project.id}
+                selectedId={snapshot.project.selectedArtworkVersionId}
+                selectable={
+                  !affordances.hideComposer &&
+                  (phase === "ask_revisions" || phase === "revision_received")
+                }
+                busy={sending}
+                onSelect={(id) => void selectConcept(id)}
+              />
             ) : null}
 
             {error ? (
@@ -628,11 +850,13 @@ export function ChatApp() {
         )}
       </main>
 
-      <Composer
-        disabled={composerDisabled}
-        placeholder={placeholder}
-        onSend={sendMessage}
-      />
+      {!affordances.hideComposer ? (
+        <Composer
+          disabled={composerDisabled}
+          placeholder={placeholder}
+          onSend={sendMessage}
+        />
+      ) : null}
     </div>
   );
 }

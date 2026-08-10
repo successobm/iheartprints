@@ -20,6 +20,8 @@ export class UnavailableConceptGenerationProvider
   implements ConceptGenerationProvider
 {
   readonly providerKey = "unavailable";
+  /** Never generates anything — every call throws before any image work. */
+  readonly editsSourceArtwork = false;
 
   constructor(
     private readonly safeErrorCode: GenerationUnavailableSafeErrorCode,

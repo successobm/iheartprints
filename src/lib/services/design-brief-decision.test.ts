@@ -98,6 +98,83 @@ describe("submitDesignBriefDecision (API facade)", () => {
   });
 });
 
+/**
+ * Live acceptance failure, 2026-08-08: a PostgREST rejection (a plain
+ * object, not an `Error`) was reported to the customer as the generic
+ * fallback and logged as an unlabelled object, so the actual cause — a
+ * column missing from the database — was invisible from the browser.
+ */
+describe("brief decision failure classification", () => {
+  it("names the real cause in the log, including a PostgREST code", async () => {
+    const { describeDecisionFailure } = await import(
+      "@/app/api/projects/[projectId]/brief/decision/decision-failure"
+    );
+
+    assert.equal(
+      describeDecisionFailure({
+        code: "PGRST204",
+        message:
+          "Could not find the 'target_artwork_version_id' column of 'generation_jobs' in the schema cache",
+      }),
+      "PGRST204: Could not find the 'target_artwork_version_id' column of 'generation_jobs' in the schema cache",
+    );
+    assert.equal(
+      describeDecisionFailure(new Error("Project not found")),
+      "Project not found",
+    );
+    assert.equal(
+      describeDecisionFailure("something odd"),
+      "Failed to submit decision",
+    );
+  });
+
+  it("keeps infrastructure detail out of the customer's message", async () => {
+    const { customerFacingDecisionMessage } = await import(
+      "@/app/api/projects/[projectId]/brief/decision/decision-failure"
+    );
+
+    assert.equal(
+      customerFacingDecisionMessage({
+        code: "PGRST204",
+        message: "Could not find the 'target_artwork_version_id' column",
+      }),
+      "Failed to submit decision",
+    );
+    assert.equal(
+      customerFacingDecisionMessage(
+        new Error("Design summary is not ready for approval"),
+      ),
+      "Design summary is not ready for approval",
+    );
+  });
+
+  it("treats infrastructure failures as server faults, never client mistakes", async () => {
+    const { decisionFailureStatus } = await import(
+      "@/app/api/projects/[projectId]/brief/decision/decision-failure"
+    );
+
+    assert.equal(decisionFailureStatus(new Error("Project not found")), 404);
+    assert.equal(
+      decisionFailureStatus(new Error("Design summary is not ready for approval")),
+      409,
+    );
+    assert.equal(
+      decisionFailureStatus(new Error("Cannot edit the design brief from the current step")),
+      409,
+    );
+    // A database rejection whose text contains a word the domain mapping
+    // looks for must still be a 500 — retrying it is not the customer's
+    // problem to solve.
+    assert.equal(
+      decisionFailureStatus({
+        code: "PGRST205",
+        message: "Could not find the table 'public.generation_jobs' — not found",
+      }),
+      500,
+    );
+  });
+});
+
 describe("brief decision request schema", () => {
   it("accepts approve and edit", async () => {
     const { briefDecisionBodySchema } = await import(

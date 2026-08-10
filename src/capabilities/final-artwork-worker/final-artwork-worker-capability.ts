@@ -46,9 +46,15 @@ import {
   createPrintValidationCapability,
   deriveProductionRequirements,
 } from "@/capabilities/print-validation";
-import type { PrintValidationReport, ResolutionProvenance } from "@/capabilities/print-validation/contracts";
+import type {
+  PrintValidationReport,
+  ProductionNormalizationSummary,
+  ResolutionProvenance,
+} from "@/capabilities/print-validation/contracts";
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
+import type { PlacementSizingPolicy } from "@/capabilities/shared/print-placement-dimensions";
 import type { FinalArtworkProvider, FinalArtworkProviderResumeContext } from "@/capabilities/final-artwork/provider";
+import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwork/production-normalization";
 import {
   createConceptEvaluationCapability,
   resolveConceptEvaluationProvider,
@@ -90,6 +96,15 @@ interface ProductionProvenanceMeta {
   reconstructedHeightPx: number | null;
   preservesApprovedContent: boolean;
   providerRequestId: string | null;
+  /**
+   * Print-Ready Normalization Phase 1: the production transform's own
+   * measured geometry, as the provider-neutral summary authoritative Print
+   * Validation consumes. `null` only for a production asset persisted before
+   * this phase existed (see `provenanceFromExistingAsset`) — such an asset is
+   * honestly re-validated without normalization evidence rather than being
+   * credited with geometry nobody measured.
+   */
+  normalization: ProductionNormalizationSummary | null;
 }
 
 export function createFinalArtworkWorkerCapability(
@@ -201,8 +216,12 @@ export function createFinalArtworkWorkerCapability(
     );
   }
 
-  function provenanceFromExistingAsset(asset: AssetRecord): ProductionProvenanceMeta {
+  function provenanceFromExistingAsset(
+    asset: AssetRecord,
+    sizing: PlacementSizingPolicy,
+  ): ProductionProvenanceMeta {
     const meta = asset.metadata as Record<string, unknown>;
+    const normalization = readNormalizationSummary(meta.normalization, sizing);
     const provenance =
       meta.resolutionProvenance === "native" ||
       meta.resolutionProvenance === "interpolated_upscale" ||
@@ -220,6 +239,7 @@ export function createFinalArtworkWorkerCapability(
       preservesApprovedContent: meta.preservesApprovedContent === true,
       providerRequestId:
         typeof meta.providerRequestId === "string" ? meta.providerRequestId : null,
+      normalization,
     };
   }
 
@@ -292,10 +312,24 @@ export function createFinalArtworkWorkerCapability(
     // `shared/print-placement-dimensions.ts` (full_front/full_back,
     // left_chest, sleeve) via `deriveProductionRequirements` — no new
     // universal assumption invented here.
+    // Live Acceptance Cleanup (Issue 5): the customer's chosen production
+    // WIDTH is authoritative production intent and is read from the working
+    // brief (`intendedPrintWidthIn`), not from the frozen brief snapshot.
+    // Physical size is a production specification, not creative content — it
+    // is deliberately absent from `DesignBriefSnapshotContent`, so choosing
+    // 12 inches never supersedes an approved brief version, never restyles
+    // artwork, and never marks a concept stale. `null` (never chosen) falls
+    // back to the placement default, exactly as before this pass.
+    //
+    // Nothing about the size comes from the request that enqueued this job,
+    // so a stale or forged finalize call cannot smuggle a different one in;
+    // and nothing infers it from the pixels a generator happened to produce.
+    const intendedPrintWidthIn = snapshot.brief.intendedPrintWidthIn;
     const requirements = deriveProductionRequirements({
       printPlacement: briefVersion.content.printPlacement,
       productSummary: briefVersion.content.productSummary,
       designDescription: briefVersion.content.designDescription,
+      intendedPrintWidthIn,
     });
 
     // Goal 17: Phase 2C supports raster apparel production only. An
@@ -308,14 +342,18 @@ export function createFinalArtworkWorkerCapability(
       return;
     }
     // Goal 4: genuine customer input (print location) is required to
-    // determine target dimensions — never guessed.
-    if (!requirements.targetDimensions || !requirements.minRasterDimensionsPx) {
+    // determine target dimensions — never guessed. Print-Ready Normalization
+    // Phase 1: what the provider needs is the placement's SIZING POLICY
+    // (target physical width + PPI); output pixels are resolved from the
+    // trimmed artwork's own aspect ratio inside the production transform.
+    if (!requirements.sizing) {
       await completeWithoutAsset(
         job,
         "Print location is not yet known; target production dimensions could not be determined.",
       );
       return;
     }
+    const sizing = requirements.sizing;
 
     // --- Goal 16: idempotent retry — reuse an already-created production
     // asset for this exact job rather than transforming/uploading again.
@@ -324,7 +362,7 @@ export function createFinalArtworkWorkerCapability(
     let providerLatencyMs: number | null = null;
 
     if (productionAsset) {
-      provenance = provenanceFromExistingAsset(productionAsset);
+      provenance = provenanceFromExistingAsset(productionAsset, sizing);
     } else {
       if (job.attempts > MAX_FINAL_ARTWORK_ATTEMPTS) {
         await failJob(
@@ -361,9 +399,7 @@ export function createFinalArtworkWorkerCapability(
           provider.produce({
             sourceBytes: source.bytes,
             sourceContentType: sourceAsset.contentType ?? source.contentType,
-            targetWidthPx: requirements.minRasterDimensionsPx!.widthPx,
-            targetHeightPx: requirements.minRasterDimensionsPx!.heightPx,
-            marginFraction: requirements.artworkBoundaryMarginPercent / 100,
+            sizing,
             existingProviderRequest,
             onProviderRequestSubmitted: async (providerRequestId) => {
               submittedNewPaidRequest = true;
@@ -432,6 +468,11 @@ export function createFinalArtworkWorkerCapability(
             preservesApprovedContent: output.preservesApprovedContent,
             providerRequestId: output.providerRequestId,
             sourceAssetId: sourceAsset.id,
+            // Print-Ready Normalization Phase 1: the production transform's
+            // full measured geometry travels WITH the plate, so a recovered
+            // or retried attempt re-validates the same deliverable against
+            // the same evidence instead of re-deriving it.
+            normalization: output.normalization as unknown as Record<string, unknown>,
           },
         });
       } catch (error) {
@@ -458,7 +499,26 @@ export function createFinalArtworkWorkerCapability(
         reconstructedHeightPx: output.reconstructedHeightPx,
         preservesApprovedContent: output.preservesApprovedContent,
         providerRequestId: output.providerRequestId,
+        normalization: toNormalizationSummary(output.normalization, sizing),
       };
+    }
+
+    // Print-Ready Normalization Phase 1: `print_ready` means the NORMALIZED
+    // artwork itself is production-ready, which cannot be decided without the
+    // plate's own measured production geometry. A production asset persisted
+    // before this phase carries none, so it is honestly reported as needing
+    // finalization rather than re-credited as ready on the strength of a
+    // canvas nobody measured. Existing assets are never deleted, rewritten,
+    // or regenerated here.
+    if (!provenance.normalization) {
+      await repo.updateFinalArtworkJob(job.id, {
+        status: "completed",
+        lastError:
+          "This production artwork predates print-ready normalization and carries no recorded production geometry; it must be re-prepared before it can be confirmed print-ready.",
+        completedAt: new Date().toISOString(),
+      });
+      await maybeTransitionProjectStatus(job, "finalization_required");
+      return;
     }
 
     // --- Sprint 2M Phase 2E (Goal 7/9): independent production
@@ -508,6 +568,9 @@ export function createFinalArtworkWorkerCapability(
       designBriefVersionId: briefVersion.id,
       currentApprovedDesignBriefVersionId: currentApproved?.id ?? null,
       brief: briefVersion.content,
+      // The exact width this plate was sized from — validation judges it
+      // against the intended size, never the placement default (Issue 5).
+      intendedPrintWidthIn,
       asset: {
         contentType: productionAsset.contentType,
         widthPx: productionAsset.widthPx,
@@ -519,6 +582,7 @@ export function createFinalArtworkWorkerCapability(
       },
       conceptEvaluationStatus: conceptEvaluationStatusForValidation,
       conceptEvaluation: conceptEvaluationForValidation,
+      normalization: provenance.normalization,
     });
 
     const report = printValidation.validateArtwork(validationInput);
@@ -587,6 +651,92 @@ export function createFinalArtworkWorkerCapability(
 function describeFinalArtworkError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return "Final artwork production failed for an unknown reason.";
+}
+
+/**
+ * Print-Ready Normalization Phase 1: maps the Final Artwork provider's own
+ * normalization metadata onto the provider-neutral summary Print Validation
+ * consumes. Print Validation must never depend on the Final Artwork
+ * capability's types (ARCHITECTURE.md dependency direction), so this worker —
+ * which legitimately knows both — is the one place the two shapes meet.
+ *
+ * `widthToleranceIn` comes from the placement policy rather than the provider:
+ * how closely a plate must match its target width is a production-policy
+ * decision, never a provider's to declare.
+ */
+function toNormalizationSummary(
+  normalization: ProductionNormalizationMetadata,
+  sizing: PlacementSizingPolicy,
+): ProductionNormalizationSummary {
+  return {
+    strategy: normalization.strategy,
+    alphaBBoxWidthPx: normalization.alphaBBoxWidthPx,
+    alphaBBoxHeightPx: normalization.alphaBBoxHeightPx,
+    trimmedWidthPx: normalization.trimmedWidthPx,
+    trimmedHeightPx: normalization.trimmedHeightPx,
+    artworkOccupancy: normalization.artworkOccupancy,
+    targetWidthIn: normalization.targetWidthIn,
+    widthToleranceIn: sizing.widthToleranceIn,
+    targetPpi: normalization.targetPpi,
+    intendedWidthIn: normalization.intendedWidthIn,
+    intendedHeightIn: normalization.intendedHeightIn,
+    constrainedBy: normalization.constrainedBy,
+    densityPixelsPerMetre: normalization.densityPixelsPerMetre,
+  };
+}
+
+/**
+ * Reads a normalization summary back off an already-persisted production
+ * asset (the Goal 16 idempotent-retry path). Returns `null` for anything that
+ * is not a complete, numerically valid record — a partially-recorded plate is
+ * treated exactly like one from before this phase, never patched up with
+ * defaults that would amount to inventing geometry.
+ *
+ * `widthToleranceIn` comes from the current placement policy rather than the
+ * stored record, for the same reason it does on a fresh run: how closely a
+ * plate must match its target width is a production-policy decision, not a
+ * property of the file.
+ */
+function readNormalizationSummary(
+  value: unknown,
+  sizing: PlacementSizingPolicy,
+): ProductionNormalizationSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const meta = value as Record<string, unknown>;
+
+  const numbers = [
+    "alphaBBoxWidthPx",
+    "alphaBBoxHeightPx",
+    "trimmedWidthPx",
+    "trimmedHeightPx",
+    "artworkOccupancy",
+    "targetWidthIn",
+    "targetPpi",
+    "intendedWidthIn",
+    "intendedHeightIn",
+  ] as const;
+  for (const key of numbers) {
+    if (typeof meta[key] !== "number" || !Number.isFinite(meta[key] as number)) return null;
+  }
+  if (meta.strategy !== "width_constrained_preserve_aspect") return null;
+  if (meta.constrainedBy !== "width" && meta.constrainedBy !== "max_height") return null;
+
+  return {
+    strategy: "width_constrained_preserve_aspect",
+    alphaBBoxWidthPx: meta.alphaBBoxWidthPx as number,
+    alphaBBoxHeightPx: meta.alphaBBoxHeightPx as number,
+    trimmedWidthPx: meta.trimmedWidthPx as number,
+    trimmedHeightPx: meta.trimmedHeightPx as number,
+    artworkOccupancy: meta.artworkOccupancy as number,
+    targetWidthIn: meta.targetWidthIn as number,
+    widthToleranceIn: sizing.widthToleranceIn,
+    targetPpi: meta.targetPpi as number,
+    intendedWidthIn: meta.intendedWidthIn as number,
+    intendedHeightIn: meta.intendedHeightIn as number,
+    constrainedBy: meta.constrainedBy,
+    densityPixelsPerMetre:
+      typeof meta.densityPixelsPerMetre === "number" ? meta.densityPixelsPerMetre : null,
+  };
 }
 
 function summarizeReportForInternalLog(report: PrintValidationReport): string {

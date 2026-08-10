@@ -233,5 +233,12 @@ export async function drainCapabilityGraphForTests(): Promise<void> {
       /* batch already failed; still drop the singleton */
     }
   }
+  if (graph.finalArtworkScheduler.hasActiveBatch()) {
+    try {
+      await graph.finalArtworkScheduler.runBatch();
+    } catch {
+      /* batch already failed; still drop the singleton */
+    }
+  }
   graph = null;
 }

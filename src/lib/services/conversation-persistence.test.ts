@@ -37,17 +37,17 @@ describe("Sprint 1/2F conversation persistence", () => {
 
     const afterReply = await handleUserMessage(
       projectId,
-      "A T-shirt for the school fair",
+      "T-shirt",
     );
     assert.equal(afterReply.conversation.phase, "interviewing");
     assert.equal(afterReply.messages.length, created.messages.length + 2);
-    assert.equal(afterReply.brief.productSummary, "A T-shirt for the school fair");
+    assert.equal(afterReply.brief.productSummary, "T-shirt");
 
     const restored = await getConversation(projectId);
     assert.ok(restored);
     assert.equal(restored.project.id, projectId);
     assert.equal(restored.conversation.phase, "interviewing");
-    assert.equal(restored.brief.productSummary, "A T-shirt for the school fair");
+    assert.equal(restored.brief.productSummary, "T-shirt");
     assert.equal(restored.messages.length, afterReply.messages.length);
     assert.equal(restored.messages[0]?.content, "What are we printing today?");
     assert.equal(

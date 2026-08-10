@@ -38,6 +38,7 @@ function tinyPng(): Buffer {
  */
 class ScriptedProvider implements ConceptGenerationProvider {
   readonly providerKey = "scripted";
+  readonly editsSourceArtwork = false;
   calls: ConceptGenerationRequest[] = [];
   private readonly script: Array<
     "succeed_with_assets" | "succeed_without_assets" | "fail"
