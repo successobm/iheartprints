@@ -211,6 +211,15 @@ function isAbortError(error: unknown): boolean {
  */
 interface Applicability {
   requiredWording: string | null;
+  /**
+   * Phase 1.1: the customer explicitly asked for NO text. Distinct from
+   * `requiredWording === null`, which also covers "not answered yet" — only
+   * an explicit request may fail a concept for containing lettering. Live
+   * acceptance showed the old code treating explicit no-text as simply "no
+   * wording requirement to check", so concepts full of invented lettering
+   * passed evaluation cleanly.
+   */
+  noText: boolean;
   exclusions: string | null;
   style: string | null;
   graphics: string | null;
@@ -224,6 +233,7 @@ function deriveApplicability(request: ConceptEvaluationRequest): Applicability {
   const wording = deriveRequiredWording({ exactText: request.brief.exactText });
   return {
     requiredWording: wording.mode === "provided" ? wording.text : null,
+    noText: wording.mode === "none",
     exclusions: nonEmpty(request.brief.exclusions),
     style: nonEmpty(request.brief.designStyle),
     graphics: nonEmpty(request.brief.designDescription),
@@ -300,6 +310,11 @@ function buildMessages(
       `Required wording that must appear, spelled correctly: "${applicability.requiredWording}".`,
     );
   }
+  if (applicability.noText) {
+    requirementLines.push(
+      "NO TEXT: the customer explicitly asked for a design with no wording. The artwork must contain no words, letters, numbers, typography, labels, captions, monograms, dates, or decorative lettering anywhere — including on badges, banners, ribbons, borders, signs, or any object depicted.",
+    );
+  }
   if (applicability.exclusions) {
     requirementLines.push(`Explicit exclusions — must NOT appear: ${applicability.exclusions}.`);
   }
@@ -319,12 +334,17 @@ function buildMessages(
     "Broad matching applies to how something is rendered, never to whether it is present. When the requested graphics description names several distinct subjects, gives a count, or states where things sit relative to each other, check each one: a named subject that is absent, a stated count that is wrong, or a stated relationship that is contradicted is a graphics MISMATCH — set graphics.matches to false and name what is missing in notes, rather than scoring it as a near-match. Simplified or stylized rendering of a subject that IS present is fine and must not be penalized.",
     "Judge style at a broad, high level only (e.g. vintage, minimalist, modern, retro, grunge, industrial) — never subjective artistic ranking.",
     "For required wording, read any visible text in the image. Minor uncertainty reading small or stylized text should lower your confidence, not automatically fail the match — report your actual confidence honestly.",
+    // Phase 1.1: the no-text check. Deliberately a judgment about visible
+    // lettering by the same vision model, not an OCR pass — adding OCR is a
+    // separate capability and is out of scope.
+    "When the requirements list a NO TEXT rule, inspect the whole image for lettering and report it in the `noText` field: set violated true if the artwork contains any readable word, letter, number, monogram, date, or shape clearly intended to be read as typography — anywhere, including small text on signs, hulls, banners, ribbons, or badge borders. Put whatever you can read into detectedText. Be conservative about ambiguity: incidental texture, brush marks, hatching, or abstract marks that merely resemble letters are NOT a violation, and low confidence should be reported honestly rather than guessed either way. Obvious lettering is a violation even when it is decorative, stylized, partially cropped, or clearly a placeholder.",
     "For exclusions, flag only obvious, clear violations (e.g. a skull when 'no skulls' was requested) — not speculative ones.",
     "Always assess composition and readability at a high level, and always give an overall alignment judgment, regardless of which specific requirements were stated.",
     "Respond with a single JSON object only — no markdown fences, no commentary — matching exactly this shape:",
     JSON.stringify(
       {
         requiredWording: { found: "boolean or null", detectedText: "string", confidence: "0-100", notes: "string" },
+        noText: { violated: "boolean or null", detectedText: "string", confidence: "0-100", notes: "string" },
         exclusions: { violated: "boolean or null", details: "string", confidence: "0-100" },
         style: { matches: "boolean or null", score: "0-100", confidence: "0-100", notes: "string" },
         graphics: { matches: "boolean or null", score: "0-100", confidence: "0-100", notes: "string" },
@@ -431,9 +451,43 @@ function normalizeRawEvaluation(
   const matchedRequirements: string[] = [];
   const missingRequirements: string[] = [];
 
-  // required_wording
+  // required_wording — Phase 1.1: this one criterion now answers whichever
+  // of the two mutually-exclusive wording contracts is in force. Explicit
+  // no-text reuses it deliberately rather than introducing a new criterion
+  // key: it IS the wording verdict for this design ("the wording rule was
+  // 'none', was it honored?"), and a new key would mean a contracts change
+  // and a persistence migration for no semantic gain.
   let requiredWordingFailed = false;
-  if (applicability.requiredWording) {
+  if (applicability.noText) {
+    const signal = readSignal(raw, "noText");
+    const violated = readBool(signal?.violated);
+    const confidence = clampScore(signal?.confidence) ?? 0;
+    const detectedText = sanitizeNote(signal?.detectedText) ?? "";
+
+    // The model's own boolean is cross-checked in code, exactly as the
+    // required-wording path does: if it reports readable text it actually
+    // saw, that IS a violation, whatever it set `violated` to.
+    const readableTextSeen = normalizeWordingText(detectedText).length > 0;
+    const effectiveViolated = readableTextSeen ? true : violated;
+
+    criteria.push({
+      key: "required_wording",
+      score: effectiveViolated === false ? 100 : effectiveViolated === true ? 0 : null,
+      passed: effectiveViolated === null ? null : !effectiveViolated,
+      confidence,
+      notes: sanitizeNote(signal?.notes) ?? "assessed_no_text",
+    });
+    if (effectiveViolated === false) {
+      matchedRequirements.push("no text");
+    } else if (effectiveViolated === true) {
+      // Text the model actually read off the image is decisive on its own —
+      // it does not also need the model's confidence to clear the threshold.
+      if (readableTextSeen || confidence >= CONFIDENCE_DECISION_THRESHOLD) {
+        missingRequirements.push("no text");
+        requiredWordingFailed = true;
+      }
+    }
+  } else if (applicability.requiredWording) {
     const signal = readSignal(raw, "requiredWording");
     const found = readBool(signal?.found);
     const confidence = clampScore(signal?.confidence) ?? 0;

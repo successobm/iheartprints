@@ -68,6 +68,31 @@ export type ArtworkKind = "concept" | "revision" | "final";
  */
 export type ConceptDirectionKey = "bold_direct" | "soft_illustrated" | "minimal_badge";
 
+/**
+ * Phase 1.1: the three genuinely different states of "what text goes on this
+ * design", as a first-class provider-neutral vocabulary.
+ *
+ *   "unknown"  — the customer has not answered yet. NOT a no-text request.
+ *   "provided" — exact wording is required, character for character.
+ *   "none"     — the customer explicitly said there is no wording. This is a
+ *                HARD no-text constraint on the artwork, not merely the
+ *                absence of a required string.
+ *
+ * Defined here rather than in `required-wording.ts` to avoid a circular
+ * import (`required-wording.ts` already imports `TShirtDesignBrief` from this
+ * file, and `GenerationPromptRequest` below needs the type);
+ * `required-wording.ts` re-exports it and remains the one place the
+ * `exactText` storage representation is interpreted.
+ *
+ * The live audit that motivated this: `exactText === ""` already derived
+ * `mode: "none"` correctly, but `GenerationPromptRequest` flattened it back
+ * to `requiredWording: null` — indistinguishable from "unresolved". Every
+ * downstream layer therefore read an explicit no-text request as merely "no
+ * required string", kept typography-forward direction language, and produced
+ * artwork covered in invented lettering.
+ */
+export type RequiredWordingMode = "unknown" | "provided" | "none";
+
 export type PrintPlacement =
   | "full_front"
   | "full_back"
@@ -219,7 +244,21 @@ export interface GenerationPromptRequest {
   style: string | null;
   colors: string[];
   productColor: string | null;
+  /** The exact text to print — non-null ONLY when `wordingMode` is `"provided"`. */
   requiredWording: string | null;
+  /**
+   * Phase 1.1: which of the three text states this generation is under.
+   * `requiredWording: null` alone is ambiguous — it is produced both by "the
+   * customer hasn't answered yet" and by "the customer explicitly wants no
+   * text at all", and those demand opposite provider behavior. Every
+   * consumer must branch on this field, never guess from `requiredWording`.
+   *
+   * `"none"` is a HARD constraint: no words, letters, numbers, typography,
+   * labels, captions, signage, decorative lettering, or invented brand text
+   * anywhere in the artwork. It outranks concept-direction treatment, style
+   * preferences, and every provider default.
+   */
+  wordingMode: RequiredWordingMode;
   printLocation: PrintPlacement | null;
   audience: string | null;
   purpose: string | null;

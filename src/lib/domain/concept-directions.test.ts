@@ -13,6 +13,7 @@ function prompt(overrides: Partial<GenerationPromptRequest> = {}): GenerationPro
     colors: [],
     productColor: "Black",
     requiredWording: "My 3 Sons",
+    wordingMode: "provided",
     printLocation: "full_back",
     audience: "bowling team",
     purpose: "team apparel",

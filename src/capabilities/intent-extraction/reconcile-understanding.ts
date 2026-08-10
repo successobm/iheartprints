@@ -15,6 +15,7 @@ import type { BriefSectionKey } from "@/capabilities/shared/contracts";
 import type { PrintPlacement, TShirtDesignBrief } from "@/lib/domain/types";
 
 import type { BriefFieldPatch } from "./extraction";
+import { mergeDesignDescription } from "./design-description-merge";
 import { preserveDesignDetail } from "./preserve-design-detail";
 
 /**
@@ -201,14 +202,25 @@ export function reconcileUnderstanding(
         accepted.push("product");
         break;
       }
-      case "graphics":
+      case "graphics": {
         if (!value) {
           reject("empty_value");
           continue;
         }
-        fields.designDescription = preserveDesignDetail(value, context.message);
+        // Phase 1: restore design-critical detail a lossy synthesis dropped.
+        // Phase 1.1: then merge that against what the brief ALREADY says
+        // rather than overwriting it — the live multi-turn failure was a
+        // straight assignment here, which is why turn 2 deleted turn 1's
+        // Discovery Bay / waterways / aerial context outright.
+        const restored = preserveDesignDetail(value, context.message);
+        fields.designDescription = mergeDesignDescription(
+          context.brief.designDescription,
+          restored,
+          context.message ?? restored,
+        );
         accepted.push("graphics");
         break;
+      }
       case "style":
         if (!value) {
           reject("empty_value");

@@ -50,6 +50,7 @@ function prompt(overrides: Partial<GenerationPromptRequest> = {}): GenerationPro
     colors: ["red"],
     productColor: "Black",
     requiredWording: "1988 TOYOTA MR2",
+    wordingMode: "provided",
     printLocation: "full_front",
     audience: "car enthusiasts",
     purpose: "club merch",

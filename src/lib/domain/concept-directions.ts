@@ -2,7 +2,11 @@ import {
   analyzeDesignContent,
   type DesignContentContract,
 } from "./design-content-contract";
-import type { ConceptDirectionKey, GenerationPromptRequest } from "./types";
+import type {
+  ConceptDirectionKey,
+  GenerationPromptRequest,
+  RequiredWordingMode,
+} from "./types";
 
 // Re-exported for backward compatibility — the canonical definition now
 // lives in `./types` (see its doc comment) to avoid a circular import,
@@ -49,7 +53,15 @@ export type { ConceptDirectionKey } from "./types";
 export interface ConceptDirectionTreatment {
   /** Plain-language composition guidance — provider-neutral, not prompt dialect. */
   composition: string;
-  typographyEmphasis: string;
+  /**
+   * Phase 1.1: `null` when the customer explicitly asked for NO text
+   * (`wordingMode === "none"`). A direction has nothing to say about
+   * typography in a design that must contain no lettering at all, and the
+   * type says so rather than leaving a consumer to filter a string that
+   * still authorizes text. Consumers must omit typography guidance entirely
+   * when this is `null` — see `openai-concept-provider.ts`.
+   */
+  typographyEmphasis: string | null;
   illustrationDensity: string;
   iconography: string;
   layout: string;
@@ -64,6 +76,21 @@ export interface ConceptDirection extends ConceptDirectionTreatment {
   title: string;
   placeholderLabel: string;
   accentColor: string;
+  /** The base entry always states its typography angle; only the no-text layer removes it. */
+  typographyEmphasis: string;
+  /**
+   * Phase 1.1: applied when the customer explicitly asked for NO text
+   * (`wordingMode === "none"`). Applied LAST, after every other layer,
+   * because explicit no-text sits in the highest precedence tier — above
+   * required content, style preference, direction treatment, and defaults.
+   *
+   * Overrides only the fields that would otherwise authorize or reference
+   * lettering. Everything else — the direction's shape language, density,
+   * framing and scene-fidelity guarantees — is left exactly as the lower
+   * layers resolved it, so the three concepts stay genuinely distinct
+   * (Constitution §13) instead of collapsing into one graphic-only look.
+   */
+  noTextTreatment?: ConceptDirectionTreatmentOverrides;
   /**
    * Applied when the approved design content requires more than one element
    * or states a relationship between elements (`DesignContentContract.
@@ -106,10 +133,20 @@ export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
     composition: "a bold, high-contrast composition built around a strong central silhouette",
     typographyEmphasis:
       "typography-forward — the required wording is the dominant visual element, large and unmistakably readable",
-    illustrationDensity: "minimal supporting illustration; only what reinforces the wording",
+    // Phase 1.1: "reinforces the focal point" rather than "reinforces the
+    // wording" — the base density guidance has to be true of a design that
+    // may legitimately have no lettering at all, so that the no-text layer
+    // below only has to remove typography, not repair every field that
+    // silently assumed text existed.
+    illustrationDensity: "minimal supporting illustration; only what reinforces the focal point",
     iconography: "one simple, direct supporting graphic, not a scene",
     layout: "centered, symmetrical layout with generous margins",
     visualHierarchy: "wording first, supporting graphic second — nothing competes with the text",
+    noTextTreatment: {
+      typographyEmphasis: null,
+      visualHierarchy:
+        "hierarchy comes entirely from scale, contrast, and shape weight — the dominant graphic reads first, and there is no lettering anywhere to compete with it",
+    },
     sceneTreatment: {
       composition:
         "a bold, high-contrast composition that renders the whole required subject in strong, simplified shapes with clear separation between elements",
@@ -137,6 +174,11 @@ export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
     iconography: "a small scene or grouped motifs that add personality without depending on any specific real character or person",
     layout: "asymmetrical or loosely balanced layout that feels hand-arranged, not gridded",
     visualHierarchy: "illustration and wording read as one integrated unit",
+    noTextTreatment: {
+      typographyEmphasis: null,
+      visualHierarchy:
+        "the illustration reads as one complete, self-contained unit that needs no caption or label to be understood",
+    },
     sceneTreatment: {
       illustrationDensity:
         "the richest, most detailed illustration of the three directions — full scenic treatment with visual texture and depth",
@@ -159,6 +201,11 @@ export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
     iconography: "one restrained icon representative of the subject, rendered simply",
     layout: "circular, shield, or crest-style contained layout with a defined edge",
     visualHierarchy: "badge shape first, wording and icon balanced evenly within it",
+    noTextTreatment: {
+      typographyEmphasis: null,
+      visualHierarchy:
+        "badge shape first, with the imagery balanced evenly inside it — the emblem is carried by shape and image alone, with no lettering, monogram, or inscription on or around the border",
+    },
     sceneTreatment: {
       composition:
         "a compact, emblem/badge-style composition contained within a simple border, whose interior holds the complete required subject matter drawn in a pared-back way",
@@ -191,10 +238,17 @@ export const CONCEPT_DIRECTIONS: readonly ConceptDirection[] = [
  * The result still differs sharply between the three directions — that is
  * the point. Fidelity is achieved by constraining what a direction may
  * REMOVE, never by making the three prompts converge.
+ *
+ * Phase 1.1 adds a fourth, highest layer: `noTextTreatment`, applied when
+ * the customer explicitly asked for no wording. It goes last because
+ * explicit no-text is precedence tier 1 — above required content,
+ * composition, style, direction treatment, and provider defaults — so it
+ * must be able to override anything the layers beneath it decided.
  */
 export function resolveDirectionTreatment(
   direction: ConceptDirection,
   contract: Pick<DesignContentContract, "requiresScene" | "hasExplicitComposition">,
+  options: { wordingMode?: RequiredWordingMode } = {},
 ): ConceptDirectionTreatment {
   return {
     composition: direction.composition,
@@ -207,6 +261,7 @@ export function resolveDirectionTreatment(
     ...(contract.hasExplicitComposition
       ? direction.customerComposedTreatment ?? {}
       : {}),
+    ...(options.wordingMode === "none" ? direction.noTextTreatment ?? {} : {}),
   };
 }
 
@@ -238,9 +293,18 @@ export function describeConceptDirection(
   prompt: GenerationPromptRequest,
 ): string {
   const shirt = prompt.productColor?.trim() || "the shirt";
-  const text = prompt.requiredWording
-    ? `Featuring "${prompt.requiredWording}".`
-    : "No text lockup — graphic-led.";
+  // Phase 1.1: the card copy must match the contract the provider was
+  // actually given. Live acceptance showed cards reading "No text lockup —
+  // graphic-led" while the prompt still carried typography-forward direction
+  // language and the artwork came back covered in lettering. An explicit
+  // no-text request now says so plainly; an unanswered wording question is
+  // still only "no lockup", because that is genuinely all we know.
+  const text =
+    prompt.wordingMode === "provided" && prompt.requiredWording
+      ? `Featuring "${prompt.requiredWording}".`
+      : prompt.wordingMode === "none"
+        ? "Graphic-only — no text."
+        : "No text lockup — graphic-led.";
   // Detailed-Description Fidelity (Phase 1): describe the treatment actually
   // sent to the provider. Telling a customer their scenic request became "a
   // strong central silhouette" when the prompt says otherwise would be the
@@ -248,6 +312,7 @@ export function describeConceptDirection(
   const treatment = resolveDirectionTreatment(
     direction,
     analyzeDesignContent(prompt.subject, { additionalContext: prompt.notes }),
+    { wordingMode: prompt.wordingMode },
   );
   return `${direction.title}: ${treatment.composition}. ${text} Designed for a ${shirt} shirt.`;
 }

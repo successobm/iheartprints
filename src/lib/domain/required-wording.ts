@@ -1,4 +1,4 @@
-import type { TShirtDesignBrief } from "./types";
+import type { RequiredWordingMode, TShirtDesignBrief } from "./types";
 
 /**
  * Sprint 2F: provider-neutral explicit state for required wording.
@@ -20,8 +20,16 @@ import type { TShirtDesignBrief } from "./types";
  * (`null`→'unknown', `''`→'none', else→'provided'), then have
  * `deriveRequiredWording` read the new column directly. No customer-facing
  * behavior would change — only the storage representation.
+ *
+ * Phase 1.1: `RequiredWordingMode` itself now lives in `./types` (see its
+ * doc comment) so `GenerationPromptRequest` can carry it without a circular
+ * import. It is re-exported here because this module remains the single
+ * authority on how `exactText`'s storage representation maps onto it, and
+ * every existing import site continues to work unchanged. Phase 1.1 also
+ * sharpens what `"none"` MEANS downstream: not merely "no required string",
+ * but "no text of any kind may appear in the artwork".
  */
-export type RequiredWordingMode = "unknown" | "provided" | "none";
+export type { RequiredWordingMode } from "./types";
 
 export interface RequiredWording {
   mode: RequiredWordingMode;

@@ -14,6 +14,7 @@ import type {
   BriefSectionKey,
   DetectedIntent,
 } from "@/capabilities/shared/contracts";
+import { mergeDesignDescription } from "./design-description-merge";
 import { preserveDesignDetail } from "./preserve-design-detail";
 
 /**
@@ -593,7 +594,14 @@ export function extractAdaptive(context: ExtractionContext): ExtractionOutcome {
   // capture dropped, using the same rules that protect the semantic path.
   const graphics = extractGraphics(positiveText);
   if (graphics) {
-    fields.designDescription = preserveDesignDetail(graphics, positiveText);
+    // Phase 1.1: merge against the brief instead of assigning over it, so
+    // the no-provider deterministic path accumulates multi-turn design
+    // intent exactly as the semantic path does.
+    fields.designDescription = mergeDesignDescription(
+      context.brief.designDescription,
+      preserveDesignDetail(graphics, positiveText),
+      trimmed,
+    );
   }
 
   // Sprint 2K Phase 3 (Goal 1): a short, single-clause reply is a direct
@@ -1320,7 +1328,13 @@ function applyPendingSectionFallback(
       ) {
         return;
       }
-      fields.designDescription = trimmed;
+      // Phase 1.1: same accumulate-don't-overwrite contract as the
+      // cue-anchored path above.
+      fields.designDescription = mergeDesignDescription(
+        context.brief.designDescription,
+        trimmed,
+        trimmed,
+      );
       return;
     case "productColor":
       fields.shirtColor = normalizeColorAnswer(trimmed);

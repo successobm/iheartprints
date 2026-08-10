@@ -12,6 +12,7 @@ function prompt(overrides: Partial<GenerationPromptRequest> = {}): GenerationPro
     colors: ["gold", "forest green"],
     productColor: "Navy",
     requiredWording: "Camp Wildwood 2026",
+    wordingMode: "provided",
     printLocation: "full_front",
     audience: "camp families",
     purpose: "fundraiser",

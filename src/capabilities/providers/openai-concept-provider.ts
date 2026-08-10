@@ -405,7 +405,12 @@ function buildPrompt(
   const contract = analyzeDesignContent(prompt.subject, {
     additionalContext: prompt.notes,
   });
-  const treatment = resolveDirectionTreatment(direction, contract);
+  // Phase 1.1: explicit no-text is precedence tier 1 — it is resolved before
+  // anything else here and every later section branches on it.
+  const noText = prompt.wordingMode === "none";
+  const treatment = resolveDirectionTreatment(direction, contract, {
+    wordingMode: prompt.wordingMode,
+  });
 
   const sections: string[] = [
     `Print-ready apparel graphic for ${prompt.product}.`,
@@ -422,7 +427,15 @@ function buildPrompt(
     );
   }
 
-  if (prompt.requiredWording) {
+  // Phase 1.1: the two wording states are mutually exclusive customer
+  // intents, and exactly one of these blocks can ever appear. The third
+  // state — the customer has not answered yet — deliberately produces
+  // neither: an unanswered question is not a no-text request.
+  if (noText) {
+    sections.push(
+      "NO TEXT — the customer explicitly asked for a design with no wording. This design must contain no text of any kind. Do not render any words, letters, numbers, typography, labels, captions, titles, signage, monograms, dates, slogans, decorative lettering, or invented brand text anywhere in the artwork — including inside or around badges, banners, ribbons, crests, borders, and on any object, sign, or surface depicted in the scene. Depict lettering-free objects: if something would normally carry a name or label, draw it blank.",
+    );
+  } else if (prompt.requiredWording) {
     sections.push(
       `REQUIRED WORDING — include this exact wording, spelled correctly, and no other wording: "${prompt.requiredWording}".`,
     );
@@ -430,12 +443,19 @@ function buildPrompt(
 
   const styleLines = [
     `Creative direction — ${direction.title}: ${treatment.composition}.`,
-    `Typography: ${treatment.typographyEmphasis}.`,
+  ];
+  // A design that must contain no lettering has no typography guidance to
+  // give. Emitting the direction's typography line anyway — even a
+  // "restrained typography" one — reads as permission to letter.
+  if (treatment.typographyEmphasis) {
+    styleLines.push(`Typography: ${treatment.typographyEmphasis}.`);
+  }
+  styleLines.push(
     `Illustration density: ${treatment.illustrationDensity}.`,
     `Iconography: ${treatment.iconography}.`,
     `Layout: ${treatment.layout}.`,
     `Visual hierarchy: ${treatment.visualHierarchy}.`,
-  ];
+  );
   if (prompt.style) styleLines.push(`Style: ${prompt.style}.`);
   if (prompt.colors.length > 0) {
     styleLines.push(`Preferred colors: ${prompt.colors.join(", ")}.`);
@@ -454,10 +474,26 @@ function buildPrompt(
   // Sprint 2K Phase 3 (Goal 7): explicit, deterministic instruction against
   // inventing text — driven by the provider-neutral `allowAdditionalText`
   // flag rather than being a one-off OpenAI-only afterthought.
+  //
+  // Phase 1.1: this sentence used to be emitted unconditionally, and its
+  // trailing "beyond the exact wording specified above" pointed at a
+  // REQUIRED WORDING block that, for a no-text design, does not exist. A
+  // dangling exception is worse than no sentence: it implies some wording
+  // was authorized somewhere. Each of the three wording states now gets a
+  // sentence that is actually true of it.
   if (!prompt.allowAdditionalText) {
-    sections.push(
-      "Do not add any other text, letters, words, dates, or slogans beyond the exact wording specified above.",
-    );
+    if (noText) {
+      // The NO TEXT block above is already absolute; anything more here
+      // would only reintroduce the idea that some text might be allowed.
+    } else if (prompt.requiredWording) {
+      sections.push(
+        "Do not add any other text, letters, words, dates, or slogans beyond the exact wording specified above.",
+      );
+    } else {
+      sections.push(
+        "The customer has not specified any wording for this design. Do not invent words, letters, dates, or slogans they did not ask for.",
+      );
+    }
   }
   // Sprint 2K Phase 3 (Goal 4): a stylistic/era/pop-culture reference the
   // customer gave is inspiration for visual language only — never an
@@ -493,17 +529,27 @@ function buildPrompt(
     // instruction that reads as forbidding its own creative direction is
     // just a different contradiction.
     "DO NOT OMIT: every subject, object, count, and spatial relationship named in REQUIRED DESIGN CONTENT and COMPOSITION must be present in the finished artwork. Do not drop a named element, merge several named elements into one, replace the described arrangement with a generic one, or reduce the design to one lone symbol in order to satisfy the creative direction.",
-    "PRIORITY when anything conflicts: required wording and exclusions first; then the required design content and composition; then the customer's stated style and colors; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one.",
-    "CREATIVE FREEDOM: typography treatment, illustration style, line weight, framing, decorative detail, texture, and palette treatment wherever the customer has not constrained them.",
+    noText
+      ? "PRIORITY when anything conflicts: the NO TEXT rule and the exclusions first — nothing overrides them; then the required design content and composition; then the customer's stated style and colors; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one. No creative direction, badge convention, or stylistic habit justifies adding lettering."
+      : "PRIORITY when anything conflicts: required wording and exclusions first; then the required design content and composition; then the customer's stated style and colors; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one.",
+    // Typography is removed from the creative-freedom list entirely for a
+    // no-text design — listing it as a free choice directly contradicts the
+    // NO TEXT rule above.
+    noText
+      ? "CREATIVE FREEDOM: illustration style, line weight, shape language, framing, decorative detail, texture, and palette treatment wherever the customer has not constrained them. Typography is not among them — this design has no text."
+      : "CREATIVE FREEDOM: typography treatment, illustration style, line weight, framing, decorative detail, texture, and palette treatment wherever the customer has not constrained them.",
   );
 
   // Centered composition is a provider DEFAULT — the lowest priority thing
   // in this prompt. When the customer has said where things go, asserting it
   // anyway is a direct contradiction of a higher-priority requirement.
+  const closing = contract.hasExplicitComposition
+    ? "Clean vector-style illustration, transparent background, arranged to match the customer's stated composition above, no watermark, no mockup, no photograph of a shirt — artwork only."
+    : "Clean vector-style illustration, transparent background, centered composition, no watermark, no mockup, no photograph of a shirt — artwork only.";
   sections.push(
-    contract.hasExplicitComposition
-      ? "Clean vector-style illustration, transparent background, arranged to match the customer's stated composition above, no watermark, no mockup, no photograph of a shirt — artwork only."
-      : "Clean vector-style illustration, transparent background, centered composition, no watermark, no mockup, no photograph of a shirt — artwork only.",
+    noText
+      ? `${closing.slice(0, -1)}, and no text or lettering of any kind.`
+      : closing,
   );
 
   return sections.join("\n\n");

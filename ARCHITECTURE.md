@@ -101,6 +101,12 @@ Derived from the Constitution and enforced by the current implementation:
     required subject matter. Provider defaults (for example a centered
     composition) are the lowest priority in the system and must never
     contradict an explicit customer composition. See §13f.
+16. **Design intent accumulates across turns; text intent is explicit.** A
+    later customer turn ADDS to the design description, REFINES the part it
+    contradicts, or REPLACES it only when the customer says so — it never
+    silently overwrites what earlier turns established. And "no wording" is a
+    positive instruction meaning *no lettering of any kind*, never the same
+    thing as an unanswered wording question. See §13g.
 
 ---
 
@@ -3637,6 +3643,143 @@ model compliance. That remains a live-acceptance question. See §24.
 
 ---
 
+## 13g. Multi-Turn Design Intent and Explicit No-Text (Phase 1.1)
+
+Two independent live failures, both structural rather than heuristic.
+
+### Multi-turn design intent
+
+**The failure.** A customer opened with Discovery Bay, its lighthouse, its
+waterways, and a request for the real area / an aerial idea of it. Their next
+turn described the channel to the marina, the homes, and boats. The second
+turn *replaced* `designDescription` outright, and the location, the
+waterways, and the real-area intent were gone from the brief before anything
+downstream ran.
+
+**The cause.** `designDescription` had only ever had assignment semantics —
+`fields.designDescription = <this turn's value>` — and nothing in the
+pre-approval path asked what the new turn was *doing* to the design.
+
+**The contract.** Compatible clarifications accumulate. Explicit refinements
+replace only the detail they contradict. Explicit replacement language
+supersedes prior content.
+
+| Operation | Customer language | Result |
+|---|---|---|
+| ADD | "also add homes on the left", "and include a marina" | both turns' content is kept |
+| REFINE | "move the lighthouse to the right", "make the marina smaller" | the contradicted detail is superseded; everything else survives |
+| REPLACE | "forget the lighthouse", "start over with a marina scene" | prior content is deliberately superseded |
+
+`intent-extraction/design-description-merge.ts` owns this, as a pure
+function, and is applied on both the semantic (`reconcile-understanding.ts`)
+and deterministic (`extraction.ts`) paths.
+
+**How contradictions are resolved.** The merge works at STATEMENT level. An
+existing statement is dropped only when a new statement shares a subject
+**and** constrains the same attribute *dimension* (position / shape / size /
+count / color) with a different value. That two-part test is what leaves
+exactly one lighthouse requirement after "move the lighthouse to the right",
+while "make the marina smaller" (size) leaves "marina on the right"
+(position) untouched. ADD and REFINE therefore share one algorithm — with no
+subject overlap nothing is dropped, which is exactly the ADD case — and the
+distinction between them is descriptive, not a separate code path.
+
+Deliberately **not** a scene graph and **not** a schema change: nothing here
+is persisted, and `designDescription` remains a single coherent free-text
+contract.
+
+This is **not** the post-selection revision path. That path
+(`revision-delta` / `revision-intent` / `buildEditPrompt`) assumes a selected
+`ArtworkVersion` and produces an image-edit delta; this one runs pre-approval
+where no artwork exists. The vocabulary is deliberately similar; the
+machinery is not shared, and the revision path is untouched.
+
+### Real-world / research requests
+
+Preserve the desired real-world fidelity honestly. Never claim external
+grounding unless a reference/research capability actually ran — and none
+exists yet. The customer's request now survives because the merge no longer
+discards earlier turns; the provider prompt continues to answer it with the
+§13f honesty line (approximate from the customer's own description; no map or
+aerial reference is available; invent no landmarks; imply no survey
+accuracy).
+
+### Explicit no-text
+
+**The failure.** Asked "what exact text should appear? Say 'none' if there is
+no text," the customer answered "No wording". The brief correctly stored
+`exactText: ""` and `deriveRequiredWording` correctly derived `mode: "none"`
+— and then `GenerationPromptRequest` flattened it back to
+`requiredWording: null`, which is *also* what an unanswered question
+produces. Downstream therefore read an explicit no-text request as merely
+"no required string": the prompt kept typography-forward direction language,
+told the model not to add text "beyond the exact wording specified above"
+when no wording was specified above, listed typography under creative
+freedom, and the artwork came back covered in invented lettering — which
+evaluation then passed, because "no required wording" read as "nothing to
+check". The concept card meanwhile claimed "No text lockup — graphic-led".
+
+**The semantics.** Three genuinely distinct states, now first-class as
+`RequiredWordingMode` on `GenerationPromptRequest.wordingMode`:
+
+| Mode | Storage | Meaning |
+|---|---|---|
+| `unknown` | `exactText === null` | not answered yet. **Never** a no-text request |
+| `provided` | non-empty `exactText` | this exact text must appear |
+| `none` | `exactText === ""` | **no text of any kind** may appear |
+
+`"none"` prohibits words, letters, numbers, typography, labels, captions,
+signage, monograms, dates, slogans, decorative lettering, and invented brand
+text — anywhere, including inside badges, banners, ribbons, borders, and on
+objects depicted in the scene. Required wording and explicit no-text are
+mutually exclusive customer intents; exactly one block ever appears in a
+prompt, and an unresolved wording question produces neither.
+
+Not sticky: a customer who said "none" can later add wording, and
+`wordingMode` follows the brief back to `"provided"` with typography
+available again.
+
+**Text policy precedence** (extends §13f):
+
+1. required wording / explicit no-text / exclusions
+2. required content + composition
+3. customer style and colors
+4. concept-direction treatment
+5. provider defaults
+
+**Layer behavior under `"none"`:**
+
+- *Prompt Translation* — `deriveRequiredWording` decides both
+  `requiredWording` and `wordingMode`. A `RegenerationPlan` removal of
+  required wording downgrades `"provided"` → `"unknown"`, never to `"none"`:
+  only the customer's own explicit answer may impose no-text. An
+  already-explicit `"none"` is never downgraded.
+- *Concept directions* — a fourth override layer, `noTextTreatment`, applied
+  **last** (above the scene and customer-composed overrides) because no-text
+  is precedence tier 1. `ConceptDirectionTreatment.typographyEmphasis`
+  becomes `string | null`, and `null` means consumers must omit typography
+  guidance entirely rather than filter a string that still authorizes
+  lettering. Only the fields that reference or authorize text are
+  overridden, so the three directions stay genuinely distinct on shape
+  language, density, framing, and hierarchy.
+- *Provider prompt* — a hard `NO TEXT` block replaces `REQUIRED WORDING`; the
+  typography line is dropped; typography is removed from `CREATIVE FREEDOM`;
+  the dangling "beyond the exact wording specified above" is replaced by a
+  sentence that is true of the actual wording state; and the closing line
+  adds "no text or lettering of any kind".
+- *Evaluation* — the existing `required_wording` criterion answers whichever
+  wording contract is in force, so no new criterion key, contract change, or
+  migration was needed. Under `"none"` the vision model reports a `noText`
+  signal; readable text it actually transcribed is decisive in code even if
+  it self-reports no violation, mirroring the required-wording cross-check.
+  Deliberately no OCR — judgment by the existing vision provider, and
+  conservative about incidental texture.
+- *Concept card copy* — "Graphic-only — no text." under `"none"`, so the
+  customer-facing summary matches the contract the provider was actually
+  given.
+
+---
+
 ## 14. Background Worker Architecture
 
 Two independent job queues, two independent workers — deliberately never
@@ -4187,6 +4330,26 @@ Verified against the implementation:
   restored clause is appended in the customer's own words even when most of
   it was already present. Restating a detail is deliberately preferred over
   risking its loss
+- Phase 1.1's multi-turn merge classifies ADD / REFINE / REPLACE from
+  generic English structure (supersede cues, refinement cues, subject and
+  attribute-dimension overlap) — not language understanding. A replacement
+  phrased without any recognized supersede cue reads as an addition, and the
+  superseded content stays in the brief; the Design Summary approval gate is
+  the customer's opportunity to catch that. Merged output can also read a
+  little seam-like ("Marina on the right. A smaller marina.") — preserving
+  the customer's stated detail is deliberately preferred over prose polish
+- Phase 1.1's no-text guarantee, like every other guarantee here, is about
+  what iHeartPrints **sends**. Nothing proves an image model will produce
+  lettering-free artwork; the `NO TEXT` block, the removal of every
+  text-authorizing phrase, and the evaluation check are the three
+  deterministic layers that make a violation detectable, not preventable
+- The no-text evaluation check is a vision-model judgment, **not OCR**. Small,
+  low-contrast, heavily stylized, or partially occluded lettering can be
+  missed, and the check is deliberately conservative about marks that merely
+  resemble letters. It reuses the `required_wording` criterion rather than
+  adding a criterion key, so a persisted evaluation does not distinguish
+  "wording missing" from "text present when none was allowed" by key alone —
+  the criterion notes and `missingRequirements` ("no text") carry that
 - Concept Evaluation now instructs the vision model that a named subject
   which is absent, a wrong stated count, or a contradicted stated
   relationship is a graphics *mismatch*. That is a prompt-level

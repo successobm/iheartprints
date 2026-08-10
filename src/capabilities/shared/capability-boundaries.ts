@@ -212,6 +212,35 @@
  *     genuinely distinct (Constitution §13), so fidelity is never achieved
  *     by making the three provider prompts converge.
  *
+ * Phase 1.1 — multi-turn design intent and explicit no-text
+ * (ARCHITECTURE.md Principle 16 / §13g):
+ *
+ *   - `intent-extraction/design-description-merge.ts` — the ONE authority on
+ *     what a later customer turn does to `designDescription`: ADD (compatible
+ *     clarifications accumulate), REFINE (only the contradicted detail is
+ *     superseded), REPLACE (explicit supersede language wins). Pure, not
+ *     persisted, no scene graph. Applied on BOTH the semantic
+ *     (`reconcile-understanding.ts`) and deterministic (`extraction.ts`)
+ *     paths — `designDescription` must never again be assigned over.
+ *     Deliberately NOT the post-selection revision path
+ *     (`shared/revision-delta.ts` / `shared/revision-intent.ts`), which
+ *     assumes a selected ArtworkVersion and produces an image-edit delta.
+ *     Similar vocabulary, separate machinery, no shared code.
+ *   - `GenerationPromptRequest.wordingMode` (`RequiredWordingMode`) — the
+ *     three text states are first-class and must never be re-derived by
+ *     guessing from `requiredWording === null`, which is produced both by
+ *     "unanswered" and by "explicitly no text". Only `"none"` — sourced
+ *     solely from the customer's own `exactText === ""` — imposes the hard
+ *     no-text constraint; a RegenerationPlan removal never may.
+ *     `lib/domain/required-wording.ts` remains the single place the
+ *     `exactText` storage representation is interpreted.
+ *   - Explicit no-text sits in precedence tier 1, above required content,
+ *     style preference, concept-direction treatment, and provider defaults.
+ *     A direction's `noTextTreatment` is therefore applied LAST in
+ *     `resolveDirectionTreatment`, and `typographyEmphasis: null` means a
+ *     consumer must omit typography guidance entirely rather than emit a
+ *     softened string that still authorizes lettering.
+ *
  * Sprint 2K Phase 3 additions (quality/generation-fidelity sprint; no new
  * capabilities, no architecture redesign):
  *   - `lib/domain/concept-directions.ts` — the single, provider-neutral

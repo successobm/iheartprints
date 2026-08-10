@@ -5,6 +5,7 @@ import type {
   RevisionDirective,
 } from "@/lib/domain/types";
 import type { RegenerationPlan } from "@/capabilities/regeneration-intelligence";
+import { deriveRequiredWording } from "@/lib/domain/required-wording";
 import { COLOR_WORD_PATTERN } from "@/capabilities/shared/color-families";
 import { extractRevisionDelta } from "@/capabilities/shared/revision-delta";
 
@@ -80,13 +81,25 @@ export function translateApprovedBrief(
     ...styleSplit.inspirations,
   ]);
 
+  // Phase 1.1: the fix for the live no-text failure. The old expression here
+  // was `content.exactText?.trim() || null`, which collapsed the customer's
+  // explicit "no wording" (`exactText === ""`) into exactly the same `null`
+  // that an unanswered question produces. Every downstream layer then had no
+  // way to tell "the customer wants NO text" apart from "we don't know yet",
+  // so neither the provider prompt nor the concept directions ever imposed a
+  // no-text constraint — and the generated artwork came back covered in
+  // invented lettering. `deriveRequiredWording` is the one authority on that
+  // distinction; the mode travels with the request from here on.
+  const wording = deriveRequiredWording({ exactText: content.exactText });
+
   return {
     product: content.productSummary?.trim() || "a custom t-shirt",
     subject: subjectSplit.content || "a design that reflects the customer's intent",
     style: deferred.has("style") ? null : styleSplit.content || null,
     colors: deferred.has("colors") ? [] : content.preferredColors,
     productColor: content.shirtColor?.trim() || null,
-    requiredWording: content.exactText?.trim() || null,
+    requiredWording: wording.mode === "provided" ? wording.text : null,
+    wordingMode: wording.mode,
     printLocation: content.printPlacement,
     audience: deferred.has("audience")
       ? null
@@ -335,6 +348,17 @@ function applyRemove(
   switch (section) {
     case "requiredWording":
       request.requiredWording = null;
+      // Phase 1.1: a RegenerationPlan removal means "stop requiring THAT
+      // string", which is not the same customer intent as "put no text on
+      // this design at all". Only an explicit `exactText === ""` on the
+      // approved brief may ever produce the hard no-text constraint — and
+      // when the customer did say that, `translateApprovedBrief` has already
+      // set `wordingMode: "none"` above and this branch is never the thing
+      // that decides it. Downgrading to `"unknown"` here keeps the two
+      // intents from being conflated in either direction. An already-explicit
+      // `"none"` is never downgraded — removing wording that is already
+      // absent must not quietly cancel the customer's no-text request.
+      if (request.wordingMode === "provided") request.wordingMode = "unknown";
       break;
     case "style":
       request.style = null;
