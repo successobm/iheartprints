@@ -8,8 +8,16 @@ import type {
   DesignSummaryView,
   RecommendationAction,
 } from "@/capabilities/shared/contracts";
+import type { PrintPlacement } from "@/lib/domain/types";
 import type { ApiProjectSnapshot } from "@/lib/services/conversation-service";
 import { deriveChatAffordances } from "./chat-affordances";
+import {
+  deriveUploadedArtworkStep,
+  uploadedArtworkOwnsSurface,
+  type WorkflowChoice,
+} from "./uploaded-artwork-flow";
+import { UploadedArtworkPanel } from "./UploadedArtworkPanel";
+import { WorkflowChoiceCard } from "./WorkflowChoiceCard";
 import {
   CHAT_PROJECT_STORAGE_KEY,
   planSessionBootstrap,
@@ -48,6 +56,27 @@ export function ChatApp() {
    * submits a real revision through the existing lifecycle.
    */
   const [deliveryEditingReopened, setDeliveryEditingReopened] = useState(false);
+  /**
+   * Existing Artwork → Print Ready Phase 1. Transient by design: only the
+   * window BEFORE anything has been uploaded needs it, and there is nothing
+   * durable to remember yet. A reload correctly returns the customer to the
+   * choice rather than trapping them in a workflow they never committed to —
+   * see `uploaded-artwork-flow.ts`.
+   */
+  const [workflowChoice, setWorkflowChoice] = useState<WorkflowChoice>("undecided");
+  /** Client-only "take me back a step" from the comparison/analysis surface. */
+  const [reconsideringUpload, setReconsideringUpload] = useState(false);
+  /**
+   * Signed URLs are tagged with the preparation they belong to, so a stale
+   * URL can never be rendered against a different (or absent) preparation —
+   * the alternative, clearing state from inside the fetch effect, is a
+   * cascading-render pattern React explicitly warns against.
+   */
+  const [preparationImages, setPreparationImages] = useState<{
+    preparationId: string | null;
+    original: string | null;
+    prepared: string | null;
+  }>({ preparationId: null, original: null, prepared: null });
   const previousConceptStatusRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -475,6 +504,90 @@ export function ChatApp() {
     }
   }
 
+  /**
+   * Existing Artwork → Print Ready Phase 1: the four explicit actions in the
+   * Upload Existing Artwork flow. All four go through the same request shape
+   * as every other action in this component and all four are idempotent
+   * server-side, so a double click is always safe.
+   */
+  async function submitPreparationAction(
+    request: () => Promise<Response>,
+    failureMessage: string,
+  ) {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await request();
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || failureMessage);
+      setReconsideringUpload(false);
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : failureMessage);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function uploadExistingArtwork(file: File) {
+    if (!snapshot) return;
+    const body = new FormData();
+    body.append("file", file);
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-upload`, {
+          method: "POST",
+          body,
+        }),
+      "We couldn't accept that upload. Please try again.",
+    );
+  }
+
+  async function saveUploadedArtworkDetails(input: {
+    productSummary: string | null;
+    productColor: string | null;
+    printPlacement: PrintPlacement | null;
+  }) {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "context", ...input }),
+        }),
+      "Failed to save those details",
+    );
+  }
+
+  async function prepareUploadedArtwork() {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "prepare" }),
+        }),
+      "Failed to prepare your artwork",
+    );
+  }
+
+  async function approvePreparedArtwork() {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "approve" }),
+        }),
+      "Failed to approve your prepared artwork",
+    );
+  }
+
   async function refresh() {
     if (!snapshot) return;
     const response = await fetch(`/api/projects/${snapshot.project.id}`);
@@ -490,6 +603,48 @@ export function ChatApp() {
     await bootstrap();
   }
 
+  const preparation = snapshot?.artworkPreparation ?? null;
+  const preparationId = preparation?.preparationId ?? null;
+  const hasPreparedArtwork = preparation?.hasPreparedArtwork ?? false;
+
+  // Existing Artwork → Print Ready Phase 1: mint fresh signed URLs for the
+  // original and (once it exists) the prepared image. Keyed on the
+  // preparation id plus whether a prepared asset exists, so approving or
+  // re-preparing re-fetches while unrelated snapshot updates do not.
+  useEffect(() => {
+    // No preparation means nothing to fetch. State is not cleared here —
+    // render reads `preparationId` alongside it (see `preparationImagesFor`),
+    // so a stale URL can never be shown for a different preparation.
+    if (!isClient || !snapshot || !preparationId) return;
+
+    let cancelled = false;
+    const projectId = snapshot.project.id;
+
+    async function loadImageUrl(role: "original" | "prepared") {
+      const response = await fetch(
+        `/api/projects/${projectId}/artwork-preparation/image/${role}`,
+      );
+      if (!response.ok) return null;
+      const data = (await response.json()) as { url?: string };
+      return typeof data.url === "string" ? data.url : null;
+    }
+
+    void (async () => {
+      const [original, prepared] = await Promise.all([
+        loadImageUrl("original").catch(() => null),
+        hasPreparedArtwork ? loadImageUrl("prepared").catch(() => null) : null,
+      ]);
+      if (!cancelled) {
+        setPreparationImages({ preparationId, original, prepared });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isClient, snapshot?.project.id, preparationId, hasPreparedArtwork]);
+
   const phase = snapshot?.conversation.phase;
   const affordances = deriveChatAffordances({
     phase,
@@ -503,7 +658,40 @@ export function ChatApp() {
     finalizationStatus: snapshot?.finalization.status ?? "not_requested",
     deliveryEditingReopened,
   });
-  const composerDisabled = affordances.composerDisabled;
+
+  // Existing Artwork → Print Ready Phase 1. The workflow choice is offered
+  // only at the very start; once anything is uploaded, the preparation record
+  // itself is the durable workflow identity (see `uploaded-artwork-flow.ts`).
+  const atProjectStart =
+    !!snapshot &&
+    snapshot.messages.every((message) => message.role !== "user") &&
+    snapshot.artworkVersions.length === 0;
+  const derivedUploadStep = deriveUploadedArtworkStep({
+    preparation,
+    choice: workflowChoice,
+    atProjectStart,
+  });
+  // "Change these details" / "Keep my original for now" step back without
+  // discarding anything the server already holds.
+  const uploadedArtworkStep =
+    reconsideringUpload &&
+    derivedUploadStep !== null &&
+    derivedUploadStep !== "approved" &&
+    derivedUploadStep !== "choose_workflow" &&
+    derivedUploadStep !== "upload"
+      ? "confirm_details"
+      : derivedUploadStep;
+  const uploadedArtworkActive = uploadedArtworkOwnsSurface(uploadedArtworkStep);
+  const currentPreparationImages =
+    preparationId !== null && preparationImages.preparationId === preparationId
+      ? preparationImages
+      : { original: null, prepared: null };
+
+  // An uploaded-artwork customer already has their design: the creative
+  // surfaces (concept grid, summary card, revision actions, composer) are
+  // hidden rather than merely unreachable, so they are never walked through a
+  // design description, three directions, or a wording interview.
+  const composerDisabled = affordances.composerDisabled || uploadedArtworkActive;
 
   const placeholder = useMemo(() => {
     if (!isClient || loading) return "Message iHeartPrints...";
@@ -558,7 +746,9 @@ export function ChatApp() {
   const currentArtworkVersions = snapshot?.conceptStatus.currentConcepts ?? [];
 
   const showConcepts =
-    currentArtworkVersions.length > 0 && affordances.showArtworkSurfaces;
+    currentArtworkVersions.length > 0 &&
+    affordances.showArtworkSurfaces &&
+    !uploadedArtworkActive;
 
   const lastConceptsReadyMessageId = [...(snapshot?.messages ?? [])]
     .reverse()
@@ -585,14 +775,21 @@ export function ChatApp() {
     snapshot.conceptStatus.status === "needs_update" &&
     !conceptBannerDismissed &&
     // Only meaningful once the customer can actually see concepts.
-    affordances.showArtworkSurfaces;
+    affordances.showArtworkSurfaces &&
+    !uploadedArtworkActive;
 
   // Sprint 2M Phase 2B: same "concepts are visible" gate as the
   // concept-status banner above — a selected, current concept can be
   // approved for production once the customer is done revising it.
-  const showFinalizeAction = affordances.showArtworkSurfaces;
+  // Phase 1 deliberately stops at approved prepared artwork: production
+  // finalization for uploaded artwork is Phase 2's, so the Prepare
+  // Print-Ready action stays out of this workflow entirely rather than
+  // appearing and doing something only half-wired.
+  const showFinalizeAction =
+    affordances.showArtworkSurfaces && !uploadedArtworkActive;
   const canRequestFinalArtwork = affordances.canRequestFinalArtwork;
-  const showUseThisDesignAction = affordances.showUseThisDesign;
+  const showUseThisDesignAction =
+    affordances.showUseThisDesign && !uploadedArtworkActive;
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
@@ -719,7 +916,35 @@ export function ChatApp() {
               );
             })}
 
+            {/* Existing Artwork → Print Ready Phase 1. The choice card is a
+                pure client-side branch: picking "Create New Artwork" only
+                dismisses it, so the existing interview is byte-for-byte
+                unchanged for every customer who does not upload anything. */}
+            {uploadedArtworkStep === "choose_workflow" ? (
+              <WorkflowChoiceCard
+                busy={sending}
+                onCreateNew={() => setWorkflowChoice("create_new")}
+                onUploadExisting={() => setWorkflowChoice("upload_existing")}
+              />
+            ) : null}
+
+            {uploadedArtworkStep && uploadedArtworkStep !== "choose_workflow" ? (
+              <UploadedArtworkPanel
+                step={uploadedArtworkStep}
+                preparation={preparation}
+                busy={sending}
+                originalImageUrl={currentPreparationImages.original}
+                preparedImageUrl={currentPreparationImages.prepared}
+                onUpload={(file) => void uploadExistingArtwork(file)}
+                onSaveDetails={(input) => void saveUploadedArtworkDetails(input)}
+                onPrepare={() => void prepareUploadedArtwork()}
+                onApprove={() => void approvePreparedArtwork()}
+                onReconsider={() => setReconsideringUpload(true)}
+              />
+            ) : null}
+
             {(sending || snapshot?.project.status === "generating") &&
+            !uploadedArtworkActive &&
             phase !== "concepts_ready" &&
             phase !== "awaiting_summary_confirmation" ? (
               <div className="flex justify-start">
@@ -771,8 +996,9 @@ export function ChatApp() {
                 genuinely different directions from the same brief. Both are
                 quiet secondary actions: neither should compete with Use
                 This Design for attention. */}
-            {affordances.showChangeSelection ||
-            affordances.showExploreNewConcepts ? (
+            {!uploadedArtworkActive &&
+            (affordances.showChangeSelection ||
+              affordances.showExploreNewConcepts) ? (
               <div className="flex flex-wrap items-center gap-3 text-xs">
                 {affordances.showChangeSelection ? (
                   <button
@@ -824,7 +1050,7 @@ export function ChatApp() {
               </div>
             ) : null}
 
-            {snapshot ? (
+            {snapshot && !uploadedArtworkActive ? (
               <DesignHistory
                 entries={designHistoryEntries}
                 artworkVersions={snapshot.artworkVersions}
@@ -850,7 +1076,7 @@ export function ChatApp() {
         )}
       </main>
 
-      {!affordances.hideComposer ? (
+      {!affordances.hideComposer && !uploadedArtworkActive ? (
         <Composer
           disabled={composerDisabled}
           placeholder={placeholder}

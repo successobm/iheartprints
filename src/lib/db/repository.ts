@@ -1,4 +1,6 @@
 import type {
+  ArtworkPreparation,
+  ArtworkPreparationStatus,
   ArtworkVersion,
   AssetRecord,
   ConceptDirectionKey,
@@ -147,6 +149,31 @@ export interface CreateProductionAssetValidationInput {
   status: string;
   report: Record<string, unknown>;
 }
+
+/**
+ * Existing Artwork → Print Ready Phase 1: creating the durable record of one
+ * customer-uploaded artwork, at the moment its immutable original has landed
+ * in storage and deterministic analysis has run.
+ */
+export interface CreateArtworkPreparationInput {
+  originalAssetId: string;
+  originalFilename: string | null;
+  analysis: Record<string, unknown>;
+}
+
+/**
+ * Existing Artwork → Print Ready Phase 1. Deliberately narrow: `originalAssetId`
+ * is NOT patchable — the customer's upload is immutable, and the only way to
+ * work from different source bytes is a new preparation.
+ */
+export type UpdateArtworkPreparationInput = Partial<{
+  status: ArtworkPreparationStatus;
+  preparedAssetId: string | null;
+  preparedArtworkVersionId: string | null;
+  analysis: Record<string, unknown>;
+  preparation: Record<string, unknown> | null;
+  approvedAt: string | null;
+}>;
 
 /**
  * Thrown when a repository detects a duplicate (project_id, version_number)
@@ -383,4 +410,30 @@ export interface ProjectRepository {
     projectId: string,
     finalArtworkJobId: string,
   ): Promise<ProductionAssetValidation | null>;
+
+  // --- Existing Artwork → Print Ready Phase 1: uploaded-artwork preparation ---
+
+  createArtworkPreparation(
+    projectId: string,
+    input: CreateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation>;
+  /**
+   * The project's current preparation — the most recently created one. Also
+   * the authoritative answer to "is this a `prepare_existing` project?": a
+   * non-null result IS the workflow identity, which is why Phase 1 needs no
+   * workflow enum column anywhere (see `ArtworkPreparation`'s doc comment).
+   */
+  getArtworkPreparation(projectId: string): Promise<ArtworkPreparation | null>;
+  /**
+   * By id, WITHOUT a project filter — callers are responsible for checking
+   * `projectId` themselves. Deliberately shaped this way (mirroring
+   * `getFinalDirectionApprovalById`) so a cross-project id is detected as a
+   * mismatch by the capability rather than silently returning `null`, which
+   * would be indistinguishable from "does not exist".
+   */
+  getArtworkPreparationById(id: string): Promise<ArtworkPreparation | null>;
+  updateArtworkPreparation(
+    id: string,
+    patch: UpdateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation>;
 }

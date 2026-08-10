@@ -53,7 +53,15 @@ export type ConversationPhase = (typeof CONVERSATION_PHASES)[number];
 
 export type MessageRole = "user" | "assistant" | "system";
 
-export type ArtworkKind = "concept" | "revision" | "final";
+/**
+ * Existing Artwork → Print Ready Phase 1: `"prepared_upload"` is artwork the
+ * CUSTOMER supplied, background-prepared deterministically and approved by
+ * them — never AI-generated, never a concept, never a revision of one. It
+ * exists as its own kind precisely so uploaded artwork can never be
+ * mislabelled as a generated concept anywhere downstream (Constitution §6.11
+ * / §16 — provenance is never inferred).
+ */
+export type ArtworkKind = "concept" | "revision" | "final" | "prepared_upload";
 
 /**
  * Sprint 2G Live Acceptance Corrective Pass: the stable identity of one of
@@ -791,6 +799,84 @@ export interface FinalArtworkJob {
   providerKey: string | null;
   providerRequestId: string | null;
   providerStatus: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Existing Artwork → Print Ready Phase 1: the lifecycle of ONE piece of
+ * customer-uploaded artwork on its way to becoming print-ready.
+ *
+ *   "analyzed" — the immutable original is stored and deterministic analysis
+ *                has run. Nothing derived exists yet.
+ *   "prepared" — a derived, transparent PNG exists (background isolated,
+ *                edges cleaned). The customer has NOT approved it.
+ *   "approved" — the customer explicitly confirmed the prepared artwork
+ *                faithfully represents what they uploaded. This is NOT a
+ *                claim that production ran, that enhancement happened, or
+ *                that print validation passed (Constitution §15).
+ *
+ * There is deliberately no "rejected"/"failed" status: a preparation the
+ * analyzer refuses to auto-repair simply stays `"analyzed"` and carries an
+ * honest classification, which is a truthful description of reality rather
+ * than a terminal state that would have to be un-stuck later.
+ */
+export type ArtworkPreparationStatus = "analyzed" | "prepared" | "approved";
+
+/**
+ * Existing Artwork → Print Ready Phase 1: the durable record of the second
+ * first-class iHeartPrints workflow — "I already have artwork; make THAT
+ * print-ready."
+ *
+ * WHY this is its own record rather than fields squeezed onto existing rows
+ * (the schema-discipline audit for Phase 1):
+ *
+ *   1. It is the WORKFLOW IDENTITY. "Is this project `create_new` or
+ *      `prepare_existing`?" is answered by "does a preparation exist for
+ *      it?" — a real domain fact, not a speculative enum column added to
+ *      `PrintProject` ahead of any second consumer.
+ *   2. `AssetRecord` cannot express original → prepared lineage honestly:
+ *      `vectorAssetId` means "a vector companion" and `printAssetId` means
+ *      "a print-ready production asset". Neither means "the customer upload
+ *      this was derived from", and reusing one would make a narrower field
+ *      lie (explicitly forbidden by the Phase 1 brief).
+ *   3. The customer's prepared-artwork APPROVAL must survive reload and is
+ *      not any existing flag: `finalDirectionConfirmed` means "no more
+ *      creative changes" in the generated-concept lifecycle and is reset by
+ *      `selectConcept`; `selectedArtworkVersionId` means "the direction I'm
+ *      working with". Neither means "this prepared file faithfully
+ *      represents my upload".
+ *
+ * `analysis` / `preparation` are loosely typed as plain objects for the same
+ * domain-layer-independence reason `ProductionAssetValidation.report` is —
+ * they are narrowed at the `ArtworkPreparationCapability` boundary that
+ * writes and reads them. Both are INTERNAL diagnostics: customer-facing copy
+ * is derived from them (`preparation-copy.ts`), never rendered from them.
+ */
+export interface ArtworkPreparation {
+  id: string;
+  projectId: string;
+  status: ArtworkPreparationStatus;
+  /**
+   * The customer's uploaded bytes, exactly as received. Immutable — every
+   * transformation produces a NEW asset and this id never changes.
+   */
+  originalAssetId: string;
+  /** The derived transparent PNG. `null` until background preparation runs. */
+  preparedAssetId: string | null;
+  /**
+   * The `ArtworkVersion` (`kind: "prepared_upload"`) created when the
+   * customer approves the prepared artwork — the handoff Phase 2's
+   * `FinalArtwork` pipeline consumes. `null` until approval.
+   */
+  preparedArtworkVersionId: string | null;
+  /** Sanitized customer filename. Display only — never a storage path. */
+  originalFilename: string | null;
+  /** Deterministic `ArtworkAnalysis`. Internal diagnostics; never rendered raw. */
+  analysis: Record<string, unknown>;
+  /** Deterministic `BackgroundPreparationRecord`. `null` until prepared. */
+  preparation: Record<string, unknown> | null;
+  approvedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

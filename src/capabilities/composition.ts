@@ -1,6 +1,7 @@
 import { getProjectRepository } from "@/lib/db";
 import type { ProjectRepository } from "@/lib/db/repository";
 
+import { createArtworkPreparationCapability } from "@/capabilities/artwork-preparation";
 import { resolveAssetStorageProvider } from "@/capabilities/asset-storage";
 import {
   createAssetCapability,
@@ -80,6 +81,12 @@ export interface CapabilityGraph {
   printVault: ReturnType<typeof createPrintVaultCapability>;
   assets: ReturnType<typeof createAssetCapability>;
   ownership: ReturnType<typeof createOwnershipCapability>;
+  /**
+   * Existing Artwork → Print Ready Phase 1: the Upload Existing Artwork
+   * workflow. Deliberately has NO provider dependency of any kind — every
+   * operation is local, deterministic pixel math.
+   */
+  artworkPreparation: ReturnType<typeof createArtworkPreparationCapability>;
 }
 
 let graph: CapabilityGraph | null = null;
@@ -201,6 +208,14 @@ export function createCapabilityGraph(
     printVault: createPrintVaultCapability(),
     assets,
     ownership: createOwnershipCapability(),
+    // Existing Artwork → Print Ready Phase 1: repository + assets + the one
+    // brief-mutation boundary. No provider is resolved here, and none exists
+    // to resolve — preparation is local and deterministic by construction.
+    artworkPreparation: createArtworkPreparationCapability(
+      repo,
+      assets,
+      designBrief,
+    ),
   };
 }
 

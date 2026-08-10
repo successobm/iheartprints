@@ -8,6 +8,7 @@ import {
 } from "@/lib/domain/conversation";
 import { emptyInterviewState } from "@/lib/domain/types";
 import type {
+  ArtworkPreparation,
   ArtworkVersion,
   AssetRecord,
   ConversationMessage,
@@ -26,6 +27,7 @@ import type {
 } from "@/lib/domain/types";
 import type {
   ApproveDesignBriefInput,
+  CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
   CreateFinalArtworkJobInput,
@@ -35,6 +37,7 @@ import type {
   CreateProductionAssetValidationInput,
   ProjectRepository,
   UpdateArtworkEvaluationInput,
+  UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
 } from "./repository";
@@ -55,6 +58,8 @@ interface LocalDatabase {
   finalArtworkJobs: FinalArtworkJob[];
   /** Sprint 2M Phase 2C. */
   productionAssetValidations: ProductionAssetValidation[];
+  /** Existing Artwork → Print Ready Phase 1. */
+  artworkPreparations: ArtworkPreparation[];
 }
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -77,6 +82,7 @@ function emptyDb(): LocalDatabase {
     finalDirectionApprovals: [],
     finalArtworkJobs: [],
     productionAssetValidations: [],
+    artworkPreparations: [],
   };
 }
 
@@ -169,6 +175,9 @@ async function readDb(): Promise<LocalDatabase> {
         providerStatus: job.providerStatus ?? null,
       })),
       productionAssetValidations: parsed.productionAssetValidations ?? [],
+      // Existing Artwork → Print Ready Phase 1: absent in every store
+      // written before uploaded-artwork preparation existed.
+      artworkPreparations: parsed.artworkPreparations ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -1006,5 +1015,60 @@ export class LocalProjectRepository implements ProjectRepository {
       )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     return matches.at(-1) ?? null;
+  }
+
+  async createArtworkPreparation(
+    projectId: string,
+    input: CreateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation> {
+    const db = await readDb();
+    const timestamp = nowIso();
+    const preparation: ArtworkPreparation = {
+      id: randomUUID(),
+      projectId,
+      status: "analyzed",
+      originalAssetId: input.originalAssetId,
+      preparedAssetId: null,
+      preparedArtworkVersionId: null,
+      originalFilename: input.originalFilename,
+      analysis: input.analysis,
+      preparation: null,
+      approvedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.artworkPreparations.push(preparation);
+    await writeDb(db);
+    return preparation;
+  }
+
+  async getArtworkPreparation(
+    projectId: string,
+  ): Promise<ArtworkPreparation | null> {
+    const db = await readDb();
+    const matches = db.artworkPreparations
+      .filter((item) => item.projectId === projectId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return matches.at(-1) ?? null;
+  }
+
+  async getArtworkPreparationById(
+    id: string,
+  ): Promise<ArtworkPreparation | null> {
+    const db = await readDb();
+    return db.artworkPreparations.find((item) => item.id === id) ?? null;
+  }
+
+  async updateArtworkPreparation(
+    id: string,
+    patch: UpdateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation> {
+    const db = await readDb();
+    const preparation = db.artworkPreparations.find((item) => item.id === id);
+    if (!preparation) throw new Error("Artwork preparation not found");
+
+    Object.assign(preparation, patch, { updatedAt: nowIso() });
+    await writeDb(db);
+    return preparation;
   }
 }

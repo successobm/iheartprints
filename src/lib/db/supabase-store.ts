@@ -4,6 +4,8 @@ import {
 } from "@/lib/domain/conversation";
 import { emptyInterviewState } from "@/lib/domain/types";
 import type {
+  ArtworkPreparation,
+  ArtworkPreparationStatus,
   ArtworkVersion,
   AssetKind,
   AssetRecord,
@@ -31,6 +33,7 @@ import type {
 } from "@/lib/domain/types";
 import type {
   ApproveDesignBriefInput,
+  CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
   CreateFinalArtworkJobInput,
@@ -40,6 +43,7 @@ import type {
   CreateProductionAssetValidationInput,
   ProjectRepository,
   UpdateArtworkEvaluationInput,
+  UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
 } from "./repository";
@@ -210,6 +214,22 @@ type DbProductionAssetValidation = {
   report: Record<string, unknown>;
   validated_at: string;
   created_at: string;
+};
+
+/** Existing Artwork → Print Ready Phase 1. */
+type DbArtworkPreparation = {
+  id: string;
+  project_id: string;
+  status: ArtworkPreparationStatus;
+  original_asset_id: string;
+  prepared_asset_id: string | null;
+  prepared_artwork_version_id: string | null;
+  original_filename: string | null;
+  analysis: Record<string, unknown> | null;
+  preparation: Record<string, unknown> | null;
+  approved_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 type DbDesignBriefVersion = {
@@ -405,6 +425,23 @@ function mapProductionAssetValidation(
     report: row.report ?? {},
     validatedAt: row.validated_at,
     createdAt: row.created_at,
+  };
+}
+
+function mapArtworkPreparation(row: DbArtworkPreparation): ArtworkPreparation {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    status: row.status,
+    originalAssetId: row.original_asset_id,
+    preparedAssetId: row.prepared_asset_id,
+    preparedArtworkVersionId: row.prepared_artwork_version_id,
+    originalFilename: row.original_filename,
+    analysis: row.analysis ?? {},
+    preparation: row.preparation ?? null,
+    approvedAt: row.approved_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -1346,5 +1383,76 @@ export class SupabaseProjectRepository implements ProjectRepository {
     return data
       ? mapProductionAssetValidation(data as DbProductionAssetValidation)
       : null;
+  }
+
+  async createArtworkPreparation(
+    projectId: string,
+    input: CreateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation> {
+    const { data, error } = await this.client
+      .from("artwork_preparations")
+      .insert({
+        project_id: projectId,
+        status: "analyzed",
+        original_asset_id: input.originalAssetId,
+        original_filename: input.originalFilename,
+        analysis: input.analysis,
+      })
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapArtworkPreparation(data as DbArtworkPreparation);
+  }
+
+  async getArtworkPreparation(
+    projectId: string,
+  ): Promise<ArtworkPreparation | null> {
+    const { data, error } = await this.client
+      .from("artwork_preparations")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkPreparation(data as DbArtworkPreparation) : null;
+  }
+
+  async getArtworkPreparationById(
+    id: string,
+  ): Promise<ArtworkPreparation | null> {
+    const { data, error } = await this.client
+      .from("artwork_preparations")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkPreparation(data as DbArtworkPreparation) : null;
+  }
+
+  async updateArtworkPreparation(
+    id: string,
+    patch: UpdateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation> {
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (patch.status !== undefined) update.status = patch.status;
+    if (patch.preparedAssetId !== undefined) {
+      update.prepared_asset_id = patch.preparedAssetId;
+    }
+    if (patch.preparedArtworkVersionId !== undefined) {
+      update.prepared_artwork_version_id = patch.preparedArtworkVersionId;
+    }
+    if (patch.analysis !== undefined) update.analysis = patch.analysis;
+    if (patch.preparation !== undefined) update.preparation = patch.preparation;
+    if (patch.approvedAt !== undefined) update.approved_at = patch.approvedAt;
+
+    const { data, error } = await this.client
+      .from("artwork_preparations")
+      .update(update)
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapArtworkPreparation(data as DbArtworkPreparation);
   }
 }

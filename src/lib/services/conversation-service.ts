@@ -1,3 +1,4 @@
+import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
 import { getCapabilityGraph } from "@/capabilities/composition";
 import type { DesignBriefDecisionAction } from "@/capabilities/conversation";
 import {
@@ -83,6 +84,14 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * placement policy table; no client component computes inches.
    */
   printReadySize: PrintReadySizeView | null;
+  /**
+   * Existing Artwork → Print Ready Phase 1: the Upload Existing Artwork
+   * workflow's state, already phrased for the customer (no analysis numbers,
+   * no asset ids, no storage keys). `null` for every Create New Artwork
+   * project — and that `null` IS the workflow identity the UI branches on,
+   * which is why Phase 1 needs no workflow enum anywhere.
+   */
+  artworkPreparation: ArtworkPreparationView | null;
 };
 
 async function withConceptStatus(
@@ -99,7 +108,24 @@ async function withConceptStatus(
     conceptStatus: toCustomerConceptStatusView(conceptStatus),
     finalization: toCustomerFinalizationView(snapshot.project.status),
     printReadySize: await resolvePrintReadySize(snapshot),
+    artworkPreparation: await resolveArtworkPreparation(snapshot.project.id),
   };
+}
+
+/**
+ * Never allowed to take down a snapshot the customer is waiting on: a project
+ * with no preparation is the overwhelmingly common case, and a lookup failure
+ * must degrade to "no uploaded artwork" rather than a failed page load. Same
+ * advisory-not-a-gate rule as `resolvePrintReadySize`.
+ */
+async function resolveArtworkPreparation(
+  projectId: string,
+): Promise<ArtworkPreparationView | null> {
+  try {
+    return await getCapabilityGraph().artworkPreparation.getPreparation(projectId);
+  } catch {
+    return null;
+  }
 }
 
 /**

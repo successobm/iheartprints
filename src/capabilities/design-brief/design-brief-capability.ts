@@ -6,6 +6,7 @@ import { toDesignBriefSnapshotContent } from "@/lib/domain/brief-snapshot";
 import type {
   DesignBriefSnapshotContent,
   DesignBriefVersion,
+  PrintPlacement,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 import type { BriefPatchProposal } from "@/capabilities/shared/contracts";
@@ -46,6 +47,32 @@ export interface DesignBriefCapability {
     designId: string,
     widthIn: number | null,
   ): Promise<TShirtDesignBrief>;
+  /**
+   * Existing Artwork → Print Ready Phase 1: records the PRODUCTION CONTEXT an
+   * uploaded-artwork customer states — what we're printing on, its colour,
+   * and where the print goes.
+   *
+   * Separate from `applyProposal` for the same reason `setIntendedPrintWidth`
+   * is: this is not an Intent Extraction interpretation of a conversational
+   * message, and labelling it `source: "intent_extraction"` to reuse that
+   * path would make the provenance a lie. The customer answered a direct
+   * question with a direct value.
+   *
+   * It deliberately touches ONLY these three fields. `designDescription`,
+   * `exactText`, `designStyle`, and every other creative field stay untouched
+   * — for uploaded artwork the pixels are the design, and inventing a written
+   * description of them would create a second, competing source of truth.
+   *
+   * `undefined` leaves a field alone; an explicit `null` clears it.
+   */
+  setUploadedArtworkContext(
+    designId: string,
+    input: {
+      productSummary?: string | null;
+      shirtColor?: string | null;
+      printPlacement?: PrintPlacement | null;
+    },
+  ): Promise<TShirtDesignBrief>;
   /** Most recent durable approval, if any. */
   getLatestApprovedVersion(
     designId: string,
@@ -81,6 +108,22 @@ export function createDesignBriefCapability(
 
     async setIntendedPrintWidth(designId, widthIn) {
       return repo.updateBrief(designId, { intendedPrintWidthIn: widthIn });
+    },
+
+    async setUploadedArtworkContext(designId, input) {
+      const patch: Partial<TShirtDesignBrief> = {};
+      if (input.productSummary !== undefined) {
+        patch.productSummary = normalizeOptionalText(input.productSummary);
+      }
+      if (input.shirtColor !== undefined) {
+        patch.shirtColor = normalizeOptionalText(input.shirtColor);
+      }
+      if (input.printPlacement !== undefined) {
+        patch.printPlacement = input.printPlacement;
+      }
+
+      if (Object.keys(patch).length === 0) return this.getWorkingBrief(designId);
+      return repo.updateBrief(designId, patch);
     },
 
     async getLatestApprovedVersion(designId) {
@@ -120,4 +163,11 @@ function contentEquals(
   b: DesignBriefSnapshotContent,
 ): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Whitespace-only input is "not answered", never a stored empty string. */
+function normalizeOptionalText(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
 }

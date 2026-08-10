@@ -145,4 +145,14 @@ export const TEST_FILES = [
   "src/capabilities/conversation/concept-selection-lifecycle.test.ts",
   "src/capabilities/conversation/production-size-lifecycle.test.ts",
   "src/components/chat/PrintReadySizeCard.test.tsx",
+  // Existing Artwork → Print Ready Phase 1.
+  "src/capabilities/artwork-preparation/upload-security.test.ts",
+  "src/capabilities/artwork-preparation/image-analysis.test.ts",
+  "src/capabilities/artwork-preparation/background-isolation.test.ts",
+  "src/capabilities/artwork-preparation/artwork-preparation-capability.test.ts",
+  "src/capabilities/artwork-preparation/bowling-upload-regression.test.ts",
+  "src/capabilities/artwork-preparation/no-paid-provider.test.ts",
+  "src/components/chat/uploaded-artwork-flow.test.ts",
+  "src/components/chat/UploadedArtworkPanel.test.tsx",
+  "src/app/api/projects/[projectId]/artwork-upload/route.test.ts",
 ];

@@ -943,6 +943,85 @@
  *     recomputes from it rather than trusting it.
  *     `FinalArtworkWorkerCapability`, which legitimately knows both sides, is
  *     the single place the provider's metadata is mapped onto that summary.
+ *
+ * ## Existing Artwork → Print Ready Phase 1 — the SECOND workflow
+ *
+ * iHeartPrints now has two first-class ways to reach print-ready artwork, and
+ * they are genuinely different operations rather than two entry points to one
+ * pipeline. See ARCHITECTURE.md §13h for the full design.
+ *
+ *     CREATE NEW ARTWORK      (unchanged)
+ *       conversation → Design Brief → approval → generation → concepts
+ *
+ *     UPLOAD EXISTING ARTWORK (new)
+ *       upload → deterministic analysis → repairability classification
+ *              → background isolation → edge cleanup → prepared PNG
+ *              → explicit customer approval
+ *
+ * New capability `ArtworkPreparationCapability`
+ * (`src/capabilities/artwork-preparation/`):
+ *   - Depends on `ProjectRepository`, `AssetCapability`, and
+ *     `DesignBriefCapability` only. It has NO provider port at all — not an
+ *     unconfigured one, not a stubbed one. Every operation is local,
+ *     deterministic pixel math (`upload-limits.ts`, `image-decode.ts`,
+ *     `image-analysis.ts`, `repairability.ts`, `background-isolation.ts`),
+ *     which is what makes "zero OpenAI/Topaz/network calls" a structural
+ *     property rather than a policy (proved by `no-paid-provider.test.ts`).
+ *   - Never enqueues a `GenerationJob`, never calls a
+ *     `ConceptGenerationProvider`, and never produces an `ArtworkVersion` of
+ *     kind `"concept"`. Uploaded artwork is never labelled AI-generated.
+ *   - Never mutates the uploaded original. `AssetRecord`s of kind
+ *     `"customer_upload"` are written once; every transformation produces a
+ *     new asset (`AssetCapability.uploadCustomerArtwork`, new — deliberately
+ *     not a reuse of `uploadConceptImage`, whose `providerKey`/
+ *     `generationJobId` provenance fields are all wrong here).
+ *   - Never changes wording, redraws objects, shifts colour globally, alters
+ *     composition, invents elements, regenerates, or reframes. Geometry
+ *     preservation is asserted, not assumed.
+ *
+ * WORKFLOW IDENTITY is derived, not stored: a project with an
+ * `ArtworkPreparation` row IS a `prepare_existing` project. There is
+ * deliberately no `PrintProject.workflowKind` column — the audit for it is in
+ * the migration header and in `ArtworkPreparation`'s doc comment. The
+ * customer's pre-upload choice is transient client state
+ * (`components/chat/uploaded-artwork-flow.ts`), because nothing durable
+ * exists to remember until they actually upload something.
+ *
+ * `DesignBriefCapability` gains `setUploadedArtworkContext` — a sibling of
+ * `setIntendedPrintWidth`, and for the same reason: it records a production
+ * fact the customer stated directly, so routing it through `applyProposal`
+ * (`source: "intent_extraction"`) would make the provenance a lie. It writes
+ * ONLY `productSummary` / `shirtColor` / `printPlacement`; for uploaded
+ * artwork the pixels ARE the design, so nothing ever writes
+ * `designDescription`, `exactText`, or `designStyle` from this path — a
+ * written description of uploaded pixels would be a second, competing source
+ * of truth.
+ *
+ * NO REQUIRED-WORDING CONTRACT. Uploaded artwork never goes through Concept
+ * Evaluation's required-wording checks, and Phase 1 performs no OCR: the
+ * uploaded pixels are authoritative for visual content, and the customer is
+ * never asked to retype text they already have. The architectural hook Phase 2
+ * needs is `ArtworkVersion.kind === "prepared_upload"` — the unambiguous,
+ * non-inferred signal a future uploaded-preserve print-validation
+ * applicability profile branches on. Phase 2 owns that profile; Phase 1 only
+ * guarantees the signal exists and is honest.
+ *
+ * Forbidden (additions):
+ *   ArtworkPreparation calling any image model, segmentation service, or
+ *     other network provider
+ *   ArtworkPreparation creating a GenerationJob, a FinalDirectionApproval, or
+ *     a FinalArtworkJob
+ *   Overwriting, re-encoding in place, or deleting a `customer_upload` asset
+ *   Removing background-coloured pixels that no border-connected path reaches
+ *   Recording original → prepared lineage on `AssetRecord.vectorAssetId` /
+ *     `printAssetId` (both mean something narrower) or on
+ *     `ArtworkVersion.sourceArtworkVersionId` (which means "a targeted
+ *     revision of that artwork version", and the source here is an ASSET)
+ *   Describing prepared artwork as print-ready, enhanced, upscaled, or
+ *     validated — Phase 1 does none of those (Constitution §15)
+ *   Surfacing flood fill, tolerance, sigma, masks, alpha, or pixel counts to
+ *     a customer — `preparation-copy.ts` is the one place analysis becomes
+ *     language, and it speaks only in inches
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2M2i" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2M2j" as const;

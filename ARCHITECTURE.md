@@ -175,6 +175,22 @@ Next.js Application
 
 ## 4. End-to-End Customer Workflow
 
+There are **two** first-class workflows. They share the Design Brief, asset
+storage, and print-sizing policy, and share nothing else — see §13h for why
+they are genuinely different operations rather than two entry points to one
+pipeline.
+
+```
+CREATE NEW ARTWORK       "design something for me"        (below)
+UPLOAD EXISTING ARTWORK  "make MY artwork printable"      (§13h)
+```
+
+Which workflow a project is in is **derived**, not stored: a project with an
+`ArtworkPreparation` row is an uploaded-artwork project. There is no workflow
+enum column.
+
+### Create New Artwork
+
 Currently implemented flow:
 
 ```
@@ -236,6 +252,7 @@ and intent remain ephemeral. See §5 and §13a.
 | Generation status | Read-only browser polling; never claims or runs jobs |
 | Finalization status | Read-only browser polling while `preparing`; never claims or runs jobs |
 | Post-approval revisions | Synchronous brief update; regeneration is enqueue-only |
+| Uploaded-artwork upload, analysis, background preparation, approval (§13h) | Synchronous within the customer request — local, deterministic pixel math with no provider call to wait on |
 
 Real provider generation is guarded by configuration
 (`CONCEPT_GENERATION_PROVIDER`, asset storage readiness, and
@@ -714,12 +731,32 @@ See §13 for the full evaluation contract and §21 for configuration.
 
 | | |
 |---|---|
-| **Responsibility** | Persist asset metadata; upload concept images; signed URLs; cleanup |
+| **Responsibility** | Persist asset metadata; upload concept, production, and customer-supplied images; signed URLs; cleanup |
 | **Inputs** | Image bytes + metadata |
-| **Outputs** | `AssetRecord` pairs (primary + optional thumbnail) |
+| **Outputs** | `AssetRecord` pairs (primary + optional thumbnail); single production or customer-artwork `AssetRecord` |
 | **Dependencies** | ProjectRepository, AssetStorageProvider, ThumbnailGenerator |
 | **Owns** | Asset lifecycle boundary |
 | **Must never own** | Provider prompt dialect; brief mutation |
+
+`uploadCustomerArtwork` (§13h) is deliberately its own method rather than a
+reuse of `uploadConceptImage`: every provenance field on the latter
+(`providerKey`, `generationJobId`) is wrong for artwork the customer
+supplied, and no thumbnail companion is generated because a third asset with
+ambiguous provenance would add nothing.
+
+### ArtworkPreparationCapability — Active (Existing Artwork → Print Ready Phase 1)
+
+| | |
+|---|---|
+| **Responsibility** | The Upload Existing Artwork workflow: ingest, analyze, classify, isolate background, clean edges, record approval |
+| **Inputs** | Uploaded image bytes + declared content type + filename; production context (product, garment colour, print location) |
+| **Outputs** | `ArtworkPreparation` lifecycle record; immutable `customer_upload` asset; derived transparent `png` asset; `prepared_upload` `ArtworkVersion` on approval; already-phrased customer view |
+| **Dependencies** | ProjectRepository, AssetCapability, DesignBriefCapability |
+| **Owns** | Upload ingress safety, deterministic analysis, repairability classification, edge-connected background isolation, fringe decontamination, prepared-artwork approval |
+| **Must never own** | Any provider port (it has none); GenerationJob/FinalArtworkJob creation; mutation of the uploaded original; creative reinterpretation of any kind; customer-facing phrasing of analysis internals |
+
+See §13h. Every operation is local and deterministic — there is no provider
+to configure, disable, or accidentally call.
 
 ### AssetStorageProvider — Partial
 
@@ -1322,6 +1359,7 @@ Primary types live in `src/lib/domain/types.ts`.
 | `ApiProjectSnapshot` | Customer/API aggregate: same shape with sanitized `CustomerArtworkVersion[]` + a derived `finalization` view |
 | `FinalDirectionApproval` | Sprint 2M Phase 2B: durable, append-only "this is my final direction" decision, targeting one exact `ArtworkVersion` (internal; not in snapshot) |
 | `FinalArtworkJob` | Sprint 2M Phase 2B: idempotent production-finalization request keyed 1:1 to one approval (internal; not in snapshot; Phase 2B never claims/runs it) |
+| `ArtworkPreparation` | §13h: the Upload Existing Artwork lifecycle for one customer file — immutable original, derived prepared asset, analysis/preparation diagnostics, explicit approval. Its existence IS the workflow identity |
 
 ### Key relationships
 
@@ -1335,6 +1373,13 @@ Primary types live in `src/lib/domain/types.ts`.
 - Required wording is derived/normalized via `src/lib/domain/required-wording.ts`
 - One-level undo: `interviewState.lastRevision` stores previous brief snapshot
 - Conversation lifecycle: new projects use phase `interviewing`; legacy phases remain readable
+- §13h: an `ArtworkPreparation` references its immutable `originalAssetId`,
+  its derived `preparedAssetId`, and (once approved) a
+  `prepared_upload` `ArtworkVersion`. Original → prepared lineage lives here
+  rather than on `AssetRecord` (whose `vectorAssetId`/`printAssetId` both mean
+  something narrower) or on `ArtworkVersion.sourceArtworkVersionId` (which
+  means "a targeted revision of that artwork version"). A project with a
+  preparation is an uploaded-artwork project; there is no workflow enum
 - Sprint 2M Phase 2B: a `FinalDirectionApproval` references exactly one
   `artworkVersionId` + the `designBriefVersionId` it was generated against;
   at most one row per project is `"active"`. A `FinalArtworkJob` references
@@ -3780,6 +3825,256 @@ available again.
 
 ---
 
+## 13h. Existing Artwork → Print Ready (Phase 1)
+
+### Why: two workflows, not two entry points
+
+iHeartPrints was built around one job — *"design something for me"* — and the
+whole architecture reflects it: interview, Design Brief, approval,
+generation, concepts, revision. A large share of real customers arrive with a
+different job entirely: *"I already have my artwork; make THAT printable."*
+
+Those are not two ways into one pipeline. Everything downstream of
+"understand what the customer wants" is different, and several steps are
+actively harmful when applied to the second job — asking someone to describe
+a design they are literally holding, offering them three creative directions
+for artwork they already chose, or asking them to retype the wording that is
+already in their file.
+
+Phase 1 therefore adds a genuinely second first-class workflow:
+
+```
+CREATE NEW ARTWORK  (unchanged)
+  conversation → Design Brief → approval → generation → concepts → revision
+
+UPLOAD EXISTING ARTWORK  (new)
+  upload → deterministic analysis → repairability classification
+         → exterior background isolation → edge cleanup
+         → Original vs Prepared → explicit customer approval
+```
+
+Phase 1 stops at approved prepared artwork. It does not enhance, upscale,
+validate, finalize, or produce a print-ready deliverable — and never says it
+does (Constitution §15).
+
+### The preservation contract
+
+Uploaded artwork is **pixel-authoritative**. The customer is not asking for a
+redesign.
+
+| Phase 1 may | Phase 1 must never |
+|---|---|
+| decode and normalize the source | change wording |
+| measure edge statistics and bounds | redraw objects |
+| identify an exterior background | shift colours globally |
+| remove it, creating transparency | alter composition |
+| clean the boundary it leaves behind | invent elements |
+| classify repairability | regenerate artwork |
+| preserve aspect ratio exactly | call an image model |
+| | overwrite the uploaded original |
+
+**The original upload is immutable.** Its `AssetRecord` (kind
+`customer_upload`) is written once and never updated; every transformation
+produces a new, separate asset. Asserted by hashing the stored bytes before
+and after a full prepare-and-approve run.
+
+### Workflow identity is derived, not stored
+
+There is deliberately **no `PrintProject.workflowKind` column**. A project
+with an `ArtworkPreparation` row *is* a `prepare_existing` project — a real
+domain fact rather than a speculative enum added ahead of a second consumer.
+
+The customer's choice *before* they upload anything is transient client state
+(`components/chat/uploaded-artwork-flow.ts`), because nothing durable exists
+to remember yet. A reload correctly returns them to the choice rather than
+trapping them in a workflow they never committed to.
+
+### Capability
+
+`ArtworkPreparationCapability` (`src/capabilities/artwork-preparation/`)
+depends on `ProjectRepository`, `AssetCapability`, and
+`DesignBriefCapability` — and on **no provider port at all**. Not an
+unconfigured one, not a stub. There is nothing in the module that could make
+a network call, which is what turns "zero paid-provider calls" from a policy
+into a structural property.
+
+| Module | Responsibility |
+|---|---|
+| `upload-limits.ts` | Size/format/dimension/pixel bounds, magic-signature sniffing, filename sanitization. Pure. |
+| `image-decode.ts` | The only place upload bytes become pixels. Header-bounds-check *before* decoding. |
+| `image-analysis.ts` | Deterministic measurement. Measures; never decides. |
+| `repairability.ts` | The conservative verdict. Reads analysis; touches no pixels. |
+| `background-isolation.ts` | Edge-connected fill, fringe decontamination, halo guard. Pure. |
+| `preparation-copy.ts` | The one place analysis becomes customer language. |
+| `artwork-preparation-capability.ts` | Orchestration, persistence, ownership checks. |
+
+### Background isolation: reachability, not similarity
+
+The audited reference case is a customer's bowling logo — 979x1024, fully
+opaque, near-black exterior touching all four edges (edge mean ≈0.78, edge
+sigma ≈0.53), with **~5,835 near-black pixels that are intentional interior
+line work**. "Remove every black pixel" would delete the customer's artwork.
+
+Only **reachability from the image border** distinguishes the two:
+
+1. Estimate the background from the border ring's *dominant* colour (the
+   mode's own mean, so one bright corner pixel cannot define it).
+2. Derive tolerance adaptively from measured edge deviation — a genuinely
+   flat export stays at the audited baseline of 12; noise widens it, up to a
+   hard ceiling past which the artwork is classified `NEEDS_REVIEW` instead.
+3. Multi-seed 4-connected flood fill from **every** matching border pixel.
+   4-connectivity, not 8: diagonal connectivity lets a fill squeeze through a
+   one-pixel anti-aliased gap in an outline and flood a design's interior,
+   which is the classic way this kind of tool eats artwork.
+4. Fringe decontamination, **only** within 2px of the removed region. For a
+   pixel `C` that is foreground `F` composited over background `B`,
+   `C = a·F + (1−a)·B`, so `a ≈ |C−B| / |F−B|` and the uncontaminated colour
+   is `B + (C−B)/a`, with `F` taken from a nearby genuinely-solid pixel.
+   **When no such reference exists, or the pixel is already essentially
+   solid, it is preserved unchanged.** Artwork fidelity outranks cleanup.
+5. Halo guard: bleed retained RGB two pixels into the now-transparent
+   exterior. Transparent pixels still carry colour, and every resample in
+   this codebase interpolates RGB independently of alpha
+   (`raster-transform.ts` is straight, not premultiplied) — leaving the old
+   near-black behind a zero alpha is exactly how a dark halo reappears during
+   a later upscale.
+
+### Repairability
+
+Precedence, highest first, biased one way on purpose: when the deterministic
+evidence is ambiguous, prefer review over acting.
+
+| Verdict | Meaning |
+|---|---|
+| `NOT_REPAIRABLE` | No visible artwork at all. |
+| `NEEDS_REVIEW` | Complex/photographic exterior, or a fill that would remove ~everything or ~nothing. |
+| `REQUIRES_ENHANCEMENT` | Otherwise fine, but too few real pixels for the placement's production target. |
+| `PRINT_READY_ALREADY` | Already usably transparent, and big enough. |
+| `REPAIRABLE_AUTOMATICALLY` | Uniform, edge-connected exterior; sufficient resolution. |
+
+`backgroundTreatment` is **independent of** resolution: background
+preparation and enhancement are separate problems, so an artwork that needs
+enhancement can still have its background prepared honestly today. Print-size
+sufficiency reads `shared/print-placement-dimensions.ts` — artwork
+preparation never restates a print-sizing rule — and is measured against the
+**visible artwork's** width, never the padded canvas.
+
+### Persistence
+
+One new table, `artwork_preparations`, plus one new `artwork_kind` enum value
+(`prepared_upload`). The schema-discipline audit — what must survive reload,
+why existing tables cannot represent it honestly, and why this is the
+smallest additive change — is written out in full in the migration header
+(`20260810140000_uploaded_artwork_preparation.sql`) and in
+`ArtworkPreparation`'s doc comment. In short:
+
+- `AssetRecord` has no honest lineage slot (`vectorAssetId` means "an SVG
+  companion"; `printAssetId` means "a print-ready production asset").
+- The customer's prepared-artwork approval is not any existing flag.
+  `finalDirectionConfirmed` means "no more creative changes" and is reset by
+  concept selection; `selectedArtworkVersionId` means "the direction I'm
+  working with".
+
+### The prepared ArtworkVersion (the Phase 2 handoff)
+
+On approval, one `ArtworkVersion` is created with `kind: "prepared_upload"` —
+its own kind precisely so uploaded artwork can never be mislabelled as an
+AI-generated concept (Constitution §16). Its provenance is honest by
+omission: `generationJobId`, `providerKey`, and `designBriefVersionId` are
+all `null`, because no job, no provider, and no approved brief version
+authorized these pixels — the customer's own file did.
+`sourceArtworkVersionId` is also `null`: it means "a targeted revision of
+that artwork version", and the source here is an **asset**. Original →
+prepared lineage lives on `artwork_preparations`, where it is true.
+
+Phase 1 deliberately does **not** set `selectedArtworkVersionId`,
+`finalDirectionConfirmed`, or any `PrintProject.status` transition. Those are
+production-lifecycle claims, and Phase 2 owns the decision about how an
+uploaded-artwork project enters `FinalArtworkCapability`.
+
+### No required-wording contract
+
+Uploaded artwork never goes through Concept Evaluation's required-wording
+checks, and Phase 1 performs no OCR. The pixels are authoritative for visual
+content; the customer is never asked to retype text they already have, and
+the text is never modified.
+
+The architectural hook Phase 2 needs is exactly
+`ArtworkVersion.kind === "prepared_upload"` — an unambiguous, non-inferred
+signal for a future uploaded-preserve print-validation applicability profile.
+Phase 2 owns that profile; Phase 1 only guarantees the signal exists.
+
+### Formats
+
+**PNG only, and it says so.** The repository's one image codec is `pngjs`
+(`png-thumbnail-generator.ts`, `raster-transform.ts`, `production-png.ts`),
+which is PNG-only. JPEG/WebP support would mean adding a new decoder
+dependency and its entire security surface, which Phase 1 deliberately does
+not do. JPEG, WebP, and GIF are *detected* so the customer gets an honest
+"we can't take that yet" rather than a generic corruption error; SVG is
+detected and rejected explicitly.
+
+### Security boundary
+
+Every rule runs before any uncontrolled allocation:
+
+- **Scope.** Bound to `projectId` from the path; the capability re-verifies
+  ownership of every row it touches, and image reads additionally confirm the
+  asset belongs to the project. (This codebase has no user authentication
+  layer — see §23/§24 — so "authenticated" here means project-scoped
+  authorization, which is the strongest statement currently true.)
+- **Bytes are authoritative.** Declared `Content-Type` and filename are
+  untrusted claims. A declared type that disagrees with the signature is
+  rejected rather than silently corrected.
+- **Decompression bombs** are stopped at the PNG header: a 30000x30000 PNG is
+  a few hundred bytes on the wire and ~3.6 GB decoded, so checking the
+  decoded image would already be too late.
+- **Filenames** are sanitized for display only and never used to build a
+  storage path — object keys are always
+  `projects/{projectId}/concepts/{groupingId}/{name}` with a name this code
+  chooses.
+- Every image-read miss returns the same generic 404, so the endpoint cannot
+  be used to enumerate internal state.
+
+### UI
+
+`WorkflowChoiceCard` appears only at the very start of a project. Choosing
+"Create New Artwork" is a pure client-side dismissal — the existing interview
+is byte-for-byte unchanged for every customer who does not upload anything.
+
+`UploadedArtworkPanel` owns the surface once an upload exists, and the
+creative surfaces (concept grid, summary card, revision actions, composer)
+are hidden rather than merely unreachable.
+
+`ArtworkComparison` renders Original and Prepared side by side, both labelled,
+with the prepared tile on a transparency checkerboard so removed background
+reads as genuinely removed rather than repainted white. **Enlarging is not
+approving**: `ArtworkPreviewModal` has no approval affordance in it at all —
+a stronger version of the structural fix applied to `ConceptCards`, where the
+enlarge control had to become a sibling of the select control. Approval is
+only ever the explicit "Use Prepared Artwork" button.
+
+Every sentence the panel renders comes from the server
+(`preparation-copy.ts`). No copy is derived client-side from analysis
+numbers, because analysis numbers never reach the client at all.
+
+### Testing
+
+Fixture cases A–I (solid black exterior, internal outline, enclosed region,
+near-black, white background, already transparent, edge-touching subject,
+halo, photographic background) plus J (original immutability, verified by
+hash), a full security suite at both the pure and route layers, and a bowling
+acceptance regression against a **synthetic** fixture reproducing the audited
+properties at real dimensions — the customer's own file is deliberately not
+committed to the repository (privacy and ownership, Constitution §16).
+
+`no-paid-provider.test.ts` traps `fetch`, `http.request`, `https.request`,
+and `net.Socket.prototype.connect` for the duration of a full
+upload → analyze → prepare → approve run, so a paid call would fail the suite
+loudly instead of quietly spending money.
+
+---
+
 ## 14. Background Worker Architecture
 
 Two independent job queues, two independent workers — deliberately never
@@ -3879,6 +4174,12 @@ Deployment details: `docs/deployment/generation-worker.md`.
 - Signed URL defaults: 300s; hard max 900s
 - Raw object keys remain internal
 - Cleanup deletes storage bytes if DB persist fails after upload
+- §13h: customer-supplied artwork uses the same object hierarchy and the same
+  orphan-cleanup guarantee, via `uploadCustomerArtwork`. The `customer_upload`
+  original is written once and **never** updated, re-encoded in place, or
+  deleted; the prepared transparent PNG is always a separate asset. The
+  customer's filename is stored as display metadata only and never
+  contributes to an object key
 
 ### Customer-safe concept-image read path (Sprint 2K Phase 1)
 
@@ -3933,6 +4234,15 @@ Production-oriented implemented: `supabase_storage`. Reserved:
 - Filesystem signing via `ASSET_SIGNING_SECRET` (dev fallback when unset)
 - Customer snapshots never expose raw storage keys, asset ids, or signed
   URLs — only `hasImage` plus public concept presentation fields (§19)
+- §13h (customer-supplied binary ingress): encoded size bounded before and
+  after buffering; format determined by magic signature, not by the declared
+  `Content-Type` or filename, and a disagreement between them is a rejection
+  rather than a silent correction; SVG explicitly rejected; decoded
+  dimensions and total pixel count bounded against the image header before
+  any bitmap allocation (decompression-bomb guard); malformed and truncated
+  input rejected as a customer-facing 400, never an unhandled throw;
+  filenames sanitized for display only; uploaded-artwork image reads scoped
+  to the owning project with a uniform 404 on every miss
 
 Do not document or commit actual secrets.
 
@@ -3970,9 +4280,18 @@ Other notes:
   table persists authoritative Print Validation runs; `project_status`
   gained `"finalization_required"` — see
   `supabase/migrations/20260807140000_final_artwork_production_pipeline.sql`
+- §13h: one new table, `artwork_preparations`, plus one new `artwork_kind`
+  enum value (`prepared_upload`) — see
+  `supabase/migrations/20260810140000_uploaded_artwork_preparation.sql`, whose
+  header carries the full schema-discipline audit (what must survive reload,
+  why existing tables cannot represent it honestly, why this is the smallest
+  additive change). Notably there is **no** workflow-kind column: the
+  preparation row's existence is the workflow identity
 - Derived values recomputed rather than stored as authority: concept
   status batches, brief evaluation, intelligence assessment, revision
-  impact, summary views, customer-facing `finalization` status
+  impact, summary views, customer-facing `finalization` status, uploaded-
+  artwork repairability (reclassified from the stored analysis on every read,
+  and the analysis itself re-measured whenever the print placement changes)
 
 ---
 
@@ -3996,6 +4315,9 @@ delegation to composed capabilities.
 | `GET /api/projects/[projectId]/production-artwork/image` | Mint short-lived production-PNG URL + customer-safe metadata once print-ready (delivery preview) |
 | `GET /api/projects/[projectId]/production-artwork/download` | Stream print-ready production PNG with customer filename (`Content-Disposition`) |
 | `POST /api/projects/[projectId]/undo` | One-level undo |
+| `POST /api/projects/[projectId]/artwork-upload` | §13h: project-scoped multipart ingress for customer-supplied artwork (PNG only; bytes authoritative over declared type and filename) |
+| `POST /api/projects/[projectId]/artwork-preparation` | §13h: the three uploaded-artwork actions — `context` (production details), `prepare` (deterministic background isolation), `approve` (explicit prepared-artwork approval). All idempotent |
+| `GET /api/projects/[projectId]/artwork-preparation/image/[role]` | §13h: mint short-lived URL for `original` or `prepared`. The browser names a role, never an asset id; uniform 404 on every miss |
 | `GET /api/assets/[...objectKey]` | Serve filesystem signed assets |
 | `POST /api/worker/generation` | Independent concept-generation worker batch (secret-protected) |
 | `POST /api/worker/final-artwork` | Sprint 2M Phase 2C: independent final-artwork worker batch (secret-protected) |
@@ -4024,11 +4346,20 @@ Image route rules: mint on demand via `getConceptImageUrl` →
 `AssetCapability.getSignedUrl`; return `{ url }` only; never persist the
 URL; reject cross-project lookups; uniform 404 on every miss.
 
+`ApiProjectSnapshot` also carries `artworkPreparation` — an already-phrased
+uploaded-artwork view (§13h) containing no analysis numbers, asset ids, or
+storage keys. It is `null` for every Create New Artwork project, and that
+`null` is what the UI branches on.
+
 Rules:
 
 - Routes validate/translate requests (often with zod)
 - Services/facades call capabilities
 - Routes must not implement product rules
+- Binary ingress (`artwork-upload`) bounds `Content-Length` before buffering
+  and re-checks the buffered size; the real format comes from the magic
+  signature, never the declared type or filename; decode limits are enforced
+  against the image header before any bitmap is allocated (§13h)
 - Generation status polling is read-only in production / automated tests;
   interactive `next dev` may recover a stranded `queued`/`attempts=0` job
 - Finalization status polling is read-only and never dispatches work
@@ -4060,10 +4391,22 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 | `DesignHistory` | Single consolidated design-history surface — see below |
 | `ConceptCards` | Concept selection grid: loading state, real signed image, or safe placeholder fallback (Sprint 2K Phase 1); no customer-facing provider/settings |
 | `PrepareForPrintAction` | Sprint 2M Phase 2B: the one explicit "final direction approval" action + truthful "preparing"/"print ready" states; plain customer language only — never job/asset/validation terminology |
+| `WorkflowChoiceCard` | §13h: Create New Artwork vs Upload Existing Artwork, at project start only. "Create New" is a pure client-side dismissal — the existing interview is unchanged |
+| `UploadedArtworkPanel` | §13h: the Upload Existing Artwork surface (upload → production details → analysis → compare → approved). Renders only server-authored copy |
+| `ArtworkComparison` | §13h: labelled Original vs Prepared tiles; prepared on a transparency checkerboard; `Enlarge` is a separate control from approval |
+| `ArtworkPreviewModal` | §13h: read-only full-size viewer with **no** approval affordance at all — viewing can never approve |
+| `uploaded-artwork-flow.ts` | §13h: pure step derivation + "does the upload workflow own the surface?" — testable without a DOM, same reason as `chat-affordances.ts` |
 | `Composer` | Message input |
 | `chat-session.ts` | localStorage project id restore/create |
 | `status-poll-controller.ts` | Shared read-only generation + finalization status poller |
 | `use-is-client.ts` | Hydration gate |
+
+When the uploaded-artwork workflow owns the surface (§13h), the creative
+surfaces — concept grid, design summary, status banner, revision actions,
+Use This Design, Prepare Print-Ready, design history, and the composer — are
+hidden rather than merely unreachable. An uploaded-artwork customer already
+has their design and must never be walked through a design description, three
+concept directions, or a wording interview.
 
 Polling: while `project.status === "generating"`, poll generation status
 every few seconds; on exit from generating, refresh full snapshot. While
@@ -4262,6 +4605,23 @@ Verified against the implementation:
   process; it is not started by customer HTTP requests
 - No live Supabase integration tests in CI
 - Filesystem/worker rate limiting is in-memory/single-instance
+- **Uploaded artwork (§13h) supports PNG only.** JPEG, WebP, and GIF are
+  detected and honestly refused; SVG is explicitly rejected. Adding a format
+  means adding a decoder dependency and its security surface
+- **Uploaded artwork stops at approved prepared artwork.** No enhancement, no
+  upscale, no 300 PPI production, no print validation, no download, no
+  billing — all Phase 2. Nothing in the flow describes prepared artwork as
+  print-ready
+- **Complex/photographic backgrounds are refused, not solved.** They classify
+  `NEEDS_REVIEW` with no automatic mask; AI segmentation is Phase 3 and would
+  require a provider port this capability deliberately does not have
+- A background-coloured stroke that genuinely touches the exterior background
+  is indistinguishable from the background itself and will be removed with
+  it. This is inherent to any reachability-based isolation; the mitigation is
+  the conservative classifier, not a cleverer fill
+- Uploaded artwork is never OCR'd, so Phase 1 knows nothing about text inside
+  it. That is intentional (the pixels are authoritative), and Phase 2's
+  uploaded-preserve validation profile must not assume otherwise
 - PNG thumbnail resizing is basic (`PngThumbnailGenerator`)
 - S3 adapter is reserved but not implemented
 - Orphan asset cleanup cannot recover from a hard process crash after
@@ -4491,7 +4851,9 @@ Describe attachment points only — not a delivery plan:
 | GenerationIntent | **Phase 3 done.** Sole PromptTranslation input; immutable; never persisted; never customer-facing |
 | PrintValidationCapability | **Sprint 2M Phase 1 (architecture) + Phase 2A (provisional intelligence) + Phase 2C (authoritative, production-asset-scoped run) done — see §5/§13c.** Authoritative status now persists on `ProductionAssetValidation`, never `ArtworkVersion.printValidationStatus` (confirmed correct across three sprints of audit). Future: extend `resolutionProvenance` to a real provider-reconstruction path once one exists; never mutate brief; never confuse with Concept Evaluation |
 | **FinalArtworkCapability** / **FinalArtworkWorkerCapability** | **Sprint 2M Phase 2B (approval + idempotent enqueue) + Phase 2C (real worker, raster production, authoritative validation, print-ready transition) done — see §13b/§13c.** Phase 2C supports raster apparel PNG only via one local, deterministic provider. Future: a provider-hosted reconstruction/regeneration `FinalArtworkProvider` (gated behind its own default-off env var, mirroring `CONCEPT_GENERATION_ENABLE_REAL`) that can genuinely exceed native source detail for full-back/left-chest placements; vector/PDF production (`"production_svg"`/`"production_pdf"` `ProductionAssetRole` values are reserved); embroidery digitization; a purchasing/download product built on the existing secure read boundary (§13c "Download boundary"). Must never generate/transform anything Print Validation itself decided; Print Validation must remain pure validation |
+| **ArtworkPreparationCapability** | **Existing Artwork → Print Ready Phase 1 (upload, analysis, repairability, background isolation, edge cleanup, approval) done — see §13h.** Phase 2: consume the approved `prepared_upload` `ArtworkVersion` through `FinalArtworkCapability` (enhancement/upscale, 300 PPI production, an uploaded-preserve print-validation applicability profile, download). Phase 3: AI segmentation / complex photographic background removal behind a NEW provider port — this capability has none today, and that absence is what makes "zero paid-provider calls" structural. Must never change wording, redraw, recolour, recompose, or regenerate; must never mutate the uploaded original |
 | Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider` (e.g. a dedicated OCR specialist, a different vision model); no domain change |
+| JPEG / WebP upload ingestion | A new decoder dependency behind `image-decode.ts` (the single decode choke point), with its own documented security surface. Phase 1 intentionally supports PNG only and says so rather than advertising formats it cannot decode |
 | Production file generation | New assets linked via `printAssetId` / dedicated kinds |
 | Vector output | `vectorAssetId` / SVG asset kinds |
 | Mockups | Presentation layer consuming artwork + product context |
