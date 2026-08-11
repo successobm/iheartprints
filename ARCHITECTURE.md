@@ -4713,8 +4713,18 @@ Interface: `ProjectRepository` (`src/lib/db/repository.ts`)
 
 | Implementation | When selected |
 |---|---|
-| `LocalProjectRepository` | Supabase env not configured; `.data/sprint1-store.json` |
-| `SupabaseProjectRepository` | `NEXT_PUBLIC_SUPABASE_URL` + service-role or anon key |
+| `LocalProjectRepository` | Neither Supabase variable configured; `.data/sprint1-store.json` |
+| `SupabaseProjectRepository` | `NEXT_PUBLIC_SUPABASE_URL` **and** `SUPABASE_SERVICE_ROLE_KEY` |
+| *(refuses to start)* | URL configured, `SUPABASE_SERVICE_ROLE_KEY` missing |
+
+Selection is three-way, not two-way. A Supabase URL with no service-role key
+is a **misconfiguration**, not a request for local mode: it used to resolve to
+an anon-keyed client (which can no longer read a single application row — see
+§23.1) or to the on-disk store, meaning a deployment could believe it was
+persisting customer work to Supabase while writing to a directory the next
+deploy discards. `getProjectRepository()` now throws. Automated test runs are
+exempt and keep the local store, so the suite can never reach real
+infrastructure.
 
 Parity expectations: both implement the same repository contract including
 atomic job claim/heartbeat/recovery, asset CRUD, and Concept Evaluation
@@ -5021,6 +5031,70 @@ architecture.
 
 ## 23. Security Boundaries
 
+### 23.1 Current Data Access Model (server-only)
+
+```text
+Browser  ->  iHeartPrints Next.js server  ->  Supabase service role  ->  Postgres
+```
+
+Every public-schema application table is reachable **only** through the
+server. All twelve carry:
+
+- Row Level Security **enabled**
+- **Zero** policies
+- **No** table privileges for `anon` or `authenticated`
+
+`print_projects`, `tshirt_design_briefs`, `design_conversations`,
+`conversation_messages`, `artwork_versions`, `design_brief_versions`,
+`generation_jobs`, `assets`, `final_direction_approvals`,
+`final_artwork_jobs`, `production_asset_validations`, `artwork_preparations`.
+
+| Role | Direct PostgREST access |
+|---|---|
+| `anon` (incl. the publishable key) | denied — no privilege, no policy |
+| `authenticated` | denied — no privilege, no policy |
+| `service_role` | full; `BYPASSRLS` is the server-only boundary |
+
+**RLS with no policies is the design, not an unfinished state.** No policy
+means no row qualifies for any non-bypassing role, which is exactly the
+current contract. Nothing in the browser speaks to PostgREST, so there is no
+legitimate direct-access path to preserve.
+
+**Project UUID knowledge is NOT authorization.** A project id is not a
+secret — it appears in URLs and client state. No RLS policy, route check, or
+future ownership rule may treat possession of an id as identity.
+
+Two independent controls (RLS *and* revoked grants) rather than one: a
+permissive policy added by mistake later still cannot expose these tables,
+because the browser-facing roles hold no privilege on the relation to
+exercise.
+
+Enforced by `supabase/migrations/20260811191500_server_only_rls_lockdown.sql`,
+which asserts its own postconditions against `pg_class`, `pg_policies`, and
+`information_schema.role_table_grants` and aborts if they do not hold.
+
+**Convention for new tables.** Every new public application table must
+`ENABLE ROW LEVEL SECURITY` and `REVOKE ALL PRIVILEGES ... FROM anon,
+authenticated` in the same migration that creates it.
+`src/lib/db/security-lockdown.migration.test.ts` fails `npm run verify` when
+one does not — the incident below is not permitted to recur with table #13.
+
+**Origin.** A read-only audit found all twelve tables with RLS disabled, no
+policies, and full `anon`/`authenticated` privileges; anonymous PostgREST
+SELECT returned real customer data on every one, via both the legacy `anon`
+key and the newer publishable key.
+
+**Queued follow-up (blocks customer accounts, payment, and customer
+management).** Owner-scoped policies cannot be written today because no
+identity model exists — no `owner_user_id`, `user_id`, `tenant_id`, or
+`organization_id` on any table. Before launching customer accounts:
+implement real customer identity; add explicit project ownership; decide
+whether a tenant/org model is needed; enforce authenticated authorization at
+the app routes; and only then decide whether any direct Supabase client
+access is warranted at all. Until that phase lands, inventing an ownership
+column or a `using (true)` policy to satisfy a security advisor is
+prohibited.
+
 Summarized:
 
 - Service role stays server-side
@@ -5039,6 +5113,9 @@ Summarized:
   cross-project
 - Configuration fails closed in production for misconfigured real generation
   and missing worker secret
+- The privileged Supabase client never falls back to a browser-facing key:
+  `getSupabaseServiceClient()` demands `SUPABASE_SERVICE_ROLE_KEY` and throws
+  naming only the missing variable (never a value) — see §18 and §23.1
 - Sprint 2M Phase 2B: `POST /api/projects/[projectId]/finalize` resolves
   `artworkVersionId` only through that project's own snapshot — a
   foreign/forged id is indistinguishable from "not found" (404); no

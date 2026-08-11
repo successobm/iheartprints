@@ -180,4 +180,6 @@ export const TEST_FILES = [
   "src/capabilities/print-validation/uploaded-preserve-profile.test.ts",
   "src/capabilities/final-artwork-worker/prepared-upload-finalization.test.ts",
   "src/capabilities/artwork-preparation/bowling-print-ready-regression.test.ts",
+  "src/lib/db/supabase-client.security.test.ts",
+  "src/lib/db/security-lockdown.migration.test.ts",
 ];
