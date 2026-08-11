@@ -55,11 +55,14 @@ export function describeArtworkForCustomer(
 }
 
 /**
- * Phase 1 terminal copy after the customer approves the prepared artwork.
+ * Terminal copy after the customer approves the prepared artwork.
  *
  * Approval means background cleanup was accepted — never that enhancement,
- * 300 DPI production, print validation, or delivery already ran. Phase 2
- * owns those steps; this language must stay honest until they exist.
+ * 300 DPI production, print validation, or delivery already ran. Those are
+ * Phase 2's steps, and this language stays honest about the boundary:
+ *
+ *     PREPARED ARTWORK  !=  PRINT-READY ARTWORK
+ *     PREPARED APPROVAL !=  PRINT_READY
  */
 export interface ApprovedPreparationCopy {
   headline: string;
@@ -79,6 +82,109 @@ export function describeApprovedPreparation(
       : "This prepared artwork is ready for final print preparation.",
   };
 }
+
+/**
+ * Existing Artwork → Print Ready Phase 2: the continuation affordance shown
+ * once the prepared artwork is approved.
+ *
+ * Constrained by the same rule as everything else in this module — the only
+ * technical figure allowed through is INCHES, because how large the design
+ * prints is a real customer decision. DPI is the one deliberate exception the
+ * Constitution's §6.6 carve-out already covers elsewhere (`PrintReadySizeCard`
+ * states it as a guarantee, never as a setting), so it is stated there rather
+ * than restated here. No pixel counts, no provider names, no "upscale",
+ * "reconstruct", "Topaz", "validation profile", or job status ever appears.
+ */
+export interface PrintReadyPreparationCopy {
+  headline: string;
+  /** One sentence about what happens next. Always present. */
+  message: string;
+  /** Only present when the artwork genuinely needs enhancing first — stated as a fact about this file, never as a warning. */
+  enhancementMessage: string | null;
+  actionLabel: string;
+}
+
+export function describePrintReadyPreparation(
+  enhancementNeeded: boolean,
+): PrintReadyPreparationCopy {
+  return {
+    headline: "Ready for print preparation",
+    message:
+      "Next we'll produce the final print-ready file at the size below.",
+    enhancementMessage: enhancementNeeded
+      ? "Your artwork needs to be enhanced for this print size. We'll take care of that — your design, wording, and colours stay exactly as they are."
+      : null,
+    actionLabel: "Prepare Print-Ready Artwork",
+  };
+}
+
+/**
+ * Existing Artwork → Print Ready Phase 1.2: the guided background cleanup
+ * surface, in customer language.
+ *
+ * Nothing here names a cavity, a connected component, a wall ratio, a flood
+ * fill, an alpha value or a tolerance. The customer is told what they can see
+ * ("some background is still showing") and what to do about it ("click it").
+ * The word "background" is doing all the work, and it is a word they already
+ * used when they uploaded the file.
+ */
+export const GUIDED_CLEANUP_COPY = {
+  /** Sits under the prepared preview whenever cleanup is available. */
+  invitation:
+    "If any background is still showing inside your design, click it and we'll remove that too.",
+  /** The control that turns clicking on. */
+  enterActionLabel: "Remove More Background",
+  /** The control that turns it off again. */
+  exitActionLabel: "Done Removing",
+  /** While cleanup mode is on. */
+  activeHint: "Click any area that should be see-through. You can undo this.",
+  undoActionLabel: "Undo Last Removal",
+} as const;
+
+/**
+ * What to say after one click. The refusal cases are deliberately warm and
+ * deliberately vague about mechanism: the customer does not need to know that
+ * their click landed outside an enclosed candidate region, only that we left
+ * their artwork alone — which is the reassuring half of the answer anyway.
+ */
+export type GuidedCleanupOutcomeCode =
+  | "removed"
+  | "already_removed"
+  | "not_background"
+  | "outside_image"
+  | "nothing_to_undo"
+  | "undone";
+
+export function describeGuidedCleanupOutcome(
+  outcome: GuidedCleanupOutcomeCode,
+): string {
+  switch (outcome) {
+    case "removed":
+      return "Removed. If that wasn't right, undo it.";
+    case "already_removed":
+      return "That area is already see-through.";
+    case "not_background":
+      // The single most important sentence in this flow: the customer clicked
+      // their own artwork and we declined. Says what we did NOT do, because
+      // that is the reassurance they need.
+      return "That looks like part of your artwork, so we left it unchanged.";
+    case "outside_image":
+      return "That click landed outside your artwork.";
+    case "nothing_to_undo":
+      return "There's nothing to undo yet.";
+    case "undone":
+      return "Put back.";
+  }
+}
+
+/**
+ * Existing Artwork → Print Ready Phase 2: the honest "something went wrong"
+ * state. Never says the file is ready, never blames the customer, and never
+ * suggests their artwork is lost — the original upload and the prepared
+ * version both survive any finalization failure.
+ */
+export const PRINT_READY_NEEDS_ATTENTION_MESSAGE =
+  "Your artwork needs attention before we can finish the print-ready file. Your uploaded artwork and the prepared version are both safe — you can try again, and we'll take another look.";
 
 function backgroundMessageFor(assessment: RepairabilityAssessment): string {
   switch (assessment.backgroundTreatment) {

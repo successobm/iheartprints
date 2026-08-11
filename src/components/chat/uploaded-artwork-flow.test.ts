@@ -27,9 +27,12 @@ function preparation(
     approved: false,
     widthPx: 979,
     heightPx: 1024,
+    visibleArtworkWidthPx: 923,
+    visibleArtworkHeightPx: 909,
     productSummary: null,
     productColor: null,
     printPlacement: null,
+    guidedCleanup: { available: false, removalCount: 0 },
     ...overrides,
   };
 }

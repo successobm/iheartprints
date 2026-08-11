@@ -47,13 +47,23 @@ import type {
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 
-import { isolateBackground, passThroughTransparentArtwork } from "./background-isolation";
+import {
+  isolateBackground,
+  passThroughTransparentArtwork,
+  resolveGuidedRemovalAt,
+} from "./background-isolation";
 import type { ArtworkAnalysis, RepairabilityAssessment } from "./contracts";
+import type {
+  GuidedRemovalPoint,
+  GuidedRemovalRecord,
+} from "./guided-removal";
 import { decodePngUpload, encodeRgbaToPng } from "./image-decode";
 import { analyzeArtwork } from "./image-analysis";
 import {
   describeArtworkForCustomer,
+  describeGuidedCleanupOutcome,
   type ArtworkPreparationCustomerView,
+  type GuidedCleanupOutcomeCode,
 } from "./preparation-copy";
 import { classifyRepairability } from "./repairability";
 import {
@@ -99,10 +109,52 @@ export interface ArtworkPreparationView {
   /** Source pixel dimensions — the only raw figures the customer ever sees, and only as "your file is this big". */
   widthPx: number;
   heightPx: number;
+  /**
+   * Existing Artwork → Print Ready Phase 2: the VISIBLE artwork's own
+   * dimensions, in source pixels — never the padded canvas. `null` when the
+   * analyzer found no artwork bounds at all.
+   *
+   * Exposed because the print-ready size shown before finalization must be
+   * derived from the same thing production sizes from: the artwork's own
+   * aspect ratio. Using `widthPx`/`heightPx` would quote a height that
+   * includes whatever transparent margin the customer's file happens to
+   * carry, and the finished plate would then disagree with the figure they
+   * were shown. Still not customer-facing pixel counts — the client passes
+   * these to the server-side size describer, never renders them.
+   */
+  visibleArtworkWidthPx: number | null;
+  visibleArtworkHeightPx: number | null;
   /** Production context already recorded for this project. */
   productSummary: string | null;
   productColor: string | null;
   printPlacement: PrintPlacement | null;
+  /**
+   * Existing Artwork → Print Ready Phase 1.2: how much background the customer
+   * has removed by hand, and whether they may still do so. Counts only —
+   * never region geometry, never coordinates, never anything the client could
+   * turn back into a removal request.
+   */
+  guidedCleanup: GuidedCleanupStateView;
+}
+
+export interface GuidedCleanupStateView {
+  /** True while cleanup is possible at all: prepared, not yet approved. */
+  available: boolean;
+  /** How many areas the customer has removed. Drives "Undo" being offered. */
+  removalCount: number;
+}
+
+/** The result of one guided-cleanup action. */
+export interface GuidedCleanupResult {
+  outcome: GuidedCleanupOutcomeCode;
+  /** Already-phrased. The UI renders this verbatim. */
+  message: string;
+  view: ArtworkPreparationView;
+}
+
+/** Persisted shape of `ArtworkPreparation.guidedCleanup`. */
+interface GuidedCleanupRecord {
+  removals: GuidedRemovalRecord[];
 }
 
 /** The production context an uploaded-artwork customer states. Never a creative brief. */
@@ -141,6 +193,25 @@ export interface ArtworkPreparationCapability {
    * existing prepared asset rather than producing a second one.
    */
   prepareBackground(designId: string): Promise<ArtworkPreparationView>;
+  /**
+   * Existing Artwork → Print Ready Phase 1.2: the customer points at an area
+   * of their prepared artwork that should also be see-through.
+   *
+   * A click is EVIDENCE, not authority: it may only ever resolve to an
+   * enclosed background-coloured region the automatic pass already identified
+   * and then declined on ambiguous geometry. A click that lands on artwork is
+   * refused and nothing changes. Idempotent — clicking the same area twice is
+   * harmless and produces no second asset.
+   *
+   * Refuses once the preparation is approved: an approved prepared asset is
+   * history and is never rewritten.
+   */
+  applyGuidedCleanup(
+    designId: string,
+    point: GuidedRemovalPoint,
+  ): Promise<GuidedCleanupResult>;
+  /** Takes back the customer's most recent guided removal. Idempotent when there is none. */
+  undoGuidedCleanup(designId: string): Promise<GuidedCleanupResult>;
   /**
    * The customer's explicit "this prepared version faithfully represents the
    * artwork I uploaded". Creates the `prepared_upload` `ArtworkVersion` that
@@ -194,8 +265,17 @@ export function createArtworkPreparationCapability(
   ): Promise<ArtworkPreparationView> {
     const analysis = preparation.analysis as unknown as ArtworkAnalysis;
     const assessment = classifyRepairability(analysis);
+    const removals = readGuidedRemovals(preparation);
 
     return {
+      guidedCleanup: {
+        // Cleanup edits the CURRENT derived asset, so it needs one to exist
+        // and it stops the moment the customer's approval turns that asset
+        // into history.
+        available:
+          preparation.preparedAssetId !== null && preparation.status !== "approved",
+        removalCount: removals.length,
+      },
       preparationId: preparation.id,
       status: preparation.status,
       originalFilename: preparation.originalFilename,
@@ -205,6 +285,8 @@ export function createArtworkPreparationCapability(
       approved: preparation.status === "approved",
       widthPx: analysis.widthPx,
       heightPx: analysis.heightPx,
+      visibleArtworkWidthPx: analysis.artworkBounds?.width ?? null,
+      visibleArtworkHeightPx: analysis.artworkBounds?.height ?? null,
       productSummary: brief.productSummary,
       productColor: brief.shirtColor,
       printPlacement: brief.printPlacement,
@@ -241,6 +323,148 @@ export function createArtworkPreparationCapability(
     return repo.updateArtworkPreparation(preparation.id, {
       analysis: analysis as unknown as Record<string, unknown>,
     });
+  }
+
+  /** The immutable original, decoded. Never cached — the bytes are the source of truth. */
+  async function loadOriginalImage(preparation: ArtworkPreparation) {
+    const downloaded = await assets.downloadAssetBytes(preparation.originalAssetId);
+    if (!downloaded) {
+      throw new ArtworkPreparationStateError(
+        "We couldn't find the artwork you uploaded. Please upload it again.",
+      );
+    }
+    return decodePngUpload(downloaded.bytes).image;
+  }
+
+  /**
+   * Runs the deterministic pipeline over the IMMUTABLE original and persists
+   * the result as a NEW asset.
+   *
+   * The single derivation path: automatic preparation calls it with no clicks,
+   * guided cleanup calls it with the customer's whole click history. That is
+   * what makes the two produce byte-identical output for the same inputs, and
+   * what makes a reload safe — the prepared asset is always a pure function of
+   * (original bytes, background model, click list), never of how many times
+   * anything ran.
+   *
+   * A NEW asset every time, never an overwrite: the original is immutable by
+   * contract, and a superseded prepared asset stays in place so lineage
+   * remains readable.
+   */
+  async function derivePreparedAsset(
+    designId: string,
+    preparation: ArtworkPreparation,
+    analysis: ArtworkAnalysis,
+    assessment: RepairabilityAssessment,
+    guidedRemovalPoints: readonly GuidedRemovalPoint[],
+  ) {
+    const image = await loadOriginalImage(preparation);
+    const isolated =
+      assessment.backgroundTreatment === "already_transparent"
+        ? passThroughTransparentArtwork(
+            image,
+            analysis.estimatedBackgroundColor,
+            analysis.backgroundTolerance,
+          )
+        : isolateBackground(image, {
+            backgroundColor: analysis.estimatedBackgroundColor,
+            tolerance: analysis.backgroundTolerance,
+            guidedRemovalPoints,
+          });
+
+    assertPreservesGeometry(image, isolated.image);
+
+    const asset = await assets.uploadCustomerArtwork(designId, {
+      conceptId: `prepared-${preparation.id}-${isolated.guided.applied.length}`,
+      bytes: encodeRgbaToPng(isolated.image),
+      contentType: "image/png",
+      widthPx: isolated.image.width,
+      heightPx: isolated.image.height,
+      hasTransparency: true,
+      kind: "png",
+      metadata: {
+        // Lineage lives on the preparation row; this mirror exists purely so
+        // an asset can be traced back without a join. The click list is
+        // included because it is the other half of "what produced these
+        // bytes" — the original alone no longer explains them.
+        derivedFromAssetId: preparation.originalAssetId,
+        artworkPreparationId: preparation.id,
+        preparation: isolated.record as unknown as Record<string, unknown>,
+        guidedRemovals: isolated.guided.applied as unknown as Record<
+          string,
+          unknown
+        >[],
+      },
+    });
+
+    return { asset, isolated };
+  }
+
+  /**
+   * Re-derives the prepared asset from the customer's whole click history and
+   * persists both. Shared by apply and undo so there is exactly one way the
+   * prepared bytes and the stored click list can change, and they cannot get
+   * out of step.
+   */
+  async function persistGuidedCleanup(
+    designId: string,
+    preparation: ArtworkPreparation,
+    brief: TShirtDesignBrief,
+    removals: GuidedRemovalRecord[],
+    outcome: GuidedCleanupOutcomeCode,
+  ): Promise<GuidedCleanupResult> {
+    const analysis = preparation.analysis as unknown as ArtworkAnalysis;
+    const assessment = classifyRepairability(analysis);
+
+    const { asset, isolated } = await derivePreparedAsset(
+      designId,
+      preparation,
+      analysis,
+      assessment,
+      removals.map((removal) => removal.point),
+    );
+
+    const updated = await repo.updateArtworkPreparation(preparation.id, {
+      preparedAssetId: asset.id,
+      preparation: isolated.record as unknown as Record<string, unknown>,
+      // Stored as what the pipeline ACCEPTED, not as what the client sent —
+      // a point that stopped resolving would otherwise linger forever.
+      guidedCleanup:
+        isolated.guided.applied.length === 0
+          ? null
+          : ({ removals: isolated.guided.applied } as unknown as Record<
+              string,
+              unknown
+            >),
+    });
+
+    return {
+      outcome,
+      message: describeGuidedCleanupOutcome(outcome),
+      view: await toView(updated, brief),
+    };
+  }
+
+  /**
+   * Guided cleanup is only meaningful between "prepared" and "approved".
+   * Before, there is no derived asset to correct; after, the asset is the
+   * thing the customer approved and Phase 2 may already be consuming.
+   */
+  async function requireCleanupTarget(designId: string) {
+    const { brief, preparation } = await loadOwned(designId);
+
+    if (preparation.status === "approved") {
+      throw new ArtworkPreparationStateError(
+        "You've already approved this artwork. Start a new project to make further changes.",
+      );
+    }
+    if (!preparation.preparedAssetId) {
+      throw new ArtworkPreparationStateError(
+        "There's nothing to clean up yet — prepare the artwork first.",
+      );
+    }
+
+    return { brief, preparation, removals: readGuidedRemovals(preparation) };
   }
 
   return {
@@ -340,53 +564,83 @@ export function createArtworkPreparationCapability(
         );
       }
 
-      const downloaded = await assets.downloadAssetBytes(preparation.originalAssetId);
-      if (!downloaded) {
-        throw new ArtworkPreparationStateError(
-          "We couldn't find the artwork you uploaded. Please upload it again.",
-        );
-      }
-
-      const decoded = decodePngUpload(downloaded.bytes);
-      const isolated =
-        assessment.backgroundTreatment === "already_transparent"
-          ? passThroughTransparentArtwork(
-              decoded.image,
-              analysis.estimatedBackgroundColor,
-              analysis.backgroundTolerance,
-            )
-          : isolateBackground(decoded.image, {
-              backgroundColor: analysis.estimatedBackgroundColor,
-              tolerance: analysis.backgroundTolerance,
-            });
-
-      assertPreservesGeometry(decoded.image, isolated.image);
-
-      const preparedBytes = encodeRgbaToPng(isolated.image);
-      const preparedAsset = await assets.uploadCustomerArtwork(designId, {
-        conceptId: `prepared-${preparation.id}`,
-        bytes: preparedBytes,
-        contentType: "image/png",
-        widthPx: isolated.image.width,
-        heightPx: isolated.image.height,
-        hasTransparency: true,
-        kind: "png",
-        metadata: {
-          // Lineage lives on the preparation row; this mirror exists purely
-          // so an asset can be traced back without a join.
-          derivedFromAssetId: preparation.originalAssetId,
-          artworkPreparationId: preparation.id,
-          preparation: isolated.record as unknown as Record<string, unknown>,
-        },
-      });
+      // No clicks: automatic preparation is exactly this pipeline with an
+      // empty click list, which is why guided cleanup cannot change what an
+      // untouched preparation produces.
+      const { asset, isolated } = await derivePreparedAsset(
+        designId,
+        preparation,
+        analysis,
+        assessment,
+        [],
+      );
 
       const updated = await repo.updateArtworkPreparation(preparation.id, {
         status: "prepared",
-        preparedAssetId: preparedAsset.id,
+        preparedAssetId: asset.id,
         preparation: isolated.record as unknown as Record<string, unknown>,
       });
 
       return toView(updated, brief);
+    },
+
+    async applyGuidedCleanup(designId, point) {
+      const { brief, preparation, removals } = await requireCleanupTarget(designId);
+      const analysis = preparation.analysis as unknown as ArtworkAnalysis;
+
+      const image = await loadOriginalImage(preparation);
+      const resolution = resolveGuidedRemovalAt(image, point, {
+        backgroundColor: analysis.estimatedBackgroundColor,
+        tolerance: analysis.backgroundTolerance,
+        applied: removals,
+      });
+
+      // Every refusal leaves the preparation byte-for-byte untouched: no new
+      // asset, no repository write, nothing to undo. Clicking artwork is a
+      // no-op, and so is clicking an area that is already see-through, which
+      // is what makes a double click safe.
+      if (resolution.outcome !== "eligible") {
+        return {
+          outcome: resolution.outcome,
+          message: describeGuidedCleanupOutcome(resolution.outcome),
+          view: await toView(preparation, brief),
+        };
+      }
+
+      return persistGuidedCleanup(
+        designId,
+        preparation,
+        brief,
+        [
+          ...removals,
+          {
+            point: { x: Math.floor(point.x), y: Math.floor(point.y) },
+            regionKey: resolution.region.regionKey,
+            pixelCount: resolution.region.pixelCount,
+          },
+        ],
+        "removed",
+      );
+    },
+
+    async undoGuidedCleanup(designId) {
+      const { brief, preparation, removals } = await requireCleanupTarget(designId);
+
+      if (removals.length === 0) {
+        return {
+          outcome: "nothing_to_undo",
+          message: describeGuidedCleanupOutcome("nothing_to_undo"),
+          view: await toView(preparation, brief),
+        };
+      }
+
+      return persistGuidedCleanup(
+        designId,
+        preparation,
+        brief,
+        removals.slice(0, -1),
+        "undone",
+      );
     },
 
     async approvePreparedArtwork(designId) {
@@ -443,6 +697,23 @@ export function createArtworkPreparationCapability(
         approvedAt: new Date().toISOString(),
       });
 
+      // Existing Artwork → Print Ready Phase 2 (Goal 10): the project stops
+      // being "intake". An upload customer was never in a design interview,
+      // and leaving the project sitting in the status a brand-new,
+      // nothing-said-yet project has would misdescribe someone who has
+      // uploaded artwork, stated their production context, and explicitly
+      // approved a prepared file.
+      //
+      // `"approved"` is the existing status that already means exactly this in
+      // the other workflow: the customer's creative decision is settled and
+      // production is the next step (see `submitDesignBriefDecision`, which
+      // sets it at the equivalent moment). Reusing it keeps the two workflows
+      // describable by one lifecycle rather than adding a speculative
+      // `"artwork_approved"` value whose only difference would be its name.
+      //
+      // Deliberately NOT `"finalizing"`: nothing has been requested yet.
+      await repo.setProjectStatus(designId, "approved");
+
       return toView(updated, brief);
     },
 
@@ -479,6 +750,33 @@ function assertPreservesGeometry(
       "Artwork preparation must never change the size or shape of the uploaded artwork.",
     );
   }
+}
+
+/**
+ * Narrows the loosely-typed `guidedCleanup` column back into records.
+ *
+ * Total and forgiving by design: anything malformed reads as "no cleanup"
+ * rather than throwing, because a corrupt diagnostics blob must never make a
+ * customer's artwork unopenable. Nothing here is trusted anyway — a stored
+ * point is re-resolved against the real image on every derivation, so a bogus
+ * coordinate simply resolves to nothing and drops out.
+ */
+function readGuidedRemovals(preparation: ArtworkPreparation): GuidedRemovalRecord[] {
+  const stored = preparation.guidedCleanup as GuidedCleanupRecord | null;
+  if (!stored || !Array.isArray(stored.removals)) return [];
+
+  return stored.removals.flatMap((removal) => {
+    const x = removal?.point?.x;
+    const y = removal?.point?.y;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
+    return [
+      {
+        point: { x: Math.floor(x), y: Math.floor(y) },
+        regionKey: typeof removal.regionKey === "string" ? removal.regionKey : "",
+        pixelCount: Number.isFinite(removal.pixelCount) ? removal.pixelCount : 0,
+      },
+    ];
+  });
 }
 
 function randomSuffix(): string {

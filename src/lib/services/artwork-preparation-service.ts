@@ -12,6 +12,8 @@
 import { getCapabilityGraph } from "@/capabilities/composition";
 import type {
   ArtworkPreparationView,
+  GuidedCleanupOutcomeCode,
+  GuidedRemovalPoint,
   UploadArtworkInput,
   UploadedArtworkContextInput,
 } from "@/capabilities/artwork-preparation";
@@ -19,6 +21,7 @@ import {
   getConversation,
   type ApiProjectSnapshot,
 } from "@/lib/services/conversation-service";
+import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
 
 export async function uploadArtwork(
   projectId: string,
@@ -51,6 +54,79 @@ export async function approvePreparedArtwork(
 ): Promise<ApiProjectSnapshot> {
   await getCapabilityGraph().artworkPreparation.approvePreparedArtwork(projectId);
   return requireSnapshot(projectId);
+}
+
+/**
+ * Existing Artwork → Print Ready Phase 1.2: one guided-cleanup action, plus
+ * the refreshed project snapshot.
+ *
+ * The outcome rides ALONGSIDE the snapshot rather than inside it, because it
+ * describes THIS click rather than the state of the project — "that looks like
+ * part of your artwork" is not a fact about the preparation, and persisting it
+ * anywhere would make it reappear after a reload that has nothing to do with
+ * it.
+ */
+export interface GuidedCleanupResponse extends ApiProjectSnapshot {
+  cleanup: {
+    outcome: GuidedCleanupOutcomeCode;
+    /** Already-phrased by `preparation-copy.ts`. Rendered verbatim. */
+    message: string;
+  };
+}
+
+export async function applyGuidedCleanup(
+  projectId: string,
+  point: GuidedRemovalPoint,
+): Promise<GuidedCleanupResponse> {
+  const result =
+    await getCapabilityGraph().artworkPreparation.applyGuidedCleanup(
+      projectId,
+      point,
+    );
+  return {
+    ...(await requireSnapshot(projectId)),
+    cleanup: { outcome: result.outcome, message: result.message },
+  };
+}
+
+export async function undoGuidedCleanup(
+  projectId: string,
+): Promise<GuidedCleanupResponse> {
+  const result =
+    await getCapabilityGraph().artworkPreparation.undoGuidedCleanup(projectId);
+  return {
+    ...(await requireSnapshot(projectId)),
+    cleanup: { outcome: result.outcome, message: result.message },
+  };
+}
+
+/**
+ * Existing Artwork → Print Ready Phase 2: the customer's explicit "prepare my
+ * print-ready artwork" action for artwork they uploaded.
+ *
+ * The upload workflow's counterpart to `approveFinalDirection` — same shape,
+ * same idempotency guarantee, same interactive-dev worker kick. It takes no
+ * artwork id, because there is nothing to choose: the project has exactly one
+ * approved prepared artwork, and naming it from the client would only create a
+ * value to forge (Goal 18).
+ */
+export async function prepareUploadedArtworkForPrint(
+  projectId: string,
+): Promise<ApiProjectSnapshot> {
+  await getCapabilityGraph().finalArtwork.requestPreparedUploadFinalArtwork(
+    projectId,
+  );
+  const snapshot = await requireSnapshot(projectId);
+  // Interactive `next dev` only — production and automated tests no-op. Same
+  // policy and the same scheduler as the create_new path; no second worker
+  // exists for uploaded artwork (Goal 17).
+  if (snapshot.project.status === "finalizing") {
+    maybeTriggerLocalFinalArtworkWorker({
+      projectId,
+      reason: "prepare_uploaded_artwork",
+    });
+  }
+  return snapshot;
 }
 
 export interface PreparedArtworkImageView {

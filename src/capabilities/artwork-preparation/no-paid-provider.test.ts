@@ -137,7 +137,9 @@ describe("Artwork preparation makes zero network calls", () => {
     assert.equal(await repo.claimNextQueuedFinalArtworkJob(), null);
 
     const snapshot = await repo.getProject(projectId);
-    assert.equal(snapshot!.project.status, "intake");
+    // "approved" = the customer's creative decision is settled; production has
+    // NOT been requested and definitely has not run.
+    assert.equal(snapshot!.project.status, "approved");
     assert.equal(snapshot!.designBriefVersions.length, 0);
   });
 });

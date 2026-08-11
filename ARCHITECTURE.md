@@ -752,7 +752,7 @@ ambiguous provenance would add nothing.
 | **Inputs** | Uploaded image bytes + declared content type + filename; production context (product, garment colour, print location) |
 | **Outputs** | `ArtworkPreparation` lifecycle record; immutable `customer_upload` asset; derived transparent `png` asset; `prepared_upload` `ArtworkVersion` on approval; already-phrased customer view |
 | **Dependencies** | ProjectRepository, AssetCapability, DesignBriefCapability |
-| **Owns** | Upload ingress safety, deterministic analysis, repairability classification, edge-connected background isolation, fringe decontamination, prepared-artwork approval |
+| **Owns** | Upload ingress safety, deterministic analysis, repairability classification, edge-connected background isolation, enclosed-cavity classification, fringe decontamination, prepared-artwork approval |
 | **Must never own** | Any provider port (it has none); GenerationJob/FinalArtworkJob creation; mutation of the uploaded original; creative reinterpretation of any kind; customer-facing phrasing of analysis internals |
 
 See §13h. Every operation is local and deterministic — there is no provider
@@ -3904,18 +3904,35 @@ into a structural property.
 | `image-decode.ts` | The only place upload bytes become pixels. Header-bounds-check *before* decoding. |
 | `image-analysis.ts` | Deterministic measurement. Measures; never decides. |
 | `repairability.ts` | The conservative verdict. Reads analysis; touches no pixels. |
+| `pixel-metrics.ts` | The background-membership test and colour distances, in one place so both removal passes agree on them. Pure. |
 | `background-isolation.ts` | Edge-connected fill, fringe decontamination, halo guard. Pure. |
+| `background-cavities.ts` | Enclosed background a foreground structure sealed off from the border — letter counters, ring interiors. Extends the mask; removes nothing on its own. Pure. |
+| `background-speckle.ts` | Isolated near-background flecks the fill tolerance just missed. Extends the mask. Pure. |
+| `guided-removal.ts` | Resolves a customer's click to one preserved enclosed candidate, or refuses it. Extends the mask. Pure. |
 | `preparation-copy.ts` | The one place analysis becomes customer language. |
 | `artwork-preparation-capability.ts` | Orchestration, persistence, ownership checks. |
 
-### Background isolation: reachability, not similarity
+The three mask passes are deliberately **three modules and three test suites**,
+because they are three different kinds of evidence — measured geometry,
+measured isolation, and the customer's own judgement — and collapsing them
+would make it impossible to say which one removed a given pixel.
+
+### Background isolation: evidence, not similarity
+
+> **THE SAFETY INVARIANT.** Background removal may remove pixels only when the
+> system has **affirmative evidence that they belong to the detected
+> background**. Colour similarity alone is insufficient. Enclosure alone is
+> insufficient.
 
 The audited reference case is a customer's bowling logo — 979x1024, fully
 opaque, near-black exterior touching all four edges (edge mean ≈0.78, edge
-sigma ≈0.53), with **~5,835 near-black pixels that are intentional interior
-line work**. "Remove every black pixel" would delete the customer's artwork.
+sigma ≈0.53), with **thousands of near-black pixels that are intentional
+interior line work**. "Remove every black pixel" would delete the customer's
+artwork.
 
-Only **reachability from the image border** distinguishes the two:
+There are exactly **two** ways a region can earn that evidence, and they are
+deliberately separate passes. The first is **reachability from the image
+border**:
 
 1. Estimate the background from the border ring's *dominant* colour (the
    mode's own mean, so one bright corner pixel cannot define it).
@@ -3932,12 +3949,222 @@ Only **reachability from the image border** distinguishes the two:
    is `B + (C−B)/a`, with `F` taken from a nearby genuinely-solid pixel.
    **When no such reference exists, or the pixel is already essentially
    solid, it is preserved unchanged.** Artwork fidelity outranks cleanup.
+
+   A composite also has to *be* one. `C = a·F + (1−a)·B` puts a blended pixel
+   **on the line between `B` and `F`**; a pixel that is its own colour is not,
+   and decontaminating it divides by a coverage that never existed. A 3px dark
+   outline — (16,8,0) against (1,1,1), with the letter's white fill inside the
+   2px reference window — resolves to a coverage of 0.038, and `B + (C−B)/a`
+   blows its warm tint up to a saturated (255,183,0) at alpha 10: the outline
+   is punched through from both sides. Pixels whose residual from the `B→F`
+   line exceeds 25% of their own background distance are therefore preserved
+   whole. Thick dark outlines were already safe by accident (no high-contrast
+   reference within the search window, so the pass declines); only thin ones
+   ever reached the broken path. The check changes **no** pixel count on the
+   audited bowling fixtures — genuine anti-aliased blends sit on the line.
 5. Halo guard: bleed retained RGB two pixels into the now-transparent
    exterior. Transparent pixels still carry colour, and every resample in
    this codebase interpolates RGB independently of alpha
    (`raster-transform.ts` is straight, not premultiplied) — leaving the old
    near-black behind a zero alpha is exactly how a dark halo reappears during
    a later upscale.
+
+### Enclosed background cavities
+
+A border-seeded fill is, by construction, blind to background that a
+foreground shape has topologically **sealed off** from the border: the
+counters inside letterforms, the open middle of a ring or badge, the area a
+frame encloses. Visual acceptance of the bowling logo found exactly this — the
+exterior went transparent while the counters in `SPLIT DISTURBERS` and, worst,
+in the small `DISTURBING FROM DAY ONE` wording stayed black.
+
+`background-cavities.ts` extends the exterior mask with those regions, and
+with nothing else. It is a **mask extension, not a second removal pipeline**:
+one fringe pass, one halo guard, one set of audited edge behaviour still runs
+downstream, over a mask that now includes confirmed cavities.
+
+The hard part is not finding them; it is the **negative control**. A bowling
+ball's finger holes are enclosed, black, the same colour as the background,
+and surrounded entirely by foreground — and they are the customer's artwork.
+"Enclosed + background-coloured" describes a letter counter and a finger hole
+equally well, so it can never be the test. Four kinds of evidence are required
+of every region, all of them:
+
+1. **A confirmed exterior background exists.** With no exterior fill there is
+   no background model, and the pass does nothing at all.
+2. **Colour**: every pixel satisfies the *same* membership test the exterior
+   fill used — same estimated colour, same adaptive tolerance, from
+   `pixel-metrics.ts`. True by construction, since regions are grown with that
+   predicate.
+3. **A real foreground wall**: ≥75% of the enclosing boundary is
+   affirmatively **outside the background model** — the same
+   `matchesBackgroundColor` contract, not a contrast threshold.
+
+   This gate originally demanded ≥48 Euclidean RGB, borrowed from
+   `SOLID_REFERENCE_MIN_DISTANCE`, and **on the real bowling artwork it
+   rejected 129 of the file's counters**. Real typography is outlined in dark
+   ink: measured (16,8,0) and (24,8,0) against a (1,1,1) background. Those are
+   unambiguously foreground under the model (Chebyshev 15 and 23 against a
+   tolerance of 12) while sitting only ~17 and ~25 Euclidean from it. 48
+   answers "is there enough colour separation to divide by?" for fringe
+   decontamination — a different question, and borrowing it silently required
+   customer artwork to be high-contrast.
+
+   > **FOREGROUND STRUCTURE DOES NOT NEED TO BE HIGH-CONTRAST. IT ONLY NEEDS
+   > TO BE AFFIRMATIVELY OUTSIDE THE BACKGROUND MODEL.**
+4. **Shallow enclosure**: the thinnest foreground wall between the region and
+   the confirmed exterior is no thicker than the region itself —
+   `wall ≤ 1.75 · inradius + 6`, both measured by 4-connected BFS.
+
+   The base term moved from 4 to 6 on **measured real-file evidence**: two
+   genuine tagline counters in the customer's artwork (the enclosed slots in
+   the `R` and `B` of `DISTURBING FROM DAY ONE`) measure inradius 1 / wall 7,
+   so the ratio term contributes under two pixels and the base decided the case
+   alone — `1.75·1 + 4 = 5.75` refused them, `1.75·1 + 6 = 7.75` reaches them.
+   Because the base is a *constant* it is swamped by the ratio term everywhere
+   the cavity is not near-zero-sized, so the governing negative control barely
+   moves: the real finger hole at inradius 9 / wall 26 goes from an allowance
+   of 19.75 to 21.75 and stays preserved with 4px to spare.
+
+Rule 4 does the real work, and it is a statement about **topology, not
+typography**. Background shows through a hole in a *structure* — a stroke, a
+ring, a border — so the wall around it is on the order of the hole. A dark
+feature belonging to a solid object sits deep in that object's mass. On the
+acceptance fixture:
+
+| Region | Inradius | Wall | Outcome |
+|---|---|---|---|
+| display counter (plain stroke) | 30px | 11px | removed |
+| small-wording counter | 6px | 5px | removed |
+| dark-outlined tagline counter | 5px | 10px | removed |
+| dark-outlined display counter | 11px | 31px | **refused — open case, see limitations** |
+| ball outline crescent | 6px | 124px | preserved |
+| drop shadow band | 10px | 71px | preserved |
+| **finger hole** | 14px | 244–312px | **preserved** |
+
+No letter is identified, no glyph matched, nothing OCR'd, and no colour
+special-cased — a light background behind a dark logo runs the identical code
+path. A final ceiling refuses the whole pass if exterior plus cavities would
+consume >99.5% of the canvas, and a region no foreground path reaches (sealed
+behind another dark region) is preserved rather than guessed at.
+
+Every threshold is set so that **ambiguity preserves**. A missed cavity is a
+blemish the customer can point at; a destroyed one is artwork we cannot
+recreate.
+
+### Isolated near-background speckle
+
+The fill removes pixels *within* tolerance. A real export is not that tidy: on
+the audited artwork, background (1,1,1) with a tolerance of 12 left a scatter of
+pixels at Chebyshev 13–24 — invisible against the black they came from, and a
+dotted black outline traced around the whole design the moment the background
+went away. The prepared file carried **488 of them, 520 pixels**.
+
+Widening the tolerance is the wrong fix and would be a serious one: the same
+looser test would then apply to the customer's 34,392 dark foreground pixels
+and let the flood fill march through them. The residue is distinguishable not by
+its colour but by its **topology** — it is a fleck floating in space, attached
+to nothing. `background-speckle.ts` gates on exactly that:
+
+1. **Fully isolated.** Every neighbour outside the component is already-removed
+   background, or the image border. Not "mostly"; every one. A pixel touching
+   artwork *is* artwork and this pass cannot see it.
+2. **Tiny.** ≤ 4 pixels. The measured population ran 1px (463), 2px (19), 3px
+   (5), 4px (1) — and then **nothing at all until 21px**, where the artwork's
+   own smallest retained component begins. The bound sits inside a genuine
+   five-fold gap in the data rather than on a slope.
+3. **Near-background.** Every pixel within `2 × tolerance` of the confirmed
+   background colour — a multiple, not an absolute, so a noisy export gets
+   proportionally more room and a clean one gets almost none. A deliberate 1px
+   accent fails this by a mile.
+
+Rule 1 is what makes it safe and is why the pass needs no notion of "near an
+edge": an island enclosed by removed background is, by construction, adjacent to
+it. **One pass, never iterated** — removing an island cannot isolate anything
+that was not already isolated, and looping would creep outward from a boundary
+that just moved, which is precisely the erosion this must not do.
+
+### User-guided background cleanup
+
+> **Automatic classification fails toward preservation. For pixels it cannot
+> classify, the CUSTOMER is the authority.**
+
+Some enclosed regions are not ambiguous by accident; they are ambiguous to every
+measurement available. The full real-file audit settled this quantitatively.
+Across the customer's bowling artwork the wall/inradius statistic — the one rule
+4 gates on — measures:
+
+| Population | wall / inradius |
+|---|---|
+| genuine letter counters (6 regions) | 2.11 – 5.29 |
+| **bowling-ball finger holes (3 regions)** | **2.89 – 4.69** |
+
+The finger holes sit **inside** the counter range. The populations are *nested*,
+so no threshold on that statistic separates them, and no reparameterization of
+it can: raising the ratio far enough to reach the counters deletes the ball
+first. Several alternative statistics did separate on that one file (best:
+75th-percentile ray crossing thickness over inradius, ~2× margin), but on three
+negative controls from a single image — and a smaller ball icon with
+proportionally larger holes collapses the separation. **That is not enough
+evidence to spend a customer's artwork on.**
+
+So the system stops guessing and asks. `guided-removal.ts`:
+
+- The browser sends an **image-space coordinate** — never a region id, a mask,
+  an alpha value or an asset path. There is consequently nothing to forge: a
+  made-up coordinate resolves to whatever is genuinely there, and if that is
+  artwork the answer is "no".
+- A click may resolve **only** to a region the automatic cavity pass already
+  identified as an enclosed background-coloured candidate and then declined on
+  geometry. Everything else in the image is inert — the customer's dark outline
+  measures Chebyshev 15 against a tolerance of 12, so it was never a candidate
+  and no click can reach it.
+- `identifyGuidedRemovalRegion` reports the exact bounded region a click *would*
+  affect before anything is removed, so a mis-click is visible and undoable.
+- A click on a **finger hole is eligible**, and that is not a bug. A finger hole
+  is an enclosed background-coloured region preserved on ambiguity, exactly like
+  a counter; the system genuinely cannot tell them apart. What protects it is
+  the customer, who is looking at their own bowling ball. What the code
+  guarantees is that nothing happens that they did not see and cannot undo.
+
+**Pipeline order.** The mask is built by four passes that only ever *grow* it —
+exterior → cavities → guided → speckle — and not one of them reads or writes a
+colour. Only then do erase, fringe decontamination and the halo guard run. That
+split keeps the audited edge behaviour singular: an exterior pixel, a cavity
+pixel, a clicked pixel and a speckle pixel are indistinguishable by the time any
+colour is computed, so there is **one** fringe pass rather than four variants,
+and the composite guard that protects 10,449 opaque dark line-work pixels on the
+real file cannot be bypassed by the new passes. Speckle runs last of the four
+because "surrounded entirely by removed background" is not knowable until the
+mask is final — removing a large counter can strand a fleck inside it.
+
+**Persistence and lineage.** `artwork_preparations.guided_cleanup` stores the
+customer's ordered **clicks**, not the resulting mask. The clicks are the only
+thing the customer authored; replaying them through the deterministic pipeline
+over the immutable original reproduces the prepared bytes exactly. That one
+choice buys reload-safety, undo (drop the last point), idempotency (a repeat
+click resolves to a region already in the list and changes nothing) and
+auditability. A stored mask would give none of it and could silently disagree
+with the original it claims to describe.
+
+```
+customer_upload (IMMUTABLE, never rewritten)
+  └─ automatic preparation      → prepared asset #1
+       └─ + click               → prepared asset #2   (preparedAssetId repoints)
+            └─ undo             → prepared asset #3   (≡ #1, byte-for-byte)
+                 └─ APPROVED    → prepared_upload ArtworkVersion → Phase 2
+```
+
+Every cleanup derives a **new** asset; superseded ones are left in place, so
+lineage stays readable and nothing is overwritten. Once `status = 'approved'`
+the preparation is history: `applyGuidedCleanup` and `undoGuidedCleanup` both
+refuse, so the artwork Phase 2 consumes can never change underneath it.
+
+> **PREPARED ARTWORK MAY INCLUDE CUSTOMER-GUIDED CLEANUP BEFORE APPROVAL.** What
+> the customer approves is the prepared file as they last saw it — automatic
+> passes plus whatever they removed themselves. `guidedRegionsRemoved` on the
+> preparation record is the honest, durable statement of how much of it went on
+> their authority rather than on measured evidence.
 
 ### Repairability
 
@@ -3987,10 +4214,13 @@ authorized these pixels — the customer's own file did.
 that artwork version", and the source here is an **asset**. Original →
 prepared lineage lives on `artwork_preparations`, where it is true.
 
-Phase 1 deliberately does **not** set `selectedArtworkVersionId`,
-`finalDirectionConfirmed`, or any `PrintProject.status` transition. Those are
-production-lifecycle claims, and Phase 2 owns the decision about how an
-uploaded-artwork project enters `FinalArtworkCapability`.
+Phase 1 deliberately does **not** set `selectedArtworkVersionId` or
+`finalDirectionConfirmed` — both belong to the generated-concept lifecycle.
+Phase 2 adds exactly one lifecycle write here: approval moves
+`PrintProject.status` from `"intake"` to `"approved"`, meaning "the customer's
+creative decision is settled; production is the next step" — the same thing it
+means when `submitDesignBriefDecision` sets it in the other workflow. It is
+never `"finalizing"` (nothing has been requested) and never `"print_ready"`.
 
 ### No required-wording contract
 
@@ -4001,8 +4231,8 @@ the text is never modified.
 
 The architectural hook Phase 2 needs is exactly
 `ArtworkVersion.kind === "prepared_upload"` — an unambiguous, non-inferred
-signal for a future uploaded-preserve print-validation applicability profile.
-Phase 2 owns that profile; Phase 1 only guarantees the signal exists.
+signal for the uploaded-preserve print-validation applicability profile. Phase
+2 implements that profile; see §13i.
 
 ### Formats
 
@@ -4072,6 +4302,207 @@ committed to the repository (privacy and ownership, Constitution §16).
 and `net.Socket.prototype.connect` for the duration of a full
 upload → analyze → prepare → approve run, so a paid call would fail the suite
 loudly instead of quietly spending money.
+
+---
+
+## 13i. Existing Artwork → Print Ready (Phase 2: production finalization)
+
+Phase 1 ends at an approved, background-prepared transparent PNG. Phase 2
+turns that into the file a printer can actually use, and it is the point where
+the two workflows finally converge.
+
+### Two authorities, one pipeline
+
+**PREPARED ARTWORK != PRINT-READY ARTWORK.**
+**PREPARED APPROVAL != `print_ready`.**
+
+```
+CREATE NEW ARTWORK                     UPLOAD EXISTING ARTWORK
+  selected concept                       uploaded original
+    ↓                                      ↓
+  final direction approval               prepared artwork
+  (FinalDirectionApproval)                 ↓
+    ↓                                    prepared approval
+    │                                    (ArtworkPreparation.status='approved')
+    │                                      ↓
+    └──────────────► FinalArtworkJob ◄─────┘
+                          ↓
+                 production requirements  (placement policy + chosen width)
+                          ↓
+                 enhancement decision     (visible pixels vs target pixels)
+                          ↓
+                 provider / normalization (trim → size → resample → pHYs)
+                          ↓
+                 production asset         (immutable, production_png)
+                          ↓
+                 AUTHORITATIVE Print Validation
+                          ↓
+                 print_ready  /  finalization_required
+```
+
+These are **parallel customer-authority boundaries**, not one gate with two
+doors. A create_new customer's authority is "I am done revising the design you
+made for me". An upload customer was never revising anything — their authority
+is "this prepared file faithfully represents the artwork I gave you". Asking
+the second customer the first question has no meaning.
+
+### The authority model (why no synthetic approval)
+
+`FinalArtworkJob` carries **either** a `final_direction_approval_id` **or** an
+`artwork_preparation_id`, with a database CHECK enforcing exactly one. The
+job's `sourceKind` is *derived* from which one is set, never stored, so there
+is no third fact that could disagree with the two keys.
+
+Three options were audited:
+
+| Option | Verdict |
+| --- | --- |
+| Reuse `FinalDirectionApproval` with a source kind | **Rejected.** Its `design_brief_version_id` is `NOT NULL` and honest for every existing row; uploaded artwork has no approved brief version, so this means weakening a real constraint AND fabricating a brief-version reference for artwork no brief describes. |
+| A generalized `ProductionApproval` abstraction | **Rejected.** A new table whose only content would be a foreign key to one of two records that already exist — indirection with no new fact in it. |
+| **`ArtworkPreparation` approval IS the authority** | **Chosen.** The row already records exactly this decision (`status`, `approved_at`, `prepared_artwork_version_id`), durably and auditably. Creating a second record for the same decision would be the duplicate competing authority this design exists to avoid. |
+
+`requestPreparedUploadFinalArtwork` therefore requires **none** of
+`selectedArtworkVersionId`, `finalDirectionConfirmed`, an approved
+`DesignBriefVersion`, or a `FinalDirectionApproval`. It requires the approved
+preparation, its prepared asset, and its `prepared_upload` `ArtworkVersion`.
+
+### Idempotency: approval + production size
+
+The upload workflow's idempotency key is **(project, preparation, production
+width)**, enforced by a partial unique index. Consequences, all intended:
+
+- Double click, reload, second tab, retry → the same job, and therefore never
+  a second paid reconstruction.
+- A `"failed"` job (infrastructure) revives to `"queued"` on the customer's
+  next press of the same button.
+- A `"completed"` job is returned as-is — that is a real verdict about this
+  artwork at this size, not a hiccup.
+- **A different print width is a different deliverable**, and gets its own
+  job. The older plate stays immutable and correct for the size it was made
+  at; `getCurrentProductionAssetId` resolves only the job matching the
+  CURRENT intent, so a mismatched plate is withheld rather than handed over
+  with a size on it that is a lie.
+
+`FinalArtworkJob.productionWidthIn` freezes each upload job's own target at
+enqueue, so a size change mid-flight cannot retroactively re-target a running
+job. (The create_new path is unchanged and still reads
+`TShirtDesignBrief.intendedPrintWidthIn` at run time.)
+
+### Source contract: the prepared PNG, never the original
+
+The enhancement source is the **approved prepared transparent PNG**. The
+customer already accepted that background isolation; starting from the opaque
+original would discard their decision, and re-running isolation would
+re-litigate it. The worker refuses to proceed if the preparation's prepared
+asset and the approved `ArtworkVersion`'s primary asset disagree, or if the
+prepared asset is the original.
+
+### Enhancement decision (cost policy, `enhancement-decision.ts`)
+
+Pure arithmetic on two numbers known before any provider is contacted:
+
+```
+visible artwork width (alpha bbox, in real source pixels)
+  vs
+targetWidthIn × targetPpi     e.g. 10.5in × 300 = 3150px
+```
+
+- `>= target` → **skipped**. No paid call at all; the local
+  normalization-only provider runs.
+- `< target` → **reconstructed**. The configured provider runs (Topaz
+  Transparency Upscale in live configuration).
+
+Visible width, never canvas width — transparent padding is not resolution.
+This is the same rule `image-analysis.ts` already applies when telling the
+customer whether enhancement will be needed, so what they were told before
+approving and what production does cannot disagree.
+
+There is **no retry ladder**. If a reconstruction still lands short of the
+target, the plate is produced honestly and authoritative validation fails it
+via `reconstruction_sufficiency` — never an escalating loop of paid calls.
+
+### Uploaded-preserve validation profile
+
+`PrintValidationInput.validationProfile` selects which checks *apply*. It is
+an applicability profile, not a strictness dial.
+
+Under `uploaded_preserve`, three checks are **not emitted** because they have
+no meaning for customer-supplied artwork — not because they are inconvenient:
+
+| Check | Why inapplicable |
+| --- | --- |
+| `brief_provenance` | No Design Brief version authorizes this artwork; the customer's file and their prepared-artwork approval do. |
+| `concept_evaluation_alignment` | "Does this match the brief we were given?" has no answer when no brief describes it and nothing generated it. |
+| `required_wording_verification` | The wording is already in the customer's pixels. They never typed it; asking them to, so we could check our own transform, would invent a requirement. Phase 2 performs no OCR. |
+
+Everything a print shop would actually reject a file for still **blocks**,
+unchanged: `content_type`, `raster_dimensions_known`, `transparency`,
+`effective_resolution`, `minimum_raster_dimensions`,
+`production_normalization`, `alpha_bound_artwork`, `transparent_dead_canvas`,
+`physical_width_policy`, `aspect_ratio_preserved`.
+
+Three preservation checks are **added** — so this profile is not weaker, it is
+different and in places stricter:
+
+- `source_lineage` — the plate provably derives from the approved prepared
+  asset (never the original, never another project's), with a SHA-256 of the
+  exact source bytes. Missing lineage **fails**; "we didn't write it down" is
+  not a reason to certify.
+- `preserved_source_geometry` — the plate's own alpha bbox keeps the approved
+  artwork's proportions, so a crop, letterbox, or squash is caught.
+- `reconstruction_sufficiency` — the plate was not enlarged beyond the raster
+  it was built from.
+
+Every report also carries a `validation_profile` info check and a `profile`
+field, so **"not asked" is never indistinguishable from "passed"**.
+
+### Preservation honesty boundary
+
+Deterministic checks prove the pipeline used the artwork the customer
+approved, and that its geometry survived. They **do not** prove it still looks
+the same. A provider-hosted reconstruction is a genuine enhancement transform,
+and visual fidelity after it remains provider-dependent and unproven by
+arithmetic. This limitation is stated in
+`print-validation/contracts.ts` rather than papered over.
+
+### Project lifecycle
+
+No new statuses and no new conversation phase. `PrintProject.status` is the
+sole lifecycle authority for the upload workflow (the design-interview surface
+is structurally absent for these projects — the uploaded-artwork panel owns
+the screen and the composer is hidden):
+
+```
+intake → approved → finalizing → print_ready
+                              ↘ finalization_required   ("needs attention")
+```
+
+A size change after delivery returns an upload project to `approved`, which is
+truthful: an approved design, and no print-ready file *at the size now
+intended*. The previously produced plate is untouched.
+
+### Customer-facing surface
+
+The approved step of the uploaded-artwork panel gains the size card (reused
+from create_new) and one action, "Prepare Print-Ready Artwork". While
+production runs it shows the shared `PRINT_READY_WAITING_MESSAGE`; on failure
+it shows an honest needs-attention message that states both the original and
+the prepared artwork are safe, plus a retry. On success the existing
+`FinalArtworkDeliveryCard` renders — without "Make Another Change", which
+reopens a creative loop an upload customer does not have. The size control
+stays available, because it is their only route to a different size.
+
+The download filename prefers the customer's own sanitized upload name
+(`split-disturbers-print-ready.png`) over brief text, which for an upload
+project only ever describes the garment.
+
+### Migration
+
+One additive, forward-only migration
+(`20260810180000_prepared_upload_finalization.sql`): two nullable columns on
+`final_artwork_jobs`, one dropped `NOT NULL`, one CHECK, one partial unique
+index. No new table, no new enum. Every existing row satisfies the CHECK
+unchanged, and the create_new path gains no new behavior.
 
 ---
 
@@ -4316,7 +4747,7 @@ delegation to composed capabilities.
 | `GET /api/projects/[projectId]/production-artwork/download` | Stream print-ready production PNG with customer filename (`Content-Disposition`) |
 | `POST /api/projects/[projectId]/undo` | One-level undo |
 | `POST /api/projects/[projectId]/artwork-upload` | §13h: project-scoped multipart ingress for customer-supplied artwork (PNG only; bytes authoritative over declared type and filename) |
-| `POST /api/projects/[projectId]/artwork-preparation` | §13h: the three uploaded-artwork actions — `context` (production details), `prepare` (deterministic background isolation), `approve` (explicit prepared-artwork approval). All idempotent |
+| `POST /api/projects/[projectId]/artwork-preparation` | §13h: the uploaded-artwork actions — `context` (production details), `prepare` (deterministic background isolation), `cleanup` / `undo_cleanup` (customer-guided background removal; carries a coordinate, the one piece of client input, and grants nothing — see "User-guided background cleanup"), `approve` (explicit prepared-artwork approval), `print_ready` (Phase 2). All idempotent |
 | `GET /api/projects/[projectId]/artwork-preparation/image/[role]` | §13h: mint short-lived URL for `original` or `prepared`. The browser names a role, never an asset id; uniform 404 on every miss |
 | `GET /api/assets/[...objectKey]` | Serve filesystem signed assets |
 | `POST /api/worker/generation` | Independent concept-generation worker batch (secret-protected) |
@@ -4619,6 +5050,45 @@ Verified against the implementation:
   is indistinguishable from the background itself and will be removed with
   it. This is inherent to any reachability-based isolation; the mitigation is
   the conservative classifier, not a cleverer fill
+- **Enclosed cavities are decided by wall thickness against cavity size, and
+  the ambiguous cases resolve toward preserving artwork.** A counter ringed by
+  an unusually heavy stroke (wall > 1.75x its inradius) is left black rather
+  than guessed at, and conversely an intentional dark speck sitting within a
+  few pixels of a shape's outer edge can be read as a cavity. Both directions
+  are documented consequences of the same ratio, and it is deliberately tuned
+  to fail toward the first
+- **RESOLVED, by asking rather than by tuning: display-scale counters inside a
+  compound stroke are never removed automatically.** The full real-file audit
+  measured wall/inradius at 2.11–5.29 for genuine letter counters and 2.89–4.69
+  for the bowling ball's finger holes — the finger holes sit *inside* the
+  counter range, so the populations are **nested** and no threshold on that
+  statistic can separate them. Alternative statistics did separate on that one
+  file (best: 75th-percentile ray crossing thickness over inradius, ~2× margin),
+  but on three negative controls from a single image, and a smaller ball icon
+  with proportionally larger holes collapses the margin. These regions are
+  therefore preserved and the customer removes them with a click (see
+  "User-guided background cleanup"). `darkOutlinedDisplayArtwork` remains the
+  characterization fixture; it now pins preservation as *correct*
+- **Guided cleanup can remove a finger hole if the customer clicks one.** This
+  is the unavoidable consequence of the finding above: the system cannot
+  distinguish it, so it cannot refuse it on the customer's behalf. Mitigations
+  are that nothing is ever removed automatically, the affected region is bounded
+  and previewed, and undo is always available before approval. A confirmation
+  step for unusually large regions is the obvious next hardening if real usage
+  shows mis-clicks
+- **Speckle cleanup only reaches fully isolated flecks of ≤4px.** Residue still
+  *attached* to artwork — a one-pixel-wide dark protrusion along an outline — is
+  left alone, because it cannot be told apart from thin intentional detail. On
+  the audited file that leaves the retained-pixel islands at zero but does not
+  claim to remove every near-background pixel near an edge
+- Since the boundary gate became membership-based, a dark fill behind a thin
+  dark wall is no longer protected — its protection came entirely from the 48
+  threshold, and that threshold provably rejects the real file's counters. The
+  two requirements are mutually exclusive; the Original-vs-Prepared comparison
+  is the customer's safeguard
+- A cavity sealed behind another dark enclosed region (a dot inside a closed
+  black ring) has no measurable wall and is always preserved, even when it is
+  in fact background
 - Uploaded artwork is never OCR'd, so Phase 1 knows nothing about text inside
   it. That is intentional (the pixels are authoritative), and Phase 2's
   uploaded-preserve validation profile must not assume otherwise

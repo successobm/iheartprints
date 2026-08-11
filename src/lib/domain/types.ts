@@ -759,11 +759,54 @@ export type FinalArtworkJobStatus =
   | "failed"
   | "cancelled";
 
+/**
+ * Existing Artwork → Print Ready Phase 2: which customer authority a
+ * `FinalArtworkJob` was created under. DERIVED, never a stored column — it is
+ * `"prepared_upload"` exactly when `artworkPreparationId` is set, and
+ * `"generated_concept"` exactly when `finalDirectionApprovalId` is
+ * (the persistence layer enforces "exactly one"). Modelling it as a derived
+ * discriminant rather than an enum column keeps the schema from carrying a
+ * third fact that could disagree with the two foreign keys.
+ *
+ *   "generated_concept" — Create New Artwork. The authority is the customer's
+ *     `FinalDirectionApproval` ("this concept is my final direction").
+ *   "prepared_upload"   — Upload Existing Artwork. The authority is the
+ *     customer's approval of their own PREPARED artwork
+ *     (`ArtworkPreparation.status === "approved"`). There is deliberately no
+ *     `FinalDirectionApproval` on this path — see `ArtworkPreparation`'s doc
+ *     and ARCHITECTURE.md §13i for why fabricating one would be a second,
+ *     competing production-approval authority.
+ */
+export type FinalArtworkSourceKind = "generated_concept" | "prepared_upload";
+
 export interface FinalArtworkJob {
   id: string;
   projectId: string;
-  finalDirectionApprovalId: string;
-  /** Denormalized for convenient querying — always the same artwork the approval references. */
+  /** See `FinalArtworkSourceKind` — derived from which authority id is set, never persisted separately. */
+  sourceKind: FinalArtworkSourceKind;
+  /** The Create New Artwork authority. `null` for a `"prepared_upload"` job. */
+  finalDirectionApprovalId: string | null;
+  /**
+   * Existing Artwork → Print Ready Phase 2: the Upload Existing Artwork
+   * authority — the `ArtworkPreparation` whose customer approval authorized
+   * this finalization. `null` for a `"generated_concept"` job.
+   */
+  artworkPreparationId: string | null;
+  /**
+   * Existing Artwork → Print Ready Phase 2: the production print WIDTH, in
+   * inches, this job was enqueued for — frozen at enqueue rather than re-read
+   * from the working brief while the job runs.
+   *
+   * Only set for `"prepared_upload"`, where it is half of the idempotency key
+   * (Goal 14: exactly one active finalization per preparation approval +
+   * production-size intent, and a size change after a completed plate demands
+   * a NEW job rather than silently reusing a mismatched deliverable).
+   * `"generated_concept"` keeps its existing behavior — the worker reads
+   * `TShirtDesignBrief.intendedPrintWidthIn` at run time — so nothing about
+   * that path changes.
+   */
+  productionWidthIn: number | null;
+  /** Denormalized for convenient querying — always the same artwork the authorizing record references. */
   artworkVersionId: string;
   status: FinalArtworkJobStatus;
   /**
@@ -868,6 +911,10 @@ export interface ArtworkPreparation {
    * The `ArtworkVersion` (`kind: "prepared_upload"`) created when the
    * customer approves the prepared artwork — the handoff Phase 2's
    * `FinalArtwork` pipeline consumes. `null` until approval.
+   *
+   * Phase 2: together with `status === "approved"`, this IS the production
+   * authority for the upload workflow — `FinalArtworkJob.artworkPreparationId`
+   * points back here rather than at a fabricated `FinalDirectionApproval`.
    */
   preparedArtworkVersionId: string | null;
   /** Sanitized customer filename. Display only — never a storage path. */
@@ -876,6 +923,26 @@ export interface ArtworkPreparation {
   analysis: Record<string, unknown>;
   /** Deterministic `BackgroundPreparationRecord`. `null` until prepared. */
   preparation: Record<string, unknown> | null;
+  /**
+   * Existing Artwork → Print Ready Phase 1.2: the customer's own background
+   * cleanup, as the ORDERED LIST OF POINTS THEY CLICKED. `null` until they
+   * click something.
+   *
+   * Deliberately the INPUT, not the output. The prepared PNG is a derived
+   * asset that any of these clicks replaces; the clicks are the only fact the
+   * customer actually authored, and re-running the deterministic pipeline over
+   * the immutable original with this list reproduces the prepared bytes
+   * exactly. That is what makes a reload, a retry, and an undo all cheap and
+   * all honest — and it is why storing a pixel mask here instead would be
+   * strictly worse: a mask cannot be replayed against a re-analysis, cannot be
+   * undone one step at a time, and could disagree with the original it claims
+   * to describe.
+   *
+   * Loosely typed for the same reason `analysis` and `preparation` are:
+   * `GuidedCleanupRecord` is narrowed at the `ArtworkPreparationCapability`
+   * boundary that writes and reads it.
+   */
+  guidedCleanup: Record<string, unknown> | null;
   approvedAt: string | null;
   createdAt: string;
   updatedAt: string;

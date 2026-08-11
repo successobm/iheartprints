@@ -173,6 +173,14 @@ async function readDb(): Promise<LocalDatabase> {
         providerKey: job.providerKey ?? null,
         providerRequestId: job.providerRequestId ?? null,
         providerStatus: job.providerStatus ?? null,
+        // Existing Artwork → Print Ready Phase 2: every job written before
+        // the upload workflow existed is, by definition, a generated-concept
+        // job — its authority is the approval id it already carries.
+        finalDirectionApprovalId: job.finalDirectionApprovalId ?? null,
+        artworkPreparationId: job.artworkPreparationId ?? null,
+        productionWidthIn: job.productionWidthIn ?? null,
+        sourceKind:
+          job.artworkPreparationId != null ? "prepared_upload" : "generated_concept",
       })),
       productionAssetValidations: parsed.productionAssetValidations ?? [],
       // Existing Artwork → Print Ready Phase 1: absent in every store
@@ -854,22 +862,50 @@ export class LocalProjectRepository implements ProjectRepository {
     input: CreateFinalArtworkJobInput,
   ): Promise<FinalArtworkJob> {
     const db = await readDb();
-    const duplicate = db.finalArtworkJobs.find(
-      (item) =>
-        item.projectId === projectId &&
-        item.finalDirectionApprovalId === input.finalDirectionApprovalId,
-    );
-    if (duplicate) {
-      throw new UniqueConstraintViolationError(
-        "final_artwork_jobs_project_id_final_direction_approval_id",
+    if (input.sourceKind === "generated_concept") {
+      const duplicate = db.finalArtworkJobs.find(
+        (item) =>
+          item.projectId === projectId &&
+          item.finalDirectionApprovalId === input.finalDirectionApprovalId,
       );
+      if (duplicate) {
+        throw new UniqueConstraintViolationError(
+          "final_artwork_jobs_project_id_final_direction_approval_id",
+        );
+      }
+    } else {
+      // Existing Artwork → Print Ready Phase 2: the upload workflow's
+      // idempotency key is (project, preparation, production width) — the
+      // local-store equivalent of the partial unique index the migration
+      // adds. Widths are compared with the same explicit tolerance the
+      // capability uses rather than float equality.
+      const duplicate = db.finalArtworkJobs.find(
+        (item) =>
+          item.projectId === projectId &&
+          item.artworkPreparationId === input.artworkPreparationId &&
+          item.productionWidthIn !== null &&
+          Math.abs(item.productionWidthIn - input.productionWidthIn) < 1e-6,
+      );
+      if (duplicate) {
+        throw new UniqueConstraintViolationError(
+          "final_artwork_jobs_project_id_artwork_preparation_id_width",
+        );
+      }
     }
 
     const timestamp = nowIso();
     const job: FinalArtworkJob = {
       id: randomUUID(),
       projectId,
-      finalDirectionApprovalId: input.finalDirectionApprovalId,
+      sourceKind: input.sourceKind,
+      finalDirectionApprovalId:
+        input.sourceKind === "generated_concept"
+          ? input.finalDirectionApprovalId
+          : null,
+      artworkPreparationId:
+        input.sourceKind === "prepared_upload" ? input.artworkPreparationId : null,
+      productionWidthIn:
+        input.sourceKind === "prepared_upload" ? input.productionWidthIn : null,
       artworkVersionId: input.artworkVersionId,
       status: "queued",
       attempts: 0,
@@ -900,6 +936,20 @@ export class LocalProjectRepository implements ProjectRepository {
           item.finalDirectionApprovalId === finalDirectionApprovalId,
       ) ?? null
     );
+  }
+
+  async listFinalArtworkJobsForPreparation(
+    projectId: string,
+    artworkPreparationId: string,
+  ): Promise<FinalArtworkJob[]> {
+    const db = await readDb();
+    return db.finalArtworkJobs
+      .filter(
+        (item) =>
+          item.projectId === projectId &&
+          item.artworkPreparationId === artworkPreparationId,
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   async getFinalDirectionApprovalById(
@@ -1033,6 +1083,7 @@ export class LocalProjectRepository implements ProjectRepository {
       originalFilename: input.originalFilename,
       analysis: input.analysis,
       preparation: null,
+      guidedCleanup: null,
       approvedAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,

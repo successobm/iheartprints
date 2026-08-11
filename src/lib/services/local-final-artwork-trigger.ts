@@ -6,6 +6,7 @@ import {
   type LocalGenerationTriggerDecision,
 } from "@/lib/config/local-generation-trigger-policy";
 import { getProjectRepository } from "@/lib/db";
+import type { FinalArtworkJob } from "@/lib/domain/types";
 
 /**
  * Interactive-local convenience: after a FinalArtworkJob is durably queued,
@@ -30,6 +31,8 @@ export const LOCAL_FINAL_ARTWORK_TRIGGER_CODE_VERSION =
 
 export type LocalFinalArtworkTriggerReason =
   | "approve_final_direction"
+  /** Existing Artwork → Print Ready Phase 2: the upload workflow's equivalent post-enqueue kick. */
+  | "prepare_uploaded_artwork"
   | "status_poll"
   | "project_reload";
 
@@ -162,13 +165,14 @@ export function maybeTriggerLocalFinalArtworkWorker(
 
 /**
  * Interactive `next dev` only: if this project is still `finalizing` with a
- * never-claimed FinalArtworkJob (`queued`, `attempts=0`) behind an active
- * FinalDirectionApproval, kick the in-process final-artwork scheduler.
- * Covers a missed post-enqueue trigger or a stale `next dev` module after
- * hot reload. Production and automated tests no-op. Does not change claim
- * order, does not revive failed/cancelled/completed jobs, and never
- * increments attempts itself — `claimNextQueuedFinalArtworkJob` owns that.
- * Never throws.
+ * never-claimed FinalArtworkJob (`queued`, `attempts=0`) behind whichever
+ * production authority applies — an active `FinalDirectionApproval` for
+ * Create New Artwork, or an approved `ArtworkPreparation` for Upload Existing
+ * Artwork — kick the in-process final-artwork scheduler. Covers a missed
+ * post-enqueue trigger or a stale `next dev` module after hot reload.
+ * Production and automated tests no-op. Does not change claim order, does not
+ * revive failed/cancelled/completed jobs, and never increments attempts
+ * itself — `claimNextQueuedFinalArtworkJob` owns that. Never throws.
  */
 export async function maybeRecoverStrandedLocalFinalArtworkJobs(
   projectId: string,
@@ -196,13 +200,7 @@ export async function maybeRecoverStrandedLocalFinalArtworkJobs(
       return null;
     }
 
-    const approval = await repo.getActiveFinalDirectionApproval(projectId);
-    if (!approval) return null;
-
-    const job = await repo.getFinalArtworkJobByApprovalId(
-      projectId,
-      approval.id,
-    );
+    const job = await resolveStrandedJob(repo, projectId);
     if (!job || job.status !== "queued" || job.attempts !== 0) {
       return null;
     }
@@ -227,6 +225,39 @@ export async function maybeRecoverStrandedLocalFinalArtworkJobs(
     );
     return null;
   }
+}
+
+/**
+ * Finds this project's current, still-unclaimed finalization job under
+ * whichever production authority it has.
+ *
+ * Deliberately checks the create_new authority first and only falls through
+ * when there is none: a project can only ever have one of the two (a
+ * `FinalDirectionApproval` requires a generated concept; an approved
+ * `ArtworkPreparation` is what makes a project an upload project), so this is
+ * a dispatch rather than a precedence rule. Returns `null` on any miss so a
+ * dev-only convenience never becomes a source of surprising behavior.
+ */
+async function resolveStrandedJob(
+  repo: ReturnType<typeof getProjectRepository>,
+  projectId: string,
+): Promise<FinalArtworkJob | null> {
+  const approval = await repo.getActiveFinalDirectionApproval(projectId);
+  if (approval) {
+    return repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
+  }
+
+  const preparation = await repo.getArtworkPreparation(projectId);
+  if (!preparation || preparation.status !== "approved") return null;
+
+  // The newest job for this preparation. A project that changed print size
+  // owns more than one, and the one that matters is the one just enqueued —
+  // the earlier sizes' jobs are already terminal.
+  const jobs = await repo.listFinalArtworkJobsForPreparation(
+    projectId,
+    preparation.id,
+  );
+  return jobs.at(-1) ?? null;
 }
 
 function describeDecision(decision: LocalGenerationTriggerDecision): string {

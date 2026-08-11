@@ -152,7 +152,26 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/artwork-preparation-capability.test.ts",
   "src/capabilities/artwork-preparation/bowling-upload-regression.test.ts",
   "src/capabilities/artwork-preparation/no-paid-provider.test.ts",
+  // Phase 1 follow-up: enclosed background cavities (letter counters, ring
+  // interiors) removed, intentional black artwork preserved.
+  "src/capabilities/artwork-preparation/background-cavities.test.ts",
+  "src/capabilities/artwork-preparation/bowling-cavity-acceptance.test.ts",
+  // Phase 1.2: the three stages that answer the real-file audit — a measured
+  // hairline-counter allowance, isolated speckle residue, and user-guided
+  // removal of the regions no threshold can safely classify. Deliberately
+  // three separate suites, because they are three separate mechanisms.
+  "src/capabilities/artwork-preparation/background-speckle.test.ts",
+  "src/capabilities/artwork-preparation/guided-removal.test.ts",
+  "src/capabilities/artwork-preparation/guided-cleanup-capability.test.ts",
+  "src/components/chat/artwork-click-mapping.test.ts",
   "src/components/chat/uploaded-artwork-flow.test.ts",
   "src/components/chat/UploadedArtworkPanel.test.tsx",
   "src/app/api/projects/[projectId]/artwork-upload/route.test.ts",
+  // Existing Artwork → Print Ready Phase 2: enhancement decision, production
+  // finalization, the uploaded-preserve validation profile, and the synthetic
+  // bowling end-to-end acceptance regression.
+  "src/capabilities/final-artwork/enhancement-decision.test.ts",
+  "src/capabilities/print-validation/uploaded-preserve-profile.test.ts",
+  "src/capabilities/final-artwork-worker/prepared-upload-finalization.test.ts",
+  "src/capabilities/artwork-preparation/bowling-print-ready-regression.test.ts",
 ];

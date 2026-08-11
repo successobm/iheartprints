@@ -10,6 +10,7 @@ import type {
 } from "@/capabilities/shared/contracts";
 import type { PrintPlacement } from "@/lib/domain/types";
 import type { ApiProjectSnapshot } from "@/lib/services/conversation-service";
+import type { ImagePoint } from "./artwork-click-mapping";
 import { deriveChatAffordances } from "./chat-affordances";
 import {
   deriveUploadedArtworkStep,
@@ -66,6 +67,12 @@ export function ChatApp() {
   const [workflowChoice, setWorkflowChoice] = useState<WorkflowChoice>("undecided");
   /** Client-only "take me back a step" from the comparison/analysis surface. */
   const [reconsideringUpload, setReconsideringUpload] = useState(false);
+  /**
+   * Phase 1.2: the server's already-phrased answer to the LAST cleanup click.
+   * Transient by design — it describes one action, not the project, so it is
+   * never persisted and is cleared by any other action.
+   */
+  const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
   /**
    * Signed URLs are tagged with the preparation they belong to, so a stale
    * URL can never be rendered against a different (or absent) preparation —
@@ -505,10 +512,10 @@ export function ChatApp() {
   }
 
   /**
-   * Existing Artwork → Print Ready Phase 1: the four explicit actions in the
-   * Upload Existing Artwork flow. All four go through the same request shape
-   * as every other action in this component and all four are idempotent
-   * server-side, so a double click is always safe.
+   * Existing Artwork → Print Ready Phase 1: the explicit actions in the Upload
+   * Existing Artwork flow. All go through the same request shape as every
+   * other action in this component and all are idempotent server-side, so a
+   * double click is always safe.
    */
   async function submitPreparationAction(
     request: () => Promise<Response>,
@@ -524,6 +531,14 @@ export function ChatApp() {
       if (!response.ok) throw new Error(data.error || failureMessage);
       setReconsideringUpload(false);
       setSnapshot(data as ApiSnapshot);
+      // Phase 1.2: the server's answer to a cleanup click, including its
+      // refusals, travels beside the snapshot rather than in it. Cleared on
+      // every other action so a stale "we left that unchanged" can never
+      // linger over an unrelated step.
+      const cleanup = (data as { cleanup?: { message?: string } }).cleanup;
+      setCleanupMessage(
+        typeof cleanup?.message === "string" ? cleanup.message : null,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : failureMessage);
     } finally {
@@ -588,6 +603,60 @@ export function ChatApp() {
     );
   }
 
+  /**
+   * Existing Artwork → Print Ready Phase 1.2: the customer clicked background
+   * the automatic pass left behind.
+   *
+   * Sends a COORDINATE in source-image pixels and nothing else — no region id,
+   * no mask, no asset path. The server decides whether anything at that point
+   * may be removed, so a stale or mis-mapped click is refused rather than
+   * obeyed, and clicking the same area twice is a server-side no-op.
+   */
+  async function applyGuidedCleanup(point: ImagePoint) {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "cleanup", x: point.x, y: point.y }),
+        }),
+      "We couldn't remove that area. Please try again.",
+    );
+  }
+
+  async function undoGuidedCleanup() {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "undo_cleanup" }),
+        }),
+      "We couldn't undo that. Please try again.",
+    );
+  }
+
+  /**
+   * Existing Artwork → Print Ready Phase 2: the upload workflow's "Prepare
+   * Print-Ready Artwork". Idempotent server-side on (approved preparation,
+   * production size), so a double click, a reload, or a second tab can never
+   * start a second run — or a second paid one.
+   */
+  async function prepareUploadedArtworkForPrint() {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "print_ready" }),
+        }),
+      "Failed to prepare your print-ready artwork",
+    );
+  }
+
   async function refresh() {
     if (!snapshot) return;
     const response = await fetch(`/api/projects/${snapshot.project.id}`);
@@ -606,11 +675,23 @@ export function ChatApp() {
   const preparation = snapshot?.artworkPreparation ?? null;
   const preparationId = preparation?.preparationId ?? null;
   const hasPreparedArtwork = preparation?.hasPreparedArtwork ?? false;
+  /**
+   * Phase 1.2: every accepted guided removal (and every undo) replaces the
+   * prepared asset, so this count is what tells the effect below that the
+   * signed URL it holds now points at superseded bytes. Without it the
+   * customer would click, the server would do the work, and the preview would
+   * not change — which reads exactly like the click was ignored.
+   *
+   * A REFUSED click leaves the count alone, which is correct: nothing was
+   * derived, so there is nothing new to fetch.
+   */
+  const guidedCleanupCount = preparation?.guidedCleanup.removalCount ?? 0;
 
   // Existing Artwork → Print Ready Phase 1: mint fresh signed URLs for the
   // original and (once it exists) the prepared image. Keyed on the
-  // preparation id plus whether a prepared asset exists, so approving or
-  // re-preparing re-fetches while unrelated snapshot updates do not.
+  // preparation id, whether a prepared asset exists, and how many guided
+  // removals produced it — so approving, re-preparing, or cleaning up
+  // re-fetches while unrelated snapshot updates do not.
   useEffect(() => {
     // No preparation means nothing to fetch. State is not cleared here —
     // render reads `preparationId` alongside it (see `preparationImagesFor`),
@@ -643,7 +724,13 @@ export function ChatApp() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isClient, snapshot?.project.id, preparationId, hasPreparedArtwork]);
+  }, [
+    isClient,
+    snapshot?.project.id,
+    preparationId,
+    hasPreparedArtwork,
+    guidedCleanupCount,
+  ]);
 
   const phase = snapshot?.conversation.phase;
   const affordances = deriveChatAffordances({
@@ -940,6 +1027,13 @@ export function ChatApp() {
                 onPrepare={() => void prepareUploadedArtwork()}
                 onApprove={() => void approvePreparedArtwork()}
                 onReconsider={() => setReconsideringUpload(true)}
+                onCleanupPoint={(point) => void applyGuidedCleanup(point)}
+                onUndoCleanup={() => void undoGuidedCleanup()}
+                cleanupMessage={cleanupMessage}
+                printReadySize={snapshot?.printReadySize ?? null}
+                onChoosePrintWidth={(widthIn) => void choosePrintWidth(widthIn)}
+                finalizationStatus={snapshot?.finalization.status ?? "not_requested"}
+                onPrepareForPrint={() => void prepareUploadedArtworkForPrint()}
               />
             ) : null}
 
@@ -1040,10 +1134,12 @@ export function ChatApp() {
               <FinalArtworkDeliveryCard
                 projectId={snapshot.project.id}
                 onMakeAnotherChange={() => setDeliveryEditingReopened(true)}
+                showMakeAnotherChange={!uploadedArtworkActive}
               />
             ) : null}
 
             {snapshot?.finalization.status === "print_ready" &&
+            !uploadedArtworkActive &&
             deliveryEditingReopened ? (
               <div className="mt-3 rounded-2xl border border-black/8 bg-white p-4 text-sm text-ink shadow-sm">
                 Describe the change you&apos;d like to make.

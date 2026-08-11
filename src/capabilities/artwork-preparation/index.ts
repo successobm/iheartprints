@@ -4,9 +4,18 @@ export {
   ArtworkUploadRejectedError,
   type ArtworkPreparationCapability,
   type ArtworkPreparationView,
+  type GuidedCleanupResult,
+  type GuidedCleanupStateView,
   type UploadArtworkInput,
   type UploadedArtworkContextInput,
 } from "./artwork-preparation-capability";
+export type {
+  GuidedRemovalOutcome,
+  GuidedRemovalPoint,
+  GuidedRemovalRecord,
+  GuidedRemovalRegion,
+  GuidedRemovalResolution,
+} from "./guided-removal";
 export type {
   ArtworkAnalysis,
   ArtworkBounds,
@@ -21,8 +30,14 @@ export type {
 export {
   describeArtworkForCustomer,
   describeApprovedPreparation,
+  describeGuidedCleanupOutcome,
+  describePrintReadyPreparation,
+  GUIDED_CLEANUP_COPY,
+  PRINT_READY_NEEDS_ATTENTION_MESSAGE,
   type ApprovedPreparationCopy,
   type ArtworkPreparationCustomerView,
+  type GuidedCleanupOutcomeCode,
+  type PrintReadyPreparationCopy,
 } from "./preparation-copy";
 export {
   MAX_IMAGE_DIMENSION_PX,

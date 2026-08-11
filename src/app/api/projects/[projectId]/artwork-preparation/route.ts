@@ -6,10 +6,14 @@ import { getPersistenceMode } from "@/lib/db";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
 import type { PrintPlacement } from "@/lib/domain/types";
 import {
+  applyGuidedCleanup,
   approvePreparedArtwork,
   prepareUploadedArtwork,
+  prepareUploadedArtworkForPrint,
   setUploadedArtworkContext,
+  undoGuidedCleanup,
 } from "@/lib/services/artwork-preparation-service";
+import { MAX_IMAGE_DIMENSION_PX } from "@/capabilities/artwork-preparation";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
@@ -21,18 +25,37 @@ const PLACEMENTS = Object.keys(PRINT_PLACEMENT_LABELS) as [
 ];
 
 /**
- * The three explicit customer actions in the uploaded-artwork flow, behind
- * one project-scoped endpoint:
+ * The four explicit customer actions in the uploaded-artwork flow, behind one
+ * project-scoped endpoint:
  *
- *   "context" — record what we're printing, its colour, and where the print
- *               goes. Production context only; never a creative brief edit.
- *   "prepare" — run deterministic background isolation, producing a NEW
- *               transparent PNG. Local pixel math only, no provider.
- *   "approve" — "this prepared version faithfully represents the artwork I
- *               uploaded". Explicitly NOT a claim that production ran, that
- *               enhancement happened, or that print validation passed.
+ *   "context"    — record what we're printing, its colour, and where the print
+ *                  goes. Production context only; never a creative brief edit.
+ *   "prepare"    — run deterministic background isolation, producing a NEW
+ *                  transparent PNG. Local pixel math only, no provider.
+ *   "approve"    — "this prepared version faithfully represents the artwork I
+ *                  uploaded". Explicitly NOT a claim that production ran, that
+ *                  enhancement happened, or that print validation passed.
+ *   "print_ready"— (Phase 2) produce the final print-ready file from that
+ *                  approved prepared artwork. The ONE action that may spend a
+ *                  paid reconstruction call, and only when the artwork
+ *                  genuinely lacks the pixels for the chosen size.
+ *   "cleanup"    — (Phase 1.2) the customer points at background the automatic
+ *                  pass left behind. Carries a COORDINATE, which is the one
+ *                  piece of client input in this whole endpoint.
+ *   "undo_cleanup"— take back the most recent cleanup.
  *
- * Every one is idempotent server-side, so a double click is always safe.
+ * Every one is idempotent server-side, so a double click is always safe. None
+ * carries an artwork/asset/job id: a project has exactly one preparation, so
+ * there is nothing to name and therefore nothing to forge (Goal 18).
+ *
+ * WHY A COORDINATE IS SAFE TO ACCEPT. It is not an identifier and it grants
+ * nothing. The server resolves it against the customer's own image and removes
+ * something only when that point lands in a region the automatic pass already
+ * classified as enclosed background and then declined on ambiguous geometry
+ * (`guided-removal.ts`). A forged, random, or out-of-range coordinate
+ * therefore resolves to "that's artwork" or "that's off the canvas" and
+ * changes nothing. The bounds below exist to reject nonsense cheaply, not as
+ * the security boundary — the region resolution is.
  */
 const bodySchema = z.discriminatedUnion("action", [
   z.object({
@@ -43,7 +66,37 @@ const bodySchema = z.discriminatedUnion("action", [
   }),
   z.object({ action: z.literal("prepare") }),
   z.object({ action: z.literal("approve") }),
+  z.object({ action: z.literal("print_ready") }),
+  z.object({
+    action: z.literal("cleanup"),
+    x: z.number().int().min(0).max(MAX_IMAGE_DIMENSION_PX),
+    y: z.number().int().min(0).max(MAX_IMAGE_DIMENSION_PX),
+  }),
+  z.object({ action: z.literal("undo_cleanup") }),
 ]);
+
+type PreparationAction = z.infer<typeof bodySchema>;
+
+function runPreparationAction(projectId: string, action: PreparationAction) {
+  switch (action.action) {
+    case "context":
+      return setUploadedArtworkContext(projectId, {
+        productSummary: action.productSummary,
+        productColor: action.productColor,
+        printPlacement: action.printPlacement,
+      });
+    case "prepare":
+      return prepareUploadedArtwork(projectId);
+    case "approve":
+      return approvePreparedArtwork(projectId);
+    case "print_ready":
+      return prepareUploadedArtworkForPrint(projectId);
+    case "cleanup":
+      return applyGuidedCleanup(projectId, { x: action.x, y: action.y });
+    case "undo_cleanup":
+      return undoGuidedCleanup(projectId);
+  }
+}
 
 export async function POST(request: Request, context: RouteContext) {
   try {
@@ -55,16 +108,7 @@ export async function POST(request: Request, context: RouteContext) {
       return NextResponse.json({ error: "Invalid request" }, { status: 400 });
     }
 
-    const snapshot =
-      parsed.data.action === "context"
-        ? await setUploadedArtworkContext(projectId, {
-            productSummary: parsed.data.productSummary,
-            productColor: parsed.data.productColor,
-            printPlacement: parsed.data.printPlacement,
-          })
-        : parsed.data.action === "prepare"
-          ? await prepareUploadedArtwork(projectId)
-          : await approvePreparedArtwork(projectId);
+    const snapshot = await runPreparationAction(projectId, parsed.data);
 
     return NextResponse.json({
       ...snapshot,

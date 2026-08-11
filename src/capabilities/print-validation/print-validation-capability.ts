@@ -23,10 +23,12 @@ import type {
   FinalizationTransformation,
   PrintValidationCheck,
   PrintValidationInput,
+  PrintValidationProfile,
   PrintValidationReport,
   PrintValidationStatus,
   ProductionNormalizationSummary,
   ProductionRequirements,
+  UploadedPreserveEvidence,
 } from "./contracts";
 
 /**
@@ -50,6 +52,26 @@ const EFFECTIVE_PPI_TOLERANCE = 0.5;
 const DENSITY_METADATA_TOLERANCE = 0.01;
 /** An alpha bounding box smaller than this on either axis is not meaningful artwork — it is a stray pixel or an encoding artifact. */
 const MIN_MEANINGFUL_ALPHA_BBOX_PX = 16;
+/**
+ * Existing Artwork → Print Ready Phase 2. Allowed relative deviation between
+ * the approved prepared artwork's own aspect ratio and the produced plate's
+ * visible artwork. Wider than `ASPECT_RATIO_TOLERANCE` on purpose: that one
+ * compares two measurements of the SAME raster inside one transform, while
+ * this one spans an enhancement step, where an alpha threshold applied to
+ * reconstructed edge pixels can legitimately move a bounding box by a pixel
+ * or two. Still far tighter than any real crop or letterbox, which is what
+ * this check exists to catch.
+ */
+const SOURCE_GEOMETRY_TOLERANCE = 0.02;
+/**
+ * Existing Artwork → Print Ready Phase 2. How far past 1.0 the production
+ * resample may scale the artwork it was built from before the plate is
+ * reporting pixels it does not have detail for. Absorbs rounding only — the
+ * failure this guards against (a reconstruction that lands short of the
+ * production target) overshoots it by whole multiples, never by half a
+ * percent.
+ */
+const CONTENT_SCALE_TOLERANCE = 0.005;
 
 export interface PrintValidationCapability {
   /** Deterministic — the same input always produces the same report. Never mutates `input`. */
@@ -72,8 +94,17 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     intendedPrintWidthIn: input.intendedPrintWidthIn ?? null,
   });
 
+  const profile: PrintValidationProfile =
+    input.validationProfile ?? "generated_concept";
+  const uploadedPreserve = profile === "uploaded_preserve";
+
   const checks: PrintValidationCheck[] = [];
   const requiredTransformations = new Set<FinalizationTransformation>();
+
+  // Emitted first, and on every run, so a report always states which checks
+  // it was even asking — never leaving "not applicable" and "passed"
+  // indistinguishable to whoever reads it later.
+  checks.push(describeValidationProfile(profile));
 
   // --- Hard-block checks -------------------------------------------------
   // These represent "there is nothing here to finalize", not "this needs
@@ -84,21 +115,45 @@ function validate(input: PrintValidationInput): PrintValidationReport {
       check: "asset_exists",
       status: "fail",
       severity: "blocking",
-      reason: "No generated asset exists for this concept.",
+      reason: uploadedPreserve
+        ? "No production asset exists for this uploaded artwork."
+        : "No generated asset exists for this concept.",
     });
-    return buildReport(input, requirements, checks, requiredTransformations, "blocked");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
   }
   checks.push({
     check: "asset_exists",
     status: "pass",
     severity: "blocking",
-    reason: "A generated asset exists for this concept.",
+    reason: uploadedPreserve
+      ? "A production asset exists for this uploaded artwork."
+      : "A generated asset exists for this concept.",
   });
 
-  const provenance = checkBriefProvenance(input);
-  checks.push(provenance);
-  if (provenance.status === "fail") {
-    return buildReport(input, requirements, checks, requiredTransformations, "blocked");
+  // Existing Artwork → Print Ready Phase 2: `brief_provenance` asks whether
+  // this artwork was generated from the currently approved Design Brief
+  // version. Uploaded artwork was not generated from anything — the
+  // customer's own file, and their explicit approval of the prepared version
+  // of it, are the authority (see `PrintValidationProfile`). The check is not
+  // emitted rather than emitted as a pass, so nothing reads as verified that
+  // was never asked; `source_lineage` below is the uploaded workflow's own,
+  // genuinely applicable provenance check.
+  if (!uploadedPreserve) {
+    const provenance = checkBriefProvenance(input);
+    checks.push(provenance);
+    if (provenance.status === "fail") {
+      return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+    }
+  } else {
+    const lineage = checkSourceLineage(input);
+    checks.push(lineage);
+    if (lineage.status !== "pass") {
+      // A plate whose lineage cannot be established is not a plate to spend
+      // any further arithmetic certifying — the same "there is nothing here
+      // to finalize" class as a missing asset.
+      requiredTransformations.add("require_human_review");
+      return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+    }
   }
 
   // --- Recoverable checks --------------------------------------------------
@@ -191,6 +246,26 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     // Informational only — density metadata is never allowed to stand in for
     // real pixel geometry (see `effective-resolution.ts`).
     checks.push(checkDensityMetadata(normalization));
+
+    // --- Existing Artwork → Print Ready Phase 2: preservation checks -------
+    // Only meaningful against a real plate, and only for artwork whose source
+    // pixels are themselves the specification.
+    if (uploadedPreserve && input.uploadedPreserve) {
+      const geometryCheck = checkPreservedSourceGeometry(
+        normalization,
+        input.uploadedPreserve,
+      );
+      checks.push(geometryCheck);
+      if (geometryCheck.status !== "pass") {
+        requiredTransformations.add("require_human_review");
+      }
+
+      const sufficiencyCheck = checkReconstructionSufficiency(normalization);
+      checks.push(sufficiencyCheck);
+      if (sufficiencyCheck.status !== "pass") {
+        requiredTransformations.add("upscale_raster_artwork");
+      }
+    }
   }
 
   const vectorCheck = checkVectorSource(requirements, asset);
@@ -205,16 +280,23 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     }
   }
 
-  const evaluationCheck = checkConceptEvaluationAlignment(input);
-  checks.push(evaluationCheck);
-  if (evaluationCheck.status === "fail") {
-    requiredTransformations.add("require_human_review");
-  }
+  // Existing Artwork → Print Ready Phase 2: both of these ask "does this
+  // artwork match the brief we were given?" — a question with no answer, not
+  // a lenient one, when the customer supplied the artwork and no brief
+  // describes it. Not emitted under `uploaded_preserve`; see
+  // `PrintValidationProfile` for the full rationale.
+  if (!uploadedPreserve) {
+    const evaluationCheck = checkConceptEvaluationAlignment(input);
+    checks.push(evaluationCheck);
+    if (evaluationCheck.status === "fail") {
+      requiredTransformations.add("require_human_review");
+    }
 
-  const wordingCheck = checkRequiredWordingVerification(input);
-  checks.push(wordingCheck);
-  if (wordingCheck.status === "fail") {
-    requiredTransformations.add("verify_or_recreate_text");
+    const wordingCheck = checkRequiredWordingVerification(input);
+    checks.push(wordingCheck);
+    if (wordingCheck.status === "fail") {
+      requiredTransformations.add("verify_or_recreate_text");
+    }
   }
 
   // --- Informational checks (never change status) -------------------------
@@ -240,7 +322,21 @@ function validate(input: PrintValidationInput): PrintValidationReport {
   });
 
   const status = aggregateStatus(checks);
-  return buildReport(input, requirements, checks, requiredTransformations, status);
+  return buildReport(input, requirements, checks, requiredTransformations, profile, status);
+}
+
+function describeValidationProfile(
+  profile: PrintValidationProfile,
+): PrintValidationCheck {
+  return {
+    check: "validation_profile",
+    status: "pass",
+    severity: "info",
+    reason:
+      profile === "uploaded_preserve"
+        ? "Applied the uploaded-preserve profile: the customer's own approved artwork is the specification, so brief provenance, Concept Evaluation alignment, and typed required-wording verification are inapplicable and were not evaluated; source-lineage and geometry-preservation checks were evaluated in their place."
+        : "Applied the generated-concept profile: this artwork was produced from an approved Design Brief, so brief provenance, Concept Evaluation alignment, and required-wording verification all apply.",
+  };
 }
 
 function checkBriefProvenance(input: PrintValidationInput): PrintValidationCheck {
@@ -653,6 +749,158 @@ function checkRequiredWordingVerification(
 }
 
 // ---------------------------------------------------------------------------
+// Existing Artwork → Print Ready Phase 2 — uploaded-preserve checks
+// ---------------------------------------------------------------------------
+
+/**
+ * The uploaded workflow's own provenance check, and the structural guarantee
+ * behind Goal 6: the plate was built from the PREPARED artwork the customer
+ * approved, never from the immutable original upload and never from an asset
+ * this report is not actually about.
+ *
+ * Missing evidence fails rather than passes. A plate whose lineage nobody
+ * recorded is indistinguishable from one built from the wrong source, and
+ * "we didn't write it down" is not a reason to certify it.
+ */
+function checkSourceLineage(input: PrintValidationInput): PrintValidationCheck {
+  const evidence = input.uploadedPreserve;
+  if (!evidence) {
+    return {
+      check: "source_lineage",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "No source lineage was recorded for this production artwork, so it cannot be shown to derive from the prepared artwork the customer approved.",
+    };
+  }
+  if (evidence.preparedArtworkVersionId !== input.artworkVersionId) {
+    return {
+      check: "source_lineage",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "This production artwork's recorded source is a different prepared artwork than the one being validated.",
+    };
+  }
+  if (!evidence.preparedAssetId || evidence.preparedAssetId === evidence.originalAssetId) {
+    return {
+      check: "source_lineage",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "This production artwork records the customer's original upload as its source rather than the approved, background-prepared version of it.",
+    };
+  }
+  if (!/^[0-9a-f]{64}$/.test(evidence.sourceBytesSha256)) {
+    return {
+      check: "source_lineage",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "This production artwork carries no usable content hash for the exact source pixels it was built from.",
+    };
+  }
+  return {
+    check: "source_lineage",
+    status: "pass",
+    severity: "blocking",
+    reason: `Production artwork derives from the customer-approved prepared artwork (content hash ${evidence.sourceBytesSha256.slice(0, 12)}…), not from the immutable original upload.`,
+  };
+}
+
+/**
+ * Compares the plate's own visible artwork against the approved prepared
+ * artwork's visible artwork, by proportion. Both figures are alpha bounding
+ * boxes measured at the same threshold, so this is one measurement against
+ * another rather than two different ideas of "visible".
+ *
+ * DELIBERATELY NOT a fidelity claim. It cannot tell whether a reconstruction
+ * changed a colour, softened a letterform, or altered a texture — no
+ * arithmetic on bounding boxes can. What it does catch is the failure mode
+ * that arithmetic CAN catch: artwork cropped away, padded out, or squashed on
+ * its way through the production pipeline.
+ */
+function checkPreservedSourceGeometry(
+  normalization: ProductionNormalizationSummary,
+  evidence: UploadedPreserveEvidence,
+): PrintValidationCheck {
+  const sourceRatio =
+    evidence.sourceAlphaBBoxWidthPx / evidence.sourceAlphaBBoxHeightPx;
+  const plateRatio =
+    normalization.alphaBBoxWidthPx / normalization.alphaBBoxHeightPx;
+
+  if (
+    !Number.isFinite(sourceRatio) ||
+    !Number.isFinite(plateRatio) ||
+    sourceRatio <= 0 ||
+    plateRatio <= 0
+  ) {
+    return {
+      check: "preserved_source_geometry",
+      status: "unknown",
+      severity: "blocking",
+      reason:
+        "Source and production artwork proportions could not be compared — one of the recorded artwork bounds is incomplete.",
+    };
+  }
+
+  const relativeDeviation = Math.abs(plateRatio - sourceRatio) / sourceRatio;
+  const preserved = relativeDeviation <= SOURCE_GEOMETRY_TOLERANCE;
+  return {
+    check: "preserved_source_geometry",
+    status: preserved ? "pass" : "fail",
+    severity: "blocking",
+    reason: preserved
+      ? `Production artwork keeps the approved artwork's proportions (${sourceRatio.toFixed(4)} → ${plateRatio.toFixed(4)}, within ${SOURCE_GEOMETRY_TOLERANCE * 100}%).`
+      : `Production artwork's proportions differ from the approved artwork's (${sourceRatio.toFixed(4)} → ${plateRatio.toFixed(4)}) — the design appears to have been cropped, padded, or distorted during production.`,
+  };
+}
+
+/**
+ * The honest answer to "what if enhancement still isn't enough?".
+ *
+ * Production sizing always resamples the trimmed artwork to the target
+ * dimensions, so a plate ALWAYS has the pixel count its physical size
+ * demands — that number alone can never fail. What can fail is whether those
+ * pixels carry detail: if the raster the plate was built from was narrower
+ * than the plate itself, the difference was manufactured by interpolation.
+ *
+ * Derived from figures the summary already carries rather than a new field:
+ * the produced width is `intendedWidthIn × targetPpi` by construction, and
+ * `trimmedWidthPx` is the artwork it was resampled from, so their ratio is
+ * exactly the production transform's own content scale.
+ */
+function checkReconstructionSufficiency(
+  normalization: ProductionNormalizationSummary,
+): PrintValidationCheck {
+  const producedWidthPx = normalization.intendedWidthIn * normalization.targetPpi;
+  if (
+    !Number.isFinite(producedWidthPx) ||
+    !Number.isFinite(normalization.trimmedWidthPx) ||
+    normalization.trimmedWidthPx <= 0
+  ) {
+    return {
+      check: "reconstruction_sufficiency",
+      status: "unknown",
+      severity: "blocking",
+      reason:
+        "Cannot determine whether this production artwork was enlarged beyond its source detail — its recorded production geometry is incomplete.",
+    };
+  }
+
+  const contentScale = producedWidthPx / normalization.trimmedWidthPx;
+  const sufficient = contentScale <= 1 + CONTENT_SCALE_TOLERANCE;
+  return {
+    check: "reconstruction_sufficiency",
+    status: sufficient ? "pass" : "fail",
+    severity: "blocking",
+    reason: sufficient
+      ? `Production artwork was sized down from (or held at) the detail it was built from (${Math.round(normalization.trimmedWidthPx)}px → ${Math.round(producedWidthPx)}px), so every printed pixel carries real detail.`
+      : `Production artwork was enlarged ${contentScale.toFixed(2)}x beyond the artwork it was built from (${Math.round(normalization.trimmedWidthPx)}px → ${Math.round(producedWidthPx)}px) — it carries the required pixel count without the detail to match it.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Print-Ready Normalization Phase 1 — production-plate checks
 // ---------------------------------------------------------------------------
 
@@ -833,6 +1081,7 @@ function buildReport(
   requirements: ProductionRequirements,
   checks: PrintValidationCheck[],
   requiredTransformations: Set<FinalizationTransformation>,
+  profile: PrintValidationProfile,
   status: PrintValidationStatus,
 ): PrintValidationReport {
   // A "blocking"-severity check only ever carries status "pass" / "fail" /
@@ -850,6 +1099,7 @@ function buildReport(
   return {
     artworkVersionId: input.artworkVersionId,
     designBriefVersionId: input.designBriefVersionId,
+    profile,
     status,
     requirements,
     checks,

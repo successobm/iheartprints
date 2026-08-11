@@ -470,6 +470,7 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const { projectId, artworkId } = await setupProjectWithConcept(repo, assets);
 
     const job = await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "generated_concept",
       finalDirectionApprovalId: "00000000-0000-0000-0000-000000000000",
       artworkVersionId: artworkId,
     });
@@ -955,7 +956,7 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     // pre-normalization metadata.
     const legacyBytes = buildFixturePng(900);
     const legacyAsset = await assets.uploadProductionAsset(projectId, {
-      conceptId: job.finalDirectionApprovalId,
+      conceptId: job.finalDirectionApprovalId!,
       bytes: legacyBytes,
       contentType: "image/png",
       widthPx: 900,

@@ -189,7 +189,11 @@ type DbFinalDirectionApproval = {
 type DbFinalArtworkJob = {
   id: string;
   project_id: string;
-  final_direction_approval_id: string;
+  /** Existing Artwork → Print Ready Phase 2: nullable — a prepared-upload job's authority is `artwork_preparation_id` instead. */
+  final_direction_approval_id: string | null;
+  artwork_preparation_id: string | null;
+  /** Postgres `numeric` arrives as a number or a string depending on driver/precision — normalized in `mapFinalArtworkJob`. */
+  production_width_in: number | string | null;
   artwork_version_id: string;
   status: FinalArtworkJobStatus;
   attempts: number;
@@ -227,6 +231,8 @@ type DbArtworkPreparation = {
   original_filename: string | null;
   analysis: Record<string, unknown> | null;
   preparation: Record<string, unknown> | null;
+  /** Phase 1.2. Absent on rows written before the column existed. */
+  guided_cleanup?: Record<string, unknown> | null;
   approved_at: string | null;
   created_at: string;
   updated_at: string;
@@ -394,10 +400,15 @@ function mapFinalDirectionApproval(
 }
 
 function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
+  const artworkPreparationId = row.artwork_preparation_id ?? null;
   return {
     id: row.id,
     projectId: row.project_id,
-    finalDirectionApprovalId: row.final_direction_approval_id,
+    // Derived, never a stored column — see `FinalArtworkSourceKind`.
+    sourceKind: artworkPreparationId ? "prepared_upload" : "generated_concept",
+    finalDirectionApprovalId: row.final_direction_approval_id ?? null,
+    artworkPreparationId,
+    productionWidthIn: readNumericColumn(row.production_width_in),
     artworkVersionId: row.artwork_version_id,
     status: row.status,
     attempts: row.attempts,
@@ -411,6 +422,19 @@ function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * Postgres `numeric` has no lossless JavaScript equivalent, so PostgREST may
+ * return it as a string. Normalized here rather than at every call site, and
+ * anything unparseable becomes `null` — never a silently wrong production
+ * size (Constitution §15: an unknown figure is stated as unknown, never
+ * guessed).
+ */
+function readNumericColumn(value: number | string | null): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function mapProductionAssetValidation(
@@ -439,6 +463,7 @@ function mapArtworkPreparation(row: DbArtworkPreparation): ArtworkPreparation {
     originalFilename: row.original_filename,
     analysis: row.analysis ?? {},
     preparation: row.preparation ?? null,
+    guidedCleanup: row.guided_cleanup ?? null,
     approvedAt: row.approved_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -1195,25 +1220,51 @@ export class SupabaseProjectRepository implements ProjectRepository {
   ): Promise<FinalArtworkJob> {
     const { data, error } = await this.client
       .from("final_artwork_jobs")
-      .insert({
-        project_id: projectId,
-        final_direction_approval_id: input.finalDirectionApprovalId,
-        artwork_version_id: input.artworkVersionId,
-        status: "queued",
-      })
+      .insert(
+        input.sourceKind === "generated_concept"
+          ? {
+              project_id: projectId,
+              final_direction_approval_id: input.finalDirectionApprovalId,
+              artwork_version_id: input.artworkVersionId,
+              status: "queued",
+            }
+          : {
+              project_id: projectId,
+              artwork_preparation_id: input.artworkPreparationId,
+              production_width_in: input.productionWidthIn,
+              artwork_version_id: input.artworkVersionId,
+              status: "queued",
+            },
+      )
       .select("*")
       .single();
 
     if (error) {
       if (error.code === POSTGRES_UNIQUE_VIOLATION) {
         throw new UniqueConstraintViolationError(
-          "final_artwork_jobs_project_id_final_direction_approval_id",
+          input.sourceKind === "generated_concept"
+            ? "final_artwork_jobs_project_id_final_direction_approval_id"
+            : "final_artwork_jobs_project_id_artwork_preparation_id_width",
         );
       }
       throw error;
     }
 
     return mapFinalArtworkJob(data as DbFinalArtworkJob);
+  }
+
+  async listFinalArtworkJobsForPreparation(
+    projectId: string,
+    artworkPreparationId: string,
+  ): Promise<FinalArtworkJob[]> {
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("artwork_preparation_id", artworkPreparationId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbFinalArtworkJob[]) ?? []).map(mapFinalArtworkJob);
   }
 
   async getFinalArtworkJobByApprovalId(
@@ -1444,6 +1495,9 @@ export class SupabaseProjectRepository implements ProjectRepository {
     }
     if (patch.analysis !== undefined) update.analysis = patch.analysis;
     if (patch.preparation !== undefined) update.preparation = patch.preparation;
+    if (patch.guidedCleanup !== undefined) {
+      update.guided_cleanup = patch.guidedCleanup;
+    }
     if (patch.approvedAt !== undefined) update.approved_at = patch.approvedAt;
 
     const { data, error } = await this.client

@@ -38,6 +38,67 @@ describe("FinalArtworkDeliveryCard", () => {
     assert.match(html, /Your print-ready artwork is ready/);
   });
 
+  /**
+   * Existing Artwork → Print Ready Phase 2 (scenario Y): the same card, for an
+   * uploaded-artwork project.
+   */
+  it("Y: renders uploaded-artwork metadata and no dead-end 'Make Another Change'", () => {
+    const uploaded: ProductionArtworkClientView = {
+      url: "https://signed.example/uploaded-production?token=xyz",
+      filename: "split-disturbers-print-ready.png",
+      mimeType: "image/png",
+      widthPx: 3150,
+      heightPx: 3105,
+      transparent: true,
+      placementLabel: "Full Back",
+      designLabel: "T-shirts for our bowling team",
+      widthIn: 10.5,
+      heightIn: 10.35,
+      dpi: 300,
+    };
+
+    const html = renderToString(
+      createElement(FinalArtworkDeliveryCard, {
+        projectId: "project-upload",
+        onMakeAnotherChange: () => {},
+        // An upload customer has no creative loop to reopen.
+        showMakeAnotherChange: false,
+        forcedLoadState: { status: "ready", artwork: uploaded },
+      }),
+    );
+
+    const metadataLine = formatProductionArtworkMetadataLine(uploaded)
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      // React escapes inch marks in server-rendered HTML.
+      .replace(/"/g, "&quot;");
+    assert.match(html, new RegExp(metadataLine));
+    assert.match(html, /Full Back/);
+    assert.match(html, /Download Print-Ready Artwork/);
+    assert.doesNotMatch(html, /Make Another Change/);
+    // Never a UUID, storage key, or internal id in what the customer sees.
+    assert.doesNotMatch(
+      html,
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    );
+  });
+
+  it("Y: the metadata line states physical size, resolution, pixels, and transparency", () => {
+    const line = formatProductionArtworkMetadataLine({
+      mimeType: "image/png",
+      widthPx: 3150,
+      heightPx: 3105,
+      transparent: true,
+      widthIn: 10.5,
+      heightIn: 10.35,
+      dpi: 300,
+    });
+
+    assert.equal(
+      line,
+      'PNG · 10.5" × 10.35" · 300 DPI · 3,150 × 3,105 · Transparent background',
+    );
+  });
+
   it("B: production preview uses the production asset URL, not the selected concept URL", () => {
     const html = renderToString(
       createElement(FinalArtworkDeliveryCard, {

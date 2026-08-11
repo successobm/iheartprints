@@ -719,9 +719,33 @@ export function createConversationCapability(
       );
     }
     if (current.project.status === "print_ready") {
-      throw new Error(
-        "Your print-ready artwork is already prepared at the size you chose — choose Make Another Change to prepare it at a different size",
-      );
+      // Existing Artwork → Print Ready Phase 2: for uploaded artwork, changing
+      // the size after delivery is ALLOWED, and the guard above is what makes
+      // it safe.
+      //
+      // The asymmetry is real, not an oversight. A create_new customer who
+      // wants a different size goes through "Make Another Change", which
+      // reopens the creative loop they are still in. An upload customer has no
+      // creative loop to reopen — their design is finished and always was, so
+      // refusing here would leave them with no route to a different size at
+      // all except starting the whole project over.
+      //
+      // Nothing is overwritten by allowing it: the existing plate stays
+      // immutable, the new size gets its OWN finalization job (the
+      // preparation + width idempotency key), and until that job completes,
+      // `getCurrentProductionAssetId` resolves nothing for the new size —
+      // so the customer is never handed a file whose stated size is wrong.
+      const preparation = await repo.getArtworkPreparation(designId);
+      if (!preparation || preparation.status !== "approved") {
+        throw new Error(
+          "Your print-ready artwork is already prepared at the size you chose — choose Make Another Change to prepare it at a different size",
+        );
+      }
+      // Back to "artwork approved, production not yet requested" — the
+      // truthful description of a project that has an approved design and no
+      // print-ready file at the size now intended. The old plate is untouched
+      // and still resolvable if they change back.
+      await repo.setProjectStatus(designId, "approved");
     }
 
     const resolved = resolveProductionWidth(placement, requestedWidthIn);

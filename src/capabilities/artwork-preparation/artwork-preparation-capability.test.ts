@@ -250,8 +250,14 @@ describe("ArtworkPreparationCapability", () => {
     assert.equal(version!.designBriefVersionId, null);
     assert.equal(version!.sourceArtworkVersionId ?? null, null);
 
-    // Approval is NOT a production or print-readiness claim.
-    assert.equal(snapshot!.project.status, "intake");
+    // Approval is NOT a production or print-readiness claim. Phase 2 does move
+    // the project off "intake" — a customer who has uploaded artwork, given
+    // production context, and approved a prepared file is plainly not sitting
+    // in a brand-new, nothing-said-yet project — but "approved" means only
+    // "the creative decision is settled", never that production ran.
+    assert.equal(snapshot!.project.status, "approved");
+    assert.notEqual(snapshot!.project.status, "print_ready");
+    assert.notEqual(snapshot!.project.status, "finalizing");
     assert.equal(snapshot!.project.finalDirectionConfirmed, false);
     // Phase 1 must never enqueue generation work by approving preparation.
     assert.equal((await repo.listGenerationJobs(projectId)).length, 0);

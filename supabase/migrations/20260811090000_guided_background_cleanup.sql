@@ -1,0 +1,68 @@
+-- Existing Artwork → Print Ready Phase 1.2: user-guided background cleanup.
+-- Additive and forward-only. One nullable column; no constraint on any
+-- existing column changes, no existing row is rewritten, and every row written
+-- before this migration reads back as "the customer clicked nothing", which is
+-- exactly what was true of them.
+--
+-- SCHEMA DISCIPLINE AUDIT (why this column exists at all)
+--
+-- 1. WHAT MUST SURVIVE RELOAD, AND CANNOT ALREADY BE REPRESENTED
+--
+--    WHICH REGIONS THE CUSTOMER THEMSELVES DECIDED WERE BACKGROUND.
+--
+--    The automatic passes remove a region only when deterministic evidence
+--    proves it is background. The real-file audit established that for one
+--    family of regions no such evidence exists: the counters inside large
+--    display lettering (wall/inradius 2.11–5.29) and a bowling ball's finger
+--    holes (2.89–4.69) are NESTED populations, so no threshold separates them
+--    and any automatic answer is a coin flip with the customer's artwork.
+--    The customer resolves it in one glance, and that judgement is a real,
+--    durable domain fact that nothing in the schema records today.
+--
+--    It is NOT `artwork_preparations.preparation`. That column holds the
+--    `BackgroundPreparationRecord` — a per-run OUTPUT describing what the
+--    deterministic pass did (pixel counts, tolerances, fringe statistics). It
+--    is overwritten on every re-preparation by design. Storing customer
+--    decisions inside a field whose whole contract is "the last run's
+--    diagnostics" would make it lie, and would lose the decisions the first
+--    time anything re-ran.
+--
+--    It is NOT `analysis`, which is a pure function of the original bytes and
+--    the print placement — it must stay reproducible from the upload alone.
+--
+--    It is NOT expressible on `assets`. A prepared asset is DERIVED; the
+--    clicks are the input that derived it. Recording the input on the output
+--    would mean the record dies with each superseded asset, and undo would
+--    have nothing to walk back.
+--
+-- 2. WHY THE CLICKS AND NOT THE RESULTING MASK
+--
+--    A mask is an output, and outputs go stale. The clicked points are the
+--    only thing the customer actually authored, and replaying them through the
+--    deterministic pipeline over the IMMUTABLE original reproduces the
+--    prepared bytes exactly. That single choice buys reload-safety, undo (drop
+--    the last point), idempotency (a repeat click resolves to a region already
+--    in the list and changes nothing), and auditability — "why is this pixel
+--    transparent?" is answerable forever. A stored mask would give none of it,
+--    and could silently disagree with the original it claims to describe.
+--
+-- 3. WHY NOT A SEPARATE TABLE
+--
+--    A guided-cleanup row would be 1:1 with its preparation, would never be
+--    queried independently, and would need its own ordering column to preserve
+--    click order that a JSON array already carries for free. There is no
+--    second consumer and no independent lifecycle, so a table would be
+--    ceremony around a list.
+--
+-- SHAPE: {"removals": [{"point": {"x": int, "y": int},
+--                       "regionKey": text, "pixelCount": int}, ...]}
+--
+-- `regionKey` is DERIVED server-side from the region a point resolves to and
+-- is never accepted from a client. It exists so a repeated click is detected
+-- exactly rather than by proximity.
+
+alter table public.artwork_preparations
+  add column if not exists guided_cleanup jsonb null;
+
+comment on column public.artwork_preparations.guided_cleanup is
+  'Phase 1.2: the customer''s ordered background-cleanup clicks, as image-space points. Replaying them over the immutable original reproduces the prepared asset. Null means the customer clicked nothing.';

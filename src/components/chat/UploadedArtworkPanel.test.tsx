@@ -4,6 +4,8 @@ import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
+import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size";
+import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
 
 import { ArtworkComparison } from "./ArtworkComparison";
 import { UploadedArtworkPanel } from "./UploadedArtworkPanel";
@@ -34,23 +36,80 @@ function preparation(
     approved: false,
     widthPx: 979,
     heightPx: 1024,
+    visibleArtworkWidthPx: 923,
+    visibleArtworkHeightPx: 909,
     productSummary: "T-shirts for our bowling team",
     productColor: "Black",
     printPlacement: "full_front",
+    guidedCleanup: { available: true, removalCount: 0 },
     ...overrides,
   };
+}
+
+/**
+ * Existing Artwork → Print Ready Phase 2: the size view the server computes
+ * for an approved upload. Every figure here arrives pre-computed — the panel
+ * never derives inches of its own.
+ */
+function printReadySize(): PrintReadySizeView {
+  return {
+    widthIn: 10.5,
+    heightIn: 10.34,
+    dpi: 300,
+    placementLabel: "Full Back",
+    isDefaultWidth: true,
+    minWidthIn: 4,
+    maxWidthIn: 14,
+    widthOptions: [
+      { widthIn: 9, label: '9"', isStandard: false, isSelected: false },
+      { widthIn: 10.5, label: '10.5" Standard', isStandard: true, isSelected: true },
+      { widthIn: 12, label: '12"', isStandard: false, isSelected: false },
+    ],
+    note: "This is a standard adult full back print size.",
+  };
+}
+
+/**
+ * What a customer would actually READ: markup stripped, SSR comment markers
+ * removed, entities decoded, whitespace collapsed. Assertions about customer
+ * copy belong against this rather than against raw HTML, where Tailwind class
+ * names and React's `<!-- -->` text separators both produce false results.
+ */
+function visibleText(html: string): string {
+  return html
+    .replace(/<!--.*?-->/g, "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function render(
   step: UploadedArtworkStep,
   overrides: Partial<ArtworkPreparationView> = {},
   images: { original?: string | null; prepared?: string | null } = {},
+  phase2: {
+    printReadySize?: PrintReadySizeView | null;
+    finalizationStatus?: CustomerFinalizationStatus;
+  } = {},
 ) {
   return renderToString(
     createElement(UploadedArtworkPanel, {
       step,
       preparation: preparation(overrides),
       busy: false,
+      printReadySize:
+        "printReadySize" in phase2 ? phase2.printReadySize! : printReadySize(),
+      finalizationStatus: phase2.finalizationStatus ?? "not_requested",
+      onChoosePrintWidth: () => {
+        throw new Error("onChoosePrintWidth must never fire from rendering");
+      },
+      onPrepareForPrint: () => {
+        throw new Error("onPrepareForPrint must never fire from rendering");
+      },
       // `in`, not `??` — an explicit `null` means "still loading" and must
       // not fall back to the default URL.
       originalImageUrl:
@@ -226,6 +285,129 @@ describe("UploadedArtworkPanel", () => {
   });
 });
 
+/**
+ * Existing Artwork → Print Ready Phase 2 (Goals 11/12): the continuation
+ * affordance on the approved step.
+ */
+describe("UploadedArtworkPanel — print-ready continuation", () => {
+  const approvedState = {
+    approved: true,
+    status: "approved" as const,
+    hasPreparedArtwork: true,
+  };
+
+  it("offers the print-ready action, the size, and an honest enhancement note", () => {
+    const text = visibleText(render("approved", approvedState));
+
+    assert.match(text, /Ready for print preparation/);
+    assert.match(text, /Prepare Print-Ready Artwork/);
+    // Size and resolution, stated in the customer's own units.
+    assert.match(text, /10\.5" × 10\.34"/);
+    assert.match(text, /300 DPI/);
+    assert.match(text, /Full Back/);
+    assert.match(text, /Change Size/);
+    const html = render("approved", approvedState);
+    // Enhancement is stated as a fact about a later step, with the
+    // preservation promise attached.
+    assert.match(html, /needs to be enhanced for this print size/);
+    assert.match(html, /wording, and colours stay exactly as they are/);
+  });
+
+  it("never shows concept-generation or revision affordances", () => {
+    const html = render("approved", approvedState);
+
+    assert.doesNotMatch(html, /Use This Design/);
+    assert.doesNotMatch(html, /Show Me 3 New Concepts/);
+    assert.doesNotMatch(html, /Change Selection/i);
+    assert.doesNotMatch(html, /concept/i);
+    assert.doesNotMatch(html, /revision/i);
+  });
+
+  it("never leaks production internals to the customer", () => {
+    // Checked against VISIBLE TEXT, not markup: Tailwind class names are full
+    // of things like `px-3.5`, and a check that trips on those would be
+    // measuring the stylesheet rather than the copy.
+    const text = visibleText(render("approved", approvedState));
+
+    for (const forbidden of [
+      /topaz/i,
+      /upscal/i,
+      /reconstruct/i,
+      /provider/i,
+      /pixel/i,
+      /\bpx\b/i,
+      /validat/i,
+      /\bjob\b/i,
+      /alpha/i,
+      /storage/i,
+      /finaliz/i,
+      /\bDTF\b/,
+    ]) {
+      assert.doesNotMatch(text, forbidden, `leaked internal term: ${forbidden}`);
+    }
+  });
+
+  it("omits the enhancement note when the artwork is already large enough", () => {
+    const html = render("approved", {
+      ...approvedState,
+      customer: {
+        backgroundMessage: "Your artwork already has a clear background.",
+        resolutionMessage: null,
+        canPrepare: false,
+        prepareActionLabel: null,
+        enhancementNeeded: false,
+      },
+    });
+
+    assert.match(html, /Prepare Print-Ready Artwork/);
+    assert.doesNotMatch(html, /needs to be enhanced for this print size/);
+  });
+
+  it("replaces the action with the shared waiting copy while production runs", () => {
+    const html = render("approved", approvedState, {}, {
+      finalizationStatus: "preparing",
+    });
+
+    assert.match(html, /Preparing your print-ready artwork/);
+    assert.match(html, /about 3–4 minutes/);
+    assert.doesNotMatch(html, /Prepare Print-Ready Artwork/);
+    // Size is not changeable once production has started.
+    assert.doesNotMatch(html, /Change Size/);
+  });
+
+  it("states an honest needs-attention message, and offers a retry, on failure", () => {
+    const html = render("approved", approvedState, {}, {
+      finalizationStatus: "needs_review",
+    });
+
+    assert.match(html, /needs attention before we can finish/);
+    assert.match(html, /uploaded artwork and the prepared version are both safe/);
+    assert.match(html, /Try Again/);
+    assert.doesNotMatch(html, /is ready|print-ready file is ready/i);
+  });
+
+  it("keeps the size control but drops the primary action once artwork is print-ready", () => {
+    const html = render("approved", approvedState, {}, {
+      finalizationStatus: "print_ready",
+    });
+
+    // The delivery card owns the "it's ready" message; this panel must not
+    // compete with it.
+    assert.doesNotMatch(html, /Prepare Print-Ready Artwork/);
+    assert.doesNotMatch(html, /Ready for print preparation/);
+    // But the only route an upload customer has to a different size stays.
+    assert.match(html, /Change Size/);
+  });
+
+  it("says nothing about size when there is nothing honest to say", () => {
+    const html = render("approved", approvedState, {}, { printReadySize: null });
+
+    assert.doesNotMatch(html, /Change Size/);
+    assert.doesNotMatch(html, /300 DPI/);
+    assert.match(html, /Prepare Print-Ready Artwork/);
+  });
+});
+
 describe("ArtworkComparison", () => {
   it("renders the prepared tile on a transparency checkerboard", () => {
     const html = renderToString(
@@ -252,5 +434,124 @@ describe("ArtworkComparison", () => {
     );
 
     assert.doesNotMatch(html, /Use Prepared Artwork|Approve|Select/i);
+  });
+
+  it("is not clickable at all unless cleanup mode is turned on", () => {
+    const html = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: "https://signed.example/original.png", loading: false },
+        prepared: { url: "https://signed.example/prepared.png", loading: false },
+        preparedCleanup: {
+          active: false,
+          busy: false,
+          onSelectPoint: () => {},
+        },
+      }),
+    );
+
+    assert.doesNotMatch(html, /Click background to remove it/);
+    assert.doesNotMatch(html, /cursor-crosshair/);
+  });
+
+  it("makes ONLY the prepared image clickable in cleanup mode", () => {
+    const html = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: "https://signed.example/original.png", loading: false },
+        prepared: { url: "https://signed.example/prepared.png", loading: false },
+        preparedCleanup: {
+          active: true,
+          busy: false,
+          onSelectPoint: () => {},
+        },
+      }),
+    );
+
+    // Exactly one clickable image surface, and it is the prepared one. The
+    // original has no cleanup prop at all, so no code path could mutate from
+    // the left-hand tile.
+    assert.equal(html.match(/Click background to remove it/g)?.length, 1);
+    assert.match(html, /cursor-crosshair/);
+
+    // Enlarge stays available and stays OUTSIDE the clickable surface — it
+    // lives in the tile footer, so it cannot nest inside the image button.
+    assert.match(html, /Enlarge prepared artwork/);
+    const clickable = html.slice(html.indexOf("Click background to remove it"));
+    const buttonEnd = clickable.indexOf("</button>");
+    assert.equal(
+      clickable.slice(0, buttonEnd).includes("Enlarge"),
+      false,
+      "no nested interactive element",
+    );
+  });
+});
+
+describe("UploadedArtworkPanel — guided background cleanup", () => {
+  function render(
+    overrides: Partial<ArtworkPreparationView> = {},
+    props: Record<string, unknown> = {},
+  ) {
+    return renderToString(
+      createElement(UploadedArtworkPanel, {
+        step: "compare" as UploadedArtworkStep,
+        preparation: preparation(overrides),
+        busy: false,
+        originalImageUrl: "https://signed.example/original.png",
+        preparedImageUrl: "https://signed.example/prepared.png",
+        onUpload: () => {},
+        onSaveDetails: () => {},
+        onPrepare: () => {},
+        onApprove: () => {},
+        onReconsider: () => {},
+        onCleanupPoint: () => {},
+        onUndoCleanup: () => {},
+        ...props,
+      }),
+    );
+  }
+
+  it("invites the customer in plain language, with no technical vocabulary", () => {
+    const html = render();
+
+    assert.match(html, /If any background is still showing/i);
+    assert.match(html, /Remove More Background/);
+    // Constitution §6.6: none of the machinery may surface.
+    assert.doesNotMatch(
+      html,
+      /cavity|connected component|flood fill|tolerance|alpha|inradius|wall ratio|mask/i,
+    );
+  });
+
+  it("offers Undo only once something has been removed", () => {
+    assert.doesNotMatch(render({ guidedCleanup: { available: true, removalCount: 0 } }), /Undo Last Removal/);
+    assert.match(render({ guidedCleanup: { available: true, removalCount: 2 } }), /Undo Last Removal/);
+  });
+
+  it("says nothing about cleanup when the server has not offered it", () => {
+    const html = render({ guidedCleanup: { available: false, removalCount: 0 } });
+
+    assert.doesNotMatch(html, /Remove More Background/);
+    assert.doesNotMatch(html, /If any background is still showing/i);
+    // The rest of the compare step is untouched.
+    assert.match(html, /Use Prepared Artwork/);
+  });
+
+  it("renders the server's refusal verbatim", () => {
+    // The single most important sentence in the flow. It is authored on the
+    // server and rendered as-is, so the panel can never soften or invent it.
+    const html = render(
+      {},
+      {
+        cleanupMessage:
+          "That looks like part of your artwork, so we left it unchanged.",
+      },
+    );
+
+    assert.match(html, /That looks like part of your artwork, so we left it unchanged\./);
+  });
+
+  it("is not an image editor", () => {
+    const html = render();
+
+    assert.doesNotMatch(html, /brush|lasso|eraser|freehand|layer|opacity slider/i);
   });
 });

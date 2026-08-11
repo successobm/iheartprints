@@ -172,8 +172,45 @@ export interface BackgroundPreparationRecord {
   tolerance: number;
   /** Pixels the edge-connected fill made fully transparent. */
   exteriorPixelsRemoved: number;
-  /** Background-coloured pixels deliberately KEPT because nothing connected them to the border. */
+  /**
+   * Background-coloured pixels deliberately KEPT: nothing connected them to
+   * the border, and they did not earn enclosed-cavity evidence either. The
+   * bowling ball's finger holes are counted here, and that is the point.
+   */
   interiorBackgroundColoredPixelsPreserved: number;
+  /**
+   * Enclosed, background-coloured regions that a foreground structure sealed
+   * off from the border and that the cavity evidence confirmed ARE background
+   * — letter counters, ring interiors, framed areas. See
+   * `background-cavities.ts` for the evidence required.
+   */
+  enclosedCavityRegionsRemoved: number;
+  /** Total pixels in those regions. */
+  enclosedCavityPixelsRemoved: number;
+  /**
+   * Enclosed candidate regions the evidence refused to remove. Includes both
+   * the customer's intentional interior shapes (a bowling ball's finger holes)
+   * and regions whose geometry was simply ambiguous — the latter are exactly
+   * what `guidedRegionsRemoved` below can later claim.
+   */
+  enclosedCavityRegionsPreserved: number;
+  /**
+   * Phase 1.2: preserved candidate regions the CUSTOMER clicked to say "this
+   * is background too". Always 0 for an automatic preparation; a non-zero
+   * value is the honest record that these pixels went on the customer's
+   * authority rather than on measured evidence. See `guided-removal.ts`.
+   */
+  guidedRegionsRemoved: number;
+  /** Total pixels in those regions. */
+  guidedPixelsRemoved: number;
+  /**
+   * Phase 1.2: isolated near-background flecks removed by
+   * `background-speckle.ts` — residue the fill tolerance just missed, each one
+   * fully enclosed by already-removed background.
+   */
+  speckleIslandsRemoved: number;
+  /** Total pixels in those islands. */
+  specklePixelsRemoved: number;
   /** Pixels whose alpha was softened at the removed boundary (anti-aliasing). */
   featheredEdgePixels: number;
   /** Pixels whose colour was corrected for background matte contamination. */

@@ -173,6 +173,33 @@ export const PRINT_VALIDATION_CHECK_CODES = [
   "aspect_ratio_preserved",
   /** Info-only: the PNG's embedded pHYs density agrees with the intended production PPI. Never authoritative. */
   "density_metadata",
+  // --- Existing Artwork → Print Ready Phase 2 -----------------------------
+  /**
+   * Info-only: which APPLICABILITY PROFILE this run used. Emitted on every
+   * run so a report is self-describing — "required wording was not checked"
+   * must never be indistinguishable from "required wording passed".
+   */
+  "validation_profile",
+  /**
+   * `uploaded_preserve` only. The plate is provably derived from the exact
+   * prepared artwork the customer approved — not the immutable original, not
+   * another project's asset, not an unrecorded source.
+   */
+  "source_lineage",
+  /**
+   * `uploaded_preserve` only. The plate's own visible artwork still has the
+   * proportions of the approved prepared artwork it was built from, so the
+   * production pipeline neither cropped nor letterboxed the customer's design
+   * on its way through reconstruction.
+   */
+  "preserved_source_geometry",
+  /**
+   * `uploaded_preserve` only. The plate was not stretched beyond the density
+   * of the raster it was actually built from. Catches the honest failure mode
+   * of a reconstruction that lands short of the production target: the file
+   * has the required pixel count without the detail to match it.
+   */
+  "reconstruction_sufficiency",
 ] as const;
 
 export type PrintValidationCheckCode =
@@ -212,6 +239,8 @@ export type FinalizationTransformation =
 export interface PrintValidationReport {
   artworkVersionId: string;
   designBriefVersionId: string | null;
+  /** Which applicability profile produced these checks — see `PrintValidationProfile`. */
+  profile: PrintValidationProfile;
   status: PrintValidationStatus;
   requirements: ProductionRequirements;
   checks: PrintValidationCheck[];
@@ -339,6 +368,87 @@ export interface ProductionNormalizationSummary {
 }
 
 /**
+ * Existing Artwork → Print Ready Phase 2: WHICH CHECKS APPLY to the artwork
+ * being validated. Not a strictness dial and not a way to skip inconvenient
+ * rules — an applicability profile, in the same sense a print shop applies
+ * different pre-flight checks to a customer-supplied file than to one it
+ * designed itself.
+ *
+ *   "generated_concept" (default) — artwork this platform generated from an
+ *     approved Design Brief. The brief is the specification, so the brief IS
+ *     checkable: was this concept generated from the currently approved brief
+ *     version, did Concept Evaluation agree it matches, and was the
+ *     customer's required wording verified as present and correct? Behavior
+ *     is byte-for-byte what it was before this profile existed.
+ *
+ *   "uploaded_preserve" — artwork the CUSTOMER supplied and explicitly
+ *     approved after background preparation. The uploaded pixels are the
+ *     specification. Three checks are therefore not merely relaxed but
+ *     genuinely INAPPLICABLE, and are not emitted at all:
+ *
+ *       brief_provenance             — no Design Brief version authorizes
+ *                                      this artwork; the customer's own file
+ *                                      and their approval of the prepared
+ *                                      version do (see `ArtworkPreparation`).
+ *       concept_evaluation_alignment — "does this match the brief we were
+ *                                      given?" has no answer when there is no
+ *                                      brief describing the artwork. Nothing
+ *                                      generated it to compare against.
+ *       required_wording_verification— the customer never typed the wording;
+ *                                      it is already IN their pixels. Asking
+ *                                      them to retype it so we can check our
+ *                                      own transform against it would invent
+ *                                      a requirement, and Phase 2 performs no
+ *                                      OCR.
+ *
+ *     Everything a print shop would actually reject a file for still blocks,
+ *     unchanged: decodability, transparency, physical width, effective
+ *     resolution, minimum pixels, aspect preservation, alpha-bound content,
+ *     dead canvas, and the plate's own recorded production geometry. Three
+ *     preservation checks are ADDED (`source_lineage`,
+ *     `preserved_source_geometry`, `reconstruction_sufficiency`), so this
+ *     profile is not a weaker one — it is a different, and in places
+ *     stricter, set.
+ */
+export type PrintValidationProfile = "generated_concept" | "uploaded_preserve";
+
+/**
+ * Existing Artwork → Print Ready Phase 2 (Goal 8): the deterministic
+ * preservation evidence for one uploaded-artwork production plate. Present
+ * only under the `uploaded_preserve` profile.
+ *
+ * HONESTY BOUNDARY, stated plainly because it would otherwise be tempting to
+ * read more into these numbers than they carry: none of this proves the
+ * artwork still LOOKS the same. A provider-hosted reconstruction is a genuine
+ * enhancement transform, and visual fidelity after it remains
+ * provider-dependent and unproven by arithmetic. What these fields DO prove is
+ * that the pipeline used the artwork the customer approved (not the original
+ * upload, not another project's asset), and that the geometry survived —
+ * nothing was cropped away, stretched, letterboxed, or invented past the
+ * density of the raster it was built from.
+ */
+export interface UploadedPreserveEvidence {
+  /** The approved prepared `ArtworkVersion` this plate was produced from. Must equal the report's `artworkVersionId`. */
+  preparedArtworkVersionId: string;
+  /** The approved prepared (transparent PNG) asset whose pixels the transform actually consumed. */
+  preparedAssetId: string;
+  /** The customer's immutable original upload — recorded so lineage can prove it was NOT the enhancement source (Goal 6). */
+  originalAssetId: string;
+  /** SHA-256 of the exact prepared source bytes the transform read. Pixel-source lineage, not a fidelity claim. */
+  sourceBytesSha256: string;
+  /**
+   * The approved prepared artwork's own alpha bounding box, measured with the
+   * SAME threshold production normalization uses — so comparing it against
+   * the plate's alpha bounding box is one measurement against another rather
+   * than two different definitions of "visible".
+   */
+  sourceAlphaBBoxWidthPx: number;
+  sourceAlphaBBoxHeightPx: number;
+  /** Which enhancement path produced the plate. Internal only — the provider's name never appears here. */
+  enhancement: "skipped" | "reconstructed";
+}
+
+/**
  * Everything `PrintValidationCapability.validateArtwork` needs, already
  * resolved by the caller. Print Validation itself never reads a repository
  * (Goal 16/17 — "PrintValidation should remain pure validation"), mirroring
@@ -348,7 +458,19 @@ export interface ProductionNormalizationSummary {
  */
 export interface PrintValidationInput {
   artworkVersionId: string;
-  /** The approved Design Brief version this concept claims to have been generated against. */
+  /**
+   * Which checks apply. Omitted/`undefined` means `"generated_concept"`, so
+   * every existing caller keeps exactly the behavior it had.
+   */
+  validationProfile?: PrintValidationProfile;
+  /**
+   * Existing Artwork → Print Ready Phase 2: preservation evidence for an
+   * uploaded-artwork plate. REQUIRED under the `uploaded_preserve` profile
+   * (its absence is itself a blocking `source_lineage` failure — a plate
+   * whose lineage nobody recorded is not one to certify); ignored otherwise.
+   */
+  uploadedPreserve?: UploadedPreserveEvidence | null;
+  /** The approved Design Brief version this concept claims to have been generated against. `null` for uploaded artwork, which no brief version authorizes. */
   designBriefVersionId: string | null;
   /** The design's current/latest approved Design Brief version id, for provenance comparison (Goal 6, Goal 14 Scenario H). */
   currentApprovedDesignBriefVersionId: string | null;

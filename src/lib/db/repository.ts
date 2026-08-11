@@ -116,11 +116,30 @@ export interface CreateFinalDirectionApprovalInput {
   designBriefVersionId: string;
 }
 
-/** Sprint 2M Phase 2B. */
-export interface CreateFinalArtworkJobInput {
-  finalDirectionApprovalId: string;
-  artworkVersionId: string;
-}
+/**
+ * Sprint 2M Phase 2B, generalized by Existing Artwork → Print Ready Phase 2.
+ *
+ * A discriminated union rather than four optional fields, because "exactly one
+ * production authority" is a domain invariant, not a convention: a job with
+ * both (or neither) is meaningless, and the database enforces the same rule
+ * with a CHECK constraint. Implementations must throw
+ * `UniqueConstraintViolationError` on a duplicate for the relevant key —
+ * `(project, approval)` for a generated concept, `(project, preparation,
+ * production width)` for a prepared upload.
+ */
+export type CreateFinalArtworkJobInput =
+  | {
+      sourceKind: "generated_concept";
+      finalDirectionApprovalId: string;
+      artworkVersionId: string;
+    }
+  | {
+      sourceKind: "prepared_upload";
+      artworkPreparationId: string;
+      artworkVersionId: string;
+      /** The production print width, in inches, this job is enqueued for — half of its idempotency key. */
+      productionWidthIn: number;
+    };
 
 /**
  * Sprint 2M Phase 2C: mirrors `UpdateGenerationJobInput`. Sprint 2M Phase 2E
@@ -172,6 +191,8 @@ export type UpdateArtworkPreparationInput = Partial<{
   preparedArtworkVersionId: string | null;
   analysis: Record<string, unknown>;
   preparation: Record<string, unknown> | null;
+  /** Phase 1.2: the customer's ordered guided-cleanup clicks. */
+  guidedCleanup: Record<string, unknown> | null;
   approvedAt: string | null;
 }>;
 
@@ -371,6 +392,26 @@ export interface ProjectRepository {
     projectId: string,
     finalDirectionApprovalId: string,
   ): Promise<FinalArtworkJob | null>;
+  /**
+   * Existing Artwork → Print Ready Phase 2: every finalization job ever
+   * enqueued for one `ArtworkPreparation`, oldest first. Returns the whole
+   * history rather than one row because a project may legitimately own more
+   * than one (the customer changed production size after a plate was already
+   * produced — a different physical specification is a different deliverable,
+   * never a rewrite of the old one).
+   *
+   * Matching by production width is deliberately left to the caller: an
+   * inches figure is a float, and "the same size" is a tolerance question
+   * (`FinalArtworkCapability` owns that policy), not something to express as
+   * SQL float equality.
+   *
+   * Always project-scoped — a preparation id from another project can never
+   * return rows here (Goal 18).
+   */
+  listFinalArtworkJobsForPreparation(
+    projectId: string,
+    artworkPreparationId: string,
+  ): Promise<FinalArtworkJob[]>;
   /** Sprint 2M Phase 2C. Also needed to re-resolve `designBriefVersionId` (via the approval, not denormalized on the job) once the worker claims a job. */
   getFinalDirectionApprovalById(
     id: string,

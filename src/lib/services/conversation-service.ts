@@ -102,13 +102,14 @@ async function withConceptStatus(
     snapshot.artworkVersions,
     snapshot.designBriefVersions,
   );
+  const artworkPreparation = await resolveArtworkPreparation(snapshot.project.id);
   return {
     ...snapshot,
     artworkVersions: toCustomerArtworkVersions(snapshot.artworkVersions),
     conceptStatus: toCustomerConceptStatusView(conceptStatus),
     finalization: toCustomerFinalizationView(snapshot.project.status),
-    printReadySize: await resolvePrintReadySize(snapshot),
-    artworkPreparation: await resolveArtworkPreparation(snapshot.project.id),
+    printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
+    artworkPreparation,
   };
 }
 
@@ -143,9 +144,33 @@ async function resolveArtworkPreparation(
  */
 async function resolvePrintReadySize(
   snapshot: ProjectSnapshot,
+  preparation: ArtworkPreparationView | null,
 ): Promise<PrintReadySizeView | null> {
+  // Existing Artwork → Print Ready Phase 2: an upload project has no
+  // "selected concept" and never will — its production artwork is the
+  // prepared upload the customer approved. Height comes from that artwork's
+  // OWN visible bounds rather than its canvas, because the production
+  // transform trims to those bounds before sizing; quoting the canvas would
+  // promise a height the finished plate will not have.
+  //
+  // Unlike the create_new path below, this is NOT skipped once the artwork is
+  // print-ready. A create_new customer who wants a different size reopens the
+  // creative loop they are still in ("Make Another Change"); an upload
+  // customer has no creative loop, so this control is their only route to a
+  // different size, and hiding it would strand them.
+  if (preparation?.approved) {
+    return describePrintReadySize({
+      printPlacement: snapshot.brief.printPlacement,
+      intendedPrintWidthIn: snapshot.brief.intendedPrintWidthIn,
+      artworkWidthPx: preparation.visibleArtworkWidthPx,
+      artworkHeightPx: preparation.visibleArtworkHeightPx,
+    });
+  }
+
+  if (snapshot.project.status === "print_ready") return null;
+
   const selectedId = snapshot.project.selectedArtworkVersionId;
-  if (!selectedId || snapshot.project.status === "print_ready") return null;
+  if (!selectedId) return null;
 
   const selected = snapshot.artworkVersions.find(
     (version) => version.id === selectedId,
@@ -611,12 +636,21 @@ async function resolveCurrentProductionArtwork(projectId: string): Promise<{
     | Record<string, unknown>
     | undefined;
 
+  // Existing Artwork → Print Ready Phase 2: for an upload project, the
+  // customer's own filename is the name they will recognize — see
+  // `buildPrintReadyFilename`'s precedence. Resolved through the same
+  // never-take-down-the-request helper as everywhere else: a filename is
+  // presentation, and a lookup failure must degrade to the brief-derived
+  // name rather than fail the download.
+  const preparation = await resolveArtworkPreparation(projectId);
+
   return {
     assetId,
     widthIn: readFiniteNumber(normalization?.intendedWidthIn),
     heightIn: readFiniteNumber(normalization?.intendedHeightIn),
     dpi: readFiniteNumber(normalization?.targetPpi),
     filename: buildPrintReadyFilename({
+      uploadedFilename: preparation?.originalFilename ?? null,
       exactText: snapshot.brief.exactText,
       productSummary: snapshot.brief.productSummary,
       mimeType,

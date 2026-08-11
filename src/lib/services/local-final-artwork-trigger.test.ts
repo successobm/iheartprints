@@ -40,6 +40,41 @@ async function reachConfirmedSelectedConcept() {
   };
 }
 
+/**
+ * Existing Artwork → Print Ready Phase 2 (scenario AD): drives a project to
+ * "approved prepared upload" through the REAL service layer, so the
+ * interactive-dev trigger is exercised against a `prepared_upload` job rather
+ * than a hand-built row.
+ */
+async function reachApprovedPreparedUpload() {
+  const { resetCapabilityGraphForTests } = await import("@/capabilities/composition");
+  resetCapabilityGraphForTests();
+
+  const { solidBlackExteriorArtwork, toPngBytes } = await import(
+    "@/capabilities/artwork-preparation/artwork-fixtures"
+  );
+  const conversationService = await import("./conversation-service");
+  const preparationService = await import("./artwork-preparation-service");
+
+  const started = await conversationService.startConversation();
+  const projectId = started.project.id;
+
+  await preparationService.uploadArtwork(projectId, {
+    bytes: toPngBytes(solidBlackExteriorArtwork()),
+    declaredContentType: "image/png",
+    filename: "team-logo.png",
+  });
+  await preparationService.setUploadedArtworkContext(projectId, {
+    productSummary: "T-shirts for our bowling team",
+    productColor: "Black",
+    printPlacement: "left_chest",
+  });
+  await preparationService.prepareUploadedArtwork(projectId);
+  await preparationService.approvePreparedArtwork(projectId);
+
+  return { projectId, preparationService };
+}
+
 describe("maybeTriggerLocalFinalArtworkWorker", () => {
   let tempDir = "";
   let previousCwd = "";
@@ -237,6 +272,101 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
       processNextJobCalls >= 3,
       "follow-up runBatch after an in-flight batch must tick again",
     );
+    await drainCapabilityGraphForTests();
+  });
+
+  it("AD: the same interactive-dev trigger claims a prepared_upload finalization job", async () => {
+    const { drainCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    const { projectId, preparationService } = await reachApprovedPreparedUpload();
+    const { maybeTriggerLocalFinalArtworkWorker } = await import(
+      "./local-final-artwork-trigger"
+    );
+
+    await preparationService.prepareUploadedArtworkForPrint(projectId);
+
+    const repo = (await import("@/lib/db")).getProjectRepository();
+    const preparation = await repo.getArtworkPreparation(projectId);
+    assert.ok(preparation);
+    const jobs = await repo.listFinalArtworkJobsForPreparation(
+      projectId,
+      preparation.id,
+    );
+    assert.equal(jobs.length, 1, "AD: exactly one finalization job");
+    const queued = jobs[0]!;
+    assert.equal(queued.sourceKind, "prepared_upload");
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.attempts, 0);
+    // No second worker exists for uploaded artwork — the create_new authority
+    // is genuinely absent here (Goal 1/17).
+    assert.equal(await repo.getActiveFinalDirectionApproval(projectId), null);
+
+    const result = maybeTriggerLocalFinalArtworkWorker({
+      projectId,
+      reason: "prepare_uploaded_artwork",
+      policy: { allowed: true },
+    });
+    assert.equal(result.accepted, true);
+    assert.ok(result.batchPromise);
+
+    const batch = await result.batchPromise;
+    assert.deepEqual(batch.processedJobIds, [queued.id]);
+
+    const claimed = await repo.getFinalArtworkJob(queued.id);
+    assert.ok(claimed);
+    assert.ok(
+      claimed.status === "completed" || claimed.status === "failed",
+      `expected a terminal job status, got ${claimed.status}`,
+    );
+    assert.ok(claimed.attempts >= 1);
+    // The automated-test provider is local by construction — never Topaz.
+    assert.equal(claimed.providerRequestId, null, "no paid request in automated tests");
+
+    await drainCapabilityGraphForTests();
+  });
+
+  it("AD: stranded recovery finds a prepared_upload job with no final-direction approval to look behind", async () => {
+    const { drainCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    const { projectId, preparationService } = await reachApprovedPreparedUpload();
+    const { maybeRecoverStrandedLocalFinalArtworkJobs } = await import(
+      "./local-final-artwork-trigger"
+    );
+
+    await preparationService.prepareUploadedArtworkForPrint(projectId);
+
+    const repo = (await import("@/lib/db")).getProjectRepository();
+    const preparation = await repo.getArtworkPreparation(projectId);
+    const [queued] = await repo.listFinalArtworkJobsForPreparation(
+      projectId,
+      preparation!.id,
+    );
+    assert.equal(queued!.status, "queued");
+    assert.equal(queued!.attempts, 0);
+
+    const result = await maybeRecoverStrandedLocalFinalArtworkJobs(
+      projectId,
+      "project_reload",
+      { allowed: true },
+    );
+    assert.ok(result, "the upload workflow must not be invisible to recovery");
+    assert.equal(result.accepted, true);
+    assert.ok(result.batchPromise);
+    await result.batchPromise;
+
+    const after = await repo.getFinalArtworkJob(queued!.id);
+    assert.notEqual(after?.status, "queued");
+    assert.ok((after?.attempts ?? 0) >= 1);
+
+    // Recovery never creates a second job.
+    const stillOne = await repo.listFinalArtworkJobsForPreparation(
+      projectId,
+      preparation!.id,
+    );
+    assert.equal(stillOne.length, 1);
+
     await drainCapabilityGraphForTests();
   });
 

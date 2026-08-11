@@ -964,7 +964,8 @@
  *     `DesignBriefCapability` only. It has NO provider port at all — not an
  *     unconfigured one, not a stubbed one. Every operation is local,
  *     deterministic pixel math (`upload-limits.ts`, `image-decode.ts`,
- *     `image-analysis.ts`, `repairability.ts`, `background-isolation.ts`),
+ *     `image-analysis.ts`, `repairability.ts`, `pixel-metrics.ts`,
+ *     `background-isolation.ts`, `background-cavities.ts`),
  *     which is what makes "zero OpenAI/Topaz/network calls" a structural
  *     property rather than a policy (proved by `no-paid-provider.test.ts`).
  *   - Never enqueues a `GenerationJob`, never calls a
@@ -1022,6 +1023,73 @@
  *   Surfacing flood fill, tolerance, sigma, masks, alpha, or pixel counts to
  *     a customer — `preparation-copy.ts` is the one place analysis becomes
  *     language, and it speaks only in inches
+ *
+ * ## Existing Artwork → Print Ready Phase 2 — production finalization
+ *
+ * The two workflows converge. See ARCHITECTURE.md §13i for the full design;
+ * the boundary rules are:
+ *
+ *     PREPARED ARTWORK  != PRINT-READY ARTWORK
+ *     PREPARED APPROVAL != print_ready
+ *
+ * PARALLEL AUTHORITIES, one pipeline. `FinalArtworkJob` carries EITHER a
+ * `finalDirectionApprovalId` (Create New Artwork) OR an
+ * `artworkPreparationId` (Upload Existing Artwork) — never both, never
+ * neither, enforced by a database CHECK. `FinalArtworkJob.sourceKind` is
+ * DERIVED from which is set, never a stored column, so no third fact can
+ * disagree with the two keys.
+ *
+ *   create_new       selected concept → final-direction approval → finalize
+ *   prepare_existing uploaded original → prepared artwork
+ *                                      → prepared approval → finalize
+ *
+ * `FinalArtworkCapability.requestPreparedUploadFinalArtwork` deliberately
+ * requires NONE of `selectedArtworkVersionId`, `finalDirectionConfirmed`, an
+ * approved `DesignBriefVersion`, or a `FinalDirectionApproval`. Every one of
+ * those means "I am done revising the design you generated for me" — a
+ * question never asked of someone who arrived with finished artwork.
+ * Fabricating them would be a synthetic paper trail asserting a decision the
+ * customer never made, and a SECOND production-approval authority for a
+ * decision `ArtworkPreparation` already records.
+ *
+ * `FinalArtworkWorkerCapability` gains a second source-resolution path and
+ * ONE new dependency shape: a `localNormalizationProvider` alongside the
+ * configured provider. Which of the two runs is the entire substance of the
+ * cost decision (`final-artwork/enhancement-decision.ts`), so it is injected
+ * rather than assumed. Everything after source resolution — the production
+ * transform, the production asset, authoritative Print Validation, the
+ * `print_ready` decision — is one shared path, never duplicated per workflow.
+ *
+ * `PrintValidationCapability` gains an APPLICABILITY PROFILE
+ * (`"generated_concept"` | `"uploaded_preserve"`), not a strictness dial. It
+ * remains pure: no repository, no provider, no I/O. Under
+ * `uploaded_preserve` it does not emit `brief_provenance`,
+ * `concept_evaluation_alignment`, or `required_wording_verification` —
+ * inapplicable, not relaxed — and DOES emit `source_lineage`,
+ * `preserved_source_geometry`, and `reconstruction_sufficiency`. Every report
+ * records which profile ran, so "not asked" is never indistinguishable from
+ * "passed".
+ *
+ * Forbidden (additions):
+ *   Creating a `FinalDirectionApproval` (or any synthetic approval/brief
+ *     version) to make uploaded artwork fit the create_new gate
+ *   A `FinalArtworkJob` carrying both authorities, or neither
+ *   Finalizing uploaded artwork from the immutable ORIGINAL upload rather
+ *     than the approved prepared PNG
+ *   Re-running background removal, concept generation, prompt translation,
+ *     Concept Evaluation, production verification, or ANY image-model call
+ *     during upload finalization
+ *   Spending a paid reconstruction call on artwork that already carries the
+ *     target's worth of real pixels
+ *   Retrying reconstruction at a larger scale when the first one lands short
+ *     — the plate is produced honestly and validation fails it
+ *   Serving a production asset produced at a print width the customer has
+ *     since changed
+ *   Mutating, re-encoding, or deleting the original upload, the prepared
+ *     asset, or an already-produced production asset
+ *   Asking an uploaded-artwork customer to type, confirm, or verify wording
+ *     that is already in their own pixels (and no OCR)
+ *   Treating a `uploaded_preserve` report's absent checks as passes
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2M2j" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "2M2k" as const;

@@ -2,7 +2,14 @@ export {
   createFinalArtworkCapability,
   type FinalArtworkCapability,
   type RequestFinalArtworkResult,
+  type RequestPreparedUploadFinalArtworkResult,
 } from "./final-artwork-capability";
+export {
+  decideEnhancement,
+  type EnhancementDecision,
+  type EnhancementDecisionInput,
+  type EnhancementMethod,
+} from "./enhancement-decision";
 export type { FinalArtworkInput } from "./contracts";
 export type {
   FinalArtworkProvider,

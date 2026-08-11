@@ -31,6 +31,15 @@ interface FinalArtworkDeliveryCardProps {
   projectId: string;
   onMakeAnotherChange: () => void;
   /**
+   * Existing Artwork → Print Ready Phase 2: `false` for the upload workflow.
+   * "Make Another Change" reopens the creative revision loop, and an upload
+   * customer has none — their design was finished before they arrived, and the
+   * only change still available to them (production size) lives on the
+   * uploaded-artwork panel. Offering it here would be a button leading
+   * nowhere.
+   */
+  showMakeAnotherChange?: boolean;
+  /**
    * Test-only injectors — production always fetches the live route.
    */
   fetchProductionArtwork?: (
@@ -59,6 +68,7 @@ const CHECKERBOARD_STYLE = {
 export function FinalArtworkDeliveryCard({
   projectId,
   onMakeAnotherChange,
+  showMakeAnotherChange = true,
   fetchProductionArtwork = defaultFetchProductionArtwork,
   forcedLoadState,
 }: FinalArtworkDeliveryCardProps) {
@@ -178,13 +188,15 @@ export function FinalArtworkDeliveryCard({
             >
               Download Print-Ready Artwork
             </a>
-            <button
-              type="button"
-              onClick={onMakeAnotherChange}
-              className="inline-flex rounded-full border border-black/15 bg-white px-3.5 py-1.5 text-xs font-medium text-ink transition hover:bg-black/[0.03]"
-            >
-              Make Another Change
-            </button>
+            {showMakeAnotherChange ? (
+              <button
+                type="button"
+                onClick={onMakeAnotherChange}
+                className="inline-flex rounded-full border border-black/15 bg-white px-3.5 py-1.5 text-xs font-medium text-ink transition hover:bg-black/[0.03]"
+              >
+                Make Another Change
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}

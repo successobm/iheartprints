@@ -37,6 +37,9 @@ yarn-error.log*
 # local sprint persistence
 .data/
 
+# Local acceptance artifacts — customer files, never committed
+.local-acceptance/
+
 # vercel
 .vercel
 
