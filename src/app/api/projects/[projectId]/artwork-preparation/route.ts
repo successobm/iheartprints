@@ -6,10 +6,11 @@ import { getPersistenceMode } from "@/lib/db";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
 import type { PrintPlacement } from "@/lib/domain/types";
 import {
-  applyGuidedCleanup,
   approvePreparedArtwork,
+  confirmGuidedCleanup,
   prepareUploadedArtwork,
   prepareUploadedArtworkForPrint,
+  previewGuidedCleanup,
   setUploadedArtworkContext,
   undoGuidedCleanup,
 } from "@/lib/services/artwork-preparation-service";
@@ -39,9 +40,11 @@ const PLACEMENTS = Object.keys(PRINT_PLACEMENT_LABELS) as [
  *                  approved prepared artwork. The ONE action that may spend a
  *                  paid reconstruction call, and only when the artwork
  *                  genuinely lacks the pixels for the chosen size.
- *   "cleanup"    — (Phase 1.2) the customer points at background the automatic
- *                  pass left behind. Carries a COORDINATE, which is the one
- *                  piece of client input in this whole endpoint.
+ *   "cleanup_preview" — (Phase 1.3) identify what a click would remove. Carries
+ *                  a COORDINATE. Never mutates; returns a candidate token and
+ *                  exact-region highlight when eligible.
+ *   "cleanup_confirm" — (Phase 1.3) redeem a preview token and apply the Phase
+ *                  1.2 guided-removal persistence path. Revalidates server-side.
  *   "undo_cleanup"— take back the most recent cleanup.
  *
  * Every one is idempotent server-side, so a double click is always safe. None
@@ -49,13 +52,12 @@ const PLACEMENTS = Object.keys(PRINT_PLACEMENT_LABELS) as [
  * there is nothing to name and therefore nothing to forge (Goal 18).
  *
  * WHY A COORDINATE IS SAFE TO ACCEPT. It is not an identifier and it grants
- * nothing. The server resolves it against the customer's own image and removes
- * something only when that point lands in a region the automatic pass already
- * classified as enclosed background and then declined on ambiguous geometry
- * (`guided-removal.ts`). A forged, random, or out-of-range coordinate
- * therefore resolves to "that's artwork" or "that's off the canvas" and
- * changes nothing. The bounds below exist to reject nonsense cheaply, not as
- * the security boundary — the region resolution is.
+ * nothing. The server resolves it against the customer's own image and may
+ * only ever PREVIEW a region the automatic pass already classified as enclosed
+ * background and then declined on ambiguous geometry (`guided-removal.ts`).
+ * Removal requires a second, explicit confirm that revalidates a signed
+ * candidate. A forged, random, or out-of-range coordinate therefore resolves
+ * to "that's artwork" or "that's off the canvas" and changes nothing.
  */
 const bodySchema = z.discriminatedUnion("action", [
   z.object({
@@ -68,9 +70,13 @@ const bodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("approve") }),
   z.object({ action: z.literal("print_ready") }),
   z.object({
-    action: z.literal("cleanup"),
+    action: z.literal("cleanup_preview"),
     x: z.number().int().min(0).max(MAX_IMAGE_DIMENSION_PX),
     y: z.number().int().min(0).max(MAX_IMAGE_DIMENSION_PX),
+  }),
+  z.object({
+    action: z.literal("cleanup_confirm"),
+    candidateToken: z.string().min(1).max(4000),
   }),
   z.object({ action: z.literal("undo_cleanup") }),
 ]);
@@ -91,8 +97,10 @@ function runPreparationAction(projectId: string, action: PreparationAction) {
       return approvePreparedArtwork(projectId);
     case "print_ready":
       return prepareUploadedArtworkForPrint(projectId);
-    case "cleanup":
-      return applyGuidedCleanup(projectId, { x: action.x, y: action.y });
+    case "cleanup_preview":
+      return previewGuidedCleanup(projectId, { x: action.x, y: action.y });
+    case "cleanup_confirm":
+      return confirmGuidedCleanup(projectId, action.candidateToken);
     case "undo_cleanup":
       return undoGuidedCleanup(projectId);
   }

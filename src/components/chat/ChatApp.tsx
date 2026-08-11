@@ -68,11 +68,29 @@ export function ChatApp() {
   /** Client-only "take me back a step" from the comparison/analysis surface. */
   const [reconsideringUpload, setReconsideringUpload] = useState(false);
   /**
-   * Phase 1.2: the server's already-phrased answer to the LAST cleanup click.
-   * Transient by design — it describes one action, not the project, so it is
-   * never persisted and is cleared by any other action.
+   * Phase 1.2 / 1.3: the server's already-phrased answer to the LAST cleanup
+   * action. Transient by design — it describes one action, not the project,
+   * so it is never persisted and is cleared by any other action.
    */
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
+  /**
+   * Phase 1.3: pending preview awaiting confirmation. Ephemeral React state
+   * only — a reload discards it, which is intentional.
+   */
+  const [cleanupPreview, setCleanupPreview] = useState<{
+    candidateToken: string;
+    highlight: {
+      bounds: {
+        left: number;
+        top: number;
+        right: number;
+        bottom: number;
+        width: number;
+        height: number;
+      };
+      overlayDataUrl: string;
+    };
+  } | null>(null);
   /**
    * Signed URLs are tagged with the preparation they belong to, so a stale
    * URL can never be rendered against a different (or absent) preparation —
@@ -520,6 +538,7 @@ export function ChatApp() {
   async function submitPreparationAction(
     request: () => Promise<Response>,
     failureMessage: string,
+    options?: { preserveCleanupPreview?: boolean },
   ) {
     if (!snapshot || sending) return;
     setSending(true);
@@ -531,14 +550,47 @@ export function ChatApp() {
       if (!response.ok) throw new Error(data.error || failureMessage);
       setReconsideringUpload(false);
       setSnapshot(data as ApiSnapshot);
-      // Phase 1.2: the server's answer to a cleanup click, including its
+      // Phase 1.2 / 1.3: the server's answer to a cleanup action, including
       // refusals, travels beside the snapshot rather than in it. Cleared on
       // every other action so a stale "we left that unchanged" can never
       // linger over an unrelated step.
-      const cleanup = (data as { cleanup?: { message?: string } }).cleanup;
+      const cleanup = (
+        data as {
+          cleanup?: {
+            message?: string;
+            outcome?: string;
+            candidateToken?: string;
+            highlight?: {
+              bounds: {
+                left: number;
+                top: number;
+                right: number;
+                bottom: number;
+                width: number;
+                height: number;
+              };
+              overlayDataUrl: string;
+            };
+          };
+        }
+      ).cleanup;
       setCleanupMessage(
         typeof cleanup?.message === "string" ? cleanup.message : null,
       );
+      if (!options?.preserveCleanupPreview) {
+        if (
+          cleanup?.outcome === "preview" &&
+          typeof cleanup.candidateToken === "string" &&
+          cleanup.highlight
+        ) {
+          setCleanupPreview({
+            candidateToken: cleanup.candidateToken,
+            highlight: cleanup.highlight,
+          });
+        } else {
+          setCleanupPreview(null);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : failureMessage);
     } finally {
@@ -604,29 +656,51 @@ export function ChatApp() {
   }
 
   /**
-   * Existing Artwork → Print Ready Phase 1.2: the customer clicked background
-   * the automatic pass left behind.
-   *
-   * Sends a COORDINATE in source-image pixels and nothing else — no region id,
-   * no mask, no asset path. The server decides whether anything at that point
-   * may be removed, so a stale or mis-mapped click is refused rather than
-   * obeyed, and clicking the same area twice is a server-side no-op.
+   * Existing Artwork → Print Ready Phase 1.3: the customer clicked an area to
+   * PREVIEW. Sends a COORDINATE only. Nothing is removed until they confirm.
    */
-  async function applyGuidedCleanup(point: ImagePoint) {
+  async function previewGuidedCleanup(point: ImagePoint) {
     if (!snapshot) return;
     await submitPreparationAction(
       () =>
         fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "cleanup", x: point.x, y: point.y }),
+          body: JSON.stringify({
+            action: "cleanup_preview",
+            x: point.x,
+            y: point.y,
+          }),
+        }),
+      "We couldn't preview that area. Please try again.",
+    );
+  }
+
+  async function confirmGuidedCleanup() {
+    if (!snapshot || !cleanupPreview) return;
+    const token = cleanupPreview.candidateToken;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "cleanup_confirm",
+            candidateToken: token,
+          }),
         }),
       "We couldn't remove that area. Please try again.",
     );
   }
 
+  function cancelGuidedCleanupPreview() {
+    setCleanupPreview(null);
+    setCleanupMessage(null);
+  }
+
   async function undoGuidedCleanup() {
     if (!snapshot) return;
+    setCleanupPreview(null);
     await submitPreparationAction(
       () =>
         fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
@@ -1027,9 +1101,12 @@ export function ChatApp() {
                 onPrepare={() => void prepareUploadedArtwork()}
                 onApprove={() => void approvePreparedArtwork()}
                 onReconsider={() => setReconsideringUpload(true)}
-                onCleanupPoint={(point) => void applyGuidedCleanup(point)}
+                onCleanupPoint={(point) => void previewGuidedCleanup(point)}
+                onConfirmCleanup={() => void confirmGuidedCleanup()}
+                onCancelCleanupPreview={cancelGuidedCleanupPreview}
                 onUndoCleanup={() => void undoGuidedCleanup()}
                 cleanupMessage={cleanupMessage}
+                cleanupPreviewHighlight={cleanupPreview?.highlight ?? null}
                 printReadySize={snapshot?.printReadySize ?? null}
                 onChoosePrintWidth={(widthIn) => void choosePrintWidth(widthIn)}
                 finalizationStatus={snapshot?.finalization.status ?? "not_requested"}

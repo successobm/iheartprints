@@ -43,6 +43,11 @@ import type {
   RgbColor,
 } from "./contracts";
 import {
+  buildGuidedRemovalHighlight,
+  findGuidedRemovalRegionByKey,
+  type GuidedCleanupHighlight,
+} from "./guided-cleanup-candidate";
+import {
   applyGuidedRemovals,
   computeGuidedRemovalCandidates,
   identifyGuidedRemovalRegion,
@@ -307,7 +312,7 @@ export interface BackgroundIsolationResult {
 }
 
 /**
- * Phase 1.2: what one customer click would remove, without removing it.
+ * Phase 1.2 / 1.3: what one customer click would remove, without removing it.
  *
  * Lives here rather than in `guided-removal.ts` because answering the question
  * needs the exterior fill, and the dependency between those two modules runs
@@ -328,6 +333,91 @@ export function resolveGuidedRemovalAt(
     point,
     options.applied ?? [],
   );
+}
+
+export interface GuidedRemovalPreviewResult {
+  resolution: GuidedRemovalResolution;
+  /** Present only when the click is eligible — exact pixels that would go. */
+  highlight: GuidedCleanupHighlight | null;
+  /** The candidate index used to build the highlight; for confirm revalidation. */
+  candidates: GuidedRemovalCandidates;
+}
+
+/**
+ * Phase 1.3: identify + exact-region highlight for a click, still without
+ * mutating anything. The highlight is derived from the same labels confirm
+ * will re-check, so the UI cannot advertise a different set of pixels than
+ * the server would remove.
+ */
+export function previewGuidedRemovalAt(
+  image: RgbaImage,
+  point: GuidedRemovalPoint,
+  options: {
+    backgroundColor: RgbColor;
+    tolerance: number;
+    applied?: readonly GuidedRemovalRecord[];
+  },
+): GuidedRemovalPreviewResult {
+  const candidates = buildGuidedCandidates(image, options);
+  const resolution = identifyGuidedRemovalRegion(
+    candidates,
+    point,
+    options.applied ?? [],
+  );
+  if (resolution.outcome !== "eligible" || !resolution.region) {
+    return { resolution, highlight: null, candidates };
+  }
+  return {
+    resolution,
+    highlight: buildGuidedRemovalHighlight(candidates, resolution.region.regionKey),
+    candidates,
+  };
+}
+
+/**
+ * Phase 1.3: re-check a previously previewed candidate against the CURRENT
+ * prepared state. Returns the live region when that canonical key is still
+ * eligible; otherwise a refusal. The signed token already bound the key to
+ * this preparation — this step only asks whether it is still removable.
+ */
+export function revalidateGuidedRemovalCandidate(
+  image: RgbaImage,
+  options: {
+    backgroundColor: RgbColor;
+    tolerance: number;
+    applied?: readonly GuidedRemovalRecord[];
+    regionKey: string;
+    point: GuidedRemovalPoint;
+  },
+): GuidedRemovalResolution {
+  const candidates = buildGuidedCandidates(image, options);
+  const applied = options.applied ?? [];
+  const byKey = findGuidedRemovalRegionByKey(
+    candidates,
+    options.regionKey,
+    applied,
+  );
+  if (byKey) {
+    return { outcome: "eligible", region: byKey };
+  }
+
+  const labelIndex = candidates.keys.indexOf(options.regionKey);
+  if (
+    labelIndex >= 0 &&
+    (candidates.removedByAutomatic[labelIndex] ||
+      applied.some((record) => record.regionKey === options.regionKey))
+  ) {
+    return { outcome: "already_removed", region: null };
+  }
+
+  // Also accept "already removed" when the original point now lands on
+  // transparent / previously-cleared pixels (exterior or prior guided).
+  const atPoint = identifyGuidedRemovalRegion(candidates, options.point, applied);
+  if (atPoint.outcome === "already_removed") {
+    return atPoint;
+  }
+
+  return { outcome: "already_removed", region: null };
 }
 
 function buildGuidedCandidates(

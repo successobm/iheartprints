@@ -2,7 +2,12 @@
 
 import { useState } from "react";
 
-import { mapClickToImagePoint, type ImagePoint } from "./artwork-click-mapping";
+import type { ArtworkBounds } from "@/capabilities/artwork-preparation";
+import {
+  mapClickToImagePoint,
+  mapImageBoundsToCssPercent,
+  type ImagePoint,
+} from "./artwork-click-mapping";
 import {
   ArtworkPreviewModal,
   transparencySurfaceStyle,
@@ -24,10 +29,10 @@ import {
  * The prepared tile renders on a transparency checkerboard so removed
  * background reads as genuinely removed, never as "we painted it white".
  *
- * ## Phase 1.2: guided cleanup
+ * ## Phase 1.2 / 1.3: guided cleanup
  *
  * The PREPARED tile — and only the prepared tile — can be put into a mode
- * where clicking it asks the server to remove more background. Three
+ * where clicking it asks the server to PREVIEW more background. Three
  * properties hold by construction:
  *
  *   1. The ORIGINAL is never clickable. It has no cleanup prop, so no code
@@ -38,6 +43,8 @@ import {
  *      is structurally impossible here rather than merely avoided.
  *   3. Cleanup mode is OFF unless the parent turns it on, so every existing
  *      render of this component behaves exactly as it did.
+ *   4. A pending highlight is paint-only. It never implies the prepared bytes
+ *      have changed; confirmation lives in the parent controls.
  */
 
 export interface ArtworkComparisonImage {
@@ -45,18 +52,25 @@ export interface ArtworkComparisonImage {
   loading: boolean;
 }
 
+export interface PreparedCleanupHighlight {
+  bounds: ArtworkBounds;
+  overlayDataUrl: string;
+}
+
 export interface PreparedCleanupMode {
-  /** True while clicking the prepared image removes background. */
+  /** True while clicking the prepared image previews a removable area. */
   active: boolean;
   busy: boolean;
   /** Receives a point in SOURCE IMAGE pixels, never client coordinates. */
   onSelectPoint: (point: ImagePoint) => void;
+  /** Exact-region overlay from the server while a preview is pending. */
+  pendingHighlight?: PreparedCleanupHighlight | null;
 }
 
 interface ArtworkComparisonProps {
   original: ArtworkComparisonImage;
   prepared: ArtworkComparisonImage;
-  /** Phase 1.2. Omitted everywhere cleanup is not offered. */
+  /** Phase 1.2 / 1.3. Omitted everywhere cleanup is not offered. */
   preparedCleanup?: PreparedCleanupMode;
 }
 
@@ -120,6 +134,19 @@ function ComparisonTile({
   cleanup,
 }: ComparisonTileProps) {
   const cleanupActive = cleanup?.active === true && image.url !== null;
+  const [naturalSize, setNaturalSize] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+
+  const highlightStyle =
+    cleanup?.pendingHighlight && naturalSize
+      ? mapImageBoundsToCssPercent(
+          cleanup.pendingHighlight.bounds,
+          naturalSize.width,
+          naturalSize.height,
+        )
+      : null;
 
   return (
     <div className="overflow-hidden rounded-xl border border-black/8">
@@ -127,14 +154,16 @@ function ComparisonTile({
         <button
           type="button"
           disabled={cleanup?.busy}
-          aria-label="Click background to remove it"
-          className="flex h-48 w-full cursor-crosshair items-center justify-center p-3 ring-2 ring-inset ring-ink/40 disabled:cursor-wait"
+          aria-label="Click background to preview removing it"
+          className="relative flex h-48 w-full cursor-crosshair items-center justify-center p-3 ring-2 ring-inset ring-ink/40 disabled:cursor-wait"
           style={transparencySurfaceStyle(showCheckerboard)}
           onClick={(event) => {
             // The <img> is the reference frame, not the button: the button is
             // padded and the image is letterboxed inside it, so measuring
             // against the button would offset every click.
-            const target = event.currentTarget.querySelector("img");
+            const target = event.currentTarget.querySelector(
+              "img[data-prepared-artwork]",
+            ) as HTMLImageElement | null;
             if (!target) return;
             const rect = target.getBoundingClientRect();
             const point = mapClickToImagePoint(
@@ -150,12 +179,38 @@ function ComparisonTile({
             if (point) cleanup?.onSelectPoint(point);
           }}
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={image.url ?? ""}
-            alt={`${label} artwork`}
-            className="pointer-events-none max-h-full max-w-full object-contain"
-          />
+          <span className="relative inline-block max-h-full max-w-full">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              data-prepared-artwork
+              src={image.url ?? ""}
+              alt={`${label} artwork`}
+              className="pointer-events-none block max-h-48 max-w-full object-contain"
+              onLoad={(event) => {
+                setNaturalSize({
+                  width: event.currentTarget.naturalWidth,
+                  height: event.currentTarget.naturalHeight,
+                });
+              }}
+            />
+            {cleanup.pendingHighlight && highlightStyle ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={cleanup.pendingHighlight.overlayDataUrl}
+                  alt=""
+                  aria-hidden
+                  className="pointer-events-none absolute"
+                  style={highlightStyle}
+                />
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute border-2 border-dashed border-ink"
+                  style={highlightStyle}
+                />
+              </>
+            ) : null}
+          </span>
         </button>
       ) : (
         <div

@@ -449,7 +449,7 @@ describe("ArtworkComparison", () => {
       }),
     );
 
-    assert.doesNotMatch(html, /Click background to remove it/);
+    assert.doesNotMatch(html, /Click background to preview removing it/);
     assert.doesNotMatch(html, /cursor-crosshair/);
   });
 
@@ -469,13 +469,13 @@ describe("ArtworkComparison", () => {
     // Exactly one clickable image surface, and it is the prepared one. The
     // original has no cleanup prop at all, so no code path could mutate from
     // the left-hand tile.
-    assert.equal(html.match(/Click background to remove it/g)?.length, 1);
+    assert.equal(html.match(/Click background to preview removing it/g)?.length, 1);
     assert.match(html, /cursor-crosshair/);
 
     // Enlarge stays available and stays OUTSIDE the clickable surface — it
     // lives in the tile footer, so it cannot nest inside the image button.
     assert.match(html, /Enlarge prepared artwork/);
-    const clickable = html.slice(html.indexOf("Click background to remove it"));
+    const clickable = html.slice(html.indexOf("Click background to preview removing it"));
     const buttonEnd = clickable.indexOf("</button>");
     assert.equal(
       clickable.slice(0, buttonEnd).includes("Enlarge"),
@@ -512,12 +512,13 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
   it("invites the customer in plain language, with no technical vocabulary", () => {
     const html = render();
 
-    assert.match(html, /If any background is still showing/i);
+    assert.match(html, /Still see some background/i);
+    assert.match(html, /preview it before removing it/i);
     assert.match(html, /Remove More Background/);
     // Constitution §6.6: none of the machinery may surface.
     assert.doesNotMatch(
       html,
-      /cavity|connected component|flood fill|tolerance|alpha|inradius|wall ratio|mask/i,
+      /cavity|connected component|flood fill|tolerance|alpha|inradius|wall ratio|mask|candidate region/i,
     );
   });
 
@@ -530,7 +531,7 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
     const html = render({ guidedCleanup: { available: false, removalCount: 0 } });
 
     assert.doesNotMatch(html, /Remove More Background/);
-    assert.doesNotMatch(html, /If any background is still showing/i);
+    assert.doesNotMatch(html, /Still see some background/i);
     // The rest of the compare step is untouched.
     assert.match(html, /Use Prepared Artwork/);
   });
@@ -542,11 +543,30 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
       {},
       {
         cleanupMessage:
-          "That looks like part of your artwork, so we left it unchanged.",
+          "That area looks like part of the artwork, so we left it unchanged.",
       },
     );
 
-    assert.match(html, /That looks like part of your artwork, so we left it unchanged\./);
+    assert.match(html, /That area looks like part of the artwork, so we left it unchanged\./);
+  });
+
+  it("shows confirm and cancel when a preview highlight is pending", () => {
+    const html = render(
+      {},
+      {
+        cleanupPreviewHighlight: {
+          bounds: { left: 10, top: 10, right: 20, bottom: 20, width: 10, height: 10 },
+          overlayDataUrl: "data:image/png;base64,abc",
+        },
+        onConfirmCleanup: () => {},
+        onCancelCleanupPreview: () => {},
+      },
+    );
+
+    assert.match(html, /Remove this area\?/i);
+    assert.match(html, /Remove This Area/);
+    assert.match(html, />Cancel</);
+    assert.doesNotMatch(html, /Undo Last Removal/);
   });
 
   it("is not an image editor", () => {

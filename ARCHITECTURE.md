@@ -4108,24 +4108,33 @@ negative controls from a single image — and a smaller ball icon with
 proportionally larger holes collapses the separation. **That is not enough
 evidence to spend a customer's artwork on.**
 
-So the system stops guessing and asks. `guided-removal.ts`:
+So the system stops guessing and asks. Phase 1.3 makes the ask
+**preview-then-confirm**, not click-to-delete:
 
-- The browser sends an **image-space coordinate** — never a region id, a mask,
-  an alpha value or an asset path. There is consequently nothing to forge: a
-  made-up coordinate resolves to whatever is genuinely there, and if that is
-  artwork the answer is "no".
+- The browser sends an **image-space coordinate** for preview — never a region
+  id, a mask, an alpha value or an asset path. A made-up coordinate resolves to
+  whatever is genuinely there, and if that is artwork the answer is "no" with
+  no confirmation surface.
+- An eligible preview returns a **signed candidate token** plus an
+  **exact-region highlight** built from the same label map the mutation path
+  uses. The UI paints that overlay; it never flood-fills client-side.
+- **Clicking does not mutate.** Only an explicit "Remove This Area" redeems the
+  token. Cancel discards the transient preview with zero persistence.
+- Confirm revalidates server-side: project, preparation, prepared asset,
+  removal count, and region eligibility must still match. Stale or forged
+  tokens refuse without writing. Double-confirm is idempotent
+  (`already_removed`).
 - A click may resolve **only** to a region the automatic cavity pass already
   identified as an enclosed background-coloured candidate and then declined on
   geometry. Everything else in the image is inert — the customer's dark outline
   measures Chebyshev 15 against a tolerance of 12, so it was never a candidate
   and no click can reach it.
-- `identifyGuidedRemovalRegion` reports the exact bounded region a click *would*
-  affect before anything is removed, so a mis-click is visible and undoable.
 - A click on a **finger hole is eligible**, and that is not a bug. A finger hole
   is an enclosed background-coloured region preserved on ambiguity, exactly like
   a counter; the system genuinely cannot tell them apart. What protects it is
-  the customer, who is looking at their own bowling ball. What the code
-  guarantees is that nothing happens that they did not see and cannot undo.
+  the customer seeing the exact highlight and choosing Cancel. What the code
+  guarantees is that nothing is removed until they confirm, and undo remains
+  available before approval.
 
 **Pipeline order.** The mask is built by four passes that only ever *grow* it —
 exterior → cavities → guided → speckle — and not one of them reads or writes a
@@ -4150,15 +4159,16 @@ with the original it claims to describe.
 ```
 customer_upload (IMMUTABLE, never rewritten)
   └─ automatic preparation      → prepared asset #1
-       └─ + click               → prepared asset #2   (preparedAssetId repoints)
+       └─ + confirmed removal   → prepared asset #2   (preparedAssetId repoints)
             └─ undo             → prepared asset #3   (≡ #1, byte-for-byte)
                  └─ APPROVED    → prepared_upload ArtworkVersion → Phase 2
 ```
 
 Every cleanup derives a **new** asset; superseded ones are left in place, so
 lineage stays readable and nothing is overwritten. Once `status = 'approved'`
-the preparation is history: `applyGuidedCleanup` and `undoGuidedCleanup` both
-refuse, so the artwork Phase 2 consumes can never change underneath it.
+the preparation is history: `previewGuidedCleanup`, `confirmGuidedCleanup`, and
+`undoGuidedCleanup` all refuse, so the artwork Phase 2 consumes can never change
+underneath it.
 
 > **PREPARED ARTWORK MAY INCLUDE CUSTOMER-GUIDED CLEANUP BEFORE APPROVAL.** What
 > the customer approves is the prepared file as they last saw it — automatic
@@ -4747,7 +4757,7 @@ delegation to composed capabilities.
 | `GET /api/projects/[projectId]/production-artwork/download` | Stream print-ready production PNG with customer filename (`Content-Disposition`) |
 | `POST /api/projects/[projectId]/undo` | One-level undo |
 | `POST /api/projects/[projectId]/artwork-upload` | §13h: project-scoped multipart ingress for customer-supplied artwork (PNG only; bytes authoritative over declared type and filename) |
-| `POST /api/projects/[projectId]/artwork-preparation` | §13h: the uploaded-artwork actions — `context` (production details), `prepare` (deterministic background isolation), `cleanup` / `undo_cleanup` (customer-guided background removal; carries a coordinate, the one piece of client input, and grants nothing — see "User-guided background cleanup"), `approve` (explicit prepared-artwork approval), `print_ready` (Phase 2). All idempotent |
+| `POST /api/projects/[projectId]/artwork-preparation` | §13h: the uploaded-artwork actions — `context` (production details), `prepare` (deterministic background isolation), `cleanup_preview` / `cleanup_confirm` / `undo_cleanup` (customer-guided background removal with Phase 1.3 preview-then-confirm; preview carries a coordinate, confirm redeems a signed candidate, and neither grants authority beyond revalidated eligibility — see "User-guided background cleanup"), `approve` (explicit prepared-artwork approval), `print_ready` (Phase 2). All idempotent |
 | `GET /api/projects/[projectId]/artwork-preparation/image/[role]` | §13h: mint short-lived URL for `original` or `prepared`. The browser names a role, never an asset id; uniform 404 on every miss |
 | `GET /api/assets/[...objectKey]` | Serve filesystem signed assets |
 | `POST /api/worker/generation` | Independent concept-generation worker batch (secret-protected) |
@@ -5069,13 +5079,13 @@ Verified against the implementation:
   therefore preserved and the customer removes them with a click (see
   "User-guided background cleanup"). `darkOutlinedDisplayArtwork` remains the
   characterization fixture; it now pins preservation as *correct*
-- **Guided cleanup can remove a finger hole if the customer clicks one.** This
+- **Guided cleanup can preview a finger hole if the customer clicks one.** This
   is the unavoidable consequence of the finding above: the system cannot
   distinguish it, so it cannot refuse it on the customer's behalf. Mitigations
-  are that nothing is ever removed automatically, the affected region is bounded
-  and previewed, and undo is always available before approval. A confirmation
-  step for unusually large regions is the obvious next hardening if real usage
-  shows mis-clicks
+  are that nothing is ever removed automatically, the affected region is
+  highlighted from the server's authoritative mask before any mutation, removal
+  requires an explicit "Remove This Area" confirmation, and undo is always
+  available before approval.
 - **Speckle cleanup only reaches fully isolated flecks of ≤4px.** Residue still
   *attached* to artwork — a one-pixel-wide dark protrusion along an outline — is
   left alone, because it cannot be told apart from thin intentional detail. On

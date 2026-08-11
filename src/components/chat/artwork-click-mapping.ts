@@ -76,6 +76,39 @@ export function mapClickToImagePoint(
   };
 }
 
+/**
+ * Maps a source-image rectangle onto CSS percentages of the rendered <img>
+ * content box (object-contain, no letterbox in the percentage space — the
+ * percentages are of the natural image, which matches an <img> whose layout
+ * box equals its drawn content).
+ */
+export function mapImageBoundsToCssPercent(
+  bounds: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  },
+  naturalWidth: number,
+  naturalHeight: number,
+): { left: string; top: string; width: string; height: string } | null {
+  if (
+    !isPositive(naturalWidth) ||
+    !isPositive(naturalHeight) ||
+    bounds.width <= 0 ||
+    bounds.height <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    left: `${(bounds.left / naturalWidth) * 100}%`,
+    top: `${(bounds.top / naturalHeight) * 100}%`,
+    width: `${(bounds.width / naturalWidth) * 100}%`,
+    height: `${(bounds.height / naturalHeight) * 100}%`,
+  };
+}
+
 function isPositive(value: number): boolean {
   return Number.isFinite(value) && value > 0;
 }

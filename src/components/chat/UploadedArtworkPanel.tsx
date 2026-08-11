@@ -68,17 +68,36 @@ export interface UploadedArtworkPanelProps {
   /** The explicit "Prepare Print-Ready Artwork" action. Idempotent server-side, so a double click is safe. */
   onPrepareForPrint?: () => void;
   /**
-   * Existing Artwork → Print Ready Phase 1.2: the customer pointed at
-   * background the automatic pass left behind. Receives SOURCE IMAGE pixels.
+   * Existing Artwork → Print Ready Phase 1.3: the customer pointed at an
+   * area to PREVIEW — not yet remove. Receives SOURCE IMAGE pixels.
    */
   onCleanupPoint?: (point: ImagePoint) => void;
+  /** Confirm the pending previewed removal. */
+  onConfirmCleanup?: () => void;
+  /** Dismiss the pending preview without mutating. */
+  onCancelCleanupPreview?: () => void;
   /** Takes back the most recent guided removal. */
   onUndoCleanup?: () => void;
   /**
-   * The server's already-phrased answer to the last cleanup click — including
-   * the refusals. Rendered verbatim; this component never composes it.
+   * The server's already-phrased answer to the last cleanup action —
+   * including refusals and the confirm prompt. Rendered verbatim.
    */
   cleanupMessage?: string | null;
+  /**
+   * Exact-region highlight while a removable area is pending confirmation.
+   * Ephemeral — never implies the prepared bytes changed.
+   */
+  cleanupPreviewHighlight?: {
+    bounds: {
+      left: number;
+      top: number;
+      right: number;
+      bottom: number;
+      width: number;
+      height: number;
+    };
+    overlayDataUrl: string;
+  } | null;
 }
 
 export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
@@ -117,8 +136,11 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           onApprove={props.onApprove}
           onReconsider={props.onReconsider}
           onCleanupPoint={props.onCleanupPoint}
+          onConfirmCleanup={props.onConfirmCleanup}
+          onCancelCleanupPreview={props.onCancelCleanupPreview}
           onUndoCleanup={props.onUndoCleanup}
           cleanupMessage={props.cleanupMessage ?? null}
+          cleanupPreviewHighlight={props.cleanupPreviewHighlight ?? null}
         />
       ) : null}
 
@@ -324,8 +346,11 @@ function CompareStep({
   onApprove,
   onReconsider,
   onCleanupPoint,
+  onConfirmCleanup,
+  onCancelCleanupPreview,
   onUndoCleanup,
   cleanupMessage,
+  cleanupPreviewHighlight,
 }: {
   preparation: ArtworkPreparationView;
   busy: boolean;
@@ -334,12 +359,16 @@ function CompareStep({
   onApprove: () => void;
   onReconsider: () => void;
   onCleanupPoint?: (point: ImagePoint) => void;
+  onConfirmCleanup?: () => void;
+  onCancelCleanupPreview?: () => void;
   onUndoCleanup?: () => void;
   cleanupMessage: string | null;
+  cleanupPreviewHighlight: UploadedArtworkPanelProps["cleanupPreviewHighlight"];
 }) {
   const [cleanupActive, setCleanupActive] = useState(false);
   const cleanup = preparation.guidedCleanup;
   const cleanupOffered = cleanup.available && Boolean(onCleanupPoint);
+  const pendingConfirmation = Boolean(cleanupPreviewHighlight);
 
   return (
     <div>
@@ -361,6 +390,7 @@ function CompareStep({
                   active: cleanupActive,
                   busy,
                   onSelectPoint: onCleanupPoint,
+                  pendingHighlight: cleanupPreviewHighlight ?? null,
                 }
               : undefined
           }
@@ -373,7 +403,16 @@ function CompareStep({
           busy={busy}
           removalCount={cleanup.removalCount}
           message={cleanupMessage}
-          onToggle={() => setCleanupActive((previous) => !previous)}
+          pendingConfirmation={pendingConfirmation}
+          onToggle={() => {
+            setCleanupActive((previous) => {
+              const next = !previous;
+              if (!next) onCancelCleanupPreview?.();
+              return next;
+            });
+          }}
+          onConfirm={onConfirmCleanup}
+          onCancelPreview={onCancelCleanupPreview}
           onUndo={onUndoCleanup}
         />
       ) : null}
@@ -390,7 +429,7 @@ function CompareStep({
             above does nothing but show a larger picture. */}
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || pendingConfirmation}
           onClick={onApprove}
           className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
         >
@@ -410,16 +449,16 @@ function CompareStep({
 }
 
 /**
- * Existing Artwork → Print Ready Phase 1.2: the guided cleanup controls.
+ * Existing Artwork → Print Ready Phase 1.2 / 1.3: the guided cleanup controls.
  *
- * Deliberately three plain buttons and two sentences. This is not an image
+ * Deliberately plain buttons and short sentences. This is not an image
  * editor: there is no brush, no lasso, no eraser, no freehand mask and no
  * layer list, because the customer's job here is to point at something that is
- * obviously wrong, not to retouch their own artwork.
+ * obviously wrong, then confirm, not to retouch their own artwork.
  *
  * Every word rendered comes from `preparation-copy.ts` — including the server's
- * answer to the last click, which is the one place a REFUSAL becomes visible
- * ("that looks like part of your artwork, so we left it unchanged"). That
+ * answer to the last action, which is the one place a REFUSAL becomes visible
+ * ("that area looks like part of the artwork, so we left it unchanged"). That
  * sentence is the whole safety story made legible, so it is never composed
  * here from a status code.
  */
@@ -428,40 +467,71 @@ function GuidedCleanupControls({
   busy,
   removalCount,
   message,
+  pendingConfirmation,
   onToggle,
+  onConfirm,
+  onCancelPreview,
   onUndo,
 }: {
   active: boolean;
   busy: boolean;
   removalCount: number;
   message: string | null;
+  pendingConfirmation: boolean;
   onToggle: () => void;
+  onConfirm?: () => void;
+  onCancelPreview?: () => void;
   onUndo?: () => void;
 }) {
   return (
     <div className="mt-3 rounded-xl border border-black/8 bg-black/[0.02] p-3">
       <p className="text-sm text-ink">
-        {active ? GUIDED_CLEANUP_COPY.activeHint : GUIDED_CLEANUP_COPY.invitation}
+        {pendingConfirmation
+          ? GUIDED_CLEANUP_COPY.confirmPrompt
+          : active
+            ? GUIDED_CLEANUP_COPY.activeHint
+            : GUIDED_CLEANUP_COPY.invitation}
       </p>
 
       <div className="mt-2.5 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          disabled={busy}
-          aria-pressed={active}
-          onClick={onToggle}
-          className={`rounded-full px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
-            active
-              ? "bg-ink text-white enabled:hover:bg-ink/90"
-              : "border border-black/10 text-muted enabled:hover:border-ink/30 enabled:hover:text-ink"
-          }`}
-        >
-          {active
-            ? GUIDED_CLEANUP_COPY.exitActionLabel
-            : GUIDED_CLEANUP_COPY.enterActionLabel}
-        </button>
+        {pendingConfirmation ? (
+          <>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onConfirm}
+              className="rounded-full bg-ink px-3 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {GUIDED_CLEANUP_COPY.confirmActionLabel}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onCancelPreview}
+              className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-muted transition enabled:hover:border-ink/30 enabled:hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {GUIDED_CLEANUP_COPY.cancelActionLabel}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            disabled={busy}
+            aria-pressed={active}
+            onClick={onToggle}
+            className={`rounded-full px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+              active
+                ? "bg-ink text-white enabled:hover:bg-ink/90"
+                : "border border-black/10 text-muted enabled:hover:border-ink/30 enabled:hover:text-ink"
+            }`}
+          >
+            {active
+              ? GUIDED_CLEANUP_COPY.exitActionLabel
+              : GUIDED_CLEANUP_COPY.enterActionLabel}
+          </button>
+        )}
 
-        {removalCount > 0 && onUndo ? (
+        {!pendingConfirmation && removalCount > 0 && onUndo ? (
           <button
             type="button"
             disabled={busy}
@@ -473,9 +543,14 @@ function GuidedCleanupControls({
         ) : null}
       </div>
 
-      {message ? (
+      {message && !pendingConfirmation ? (
         <p className="mt-2 text-xs text-ink" role="status">
           {message}
+        </p>
+      ) : null}
+      {pendingConfirmation ? (
+        <p className="sr-only" role="status" aria-live="polite">
+          {GUIDED_CLEANUP_COPY.confirmPrompt}
         </p>
       ) : null}
     </div>

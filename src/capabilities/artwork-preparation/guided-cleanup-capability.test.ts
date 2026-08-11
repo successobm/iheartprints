@@ -78,6 +78,26 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
   /** The customer's dark outline. Never a candidate, at any tolerance. */
   const OUTLINE = { x: 32, y: 80 };
 
+  /**
+   * Phase 1.3: preview then confirm — the only mutating path. Keeps these
+   * lineage tests focused on persistence while forcing the safety gate.
+   */
+  async function removeAt(
+    capability: ArtworkPreparationCapability,
+    projectId: string,
+    point: { x: number; y: number },
+  ) {
+    const preview = await capability.previewGuidedCleanup(projectId, point);
+    if (preview.outcome !== "preview" || !preview.candidateToken) {
+      return {
+        outcome: preview.outcome,
+        message: preview.message,
+        view: preview.view,
+      };
+    }
+    return capability.confirmGuidedCleanup(projectId, preview.candidateToken);
+  }
+
   async function build() {
     const { LocalProjectRepository } = await import("@/lib/db/local-store");
     const repo: ProjectRepository = new LocalProjectRepository();
@@ -132,7 +152,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     assert.equal(view.guidedCleanup.removalCount, 0);
     assert.equal(getPixel(await preparedPixels(capability, assets, projectId), 70, 80).a, 255);
 
-    const result = await capability.applyGuidedCleanup(projectId, COUNTER);
+    const result = await removeAt(capability, projectId, COUNTER);
 
     assert.equal(result.outcome, "removed");
     assert.equal(result.view.guidedCleanup.removalCount, 1);
@@ -143,13 +163,13 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     const { repo, assets, capability } = await build();
     const { projectId } = await prepared(capability, repo);
 
-    await capability.applyGuidedCleanup(projectId, COUNTER);
+    await removeAt(capability, projectId, COUNTER);
     const firstAsset = await capability.resolveImageAssetId(projectId, "prepared");
     const firstBytes = await preparedPixels(capability, assets, projectId);
 
     // A second click a few pixels away — the same region, which is what a real
     // double click or an impatient customer actually produces.
-    const second = await capability.applyGuidedCleanup(projectId, { x: 74, y: 86 });
+    const second = await removeAt(capability, projectId, { x: 74, y: 86 });
 
     assert.equal(second.outcome, "already_removed");
     assert.equal(second.view.guidedCleanup.removalCount, 1, "no second removal recorded");
@@ -170,10 +190,10 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     const before = await preparedPixels(capability, assets, projectId);
     const beforeAsset = await capability.resolveImageAssetId(projectId, "prepared");
 
-    const result = await capability.applyGuidedCleanup(projectId, OUTLINE);
+    const result = await removeAt(capability, projectId, OUTLINE);
 
     assert.equal(result.outcome, "not_background");
-    assert.match(result.message, /part of your artwork/i);
+    assert.match(result.message, /part of the artwork/i);
     assert.equal(result.view.guidedCleanup.removalCount, 0);
     assert.equal(
       await capability.resolveImageAssetId(projectId, "prepared"),
@@ -194,7 +214,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
       { x: 100_000, y: 100_000 },
       { x: -4, y: 12 },
     ]) {
-      const result = await capability.applyGuidedCleanup(projectId, point);
+      const result = await removeAt(capability, projectId, point);
       assert.equal(result.outcome, "outside_image");
       assert.equal(result.view.guidedCleanup.removalCount, 0);
     }
@@ -205,7 +225,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     const { projectId } = await prepared(capability, repo);
     const automatic = await preparedPixels(capability, assets, projectId);
 
-    await capability.applyGuidedCleanup(projectId, COUNTER);
+    await removeAt(capability, projectId, COUNTER);
     assert.equal(getPixel(await preparedPixels(capability, assets, projectId), 70, 80).a, 0);
 
     const undone = await capability.undoGuidedCleanup(projectId);
@@ -232,7 +252,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
   it("survives a reload: a fresh capability reads the same prepared artwork", async () => {
     const { repo, assets, capability } = await build();
     const { projectId } = await prepared(capability, repo);
-    await capability.applyGuidedCleanup(projectId, COUNTER);
+    await removeAt(capability, projectId, COUNTER);
     const afterCleanup = await preparedPixels(capability, assets, projectId);
 
     // A completely new capability graph over the same persisted store — the
@@ -253,9 +273,9 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     const { repo, assets, capability } = await build();
     const { projectId, uploadedHash } = await prepared(capability, repo);
 
-    await capability.applyGuidedCleanup(projectId, COUNTER);
+    await removeAt(capability, projectId, COUNTER);
     await capability.undoGuidedCleanup(projectId);
-    await capability.applyGuidedCleanup(projectId, COUNTER);
+    await removeAt(capability, projectId, COUNTER);
 
     const preparation = await repo.getArtworkPreparation(projectId);
     const original = await assets.downloadAssetBytes(preparation!.originalAssetId);
@@ -273,7 +293,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     const automaticAssetId = (await capability.resolveImageAssetId(projectId, "prepared"))!;
     const automaticBytes = (await assets.downloadAssetBytes(automaticAssetId))!.bytes;
 
-    await capability.applyGuidedCleanup(projectId, COUNTER);
+    await removeAt(capability, projectId, COUNTER);
     const cleanedAssetId = (await capability.resolveImageAssetId(projectId, "prepared"))!;
 
     assert.notEqual(cleanedAssetId, automaticAssetId, "a new asset");
@@ -288,7 +308,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     const { repo, assets, capability } = await build();
     const { projectId } = await prepared(capability, repo);
 
-    await capability.applyGuidedCleanup(projectId, COUNTER);
+    await removeAt(capability, projectId, COUNTER);
     const approved = await capability.approvePreparedArtwork(projectId);
     const approvedAssetId = (await capability.resolveImageAssetId(projectId, "prepared"))!;
     const approvedBytes = (await assets.downloadAssetBytes(approvedAssetId))!.bytes;
@@ -296,7 +316,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     assert.equal(approved.guidedCleanup.available, false, "cleanup is no longer offered");
 
     await assert.rejects(
-      () => capability.applyGuidedCleanup(projectId, { x: 70, y: 120 }),
+      () => removeAt(capability, projectId, { x: 70, y: 120 }),
       ArtworkPreparationStateError,
     );
     await assert.rejects(
@@ -325,7 +345,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     });
 
     await assert.rejects(
-      () => capability.applyGuidedCleanup(projectId, COUNTER),
+      () => removeAt(capability, projectId, COUNTER),
       ArtworkPreparationStateError,
     );
   });
@@ -333,13 +353,13 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
   it("rejects a cleanup aimed at another project", async () => {
     const { repo, assets, capability } = await build();
     const victim = await prepared(capability, repo);
-    await capability.applyGuidedCleanup(victim.projectId, COUNTER);
+    await removeAt(capability, victim.projectId, COUNTER);
     const victimBytes = await preparedPixels(capability, assets, victim.projectId);
 
     // A project with no preparation at all cannot borrow the victim's.
     const bystanderId = (await repo.createProject()).project.id;
     await assert.rejects(
-      () => capability.applyGuidedCleanup(bystanderId, COUNTER),
+      () => removeAt(capability, bystanderId, COUNTER),
       ArtworkPreparationStateError,
     );
     await assert.rejects(
@@ -358,14 +378,14 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
   it("multiple guided removals produce a deterministic final image", async () => {
     const { repo, assets, capability } = await build();
     const first = await prepared(capability, repo);
-    await capability.applyGuidedCleanup(first.projectId, COUNTER);
+    await removeAt(capability, first.projectId, COUNTER);
     const firstResult = await preparedPixels(capability, assets, first.projectId);
 
     // The same clicks, on a different project, from a different capability
     // instance: same bytes out.
     const other = await build();
     const second = await prepared(other.capability, other.repo);
-    await other.capability.applyGuidedCleanup(second.projectId, { x: 72, y: 84 });
+    await removeAt(other.capability, second.projectId, { x: 72, y: 84 });
     const secondResult = await preparedPixels(
       other.capability,
       other.assets,

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { mapClickToImagePoint } from "./artwork-click-mapping";
+import { mapClickToImagePoint, mapImageBoundsToCssPercent } from "./artwork-click-mapping";
 
 /**
  * Phase 1.2: click → source pixel.
+ * Phase 1.3: source bounds → CSS percent overlay placement.
  *
  * A wrong answer here removes a region the customer did not point at, which is
  * the one outcome guided cleanup exists to avoid. There is no DOM in this test
@@ -73,6 +74,21 @@ describe("Artwork click mapping — object-contain letterboxing", () => {
         0,
         0,
       ),
+      null,
+    );
+  });
+
+  it("maps source bounds to CSS percentages for the highlight overlay", () => {
+    assert.deepEqual(
+      mapImageBoundsToCssPercent(
+        { left: 100, top: 50, width: 200, height: 100 },
+        1000,
+        500,
+      ),
+      { left: "10%", top: "10%", width: "20%", height: "20%" },
+    );
+    assert.equal(
+      mapImageBoundsToCssPercent({ left: 0, top: 0, width: 0, height: 10 }, 100, 100),
       null,
     );
   });

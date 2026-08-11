@@ -163,6 +163,7 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/background-speckle.test.ts",
   "src/capabilities/artwork-preparation/guided-removal.test.ts",
   "src/capabilities/artwork-preparation/guided-cleanup-capability.test.ts",
+  "src/capabilities/artwork-preparation/guided-cleanup-confirmation.test.ts",
   "src/components/chat/artwork-click-mapping.test.ts",
   "src/components/chat/uploaded-artwork-flow.test.ts",
   "src/components/chat/UploadedArtworkPanel.test.tsx",

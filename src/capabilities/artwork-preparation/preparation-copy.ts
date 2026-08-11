@@ -119,46 +119,60 @@ export function describePrintReadyPreparation(
 }
 
 /**
- * Existing Artwork → Print Ready Phase 1.2: the guided background cleanup
- * surface, in customer language.
+ * Existing Artwork → Print Ready Phase 1.2 / 1.3: the guided background
+ * cleanup surface, in customer language.
  *
  * Nothing here names a cavity, a connected component, a wall ratio, a flood
  * fill, an alpha value or a tolerance. The customer is told what they can see
- * ("some background is still showing") and what to do about it ("click it").
- * The word "background" is doing all the work, and it is a word they already
- * used when they uploaded the file.
+ * ("some background is still showing") and what to do about it ("click it" /
+ * "remove this area"). The word "background" is doing all the work, and it is
+ * a word they already used when they uploaded the file.
+ *
+ * Phase 1.3: a click only PREVIEWS. Removal happens only after an explicit
+ * "Remove This Area" confirmation, so a finger-hole mis-click is visible and
+ * cancellable before any bytes change.
  */
 export const GUIDED_CLEANUP_COPY = {
   /** Sits under the prepared preview whenever cleanup is available. */
   invitation:
-    "If any background is still showing inside your design, click it and we'll remove that too.",
+    "Still see some background? Click an area to preview it before removing it.",
   /** The control that turns clicking on. */
   enterActionLabel: "Remove More Background",
   /** The control that turns it off again. */
   exitActionLabel: "Done Removing",
-  /** While cleanup mode is on. */
-  activeHint: "Click any area that should be see-through. You can undo this.",
+  /** While cleanup mode is on and nothing is pending confirmation. */
+  activeHint:
+    "Still see some background? Click an area to preview it before removing it.",
+  /** After an eligible area is selected, before confirmation. */
+  confirmPrompt: "Remove this area?",
+  confirmActionLabel: "Remove This Area",
+  cancelActionLabel: "Cancel",
   undoActionLabel: "Undo Last Removal",
 } as const;
 
 /**
- * What to say after one click. The refusal cases are deliberately warm and
- * deliberately vague about mechanism: the customer does not need to know that
- * their click landed outside an enclosed candidate region, only that we left
- * their artwork alone — which is the reassuring half of the answer anyway.
+ * What to say after one preview or confirmation. The refusal cases are
+ * deliberately warm and deliberately vague about mechanism: the customer does
+ * not need to know that their click landed outside an enclosed candidate
+ * region, only that we left their artwork alone — which is the reassuring
+ * half of the answer anyway.
  */
 export type GuidedCleanupOutcomeCode =
+  | "preview"
   | "removed"
   | "already_removed"
   | "not_background"
   | "outside_image"
   | "nothing_to_undo"
-  | "undone";
+  | "undone"
+  | "stale_preview";
 
 export function describeGuidedCleanupOutcome(
   outcome: GuidedCleanupOutcomeCode,
 ): string {
   switch (outcome) {
+    case "preview":
+      return GUIDED_CLEANUP_COPY.confirmPrompt;
     case "removed":
       return "Removed. If that wasn't right, undo it.";
     case "already_removed":
@@ -167,13 +181,15 @@ export function describeGuidedCleanupOutcome(
       // The single most important sentence in this flow: the customer clicked
       // their own artwork and we declined. Says what we did NOT do, because
       // that is the reassurance they need.
-      return "That looks like part of your artwork, so we left it unchanged.";
+      return "That area looks like part of the artwork, so we left it unchanged.";
     case "outside_image":
       return "That click landed outside your artwork.";
     case "nothing_to_undo":
       return "There's nothing to undo yet.";
     case "undone":
       return "Put back.";
+    case "stale_preview":
+      return "The artwork changed since that preview. Please select the area again.";
   }
 }
 

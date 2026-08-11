@@ -57,31 +57,70 @@ export async function approvePreparedArtwork(
 }
 
 /**
- * Existing Artwork → Print Ready Phase 1.2: one guided-cleanup action, plus
- * the refreshed project snapshot.
+ * Existing Artwork → Print Ready Phase 1.2 / 1.3: one guided-cleanup action,
+ * plus the refreshed project snapshot.
  *
  * The outcome rides ALONGSIDE the snapshot rather than inside it, because it
  * describes THIS click rather than the state of the project — "that looks like
  * part of your artwork" is not a fact about the preparation, and persisting it
  * anywhere would make it reappear after a reload that has nothing to do with
  * it.
+ *
+ * Phase 1.3: a preview may also carry a candidate token and exact-region
+ * highlight. Those are ephemeral — never stored on the preparation.
  */
 export interface GuidedCleanupResponse extends ApiProjectSnapshot {
   cleanup: {
     outcome: GuidedCleanupOutcomeCode;
     /** Already-phrased by `preparation-copy.ts`. Rendered verbatim. */
     message: string;
+    /** Present only for an eligible preview. Redeemed by `cleanup_confirm`. */
+    candidateToken?: string;
+    /** Exact-region overlay for the pending preview. */
+    highlight?: {
+      bounds: {
+        left: number;
+        top: number;
+        right: number;
+        bottom: number;
+        width: number;
+        height: number;
+      };
+      overlayDataUrl: string;
+    };
   };
 }
 
-export async function applyGuidedCleanup(
+export async function previewGuidedCleanup(
   projectId: string,
   point: GuidedRemovalPoint,
 ): Promise<GuidedCleanupResponse> {
   const result =
-    await getCapabilityGraph().artworkPreparation.applyGuidedCleanup(
+    await getCapabilityGraph().artworkPreparation.previewGuidedCleanup(
       projectId,
       point,
+    );
+  return {
+    ...(await requireSnapshot(projectId)),
+    cleanup: {
+      outcome: result.outcome,
+      message: result.message,
+      ...(result.candidateToken
+        ? { candidateToken: result.candidateToken }
+        : {}),
+      ...(result.highlight ? { highlight: result.highlight } : {}),
+    },
+  };
+}
+
+export async function confirmGuidedCleanup(
+  projectId: string,
+  candidateToken: string,
+): Promise<GuidedCleanupResponse> {
+  const result =
+    await getCapabilityGraph().artworkPreparation.confirmGuidedCleanup(
+      projectId,
+      candidateToken,
     );
   return {
     ...(await requireSnapshot(projectId)),

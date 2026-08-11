@@ -4,11 +4,13 @@ export {
   ArtworkUploadRejectedError,
   type ArtworkPreparationCapability,
   type ArtworkPreparationView,
+  type GuidedCleanupPreviewResult,
   type GuidedCleanupResult,
   type GuidedCleanupStateView,
   type UploadArtworkInput,
   type UploadedArtworkContextInput,
 } from "./artwork-preparation-capability";
+export type { GuidedCleanupHighlight } from "./guided-cleanup-candidate";
 export type {
   GuidedRemovalOutcome,
   GuidedRemovalPoint,

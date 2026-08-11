@@ -445,11 +445,12 @@ describe("Bowling cavity acceptance — enclosed background vs intentional black
     assert.equal(view.guidedCleanup.available, true);
     assert.equal(view.guidedCleanup.removalCount, 0);
 
-    const clickedBall = await capability.applyGuidedCleanup(projectId, {
+    const clickedBall = await capability.previewGuidedCleanup(projectId, {
       x: BOWLING_FINGER_HOLES[0]!.x + 40,
       y: BOWLING_FINGER_HOLES[0]!.y,
     });
     assert.equal(clickedBall.outcome, "not_background", "the gold ball is artwork");
+    assert.equal(clickedBall.candidateToken, null);
     assert.equal(clickedBall.view.guidedCleanup.removalCount, 0);
 
     const approved = await capability.approvePreparedArtwork(projectId);

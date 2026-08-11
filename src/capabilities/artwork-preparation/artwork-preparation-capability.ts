@@ -50,9 +50,15 @@ import type {
 import {
   isolateBackground,
   passThroughTransparentArtwork,
-  resolveGuidedRemovalAt,
+  previewGuidedRemovalAt,
+  revalidateGuidedRemovalCandidate,
 } from "./background-isolation";
 import type { ArtworkAnalysis, RepairabilityAssessment } from "./contracts";
+import {
+  mintGuidedCleanupCandidateToken,
+  verifyGuidedCleanupCandidateToken,
+  type GuidedCleanupHighlight,
+} from "./guided-cleanup-candidate";
 import type {
   GuidedRemovalPoint,
   GuidedRemovalRecord,
@@ -144,12 +150,27 @@ export interface GuidedCleanupStateView {
   removalCount: number;
 }
 
-/** The result of one guided-cleanup action. */
+/** The result of one guided-cleanup mutation (confirm or undo). */
 export interface GuidedCleanupResult {
   outcome: GuidedCleanupOutcomeCode;
   /** Already-phrased. The UI renders this verbatim. */
   message: string;
   view: ArtworkPreparationView;
+}
+
+/**
+ * Phase 1.3: the result of a non-mutating preview click. When eligible, the
+ * browser holds `candidateToken` until the customer confirms; nothing about
+ * the preparation has changed yet.
+ */
+export interface GuidedCleanupPreviewResult {
+  outcome: GuidedCleanupOutcomeCode;
+  message: string;
+  view: ArtworkPreparationView;
+  /** Opaque redeemable token. Null when the click was refused. */
+  candidateToken: string | null;
+  /** Exact-region overlay. Null when the click was refused. */
+  highlight: GuidedCleanupHighlight | null;
 }
 
 /** Persisted shape of `ArtworkPreparation.guidedCleanup`. */
@@ -194,21 +215,29 @@ export interface ArtworkPreparationCapability {
    */
   prepareBackground(designId: string): Promise<ArtworkPreparationView>;
   /**
-   * Existing Artwork → Print Ready Phase 1.2: the customer points at an area
-   * of their prepared artwork that should also be see-through.
+   * Existing Artwork → Print Ready Phase 1.3: identify what a click would
+   * remove, without removing it.
    *
-   * A click is EVIDENCE, not authority: it may only ever resolve to an
-   * enclosed background-coloured region the automatic pass already identified
-   * and then declined on ambiguous geometry. A click that lands on artwork is
-   * refused and nothing changes. Idempotent — clicking the same area twice is
-   * harmless and produces no second asset.
-   *
-   * Refuses once the preparation is approved: an approved prepared asset is
-   * history and is never rewritten.
+   * Returns an exact-region highlight and a signed candidate token the
+   * customer must explicitly confirm. Never writes guided_cleanup, never
+   * derives an asset, never creates a version. A click on artwork is refused
+   * with customer-safe copy and no confirmation surface.
    */
-  applyGuidedCleanup(
+  previewGuidedCleanup(
     designId: string,
     point: GuidedRemovalPoint,
+  ): Promise<GuidedCleanupPreviewResult>;
+  /**
+   * Existing Artwork → Print Ready Phase 1.3: redeem a preview token and
+   * apply the existing Phase 1.2 guided-removal persistence path.
+   *
+   * Revalidates the candidate against the current preparation before any
+   * write. Stale, forged, cross-project, or already-removed tokens do not
+   * mutate. Idempotent under double-confirm.
+   */
+  confirmGuidedCleanup(
+    designId: string,
+    candidateToken: string,
   ): Promise<GuidedCleanupResult>;
   /** Takes back the customer's most recent guided removal. Idempotent when there is none. */
   undoGuidedCleanup(designId: string): Promise<GuidedCleanupResult>;
@@ -584,25 +613,107 @@ export function createArtworkPreparationCapability(
       return toView(updated, brief);
     },
 
-    async applyGuidedCleanup(designId, point) {
+    async previewGuidedCleanup(designId, point) {
       const { brief, preparation, removals } = await requireCleanupTarget(designId);
       const analysis = preparation.analysis as unknown as ArtworkAnalysis;
 
       const image = await loadOriginalImage(preparation);
-      const resolution = resolveGuidedRemovalAt(image, point, {
+      const preview = previewGuidedRemovalAt(image, point, {
         backgroundColor: analysis.estimatedBackgroundColor,
         tolerance: analysis.backgroundTolerance,
         applied: removals,
       });
 
-      // Every refusal leaves the preparation byte-for-byte untouched: no new
-      // asset, no repository write, nothing to undo. Clicking artwork is a
-      // no-op, and so is clicking an area that is already see-through, which
-      // is what makes a double click safe.
-      if (resolution.outcome !== "eligible") {
+      const view = await toView(preparation, brief);
+
+      if (preview.resolution.outcome !== "eligible" || !preview.resolution.region) {
         return {
-          outcome: resolution.outcome,
-          message: describeGuidedCleanupOutcome(resolution.outcome),
+          outcome: preview.resolution.outcome,
+          message: describeGuidedCleanupOutcome(preview.resolution.outcome),
+          view,
+          candidateToken: null,
+          highlight: null,
+        };
+      }
+
+      const region = preview.resolution.region;
+      const candidateToken = mintGuidedCleanupCandidateToken({
+        projectId: designId,
+        preparationId: preparation.id,
+        preparedAssetId: preparation.preparedAssetId!,
+        regionKey: region.regionKey,
+        point: { x: Math.floor(point.x), y: Math.floor(point.y) },
+        pixelCount: region.pixelCount,
+        removalCount: removals.length,
+      });
+
+      return {
+        outcome: "preview",
+        message: describeGuidedCleanupOutcome("preview"),
+        view,
+        candidateToken,
+        highlight: preview.highlight,
+      };
+    },
+
+    async confirmGuidedCleanup(designId, candidateToken) {
+      const claims = verifyGuidedCleanupCandidateToken(candidateToken);
+      if (!claims || claims.projectId !== designId) {
+        const { brief, preparation } = await requireCleanupTarget(designId);
+        return {
+          outcome: "stale_preview",
+          message: describeGuidedCleanupOutcome("stale_preview"),
+          view: await toView(preparation, brief),
+        };
+      }
+
+      const { brief, preparation, removals } = await requireCleanupTarget(designId);
+
+      // Idempotent re-confirm: the region is already recorded under this
+      // preparation. Prefer this over stale when the prepared asset advanced
+      // because THIS confirm already succeeded.
+      if (removals.some((record) => record.regionKey === claims.regionKey)) {
+        return {
+          outcome: "already_removed",
+          message: describeGuidedCleanupOutcome("already_removed"),
+          view: await toView(preparation, brief),
+        };
+      }
+
+      if (
+        preparation.id !== claims.preparationId ||
+        preparation.preparedAssetId !== claims.preparedAssetId ||
+        removals.length !== claims.removalCount
+      ) {
+        return {
+          outcome: "stale_preview",
+          message: describeGuidedCleanupOutcome("stale_preview"),
+          view: await toView(preparation, brief),
+        };
+      }
+
+      const analysis = preparation.analysis as unknown as ArtworkAnalysis;
+      const image = await loadOriginalImage(preparation);
+      const resolution = revalidateGuidedRemovalCandidate(image, {
+        backgroundColor: analysis.estimatedBackgroundColor,
+        tolerance: analysis.backgroundTolerance,
+        applied: removals,
+        regionKey: claims.regionKey,
+        point: claims.point,
+      });
+
+      if (resolution.outcome !== "eligible" || !resolution.region) {
+        // Region vanished or is no longer eligible under current state.
+        return {
+          outcome:
+            resolution.outcome === "already_removed"
+              ? "already_removed"
+              : "stale_preview",
+          message: describeGuidedCleanupOutcome(
+            resolution.outcome === "already_removed"
+              ? "already_removed"
+              : "stale_preview",
+          ),
           view: await toView(preparation, brief),
         };
       }
@@ -614,7 +725,7 @@ export function createArtworkPreparationCapability(
         [
           ...removals,
           {
-            point: { x: Math.floor(point.x), y: Math.floor(point.y) },
+            point: claims.point,
             regionKey: resolution.region.regionKey,
             pixelCount: resolution.region.pixelCount,
           },
