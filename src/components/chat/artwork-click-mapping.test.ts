@@ -112,3 +112,138 @@ describe("Artwork click mapping — object-contain letterboxing", () => {
     assert.equal(mapClickToImagePoint(mobileModal, 310, 470), null);
   });
 });
+
+/**
+ * Phase 1.6B: the SAME mapper, under zoom and pan.
+ *
+ * The workspace grows the rendered content box inside a scrollable viewport
+ * rather than applying `transform: scale`, and reads the <img>'s own
+ * `getBoundingClientRect` at click time. That is why there is exactly one
+ * coordinate mapper and why panning needs no term of its own: scrolling moves
+ * the element's rect, so `clientX - rect.left` has already absorbed it.
+ *
+ * These cases pin that. Each one recreates the rect the browser would report
+ * and asserts that the customer's finger still lands on the same source pixel.
+ */
+describe("Artwork click mapping — zoom and pan in the cleanup workspace", () => {
+  const NATURAL = { naturalWidth: 979, naturalHeight: 1024 };
+  /** The bowling asset fitted into the real workspace viewport: ~0.53x. */
+  const FIT_SCALE = 0.53;
+
+  /**
+   * The <img> rect at a zoom factor, after the viewport has been scrolled.
+   * The element box IS the drawn image here — the workspace sizes it exactly —
+   * so there is no letterbox, and scrolling simply shifts `left`/`top`.
+   */
+  interface RenderedRect {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    naturalWidth: number;
+    naturalHeight: number;
+  }
+
+  function renderedRect(zoomFactor: number, panX = 0, panY = 0): RenderedRect {
+    const width = NATURAL.naturalWidth * FIT_SCALE * zoomFactor;
+    const height = NATURAL.naturalHeight * FIT_SCALE * zoomFactor;
+    return { left: 100 - panX, top: 80 - panY, width, height, ...NATURAL };
+  }
+
+  /** What the component does: client coords minus the live rect origin. */
+  function clickAt(rect: RenderedRect, clientX: number, clientY: number) {
+    return mapClickToImagePoint(rect, clientX - rect.left, clientY - rect.top);
+  }
+
+  /** Where the customer must put the pointer to hit a given source pixel. */
+  function clientForSourcePixel(rect: RenderedRect, x: number, y: number) {
+    const scale = rect.width / rect.naturalWidth;
+    return {
+      clientX: rect.left + (x + 0.5) * scale,
+      clientY: rect.top + (y + 0.5) * scale,
+    };
+  }
+
+  const TARGET = { x: 545, y: 680 }; // a real guided-removal point
+
+  for (const zoomFactor of [1, 1.25, 1.5, 2, 4]) {
+    it(`resolves the same source pixel at ${Math.round(zoomFactor * 100)}%`, () => {
+      const rect = renderedRect(zoomFactor);
+      const { clientX, clientY } = clientForSourcePixel(rect, TARGET.x, TARGET.y);
+      assert.deepEqual(clickAt(rect, clientX, clientY), TARGET);
+    });
+  }
+
+  for (const [label, panX, panY] of [
+    ["horizontal", 240, 0],
+    ["vertical", 0, 310],
+    ["diagonal", 240, 310],
+  ] as Array<[string, number, number]>) {
+    it(`resolves the same source pixel after a ${label} pan`, () => {
+      const rect = renderedRect(2, panX, panY);
+      const { clientX, clientY } = clientForSourcePixel(rect, TARGET.x, TARGET.y);
+      assert.deepEqual(clickAt(rect, clientX, clientY), TARGET);
+    });
+  }
+
+  it("is unaffected by a revision remount, which changes neither box nor natural size", () => {
+    // Confirm/undo swaps the <img> via its key but keeps the zoom factor, so
+    // the rect the next click reads is identical.
+    const before = renderedRect(2, 120, 90);
+    const after = renderedRect(2, 120, 90);
+    const { clientX, clientY } = clientForSourcePixel(before, TARGET.x, TARGET.y);
+
+    assert.deepEqual(clickAt(before, clientX, clientY), clickAt(after, clientX, clientY));
+    assert.deepEqual(clickAt(after, clientX, clientY), TARGET);
+  });
+
+  it("is unaffected by the QA background, which is CSS underneath the artwork", () => {
+    // Preview Background paints the viewport, never the image box. Same rect,
+    // same answer — there is no code path by which it could differ.
+    const rect = renderedRect(1.5, 60, 60);
+    const { clientX, clientY } = clientForSourcePixel(rect, TARGET.x, TARGET.y);
+    assert.deepEqual(clickAt(rect, clientX, clientY), TARGET);
+  });
+
+  it("keeps the highlight on the region that was selected, at every zoom", () => {
+    // The overlay is positioned in PERCENTAGES of the natural image, so it is
+    // scale-free by construction: one expression, valid at Fit and at 400%.
+    const bounds = { left: 490, top: 640, width: 80, height: 60 };
+    const percent = mapImageBoundsToCssPercent(
+      bounds,
+      NATURAL.naturalWidth,
+      NATURAL.naturalHeight,
+    );
+    assert.ok(percent);
+
+    for (const zoomFactor of [1, 2, 4]) {
+      const rect = renderedRect(zoomFactor, 50, 50);
+      const sourcePixel = rect.width / rect.naturalWidth;
+      // The highlight's top-left in client space, per those percentages...
+      const highlightLeft: number =
+        rect.left + (Number.parseFloat(percent.left) / 100) * rect.width;
+      const highlightTop: number =
+        rect.top + (Number.parseFloat(percent.top) / 100) * rect.height;
+      // ...sampled half a source pixel inside, because the edge itself is the
+      // boundary BETWEEN two pixels and which one it rounds to is a float
+      // detail, not an alignment fact.
+      assert.deepEqual(
+        clickAt(rect, highlightLeft + sourcePixel / 2, highlightTop + sourcePixel / 2),
+        { x: bounds.left, y: bounds.top },
+        `highlight top-left drifts at ${zoomFactor}x`,
+      );
+
+      // And the opposite corner, which is what would drift if the overlay were
+      // being positioned in anything but natural-image percentages.
+      assert.deepEqual(
+        clickAt(
+          rect,
+          highlightLeft + (bounds.width - 0.5) * sourcePixel,
+          highlightTop + (bounds.height - 0.5) * sourcePixel,
+        ),
+        { x: bounds.left + bounds.width - 1, y: bounds.top + bounds.height - 1 },
+        `highlight bottom-right drifts at ${zoomFactor}x`,
+      );
+    }
+  });
+});

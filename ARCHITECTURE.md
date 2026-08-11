@@ -3905,7 +3905,7 @@ into a structural property.
 | `image-analysis.ts` | Deterministic measurement. Measures; never decides. |
 | `repairability.ts` | The conservative verdict. Reads analysis; touches no pixels. |
 | `pixel-metrics.ts` | The background-membership test and colour distances, in one place so both removal passes agree on them. Pure. |
-| `background-isolation.ts` | Edge-connected fill, fringe decontamination, halo guard. Pure. |
+| `background-isolation.ts` | Edge-connected fill, fringe decontamination, RGB-only edge decontamination, residual edge islands, halo guard. Pure. |
 | `background-cavities.ts` | Enclosed background a foreground structure sealed off from the border — letter counters, ring interiors. Extends the mask; removes nothing on its own. Pure. |
 | `background-speckle.ts` | Isolated near-background flecks the fill tolerance just missed. Extends the mask. Pure. |
 | `guided-removal.ts` | Resolves a customer's click to one preserved enclosed candidate, or refuses it. Extends the mask. Pure. |
@@ -3962,12 +3962,164 @@ border**:
    reference within the search window, so the pass declines); only thin ones
    ever reached the broken path. The check changes **no** pixel count on the
    audited bowling fixtures — genuine anti-aliased blends sit on the line.
-5. Halo guard: bleed retained RGB two pixels into the now-transparent
+5. **RGB-only edge decontamination**, for the pixels step 4 just declined.
+   See below.
+6. **Residual edge islands** (Phase 1.6B), for the small dark components step 5
+   could not reason about from a single direction. See below.
+7. Halo guard: bleed retained RGB two pixels into the now-transparent
    exterior. Transparent pixels still carry colour, and every resample in
    this codebase interpolates RGB independently of alpha
    (`raster-transform.ts` is straight, not premultiplied) — leaving the old
    near-black behind a zero alpha is exactly how a dark halo reappears during
    a later upscale.
+
+### RGB-only edge decontamination
+
+**ALPHA IS TOPOLOGY. RGB IS EDGE COLOUR.**
+
+The composite model above is the right tool when a fringe pixel really is
+`a·F + (1−a)·B`. It is not the only way a dark background contaminates an edge.
+Light artwork anti-aliased over near-black produces edge pixels whose channels
+**clip on the way down**: the audited bowling swoosh runs (11,5,0) → (18,11,0)
+→ (42,30,14) → (79,66,47) → gold across four pixels. The second of those is
+Chebyshev 17 from the (1,1,1) background — outside the tolerance of 12, so the
+fill correctly keeps it — and sits 9.9 off the `B→F` line against a background
+distance of 19.75, so `liesOnComposite` correctly refuses it. The result is a
+**fully opaque ring of the old background baked into the artwork**: invisible
+on a black garment, dark stipple on a white one.
+
+The post-delivery fidelity audit measured ~8,231 such pixels against ~6,324
+pixels of legitimate dark ink in the same image, and established that every
+**alpha**-based remedy destroys the second population to reach the first:
+widening the tolerance costs 34–46% of the real ink, deleting near-black pixels
+costs the bowling ball's finger holes, eroding the edge costs the small
+tagline. What is wrong with these pixels is not that they are opaque. It is
+their **colour**. So this pass corrects colour and nothing else.
+
+It runs **only where the composite model declined**, and requires all of:
+
+- **Visible**, and within the *same* 2px reach step 4 used. `FRINGE_RADIUS_PX`
+  is not widened; the 1,571 dark pixels the audit found at distance 3 are a
+  separate question and are left alone.
+- **Adjacent to confirmed exterior transparency** — the removed mask, or a
+  pixel the composite pass proved was pure background and feathered away.
+  Topology, never darkness: "this pixel is dark and near the edge" is exactly
+  the inference that deletes finger holes.
+- **Thin.** Local dark thickness — the dark extent through the pixel along each
+  axis, smaller of the two — must be ≤ 2. That minimum is stroke thickness
+  regardless of which way the stroke runs, which a run measured along one
+  chosen direction is not: a dark ring following a horizontal edge is 200px
+  "long" measured sideways, and a directional test that looked sideways would
+  protect the very contamination this exists to fix. A genuine 3px outline
+  measures 3 whichever way it runs, and is preserved.
+- **A strictly rising luminance ramp in the ORIGINAL**, from the background
+  pixel outside it, through the candidate, to the artwork behind. That monotone
+  climb is the actual evidence that this is light artwork composited over a
+  dark background rather than dark artwork in its own right. The **original**
+  is the authority: guided cleanup and the composite pass may both have altered
+  neighbours by now, and only the upload still carries the ramp the customer's
+  file actually had.
+- **An inward reference that is materially lighter**, checked against the exact
+  bytes about to be copied. An edge whose interior is equally dark is an edge
+  of dark artwork.
+
+Then it copies that reference's RGB and **writes no alpha at all**. The alpha
+plane is compared byte-for-byte before and after in
+`edge-rgb-decontamination.test.ts`; that invariant is not negotiable, because
+this pass may be wrong about a colour but must never be able to change the
+shape of the artwork.
+
+**Ambiguity preserves.** The audit found ~557 edge pixels with neither a clean
+rising ramp nor a clean plateau. They are counted
+(`fringeRgbFallbackPreservedAmbiguous`) and left exactly as they are.
+
+On the real bowling original, replaying only the legitimate guided removals,
+this neutralises **77.5%** of the measured contamination (6,367 of 8,215) with
+**zero** alpha bytes changed, zero loss of dark ink of thickness ≥ 3, and all
+three finger holes byte-identical.
+
+**Scope.** The forensics that justify this measured *dark* contamination over a
+dark background. The pass does not fire on light-background artwork, and
+inventing the inverse case without the same evidence is not something the
+codebase does.
+
+**Garment neutrality.** The algorithm receives no shirt colour, no preview
+background, no garment colour, and there is no parameter through which one
+could reach it. One prepared asset serves White, Grey and Black alike. The
+Phase 1.5 QA preview backgrounds are a **presentation safety layer** — they
+exist so a human can see a mistake like a lost finger hole before approving —
+and are never an input to image processing.
+
+### Residual edge islands (Phase 1.6B)
+
+The pass above reads its evidence along **one inward normal**: the first
+fixed-order direction with removed background behind it. That is the right
+shape for a contaminated pixel on a straight silhouette. Where the silhouette
+turns a corner, ends in a tip, or narrows to a one-pixel sliver, the chosen
+normal points *along* the edge instead of across it, and the ramp test is being
+asked a question the geometry cannot answer.
+
+Forensic classification of what survived Phase 1.6 on the real bowling asset —
+3,288 dark pixels still touching confirmed exterior transparency — attributed
+them to:
+
+| Rejected by | Pixels |
+| --- | --- |
+| dark run 3+ deep along that one normal | 1,071 |
+| handled by the composite model, not this pass | 821 |
+| local dark thickness over the limit (intentional stroke) | 529 |
+| luminance profile not strictly rising (ambiguous by design) | 408 |
+| the pixel inward along that normal is itself transparent | 305 |
+| the pixel outward along that normal is not darker | 154 |
+
+The last three describe a **chosen direction**, not the artwork. So Phase 1.6B
+replaces the directional question with a topological one: it examines the whole
+8-connected **dark component** in the output, and recolours it only when
+
+- every pixel of it was **declined by the composite model** — which also bounds
+  the whole component inside the same 2px fringe band, since that flag is only
+  ever set there;
+- the component **touches confirmed exterior transparency**;
+- the component is **small** (≤ 8px);
+- every pixel is dark in the original and passes the **same
+  `localDarkThickness` guard** Phase 1.6 uses, unchanged;
+- every pixel has its own **materially brighter opaque artwork neighbour** to
+  take colour from.
+
+Because the component is *maximal* among dark pixels, "brighter all around" is
+structural rather than sampled — any dark neighbour would be in the component.
+And because the whole component is bounded to the fringe band, recolouring it
+cannot leave a dark remainder just outside the pass's reach: the **inverted
+ring** that a merely-deeper ramp search would produce, and the reason the ramp
+ceiling equals the fringe radius rather than being a tuning knob.
+
+**Why it cannot reach the finger holes** — measured, not asserted. The three
+holes are 439/716/437 dark pixels forming components of 503/822/480, none of
+which touches exterior transparency at all: they are preserved cavities deep
+inside the ball. The audited parameter sweep recoloured **0** hole pixels at
+every island size from 1 to 128. **Why it cannot reach intentional outlines**:
+against the 9,987 pixels the orientation-independent ink classifier calls
+stroke, it changes **0**.
+
+On the real bowling original this takes the residue from 3,288 to 1,882 and the
+measured contamination from 1,926 to 1,094 — **88.1%** of the original
+population now neutralised — with zero alpha bytes changed, identical bounding
+box, and identical cavity, speckle, guided and feathering counts. After local
+production normalization to 3150px, dark pixels on the alpha edge fall from
+9,833 to 4,686 with the visible pixel count unchanged, so the fix survives
+resampling without thinning outlines.
+
+**What it deliberately does not solve.** Of the 3,288 residual pixels, 1,208
+have a local dark thickness of 3 or more. Those are the artwork's own dark
+outlines and shadows meeting the silhouette — broken into a dotted line by the
+fill, and therefore reading as stipple on white — and the audit found no
+evidence separating them from any other intentional dark stroke. They stay.
+Preservation outranks cosmetic cleanliness, and the honest position is that
+**this residue is artwork, not contamination**.
+
+Observability: `fringeRgbResidualCandidates`, `fringeRgbResidualPixels`,
+`fringeRgbResidualPreservedAmbiguous`. Diagnostic record metadata only — no
+migration, exactly like the Phase 1.6 counters.
 
 ### Enclosed background cavities
 
@@ -4138,7 +4290,8 @@ So the system stops guessing and asks. Phase 1.3 makes the ask
 
 **Pipeline order.** The mask is built by four passes that only ever *grow* it —
 exterior → cavities → guided → speckle — and not one of them reads or writes a
-colour. Only then do erase, fringe decontamination and the halo guard run. That
+colour. Only then do erase, fringe decontamination, RGB-only edge
+decontamination and the halo guard run. That
 split keeps the audited edge behaviour singular: an exterior pixel, a cavity
 pixel, a clicked pixel and a speckle pixel are indistinguishable by the time any
 colour is computed, so there is **one** fringe pass rather than four variants,
@@ -4303,10 +4456,26 @@ the explicit "Use Prepared Artwork" button.
 
 Guided background cleanup (Phase 1.4) is opened from compare via **Clean Up
 Background**, which mounts `GuidedCleanupWorkspace` — a large interactive
-surface for preview → confirm → undo, with Fit / Zoom In / Zoom Out and
-scroll-or-drag pan so small details stay clickable. Zoom grows the rendered
-image content box inside a scrollable viewport (not CSS `scale`), so
-`mapClickToImagePoint` stays authoritative. Enlarge stays a separate read-only
+surface for preview → confirm → undo, with Fit / Zoom In / Zoom Out and pan so
+small details stay clickable. Zoom grows the rendered image content box inside
+a scrollable viewport (not CSS `scale`), so `mapClickToImagePoint` stays
+authoritative — one coordinate mapper, and panning needs no term of its own
+because scrolling moves the element's own rect.
+
+Phase 1.6B makes the surface **selection-primary**. The workspace exists so a
+customer can point at leftover background; zoom and pan are there to make that
+pointing accurate, not to be the point. Phase 1.4 nonetheless swapped the
+cursor to `grab` above Fit, which advertised dragging as the primary gesture
+while a stationary click remained the only thing that did anything — the
+affordance and the behaviour disagreed. So the cursor is now **crosshair at
+every zoom level**, and panning must be asked for: hold **Space** (or press the
+middle button) to drag, during which the cursor is `grab`/`grabbing` and no
+cleanup can fire however still the pointer is. Touch has neither cursor nor
+modifier, so the gesture carries the meaning: a tap selects, a drag pans, and a
+drag can never select. No pinch zoom — the toolbar owns zoom. The rules live in
+`guided-cleanup-interaction.ts` as pure functions, for the reason
+`artwork-click-mapping.ts` states: with no DOM in the test runner, a gesture
+rule inside an event handler could only ever be verified by clicking around. Enlarge stays a separate read-only
 viewer; the small compare tiles are not the cleanup surface. Phase 1.5 adds
 the same White / Gray / Black Preview Background control inside the workspace
 (default White). Switching it never changes prepared bytes, `preparedRevision`,
@@ -4889,6 +5058,7 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 | `ArtworkPreviewModal` | §13h: read-only full-size viewer with **no** approval or cleanup affordance — viewing can never approve or mutate; prepared enlarge may reuse QA Preview Background |
 | `GuidedCleanupWorkspace` | §13h Phase 1.4/1.5: large interactive cleanup surface (preview → confirm → undo → Done) with Fit/Zoom/pan and presentation-only Preview Background; presentation only over the Phase 1.3 API |
 | `PreviewBackgroundControl` | §13h Phase 1.5: accessible White/Gray/Black QA inspection control (presentation only) |
+| `guided-cleanup-interaction.ts` | §13h Phase 1.6B: pure selection-primary pointer rules (crosshair everywhere; Space/middle drag or touch drag pans; a pan never selects) — testable without a DOM |
 | `uploaded-artwork-flow.ts` | §13h: pure step derivation + "does the upload workflow own the surface?" — testable without a DOM, same reason as `chat-affordances.ts` |
 | `Composer` | Message input |
 | `chat-session.ts` | localStorage project id restore/create |

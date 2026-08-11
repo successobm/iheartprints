@@ -23,12 +23,20 @@ import {
   fitDisplaySize,
   GUIDED_CLEANUP_ZOOM_MAX,
   GUIDED_CLEANUP_ZOOM_MIN,
-  isPanGesture,
   nextZoomIn,
   nextZoomOut,
   zoomedDisplaySize,
   zoomPercentLabel,
 } from "./guided-cleanup-zoom";
+import {
+  advanceGesture,
+  beginGesture,
+  isPanModifierKey,
+  isPanModifierTarget,
+  resolveArtworkCursorClassName,
+  shouldSelectOnRelease,
+  type GestureSession,
+} from "./guided-cleanup-interaction";
 
 /**
  * Existing Artwork → Print Ready Phase 1.4: the LARGE guided-cleanup
@@ -79,6 +87,12 @@ export interface GuidedCleanupWorkspaceProps {
   onUndo: () => void;
   /** Closes the workspace without approving prepared artwork. */
   onDone: () => void;
+  /**
+   * Optional first-paint QA background (defaults to White). Used by tests to
+   * render Gray/Black without a browser click harness. Presentation only —
+   * never persists and never mutates artwork.
+   */
+  initialPreviewBackground?: PreviewBackground;
 }
 
 /** SSR / first-paint fallback until ResizeObserver measures the viewport. */
@@ -98,6 +112,7 @@ export function GuidedCleanupWorkspace({
   onCancelPreview,
   onUndo,
   onDone,
+  initialPreviewBackground = DEFAULT_PREVIEW_BACKGROUND,
 }: GuidedCleanupWorkspaceProps) {
   const pendingConfirmation = pendingHighlight !== null;
   const [loadedForUrl, setLoadedForUrl] = useState<{
@@ -122,28 +137,52 @@ export function GuidedCleanupWorkspace({
   const [zoomFactor, setZoomFactor] = useState(GUIDED_CLEANUP_ZOOM_MIN);
   /** QA inspection surface only — never persisted, never sent to the server. */
   const [previewBackground, setPreviewBackground] = useState<PreviewBackground>(
-    DEFAULT_PREVIEW_BACKGROUND,
+    initialPreviewBackground,
   );
-  const panSession = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    scrollLeft: number;
-    scrollTop: number;
-    moved: boolean;
-  } | null>(null);
+  // Phase 1.5: solid QA surface from preview-background.ts only — never the
+  // legacy ArtworkPreviewModal checkerboard helper (a stale Turbopack chunk
+  // once called that helper as a bare identifier and crashed Clean Up Background).
+  const artworkSurfaceStyle = previewBackgroundSurfaceStyle(previewBackground);
+  const panSession = useRef<GestureSession | null>(null);
+  /**
+   * Phase 1.6B: the explicit pan modifier. Selection is the default gesture at
+   * every zoom level, so panning has to be asked for.
+   */
+  const [spaceHeld, setSpaceHeld] = useState(false);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      if (pendingConfirmation) {
-        onCancelPreview();
+      if (event.key === "Escape") {
+        if (pendingConfirmation) {
+          onCancelPreview();
+          return;
+        }
+        onDone();
         return;
       }
-      onDone();
+      if (!isPanModifierKey(event.key)) return;
+      if (!isPanModifierTarget(event.target)) return;
+      // Space would otherwise scroll the viewport out from under the artwork.
+      event.preventDefault();
+      setSpaceHeld(true);
     }
+    function handleKeyUp(event: KeyboardEvent) {
+      if (!isPanModifierKey(event.key)) return;
+      setSpaceHeld(false);
+    }
+    /** A tab-away must not leave the workspace stuck in pan mode. */
+    function handleBlur() {
+      setSpaceHeld(false);
+    }
+
     document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
+    document.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
   }, [pendingConfirmation, onCancelPreview, onDone]);
 
   useEffect(() => {
@@ -210,17 +249,24 @@ export function GuidedCleanupWorkspace({
   }
 
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (busy || event.button !== 0) return;
     const viewport = viewportRef.current;
     if (!viewport) return;
-    panSession.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      scrollLeft: viewport.scrollLeft,
-      scrollTop: viewport.scrollTop,
-      moved: false,
-    };
+
+    const session = beginGesture(
+      {
+        pointerType: event.pointerType,
+        button: event.button,
+        spaceHeld,
+        busy,
+      },
+      { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY },
+      { scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop },
+    );
+    if (!session) return;
+
+    panSession.current = session;
+    // Middle-button drag otherwise starts the browser's own autoscroll.
+    if (event.button === 1) event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
@@ -229,15 +275,15 @@ export function GuidedCleanupWorkspace({
     const viewport = viewportRef.current;
     if (!session || session.pointerId !== event.pointerId || !viewport) return;
 
-    const dx = event.clientX - session.startX;
-    const dy = event.clientY - session.startY;
-    if (!isPanGesture(dx, dy)) return;
+    const scroll = advanceGesture(
+      session,
+      { clientX: event.clientX, clientY: event.clientY },
+      zoomFactor,
+    );
+    if (!scroll) return;
 
-    session.moved = true;
-    if (zoomFactor > GUIDED_CLEANUP_ZOOM_MIN) {
-      viewport.scrollLeft = session.scrollLeft - dx;
-      viewport.scrollTop = session.scrollTop - dy;
-    }
+    viewport.scrollLeft = scroll.scrollLeft;
+    viewport.scrollTop = scroll.scrollTop;
   }
 
   function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
@@ -250,8 +296,7 @@ export function GuidedCleanupWorkspace({
       // Capture may already be released.
     }
 
-    // A pan must never select a cleanup candidate.
-    if (session.moved || busy) return;
+    if (!shouldSelectOnRelease(session, busy)) return;
     selectPointFromClient(event.clientX, event.clientY);
   }
 
@@ -349,6 +394,11 @@ export function GuidedCleanupWorkspace({
             >
               {zoomPercentLabel(zoomFactor)}
             </span>
+            {!atMinZoom ? (
+              <span className="text-xs text-muted" data-pan-hint>
+                {GUIDED_CLEANUP_COPY.panHint}
+              </span>
+            ) : null}
           </div>
           <PreviewBackgroundControl
             idPrefix="guided-cleanup-preview-bg"
@@ -363,8 +413,9 @@ export function GuidedCleanupWorkspace({
           data-cleanup-viewport
           data-zoom-factor={clampZoomFactor(zoomFactor)}
           data-preview-background={previewBackground}
+          data-qa-surface="preview-background"
           className="min-h-[50vh] flex-1 overflow-auto overscroll-contain"
-          style={previewBackgroundSurfaceStyle(previewBackground)}
+          style={artworkSurfaceStyle}
         >
           <div
             className="flex items-center justify-center"
@@ -382,13 +433,11 @@ export function GuidedCleanupWorkspace({
               aria-disabled={busy}
               data-zoom-display-width={Math.round(display.width)}
               data-zoom-display-height={Math.round(display.height)}
-              className={`relative touch-none outline-none focus-visible:ring-2 focus-visible:ring-ink/40 ${
-                busy
-                  ? "cursor-wait"
-                  : zoomFactor > GUIDED_CLEANUP_ZOOM_MIN
-                    ? "cursor-grab active:cursor-grabbing"
-                    : "cursor-crosshair"
-              }`}
+              data-pan-modifier={spaceHeld ? "space" : "none"}
+              data-primary-gesture={busy ? "busy" : spaceHeld ? "pan" : "select"}
+              className={`relative touch-none outline-none focus-visible:ring-2 focus-visible:ring-ink/40 ${resolveArtworkCursorClassName(
+                { busy, spaceHeld },
+              )}`}
               style={{
                 width: display.width || undefined,
                 height: display.height || undefined,
@@ -399,7 +448,9 @@ export function GuidedCleanupWorkspace({
               onPointerCancel={handlePointerCancel}
               onKeyDown={(event) => {
                 if (busy) return;
-                if (event.key !== "Enter" && event.key !== " ") return;
+                // Enter only. Space is the pan modifier now, and a key cannot
+                // mean "pan" and "select the centre" at the same time.
+                if (event.key !== "Enter") return;
                 event.preventDefault();
                 // Keyboard activation inspects the artwork centre — not a
                 // substitute for precise pointing, but keeps the control operable.

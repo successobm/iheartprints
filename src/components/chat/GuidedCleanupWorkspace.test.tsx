@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 
@@ -11,6 +14,7 @@ import {
   DEFAULT_PREVIEW_BACKGROUND,
   PREVIEW_BACKGROUND_COLORS,
   PREVIEW_BACKGROUND_COPY,
+  PREVIEW_BACKGROUNDS,
   previewBackgroundSurfaceStyle,
 } from "./preview-background";
 
@@ -61,12 +65,83 @@ describe("GuidedCleanupWorkspace", () => {
     assert.doesNotMatch(html, /brush|lasso|eraser|freehand/i);
   });
 
+  it("Phase 1.6B: the artwork surface advertises SELECTION, not dragging", () => {
+    const html = render();
+
+    // The defect this replaces: `cursor-grab` above Fit told the customer that
+    // dragging was the primary gesture while clicking was the only one that
+    // did anything. Crosshair is now the resting state at every zoom level.
+    assert.match(html, /cursor-crosshair/);
+    assert.match(html, /data-primary-gesture="select"/);
+    assert.match(html, /data-pan-modifier="none"/);
+    assert.doesNotMatch(html, /cursor-grab/);
+  });
+
+  it("Phase 1.6B: busy still reads as busy", () => {
+    const html = render({ busy: true });
+    assert.match(html, /cursor-wait/);
+    assert.match(html, /data-primary-gesture="busy"/);
+    assert.doesNotMatch(html, /cursor-crosshair/);
+  });
+
+  it("Phase 1.6B: the pan gesture is told to the customer once it is usable", () => {
+    // Nothing to pan at Fit, so nothing to say.
+    assert.doesNotMatch(render(), /data-pan-hint/);
+    assert.match(GUIDED_CLEANUP_COPY.panHint, /Space/);
+    // ...and no production settings leak into the hint.
+    assert.doesNotMatch(GUIDED_CLEANUP_COPY.panHint, /DPI|pixel|resolution|model/i);
+  });
+
   it("A: workspace defaults to White QA background", () => {
     const html = render();
     assert.equal(DEFAULT_PREVIEW_BACKGROUND, "white");
     assert.match(html, /data-preview-background="white"/);
     assert.match(html, new RegExp(PREVIEW_BACKGROUND_COLORS.white));
     assert.match(html, new RegExp(PREVIEW_BACKGROUND_COPY.label));
+  });
+
+  it("regression: workspace render path never throws on Preview Background surface", () => {
+    // Catches the live Phase 1.5 ReferenceError where a stale module called
+    // bare `transparencySurfaceStyle(...)` without an import binding.
+    // renderToString executes the style expression — source-string checks alone
+    // are not enough.
+    assert.doesNotThrow(() => {
+      const html = render();
+      assert.match(html, /data-qa-surface="preview-background"/);
+      assert.match(html, /data-preview-background="white"/);
+      assert.match(html, /background-color:#FFFFFF/);
+      assert.match(html, /Preview Background/);
+      assert.match(html, /data-preview-background-option="white"/);
+    });
+
+    for (const background of PREVIEW_BACKGROUNDS) {
+      assert.doesNotThrow(() => {
+        const html = render({ initialPreviewBackground: background });
+        assert.match(html, new RegExp(`data-preview-background="${background}"`));
+        assert.match(
+          html,
+          new RegExp(
+            `background-color:${PREVIEW_BACKGROUND_COLORS[background].replace("#", "\\#")}`,
+          ),
+        );
+        assert.match(html, /src="https:\/\/signed\.example\/prepared\.png"/);
+        assert.match(html, /data-prepared-revision="rev-test"/);
+        assert.match(html, /data-zoom-factor="1"/);
+        // Background switching is presentation-only: no approve affordance.
+        assert.doesNotMatch(html, /Use Prepared Artwork|Approve/i);
+      });
+    }
+  });
+
+  it("regression: GuidedCleanupWorkspace source never calls transparencySurfaceStyle", () => {
+    const sourcePath = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "GuidedCleanupWorkspace.tsx",
+    );
+    const source = readFileSync(sourcePath, "utf8");
+    assert.doesNotMatch(source, /transparencySurfaceStyle/);
+    assert.match(source, /previewBackgroundSurfaceStyle/);
+    assert.match(source, /from "\.\/preview-background"/);
   });
 
   it("B: White / Gray / Black options render", () => {

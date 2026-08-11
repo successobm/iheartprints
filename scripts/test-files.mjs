@@ -169,6 +169,7 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/prepared-asset-storage-identity.test.ts",
   "src/components/chat/artwork-click-mapping.test.ts",
   "src/components/chat/guided-cleanup-zoom.test.ts",
+  "src/components/chat/guided-cleanup-interaction.test.ts",
   "src/components/chat/GuidedCleanupWorkspace.test.tsx",
   "src/components/chat/uploaded-artwork-flow.test.ts",
   "src/components/chat/UploadedArtworkPanel.test.tsx",

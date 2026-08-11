@@ -131,6 +131,120 @@ const FRINGE_COMPOSITE_RESIDUAL_FLOOR = 3;
 const FRINGE_FULL_REMOVAL_RATIO = 0.02;
 
 /**
+ * Phase 1.6 — RGB-ONLY EDGE DECONTAMINATION.
+ *
+ * ALPHA IS TOPOLOGY. RGB IS EDGE COLOUR.
+ *
+ * The composite model above is the right tool when a fringe pixel really is
+ * `a·F + (1−a)·B`. It is not the only way a dark background contaminates an
+ * edge. Light artwork anti-aliased over a near-black background produces edge
+ * pixels whose channels CLIP on the way down: the audited bowling swoosh runs
+ * (11,5,0) → (18,11,0) → (42,30,14) → (79,66,47) → gold across four pixels,
+ * and the second of those sits 9.9 off the B→F line against a background
+ * distance of 19.7 — `liesOnComposite` rejects it, correctly, because dividing
+ * it by a coverage of 0.18 would invent a colour. It is also outside the fill
+ * tolerance, so the exterior pass correctly keeps it.
+ *
+ * The result is a fully-opaque ring of the old background baked into the
+ * artwork. It is invisible on a black garment and reads as dark stipple on a
+ * white one. The audit measured ~8,231 such pixels against ~6,324 pixels of
+ * legitimate dark ink in the same image, and proved that every ALPHA-based
+ * remedy destroys the second population to reach the first: widening the
+ * tolerance costs 34–46% of the real ink, deleting near-black pixels costs the
+ * bowling ball's finger holes, eroding the edge costs the tagline.
+ *
+ * So this pass never touches alpha. The mask is already structurally correct;
+ * what is wrong is the COLOUR of pixels that are legitimately opaque. It
+ * recolours them from the artwork's own inward colour and writes nothing else.
+ *
+ * It runs ONLY where the composite model above declined, and demands six
+ * independent pieces of evidence — see `decontaminateEdgeRgb`. Where the
+ * evidence is ambiguous the pixel is preserved: the audit found ~557 edge
+ * pixels with neither a clean ramp nor a clean plateau, and this pass is
+ * deliberately not in the business of guessing about them.
+ */
+
+/**
+ * Longest dark run, perpendicular to the edge, that can still be contamination.
+ * The audit's discriminator: a run of 1–2 dark pixels at the silhouette is the
+ * anti-aliasing signature, a run of 3+ is a stroke the customer drew. Thick
+ * outlines are protected BY this number, so it is a ceiling, not a tuning knob.
+ */
+const FRINGE_RGB_MAX_DARK_RUN_PX = 2;
+
+/** Rec. 709 luminance below which a pixel counts as "dark" for the run test. */
+const FRINGE_RGB_DARK_LUMA = 64;
+
+/**
+ * How much brighter the inward artwork reference must be than the candidate.
+ * This is the guard that stops an edge from being recoloured when the artwork
+ * BEHIND it is itself dark — i.e. when the dark pixel is the artwork.
+ */
+const FRINGE_RGB_REFERENCE_MIN_LUMA_GAIN = 24;
+
+/** Alpha at or above which a pixel may serve as the inward artwork reference. */
+const FRINGE_RGB_REFERENCE_MIN_ALPHA = 200;
+
+/**
+ * Phase 1.6B — RESIDUAL EDGE ISLANDS.
+ *
+ * Phase 1.6 reads its evidence along ONE inward normal: the first fixed-order
+ * direction with removed background behind it. That is the right shape for a
+ * contaminated pixel sitting on a straight silhouette, and the forensic audit
+ * measured what it leaves behind — 3,288 dark pixels still touching confirmed
+ * exterior transparency in the real bowling output, rejected as:
+ *
+ *   1071  the dark run down that one normal is 3+ deep
+ *    821  the composite model handled it (softened alpha), not the fallback's
+ *    529  local dark thickness over the limit — intentional stroke, hands off
+ *    408  the luminance profile is not strictly rising — ambiguous by design
+ *    305  the pixel inward along that normal is itself transparent
+ *    154  the pixel outward along that normal is not darker
+ *
+ * The last three are not statements about the artwork. They are statements
+ * about a SINGLE CHOSEN DIRECTION: at a corner, a tip, or a one-pixel sliver
+ * the chosen normal points along the silhouette instead of across it, and the
+ * ramp test then asks a question the geometry cannot answer.
+ *
+ * This pass replaces the directional question with a topological one. It looks
+ * at the whole 8-connected DARK COMPONENT in the output rather than at a pixel
+ * and a direction, and recolours it only when the component is provably a
+ * fleck of leftover matte rather than part of a mark:
+ *
+ *   I.   Every pixel of it was DECLINED by the composite model — so every
+ *        pixel is inside the same 2px fringe band that pass already owns, and
+ *        none of them is a pixel the proven path is handling.
+ *   II.  The component TOUCHES confirmed exterior transparency.
+ *   III. The component is SMALL — at most `FRINGE_RGB_RESIDUAL_MAX_ISLAND_PX`.
+ *   IV.  Every pixel is dark in the ORIGINAL and passes the SAME
+ *        `localDarkThickness` guard Phase 1.6 uses. A stroke stays a stroke.
+ *   V.   Every pixel has its own materially brighter opaque artwork neighbour
+ *        to take colour from.
+ *
+ * Because the component is MAXIMAL among dark pixels, "brighter all around" is
+ * structural rather than sampled: any dark neighbour would be in the component.
+ * And because I bounds the WHOLE component to the fringe band, recolouring it
+ * cannot leave a dark remainder just outside the pass's reach — the inverted
+ * ring that a merely-deeper ramp search would produce.
+ *
+ * WHY THIS CANNOT REACH THE FINGER HOLES. Measured, not asserted: the three
+ * holes are 439/716/437 dark pixels forming components of 503/822/480, none of
+ * which touches exterior transparency at all — they are preserved cavities deep
+ * inside the ball. They fail II and III by two orders of magnitude. The audited
+ * sweep recoloured 0 hole pixels at EVERY island size from 1 to 128.
+ *
+ * WHY IT CANNOT REACH INTENTIONAL OUTLINES. Guard IV is Phase 1.6's own
+ * thickness test, unchanged. Against the 9,987 pixels the orientation-
+ * independent ink classifier calls intentional stroke, this pass changes 0.
+ *
+ * What it does NOT solve, and deliberately: of the 3,288 residual pixels,
+ * 1,208 have a local dark thickness of 3 or more. Those are the artwork's own
+ * dark outlines and shadows meeting the silhouette, and the audit found no
+ * evidence separating them from any other intentional dark stroke. They stay.
+ */
+const FRINGE_RGB_RESIDUAL_MAX_ISLAND_PX = 8;
+
+/**
  * How far the RGB of retained pixels is bled outward into the now-transparent
  * exterior. Transparent pixels still carry colour, and every downstream
  * resample in this codebase interpolates RGB independently of alpha
@@ -473,6 +587,12 @@ function buildGuidedCandidates(
  *      essentially solid, or when it does not lie on the B→F line
  *      (`liesOnComposite`), it is PRESERVED UNCHANGED — artwork fidelity
  *      outranks cleanup, always.
+ *   5b. RGB-ONLY EDGE DECONTAMINATION (Phase 1.6) — for the pixels pass 5 just
+ *      DECLINED, one narrower question: is this an opaque remnant of the
+ *      removed dark background baked into an anti-aliased edge? Answered from
+ *      the ORIGINAL's luminance ramp along the edge normal, and answered "no"
+ *      whenever the evidence is thin. A yes recolours the pixel from the
+ *      artwork behind it and WRITES NO ALPHA AT ALL.
  *   6. HALO GUARD — bleed retained RGB a short way into the transparent
  *      exterior so a later resample cannot pull the old background colour
  *      back in. Alpha stays 0; only the (invisible) colour changes.
@@ -560,6 +680,12 @@ export function isolateBackground(
       specklePixelsRemoved: speckle.removedPixelCount,
       featheredEdgePixels: fringe.featheredEdgePixels,
       decontaminatedPixels: fringe.decontaminatedPixels,
+      fringeRgbFallbackCandidates: fringe.rgbFallbackCandidates,
+      fringeRgbFallbackPixels: fringe.rgbFallbackPixels,
+      fringeRgbFallbackPreservedAmbiguous: fringe.rgbFallbackPreservedAmbiguous,
+      fringeRgbResidualCandidates: fringe.rgbResidualCandidates,
+      fringeRgbResidualPixels: fringe.rgbResidualPixels,
+      fringeRgbResidualPreservedAmbiguous: fringe.rgbResidualPreservedAmbiguous,
       haloGuardPixels,
       outputWidthPx: width,
       outputHeightPx: height,
@@ -581,6 +707,12 @@ function emptyGuidedApplication(mask: Uint8Array): GuidedRemovalApplication {
 interface FringeResult {
   featheredEdgePixels: number;
   decontaminatedPixels: number;
+  rgbFallbackCandidates: number;
+  rgbFallbackPixels: number;
+  rgbFallbackPreservedAmbiguous: number;
+  rgbResidualCandidates: number;
+  rgbResidualPixels: number;
+  rgbResidualPreservedAmbiguous: number;
 }
 
 /**
@@ -601,6 +733,19 @@ function cleanFringe(
 
   const distanceToExterior = computeDistanceToMask(mask, width, height, FRINGE_RADIUS_PX);
 
+  /**
+   * Pixels the composite model looked at and REFUSED — either because no solid
+   * reference existed to reason against, or because the pixel does not lie on
+   * the B→F line. This is the only population the RGB fallback below is
+   * allowed to consider, which is what makes it a fallback rather than a
+   * second opinion: every pixel the proven path handles is already gone from
+   * the set before the fallback sees anything.
+   *
+   * The preserve-ratio exit is deliberately NOT recorded. That one is an
+   * affirmative finding — "this pixel IS the artwork colour" — not a decline.
+   */
+  const compositeDeclined = new Uint8Array(width * height);
+
   for (let pixel = 0; pixel < width * height; pixel += 1) {
     if (mask[pixel] === 1) continue;
     const distance = distanceToExterior[pixel]!;
@@ -611,7 +756,10 @@ function cleanFringe(
     if (originalAlpha < VISIBLE_ALPHA_THRESHOLD) continue;
 
     const solid = findSolidReference(source, mask, pixel, background);
-    if (!solid) continue;
+    if (!solid) {
+      compositeDeclined[pixel] = 1;
+      continue;
+    }
 
     const pixelDistance = colorDistance(source.data, idx, background);
     if (pixelDistance >= solid.distance * FRINGE_PRESERVE_RATIO) continue;
@@ -623,6 +771,7 @@ function cleanFringe(
     // not. Checked before any alpha is touched, so a misjudged pixel is
     // preserved whole rather than feathered.
     if (!liesOnComposite(source.data, idx, background, solid.color, coverage, pixelDistance)) {
+      compositeDeclined[pixel] = 1;
       continue;
     }
 
@@ -645,7 +794,494 @@ function cleanFringe(
     decontaminatedPixels += 1;
   }
 
-  return { featheredEdgePixels, decontaminatedPixels };
+  const fallback = decontaminateEdgeRgb(
+    source,
+    target,
+    mask,
+    distanceToExterior,
+    compositeDeclined,
+  );
+
+  // Phase 1.6B runs strictly after Phase 1.6 and reads the state it left, so a
+  // pixel the directional pass already corrected is bright by the time this one
+  // looks for dark components — it cannot be re-examined, and it can serve as
+  // the brighter reference its neighbours needed.
+  const residual = decontaminateResidualEdgeIslands(source, target, mask, compositeDeclined);
+
+  return {
+    featheredEdgePixels,
+    decontaminatedPixels,
+    rgbFallbackCandidates: fallback.candidates,
+    rgbFallbackPixels: fallback.recoloured,
+    rgbFallbackPreservedAmbiguous: fallback.candidates - fallback.recoloured,
+    rgbResidualCandidates: residual.candidates,
+    rgbResidualPixels: residual.recoloured,
+    rgbResidualPreservedAmbiguous: residual.candidates - residual.recoloured,
+  };
+}
+
+/**
+ * Phase 1.6: the RGB-only fallback. See `FRINGE_RGB_MAX_DARK_RUN_PX` above for
+ * why this exists and why it may not touch alpha.
+ *
+ * A pixel is recoloured only with ALL SIX of these in hand:
+ *
+ *   A. It is VISIBLE. Transparent pixels are the halo guard's business.
+ *   B. It sits at distance exactly 1 from CONFIRMED exterior transparency, per
+ *      the same distance map the composite pass used. Never inferred from
+ *      darkness — that inference is what deletes finger holes.
+ *   C. The composite model DECLINED it (`compositeDeclined`).
+ *   D. Its dark run, measured perpendicular to the edge, is <= 2px. A run of
+ *      3+ is intentional ink and is left exactly as it is.
+ *   E. The ORIGINAL luminance profile along that normal RISES STRICTLY, from
+ *      the background pixel outside it, through the candidate, to the artwork
+ *      behind it. That monotone ramp is the actual evidence that this pixel is
+ *      light artwork composited over a dark background rather than dark
+ *      artwork in its own right.
+ *   F. The inward artwork reference is MATERIALLY lighter than the candidate.
+ *      An edge whose interior is equally dark is an edge of dark artwork.
+ *
+ * The ORIGINAL is the authority for D, E and F. Guided cleanup and the
+ * composite pass may both have altered neighbouring pixels by now; only the
+ * upload still carries evidence of the ramp the customer's file actually had.
+ *
+ * Determinism: the ramp is read from the immutable `source`, and the
+ * replacement COLOUR from a snapshot of `target` taken before the first write.
+ * No pixel this pass produces can ever become the reference for another, so
+ * the result does not depend on scan order.
+ *
+ * Exported so the ALPHA INVARIANT can be tested as the property it is —
+ * snapshot the alpha plane, run this, compare byte for byte — rather than
+ * inferred from whatever the surrounding passes happened to leave behind.
+ * `isolateBackground` remains the only caller in production.
+ */
+export function decontaminateEdgeRgb(
+  source: RgbaImage,
+  target: RgbaImage,
+  mask: Uint8Array,
+  distanceToExterior: Uint8Array,
+  compositeDeclined: Uint8Array,
+): { candidates: number; recoloured: number } {
+  const { width, height } = source;
+  const transparent = resolveTransparentTopology(target, mask);
+
+  // The replacement colour is read from the state the composite pass left, so
+  // no pixel this loop writes can become another pixel's reference.
+  const reference = Buffer.from(target.data);
+  let candidates = 0;
+  let recoloured = 0;
+
+  for (let pixel = 0; pixel < width * height; pixel += 1) {
+    if (compositeDeclined[pixel] !== 1) continue; // C
+    // B — bounded by the SAME reach the composite pass used. Not widened.
+    if (distanceToExterior[pixel] > FRINGE_RADIUS_PX) continue;
+    const idx = pixel * 4;
+    if (target.data[idx + 3]! < VISIBLE_ALPHA_THRESHOLD) continue; // A
+    if (luminanceAt(source.data, idx) >= FRINGE_RGB_DARK_LUMA) continue;
+
+    const inward = inwardDirection(transparent, width, height, pixel);
+    if (!inward) continue;
+
+    candidates += 1;
+
+    // D — thick stroke in any orientation. Hands off.
+    if (
+      localDarkThickness(source, transparent, width, height, pixel) >
+      FRINGE_RGB_MAX_DARK_RUN_PX
+    ) {
+      continue;
+    }
+
+    const artwork = resolveInwardRamp(source, transparent, pixel, inward);
+    if (artwork === null) continue; // D, E, F — or ambiguous, which preserves
+
+    // F, re-checked against THE ACTUAL BYTES about to be copied rather than
+    // against the original they were derived from. The composite pass may have
+    // recovered this reference's colour and softened its alpha in the same
+    // step; the softened alpha is a coverage fact and says nothing about
+    // whether the colour is right, but the colour itself must still be a
+    // materially lighter piece of artwork or there is nothing to fix here.
+    if (reference[artwork * 4 + 3]! < VISIBLE_ALPHA_THRESHOLD) continue;
+    const referenceLuma = luminanceAt(reference, artwork * 4);
+    if (referenceLuma < FRINGE_RGB_DARK_LUMA) continue;
+    if (referenceLuma - luminanceAt(reference, idx) < FRINGE_RGB_REFERENCE_MIN_LUMA_GAIN) {
+      continue;
+    }
+
+    // RGB ONLY. `idx + 3` is not written here, and must never be.
+    target.data[idx] = reference[artwork * 4]!;
+    target.data[idx + 1] = reference[artwork * 4 + 1]!;
+    target.data[idx + 2] = reference[artwork * 4 + 2]!;
+    recoloured += 1;
+  }
+
+  return { candidates, recoloured };
+}
+
+/**
+ * Phase 1.6B: the residual-island pass. See `FRINGE_RGB_RESIDUAL_MAX_ISLAND_PX`
+ * above for the evidence it demands and the measurements behind it.
+ *
+ * Exported for the same reason `decontaminateEdgeRgb` is: the alpha invariant
+ * is a property of THIS function and is tested as one, by snapshotting the
+ * alpha plane around a direct call. `cleanFringe` remains the only production
+ * caller.
+ */
+export function decontaminateResidualEdgeIslands(
+  source: RgbaImage,
+  target: RgbaImage,
+  mask: Uint8Array,
+  compositeDeclined: Uint8Array,
+): { candidates: number; recoloured: number } {
+  const { width, height } = source;
+  const total = width * height;
+  const transparent = resolveTransparentTopology(target, mask);
+
+  // Read colours from the state Phase 1.6 left, before this pass writes
+  // anything. Islands are 8-connected components of DARK pixels and references
+  // must be bright, so no reference can ever be an island member — but the
+  // snapshot makes the pass order-independent by construction rather than by
+  // argument.
+  const reference = Buffer.from(target.data);
+
+  const dark = new Uint8Array(total);
+  for (let pixel = 0; pixel < total; pixel += 1) {
+    if (transparent[pixel] === 1) continue;
+    if (luminanceAt(reference, pixel * 4) >= FRINGE_RGB_DARK_LUMA) continue;
+    dark[pixel] = 1;
+  }
+
+  const visited = new Uint8Array(total);
+  const stack = new Int32Array(total);
+  const island: number[] = [];
+  let candidates = 0;
+  let recoloured = 0;
+
+  for (let seed = 0; seed < total; seed += 1) {
+    if (dark[seed] !== 1 || visited[seed] === 1) continue;
+
+    // Flood the WHOLE component. Size is evidence, so it may not be truncated:
+    // abandoning early would let a thick outline masquerade as a small island.
+    island.length = 0;
+    let top = 0;
+    stack[top++] = seed;
+    visited[seed] = 1;
+    let touchesTransparency = false;
+
+    while (top > 0) {
+      const pixel = stack[--top]!;
+      island.push(pixel);
+      const x = pixel % width;
+      const y = (pixel - x) / width;
+
+      for (const [dx, dy] of INWARD_PROBE_DIRECTIONS) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        if (transparent[ny * width + nx] === 1) touchesTransparency = true;
+      }
+
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const neighbor = ny * width + nx;
+          if (dark[neighbor] !== 1 || visited[neighbor] === 1) continue;
+          visited[neighbor] = 1;
+          stack[top++] = neighbor;
+        }
+      }
+    }
+
+    // II and III — topology. A component that fails either is not a fleck.
+    if (!touchesTransparency) continue;
+    if (island.length > FRINGE_RGB_RESIDUAL_MAX_ISLAND_PX) continue;
+
+    // I — every pixel must be one the composite model declined. This is also
+    // what bounds the component to the fringe band: `compositeDeclined` is only
+    // ever set within `FRINGE_RADIUS_PX` of the removed exterior.
+    let eligible = true;
+    for (const pixel of island) {
+      if (compositeDeclined[pixel] !== 1) {
+        eligible = false;
+        break;
+      }
+    }
+    if (!eligible) continue;
+
+    candidates += island.length;
+
+    // IV and V — the per-pixel evidence. Resolved for the WHOLE island before
+    // anything is written: a partially-corrected island is exactly the
+    // half-erased mark this pass must never produce.
+    const replacements: number[] = [];
+    for (const pixel of island) {
+      const idx = pixel * 4;
+      if (luminanceAt(source.data, idx) >= FRINGE_RGB_DARK_LUMA) {
+        eligible = false;
+        break;
+      }
+      if (
+        localDarkThickness(source, transparent, width, height, pixel) >
+        FRINGE_RGB_MAX_DARK_RUN_PX
+      ) {
+        eligible = false;
+        break;
+      }
+      const artwork = brightestArtworkNeighbor(reference, transparent, width, height, pixel);
+      if (artwork === null) {
+        eligible = false;
+        break;
+      }
+      if (
+        luminanceAt(reference, artwork * 4) - luminanceAt(reference, idx) <
+        FRINGE_RGB_REFERENCE_MIN_LUMA_GAIN
+      ) {
+        eligible = false;
+        break;
+      }
+      replacements.push(pixel, artwork);
+    }
+    if (!eligible) continue;
+
+    for (let i = 0; i < replacements.length; i += 2) {
+      const idx = replacements[i]! * 4;
+      const from = replacements[i + 1]! * 4;
+      // RGB ONLY. `idx + 3` is not written here, and must never be.
+      target.data[idx] = reference[from]!;
+      target.data[idx + 1] = reference[from + 1]!;
+      target.data[idx + 2] = reference[from + 2]!;
+      recoloured += 1;
+    }
+  }
+
+  return { candidates, recoloured };
+}
+
+/**
+ * The brightest opaque, genuinely-light artwork pixel touching `pixel`, or null
+ * when the neighbourhood offers nothing to take colour from — which preserves
+ * the whole island.
+ *
+ * Brightest rather than nearest-in-colour: the defect being corrected is
+ * darkness, and picking the neighbour that is least dark is the choice that
+ * cannot half-fix a pixel by copying another barely-qualifying one.
+ */
+function brightestArtworkNeighbor(
+  reference: Buffer,
+  transparent: Uint8Array,
+  width: number,
+  height: number,
+  pixel: number,
+): number | null {
+  const x = pixel % width;
+  const y = (pixel - x) / width;
+  let best: number | null = null;
+  let bestLuma = -1;
+
+  for (let dy = -1; dy <= 1; dy += 1) {
+    const ny = y + dy;
+    if (ny < 0 || ny >= height) continue;
+    for (let dx = -1; dx <= 1; dx += 1) {
+      if (dx === 0 && dy === 0) continue;
+      const nx = x + dx;
+      if (nx < 0 || nx >= width) continue;
+
+      const neighbor = ny * width + nx;
+      if (transparent[neighbor] === 1) continue;
+      if (reference[neighbor * 4 + 3]! < FRINGE_RGB_REFERENCE_MIN_ALPHA) continue;
+
+      const luma = luminanceAt(reference, neighbor * 4);
+      if (luma < FRINGE_RGB_DARK_LUMA) continue;
+      if (luma > bestLuma) {
+        bestLuma = luma;
+        best = neighbor;
+      }
+    }
+  }
+
+  return best;
+}
+
+/**
+ * What counts as "confirmed exterior transparency" for this pass: the removed
+ * mask, PLUS the pixels the composite pass just proved were essentially pure
+ * background and feathered to nothing.
+ *
+ * Both are topology, established by evidence — neither is inferred from a
+ * pixel being dark, which is the inference that deletes finger holes. Widening
+ * the set makes this pass STRICTLY more careful, because it is what the
+ * intentional-ink survey below walks outward from as well.
+ *
+ * Safe to read once here: the composite pass has finished, and nothing after
+ * it writes alpha.
+ */
+function resolveTransparentTopology(target: RgbaImage, mask: Uint8Array): Uint8Array {
+  const transparent = new Uint8Array(mask.length);
+  for (let pixel = 0; pixel < mask.length; pixel += 1) {
+    transparent[pixel] =
+      mask[pixel] === 1 || target.data[pixel * 4 + 3]! < VISIBLE_ALPHA_THRESHOLD ? 1 : 0;
+  }
+  return transparent;
+}
+
+/** Longest dark extent this measurement will follow before giving up. */
+const INTENTIONAL_INK_RUN_LIMIT = 64;
+
+/**
+ * THE THICK-OUTLINE PROTECTION, and the reason this pass cannot nibble at a
+ * stroke the customer drew.
+ *
+ * Measures LOCAL DARK THICKNESS: the dark extent through the pixel along each
+ * axis, both ways, and takes the SMALLER of the two. That minimum is the
+ * stroke's thickness regardless of which way the stroke runs — a 3px outline
+ * measures 3 across and hundreds along, so its minimum is 3; a 1px
+ * contamination ring measures 1 across and hundreds along, so its minimum is
+ * 1. Anything at or under `FRINGE_RGB_MAX_DARK_RUN_PX` is thin enough to be
+ * anti-aliasing; anything above it is a mark, and this pass leaves it alone.
+ *
+ * The minimum, specifically, rather than a run measured along one chosen
+ * direction. A dark ring following a horizontal edge is 200px "long" when
+ * measured sideways, and a directional test that happened to look sideways
+ * would call that ring an intentional stroke — protecting exactly the
+ * contamination this pass exists to fix, at corners and tips where the first
+ * transparent neighbour is beside the pixel rather than behind it. Thickness
+ * does not have that ambiguity.
+ *
+ * Measured on the ORIGINAL, and bounded by `transparent` so it stops at the
+ * removed background rather than running out into it.
+ */
+function localDarkThickness(
+  source: RgbaImage,
+  transparent: Uint8Array,
+  width: number,
+  height: number,
+  pixel: number,
+): number {
+  const { data } = source;
+  const x = pixel % width;
+  const y = (pixel - x) / width;
+  let thinnest = INTENTIONAL_INK_RUN_LIMIT;
+
+  for (const [dx, dy] of [
+    [1, 0],
+    [0, 1],
+  ] as const) {
+    let extent = 1;
+    for (const sign of [1, -1] as const) {
+      let cx = x + dx * sign;
+      let cy = y + dy * sign;
+      while (
+        cx >= 0 &&
+        cy >= 0 &&
+        cx < width &&
+        cy < height &&
+        extent < INTENTIONAL_INK_RUN_LIMIT
+      ) {
+        const step = cy * width + cx;
+        if (transparent[step] === 1) break;
+        if (luminanceAt(data, step * 4) >= FRINGE_RGB_DARK_LUMA) break;
+        extent += 1;
+        cx += dx * sign;
+        cy += dy * sign;
+      }
+    }
+    if (extent < thinnest) thinnest = extent;
+  }
+
+  return thinnest;
+}
+
+/**
+ * The inward normal, derived from topology alone: the first fixed-order
+ * direction whose OPPOSITE neighbour is confirmed removed background. Reading
+ * it off the mask rather than off colour is what keeps this generic — nothing
+ * here knows or cares whether the artwork is gold or the background black.
+ */
+const INWARD_PROBE_DIRECTIONS: ReadonlyArray<readonly [number, number]> = [
+  [-1, 0],
+  [1, 0],
+  [0, -1],
+  [0, 1],
+];
+
+function inwardDirection(
+  transparent: Uint8Array,
+  width: number,
+  height: number,
+  pixel: number,
+): readonly [number, number] | null {
+  const x = pixel % width;
+  const y = (pixel - x) / width;
+
+  for (const direction of INWARD_PROBE_DIRECTIONS) {
+    const ox = x - direction[0];
+    const oy = y - direction[1];
+    if (ox < 0 || oy < 0 || ox >= width || oy >= height) continue;
+    if (transparent[oy * width + ox] === 1) return direction;
+  }
+
+  return null;
+}
+
+/**
+ * Walks inward along the normal in the ORIGINAL image and returns the index of
+ * the artwork pixel the candidate should take its colour from — or `null` when
+ * the evidence does not hold, which preserves the pixel.
+ *
+ * Returns null for, specifically: a dark run of 3+ (intentional ink), a
+ * luminance profile that is not strictly rising (no ramp — the ambiguous
+ * population the audit found and this pass deliberately does not solve), an
+ * inward reference that is transparent, and an inward reference that is not
+ * materially lighter than the candidate.
+ */
+function resolveInwardRamp(
+  source: RgbaImage,
+  transparent: Uint8Array,
+  pixel: number,
+  direction: readonly [number, number],
+): number | null {
+  const { width, height, data } = source;
+  const x = pixel % width;
+  const y = (pixel - x) / width;
+  const [dx, dy] = direction;
+
+  // The ramp has to START in the background the fill already removed.
+  const outward = (y - dy) * width + (x - dx);
+  const candidateLuma = luminanceAt(data, pixel * 4);
+  if (luminanceAt(data, outward * 4) >= candidateLuma) return null;
+
+  let previousLuma = candidateLuma;
+
+  for (let step = 1; step <= FRINGE_RGB_MAX_DARK_RUN_PX; step += 1) {
+    const nx = x + dx * step;
+    const ny = y + dy * step;
+    if (nx < 0 || ny < 0 || nx >= width || ny >= height) return null;
+
+    const neighbor = ny * width + nx;
+    if (transparent[neighbor] === 1) return null;
+
+    const luma = luminanceAt(data, neighbor * 4);
+    if (luma <= previousLuma) return null; // not a strictly rising ramp
+    previousLuma = luma;
+
+    // Still inside the dark run: keep walking, up to the ceiling.
+    if (luma < FRINGE_RGB_DARK_LUMA) continue;
+
+    if (data[neighbor * 4 + 3]! < FRINGE_RGB_REFERENCE_MIN_ALPHA) return null;
+    if (luma - candidateLuma < FRINGE_RGB_REFERENCE_MIN_LUMA_GAIN) return null;
+    return neighbor;
+  }
+
+  // The run never ended within the ceiling: 3+ dark pixels deep. Real ink.
+  return null;
+}
+
+/** Rec. 709 relative luminance — the metric the edge audit measured ramps in. */
+function luminanceAt(data: Buffer, idx: number): number {
+  return 0.2126 * data[idx]! + 0.7152 * data[idx + 1]! + 0.0722 * data[idx + 2]!;
 }
 
 interface SolidReference {
@@ -899,6 +1535,12 @@ export function passThroughTransparentArtwork(
       specklePixelsRemoved: 0,
       featheredEdgePixels: 0,
       decontaminatedPixels: 0,
+      fringeRgbFallbackCandidates: 0,
+      fringeRgbFallbackPixels: 0,
+      fringeRgbFallbackPreservedAmbiguous: 0,
+      fringeRgbResidualCandidates: 0,
+      fringeRgbResidualPixels: 0,
+      fringeRgbResidualPreservedAmbiguous: 0,
       haloGuardPixels: 0,
       outputWidthPx: image.width,
       outputHeightPx: image.height,

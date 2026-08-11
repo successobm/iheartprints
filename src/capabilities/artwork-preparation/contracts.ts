@@ -215,6 +215,32 @@ export interface BackgroundPreparationRecord {
   featheredEdgePixels: number;
   /** Pixels whose colour was corrected for background matte contamination. */
   decontaminatedPixels: number;
+  /**
+   * Phase 1.6, RGB-only edge decontamination. Edge pixels the composite model
+   * declined and this pass then EXAMINED — the denominator for the two below.
+   */
+  fringeRgbFallbackCandidates: number;
+  /** Of those, how many were recoloured. Alpha is never written by that pass. */
+  fringeRgbFallbackPixels: number;
+  /**
+   * Of those, how many were left exactly as they were because the ramp
+   * evidence was ambiguous. Reported rather than inferred: this number staying
+   * healthy is what says the pass is still declining to guess.
+   */
+  fringeRgbFallbackPreservedAmbiguous: number;
+  /**
+   * Phase 1.6B, residual edge islands. Pixels belonging to a small dark
+   * connected component that lies ENTIRELY inside the fringe band and touches
+   * confirmed exterior transparency — the denominator for the two below.
+   */
+  fringeRgbResidualCandidates: number;
+  /** Of those, how many were recoloured. Alpha is never written by that pass either. */
+  fringeRgbResidualPixels: number;
+  /**
+   * Of those, how many were preserved because a per-pixel guard refused —
+   * thickness, or no materially brighter artwork neighbour to take colour from.
+   */
+  fringeRgbResidualPreservedAmbiguous: number;
   /** Transparent pixels near the artwork whose RGB was bled outward to stop upscale halos. */
   haloGuardPixels: number;
   outputWidthPx: number;

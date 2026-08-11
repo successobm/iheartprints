@@ -662,6 +662,164 @@ export function bowlingStyleArtwork(): RgbaImage {
   return image;
 }
 
+// --- Phase 1.6: opaque matte contamination ---------------------------------
+//
+// The failure these reproduce is NOT the anti-aliased rim the composite pass
+// already handles. It is the pixel one step further out: light artwork
+// composited over a near-black background, whose darkest edge value lands
+// OUTSIDE the fill tolerance (so it is correctly kept) and OFF the B→F line
+// (so `liesOnComposite` correctly refuses to divide it by a coverage). It
+// survives fully opaque, carrying the removed background's colour, and reads
+// as dark stipple the moment the artwork is placed on a light garment.
+
+/**
+ * The measured scanline from the audited bowling swoosh, verbatim.
+ *
+ * (11,5,0) is Chebyshev 10 from the (1,1,1) background and reads as
+ * background at the audited tolerance of 12. (18,11,0) is Chebyshev 17 —
+ * outside it, kept, and 9.9 off the background→foreground line against a
+ * background distance of 19.75, which is what the composite guard rejects.
+ * Everything after it climbs to the artwork's own colour.
+ */
+export const MATTE_RAMP: readonly Rgba[] = [
+  { r: 11, g: 5, b: 0, a: 255 },
+  { r: 18, g: 11, b: 0, a: 255 },
+  { r: 42, g: 30, b: 14, a: 255 },
+  { r: 79, g: 66, b: 47, a: 255 },
+];
+/** The swoosh's own measured colour, inward of the ramp. */
+export const MATTE_ARTWORK: Rgba = { r: 161, g: 141, b: 116, a: 255 };
+
+/**
+ * A light body whose left edge carries that exact ramp. The contaminated
+ * column is x = 39; x = 38 reads as background and is removed, which is what
+ * puts x = 39 one pixel from confirmed exterior transparency.
+ */
+export function matteContaminatedEdgeArtwork(): RgbaImage {
+  const image = ditheredNearBlackCanvas(120, 120);
+  fillRect(image, 42, 30, 40, 60, MATTE_ARTWORK);
+  for (let y = 30; y < 90; y += 1) {
+    for (let step = 0; step < MATTE_RAMP.length; step += 1) {
+      setPixel(image, 38 + step, y, MATTE_RAMP[step]!);
+    }
+  }
+  return image;
+}
+
+/**
+ * The NEGATIVE CONTROL: the same light body behind a genuine 3px dark outline
+ * that runs right up to the removed background.
+ *
+ * Its outermost column sits exactly where the contaminated column sits in the
+ * fixture above, is exactly as dark, and is exactly as adjacent to
+ * transparency. The ONLY thing that distinguishes it is that the dark
+ * continues for three pixels instead of stopping after one — which is
+ * precisely the discriminator the audit measured, and the reason this pass
+ * asks how thick a dark structure is rather than how dark it is.
+ */
+export function thickDarkOutlineArtwork(): RgbaImage {
+  const image = ditheredNearBlackCanvas(120, 120);
+  fillRect(image, 42, 30, 40, 60, MATTE_ARTWORK);
+  fillRect(image, 39, 30, 3, 60, DARK_OUTLINE);
+  return image;
+}
+
+/**
+ * The SAME contaminated first column, over an edge that then gets DARKER
+ * before it brightens. Everything the composite model sees is identical — same
+ * colour, same distance from the background, same refusal — so this fixture
+ * isolates the ramp test on its own.
+ *
+ * The audit found ~557 pixels of exactly this character: dark, at the
+ * silhouette, with neither a clean rising ramp nor a clean plateau. There is
+ * no evidence here that says background composite rather than something the
+ * customer drew, and the pass is not in the business of guessing.
+ * Expect: preserved, unchanged, and COUNTED as undecided.
+ */
+export function ambiguousDarkEdgeArtwork(): RgbaImage {
+  const image = ditheredNearBlackCanvas(120, 120);
+  fillRect(image, 42, 30, 40, 60, MATTE_ARTWORK);
+  for (let y = 30; y < 90; y += 1) {
+    setPixel(image, 38, y, MATTE_RAMP[0]!);
+    setPixel(image, 39, y, MATTE_RAMP[1]!);
+    setPixel(image, 40, y, { r: 14, g: 8, b: 0, a: 255 }); // dips instead of climbing
+    setPixel(image, 41, y, MATTE_RAMP[3]!);
+  }
+  return image;
+}
+
+/**
+ * The light-background mirror: a dark body on a near-white background, with
+ * its edge ramp running the other way. Nothing in this pass may fire here —
+ * the forensics that justify it measured DARK contamination only, and a pass
+ * that guessed at the inverse case would be inventing evidence it does not
+ * have.
+ */
+export function lightBackgroundEdgeArtwork(): RgbaImage {
+  const background: Rgba = { r: 250, g: 250, b: 250, a: 255 };
+  const image = createCanvas(120, 120, background);
+  fillRect(image, 42, 30, 40, 60, { r: 20, g: 35, b: 90, a: 255 });
+  for (let y = 30; y < 90; y += 1) {
+    setPixel(image, 39, y, { r: 238, g: 238, b: 240, a: 255 });
+    setPixel(image, 40, y, { r: 180, g: 185, b: 200, a: 255 });
+    setPixel(image, 41, y, { r: 90, g: 100, b: 140, a: 255 });
+  }
+  return image;
+}
+
+/**
+ * PHASE 1.6B FIXTURE — the residue Phase 1.6's single inward normal cannot see,
+ * alongside the two structures that must survive it.
+ *
+ * Everything sits on the top edge of one light body, so every feature is the
+ * same colour, the same distance from the removed background, and equally
+ * adjacent to confirmed transparency. The ONLY thing that differs between them
+ * is the shape of the dark component each one belongs to.
+ *
+ *   `RESIDUAL_SPECK_POINTS`   1px flecks of matte. Transparent on three sides,
+ *                             artwork on the fourth. Phase 1.6 picks the first
+ *                             probe direction whose opposite is transparent —
+ *                             which here points ALONG the silhouette into more
+ *                             transparency — so its ramp test has nothing to
+ *                             read and it preserves them. Expect: recoloured.
+ *   `RESIDUAL_INTERIOR_DOT`   the same fleck, one that does NOT touch the
+ *                             exterior. A dark mark inside the artwork is the
+ *                             artwork. Expect: byte-identical.
+ *   `RESIDUAL_SPIKE_X`        a 1px-wide, 12px-long dark spike standing on the
+ *                             body. Just as thin as a fleck and just as
+ *                             blind to the ramp test — separated from one ONLY
+ *                             by the size of its component. A hairline this
+ *                             long is something a customer can draw, so the
+ *                             island ceiling must preserve it. Expect:
+ *                             byte-identical.
+ */
+export const RESIDUAL_SPECK_POINTS: Array<[number, number]> = [
+  [40, 60],
+  [50, 60],
+  [60, 60],
+];
+export const RESIDUAL_INTERIOR_DOT: [number, number] = [70, 75];
+export const RESIDUAL_SPIKE_X = 90;
+export const RESIDUAL_SPIKE_TOP = 49;
+export const RESIDUAL_SPIKE_BOTTOM = 61;
+/** The body's top row — the inward artwork reference every fleck must find. */
+export const RESIDUAL_BODY_TOP = 61;
+
+export function residualEdgeSpeckArtwork(): RgbaImage {
+  const image = ditheredNearBlackCanvas(120, 120);
+  fillRect(image, 20, RESIDUAL_BODY_TOP, 80, 40, MATTE_ARTWORK);
+
+  for (const [x, y] of RESIDUAL_SPECK_POINTS) {
+    setPixel(image, x, y, DARK_OUTLINE);
+  }
+  setPixel(image, RESIDUAL_INTERIOR_DOT[0], RESIDUAL_INTERIOR_DOT[1], DARK_OUTLINE);
+  for (let y = RESIDUAL_SPIKE_TOP; y < RESIDUAL_SPIKE_BOTTOM; y += 1) {
+    setPixel(image, RESIDUAL_SPIKE_X, y, DARK_OUTLINE);
+  }
+
+  return image;
+}
+
 /** Encodes any fixture to PNG bytes, the way a real upload arrives. */
 export function toPngBytes(image: RgbaImage): Buffer {
   return encodeRgbaToPng(image);

@@ -154,6 +154,12 @@ export const GUIDED_CLEANUP_COPY = {
   fitActionLabel: "Fit",
   zoomInActionLabel: "Zoom In",
   zoomOutActionLabel: "Zoom Out",
+  /**
+   * Phase 1.6B. Clicking is the point of this surface, so panning has to be
+   * asked for — and a gesture the customer has to hold a key for is one they
+   * have to be told about. Plain language: no talk of modifiers or gestures.
+   */
+  panHint: "Hold Space and drag to move around while zoomed in.",
 } as const;
 
 /**
