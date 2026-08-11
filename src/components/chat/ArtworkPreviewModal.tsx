@@ -1,8 +1,13 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, type CSSProperties, type MouseEvent } from "react";
 
 import { GUIDED_CLEANUP_COPY } from "@/capabilities/artwork-preparation";
+import {
+  DEFAULT_PREVIEW_BACKGROUND,
+  previewBackgroundSurfaceStyle,
+  type PreviewBackground,
+} from "./preview-background";
 
 /**
  * Existing Artwork → Print Ready Phase 1: a full-size, READ-ONLY viewer for
@@ -12,13 +17,21 @@ import { GUIDED_CLEANUP_COPY } from "@/capabilities/artwork-preparation";
  * cleanup, no callbacks other than `onClose`. Phase 1.4 keeps Enlarge as a
  * separate view-only path; interactive cleanup lives in
  * `GuidedCleanupWorkspace`. Viewing can never approve or mutate.
+ *
+ * Phase 1.5: prepared enlarge may reuse the compare QA Preview Background
+ * (solid White / Gray / Black). That remains presentation-only.
  */
 
 interface ArtworkPreviewModalProps {
   title: string;
   url: string;
-  /** Prepared artwork renders on a checkerboard so real transparency is visible, never faked by a flat colour. */
+  /**
+   * Legacy checkerboard flag. Prefer `previewBackground` for prepared
+   * inspection; when a QA background is provided it wins.
+   */
   showTransparencyCheckerboard: boolean;
+  /** Solid QA inspection surface for prepared artwork enlarge. */
+  previewBackground?: PreviewBackground;
   onClose: () => void;
 }
 
@@ -26,6 +39,7 @@ export function ArtworkPreviewModal({
   title,
   url,
   showTransparencyCheckerboard,
+  previewBackground,
   onClose,
 }: ArtworkPreviewModalProps) {
   useEffect(() => {
@@ -36,9 +50,13 @@ export function ArtworkPreviewModal({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  function handleBackdropClick(event: React.MouseEvent<HTMLDivElement>) {
+  function handleBackdropClick(event: MouseEvent<HTMLDivElement>) {
     if (event.target === event.currentTarget) onClose();
   }
+
+  const surfaceStyle = previewBackground
+    ? previewBackgroundSurfaceStyle(previewBackground)
+    : transparencySurfaceStyle(showTransparencyCheckerboard);
 
   return (
     <div
@@ -63,7 +81,8 @@ export function ArtworkPreviewModal({
 
         <div
           className="flex min-h-[45vh] flex-1 items-center justify-center p-4 sm:p-8"
-          style={transparencySurfaceStyle(showTransparencyCheckerboard)}
+          data-preview-background={previewBackground ?? undefined}
+          style={surfaceStyle}
         >
           {/* `object-contain`, never `cover` — the customer is here to check
               that their whole artwork survived, so it must never be cropped. */}
@@ -88,12 +107,13 @@ export function ArtworkPreviewModal({
 
 /**
  * The same checkerboard `ConceptPreviewModal` uses, shared here as an
- * exported helper so the comparison tiles and the enlarged view can never
- * render transparency differently from each other.
+ * exported helper so legacy surfaces that still need a checkerboard can
+ * render transparency consistently. Phase 1.5 prepared inspection prefers
+ * {@link previewBackgroundSurfaceStyle} (White / Gray / Black).
  */
 export function transparencySurfaceStyle(
   showCheckerboard: boolean,
-): React.CSSProperties {
+): CSSProperties {
   if (!showCheckerboard) return { backgroundColor: "#f7f7f5" };
   return {
     backgroundImage:
@@ -103,3 +123,7 @@ export function transparencySurfaceStyle(
     backgroundColor: "#f7f7f5",
   };
 }
+
+// Re-export so callers that already import from this module can find the
+// Phase 1.5 default without a second import path.
+export { DEFAULT_PREVIEW_BACKGROUND };

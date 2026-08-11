@@ -7,11 +7,19 @@ import { GUIDED_CLEANUP_COPY } from "@/capabilities/artwork-preparation";
 
 import { ArtworkPreviewModal } from "./ArtworkPreviewModal";
 import { GuidedCleanupWorkspace } from "./GuidedCleanupWorkspace";
+import {
+  DEFAULT_PREVIEW_BACKGROUND,
+  PREVIEW_BACKGROUND_COLORS,
+  PREVIEW_BACKGROUND_COPY,
+  previewBackgroundSurfaceStyle,
+} from "./preview-background";
 
 /**
  * Phase 1.4: the large cleanup workspace is the canonical interactive path.
  * Enlarge stays a separate read-only viewer. These SSR checks pin the copy
  * and affordances without needing a browser click harness.
+ *
+ * Phase 1.5: Preview Background is presentation-only (White default).
  */
 
 describe("GuidedCleanupWorkspace", () => {
@@ -53,6 +61,100 @@ describe("GuidedCleanupWorkspace", () => {
     assert.doesNotMatch(html, /brush|lasso|eraser|freehand/i);
   });
 
+  it("A: workspace defaults to White QA background", () => {
+    const html = render();
+    assert.equal(DEFAULT_PREVIEW_BACKGROUND, "white");
+    assert.match(html, /data-preview-background="white"/);
+    assert.match(html, new RegExp(PREVIEW_BACKGROUND_COLORS.white));
+    assert.match(html, new RegExp(PREVIEW_BACKGROUND_COPY.label));
+  });
+
+  it("B: White / Gray / Black options render", () => {
+    const html = render();
+    assert.match(html, /data-preview-background-option="white"/);
+    assert.match(html, /data-preview-background-option="gray"/);
+    assert.match(html, /data-preview-background-option="black"/);
+    assert.match(html, />White</);
+    assert.match(html, />Gray</);
+    assert.match(html, />Black</);
+  });
+
+  it("C/D/E: prepared src and revision are independent of QA background style", () => {
+    const html = render({
+      preparedImageUrl: "https://signed.example/prepared.png",
+      preparedRevision: "rev-immutable",
+    });
+    assert.match(html, /src="https:\/\/signed\.example\/prepared\.png"/);
+    assert.match(html, /data-prepared-revision="rev-immutable"/);
+    // Presentation helper never invents a different asset URL.
+    for (const background of ["white", "gray", "black"] as const) {
+      const style = previewBackgroundSurfaceStyle(background);
+      assert.equal(style.backgroundColor, PREVIEW_BACKGROUND_COLORS[background]);
+      assert.equal(Object.keys(style).length, 1);
+    }
+  });
+
+  it("F/G/I: pending candidate highlight stays mounted with QA background", () => {
+    const pending = render({
+      removalCount: 2,
+      pendingHighlight: {
+        bounds: { left: 10, top: 20, right: 40, bottom: 50, width: 30, height: 30 },
+        overlayDataUrl: "data:image/png;base64,candidate-token",
+      },
+    });
+    assert.match(pending, /data:image\/png;base64,candidate-token/);
+    assert.match(pending, /data-candidate-highlight-frame/);
+    assert.match(pending, /data-preview-background="white"/);
+    assert.match(pending, /Remove This Area/);
+    // While a preview is pending, Undo yields to Confirm/Cancel (unchanged).
+    assert.doesNotMatch(pending, /Undo Last Removal/);
+
+    const afterRemovals = render({ removalCount: 2, pendingHighlight: null });
+    assert.match(afterRemovals, /Undo Last Removal/);
+    assert.match(afterRemovals, /data-preview-background="white"/);
+  });
+
+  it("H: zoom factor and preview background are independently attributed", () => {
+    const html = render();
+    assert.match(html, /data-zoom-factor="1"/);
+    assert.match(html, /data-preview-background="white"/);
+    // Fit is the only zoom reset path; QA background sits beside the zoom
+    // toolbar and does not own Fit/scroll reset.
+    assert.match(html, /aria-label="Fit"/);
+    assert.match(html, /role="radiogroup"/);
+  });
+
+  it("J: Cancel affordance remains for zero-mutation dismiss", () => {
+    const html = render({
+      pendingHighlight: {
+        bounds: { left: 10, top: 20, right: 40, bottom: 50, width: 30, height: 30 },
+        overlayDataUrl: "data:image/png;base64,abc",
+      },
+    });
+    assert.match(html, />Cancel</);
+    assert.match(html, /data-preview-background="white"/);
+  });
+
+  it("K/L/M: confirm, undo, and Done remain available as before", () => {
+    const pending = render({
+      pendingHighlight: {
+        bounds: { left: 10, top: 20, right: 40, bottom: 50, width: 30, height: 30 },
+        overlayDataUrl: "data:image/png;base64,abc",
+      },
+    });
+    assert.match(pending, /Remove This Area/);
+    assert.match(pending, />Cancel</);
+    assert.match(pending, /Done/);
+
+    const afterRemoval = render({
+      preparedRevision: "rev-after-confirm",
+      removalCount: 1,
+    });
+    assert.match(afterRemoval, /Undo Last Removal/);
+    assert.match(afterRemoval, /data-prepared-revision="rev-after-confirm"/);
+    assert.match(afterRemoval, /Done/);
+  });
+
   it("A: workspace starts in Fit (100%)", () => {
     const html = render();
     assert.match(html, /data-zoom-factor="1"/);
@@ -92,7 +194,7 @@ describe("GuidedCleanupWorkspace", () => {
     assert.match(html, /data-zoom-factor="1"/);
   });
 
-  it("X: Enlarge remains read-only (workspace is separate)", () => {
+  it("X / N: Enlarge remains read-only (workspace is separate)", () => {
     // Covered by the sibling ArtworkPreviewModal suite below — pin that this
     // interactive surface is the only place with Zoom / click-to-clean.
     const html = render();
@@ -176,6 +278,22 @@ describe("ArtworkPreviewModal — Enlarge stays view-only", () => {
     assert.match(html, /View only — nothing can be changed here/);
     assert.doesNotMatch(html, /Clean Up Background|Remove This Area|Click background/);
     assert.doesNotMatch(html, /cursor-crosshair/);
+    assert.doesNotMatch(html, /Use Prepared Artwork|Approve/i);
+  });
+
+  it("N: prepared enlarge may reuse a QA Preview Background without approving", () => {
+    const html = renderToString(
+      createElement(ArtworkPreviewModal, {
+        title: "Prepared artwork",
+        url: "https://signed.example/prepared.png",
+        showTransparencyCheckerboard: false,
+        previewBackground: "white",
+        onClose: () => {},
+      }),
+    );
+
+    assert.match(html, /data-preview-background="white"/);
+    assert.match(html, new RegExp(PREVIEW_BACKGROUND_COLORS.white));
     assert.doesNotMatch(html, /Use Prepared Artwork|Approve/i);
   });
 });

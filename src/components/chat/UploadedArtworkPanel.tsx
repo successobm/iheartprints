@@ -17,6 +17,7 @@ import type { CustomerFinalizationStatus } from "@/lib/services/conversation-ser
 import type { ImagePoint } from "./artwork-click-mapping";
 import { ArtworkComparison } from "./ArtworkComparison";
 import { GuidedCleanupWorkspace } from "./GuidedCleanupWorkspace";
+import { PREVIEW_BACKGROUND_COPY } from "./preview-background";
 import { PrintReadySizeCard } from "./PrintReadySizeCard";
 import type { UploadedArtworkStep } from "./uploaded-artwork-flow";
 
@@ -463,26 +464,32 @@ function CompareStep({
         </p>
       ) : null}
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        {/* Approval is ONLY ever this explicit button. Enlarge is view-only;
-            Clean Up Background mutates only after confirm, and Done never
-            approves. */}
-        <button
-          type="button"
-          disabled={busy || pendingConfirmation || workspaceOpen}
-          onClick={onApprove}
-          className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Use Prepared Artwork
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onReconsider}
-          className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Keep my original for now
-        </button>
+      <div className="mt-4 space-y-2">
+        <p className="text-xs text-ink" data-approval-safety-copy>
+          {PREVIEW_BACKGROUND_COPY.approvalGuidance}
+        </p>
+        <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.approvalTip}</p>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Approval is ONLY ever this explicit button. Enlarge is view-only;
+              Clean Up Background mutates only after confirm, and Done never
+              approves. Preview Background never approves. */}
+          <button
+            type="button"
+            disabled={busy || pendingConfirmation || workspaceOpen}
+            onClick={onApprove}
+            className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Use Prepared Artwork
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onReconsider}
+            className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Keep my original for now
+          </button>
+        </div>
       </div>
     </div>
   );

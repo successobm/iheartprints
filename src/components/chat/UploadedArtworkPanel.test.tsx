@@ -410,7 +410,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
 });
 
 describe("ArtworkComparison", () => {
-  it("renders the prepared tile on a transparency checkerboard", () => {
+  it("O/P: exposes prepared Preview Background inspection control", () => {
     const html = renderToString(
       createElement(ArtworkComparison, {
         original: { url: "https://signed.example/original.png", loading: false },
@@ -418,15 +418,17 @@ describe("ArtworkComparison", () => {
       }),
     );
 
-    // The checkerboard proves removed background is genuinely transparent
-    // rather than repainted white.
-    assert.match(html, /linear-gradient\(45deg/);
-    // Whole artwork, never a crop — the customer is checking fidelity.
+    assert.match(html, /Preview Background/);
+    assert.match(html, /data-preview-background-option="white"/);
+    assert.match(html, /data-preview-background-option="gray"/);
+    assert.match(html, /data-preview-background-option="black"/);
+    assert.match(html, /data-comparison-surface="prepared"[^>]*data-preview-background="white"|data-preview-background="white"[^>]*data-comparison-surface="prepared"/);
+    assert.match(html, /#FFFFFF/);
     assert.match(html, /object-contain/);
     assert.doesNotMatch(html, /object-cover/);
   });
 
-  it("has no approval affordance of its own", () => {
+  it("S: helper copy exists for background inspection", () => {
     const html = renderToString(
       createElement(ArtworkComparison, {
         original: { url: "https://signed.example/original.png", loading: false },
@@ -434,7 +436,37 @@ describe("ArtworkComparison", () => {
       }),
     );
 
-    assert.doesNotMatch(html, /Use Prepared Artwork|Approve|Select/i);
+    assert.match(
+      html,
+      /Check your artwork on different backgrounds before approving it/,
+    );
+  });
+
+  it("T: original and prepared asset identities remain distinct URLs", () => {
+    const html = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: "https://signed.example/original.png", loading: false },
+        prepared: { url: "https://signed.example/prepared.png", loading: false },
+      }),
+    );
+
+    assert.match(html, /src="https:\/\/signed\.example\/original\.png"/);
+    assert.match(html, /src="https:\/\/signed\.example\/prepared\.png"/);
+    assert.match(html, /Shown as uploaded/);
+    assert.match(html, /Inspection background:/);
+  });
+
+  it("Q: has no approval affordance of its own", () => {
+    const html = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: "https://signed.example/original.png", loading: false },
+        prepared: { url: "https://signed.example/prepared.png", loading: false },
+      }),
+    );
+
+    assert.doesNotMatch(html, /Use Prepared Artwork/);
+    assert.doesNotMatch(html, />Approve</i);
+    assert.doesNotMatch(html, />Select</i);
   });
 
   it("keeps compare tiles read-only — cleanup is not on the small preview", () => {
@@ -498,6 +530,20 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
     assert.match(html, /Use Prepared Artwork/);
     assert.match(html, /Keep my original for now/);
     assert.match(html, /Enlarge/);
+  });
+
+  it("Q/R/S: approval safety copy stays separate from Preview Background", () => {
+    const html = render();
+
+    assert.match(html, /Preview Background/);
+    assert.match(
+      html,
+      /Make sure all parts of your design are still there and the background looks clean/,
+    );
+    assert.match(html, /Try White to spot dark background residue/);
+    assert.match(html, /Use Prepared Artwork/);
+    // Background control is not an approve action.
+    assert.match(html, /data-approval-safety-copy/);
   });
 
   it("offers Undo on compare once something has been removed", () => {

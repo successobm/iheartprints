@@ -6,6 +6,13 @@ import {
   ArtworkPreviewModal,
   transparencySurfaceStyle,
 } from "./ArtworkPreviewModal";
+import { PreviewBackgroundControl } from "./PreviewBackgroundControl";
+import {
+  DEFAULT_PREVIEW_BACKGROUND,
+  PREVIEW_BACKGROUND_COPY,
+  previewBackgroundSurfaceStyle,
+  type PreviewBackground,
+} from "./preview-background";
 
 /**
  * Existing Artwork → Print Ready Phase 1: Original vs Prepared, side by side.
@@ -20,8 +27,10 @@ import {
  *      only way to approve is the explicit action the PARENT renders outside
  *      this component.
  *
- * The prepared tile renders on a transparency checkerboard so removed
- * background reads as genuinely removed, never as "we painted it white".
+ * Phase 1.5: the Prepared tile uses a White / Gray / Black QA Preview
+ * Background (CSS under the transparent PNG). The Original tile stays a
+ * faithful upload display and is not rewritten by the QA control. Switching
+ * backgrounds never approves and never changes asset URLs.
  *
  * Phase 1.4: guided cleanup no longer lives on the small prepared tile.
  * Interactive cleanup opens in `GuidedCleanupWorkspace`. Enlarge remains a
@@ -44,25 +53,38 @@ export function ArtworkComparison({
   prepared,
 }: ArtworkComparisonProps) {
   const [enlarged, setEnlarged] = useState<"original" | "prepared" | null>(null);
+  const [previewBackground, setPreviewBackground] = useState<PreviewBackground>(
+    DEFAULT_PREVIEW_BACKGROUND,
+  );
 
   const enlargedUrl =
     enlarged === "original" ? original.url : enlarged === "prepared" ? prepared.url : null;
 
   return (
     <div>
+      <div className="mb-2 space-y-1">
+        <PreviewBackgroundControl
+          idPrefix="compare-preview-bg"
+          value={previewBackground}
+          onChange={setPreviewBackground}
+        />
+        <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.helper}</p>
+      </div>
+
       <div className="grid gap-3 sm:grid-cols-2">
         <ComparisonTile
           label="Original"
           caption="The artwork you uploaded, untouched."
           image={original}
-          showCheckerboard={false}
+          surface="original"
           onEnlarge={() => setEnlarged("original")}
         />
         <ComparisonTile
           label="Prepared"
           caption="Background removed. The design itself is unchanged."
           image={prepared}
-          showCheckerboard
+          surface="prepared"
+          previewBackground={previewBackground}
           onEnlarge={() => setEnlarged("prepared")}
         />
       </div>
@@ -71,7 +93,10 @@ export function ArtworkComparison({
         <ArtworkPreviewModal
           title={enlarged === "original" ? "Original artwork" : "Prepared artwork"}
           url={enlargedUrl}
-          showTransparencyCheckerboard={enlarged === "prepared"}
+          showTransparencyCheckerboard={false}
+          previewBackground={
+            enlarged === "prepared" ? previewBackground : undefined
+          }
           onClose={() => setEnlarged(null)}
         />
       ) : null}
@@ -83,7 +108,8 @@ interface ComparisonTileProps {
   label: string;
   caption: string;
   image: ArtworkComparisonImage;
-  showCheckerboard: boolean;
+  surface: "original" | "prepared";
+  previewBackground?: PreviewBackground;
   onEnlarge: () => void;
 }
 
@@ -91,20 +117,31 @@ function ComparisonTile({
   label,
   caption,
   image,
-  showCheckerboard,
+  surface,
+  previewBackground,
   onEnlarge,
 }: ComparisonTileProps) {
+  const surfaceStyle =
+    surface === "prepared" && previewBackground
+      ? previewBackgroundSurfaceStyle(previewBackground)
+      : transparencySurfaceStyle(false);
+
   return (
     <div className="overflow-hidden rounded-xl border border-black/8">
       <div
         className="flex h-48 items-center justify-center p-3"
-        style={transparencySurfaceStyle(showCheckerboard)}
+        data-comparison-surface={surface}
+        data-preview-background={
+          surface === "prepared" ? previewBackground : undefined
+        }
+        style={surfaceStyle}
       >
         {image.url ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={image.url}
             alt={`${label} artwork`}
+            data-comparison-image={surface}
             className="max-h-full max-w-full object-contain"
           />
         ) : (
@@ -119,6 +156,18 @@ function ComparisonTile({
             {label}
           </p>
           <p className="mt-0.5 text-xs text-muted">{caption}</p>
+          {surface === "prepared" ? (
+            <p className="mt-1 text-[11px] text-muted">
+              Inspection background:{" "}
+              {previewBackground
+                ? PREVIEW_BACKGROUND_COPY.options[previewBackground]
+                : PREVIEW_BACKGROUND_COPY.options.white}
+            </p>
+          ) : (
+            <p className="mt-1 text-[11px] text-muted">
+              Shown as uploaded
+            </p>
+          )}
         </div>
         {image.url ? (
           <button

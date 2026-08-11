@@ -4291,13 +4291,15 @@ is byte-for-byte unchanged for every customer who does not upload anything.
 creative surfaces (concept grid, summary card, revision actions, composer)
 are hidden rather than merely unreachable.
 
-`ArtworkComparison` renders Original and Prepared side by side, both labelled,
-with the prepared tile on a transparency checkerboard so removed background
-reads as genuinely removed rather than repainted white. **Enlarging is not
-approving**: `ArtworkPreviewModal` has no approval affordance in it at all —
-a stronger version of the structural fix applied to `ConceptCards`, where the
-enlarge control had to become a sibling of the select control. Approval is
-only ever the explicit "Use Prepared Artwork" button.
+`ArtworkComparison` renders Original and Prepared side by side, both labelled.
+The Prepared tile uses a presentation-only **Preview Background** control
+(White / Gray / Black) so transparent regions and dark edge residue can be
+inspected before approval. The Original tile stays a faithful upload display
+and is not rewritten by that QA control. **Enlarging is not approving**:
+`ArtworkPreviewModal` has no approval affordance in it at all — a stronger
+version of the structural fix applied to `ConceptCards`, where the enlarge
+control had to become a sibling of the select control. Approval is only ever
+the explicit "Use Prepared Artwork" button.
 
 Guided background cleanup (Phase 1.4) is opened from compare via **Clean Up
 Background**, which mounts `GuidedCleanupWorkspace` — a large interactive
@@ -4305,7 +4307,28 @@ surface for preview → confirm → undo, with Fit / Zoom In / Zoom Out and
 scroll-or-drag pan so small details stay clickable. Zoom grows the rendered
 image content box inside a scrollable viewport (not CSS `scale`), so
 `mapClickToImagePoint` stays authoritative. Enlarge stays a separate read-only
-viewer; the small compare tiles are not the cleanup surface.
+viewer; the small compare tiles are not the cleanup surface. Phase 1.5 adds
+the same White / Gray / Black Preview Background control inside the workspace
+(default White). Switching it never changes prepared bytes, `preparedRevision`,
+candidate tokens, zoom, or cleanup lifecycle.
+
+### Garment-neutral master (Phase 1.5)
+
+**GARMENT-NEUTRAL MASTER.** Prepared and final PNG bytes are independent of
+garment color. Garment / background color may affect preview, inspection, and
+QA only — never alpha, RGB, cleanup algorithms, validation results, or the
+stored prepared asset.
+
+**QA BACKGROUND.** White (`#FFFFFF`) / Gray (`#C8C8C8`) / Black (`#000000`)
+compositing is a presentation-only inspection aid (CSS under the transparent
+PNG). It is not persisted, not sent to the server, and not a garment-color
+product visualization. Actual garment color, when shown elsewhere, must not
+replace these contrasting inspection controls.
+
+**APPROVAL SAFETY.** Transparent artwork must be reviewed against a
+contrasting background before final approval. This reduces the class of
+misses where intentional dark holes and accidental transparent holes look
+identical on black — it does not by itself guarantee fidelity.
 
 The customer snapshot carries an opaque `preparedRevision` that changes on
 every confirm/undo (new prepared derivation) and is unchanged by preview.
@@ -4862,9 +4885,10 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 | `PrepareForPrintAction` | Sprint 2M Phase 2B: the one explicit "final direction approval" action + truthful "preparing"/"print ready" states; plain customer language only — never job/asset/validation terminology |
 | `WorkflowChoiceCard` | §13h: Create New Artwork vs Upload Existing Artwork, at project start only. "Create New" is a pure client-side dismissal — the existing interview is unchanged |
 | `UploadedArtworkPanel` | §13h: the Upload Existing Artwork surface (upload → production details → analysis → compare → approved). Renders only server-authored copy |
-| `ArtworkComparison` | §13h: labelled Original vs Prepared tiles; prepared on a transparency checkerboard; `Enlarge` is a separate control from approval |
-| `ArtworkPreviewModal` | §13h: read-only full-size viewer with **no** approval or cleanup affordance — viewing can never approve or mutate |
-| `GuidedCleanupWorkspace` | §13h Phase 1.4: large interactive cleanup surface (preview → confirm → undo → Done); presentation only over the Phase 1.3 API |
+| `ArtworkComparison` | §13h: labelled Original vs Prepared tiles; Prepared QA Preview Background (White/Gray/Black); `Enlarge` is a separate control from approval |
+| `ArtworkPreviewModal` | §13h: read-only full-size viewer with **no** approval or cleanup affordance — viewing can never approve or mutate; prepared enlarge may reuse QA Preview Background |
+| `GuidedCleanupWorkspace` | §13h Phase 1.4/1.5: large interactive cleanup surface (preview → confirm → undo → Done) with Fit/Zoom/pan and presentation-only Preview Background; presentation only over the Phase 1.3 API |
+| `PreviewBackgroundControl` | §13h Phase 1.5: accessible White/Gray/Black QA inspection control (presentation only) |
 | `uploaded-artwork-flow.ts` | §13h: pure step derivation + "does the upload workflow own the surface?" — testable without a DOM, same reason as `chat-affordances.ts` |
 | `Composer` | Message input |
 | `chat-session.ts` | localStorage project id restore/create |

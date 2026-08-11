@@ -11,7 +11,13 @@ import {
   mapImageBoundsToCssPercent,
   type ImagePoint,
 } from "./artwork-click-mapping";
-import { transparencySurfaceStyle } from "./ArtworkPreviewModal";
+import { PreviewBackgroundControl } from "./PreviewBackgroundControl";
+import {
+  candidateHighlightFrameClassName,
+  DEFAULT_PREVIEW_BACKGROUND,
+  previewBackgroundSurfaceStyle,
+  type PreviewBackground,
+} from "./preview-background";
 import {
   clampZoomFactor,
   fitDisplaySize,
@@ -41,6 +47,10 @@ import {
  * (never CSS `transform: scale`). Clicks use getBoundingClientRect +
  * mapClickToImagePoint. Confirm/undo remount the <img> via preparedRevision
  * but keep the current zoom factor; pan recenters on Fit only.
+ *
+ * Phase 1.5: Preview Background (White / Gray / Black) is presentation-only
+ * CSS under the transparent PNG. Switching it never changes prepared bytes,
+ * preparedRevision, candidate preview, zoom, or cleanup lifecycle.
  */
 
 export interface GuidedCleanupHighlightView {
@@ -110,6 +120,10 @@ export function GuidedCleanupWorkspace({
   const [viewportSize, setViewportSize] = useState(FALLBACK_VIEWPORT);
   /** 1 = Fit. Preserved across preparedRevision remounts. */
   const [zoomFactor, setZoomFactor] = useState(GUIDED_CLEANUP_ZOOM_MIN);
+  /** QA inspection surface only — never persisted, never sent to the server. */
+  const [previewBackground, setPreviewBackground] = useState<PreviewBackground>(
+    DEFAULT_PREVIEW_BACKGROUND,
+  );
   const panSession = useRef<{
     pointerId: number;
     startX: number;
@@ -295,53 +309,62 @@ export function GuidedCleanupWorkspace({
           </button>
         </div>
 
-        <div
-          className="flex flex-wrap items-center gap-2 border-b border-black/8 px-4 py-2"
-          role="toolbar"
-          aria-label="Artwork zoom"
-        >
-          <button
-            type="button"
+        <div className="flex flex-wrap items-end justify-between gap-3 border-b border-black/8 px-4 py-2">
+          <div
+            className="flex flex-wrap items-center gap-2"
+            role="toolbar"
+            aria-label="Artwork zoom"
+          >
+            <button
+              type="button"
+              disabled={busy}
+              onClick={resetToFit}
+              aria-label={GUIDED_CLEANUP_COPY.fitActionLabel}
+              className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {GUIDED_CLEANUP_COPY.fitActionLabel}
+            </button>
+            <button
+              type="button"
+              disabled={busy || atMinZoom}
+              onClick={() => setZoomFactor((current) => nextZoomOut(current))}
+              aria-label={GUIDED_CLEANUP_COPY.zoomOutActionLabel}
+              className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {GUIDED_CLEANUP_COPY.zoomOutActionLabel}
+            </button>
+            <button
+              type="button"
+              disabled={busy || atMaxZoom}
+              onClick={() => setZoomFactor((current) => nextZoomIn(current))}
+              aria-label={GUIDED_CLEANUP_COPY.zoomInActionLabel}
+              className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {GUIDED_CLEANUP_COPY.zoomInActionLabel}
+            </button>
+            <span
+              className="text-xs tabular-nums text-muted"
+              data-zoom-percent={zoomPercentLabel(zoomFactor)}
+              aria-live="polite"
+            >
+              {zoomPercentLabel(zoomFactor)}
+            </span>
+          </div>
+          <PreviewBackgroundControl
+            idPrefix="guided-cleanup-preview-bg"
+            value={previewBackground}
+            onChange={setPreviewBackground}
             disabled={busy}
-            onClick={resetToFit}
-            aria-label={GUIDED_CLEANUP_COPY.fitActionLabel}
-            className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {GUIDED_CLEANUP_COPY.fitActionLabel}
-          </button>
-          <button
-            type="button"
-            disabled={busy || atMinZoom}
-            onClick={() => setZoomFactor((current) => nextZoomOut(current))}
-            aria-label={GUIDED_CLEANUP_COPY.zoomOutActionLabel}
-            className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {GUIDED_CLEANUP_COPY.zoomOutActionLabel}
-          </button>
-          <button
-            type="button"
-            disabled={busy || atMaxZoom}
-            onClick={() => setZoomFactor((current) => nextZoomIn(current))}
-            aria-label={GUIDED_CLEANUP_COPY.zoomInActionLabel}
-            className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {GUIDED_CLEANUP_COPY.zoomInActionLabel}
-          </button>
-          <span
-            className="text-xs tabular-nums text-muted"
-            data-zoom-percent={zoomPercentLabel(zoomFactor)}
-            aria-live="polite"
-          >
-            {zoomPercentLabel(zoomFactor)}
-          </span>
+          />
         </div>
 
         <div
           ref={viewportRef}
           data-cleanup-viewport
           data-zoom-factor={clampZoomFactor(zoomFactor)}
+          data-preview-background={previewBackground}
           className="min-h-[50vh] flex-1 overflow-auto overscroll-contain"
-          style={transparencySurfaceStyle(true)}
+          style={previewBackgroundSurfaceStyle(previewBackground)}
         >
           <div
             className="flex items-center justify-center"
@@ -432,7 +455,8 @@ export function GuidedCleanupWorkspace({
                     />
                     <span
                       aria-hidden
-                      className="pointer-events-none absolute border-2 border-dashed border-ink"
+                      data-candidate-highlight-frame
+                      className={candidateHighlightFrameClassName()}
                       style={highlightStyle}
                     />
                   </>
