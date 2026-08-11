@@ -33,6 +33,7 @@ function preparation(
       enhancementNeeded: true,
     },
     hasPreparedArtwork: true,
+    preparedRevision: "rev-fixture-prepared",
     approved: false,
     widthPx: 979,
     heightPx: 1024,
@@ -436,52 +437,20 @@ describe("ArtworkComparison", () => {
     assert.doesNotMatch(html, /Use Prepared Artwork|Approve|Select/i);
   });
 
-  it("is not clickable at all unless cleanup mode is turned on", () => {
+  it("keeps compare tiles read-only — cleanup is not on the small preview", () => {
     const html = renderToString(
       createElement(ArtworkComparison, {
         original: { url: "https://signed.example/original.png", loading: false },
         prepared: { url: "https://signed.example/prepared.png", loading: false },
-        preparedCleanup: {
-          active: false,
-          busy: false,
-          onSelectPoint: () => {},
-        },
       }),
     );
 
+    // Phase 1.4: the canonical cleanup path is the large workspace, not an
+    // inline clickable tile. Enlarge remains available for view-only inspect.
     assert.doesNotMatch(html, /Click background to preview removing it/);
     assert.doesNotMatch(html, /cursor-crosshair/);
-  });
-
-  it("makes ONLY the prepared image clickable in cleanup mode", () => {
-    const html = renderToString(
-      createElement(ArtworkComparison, {
-        original: { url: "https://signed.example/original.png", loading: false },
-        prepared: { url: "https://signed.example/prepared.png", loading: false },
-        preparedCleanup: {
-          active: true,
-          busy: false,
-          onSelectPoint: () => {},
-        },
-      }),
-    );
-
-    // Exactly one clickable image surface, and it is the prepared one. The
-    // original has no cleanup prop at all, so no code path could mutate from
-    // the left-hand tile.
-    assert.equal(html.match(/Click background to preview removing it/g)?.length, 1);
-    assert.match(html, /cursor-crosshair/);
-
-    // Enlarge stays available and stays OUTSIDE the clickable surface — it
-    // lives in the tile footer, so it cannot nest inside the image button.
+    assert.match(html, /Enlarge original artwork/);
     assert.match(html, /Enlarge prepared artwork/);
-    const clickable = html.slice(html.indexOf("Click background to preview removing it"));
-    const buttonEnd = clickable.indexOf("</button>");
-    assert.equal(
-      clickable.slice(0, buttonEnd).includes("Enlarge"),
-      false,
-      "no nested interactive element",
-    );
   });
 });
 
@@ -509,12 +478,12 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
     );
   }
 
-  it("invites the customer in plain language, with no technical vocabulary", () => {
+  it("exposes an obvious Clean Up Background action", () => {
     const html = render();
 
     assert.match(html, /Still see some background/i);
-    assert.match(html, /preview it before removing it/i);
-    assert.match(html, /Remove More Background/);
+    assert.match(html, /Clean Up Background to remove any areas we missed/i);
+    assert.match(html, /Clean Up Background/);
     // Constitution §6.6: none of the machinery may surface.
     assert.doesNotMatch(
       html,
@@ -522,7 +491,16 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
     );
   });
 
-  it("offers Undo only once something has been removed", () => {
+  it("keeps Use Prepared Artwork as a separate approval action", () => {
+    const html = render();
+
+    assert.match(html, /Clean Up Background/);
+    assert.match(html, /Use Prepared Artwork/);
+    assert.match(html, /Keep my original for now/);
+    assert.match(html, /Enlarge/);
+  });
+
+  it("offers Undo on compare once something has been removed", () => {
     assert.doesNotMatch(render({ guidedCleanup: { available: true, removalCount: 0 } }), /Undo Last Removal/);
     assert.match(render({ guidedCleanup: { available: true, removalCount: 2 } }), /Undo Last Removal/);
   });
@@ -530,13 +508,13 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
   it("says nothing about cleanup when the server has not offered it", () => {
     const html = render({ guidedCleanup: { available: false, removalCount: 0 } });
 
-    assert.doesNotMatch(html, /Remove More Background/);
+    assert.doesNotMatch(html, /Clean Up Background/);
     assert.doesNotMatch(html, /Still see some background/i);
     // The rest of the compare step is untouched.
     assert.match(html, /Use Prepared Artwork/);
   });
 
-  it("renders the server's refusal verbatim", () => {
+  it("renders the server's refusal verbatim on compare", () => {
     // The single most important sentence in the flow. It is authored on the
     // server and rendered as-is, so the panel can never soften or invent it.
     const html = render(
@@ -550,7 +528,10 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
     assert.match(html, /That area looks like part of the artwork, so we left it unchanged\./);
   });
 
-  it("shows confirm and cancel when a preview highlight is pending", () => {
+  it("does not put confirm controls on the compare strip before the workspace opens", () => {
+    // Pending highlight + confirm live inside GuidedCleanupWorkspace. Compare
+    // only advertises Clean Up Background so customers are not asked to
+    // confirm on a tiny tile they never clicked.
     const html = render(
       {},
       {
@@ -563,10 +544,22 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
       },
     );
 
-    assert.match(html, /Remove this area\?/i);
-    assert.match(html, /Remove This Area/);
-    assert.match(html, />Cancel</);
-    assert.doesNotMatch(html, /Undo Last Removal/);
+    assert.match(html, /Clean Up Background/);
+    assert.doesNotMatch(html, />Remove This Area</);
+    assert.match(html, /Use Prepared Artwork/);
+  });
+
+  it("carries an opaque preparedRevision on the compare preparation view", () => {
+    const html = render({ preparedRevision: "rev-after-d" });
+    // Compare itself does not print the revision; the workspace keys on it.
+    // Opening the workspace requires client state — assert the prop path via
+    // GuidedCleanupWorkspace coverage, and that compare still offers cleanup.
+    assert.match(html, /Clean Up Background/);
+    assert.equal(preparation({ preparedRevision: "rev-after-d" }).preparedRevision, "rev-after-d");
+    assert.notEqual(
+      preparation({ preparedRevision: "rev-after-d" }).preparedRevision,
+      preparation({ preparedRevision: "rev-automatic" }).preparedRevision,
+    );
   });
 
   it("is not an image editor", () => {

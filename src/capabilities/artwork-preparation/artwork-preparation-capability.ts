@@ -14,7 +14,8 @@
  * Every operation is local, deterministic, and pure pixel math.
  *
  * The original upload is IMMUTABLE. Its `AssetRecord` is written once and
- * never updated; every transformation produces a new, separate asset.
+ * never updated; every transformation produces a new, separate asset with a
+ * unique storage object identity (never a removal-count-keyed path).
  *
  * ## What this is NOT
  *
@@ -37,6 +38,8 @@
  * is allowed to mutate a brief. No provider port of any kind exists here, by
  * construction.
  */
+
+import { randomUUID } from "node:crypto";
 
 import type { AssetCapability } from "@/capabilities/assets";
 import type { DesignBriefCapability } from "@/capabilities/design-brief";
@@ -71,6 +74,7 @@ import {
   type ArtworkPreparationCustomerView,
   type GuidedCleanupOutcomeCode,
 } from "./preparation-copy";
+import { opaquePreparedRevision } from "./prepared-revision";
 import { classifyRepairability } from "./repairability";
 import {
   ArtworkUploadRejectedError,
@@ -141,6 +145,13 @@ export interface ArtworkPreparationView {
    * turn back into a removal request.
    */
   guidedCleanup: GuidedCleanupStateView;
+  /**
+   * Phase 1.4: opaque identity of the current prepared derivation. Changes on
+   * every confirm/undo (new prepared asset). Unchanged by cleanup_preview.
+   * Used only so the browser can reload the prepared image — never a storage
+   * key and never accepted back as an input.
+   */
+  preparedRevision: string | null;
 }
 
 export interface GuidedCleanupStateView {
@@ -311,6 +322,7 @@ export function createArtworkPreparationCapability(
       classification: assessment.classification,
       customer: describeArtworkForCustomer(analysis, assessment),
       hasPreparedArtwork: preparation.preparedAssetId !== null,
+      preparedRevision: opaquePreparedRevision(preparation.preparedAssetId),
       approved: preparation.status === "approved",
       widthPx: analysis.widthPx,
       heightPx: analysis.heightPx,
@@ -403,8 +415,18 @@ export function createArtworkPreparationCapability(
 
     assertPreservesGeometry(image, isolated.image);
 
+    // Derived prepared assets are IMMUTABLE. Each persisted derivation needs
+    // a unique storage object identity — never `…-${applied.length}` alone.
+    // Supabase Storage uses upsert:false; a deterministic key collides with
+    // orphans/history and blocks confirm/undo. Application-level idempotency
+    // (candidate token + guided_cleanup region list) prevents duplicate
+    // successful mutations; storage-path collision must never be that gate.
+    //
+    // Ordering: upload bytes → create AssetRecord → repoint preparation.
+    // If the DB update fails after upload, an orphan object may remain; the
+    // next retry uses a fresh UUID and existing DB state stays authoritative.
     const asset = await assets.uploadCustomerArtwork(designId, {
-      conceptId: `prepared-${preparation.id}-${isolated.guided.applied.length}`,
+      conceptId: `prepared-${preparation.id}-${randomUUID()}`,
       bytes: encodeRgbaToPng(isolated.image),
       contentType: "image/png",
       widthPx: isolated.image.width,

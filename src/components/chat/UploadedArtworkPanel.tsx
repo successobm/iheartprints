@@ -16,6 +16,7 @@ import type { PrintPlacement } from "@/lib/domain/types";
 import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { ArtworkComparison } from "./ArtworkComparison";
+import { GuidedCleanupWorkspace } from "./GuidedCleanupWorkspace";
 import { PrintReadySizeCard } from "./PrintReadySizeCard";
 import type { UploadedArtworkStep } from "./uploaded-artwork-flow";
 
@@ -46,6 +47,12 @@ export interface UploadedArtworkPanelProps {
   /** Signed image URLs the parent resolves. `null` while loading or unavailable. */
   originalImageUrl: string | null;
   preparedImageUrl: string | null;
+  /**
+   * Phase 1.4: opaque identity of the prepared bytes currently shown (or last
+   * successfully fetched). Workspace keys the <img> on this so a new
+   * derivation cannot reuse a stale decoded bitmap.
+   */
+  preparedRevision?: string | null;
   onUpload: (file: File) => void;
   onSaveDetails: (input: {
     productSummary: string | null;
@@ -133,6 +140,7 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           busy={busy}
           originalImageUrl={props.originalImageUrl}
           preparedImageUrl={props.preparedImageUrl}
+          preparedRevision={props.preparedRevision ?? preparation.preparedRevision}
           onApprove={props.onApprove}
           onReconsider={props.onReconsider}
           onCleanupPoint={props.onCleanupPoint}
@@ -343,6 +351,7 @@ function CompareStep({
   busy,
   originalImageUrl,
   preparedImageUrl,
+  preparedRevision,
   onApprove,
   onReconsider,
   onCleanupPoint,
@@ -356,6 +365,7 @@ function CompareStep({
   busy: boolean;
   originalImageUrl: string | null;
   preparedImageUrl: string | null;
+  preparedRevision: string | null;
   onApprove: () => void;
   onReconsider: () => void;
   onCleanupPoint?: (point: ImagePoint) => void;
@@ -365,10 +375,18 @@ function CompareStep({
   cleanupMessage: string | null;
   cleanupPreviewHighlight: UploadedArtworkPanelProps["cleanupPreviewHighlight"];
 }) {
-  const [cleanupActive, setCleanupActive] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const cleanup = preparation.guidedCleanup;
-  const cleanupOffered = cleanup.available && Boolean(onCleanupPoint);
+  const cleanupOffered =
+    cleanup.available &&
+    Boolean(onCleanupPoint) &&
+    Boolean(preparedImageUrl);
   const pendingConfirmation = Boolean(cleanupPreviewHighlight);
+
+  function closeWorkspace() {
+    onCancelCleanupPreview?.();
+    setWorkspaceOpen(false);
+  }
 
   return (
     <div>
@@ -384,36 +402,57 @@ function CompareStep({
         <ArtworkComparison
           original={{ url: originalImageUrl, loading: originalImageUrl === null }}
           prepared={{ url: preparedImageUrl, loading: preparedImageUrl === null }}
-          preparedCleanup={
-            cleanupOffered && onCleanupPoint
-              ? {
-                  active: cleanupActive,
-                  busy,
-                  onSelectPoint: onCleanupPoint,
-                  pendingHighlight: cleanupPreviewHighlight ?? null,
-                }
-              : undefined
-          }
         />
       </div>
 
       {cleanupOffered ? (
-        <GuidedCleanupControls
-          active={cleanupActive}
+        <div className="mt-3 rounded-xl border border-black/8 bg-black/[0.02] p-3">
+          <p className="text-sm text-ink">{GUIDED_CLEANUP_COPY.invitation}</p>
+          <div className="mt-2.5 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              disabled={busy || !preparedImageUrl}
+              onClick={() => setWorkspaceOpen(true)}
+              className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {GUIDED_CLEANUP_COPY.enterActionLabel}
+            </button>
+            {cleanup.removalCount > 0 && onUndoCleanup ? (
+              <button
+                type="button"
+                disabled={busy || workspaceOpen}
+                onClick={onUndoCleanup}
+                className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {GUIDED_CLEANUP_COPY.undoActionLabel}
+              </button>
+            ) : null}
+          </div>
+          {cleanupMessage && !workspaceOpen ? (
+            <p className="mt-2 text-xs text-ink" role="status">
+              {cleanupMessage}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {workspaceOpen && preparedImageUrl && onCleanupPoint ? (
+        <GuidedCleanupWorkspace
+          preparedImageUrl={preparedImageUrl}
+          preparedRevision={
+            preparedRevision ?? preparation.preparedRevision ?? "prepared"
+          }
+          sourceWidthPx={preparation.widthPx}
+          sourceHeightPx={preparation.heightPx}
           busy={busy}
           removalCount={cleanup.removalCount}
-          message={cleanupMessage}
-          pendingConfirmation={pendingConfirmation}
-          onToggle={() => {
-            setCleanupActive((previous) => {
-              const next = !previous;
-              if (!next) onCancelCleanupPreview?.();
-              return next;
-            });
-          }}
-          onConfirm={onConfirmCleanup}
-          onCancelPreview={onCancelCleanupPreview}
-          onUndo={onUndoCleanup}
+          cleanupMessage={cleanupMessage}
+          pendingHighlight={cleanupPreviewHighlight ?? null}
+          onSelectPoint={onCleanupPoint}
+          onConfirm={() => onConfirmCleanup?.()}
+          onCancelPreview={() => onCancelCleanupPreview?.()}
+          onUndo={() => onUndoCleanup?.()}
+          onDone={closeWorkspace}
         />
       ) : null}
 
@@ -425,11 +464,12 @@ function CompareStep({
       ) : null}
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        {/* Approval is ONLY ever this explicit button. Opening either preview
-            above does nothing but show a larger picture. */}
+        {/* Approval is ONLY ever this explicit button. Enlarge is view-only;
+            Clean Up Background mutates only after confirm, and Done never
+            approves. */}
         <button
           type="button"
-          disabled={busy || pendingConfirmation}
+          disabled={busy || pendingConfirmation || workspaceOpen}
           onClick={onApprove}
           className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
         >
@@ -444,115 +484,6 @@ function CompareStep({
           Keep my original for now
         </button>
       </div>
-    </div>
-  );
-}
-
-/**
- * Existing Artwork → Print Ready Phase 1.2 / 1.3: the guided cleanup controls.
- *
- * Deliberately plain buttons and short sentences. This is not an image
- * editor: there is no brush, no lasso, no eraser, no freehand mask and no
- * layer list, because the customer's job here is to point at something that is
- * obviously wrong, then confirm, not to retouch their own artwork.
- *
- * Every word rendered comes from `preparation-copy.ts` — including the server's
- * answer to the last action, which is the one place a REFUSAL becomes visible
- * ("that area looks like part of the artwork, so we left it unchanged"). That
- * sentence is the whole safety story made legible, so it is never composed
- * here from a status code.
- */
-function GuidedCleanupControls({
-  active,
-  busy,
-  removalCount,
-  message,
-  pendingConfirmation,
-  onToggle,
-  onConfirm,
-  onCancelPreview,
-  onUndo,
-}: {
-  active: boolean;
-  busy: boolean;
-  removalCount: number;
-  message: string | null;
-  pendingConfirmation: boolean;
-  onToggle: () => void;
-  onConfirm?: () => void;
-  onCancelPreview?: () => void;
-  onUndo?: () => void;
-}) {
-  return (
-    <div className="mt-3 rounded-xl border border-black/8 bg-black/[0.02] p-3">
-      <p className="text-sm text-ink">
-        {pendingConfirmation
-          ? GUIDED_CLEANUP_COPY.confirmPrompt
-          : active
-            ? GUIDED_CLEANUP_COPY.activeHint
-            : GUIDED_CLEANUP_COPY.invitation}
-      </p>
-
-      <div className="mt-2.5 flex flex-wrap items-center gap-3">
-        {pendingConfirmation ? (
-          <>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onConfirm}
-              className="rounded-full bg-ink px-3 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {GUIDED_CLEANUP_COPY.confirmActionLabel}
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onCancelPreview}
-              className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-muted transition enabled:hover:border-ink/30 enabled:hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {GUIDED_CLEANUP_COPY.cancelActionLabel}
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            disabled={busy}
-            aria-pressed={active}
-            onClick={onToggle}
-            className={`rounded-full px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
-              active
-                ? "bg-ink text-white enabled:hover:bg-ink/90"
-                : "border border-black/10 text-muted enabled:hover:border-ink/30 enabled:hover:text-ink"
-            }`}
-          >
-            {active
-              ? GUIDED_CLEANUP_COPY.exitActionLabel
-              : GUIDED_CLEANUP_COPY.enterActionLabel}
-          </button>
-        )}
-
-        {!pendingConfirmation && removalCount > 0 && onUndo ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onUndo}
-            className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {GUIDED_CLEANUP_COPY.undoActionLabel}
-          </button>
-        ) : null}
-      </div>
-
-      {message && !pendingConfirmation ? (
-        <p className="mt-2 text-xs text-ink" role="status">
-          {message}
-        </p>
-      ) : null}
-      {pendingConfirmation ? (
-        <p className="sr-only" role="status" aria-live="polite">
-          {GUIDED_CLEANUP_COPY.confirmPrompt}
-        </p>
-      ) : null}
     </div>
   );
 }

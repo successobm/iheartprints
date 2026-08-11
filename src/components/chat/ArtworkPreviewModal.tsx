@@ -2,16 +2,16 @@
 
 import { useEffect } from "react";
 
+import { GUIDED_CLEANUP_COPY } from "@/capabilities/artwork-preparation";
+
 /**
  * Existing Artwork → Print Ready Phase 1: a full-size, READ-ONLY viewer for
  * one uploaded or prepared image.
  *
  * Deliberately has no action of any kind — no select, no approve, no
- * callbacks other than `onClose`. `ConceptCards` shipped a bug where opening
- * a preview implicitly selected a concept; the structural fix there was to
- * make the enlarge control a sibling of the select control rather than a
- * descendant. Here the property is stronger and cheaper: approval simply does
- * not exist inside this component, so viewing can never approve.
+ * cleanup, no callbacks other than `onClose`. Phase 1.4 keeps Enlarge as a
+ * separate view-only path; interactive cleanup lives in
+ * `GuidedCleanupWorkspace`. Viewing can never approve or mutate.
  */
 
 interface ArtworkPreviewModalProps {
@@ -77,6 +77,9 @@ export function ArtworkPreviewModal({
 
         <div className="border-t border-black/8 p-4">
           <p className="text-sm font-semibold text-ink">{title}</p>
+          <p className="mt-0.5 text-xs text-muted">
+            {GUIDED_CLEANUP_COPY.viewOnlyHint}
+          </p>
         </div>
       </div>
     </div>

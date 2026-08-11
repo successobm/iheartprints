@@ -10,6 +10,10 @@ export {
   type UploadArtworkInput,
   type UploadedArtworkContextInput,
 } from "./artwork-preparation-capability";
+export {
+  isStalePreparedImageResponse,
+  opaquePreparedRevision,
+} from "./prepared-revision";
 export type { GuidedCleanupHighlight } from "./guided-cleanup-candidate";
 export type {
   GuidedRemovalOutcome,

@@ -119,35 +119,41 @@ export function describePrintReadyPreparation(
 }
 
 /**
- * Existing Artwork → Print Ready Phase 1.2 / 1.3: the guided background
+ * Existing Artwork → Print Ready Phase 1.2–1.4: the guided background
  * cleanup surface, in customer language.
  *
  * Nothing here names a cavity, a connected component, a wall ratio, a flood
  * fill, an alpha value or a tolerance. The customer is told what they can see
- * ("some background is still showing") and what to do about it ("click it" /
- * "remove this area"). The word "background" is doing all the work, and it is
- * a word they already used when they uploaded the file.
+ * ("some background is still showing") and what to do about it.
  *
  * Phase 1.3: a click only PREVIEWS. Removal happens only after an explicit
- * "Remove This Area" confirmation, so a finger-hole mis-click is visible and
- * cancellable before any bytes change.
+ * "Remove This Area" confirmation.
+ *
+ * Phase 1.4: cleanup happens in a LARGE focused workspace opened by
+ * "Clean Up Background", not by silently clicking the small compare tile.
  */
 export const GUIDED_CLEANUP_COPY = {
   /** Sits under the prepared preview whenever cleanup is available. */
   invitation:
-    "Still see some background? Click an area to preview it before removing it.",
-  /** The control that turns clicking on. */
-  enterActionLabel: "Remove More Background",
-  /** The control that turns it off again. */
-  exitActionLabel: "Done Removing",
-  /** While cleanup mode is on and nothing is pending confirmation. */
+    "Still see some background? Use Clean Up Background to remove any areas we missed.",
+  /** Opens the large interactive cleanup workspace. */
+  enterActionLabel: "Clean Up Background",
+  /** Closes the workspace and returns to compare. Does NOT approve. */
+  exitActionLabel: "Done",
+  /** Inside the workspace while nothing is pending confirmation. */
   activeHint:
-    "Still see some background? Click an area to preview it before removing it.",
+    "Click any area that should be see-through. We'll show you exactly what will be removed before anything changes.",
   /** After an eligible area is selected, before confirmation. */
   confirmPrompt: "Remove this area?",
   confirmActionLabel: "Remove This Area",
   cancelActionLabel: "Cancel",
   undoActionLabel: "Undo Last Removal",
+  /** Distinguishes read-only Enlarge from interactive cleanup. */
+  viewOnlyHint: "View only — nothing can be changed here.",
+  workspaceTitle: "Clean up background",
+  fitActionLabel: "Fit",
+  zoomInActionLabel: "Zoom In",
+  zoomOutActionLabel: "Zoom Out",
 } as const;
 
 /**

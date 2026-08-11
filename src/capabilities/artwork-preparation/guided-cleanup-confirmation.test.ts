@@ -463,6 +463,108 @@ describe("Guided cleanup — Phase 1.3 preview / confirmation safety", () => {
     );
   });
 
+  // Phase 1.4: sequential confirmations must ACCUMULATE — the exact regression
+  // the prior "multiple guided removals" wording missed (that test compared one
+  // click across projects, not two confirms on one preparation).
+  it("sequential D→R confirmations accumulate removals and advance preparedRevision", async () => {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const { bowlingLetterformArtwork, BOWLING_FINGER_HOLES } = await import(
+      "./artwork-fixtures"
+    );
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const capability = createArtworkPreparationCapability(
+      repo,
+      assets,
+      createDesignBriefCapability(repo),
+    );
+
+    // Two distinct ambiguous regions that survive automatic preparation
+    // (finger holes on the synthetic bowling letterform). Same accumulation
+    // contract as letter counters — click → preview → confirm → append.
+    const D = BOWLING_FINGER_HOLES[0]!;
+    const R = BOWLING_FINGER_HOLES[1]!;
+
+    const projectId = (await repo.createProject()).project.id;
+    await capability.uploadOriginal(projectId, {
+      bytes: toPngBytes(bowlingLetterformArtwork()),
+      declaredContentType: "image/png",
+      filename: "bowling-synth.png",
+    });
+    await capability.setProductionContext(projectId, {
+      productSummary: "T-shirts",
+      productColor: "Black",
+      printPlacement: "full_front",
+    });
+    const automatic = await capability.prepareBackground(projectId);
+    assert.ok(automatic.preparedRevision);
+    assert.equal(automatic.guidedCleanup.removalCount, 0);
+
+    async function pixels() {
+      const assetId = await capability.resolveImageAssetId(projectId, "prepared");
+      assert.ok(assetId);
+      const downloaded = await assets.downloadAssetBytes(assetId);
+      assert.ok(downloaded);
+      return decodePngUpload(downloaded.bytes).image;
+    }
+
+    const before = await pixels();
+    assert.equal(getPixel(before, D.x, D.y).a, 255);
+    assert.equal(getPixel(before, R.x, R.y).a, 255);
+
+    const dPreview = await capability.previewGuidedCleanup(projectId, D);
+    assert.equal(dPreview.outcome, "preview");
+    assert.equal(dPreview.view.preparedRevision, automatic.preparedRevision);
+    assert.equal(getPixel(await pixels(), D.x, D.y).a, 255, "preview does not mutate");
+
+    const dConfirm = await capability.confirmGuidedCleanup(
+      projectId,
+      dPreview.candidateToken!,
+    );
+    assert.equal(dConfirm.outcome, "removed");
+    assert.equal(dConfirm.view.guidedCleanup.removalCount, 1);
+    assert.ok(dConfirm.view.preparedRevision);
+    assert.notEqual(dConfirm.view.preparedRevision, automatic.preparedRevision);
+    const afterD = await pixels();
+    assert.equal(getPixel(afterD, D.x, D.y).a, 0);
+    assert.equal(getPixel(afterD, R.x, R.y).a, 255);
+
+    const rPreview = await capability.previewGuidedCleanup(projectId, R);
+    assert.equal(rPreview.outcome, "preview");
+    assert.equal(
+      rPreview.view.preparedRevision,
+      dConfirm.view.preparedRevision,
+      "preview must not change preparedRevision",
+    );
+    const duringRPreview = await pixels();
+    assert.equal(getPixel(duringRPreview, D.x, D.y).a, 0, "D stays gone during R preview");
+    assert.equal(getPixel(duringRPreview, R.x, R.y).a, 255);
+
+    const rConfirm = await capability.confirmGuidedCleanup(
+      projectId,
+      rPreview.candidateToken!,
+    );
+    assert.equal(rConfirm.outcome, "removed");
+    assert.equal(rConfirm.view.guidedCleanup.removalCount, 2);
+    assert.ok(rConfirm.view.preparedRevision);
+    assert.notEqual(rConfirm.view.preparedRevision, dConfirm.view.preparedRevision);
+    const afterR = await pixels();
+    assert.equal(getPixel(afterR, D.x, D.y).a, 0, "D remains after R confirm");
+    assert.equal(getPixel(afterR, R.x, R.y).a, 0, "R removed");
+
+    const undone = await capability.undoGuidedCleanup(projectId);
+    assert.equal(undone.outcome, "undone");
+    assert.equal(undone.view.guidedCleanup.removalCount, 1);
+    assert.notEqual(undone.view.preparedRevision, rConfirm.view.preparedRevision);
+    const afterUndo = await pixels();
+    assert.equal(getPixel(afterUndo, D.x, D.y).a, 0, "undo R keeps D gone");
+    assert.equal(getPixel(afterUndo, R.x, R.y).a, 255, "undo restores R");
+  });
+
   // S. Automatic Phase 1.2 result is unchanged by preview.
   it("S: automatic preparation output is unchanged by preview activity", async () => {
     const { repo, assets, capability } = await build();

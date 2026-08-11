@@ -92,4 +92,23 @@ describe("Artwork click mapping — object-contain letterboxing", () => {
       null,
     );
   });
+
+  it("maps touch/modal-scale layout boxes the same way as desktop clicks", () => {
+    // A phone-width modal still letterboxes a wide prepared image; clientX/Y
+    // from a finger tap are already relative to the image element's CSS box
+    // (getBoundingClientRect), so the pure mapper must not assume a desktop
+    // pixel density or a second coordinate system.
+    const mobileModal = {
+      width: 320,
+      height: 480,
+      naturalWidth: 979,
+      naturalHeight: 1024,
+    };
+    const centre = mapClickToImagePoint(mobileModal, 160, 240);
+    assert.ok(centre);
+    assert.ok(centre.x > 400 && centre.x < 580);
+    assert.ok(centre.y > 400 && centre.y < 620);
+    assert.equal(mapClickToImagePoint(mobileModal, 8, 8), null);
+    assert.equal(mapClickToImagePoint(mobileModal, 310, 470), null);
+  });
 });

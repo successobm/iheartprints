@@ -12,6 +12,7 @@ import type { PrintPlacement } from "@/lib/domain/types";
 import type { ApiProjectSnapshot } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { deriveChatAffordances } from "./chat-affordances";
+import { isStalePreparedImageResponse } from "@/capabilities/artwork-preparation";
 import {
   deriveUploadedArtworkStep,
   uploadedArtworkOwnsSurface,
@@ -99,11 +100,20 @@ export function ChatApp() {
    */
   const [preparationImages, setPreparationImages] = useState<{
     preparationId: string | null;
+    /** Opaque prepared derivation identity this URL pair belongs to. */
+    preparedRevision: string | null;
     original: string | null;
     prepared: string | null;
-  }>({ preparationId: null, original: null, prepared: null });
+  }>({
+    preparationId: null,
+    preparedRevision: null,
+    original: null,
+    prepared: null,
+  });
   const previousConceptStatusRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  /** Latest prepared revision — used to drop stale signed-URL responses. */
+  const preparedRevisionRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isClient) return;
@@ -750,30 +760,28 @@ export function ChatApp() {
   const preparationId = preparation?.preparationId ?? null;
   const hasPreparedArtwork = preparation?.hasPreparedArtwork ?? false;
   /**
-   * Phase 1.2: every accepted guided removal (and every undo) replaces the
-   * prepared asset, so this count is what tells the effect below that the
-   * signed URL it holds now points at superseded bytes. Without it the
-   * customer would click, the server would do the work, and the preview would
-   * not change — which reads exactly like the click was ignored.
-   *
-   * A REFUSED click leaves the count alone, which is correct: nothing was
-   * derived, so there is nothing new to fetch.
+   * Phase 1.4: every confirm/undo replaces the prepared derivation. This
+   * opaque revision — not removalCount alone — tells the effect below that
+   * the signed URL it holds now points at superseded bytes. Preview leaves
+   * the revision unchanged, so selecting a second area never reloads (or
+   * resurrects) an older automatic/prepared image.
    */
-  const guidedCleanupCount = preparation?.guidedCleanup.removalCount ?? 0;
+  const preparedRevision = preparation?.preparedRevision ?? null;
+  preparedRevisionRef.current = preparedRevision;
 
   // Existing Artwork → Print Ready Phase 1: mint fresh signed URLs for the
-  // original and (once it exists) the prepared image. Keyed on the
-  // preparation id, whether a prepared asset exists, and how many guided
-  // removals produced it — so approving, re-preparing, or cleaning up
-  // re-fetches while unrelated snapshot updates do not.
+  // original and (once it exists) the prepared image. Keyed on preparation
+  // id + preparedRevision so cleanup/undo re-fetches while preview and other
+  // unrelated snapshot updates do not.
   useEffect(() => {
     // No preparation means nothing to fetch. State is not cleared here —
-    // render reads `preparationId` alongside it (see `preparationImagesFor`),
-    // so a stale URL can never be shown for a different preparation.
+    // render reads `preparationId` / `preparedRevision` alongside it, so a
+    // stale URL can never be shown for a different derivation.
     if (!isClient || !snapshot || !preparationId) return;
 
     let cancelled = false;
     const projectId = snapshot.project.id;
+    const requestRevision = preparedRevision;
 
     async function loadImageUrl(role: "original" | "prepared") {
       const response = await fetch(
@@ -789,9 +797,21 @@ export function ChatApp() {
         loadImageUrl("original").catch(() => null),
         hasPreparedArtwork ? loadImageUrl("prepared").catch(() => null) : null,
       ]);
-      if (!cancelled) {
-        setPreparationImages({ preparationId, original, prepared });
+      if (cancelled) return;
+      if (
+        isStalePreparedImageResponse({
+          requestRevision,
+          authoritativeRevision: preparedRevisionRef.current,
+        })
+      ) {
+        return;
       }
+      setPreparationImages({
+        preparationId,
+        preparedRevision: requestRevision,
+        original,
+        prepared,
+      });
     })();
 
     return () => {
@@ -803,7 +823,7 @@ export function ChatApp() {
     snapshot?.project.id,
     preparationId,
     hasPreparedArtwork,
-    guidedCleanupCount,
+    preparedRevision,
   ]);
 
   const phase = snapshot?.conversation.phase;
@@ -846,7 +866,7 @@ export function ChatApp() {
   const currentPreparationImages =
     preparationId !== null && preparationImages.preparationId === preparationId
       ? preparationImages
-      : { original: null, prepared: null };
+      : { original: null, prepared: null, preparedRevision: null };
 
   // An uploaded-artwork customer already has their design: the creative
   // surfaces (concept grid, summary card, revision actions, composer) are
@@ -1096,6 +1116,13 @@ export function ChatApp() {
                 busy={sending}
                 originalImageUrl={currentPreparationImages.original}
                 preparedImageUrl={currentPreparationImages.prepared}
+                preparedRevision={
+                  // Prefer the URL's bound revision while a newer fetch is in
+                  // flight so the workspace keeps showing the last authoritative
+                  // prepared bytes (e.g. post-D while post-D+R loads) instead of
+                  // flashing empty. Snapshot revision is still what triggers fetch.
+                  currentPreparationImages.preparedRevision ?? preparedRevision
+                }
                 onUpload={(file) => void uploadExistingArtwork(file)}
                 onSaveDetails={(input) => void saveUploadedArtworkDetails(input)}
                 onPrepare={() => void prepareUploadedArtwork()}

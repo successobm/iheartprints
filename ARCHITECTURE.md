@@ -4165,10 +4165,15 @@ customer_upload (IMMUTABLE, never rewritten)
 ```
 
 Every cleanup derives a **new** asset; superseded ones are left in place, so
-lineage stays readable and nothing is overwritten. Once `status = 'approved'`
-the preparation is history: `previewGuidedCleanup`, `confirmGuidedCleanup`, and
-`undoGuidedCleanup` all refuse, so the artwork Phase 2 consumes can never change
-underneath it.
+lineage stays readable and nothing is overwritten. Each persisted derivation
+uses a **unique storage object identity** (`prepared-{preparationId}-{uuid}`
+as the storage `conceptId` folder). Storage backends keep `upsert: false` —
+paths are never reused as an idempotency mechanism; candidate tokens and the
+`guided_cleanup` click list are. An orphan object from a failed DB write after
+a successful upload must not block the next confirm: the next attempt mints a
+fresh UUID. Once `status = 'approved'` the preparation is history:
+`previewGuidedCleanup`, `confirmGuidedCleanup`, and `undoGuidedCleanup` all
+refuse, so the artwork Phase 2 consumes can never change underneath it.
 
 > **PREPARED ARTWORK MAY INCLUDE CUSTOMER-GUIDED CLEANUP BEFORE APPROVAL.** What
 > the customer approves is the prepared file as they last saw it — automatic
@@ -4293,6 +4298,19 @@ approving**: `ArtworkPreviewModal` has no approval affordance in it at all —
 a stronger version of the structural fix applied to `ConceptCards`, where the
 enlarge control had to become a sibling of the select control. Approval is
 only ever the explicit "Use Prepared Artwork" button.
+
+Guided background cleanup (Phase 1.4) is opened from compare via **Clean Up
+Background**, which mounts `GuidedCleanupWorkspace` — a large interactive
+surface for preview → confirm → undo, with Fit / Zoom In / Zoom Out and
+scroll-or-drag pan so small details stay clickable. Zoom grows the rendered
+image content box inside a scrollable viewport (not CSS `scale`), so
+`mapClickToImagePoint` stays authoritative. Enlarge stays a separate read-only
+viewer; the small compare tiles are not the cleanup surface.
+
+The customer snapshot carries an opaque `preparedRevision` that changes on
+every confirm/undo (new prepared derivation) and is unchanged by preview.
+`ChatApp` reloads the prepared signed URL when that revision changes, so a
+later cleanup preview cannot resurrect a superseded automatic/prepared image.
 
 Every sentence the panel renders comes from the server
 (`preparation-copy.ts`). No copy is derived client-side from analysis
@@ -4835,7 +4853,8 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 | `WorkflowChoiceCard` | §13h: Create New Artwork vs Upload Existing Artwork, at project start only. "Create New" is a pure client-side dismissal — the existing interview is unchanged |
 | `UploadedArtworkPanel` | §13h: the Upload Existing Artwork surface (upload → production details → analysis → compare → approved). Renders only server-authored copy |
 | `ArtworkComparison` | §13h: labelled Original vs Prepared tiles; prepared on a transparency checkerboard; `Enlarge` is a separate control from approval |
-| `ArtworkPreviewModal` | §13h: read-only full-size viewer with **no** approval affordance at all — viewing can never approve |
+| `ArtworkPreviewModal` | §13h: read-only full-size viewer with **no** approval or cleanup affordance — viewing can never approve or mutate |
+| `GuidedCleanupWorkspace` | §13h Phase 1.4: large interactive cleanup surface (preview → confirm → undo → Done); presentation only over the Phase 1.3 API |
 | `uploaded-artwork-flow.ts` | §13h: pure step derivation + "does the upload workflow own the surface?" — testable without a DOM, same reason as `chat-affordances.ts` |
 | `Composer` | Message input |
 | `chat-session.ts` | localStorage project id restore/create |
