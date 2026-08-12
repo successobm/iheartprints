@@ -7,6 +7,7 @@ import {
   describePrintReadyPreparation,
   GUIDED_CLEANUP_COPY,
   PRINT_READY_NEEDS_ATTENTION_MESSAGE,
+  UPLOAD_QUALITY_GUIDANCE_COPY,
   type ArtworkPreparationView,
 } from "@/capabilities/artwork-preparation";
 import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size";
@@ -205,6 +206,23 @@ function UploadStep({
       <p className="mt-2 text-xs text-muted">
         We can work with PNG images right now.
       </p>
+      <div className="mt-3">
+        <p className="text-xs font-medium text-ink">
+          {UPLOAD_QUALITY_GUIDANCE_COPY.headline}
+        </p>
+        <p className="mt-1 text-xs text-muted">
+          {UPLOAD_QUALITY_GUIDANCE_COPY.recommendation}
+        </p>
+        <p className="mt-1 text-xs text-muted">
+          {UPLOAD_QUALITY_GUIDANCE_COPY.limitation}
+        </p>
+        <p className="mt-1 text-xs text-muted">
+          {UPLOAD_QUALITY_GUIDANCE_COPY.reassurance}
+        </p>
+        <p className="mt-1.5 text-xs text-muted">
+          {UPLOAD_QUALITY_GUIDANCE_COPY.bestPractices}
+        </p>
+      </div>
     </div>
   );
 }

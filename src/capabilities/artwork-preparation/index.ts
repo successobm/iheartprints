@@ -64,6 +64,7 @@ export {
   describePrintReadyPreparation,
   GUIDED_CLEANUP_COPY,
   PRINT_READY_NEEDS_ATTENTION_MESSAGE,
+  UPLOAD_QUALITY_GUIDANCE_COPY,
   type ApprovedPreparationCopy,
   type ArtworkPreparationCustomerView,
   type GuidedCleanupOutcomeCode,

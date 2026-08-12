@@ -119,6 +119,27 @@ export function describePrintReadyPreparation(
 }
 
 /**
+ * Existing Artwork → Print Ready: pre-upload quality guidance on the
+ * upload step. Sets expectations without making the customer responsible
+ * for doing our job, and without claiming perfect background removal.
+ *
+ * Presentation copy only — it does not change file acceptance or
+ * preparation behaviour. Transparent artwork is ideal; a solid white
+ * background is the next-best starting point, never a requirement.
+ */
+export const UPLOAD_QUALITY_GUIDANCE_COPY = {
+  headline: "For the best results",
+  recommendation:
+    "Upload a high-resolution image with a transparent or solid white background whenever possible.",
+  limitation:
+    "Images with coloured, dark, textured, or complex backgrounds may leave small traces around the edges of your design after background removal.",
+  reassurance:
+    "Don't worry — iHeartPrints will automatically clean and prepare your artwork as much as possible. You'll be able to review it before creating your print-ready file.",
+  bestPractices:
+    "Best: Transparent PNG or white background · High resolution · Clear, sharp edges",
+} as const;
+
+/**
  * Existing Artwork → Print Ready Phase 1.2–1.7: the guided background
  * cleanup surface, in customer language.
  *

@@ -166,6 +166,62 @@ describe("UploadedArtworkPanel", () => {
     assert.doesNotMatch(html, /jpe?g|webp|svg/i);
   });
 
+  it("shows pre-upload quality guidance without gating the upload", () => {
+    const html = render("upload");
+    const text = visibleText(html);
+
+    assert.match(text, /For the best results/);
+    assert.match(text, /Transparent PNG/);
+    assert.match(text, /white background/i);
+    assert.match(text, /whenever possible/i);
+    assert.match(text, /colou?red/i);
+    assert.match(text, /dark/);
+    assert.match(text, /textured/);
+    assert.match(text, /complex/);
+    assert.match(text, /traces/);
+    assert.match(text, /edges/);
+    assert.match(text, /iHeartPrints will automatically clean and prepare/);
+    assert.match(text, /review it before creating your print-ready file/);
+
+    // Recommended, never required — and transparent is listed first in Best.
+    assert.doesNotMatch(text, /\brequired\b/i);
+    assert.doesNotMatch(text, /\bmust\b/i);
+    assert.match(text, /transparent or solid white background whenever possible/i);
+    assert.match(text, /Best: Transparent PNG or white background/);
+
+    // Existing CTA and file acceptance stay the primary action.
+    assert.match(html, /Choose a PNG file/);
+    assert.match(html, /accept="image\/png"/);
+    assert.match(text, /We can work with PNG images right now/);
+    assert.doesNotMatch(html, /type="checkbox"/);
+    assert.doesNotMatch(html, /role="alert"/);
+    assert.doesNotMatch(
+      text,
+      /alpha|masks?|fringe|matte|tolerance|Phase 1|Magic Select/i,
+    );
+  });
+
+  it("renders that guidance through the Existing Artwork upload step only", () => {
+    const step = deriveUploadedArtworkStep({
+      preparation: null,
+      choice: "upload_existing",
+      atProjectStart: true,
+    });
+    assert.equal(step, "upload");
+    assert.match(visibleText(render("upload")), /For the best results/);
+
+    assert.doesNotMatch(
+      visibleText(render("confirm_details", { printPlacement: null })),
+      /For the best results/,
+    );
+    assert.doesNotMatch(visibleText(render("review_analysis")), /For the best results/);
+    assert.doesNotMatch(visibleText(render("compare")), /For the best results/);
+    assert.doesNotMatch(
+      visibleText(render("approved", { approved: true, status: "approved" })),
+      /For the best results/,
+    );
+  });
+
   it("details step asks only production questions, never creative ones", () => {
     const html = render("confirm_details", { printPlacement: null });
 
