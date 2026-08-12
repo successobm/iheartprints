@@ -80,6 +80,11 @@ export interface ConceptEvaluationResult {
   matchedRequirements: string[];
   /** Internal only — never customer-facing. */
   providerMetadata: Record<string, unknown>;
+  /**
+   * Phase 2B: attached by ConceptEvaluationCapability after the provider
+   * returns — never invented by a vision provider.
+   */
+  printPaletteCompliance?: ConceptEvaluation["printPaletteCompliance"];
 }
 
 /** Persistable slice of an evaluation result (no raw provider dialect). */

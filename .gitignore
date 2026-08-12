@@ -49,6 +49,10 @@ next-env.d.ts
 
 supabase/.temp/
 
+# Local Phase 2B Harley calibration PNGs (customer assets — never commit)
+.tmp-phase2b-harley/
+.tmp-audit-harley/
+
 # Sprint 2M Phase 2D research bake-off artifacts (local only)
 research/phase-2d-bakeoff/outputs/
 research/phase-2d-bakeoff/reports/

@@ -599,6 +599,43 @@ export interface ConceptEvaluationCriterionScore {
 }
 
 /**
+ * Phase 2B: deterministic print-palette / garment-contrast gate statuses.
+ * Authoritative for hard palette compliance; OpenAI Vision must not reverse
+ * a hard `fail`. Lifecycle rejection is deferred to Phase 2C.
+ */
+export type PrintPaletteComplianceStatus =
+  | "pass"
+  | "warn"
+  | "fail"
+  | "not_applicable";
+
+/**
+ * Compact diagnostics persisted on `ConceptEvaluation` (JSONB — no migration).
+ * Metrics are fractions / counts only; never raw pixels.
+ */
+export interface PrintPaletteCompliance {
+  status: PrintPaletteComplianceStatus;
+  metrics: {
+    visiblePixelWeight: number;
+    visiblePixelFraction: number;
+    veryLightPixelFraction: number;
+    lightPixelFraction: number;
+    midtonePixelFraction: number;
+    darkPixelFraction: number;
+    nearBlackPixelFraction: number;
+    paletteCoverageFraction: number;
+    garmentMatchingFraction: number;
+    meanVisibleLuminance: number;
+    garmentLuminance: number | null;
+    garmentClass: "light" | "mid" | "dark" | "unknown";
+    luminanceContrastDelta: number | null;
+    requiredPaletteFamily: "light" | "dark" | "mid" | "unknown";
+    enforcement: PrintPaletteEnforcement;
+  };
+  reasons: string[];
+}
+
+/**
  * Provider-neutral Concept Evaluation payload persisted on ArtworkVersion.
  * Distinct from Print Validation (DPI, transparency, print size, etc.).
  */
@@ -613,6 +650,11 @@ export interface ConceptEvaluation {
   matchedRequirements: string[];
   /** Internal provider envelope — never customer-facing. */
   providerMetadata: Record<string, unknown>;
+  /**
+   * Phase 2B: deterministic print-palette / garment-contrast compliance.
+   * Optional for records written before Phase 2B; JSONB — no migration.
+   */
+  printPaletteCompliance?: PrintPaletteCompliance | null;
 }
 
 export interface ArtworkVersion {

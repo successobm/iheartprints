@@ -55,6 +55,7 @@ export const TEST_FILES = [
   "src/capabilities/concept-evaluation/concept-evaluation-pipeline.test.ts",
   "src/capabilities/concept-evaluation/openai-concept-evaluation-provider.test.ts",
   "src/capabilities/concept-evaluation/resolve-concept-evaluation-provider.test.ts",
+  "src/capabilities/concept-evaluation/print-palette-compliance.test.ts",
   "src/lib/config/concept-evaluation-provider-config.test.ts",
   "src/capabilities/providers/openai-concept-provider.test.ts",
   "src/capabilities/providers/concept-prompt-fidelity.test.ts",

@@ -1,3 +1,4 @@
+import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import type {
   ConceptEvaluation,
   ConceptEvaluationStatus,
@@ -12,6 +13,8 @@ import type {
   PersistedConceptEvaluation,
 } from "./contracts";
 import { CONCEPT_EVALUATION_CRITERION_KEYS } from "./contracts";
+import { mergePrintPaletteCompliance } from "./merge-print-palette-compliance";
+import { evaluatePrintPaletteCompliance } from "./print-palette-compliance";
 
 export interface ConceptEvaluationInput {
   brief: DesignBriefSnapshotContent;
@@ -22,6 +25,12 @@ export interface ConceptEvaluationInput {
   };
   assets: ConceptEvaluationAssetReference[];
   idempotencyKey: string;
+  /**
+   * Phase 2B: decoded concept raster when available. Deterministic palette
+   * compliance inspects these pixels — never prompt/metadata alone. `null`
+   * / omitted → compliance records `pixels_unavailable` (not a hard invent).
+   */
+  image?: RgbaImage | null;
 }
 
 /**
@@ -84,8 +93,22 @@ export function createConceptEvaluationCapability(
         assets: input.assets,
         idempotencyKey: input.idempotencyKey,
       };
-      const result = await provider.evaluate(request);
-      return normalizeResult(result);
+      let result: ConceptEvaluationResult;
+      try {
+        result = await provider.evaluate(request);
+      } catch (error) {
+        // Same fallback the worker historically applied — kept here so Phase 2B
+        // compliance still attaches when the vision provider throws.
+        result = createFailureFallbackResult(error);
+      }
+      // Phase 2B: deterministic hard-palette gate from actual pixels.
+      // Attached after the provider so vision never invents this payload;
+      // merge enforces precedence on color_palette without changing lifecycle.
+      const compliance = evaluatePrintPaletteCompliance({
+        image: input.image ?? null,
+        brief: input.brief,
+      });
+      return normalizeResult(mergePrintPaletteCompliance(result, compliance));
     },
 
     toPersistedEvaluation(result) {
@@ -100,6 +123,7 @@ export function createConceptEvaluationCapability(
         missingRequirements: normalized.missingRequirements,
         matchedRequirements: normalized.matchedRequirements,
         providerMetadata: normalized.providerMetadata,
+        printPaletteCompliance: normalized.printPaletteCompliance ?? null,
       };
       return {
         evaluation,
@@ -109,35 +133,39 @@ export function createConceptEvaluationCapability(
     },
 
     evaluationFailureFallback(error) {
-      const message =
-        error && typeof error === "object" && "message" in error
-          ? String((error as { message?: unknown }).message ?? "unknown")
-          : "unknown";
-      return normalizeResult({
-        overallScore: null,
-        passed: null,
-        confidence: 0,
-        status: "needs_review",
-        criteria: CONCEPT_EVALUATION_CRITERION_KEYS.map((key) => ({
-          key,
-          score: null,
-          passed: null,
-          confidence: 0,
-          notes: "evaluation_provider_error",
-        })),
-        warnings: [
-          "Concept evaluation provider failed; concept retained for customer review.",
-        ],
-        recommendations: [],
-        missingRequirements: [],
-        matchedRequirements: [],
-        providerMetadata: {
-          mode: "failure_fallback",
-          errorClass: error instanceof Error ? error.name : "unknown",
-          // Sanitized — never stack traces, secrets, or signed URLs.
-          errorSummary: message.slice(0, 200),
-        },
-      });
+      return normalizeResult(createFailureFallbackResult(error));
+    },
+  };
+}
+
+function createFailureFallbackResult(error: unknown): ConceptEvaluationResult {
+  const message =
+    error && typeof error === "object" && "message" in error
+      ? String((error as { message?: unknown }).message ?? "unknown")
+      : "unknown";
+  return {
+    overallScore: null,
+    passed: null,
+    confidence: 0,
+    status: "needs_review",
+    criteria: CONCEPT_EVALUATION_CRITERION_KEYS.map((key) => ({
+      key,
+      score: null,
+      passed: null,
+      confidence: 0,
+      notes: "evaluation_provider_error",
+    })),
+    warnings: [
+      "Concept evaluation provider failed; concept retained for customer review.",
+    ],
+    recommendations: [],
+    missingRequirements: [],
+    matchedRequirements: [],
+    providerMetadata: {
+      mode: "failure_fallback",
+      errorClass: error instanceof Error ? error.name : "unknown",
+      // Sanitized — never stack traces, secrets, or signed URLs.
+      errorSummary: message.slice(0, 200),
     },
   };
 }
@@ -170,6 +198,7 @@ function normalizeResult(result: ConceptEvaluationResult): ConceptEvaluationResu
       .map((r) => redactUrls(r) ?? "")
       .filter(Boolean),
     providerMetadata: sanitizeProviderMetadata(result.providerMetadata),
+    printPaletteCompliance: result.printPaletteCompliance ?? null,
   };
 }
 

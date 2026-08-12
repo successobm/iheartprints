@@ -1,5 +1,7 @@
 import { randomUUID } from "crypto";
 
+import { PNG } from "pngjs";
+
 import type { ProjectRepository } from "@/lib/db/repository";
 import type {
   ConceptEvaluation,
@@ -14,6 +16,7 @@ import {
   createConceptEvaluationCapability,
   PlaceholderConceptEvaluationProvider,
 } from "@/capabilities/concept-evaluation";
+import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import type { PromptTranslationCapability } from "@/capabilities/prompt-translation";
 import type { RevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
 import { createRevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
@@ -221,6 +224,10 @@ export function createGenerationWorkerCapability(
    * Sprint 2I Phase 1: evaluate one concept against the approved brief.
    * Evaluation failure never discards the concept — a needs_review fallback
    * is persisted instead. Customer presentation is unchanged.
+   *
+   * Phase 2B: when primary bytes are available, decode them and pass the
+   * RGBA raster into Concept Evaluation so deterministic print-palette
+   * compliance can inspect actual pixels. Still never rejects the concept.
    */
   async function evaluateConcept(input: {
     brief: DesignBriefSnapshotContent;
@@ -230,6 +237,8 @@ export function createGenerationWorkerCapability(
     primaryAssetId: string | null;
     thumbnailAssetId: string | null;
     idempotencyKey: string;
+    /** Fresh-generation path may already hold PNG bytes — avoid a re-download. */
+    primaryBytes?: Buffer | null;
   }): Promise<{
     evaluationStatus: ConceptEvaluationStatus;
     evaluation: ConceptEvaluation;
@@ -268,6 +277,11 @@ export function createGenerationWorkerCapability(
       }
     }
 
+    const image = await resolveConceptImageForPaletteCheck({
+      primaryAssetId: input.primaryAssetId,
+      primaryBytes: input.primaryBytes ?? null,
+    });
+
     let result;
     try {
       result = await conceptEvaluation.evaluate({
@@ -279,6 +293,7 @@ export function createGenerationWorkerCapability(
         },
         assets: assetRefs,
         idempotencyKey: input.idempotencyKey,
+        image,
       });
     } catch (error) {
       result = conceptEvaluation.evaluationFailureFallback(error);
@@ -289,6 +304,44 @@ export function createGenerationWorkerCapability(
       ...persisted,
       evaluationEvaluatedAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Phase 2B: decode concept PNG bytes for deterministic palette compliance.
+   * Swallow decode failures — evaluation still proceeds; compliance records
+   * `pixels_unavailable` rather than failing the generation job.
+   */
+  async function resolveConceptImageForPaletteCheck(input: {
+    primaryAssetId: string | null;
+    primaryBytes: Buffer | null;
+  }): Promise<RgbaImage | null> {
+    let bytes = input.primaryBytes;
+    if ((!bytes || bytes.length === 0) && input.primaryAssetId) {
+      try {
+        const downloaded = await assets.downloadAssetBytes(input.primaryAssetId);
+        bytes = downloaded?.bytes ?? null;
+      } catch {
+        return null;
+      }
+    }
+    if (!bytes || bytes.length === 0) return null;
+    try {
+      const decoded = PNG.sync.read(bytes);
+      if (
+        !decoded.width ||
+        !decoded.height ||
+        decoded.data.length !== decoded.width * decoded.height * 4
+      ) {
+        return null;
+      }
+      return {
+        width: decoded.width,
+        height: decoded.height,
+        data: Buffer.from(decoded.data),
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -626,6 +679,7 @@ export function createGenerationWorkerCapability(
           primaryAssetId: assetIds.primaryAssetId,
           thumbnailAssetId: assetIds.thumbnailAssetId,
           idempotencyKey: `${job.idempotencyKey}:concept:${index}`,
+          primaryBytes: concept.asset?.imageBytes ?? null,
         });
         versionsInput.push({
           versionNumber: startingVersionNumber + index + 1,
