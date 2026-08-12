@@ -495,6 +495,27 @@ Sprint 2K Phase 3 adds two provider-neutral fields to `GenerationPromptRequest`
   beyond `requiredWording`, rather than an ad hoc prompt hack living inside
   one adapter.
 
+Phase 2A (Create New Artwork print-palette contract) adds two more
+provider-neutral fields, also derived here from existing brief state — **no
+migration**:
+
+- `printPaletteEnforcement: "hard" | "soft" | "none"` — whether
+  `preferredColors` is a required print/render palette (hard), a casual
+  preference (soft), or absent. Hard is derived when preferred colors
+  contrast with the garment **and** the design description still names
+  subject/object colors that are not the print palette (including the
+  live contrast-resolution pattern: black subject objects + white
+  artwork on a black shirt).
+- `subjectOnlyColors: string[]` — color words that appear in subject
+  semantics but are not part of the print palette (empty unless
+  enforcement is `"hard"`). Adapters must preserve subject identity while
+  forbidding those colors as dominant ink.
+
+Garment color (`productColor` / `shirtColor`), subject/object color in
+`designDescription`, and rendered print palette are three distinct
+concepts. Creative directions may vary composition and density; they must
+not dilute a hard print palette, no-text, or exclusions.
+
 ### Initial generation vs targeted revision (True Source-Image Targeted Revision)
 
 Generation has **two distinct modes**. They are different operations, not

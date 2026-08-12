@@ -457,10 +457,12 @@ function buildPrompt(
     `Visual hierarchy: ${treatment.visualHierarchy}.`,
   );
   if (prompt.style) styleLines.push(`Style: ${prompt.style}.`);
-  if (prompt.colors.length > 0) {
+  // Phase 2A: soft palette stays inside STYLE; hard palette is a dedicated
+  // production section below so creative direction cannot dilute it.
+  if (prompt.colors.length > 0 && prompt.printPaletteEnforcement === "soft") {
     styleLines.push(`Preferred colors: ${prompt.colors.join(", ")}.`);
   }
-  if (prompt.productColor) {
+  if (prompt.productColor && prompt.printPaletteEnforcement !== "hard") {
     styleLines.push(
       `Will be printed on a ${prompt.productColor} garment — keep contrast strong against it.`,
     );
@@ -470,6 +472,10 @@ function buildPrompt(
       "\n",
     )}`,
   );
+
+  if (prompt.printPaletteEnforcement === "hard" && prompt.colors.length > 0) {
+    sections.push(buildHardPrintPaletteSection(prompt));
+  }
 
   // Sprint 2K Phase 3 (Goal 7): explicit, deterministic instruction against
   // inventing text — driven by the provider-neutral `allowAdditionalText`
@@ -529,15 +535,8 @@ function buildPrompt(
     // instruction that reads as forbidding its own creative direction is
     // just a different contradiction.
     "DO NOT OMIT: every subject, object, count, and spatial relationship named in REQUIRED DESIGN CONTENT and COMPOSITION must be present in the finished artwork. Do not drop a named element, merge several named elements into one, replace the described arrangement with a generic one, or reduce the design to one lone symbol in order to satisfy the creative direction.",
-    noText
-      ? "PRIORITY when anything conflicts: the NO TEXT rule and the exclusions first — nothing overrides them; then the required design content and composition; then the customer's stated style and colors; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one. No creative direction, badge convention, or stylistic habit justifies adding lettering."
-      : "PRIORITY when anything conflicts: required wording and exclusions first; then the required design content and composition; then the customer's stated style and colors; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one.",
-    // Typography is removed from the creative-freedom list entirely for a
-    // no-text design — listing it as a free choice directly contradicts the
-    // NO TEXT rule above.
-    noText
-      ? "CREATIVE FREEDOM: illustration style, line weight, shape language, framing, decorative detail, texture, and palette treatment wherever the customer has not constrained them. Typography is not among them — this design has no text."
-      : "CREATIVE FREEDOM: typography treatment, illustration style, line weight, framing, decorative detail, texture, and palette treatment wherever the customer has not constrained them.",
+    buildPriorityLine(prompt, noText),
+    buildCreativeFreedomLine(prompt, noText),
   );
 
   // Centered composition is a provider DEFAULT — the lowest priority thing
@@ -670,6 +669,12 @@ function buildEditPrompt(prompt: GenerationPromptRequest): string {
     );
   }
 
+  // Phase 2A: a hard print palette survives targeted revision unless the
+  // customer's CHANGE list itself recolors the design.
+  if (prompt.printPaletteEnforcement === "hard" && prompt.colors.length > 0) {
+    sections.push(buildHardPrintPaletteSection(prompt));
+  }
+
   sections.push(
     "Do not redraw, re-stylize, re-crop, re-center, or re-scale the design. Do not change the aspect of anything you were not asked to change. Return the supplied artwork with only the requested changes applied, as a print-ready graphic on a transparent background — artwork only, no mockup, no photograph of a shirt, no watermark.",
   );
@@ -681,6 +686,71 @@ function buildEditPrompt(prompt: GenerationPromptRequest): string {
 function endWithPeriod(value: string): string {
   const trimmed = value.trim();
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/**
+ * Phase 2A: hard print/render palette — subject semantics stay in REQUIRED
+ * DESIGN CONTENT; this section owns ink. Creative directions must not dilute it.
+ */
+function buildHardPrintPaletteSection(prompt: GenerationPromptRequest): string {
+  const palette = prompt.colors.join(", ");
+  const garment = prompt.productColor?.trim() || "the garment";
+  const subjectOnly = prompt.subjectOnlyColors.filter(Boolean);
+  const subjectOnlyList =
+    subjectOnly.length > 0 ? subjectOnly.join(", ") : null;
+
+  const lines = [
+    "REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT:",
+    `Render the printable artwork primarily in: ${palette}.`,
+    `Garment: ${garment} — maintain strong visible contrast against this fabric.`,
+    "Colors named in REQUIRED DESIGN CONTENT describe real-world subject/object identity, not literal print ink. Preserve those objects' identity through linework, shading, negative space, silhouette, and print treatment in the required palette — do not repaint the subject as a different real-world color, and do not use large/dominant fills in subject-only colors merely because the real-world objects are described that way.",
+    "The required print palette overrides literal subject-object color where the two conflict.",
+    "Small dark accents for shading or anti-aliasing may exist; subject-only colors must not be the main printed design color when they conflict with this palette.",
+  ];
+
+  if (subjectOnlyList) {
+    lines.push(
+      `Subject-only colors (identity, not dominant ink): ${subjectOnlyList}.`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function buildPriorityLine(
+  prompt: GenerationPromptRequest,
+  noText: boolean,
+): string {
+  const hardPalette = prompt.printPaletteEnforcement === "hard";
+  if (noText) {
+    return hardPalette
+      ? "PRIORITY when anything conflicts: the NO TEXT rule and the exclusions first — nothing overrides them; then the REQUIRED PRINT PALETTE hard constraint; then the required design content and composition; then the customer's stated style; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one. No creative direction, badge convention, illustrative density, or stylistic habit justifies adding lettering or overriding the required print palette."
+      : "PRIORITY when anything conflicts: the NO TEXT rule and the exclusions first — nothing overrides them; then the required design content and composition; then the customer's stated style and colors; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one. No creative direction, badge convention, or stylistic habit justifies adding lettering.";
+  }
+  return hardPalette
+    ? "PRIORITY when anything conflicts: required wording and exclusions first; then the REQUIRED PRINT PALETTE hard constraint; then the required design content and composition; then the customer's stated style; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one. No creative direction may override the required print palette."
+    : "PRIORITY when anything conflicts: required wording and exclusions first; then the required design content and composition; then the customer's stated style and colors; then the creative direction above; then any default. Whenever a lower item would contradict a higher one, follow the higher one.";
+}
+
+function buildCreativeFreedomLine(
+  prompt: GenerationPromptRequest,
+  noText: boolean,
+): string {
+  const hardPalette = prompt.printPaletteEnforcement === "hard";
+  // Typography is removed from the creative-freedom list entirely for a
+  // no-text design — listing it as a free choice directly contradicts the
+  // NO TEXT rule above. Palette treatment is likewise removed when the
+  // print palette is a hard production constraint.
+  if (noText && hardPalette) {
+    return "CREATIVE FREEDOM: illustration style, line weight, shape language, framing, decorative detail, and texture wherever the customer has not constrained them. Typography is not among them — this design has no text. Print palette / dominant ink color is not among them — the REQUIRED PRINT PALETTE is a hard constraint.";
+  }
+  if (noText) {
+    return "CREATIVE FREEDOM: illustration style, line weight, shape language, framing, decorative detail, texture, and palette treatment wherever the customer has not constrained them. Typography is not among them — this design has no text.";
+  }
+  if (hardPalette) {
+    return "CREATIVE FREEDOM: typography treatment, illustration style, line weight, framing, decorative detail, and texture wherever the customer has not constrained them. Print palette / dominant ink color is not among them — the REQUIRED PRINT PALETTE is a hard constraint.";
+  }
+  return "CREATIVE FREEDOM: typography treatment, illustration style, line weight, framing, decorative detail, texture, and palette treatment wherever the customer has not constrained them.";
 }
 
 function extractImage(payload: unknown): { b64: string } | null {

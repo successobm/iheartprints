@@ -11,6 +11,8 @@ function prompt(overrides: Partial<GenerationPromptRequest> = {}): GenerationPro
     subject: "a retro bowling logo",
     style: "retro",
     colors: [],
+    printPaletteEnforcement: "none",
+    subjectOnlyColors: [],
     productColor: "Black",
     requiredWording: "My 3 Sons",
     wordingMode: "provided",

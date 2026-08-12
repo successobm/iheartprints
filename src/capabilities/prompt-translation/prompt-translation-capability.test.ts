@@ -67,6 +67,8 @@ describe("PromptTranslationCapability — GenerationIntent", () => {
     assert.equal(result.productColor, "Navy");
     assert.equal(result.printLocation, "full_front");
     assert.deepEqual(result.colors, ["Gold", "Cream"]);
+    assert.equal(result.printPaletteEnforcement, "soft");
+    assert.deepEqual(result.subjectOnlyColors, []);
     assert.equal(result.style, "Rustic hand-drawn");
     assert.equal(result.audience, "Camp families");
     assert.equal(result.purpose, "Fundraiser");
@@ -94,6 +96,7 @@ describe("PromptTranslationCapability — GenerationIntent", () => {
     );
     assert.equal(result.style, null);
     assert.deepEqual(result.colors, []);
+    assert.equal(result.printPaletteEnforcement, "none");
     assert.equal(result.productColor, "Navy");
   });
 

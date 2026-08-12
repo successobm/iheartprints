@@ -10,6 +10,8 @@ function prompt(overrides: Partial<GenerationPromptRequest> = {}): GenerationPro
     subject: "a friendly bear mascot",
     style: "hand-drawn",
     colors: ["gold", "forest green"],
+    printPaletteEnforcement: "soft",
+    subjectOnlyColors: [],
     productColor: "Navy",
     requiredWording: "Camp Wildwood 2026",
     wordingMode: "provided",

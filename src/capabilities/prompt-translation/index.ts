@@ -8,3 +8,8 @@ export {
   createRegenerationGenerationIntent,
   type GenerationIntent,
 } from "./generation-intent";
+export {
+  derivePrintPalette,
+  type DerivedPrintPalette,
+  type PrintPaletteEnforcement,
+} from "./print-palette-constraint";

@@ -11,6 +11,7 @@ import { extractRevisionDelta } from "@/capabilities/shared/revision-delta";
 
 import { extractCreativeReferences } from "./creative-reference-extraction";
 import type { GenerationIntent } from "./generation-intent";
+import { derivePrintPalette } from "./print-palette-constraint";
 
 /**
  * Sprint 2H Part 1 + Sprint 2J Phase 3: the only bridge between
@@ -92,11 +93,18 @@ export function translateApprovedBrief(
   // distinction; the mode travels with the request from here on.
   const wording = deriveRequiredWording({ exactText: content.exactText });
 
+  // Phase 2A: garment vs subject-object color vs print/render palette.
+  // `derivePrintPalette` decides hard vs soft from existing brief fields —
+  // no migration, no new brief columns.
+  const printPalette = derivePrintPalette(content);
+
   return {
     product: content.productSummary?.trim() || "a custom t-shirt",
     subject: subjectSplit.content || "a design that reflects the customer's intent",
     style: deferred.has("style") ? null : styleSplit.content || null,
-    colors: deferred.has("colors") ? [] : content.preferredColors,
+    colors: printPalette.colors,
+    printPaletteEnforcement: printPalette.enforcement,
+    subjectOnlyColors: printPalette.subjectOnlyColors,
     productColor: content.shirtColor?.trim() || null,
     requiredWording: wording.mode === "provided" ? wording.text : null,
     wordingMode: wording.mode,
@@ -368,6 +376,8 @@ function applyRemove(
       break;
     case "colors":
       request.colors = [];
+      request.printPaletteEnforcement = "none";
+      request.subjectOnlyColors = [];
       break;
     case "graphics":
       request.subject = "a design that reflects the customer's intent";

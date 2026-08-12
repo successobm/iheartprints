@@ -246,11 +246,36 @@ export interface ConversationMessage {
  * belong exclusively inside each provider adapter's own internal prompt
  * translation, never here and never on the Design Brief itself.
  */
+/**
+ * Phase 2A: how `GenerationPromptRequest.colors` must be treated by a
+ * generation provider. Derived by Prompt Translation from the approved
+ * brief — never persisted on the brief itself.
+ *
+ * - `"hard"` — required print/render palette; overrides literal subject-
+ *   object color where the two conflict (e.g. black Harley subject + white
+ *   ink on a black shirt after an explicit contrast resolution).
+ * - `"soft"` — casual preferred-color preference; not a hard ink override.
+ * - `"none"` — no artwork palette preference (or colors deferred).
+ */
+export type PrintPaletteEnforcement = "hard" | "soft" | "none";
+
 export interface GenerationPromptRequest {
   product: string;
   subject: string;
   style: string | null;
   colors: string[];
+  /**
+   * Phase 2A: hard/soft/none treatment for `colors`. Providers must not
+   * phrase a `"hard"` palette as optional "preferred colors".
+   */
+  printPaletteEnforcement: PrintPaletteEnforcement;
+  /**
+   * Phase 2A: color words that appear in subject semantics but are NOT part
+   * of the print palette. Empty unless `printPaletteEnforcement` is
+   * `"hard"`. Lets adapters warn against dominant ink in those colors
+   * without erasing subject identity.
+   */
+  subjectOnlyColors: string[];
   productColor: string | null;
   /** The exact text to print — non-null ONLY when `wordingMode` is `"provided"`. */
   requiredWording: string | null;

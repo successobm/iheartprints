@@ -48,6 +48,8 @@ function prompt(overrides: Partial<GenerationPromptRequest> = {}): GenerationPro
     subject: "a vintage sports car badge",
     style: "retro badge",
     colors: ["red"],
+    printPaletteEnforcement: "soft",
+    subjectOnlyColors: [],
     productColor: "Black",
     requiredWording: "1988 TOYOTA MR2",
     wordingMode: "provided",

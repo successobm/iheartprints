@@ -257,6 +257,15 @@
  *     split out of free text — never treated as literal content to depict)
  *     and `allowAdditionalText: boolean` (always `false` today — no
  *     invented wording beyond `requiredWording`).
+ *   - Phase 2A (Create New Artwork print-palette contract):
+ *     `GenerationPromptRequest.printPaletteEnforcement` (`"hard"` |
+ *     `"soft"` | `"none"`) and `subjectOnlyColors` — derived by Prompt
+ *     Translation from existing brief fields (no migration). Distinguishes
+ *     garment color, subject/object color semantics, and rendered print
+ *     palette so a hard customer contrast resolution is never phrased as
+ *     optional "Preferred colors" and never collapses into literal subject
+ *     ink. Creative directions may change composition/density, never hard
+ *     palette / no-text / exclusions.
  *   - `shared/field-normalization.ts` — deterministic product/color/print-
  *     location normalization applied at the point Intent Extraction writes
  *     a Design Brief field (not a presentation-only pass), so every
