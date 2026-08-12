@@ -206,9 +206,83 @@ describe("OpenAIConceptGenerationProvider", () => {
       idempotencyKey: "concept-generation:design-1:version-1",
     });
 
-    const body = JSON.parse(capturedBody) as { prompt: string; background: string };
+    const body = JSON.parse(capturedBody) as {
+      prompt: string;
+      background: string;
+      quality: string;
+      size: string;
+      n: number;
+    };
     assert.match(body.prompt, /Camp Wildwood 2026/);
     assert.equal(body.background, "transparent");
+    assert.equal(body.quality, "medium");
+    assert.equal(body.size, "1024x1024");
+    assert.equal(body.n, 1);
+  });
+
+  it("Phase 2C0: request payload always includes explicit quality; directions share it; model override keeps quality", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return jsonResponse(200, {
+        data: [{ b64_json: SMALL_B64 }],
+        usage: { total_tokens: 12, output_tokens: 10 },
+      });
+    }) as typeof fetch;
+
+    const provider = new OpenAIConceptGenerationProvider({
+      apiKey: "sk-test",
+      model: "gpt-image-1-mini",
+      quality: "low",
+      fetchImpl,
+    });
+
+    const result = await provider.generate({
+      designId: "design-1",
+      designBriefId: "version-1",
+      conceptCount: 3,
+      prompt: prompt(),
+      idempotencyKey: "concept-generation:design-1:version-1",
+    });
+
+    assert.equal(bodies.length, 3);
+    for (const body of bodies) {
+      assert.equal(body.quality, "low");
+      assert.equal(body.model, "gpt-image-1-mini");
+      assert.equal(body.size, "1024x1024");
+      assert.equal(body.background, "transparent");
+      assert.equal(body.n, 1);
+      assert.equal("auto" in body, false);
+    }
+    for (const concept of result.concepts) {
+      assert.equal(concept.asset?.providerMetadata?.quality, "low");
+      assert.equal(concept.asset?.providerMetadata?.model, "gpt-image-1-mini");
+    }
+  });
+
+  it("Phase 2C0: constructor defaults quality to medium when omitted", async () => {
+    let capturedBody = "";
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      capturedBody = String(init?.body ?? "");
+      return jsonResponse(200, { data: [{ b64_json: SMALL_B64 }] });
+    }) as typeof fetch;
+
+    const provider = new OpenAIConceptGenerationProvider({
+      apiKey: "sk-test",
+      model: "gpt-image-1",
+      fetchImpl,
+    });
+
+    await provider.generate({
+      designId: "design-1",
+      designBriefId: "version-1",
+      conceptCount: 1,
+      prompt: prompt(),
+      idempotencyKey: "concept-generation:design-1:version-1",
+    });
+
+    const body = JSON.parse(capturedBody) as { quality: string };
+    assert.equal(body.quality, "medium");
   });
 
   it("Sprint 2K Phase 3 (Goal 5): sends a meaningfully different prompt per concept direction", async () => {

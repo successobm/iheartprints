@@ -17,7 +17,14 @@ export type GenerationUnavailableSafeErrorCode =
    * sprint's background job / storage pipeline has been fully verified.
    * See `resolveConceptGenerationProvider` and `CONCEPT_GENERATION_ENABLE_REAL`.
    */
-  | "REAL_GENERATION_NOT_YET_ENABLED";
+  | "REAL_GENERATION_NOT_YET_ENABLED"
+  /**
+   * Phase 2C0: outside production, paid OpenAI image generation requires
+   * an explicit `ALLOW_PAID_IMAGE_GENERATION=true` arming flag in addition
+   * to `CONCEPT_GENERATION_ENABLE_REAL=true`. Prevents accidental spend from
+   * a local `.env.local` that left real generation enabled.
+   */
+  | "PAID_IMAGE_GENERATION_NOT_ARMED";
 
 /**
  * Sprint 2H Part 1A: thrown by `UnavailableConceptGenerationProvider` when

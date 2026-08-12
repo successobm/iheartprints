@@ -58,7 +58,7 @@ function restoreEnv(snapshot: Record<string, string | undefined>): void {
 // mechanics, or environment-variable names — regardless of which safe
 // error code caused the failure.
 const FORBIDDEN_CUSTOMER_TERMS =
-  /openai|api[_-]?key|data.?uri|supabase|object.?storage|s3|ASSET_STORAGE_MODE|CONCEPT_GENERATION_PROVIDER|PRODUCTION_ASSET_STORAGE_NOT_CONFIGURED|GENERATION_PROVIDER_NOT_CONFIGURED|REAL_GENERATION_NOT_YET_ENABLED|placeholder/i;
+  /openai|api[_-]?key|data.?uri|supabase|object.?storage|s3|ASSET_STORAGE_MODE|CONCEPT_GENERATION_PROVIDER|PRODUCTION_ASSET_STORAGE_NOT_CONFIGURED|GENERATION_PROVIDER_NOT_CONFIGURED|REAL_GENERATION_NOT_YET_ENABLED|PAID_IMAGE_GENERATION_NOT_ARMED|placeholder/i;
 
 describe("Production generation safety gate — end to end (Sprint 2H Part 1B/2A)", () => {
   let tempDir = "";

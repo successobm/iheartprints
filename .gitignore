@@ -52,6 +52,7 @@ supabase/.temp/
 # Local Phase 2B Harley calibration PNGs (customer assets — never commit)
 .tmp-phase2b-harley/
 .tmp-audit-harley/
+.tmp-phase2c0-bakeoff/
 
 # Sprint 2M Phase 2D research bake-off artifacts (local only)
 research/phase-2d-bakeoff/outputs/

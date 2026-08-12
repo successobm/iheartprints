@@ -14,6 +14,10 @@ import {
 } from "@/lib/domain/concept-directions";
 import { analyzeDesignContent } from "@/lib/domain/design-content-contract";
 import type { GenerationPromptRequest } from "@/lib/domain/types";
+import {
+  DEFAULT_OPENAI_CONCEPT_IMAGE_QUALITY,
+  type OpenAIConceptImageQuality,
+} from "@/lib/config/openai-concept-image-quality";
 import type { ConceptGenerationProvider } from "./concept-generation-provider";
 import { isRetryableProviderError, ProviderError } from "./provider-error";
 
@@ -31,6 +35,14 @@ const OPENAI_IMAGE_EDITS_ENDPOINT = "https://api.openai.com/v1/images/edits";
 export interface OpenAIProviderConfig {
   apiKey: string;
   model: string;
+  /**
+   * Phase 2C0: explicit OpenAI image quality. Required for predictable
+   * unit economics — never omit (OpenAI defaults omitted quality to `auto`).
+   * Defaults to `medium` when the constructor omits it (tests / older
+   * call sites); production resolution always passes an explicit value
+   * from `OPENAI_CONCEPT_IMAGE_QUALITY`.
+   */
+  quality?: OpenAIConceptImageQuality;
   /** Injectable for tests — defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
   /** Injectable for tests — defaults to a real timer. */
@@ -67,6 +79,7 @@ export class OpenAIConceptGenerationProvider
 
   private readonly apiKey: string;
   private readonly model: string;
+  private readonly quality: OpenAIConceptImageQuality;
   private readonly fetchImpl: typeof fetch;
   private readonly sleepImpl: (ms: number) => Promise<void>;
 
@@ -76,6 +89,7 @@ export class OpenAIConceptGenerationProvider
     }
     this.apiKey = config.apiKey;
     this.model = config.model;
+    this.quality = config.quality ?? DEFAULT_OPENAI_CONCEPT_IMAGE_QUALITY;
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.sleepImpl = config.sleepImpl ?? defaultSleep;
   }
@@ -100,12 +114,21 @@ export class OpenAIConceptGenerationProvider
 
     for (const [index, direction] of directions.entries()) {
       const prompt = buildPrompt(request.prompt, direction);
-      const image = await withRetry(() => this.requestImage(prompt), {
-        attempts: MAX_ATTEMPTS_PER_IMAGE,
-        isRetryable: isRetryableProviderError,
-        delayMs: (attempt) => 250 * attempt,
-        sleep: this.sleepImpl,
-      });
+      const image = await withRetry(
+        (attempt) =>
+          this.requestImage(prompt, {
+            purpose: "initial_generation",
+            directionKey: direction.key,
+            designId: request.designId,
+            attempt,
+          }),
+        {
+          attempts: MAX_ATTEMPTS_PER_IMAGE,
+          isRetryable: isRetryableProviderError,
+          delayMs: (attempt) => 250 * attempt,
+          sleep: this.sleepImpl,
+        },
+      );
 
       concepts.push({
         versionNumber: index + 1,
@@ -157,12 +180,21 @@ export class OpenAIConceptGenerationProvider
     }
 
     const prompt = buildEditPrompt(request.prompt);
-    const image = await withRetry(() => this.requestImageEdit(prompt, source), {
-      attempts: MAX_ATTEMPTS_PER_IMAGE,
-      isRetryable: isRetryableProviderError,
-      delayMs: (attempt) => 250 * attempt,
-      sleep: this.sleepImpl,
-    });
+    const image = await withRetry(
+      (attempt) =>
+        this.requestImageEdit(prompt, source, {
+          purpose: "targeted_revision",
+          directionKey: direction.key,
+          designId: request.designId,
+          attempt,
+        }),
+      {
+        attempts: MAX_ATTEMPTS_PER_IMAGE,
+        isRetryable: isRetryableProviderError,
+        delayMs: (attempt) => 250 * attempt,
+        sleep: this.sleepImpl,
+      },
+    );
 
     return {
       jobId: request.idempotencyKey,
@@ -189,7 +221,10 @@ export class OpenAIConceptGenerationProvider
     };
   }
 
-  private async requestImage(prompt: string): Promise<OpenAIImageResult> {
+  private async requestImage(
+    prompt: string,
+    context: PaidImageCallContext,
+  ): Promise<OpenAIImageResult> {
     let response: Response;
     try {
       response = await this.fetchImpl(OPENAI_IMAGES_ENDPOINT, {
@@ -202,6 +237,7 @@ export class OpenAIConceptGenerationProvider
           model: this.model,
           prompt,
           size: IMAGE_SIZE,
+          quality: this.quality,
           background: "transparent",
           n: 1,
         }),
@@ -213,7 +249,12 @@ export class OpenAIConceptGenerationProvider
       );
     }
 
-    return readImageResponse(response);
+    return readImageResponse(response, {
+      model: this.model,
+      quality: this.quality,
+      size: IMAGE_SIZE,
+      ...context,
+    });
   }
 
   /**
@@ -239,11 +280,13 @@ export class OpenAIConceptGenerationProvider
   private async requestImageEdit(
     prompt: string,
     source: SourceArtworkImage,
+    context: PaidImageCallContext,
   ): Promise<OpenAIImageResult> {
     const form = new FormData();
     form.append("model", this.model);
     form.append("prompt", prompt);
     form.append("size", IMAGE_SIZE);
+    form.append("quality", this.quality);
     form.append("background", "transparent");
     form.append("output_format", "png");
     form.append("n", "1");
@@ -270,8 +313,20 @@ export class OpenAIConceptGenerationProvider
       );
     }
 
-    return readImageResponse(response);
+    return readImageResponse(response, {
+      model: this.model,
+      quality: this.quality,
+      size: IMAGE_SIZE,
+      ...context,
+    });
   }
+}
+
+interface PaidImageCallContext {
+  purpose: "initial_generation" | "targeted_revision";
+  directionKey: string;
+  designId: string;
+  attempt: number;
 }
 
 interface OpenAIImageResult {
@@ -281,11 +336,20 @@ interface OpenAIImageResult {
   metadata: Record<string, unknown>;
 }
 
+interface ImageResponseContext extends PaidImageCallContext {
+  model: string;
+  quality: OpenAIConceptImageQuality;
+  size: string;
+}
+
 /**
  * Shared status classification + response parsing for both the generation
  * and the edit endpoint — identical failure semantics on both paths.
  */
-async function readImageResponse(response: Response): Promise<OpenAIImageResult> {
+async function readImageResponse(
+  response: Response,
+  context: ImageResponseContext,
+): Promise<OpenAIImageResult> {
   if (response.status === 429) {
     throw new ProviderError(
       "rate_limited",
@@ -323,6 +387,26 @@ async function readImageResponse(response: Response): Promise<OpenAIImageResult>
     );
   }
 
+  const usage = extractUsage(payload);
+  const providerRequestId =
+    response.headers.get("x-request-id") ??
+    response.headers.get("x-openai-request-id") ??
+    null;
+
+  // Phase 2C0: safe structured observability — never logs API keys,
+  // authorization headers, prompts, or artwork bytes.
+  console.info("[concept-generation] paid-image-call", {
+    purpose: context.purpose,
+    designId: context.designId,
+    directionKey: context.directionKey,
+    model: context.model,
+    quality: context.quality,
+    size: context.size,
+    attempt: context.attempt,
+    providerRequestId,
+    usage,
+  });
+
   const [widthPx, heightPx] = IMAGE_SIZE.split("x").map(Number) as [
     number,
     number,
@@ -336,6 +420,13 @@ async function readImageResponse(response: Response): Promise<OpenAIImageResult>
     metadata: {
       generatedAt: new Date().toISOString(),
       sizeRequested: IMAGE_SIZE,
+      model: context.model,
+      quality: context.quality,
+      purpose: context.purpose,
+      directionKey: context.directionKey,
+      attempt: context.attempt,
+      providerRequestId,
+      usage,
     },
   };
 }
@@ -762,4 +853,26 @@ function extractImage(payload: unknown): { b64: string } | null {
   const b64 = (first as { b64_json?: unknown }).b64_json;
   if (typeof b64 === "string" && b64.length > 0) return { b64 };
   return null;
+}
+
+/** Best-effort OpenAI usage object — numbers only, never prompt/image bytes. */
+function extractUsage(payload: unknown): Record<string, number> | null {
+  if (!payload || typeof payload !== "object") return null;
+  const usage = (payload as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") return null;
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(usage as Record<string, unknown>)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      out[key] = value;
+    } else if (value && typeof value === "object") {
+      for (const [nestedKey, nestedValue] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        if (typeof nestedValue === "number" && Number.isFinite(nestedValue)) {
+          out[`${key}.${nestedKey}`] = nestedValue;
+        }
+      }
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }

@@ -25,6 +25,21 @@ function isRealGenerationEnabled(): boolean {
 }
 
 /**
+ * Phase 2C0: development/local paid-image arming. Production trusts
+ * `CONCEPT_GENERATION_ENABLE_REAL` alone (already a deliberate opt-in).
+ * Outside production, also require `ALLOW_PAID_IMAGE_GENERATION=true` so a
+ * leftover `.env.local` cannot silently burn image credits during ordinary
+ * `next dev` / local acceptance. Applies only to the live-environment
+ * resolve path (no explicit config argument).
+ */
+function isPaidImageGenerationArmedOutsideProduction(): boolean {
+  return (
+    (process.env.ALLOW_PAID_IMAGE_GENERATION ?? "false").trim().toLowerCase() ===
+    "true"
+  );
+}
+
+/**
  * Sprint 2H Part 1A: turns a `ConceptGenerationConfig` decision into an
  * actual provider instance. Composition-layer concern, not a domain or
  * capability one — `ConceptGenerationCapability` never inspects
@@ -64,11 +79,29 @@ export function resolveConceptGenerationProvider(
     );
   }
 
+  // Live env only: non-production paid OpenAI image calls need an extra
+  // arming flag. Explicit `config` (unit tests / deliberate injection)
+  // bypasses this so existing resolver tests stay focused on the kill
+  // switch they already cover.
+  if (
+    config === undefined &&
+    resolvedConfig.mode === "openai" &&
+    process.env.NODE_ENV !== "production" &&
+    !isPaidImageGenerationArmedOutsideProduction()
+  ) {
+    return new UnavailableConceptGenerationProvider(
+      "PAID_IMAGE_GENERATION_NOT_ARMED",
+      "openai",
+      "Paid OpenAI concept image generation is not armed outside production. Set ALLOW_PAID_IMAGE_GENERATION=true (and CONCEPT_GENERATION_ENABLE_REAL=true) for intentional live/local acceptance runs.",
+    );
+  }
+
   switch (resolvedConfig.mode) {
     case "openai":
       return new OpenAIConceptGenerationProvider({
         apiKey: resolvedConfig.apiKey,
         model: resolvedConfig.model,
+        quality: resolvedConfig.quality,
       });
 
     case "placeholder":

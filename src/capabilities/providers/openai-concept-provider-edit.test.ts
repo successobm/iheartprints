@@ -146,6 +146,7 @@ describe("OpenAIConceptGenerationProvider — targeted revision uses the image E
     assert.equal(form.get("background"), "transparent");
     assert.equal(form.get("output_format"), "png");
     assert.equal(form.get("model"), "gpt-image-1");
+    assert.equal(form.get("quality"), "medium");
 
     // fetch must generate the multipart boundary itself.
     const headers = calls[0]!.init.headers as Record<string, string>;
@@ -461,21 +462,34 @@ describe("automated test safety — the edit path can never fire for real", () =
       key: process.env.OPENAI_API_KEY,
       provider: process.env.CONCEPT_GENERATION_PROVIDER,
       enable: process.env.CONCEPT_GENERATION_ENABLE_REAL,
+      allow: process.env.ALLOW_PAID_IMAGE_GENERATION,
     };
     process.env.OPENAI_API_KEY = "sk-live-should-never-be-used";
     process.env.CONCEPT_GENERATION_PROVIDER = "openai";
     process.env.CONCEPT_GENERATION_ENABLE_REAL = "true";
+    // Even if a local shell also armed paid generation, automated-test
+    // safety (when present) or the Phase 2C0 arming gate must still keep
+    // the live no-arg resolve off the real OpenAI edit path.
+    delete process.env.ALLOW_PAID_IMAGE_GENERATION;
 
     try {
       const provider = resolveConceptGenerationProvider();
-      assert.equal(provider.providerKey, "placeholder");
-      // Nothing that could ever reach `/v1/images/edits`.
+      // Under `npm test`, IHEARTPRINTS_AUTOMATED_TEST=1 → placeholder.
+      // Without that preload, Phase 2C0 arming returns unavailable.
+      // Either way: never a real OpenAI provider, never editsSourceArtwork.
+      assert.notEqual(provider.providerKey, "openai");
+      assert.ok(
+        provider.providerKey === "placeholder" ||
+          provider.providerKey === "unavailable",
+      );
       assert.equal(provider.editsSourceArtwork, false);
       assert.equal(provider instanceof OpenAIConceptGenerationProvider, false);
     } finally {
       process.env.OPENAI_API_KEY = restore.key;
       process.env.CONCEPT_GENERATION_PROVIDER = restore.provider;
       process.env.CONCEPT_GENERATION_ENABLE_REAL = restore.enable;
+      if (restore.allow === undefined) delete process.env.ALLOW_PAID_IMAGE_GENERATION;
+      else process.env.ALLOW_PAID_IMAGE_GENERATION = restore.allow;
     }
   });
 });

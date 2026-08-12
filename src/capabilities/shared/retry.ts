@@ -19,7 +19,7 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 export async function withRetry<T>(
-  fn: () => Promise<T>,
+  fn: (attempt: number) => Promise<T>,
   options: RetryOptions,
 ): Promise<T> {
   const { attempts, isRetryable, delayMs = () => 0, sleep = defaultSleep } =
@@ -28,7 +28,7 @@ export async function withRetry<T>(
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await fn();
+      return await fn(attempt);
     } catch (error) {
       lastError = error;
       if (attempt === attempts || !isRetryable(error)) {
