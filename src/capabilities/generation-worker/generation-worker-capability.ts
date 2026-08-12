@@ -18,18 +18,28 @@ import {
   PlaceholderConceptEvaluationProvider,
 } from "@/capabilities/concept-evaluation";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
-import type { PromptTranslationCapability } from "@/capabilities/prompt-translation";
+import type {
+  GenerationIntent,
+  PromptTranslationCapability,
+} from "@/capabilities/prompt-translation";
+import { withPrintPaletteCorrection } from "@/capabilities/prompt-translation";
 import type { RevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
 import { createRevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
 import { GenerationUnavailableError } from "@/capabilities/providers";
 import type { ConceptGenerationProvider } from "@/capabilities/providers";
 import type {
+  ConceptGenerationRequest,
   ConceptGenerationResult,
   GeneratedAssetPayload,
   GeneratedConceptDraft,
   SourceArtworkImage,
 } from "@/capabilities/shared/contracts";
 import { MAX_GENERATION_ATTEMPTS } from "@/capabilities/shared/generation-retry-policy";
+import {
+  buildPaidImageIntentKey,
+  paidIntentBudgetForJob,
+  REPLACEMENT_PAID_INTENT_EPOCH,
+} from "@/capabilities/shared/paid-image-intent";
 import {
   executePaidImageUnit,
   PAID_IMAGE_CONCEPT_METADATA_KEY,
@@ -45,7 +55,16 @@ import {
   assembleProvisionalPrintValidationInput,
   createPrintValidationCapability,
 } from "@/capabilities/print-validation";
+import {
+  classifyReplacementAcceptance,
+  isHardPrintPaletteFailure,
+  type ReplacementSkipReason,
+} from "./hard-palette-replacement-policy";
 import { logConceptGenerationUnavailable } from "@/lib/config/generation-provider-logging";
+import {
+  logConceptReplacement,
+  logConceptSetOutcome,
+} from "@/lib/config/concept-replacement-logging";
 import {
   logProvisionalPrintValidation,
   logProvisionalPrintValidationFailure,
@@ -75,6 +94,61 @@ const UNAVAILABLE_ERROR_PREFIX = "GENERATION_UNAVAILABLE:";
 export const TARGETED_REVISION_SOURCE_ERROR_PREFIX = "TARGETED_REVISION_SOURCE:";
 
 /**
+ * Phase 2C: stable, greppable prefix on `GenerationJob.lastError` when EVERY
+ * direction hard-failed the print-palette constraint and the bounded
+ * replacement budget could not rescue a single one. Internal only.
+ */
+export const CONCEPT_SET_UNRESOLVABLE_ERROR_PREFIX = "CONCEPT_SET_UNRESOLVABLE:";
+
+/**
+ * Phase 2C: not one concept in this batch can be shown.
+ *
+ * Distinct from a provider failure, and it must not be reported as one: the
+ * images were bought and stored successfully — every one of them simply
+ * violates a hard production constraint, and the platform refuses to present
+ * artwork it knows cannot be printed as specified. Delivering zero concepts
+ * is a failure the customer must be told about, so this fails the job rather
+ * than completing it with an empty set.
+ */
+export class ConceptSetUnresolvableError extends Error {
+  readonly withheldDirectionKeys: string[];
+
+  constructor(withheldDirectionKeys: string[]) {
+    super(
+      `Every generated concept violated the required print palette and could not be automatically corrected (${withheldDirectionKeys.join(", ")}).`,
+    );
+    this.name = "ConceptSetUnresolvableError";
+    this.withheldDirectionKeys = withheldDirectionKeys;
+  }
+}
+
+/**
+ * Phase 2C: one candidate concept, from the moment its image is bought until
+ * the customer-visible `ArtworkVersion` batch is written.
+ *
+ * This intermediate form is what makes "never show a concept we are about to
+ * take away" achievable: replacement decisions are made against these,
+ * BEFORE a single `ArtworkVersion` row exists.
+ */
+interface ConceptCandidate {
+  directionKey: ConceptDirectionKey | null;
+  concept: PersistedPaidConcept;
+  evaluated: EvaluatedConcept;
+  /** True once `concept` is a Phase 2C replacement, not the original. */
+  isReplacement: boolean;
+  /** True when a hard failure could not be resolved — never shown. */
+  withheld: boolean;
+  skipReason: ReplacementSkipReason | null;
+}
+
+interface EvaluatedConcept {
+  evaluationStatus: ConceptEvaluationStatus;
+  evaluation: ConceptEvaluation;
+  evaluationEvaluatedAt: string;
+  evaluationProviderKey: string;
+}
+
+/**
  * Which conversation phase a finished generation hands back to the
  * customer — success or failure alike.
  *
@@ -94,6 +168,49 @@ export const TARGETED_REVISION_SOURCE_ERROR_PREFIX = "TARGETED_REVISION_SOURCE:"
 function phaseAfterGeneration(job: GenerationJob): ConversationPhase {
   return job.targetArtworkVersionId ? "ask_revisions" : "concepts_ready";
 }
+
+/**
+ * The "here is your artwork" message, phrased to match what the customer can
+ * actually see.
+ *
+ * Phase 2C made this a function of the delivered count rather than a
+ * constant. When a direction hard-fails the print palette and its one
+ * automatic replacement cannot rescue it, that concept is withheld — and
+ * announcing "here are three concept directions" above two cards would be a
+ * small, avoidable lie in the exact moment the platform is being careful.
+ * The three-concept wording is byte-for-byte unchanged, because that remains
+ * the overwhelmingly common case.
+ *
+ * Deliberately says nothing about WHY a set is short: the customer-facing
+ * explanation belongs to a UI phase that can design it properly, and a
+ * half-explanation here ("one concept didn't meet our print requirements")
+ * would leak production vocabulary into the conversation for no benefit.
+ */
+function conceptsReadyContent(
+  job: GenerationJob,
+  deliveredCount: number,
+): string {
+  if (job.targetArtworkVersionId) {
+    return "Here's your revised concept. How does this version look?";
+  }
+  if (deliveredCount === 3) {
+    return job.kind === "regeneration"
+      ? "Here are three new directions to consider. Pick the one that feels closest."
+      : "Here are three concept directions. Pick the one that feels closest.";
+  }
+  if (deliveredCount === 1) {
+    return job.kind === "regeneration"
+      ? "Here's one new direction to consider. Would you like to work with it?"
+      : "Here's one concept direction. Would you like to work with it?";
+  }
+  const spelled = SPELLED_COUNTS[deliveredCount] ?? String(deliveredCount);
+  return job.kind === "regeneration"
+    ? `Here are ${spelled} new directions to consider. Pick the one that feels closest.`
+    : `Here are ${spelled} concept directions. Pick the one that feels closest.`;
+}
+
+/** Plain-language counts. Only ever reached for a short concept set. */
+const SPELLED_COUNTS: Record<number, string> = { 2: "two", 3: "three" };
 
 export interface GenerationWorkerCapability {
   /**
@@ -458,6 +575,312 @@ export function createGenerationWorkerCapability(
   }
 
   /**
+   * Phase 2C: AUTOMATIC HARD-FAIL CONCEPT REPLACEMENT.
+   *
+   * Runs once, after every candidate in the batch has been evaluated and
+   * BEFORE any `ArtworkVersion` row exists. That position is the whole
+   * point: a customer never sees a hard-failing concept that later vanishes,
+   * because the failing concept was never presented in the first place.
+   *
+   * Mutates `candidates` in place. Deliberately never throws — the initial
+   * set is already bought, stored, and evaluated by this point, and a
+   * problem while trying to IMPROVE it must never destroy it. Every failure
+   * mode degrades to "this direction is withheld", which the caller turns
+   * into a smaller (never a dishonest) concept set.
+   *
+   * SPEND SAFETY. There is no replacement counter here, on purpose. A
+   * replacement is attempted by asking `executePaidImageUnit` to reserve a
+   * slot; the durable `paid_image_intents` budget refusing that reservation
+   * IS the limit, and it refuses BEFORE the provider is contacted. That is
+   * what makes "at most two replacements, at most five paid images" survive
+   * a crash, a reclaim, and two workers racing — none of which an in-memory
+   * tally would survive.
+   *
+   * ORDER is the catalog direction order (Bold & Direct, Soft & Illustrated,
+   * Minimal Badge), which is the order the candidates were generated in and
+   * therefore the order they sit in this array. It is fixed and independent
+   * of async timing, so when all three fail, the SAME two directions are
+   * replaced on every run and on every reclaim.
+   */
+  async function resolveHardPaletteFailures(input: {
+    job: GenerationJob;
+    designId: string;
+    brief: DesignBriefSnapshotContent;
+    generationIntent: GenerationIntent;
+    generationRequest: ConceptGenerationRequest;
+    candidates: ConceptCandidate[];
+  }): Promise<void> {
+    // A targeted revision is a customer-requested change to one concept the
+    // customer already chose — a different intent kind, a different paid
+    // identity, and emphatically not something to silently re-buy over a
+    // palette verdict. Phase 2C replaces INITIAL concepts only.
+    if (input.job.targetArtworkVersionId) return;
+
+    const failing = input.candidates.filter(
+      (candidate) =>
+        candidate.directionKey !== null &&
+        isHardPrintPaletteFailure(candidate.evaluated.evaluation),
+    );
+    if (failing.length === 0) return;
+
+    const budget = paidIntentBudgetForJob(input.job.conceptCount);
+    const generateDirection = provider.generateDirection;
+
+    // An adapter with no per-direction entry point produced the batch as one
+    // indivisible paid unit (see `planPaidImageUnits`), so there is no single
+    // direction to re-buy. Withholding rather than regenerating the whole
+    // batch keeps the guarantee — never show a known hard failure — without
+    // inventing a coarser, more expensive replacement path.
+    if (!generateDirection) {
+      for (const candidate of failing) {
+        candidate.withheld = true;
+        candidate.skipReason = "no_per_direction_paid_unit";
+      }
+      return;
+    }
+
+    // Built once: a replacement is the SAME request as the candidate it
+    // replaces, plus the deterministic palette correction. Prompt Translation
+    // owns the DTO and the provider owns the wording — neither is assembled
+    // here (see `withPrintPaletteCorrection`).
+    const correctedRequest: ConceptGenerationRequest = {
+      ...input.generationRequest,
+      prompt: promptTranslation.translate(
+        withPrintPaletteCorrection(input.generationIntent),
+      ),
+    };
+
+    for (const candidate of failing) {
+      const directionKey = candidate.directionKey!;
+      // The candidate being replaced has no `ArtworkVersion` id yet — by
+      // design — so its logical paid intent is what identifies it. Pure over
+      // (project, job, kind, epoch, direction), so a reclaim rebuilds both
+      // this and the replacement key byte-for-byte and reuses the image.
+      const replacedPaidIntentKey = buildPaidImageIntentKey({
+        projectId: input.designId,
+        generationJobId: input.job.id,
+        kind: "initial_concept",
+        scopeKey: directionKey,
+      });
+      const replacementPaidIntentKey = buildPaidImageIntentKey({
+        projectId: input.designId,
+        generationJobId: input.job.id,
+        kind: "replacement",
+        scopeKey: directionKey,
+        replacedPaidIntentKey,
+        epoch: REPLACEMENT_PAID_INTENT_EPOCH,
+      });
+      const logBase = {
+        projectId: input.designId,
+        generationJobId: input.job.id,
+        jobAttempt: input.job.attempts,
+        directionKey,
+        replacedPaidIntentKey,
+        replacementPaidIntentKey,
+        replacementEpoch: REPLACEMENT_PAID_INTENT_EPOCH,
+        deterministicStatusBefore:
+          candidate.evaluated.evaluation.printPaletteCompliance?.status ?? "unknown",
+        paidIntentBudget: budget,
+        providerKey: provider.providerKey,
+      };
+
+      logConceptReplacement({
+        ...logBase,
+        decision: "replacement_requested",
+        deterministicStatusAfter: null,
+        paidIntentOrdinal: null,
+        paidIntentBudgetRemaining: null,
+        paidCallMade: null,
+      });
+
+      let executed: {
+        concepts: PersistedPaidConcept[];
+        paidCallMade: boolean;
+      };
+      try {
+        await repo.touchGenerationJobHeartbeat(input.job.id);
+        executed = await withPeriodicHeartbeat(input.job.id, () =>
+          executePaidImageUnit(
+            {
+              repo,
+              job: input.job,
+              providerKey: provider.providerKey,
+              dispatch: async () => {
+                const result = await generateDirection.call(
+                  provider,
+                  correctedRequest,
+                  directionKey,
+                );
+                return result.concepts;
+              },
+              persist: (drafts, intentKey) =>
+                persistPaidConcepts(
+                  input.designId,
+                  input.job.id,
+                  provider.providerKey,
+                  drafts,
+                  intentKey,
+                ),
+            },
+            {
+              kind: "replacement",
+              scopeKey: directionKey,
+              replacedPaidIntentKey,
+              epoch: REPLACEMENT_PAID_INTENT_EPOCH,
+            },
+          ),
+        );
+      } catch (error) {
+        // The direction keeps its known-bad candidate hidden either way. The
+        // two reasons are separated because they mean different things to an
+        // operator: one is a deliberate refusal to spend, the other is a
+        // genuine generation/storage problem.
+        const outOfBudget =
+          error instanceof PaidImageIntentBlockedError &&
+          error.reason === "budget_exhausted";
+        candidate.withheld = true;
+        candidate.skipReason = outOfBudget
+          ? "paid_budget_exhausted"
+          : "replacement_generation_failed";
+        logConceptReplacement({
+          ...logBase,
+          decision: "replacement_unavailable",
+          deterministicStatusAfter: null,
+          paidIntentOrdinal: null,
+          paidIntentBudgetRemaining: await countRemainingPaidIntents(
+            input.designId,
+            input.job.id,
+            budget,
+          ),
+          paidCallMade: false,
+          skipReason: candidate.skipReason,
+        });
+        // The budget is spent for this whole job, not just this direction —
+        // every STILL-UNRESOLVED failure would be refused identically, and
+        // asking again would only produce noise. Directions already rescued
+        // by an accepted replacement are emphatically not affected: they are
+        // resolved, paid for, and customer-visible, and the budget running
+        // out afterwards must never retroactively take them away.
+        if (outOfBudget) {
+          for (const remaining of failing) {
+            if (remaining.withheld || remaining.isReplacement) continue;
+            remaining.withheld = true;
+            remaining.skipReason = "paid_budget_exhausted";
+          }
+          return;
+        }
+        continue;
+      }
+
+      const replacement = executed.concepts[0];
+      if (!replacement) {
+        candidate.withheld = true;
+        candidate.skipReason = "replacement_generation_failed";
+        continue;
+      }
+
+      const intent = await repo.getPaidImageIntentByKey(
+        input.designId,
+        replacementPaidIntentKey,
+      );
+      logConceptReplacement({
+        ...logBase,
+        decision: "replacement_generated",
+        deterministicStatusAfter: null,
+        paidIntentOrdinal: intent?.paidIntentOrdinal ?? null,
+        paidIntentBudgetRemaining: await countRemainingPaidIntents(
+          input.designId,
+          input.job.id,
+          budget,
+        ),
+        paidCallMade: executed.paidCallMade,
+        providerRequestId: replacement.providerRequestId,
+      });
+
+      // Every replacement goes through the NORMAL evaluation pipeline —
+      // deterministic Phase 2B plus the configured vision evaluation. There
+      // is deliberately no lighter-weight "did the palette improve?" check:
+      // a replacement that fixed the palette by dropping a required element
+      // must be caught by exactly the same gate as any other concept.
+      await repo.touchGenerationJobHeartbeat(input.job.id);
+      const evaluated = await evaluateConcept({
+        brief: input.brief,
+        title: replacement.title,
+        summary: replacement.summary,
+        placeholderLabel: replacement.placeholderLabel,
+        primaryAssetId: replacement.primaryAssetId,
+        thumbnailAssetId: replacement.thumbnailAssetId,
+        idempotencyKey: `${input.job.idempotencyKey}:replacement:${directionKey}`,
+      });
+      const compliance = evaluated.evaluation.printPaletteCompliance ?? null;
+      const acceptance = classifyReplacementAcceptance(compliance);
+
+      if (acceptance === "reject") {
+        // One automatic replacement per direction is the entire budget for
+        // this policy. No second image, no third — the direction is withheld.
+        candidate.withheld = true;
+        candidate.skipReason = "replacement_failed_validation";
+        logConceptReplacement({
+          ...logBase,
+          decision: "replacement_rejected",
+          deterministicStatusAfter: compliance?.status ?? "unknown",
+          paidIntentOrdinal: intent?.paidIntentOrdinal ?? null,
+          paidIntentBudgetRemaining: await countRemainingPaidIntents(
+            input.designId,
+            input.job.id,
+            budget,
+          ),
+          paidCallMade: executed.paidCallMade,
+          skipReason: candidate.skipReason,
+          providerRequestId: replacement.providerRequestId,
+        });
+        continue;
+      }
+
+      candidate.concept = replacement;
+      candidate.isReplacement = true;
+      candidate.evaluated =
+        acceptance === "accept_unverified"
+          ? { ...evaluated, evaluationStatus: "needs_review" }
+          : evaluated;
+
+      logConceptReplacement({
+        ...logBase,
+        decision:
+          acceptance === "accept_unverified"
+            ? "replacement_accepted_unverified"
+            : "replacement_accepted",
+        deterministicStatusAfter: compliance?.status ?? "unknown",
+        paidIntentOrdinal: intent?.paidIntentOrdinal ?? null,
+        paidIntentBudgetRemaining: await countRemainingPaidIntents(
+          input.designId,
+          input.job.id,
+          budget,
+        ),
+        paidCallMade: executed.paidCallMade,
+        providerRequestId: replacement.providerRequestId,
+      });
+    }
+  }
+
+  /** Budget slots this job has left. Best-effort observability only. */
+  async function countRemainingPaidIntents(
+    projectId: string,
+    generationJobId: string,
+    budget: number,
+  ): Promise<number | null> {
+    try {
+      const intents = await repo.listPaidImageIntentsForJob(
+        projectId,
+        generationJobId,
+      );
+      return Math.max(0, budget - intents.length);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Sprint 2M Phase 2A: PROVISIONAL print-readiness intelligence, run
    * immediately after Concept Evaluation completes for one concept.
    *
@@ -645,6 +1068,12 @@ export function createGenerationWorkerCapability(
       (artwork) => artwork.generationJobId === job.id,
     );
     if (alreadyGenerated) {
+      // Phase 2C deliberately does NOT run here. Once this job's concepts are
+      // customer-visible, replacing one would be exactly the "it was there a
+      // moment ago" behavior the phase exists to prevent — and it would spend
+      // money to do it. Automatic replacement is a pre-exposure decision, and
+      // only ever a pre-exposure decision.
+      //
       // Sprint 2I: backfill evaluation only when a prior run left this job's
       // concepts without evaluationStatus.
       for (const artwork of current.artworkVersions) {
@@ -816,11 +1245,105 @@ export function createGenerationWorkerCapability(
       //
       // Phase 2C0.5: the assets themselves are already stored by this point
       // (that is what "persist as you go" means). This loop now only
-      // evaluates and assembles the customer-visible batch — it makes no
-      // provider call and spends nothing, so a reclaim that reaches it a
-      // second time is free.
+      // evaluates and assembles the customer-visible batch.
+      //
+      // Phase 2C: evaluation and REPLACEMENT both happen here, before a
+      // single `ArtworkVersion` row is written. Nothing below this point can
+      // be reached with a customer-visible concept that is about to be
+      // taken away, because no concept is customer-visible yet.
+      const candidates: ConceptCandidate[] = [];
+      for (const [index, concept] of paidConcepts.entries()) {
+        await repo.touchGenerationJobHeartbeat(job.id);
+        // Sprint 2I Phase 1 pipeline:
+        // Generation → Asset → Concept Evaluation → Persist evaluation.
+        // Evaluation failure never discards the concept.
+        //
+        // Phase 2C0.5: evaluation is deliberately NOT cached on the paid
+        // intent and is always re-run here. It is non-billable, and a
+        // reused image must still be evaluated against whatever the brief
+        // says now — caching it would trade a free recomputation for a
+        // stale verdict.
+        const evaluated = await evaluateConcept({
+          brief: approvedVersion.content,
+          title: concept.title,
+          summary: concept.summary,
+          placeholderLabel: concept.placeholderLabel,
+          primaryAssetId: concept.primaryAssetId,
+          thumbnailAssetId: concept.thumbnailAssetId,
+          idempotencyKey: `${job.idempotencyKey}:concept:${index}`,
+        });
+        candidates.push({
+          directionKey: concept.directionKey ?? null,
+          concept,
+          evaluated,
+          isReplacement: false,
+          withheld: false,
+          skipReason: null,
+        });
+      }
+
+      // Phase 2C: bounded automatic replacement of HARD print-palette
+      // failures. Never throws — see `resolveHardPaletteFailures`.
+      await resolveHardPaletteFailures({
+        job,
+        designId,
+        brief: approvedVersion.content,
+        generationIntent,
+        generationRequest,
+        candidates,
+      });
+
+      const delivered = candidates.filter((candidate) => !candidate.withheld);
+      const withheld = candidates.filter((candidate) => candidate.withheld);
+      logConceptSetOutcome({
+        projectId: designId,
+        generationJobId: job.id,
+        requestedConceptCount: job.conceptCount,
+        deliveredConceptCount: delivered.length,
+        withheldDirectionKeys: withheld.map(
+          (candidate) => candidate.directionKey ?? "unknown",
+        ),
+        replacedDirectionKeys: delivered
+          .filter((candidate) => candidate.isReplacement)
+          .map((candidate) => candidate.directionKey ?? "unknown"),
+        paidIntentsUsed: (
+          await repo.listPaidImageIntentsForJob(designId, job.id)
+        ).length,
+        paidIntentBudget: paidIntentBudgetForJob(job.conceptCount),
+      });
+
+      if (delivered.length === 0) {
+        // Nothing honest is left to show. Fails the job rather than
+        // completing it with an empty concept set — see the error's doc.
+        throw new ConceptSetUnresolvableError(
+          withheld.map((candidate) => candidate.directionKey ?? "unknown"),
+        );
+      }
+
+      // Version numbers are assigned over the DELIVERED set, so a withheld
+      // direction leaves no gap in what the customer sees.
       const versionsInput: Parameters<ProjectRepository["addArtworkVersions"]>[1] =
-        [];
+        delivered.map((candidate, index) => ({
+          versionNumber: startingVersionNumber + index + 1,
+          kind: candidate.concept.kind,
+          title: candidate.concept.title,
+          summary: candidate.concept.summary,
+          placeholderLabel: candidate.concept.placeholderLabel,
+          accentColor: candidate.concept.accentColor,
+          designBriefVersionId: approvedVersion.id,
+          generationJobId: job.id,
+          primaryAssetId: candidate.concept.primaryAssetId,
+          thumbnailAssetId: candidate.concept.thumbnailAssetId,
+          providerKey: provider.providerKey,
+          evaluationStatus: candidate.evaluated.evaluationStatus,
+          evaluation: candidate.evaluated.evaluation,
+          evaluationEvaluatedAt: candidate.evaluated.evaluationEvaluatedAt,
+          evaluationProviderKey: candidate.evaluated.evaluationProviderKey,
+          // Sprint 2G Live Acceptance Corrective Pass: durable revision
+          // lineage + which catalog direction this concept used.
+          sourceArtworkVersionId: job.targetArtworkVersionId ?? null,
+          conceptDirectionKey: candidate.concept.directionKey ?? null,
+        }));
       // Sprint 2M Phase 2A: per-concept data `runProvisionalPrintValidation`
       // needs, captured in the same order as `versionsInput` — the real
       // `artworkVersionId` only exists after `addArtworkVersions` returns,
@@ -834,67 +1357,24 @@ export function createGenerationWorkerCapability(
         } | null;
         evaluationStatus: ConceptEvaluationStatus;
         evaluation: ConceptEvaluation;
-      }> = [];
-      for (const [index, concept] of paidConcepts.entries()) {
-        await repo.touchGenerationJobHeartbeat(job.id);
-        // Sprint 2I Phase 1 pipeline:
-        // Generation → Asset → Concept Evaluation → Persist evaluation.
-        // Evaluation failure never discards the concept.
-        //
-        // Phase 2C0.5: evaluation is deliberately NOT cached on the paid
-        // intent and is always re-run here. It is non-billable, and a
-        // reused image must still be evaluated against whatever the brief
-        // says now — caching it would trade a free recomputation for a
-        // stale verdict. Evaluation can never cause regeneration.
-        const evaluated = await evaluateConcept({
-          brief: approvedVersion.content,
-          title: concept.title,
-          summary: concept.summary,
-          placeholderLabel: concept.placeholderLabel,
-          primaryAssetId: concept.primaryAssetId,
-          thumbnailAssetId: concept.thumbnailAssetId,
-          idempotencyKey: `${job.idempotencyKey}:concept:${index}`,
-        });
-        versionsInput.push({
-          versionNumber: startingVersionNumber + index + 1,
-          kind: concept.kind,
-          title: concept.title,
-          summary: concept.summary,
-          placeholderLabel: concept.placeholderLabel,
-          accentColor: concept.accentColor,
-          designBriefVersionId: approvedVersion.id,
-          generationJobId: job.id,
-          primaryAssetId: concept.primaryAssetId,
-          thumbnailAssetId: concept.thumbnailAssetId,
-          providerKey: provider.providerKey,
-          evaluationStatus: evaluated.evaluationStatus,
-          evaluation: evaluated.evaluation,
-          evaluationEvaluatedAt: evaluated.evaluationEvaluatedAt,
-          evaluationProviderKey: evaluated.evaluationProviderKey,
-          // Sprint 2G Live Acceptance Corrective Pass: durable revision
-          // lineage + which catalog direction this concept used.
-          sourceArtworkVersionId: job.targetArtworkVersionId ?? null,
-          conceptDirectionKey: concept.directionKey ?? null,
-        });
-        provisionalInputs.push({
-          // Asset facts come from the durable paid-intent record rather
-          // than from in-memory provider output, so a REUSED concept and a
-          // freshly generated one produce identical provisional validation
-          // input. (`null` for the placeholder provider, which produces no
-          // real image bytes; provisional validation honestly reports that
-          // as a missing asset, not a failure.)
-          asset: concept.primaryAssetId
-            ? {
-                contentType: concept.contentType,
-                widthPx: concept.widthPx,
-                heightPx: concept.heightPx,
-                hasTransparency: concept.hasTransparency,
-              }
-            : null,
-          evaluationStatus: evaluated.evaluationStatus,
-          evaluation: evaluated.evaluation,
-        });
-      }
+      }> = delivered.map((candidate) => ({
+        // Asset facts come from the durable paid-intent record rather
+        // than from in-memory provider output, so a REUSED concept and a
+        // freshly generated one produce identical provisional validation
+        // input. (`null` for the placeholder provider, which produces no
+        // real image bytes; provisional validation honestly reports that
+        // as a missing asset, not a failure.)
+        asset: candidate.concept.primaryAssetId
+          ? {
+              contentType: candidate.concept.contentType,
+              widthPx: candidate.concept.widthPx,
+              heightPx: candidate.concept.heightPx,
+              hasTransparency: candidate.concept.hasTransparency,
+            }
+          : null,
+        evaluationStatus: candidate.evaluated.evaluationStatus,
+        evaluation: candidate.evaluated.evaluation,
+      }));
 
       const createdVersions = await repo.addArtworkVersions(designId, versionsInput);
       // Sprint 2M Phase 2A: PROVISIONAL print-readiness intelligence only —
@@ -958,12 +1438,15 @@ export function createGenerationWorkerCapability(
         // this message as the "here is artwork" anchor the concept grid
         // renders against, which is a property of the event, not of the
         // phase the conversation moves into next.
-        content: job.targetArtworkVersionId
-          ? "Here's your revised concept. How does this version look?"
-          : job.kind === "regeneration"
-            ? "Here are three new directions to consider. Pick the one that feels closest."
-            : "Here are three concept directions. Pick the one that feels closest.",
-        metadata: { phase: "concepts_ready" },
+        content: conceptsReadyContent(job, createdVersions.length),
+        metadata: {
+          phase: "concepts_ready",
+          // Phase 2C: durable, non-technical UX data so a later phase can
+          // explain a short set without re-deriving it. Nothing renders it
+          // today, and it is deliberately a count — never a reason code, a
+          // validator verdict, or any production setting (Constitution §8).
+          ...(withheld.length > 0 ? { conceptsWithheld: withheld.length } : {}),
+        },
       });
     } catch (error) {
       const unavailable = error instanceof GenerationUnavailableError;
@@ -1015,6 +1498,13 @@ function describeGenerationError(error: unknown): string {
   // spend-guard stop apart from a provider outage at a glance.
   if (error instanceof PaidImageIntentBlockedError) {
     return `${PAID_IMAGE_INTENT_BLOCKED_ERROR_PREFIX}${error.reason}: ${error.message}`;
+  }
+  // Phase 2C: every concept in the batch hard-failed the print palette and
+  // the bounded replacement budget could not rescue one. Greppable so an
+  // operator can tell this apart from a provider outage — the images were
+  // bought and stored fine; they simply cannot be honestly presented.
+  if (error instanceof ConceptSetUnresolvableError) {
+    return `${CONCEPT_SET_UNRESOLVABLE_ERROR_PREFIX}${error.message}`;
   }
   // True Source-Image Targeted Revision: an actionable internal failure —
   // the revision could not be performed as an edit, and was NOT quietly

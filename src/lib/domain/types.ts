@@ -327,6 +327,19 @@ export interface GenerationPromptRequest {
    */
   targetConceptDirectionKey?: ConceptDirectionKey | null;
   /**
+   * Phase 2C: `true` ONLY when this generation is an automatic REPLACEMENT
+   * for a candidate the deterministic Phase 2B validator hard-failed on the
+   * required print palette / garment contrast.
+   *
+   * Provider-neutral by design — it states the FACT, never the wording. A
+   * replacement is otherwise byte-for-byte the same request as the candidate
+   * it replaces (same brief, same direction, same hard palette, same wording
+   * contract, same exclusions), because a replacement is that concept
+   * corrected, not a different design. Absent/`false` everywhere else,
+   * including on every targeted revision.
+   */
+  printPaletteCorrection?: boolean;
+  /**
    * True Source-Image Targeted Revision: present ONLY for a targeted
    * revision of a customer-selected concept. When set, the generation
    * contract changes shape entirely — the provider must EDIT the supplied
@@ -672,7 +685,8 @@ export interface ConceptEvaluationCriterionScore {
 /**
  * Phase 2B: deterministic print-palette / garment-contrast gate statuses.
  * Authoritative for hard palette compliance; OpenAI Vision must not reverse
- * a hard `fail`. Lifecycle rejection is deferred to Phase 2C.
+ * a hard `fail`. Phase 2C reads a hard `fail` as the sole trigger for one
+ * bounded automatic replacement of that concept.
  */
 export type PrintPaletteComplianceStatus =
   | "pass"

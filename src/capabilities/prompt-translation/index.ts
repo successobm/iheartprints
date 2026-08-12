@@ -6,6 +6,7 @@ export {
 export {
   createInitialGenerationIntent,
   createRegenerationGenerationIntent,
+  withPrintPaletteCorrection,
   type GenerationIntent,
 } from "./generation-intent";
 export {

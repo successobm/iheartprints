@@ -5,8 +5,12 @@
  * Precedence:
  *   deterministic hard FAIL  →  color_palette criterion forced to failed
  *                               (vision cannot reverse it)
- *   overall status / passed  →  left unchanged in Phase 2B
- *                               (Phase 2C decides rejection / regeneration)
+ *   overall status / passed  →  left unchanged HERE
+ *
+ * This module still decides no lifecycle. Phase 2C reads the compliance
+ * payload it attaches and decides replacement/withholding in the worker
+ * (`generation-worker/hard-palette-replacement-policy.ts`) — evaluation
+ * remains a pure verdict producer, exactly as in Phase 2B.
  */
 
 import type { ConceptEvaluation } from "@/lib/domain/types";
@@ -14,8 +18,14 @@ import type { ConceptEvaluation } from "@/lib/domain/types";
 import type { ConceptEvaluationResult } from "./contracts";
 import type { PrintPaletteComplianceResult } from "./print-palette-compliance";
 
+/**
+ * Recorded on the evaluation itself, so the verdict is legible from the
+ * persisted row alone. Deliberately still says "retained": at the moment
+ * this warning is written, the concept exists and no replacement decision
+ * has been made — that happens later, in the worker.
+ */
 const DETERMINISTIC_FAIL_WARNING =
-  "Deterministic print-palette / garment-contrast check failed; concept retained pending Phase 2C policy.";
+  "Deterministic print-palette / garment-contrast check failed; concept retained for replacement policy.";
 
 export function mergePrintPaletteCompliance(
   result: ConceptEvaluationResult,

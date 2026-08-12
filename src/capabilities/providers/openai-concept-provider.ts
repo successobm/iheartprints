@@ -634,6 +634,12 @@ function buildPrompt(
 
   if (prompt.printPaletteEnforcement === "hard" && prompt.colors.length > 0) {
     sections.push(buildHardPrintPaletteSection(prompt));
+    // Phase 2C: this generation is a REPLACEMENT for a candidate that
+    // hard-failed the palette gate. Placed immediately after the palette
+    // section it corrects, and only ever alongside it.
+    if (prompt.printPaletteCorrection) {
+      sections.push(buildPrintPaletteCorrectionSection());
+    }
   }
 
   // Sprint 2K Phase 3 (Goal 7): explicit, deterministic instruction against
@@ -874,6 +880,34 @@ function buildHardPrintPaletteSection(prompt: GenerationPromptRequest): string {
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Phase 2C: the deterministic corrective instruction on an automatic
+ * replacement. Fixed text — it takes no arguments, so it cannot vary with
+ * anything the validator measured.
+ *
+ * Three things are deliberately absent, and their absence is the design:
+ *
+ *   - no numbers. Coverage fractions, garment-matching fractions, and
+ *     luminance deltas are calibration internals; naming them would invite
+ *     the model to optimize a metric instead of following the palette.
+ *   - no validator vocabulary. Nothing here names a threshold, a reason
+ *     code, or the check itself.
+ *   - no new composition. This is the SAME direction, corrected. It does not
+ *     ask for a different subject, layout, or treatment — the surrounding
+ *     prompt (unchanged from the candidate this replaces) still governs all
+ *     of that, and the last line says so explicitly.
+ */
+function buildPrintPaletteCorrectionSection(): string {
+  return [
+    "PRINT PALETTE CORRECTION — the previous candidate for this design failed the required print-palette / garment-contrast constraint. For this version:",
+    "- Follow the REQUIRED PRINT PALETTE above strictly — it governs the printed ink.",
+    "- Do not let ink matching the garment color dominate the artwork; the design must read clearly against the fabric.",
+    "- Preserve the subject's identity using the required printable palette — through linework, silhouette, shading, negative space, and print treatment.",
+    "- Do not treat subject-object colors as literal print ink where they conflict with the required print palette.",
+    "Keep the same creative direction, subject, composition, wording rules, and exclusions specified above. This is a corrected version of the same concept, not a different design.",
+  ].join("\n");
 }
 
 function buildPriorityLine(

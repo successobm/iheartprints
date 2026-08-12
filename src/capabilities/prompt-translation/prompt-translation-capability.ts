@@ -36,6 +36,11 @@ export function createPromptTranslationCapability(): PromptTranslationCapability
       const base: GenerationPromptRequest = {
         ...translateApprovedBrief(generationIntent.approvedBrief),
         targetConceptDirectionKey: generationIntent.targetConceptDirectionKey,
+        // Phase 2C: carried through as a plain fact, and ONLY when set —
+        // an ordinary translation must stay byte-for-byte what it was.
+        ...(generationIntent.printPaletteCorrection
+          ? { printPaletteCorrection: true }
+          : {}),
       };
       if (!generationIntent.regenerationPlan) return base;
       const merged = mergeRegenerationPlan(

@@ -198,4 +198,9 @@ export const TEST_FILES = [
   "src/capabilities/shared/paid-image-intent.test.ts",
   "src/capabilities/generation-worker/paid-image-idempotency.test.ts",
   "src/capabilities/providers/transport-dispatch-classification.test.ts",
+  // Phase 2C: automatic hard-fail concept replacement. Palette verdicts come
+  // from REAL pixels through the REAL Phase 2B validator; the provider is a
+  // local double, so no paid call is possible.
+  "src/capabilities/generation-worker/hard-fail-concept-replacement.test.ts",
+  "src/capabilities/providers/print-palette-correction-prompt.test.ts",
 ];

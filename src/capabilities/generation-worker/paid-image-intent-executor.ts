@@ -99,6 +99,8 @@ export interface PaidImageUnit {
   kind: PaidImageIntentKind;
   targetArtworkVersionId?: string | null;
   replacedArtworkVersionId?: string | null;
+  /** Phase 2C: the logical paid intent this replacement supersedes. */
+  replacedPaidIntentKey?: string | null;
   epoch?: number;
 }
 
@@ -160,6 +162,7 @@ export async function executePaidImageUnit(
     scopeKey: unit.scopeKey,
     targetArtworkVersionId: unit.targetArtworkVersionId ?? null,
     replacedArtworkVersionId: unit.replacedArtworkVersionId ?? null,
+    replacedPaidIntentKey: unit.replacedPaidIntentKey ?? null,
     epoch: unit.epoch,
   };
   const intentKey = buildPaidImageIntentKey(identity);

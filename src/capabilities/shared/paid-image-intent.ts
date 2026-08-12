@@ -55,10 +55,9 @@ export type PaidImageIntentKind =
   | "initial_concept"
   | "targeted_revision"
   /**
-   * Reserved for Phase 2C automatic palette-failure replacement. NOTHING in
-   * this phase produces it — it exists here so the identity contract, the
-   * budget, and the durable table are all provably ready for it before the
-   * feature that spends against them is written.
+   * Phase 2C automatic hard-palette-failure replacement. Reserved by Phase
+   * 2C0.5 and spent by Phase 2C: one new logical paid image that replaces a
+   * candidate the deterministic validator hard-failed.
    */
   | "replacement";
 
@@ -73,11 +72,23 @@ export type PaidImageIntentScopeKey = ConceptDirectionKey | "batch";
 
 /**
  * The logical revision/replacement epoch. `0` is the original set produced
- * by a job. Phase 2C replacement will use `1`, `2`, … so a replacement of
- * an already-generated direction is a genuinely NEW paid intent rather than
- * a recovery of the one it replaces.
+ * by a job. Phase 2C replacement uses `1`, so a replacement of an
+ * already-generated direction is a genuinely NEW paid intent rather than a
+ * recovery of the one it replaces.
  */
 export const ORIGINAL_PAID_INTENT_EPOCH = 0;
+
+/**
+ * Phase 2C: the epoch of an automatic replacement. Deliberately a CONSTANT,
+ * not a counter.
+ *
+ * One automatic replacement per direction is the whole policy, so there is
+ * no epoch 2 in this phase and nothing may compute one. Fixing it here is
+ * also what makes recovery free: a reclaim, a transport retry, or a repeated
+ * sweep of the same job all rebuild the identical key, match the same
+ * durable row, and reuse the image instead of buying another.
+ */
+export const REPLACEMENT_PAID_INTENT_EPOCH = 1;
 
 export interface PaidImageIntentIdentity {
   projectId: string;
@@ -88,6 +99,21 @@ export interface PaidImageIntentIdentity {
   targetArtworkVersionId?: string | null;
   /** Set only for `"replacement"` — the artwork being replaced (Phase 2C). */
   replacedArtworkVersionId?: string | null;
+  /**
+   * Phase 2C: the alternative `"replacement"` discriminator — the logical
+   * paid intent whose candidate is being replaced.
+   *
+   * This exists because of WHEN automatic replacement happens. The customer
+   * must never see a hard-failing concept that later disappears, so a
+   * replacement is resolved BEFORE any `ArtworkVersion` row is written for
+   * the batch — which means, at that moment, the thing being replaced has no
+   * `ArtworkVersion` id to name. Its logical paid intent key is the durable,
+   * deterministic identity it does have: pure over (project, job, kind,
+   * epoch, direction), so a reclaim rebuilds it byte-for-byte.
+   *
+   * Exactly one of this and `replacedArtworkVersionId` must be set.
+   */
+  replacedPaidIntentKey?: string | null;
   /** Defaults to `ORIGINAL_PAID_INTENT_EPOCH`. */
   epoch?: number;
 }
@@ -135,13 +161,18 @@ function describeScope(identity: PaidImageIntentIdentity): string {
       return `t=${target}:d=${identity.scopeKey}`;
     }
     case "replacement": {
-      const replaced = identity.replacedArtworkVersionId;
-      if (!replaced) {
+      const replacedArtwork = identity.replacedArtworkVersionId;
+      const replacedIntent = identity.replacedPaidIntentKey;
+      if (replacedArtwork && replacedIntent) {
         throw new Error(
-          "A replacement paid image intent requires replacedArtworkVersionId.",
+          "A replacement paid image intent must name exactly one thing it replaces.",
         );
       }
-      return `d=${identity.scopeKey}:r=${replaced}`;
+      if (replacedArtwork) return `d=${identity.scopeKey}:r=${replacedArtwork}`;
+      if (replacedIntent) return `d=${identity.scopeKey}:ri=${replacedIntent}`;
+      throw new Error(
+        "A replacement paid image intent requires replacedArtworkVersionId or replacedPaidIntentKey.",
+      );
     }
   }
 }
@@ -154,8 +185,11 @@ function describeScope(identity: PaidImageIntentIdentity): string {
  * automatic replacement feature that will consume it — at most two
  * replacement images per job — and for nothing else.
  *
- * Phase 2C itself is NOT implemented here. This is the primitive it will
- * later spend against, proven and bounded before any code can spend it.
+ * Phase 2C spends against this and nothing else. It holds no counter of its
+ * own: a replacement is attempted by trying to reserve a slot, and the
+ * database refusing that reservation IS the limit. That is what makes the
+ * bound survive a crash, a reclaim, and two workers racing — an in-memory
+ * tally would survive none of them.
  */
 export const MAX_REPLACEMENT_PAID_INTENTS_PER_JOB = 2;
 
@@ -165,7 +199,7 @@ export const MAX_REPLACEMENT_PAID_INTENTS_PER_JOB = 2;
  * `paid_image_intents.paid_intent_ordinal` so the database refuses a sixth
  * intent even if application logic is wrong.
  *
- * 3 initial directions + 2 future Phase 2C replacements = 5.
+ * 3 initial directions + 2 Phase 2C replacements = 5.
  */
 export const ABSOLUTE_MAX_PAID_INTENTS_PER_JOB = 5;
 

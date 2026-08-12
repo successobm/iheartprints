@@ -48,6 +48,30 @@ export interface GenerationIntent {
    * `null` for initial generation and for a three-direction regeneration.
    */
   readonly revisionInstruction: string | null;
+  /**
+   * Phase 2C: this generation replaces a candidate that hard-failed the
+   * required print-palette / garment-contrast production constraint.
+   *
+   * Absent on every ordinary intent, which is why it is optional rather than
+   * a `false` every existing factory would have to start emitting: initial
+   * translation stays byte-for-byte what it was.
+   */
+  readonly printPaletteCorrection?: boolean;
+}
+
+/**
+ * Phase 2C: the SAME intent, marked as a print-palette correction.
+ *
+ * Derived from the original intent rather than rebuilt, so a replacement
+ * cannot drift from the candidate it replaces in subject, direction, wording
+ * contract, exclusions, or palette — the only difference between the two
+ * requests is this flag, and that is provable by construction rather than by
+ * inspection.
+ */
+export function withPrintPaletteCorrection(
+  intent: GenerationIntent,
+): GenerationIntent {
+  return Object.freeze({ ...intent, printPaletteCorrection: true });
 }
 
 /** Initial generation — brief only, no regeneration fields. */

@@ -715,11 +715,20 @@ deterministic facts:
 
 ```
 paid-image:v1:<projectId>:<generationJobId>:<kind>:e<epoch>:<scope>
-kind  = initial_concept | targeted_revision | replacement (reserved, Phase 2C)
+kind  = initial_concept | targeted_revision | replacement
 scope = d=<direction>                       (initial concept)
         t=<targetArtworkVersionId>:d=<direction>  (targeted revision)
-        d=<direction>:r=<replacedArtworkVersionId> (Phase 2C replacement)
+        d=<direction>:ri=<replacedPaidIntentKey>  (Phase 2C replacement)
+        d=<direction>:r=<replacedArtworkVersionId> (replacement of a
+                                                    persisted ArtworkVersion)
 ```
+
+A Phase 2C replacement names the intent it supersedes (`ri=`) rather than an
+`ArtworkVersion` id, because of *when* it happens: replacement is resolved
+before any `ArtworkVersion` row exists for the batch, so the thing being
+replaced has no customer-visible id yet. The initial intent's own key is the
+durable identity it does have, and it is pure over the same durable facts —
+so a reclaim rebuilds both keys byte-for-byte and reuses the image.
 
 It never encodes an attempt number, timestamp, UUID, worker identity, or
 provider request id — every one of those changes on a reclaim, and any of
@@ -750,15 +759,87 @@ recovering a succeeded intent matches the same row, and a transport retry
 bumps `dispatches` on the same row — only a genuinely new logical intent takes
 a new `paid_intent_ordinal`. `unique (generation_job_id, paid_intent_ordinal)`
 makes slot allocation atomic under concurrency, and a CHECK bounds it at 5:
-three initial directions plus the two replacements Phase 2C is budgeted for.
-Phase 2C itself is NOT implemented; this is only the primitive it will spend
-against.
+three initial directions plus the two replacements Phase 2C spends.
 
-**Customer-visible behavior is unchanged.** `ArtworkVersion` rows are still
-created in one batch after every intent resolves, so no partially-completed
-concept set is ever exposed, and direction order is unchanged. Concept
-Evaluation is non-billable, is always re-run fresh (never cached on the
-intent), and can never cause regeneration.
+**Customer-visible behavior.** `ArtworkVersion` rows are still created in one
+batch after every intent resolves, so no partially-completed concept set is
+ever exposed, and direction order is unchanged. Concept Evaluation is
+non-billable and is always re-run fresh (never cached on the intent). It can
+never cause an unbounded regeneration — the one thing it *can* cause is a
+single bounded replacement, described next.
+
+#### Automatic hard-fail concept replacement (Phase 2C)
+
+Phase 2B made a deterministic, pixel-level print-palette verdict available
+but deliberately acted on nothing. Phase 2C acts on exactly one case: a
+customer must not be shown a concept that violates a HARD production
+constraint when the platform can automatically replace it.
+
+**Trigger** (`generation-worker/hard-palette-replacement-policy.ts`), both
+conditions required:
+
+```
+printPaletteEnforcement === "hard"      (Phase 2A, from the approved brief)
+printPaletteCompliance.status === "fail" (Phase 2B, from actual pixels)
+```
+
+`warn`, `not_applicable`, soft enforcement, an absent verdict, and every
+subjective/vision judgement are explicitly NOT triggers. Vision can neither
+cause a replacement nor reverse a hard FAIL (Phase 2B precedence, unchanged).
+
+**Where it runs.** After every candidate in the batch has been evaluated and
+*before* a single `ArtworkVersion` row is written. That position is the whole
+design: a customer never sees a hard-failing concept that later disappears,
+because it was never presented. The rejected original stays fully intact
+internally — its `PaidImageIntent` row, its stored bytes, and its evaluation
+are all preserved for lineage; nothing is deleted or mutated.
+
+**Bounds.** One replacement per failed direction (epoch fixed at `1` — there
+is no epoch 2 and nothing computes one), at most two per job, at most five
+logical paid images total. There is deliberately **no replacement counter in
+application code**: a replacement is attempted by reserving a paid-intent
+slot, and the durable budget refusing that reservation *is* the limit —
+refused before the provider is contacted. That is what makes the bound
+survive a crash, a reclaim, and two workers racing. Order is catalog
+direction order (Bold & Direct, Soft & Illustrated, Minimal Badge), fixed and
+independent of async timing, so when all three fail the same two directions
+are replaced on every run.
+
+**The replacement request** is the same request as the candidate it replaces
+plus one provider-neutral flag, `GenerationPromptRequest.printPaletteCorrection`
+(derived via `withPrintPaletteCorrection`, never assembled in the worker).
+Same brief, same direction, same hard palette, same wording contract, same
+exclusions, same model/quality/size/background — a replacement is that
+concept corrected, not a different design, and no quality tier is bumped. The
+adapter owns the corrective wording, which names no threshold, reason code,
+or number.
+
+**Outcome policy** for an evaluated replacement:
+
+| Verdict | Result |
+|---|---|
+| `pass` | accepted, customer-visible |
+| `warn` | accepted — WARN is customer-visible for an original, so applying a stricter bar to a replacement would be incoherent |
+| `fail` | rejected; **no second replacement**; the direction is withheld |
+| `not_applicable` | accepted but forced to `needs_review` — never claimed as verified-compliant |
+
+**Degraded outcomes.** A direction that cannot be rescued is withheld rather
+than shown, so the customer may receive two concepts instead of three; the
+completion message is phrased to match what they can actually see, and the
+message metadata carries a `conceptsWithheld` count for a later UI phase. If
+*no* direction can be delivered, the job fails with
+`CONCEPT_SET_UNRESOLVABLE:` rather than completing with an empty set. A
+failure while trying to *improve* the batch never destroys it: replacement
+resolution cannot throw, and the healthy concepts are always delivered.
+
+**No migration.** Phase 2C adds no column and no table. Spend identity lives
+in the existing `paid_image_intents`; verdicts live in the existing
+`ArtworkVersion.evaluation` JSONB; the degraded-set signal lives in existing
+conversation-message metadata. Observability is
+`[concept-generation] hard-palette-replacement` and
+`[concept-generation] concept-set-outcome`
+(`lib/config/concept-replacement-logging.ts`) — whitelisted fields only,
+never prompt text, bytes, or credentials.
 
 **Transport policy.** `ProviderError` now carries a `dispatch` state —
 `not_dispatched` / `dispatched_ambiguous` / `dispatched_billed` — separate

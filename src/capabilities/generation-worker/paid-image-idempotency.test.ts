@@ -750,7 +750,7 @@ describe("Phase 2C0.5 — durable paid image intents", () => {
     assert.match(original, /:initial_concept:e0:/);
   });
 
-  it("K: Phase 2C automatic replacement is NOT implemented — nothing in the worker produces a replacement intent", async () => {
+  it("K: a job with no hard print-palette gate produces no replacement intent", async () => {
     const repo = await freshRepo();
     const provider = new DirectionalFakeProvider();
     const { capability, worker } = buildPipeline(repo, provider);
@@ -765,7 +765,12 @@ describe("Phase 2C0.5 — durable paid image intents", () => {
     assert.equal(intents.length, 3);
     assert.ok(
       intents.every((intent) => intent.intentKind === "initial_concept"),
-      "no replacement intent exists — Phase 2C is not implemented in this phase",
+      // Phase 2C automatic replacement now exists, and this brief is exactly
+      // the case it must NOT fire on: no preferred colors, so no hard palette
+      // constraint, so nothing to enforce. See
+      // `generation-worker/hard-fail-concept-replacement.test.ts` for the
+      // cases that DO spend a replacement.
+      "no replacement intent exists — this brief has no hard palette gate",
     );
   });
 
