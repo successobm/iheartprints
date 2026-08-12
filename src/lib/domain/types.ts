@@ -491,6 +491,77 @@ export interface GenerationJob {
 }
 
 /**
+ * Phase 2C0.5: the lifecycle of ONE logical paid image intent.
+ *
+ *   "reserved"  — a worker has durably claimed this intent and is about to
+ *                 dispatch (or has dispatched) a paid provider request for
+ *                 it. Reserved BEFORE the call, never after, so a crash
+ *                 mid-flight leaves evidence that money may already have
+ *                 been spent.
+ *   "succeeded" — the provider returned a usable image AND its bytes are
+ *                 durably persisted as an `AssetRecord`. This is the only
+ *                 status that authorizes REUSE without paying again.
+ *   "failed"    — this intent exhausted `MAX_PAID_DISPATCHES_PER_INTENT`
+ *                 without ever producing a durable image. Terminal: the
+ *                 job fails rather than paying a third time.
+ */
+export type PaidImageIntentStatus = "reserved" | "succeeded" | "failed";
+
+/**
+ * Phase 2C0.5: the durable, at-most-once record of one paid image intent.
+ *
+ * This is the smallest unit that can answer "has this exact paid image
+ * already been bought?" — see `capabilities/shared/paid-image-intent.ts`
+ * for the identity contract and why no existing table could carry it.
+ *
+ * Internal only: never surfaced through `ProjectSnapshot`, never shown to a
+ * customer, and `result` is a SANITIZED concept envelope (titles, direction,
+ * asset ids, asset dimensions) — never prompt text, never image bytes,
+ * never credentials.
+ */
+export interface PaidImageIntent {
+  id: string;
+  projectId: string;
+  generationJobId: string;
+  /** Deterministic identity — see `buildPaidImageIntentKey`. */
+  intentKey: string;
+  /** `"initial_concept" | "targeted_revision" | "replacement"`. */
+  intentKind: string;
+  /** Catalog direction, or `"batch"` for a provider with no per-direction path. */
+  directionKey: string;
+  /**
+   * 1-based slot within this job's paid-intent budget. Unique per job, so
+   * two racing workers can never both take the same slot, and bounded by a
+   * database CHECK so a sixth intent is impossible even if code is wrong.
+   */
+  paidIntentOrdinal: number;
+  status: PaidImageIntentStatus;
+  /**
+   * How many times this intent has been DISPATCHED to the provider, across
+   * every worker and every reclaim. Bounded by
+   * `MAX_PAID_DISPATCHES_PER_INTENT`.
+   */
+  dispatches: number;
+  /**
+   * Fencing token for the current reservation. Only the worker holding the
+   * live token may mark this intent succeeded — a zombie worker that wakes
+   * up after its job was reclaimed holds a stale token and its write is
+   * refused, so it can never overwrite the newer worker's result.
+   */
+  claimToken: string | null;
+  providerKey: string | null;
+  /** Present when the provider exposed one — never a credential. */
+  providerRequestId: string | null;
+  /** Sanitized concept envelope; `null` until the intent succeeds. */
+  result: Record<string, unknown> | null;
+  /** Sanitized, non-secret description of the most recent failure. */
+  lastError: string | null;
+  succeededAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * Sprint 2H Part 1: a generated or uploaded file and its metadata. Storage
  * itself stays abstracted behind `storageKey` (an opaque reference — a data
  * URI today, a real object-store key in a future sprint) so swapping

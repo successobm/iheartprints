@@ -16,6 +16,8 @@ import type {
   GenerationJob,
   InterviewStateData,
   MessageRole,
+  PaidImageIntent,
+  PaidImageIntentStatus,
   PrintProject,
   ProductionAssetValidation,
   ProjectSnapshot,
@@ -103,6 +105,49 @@ export type CreateAssetInput = Omit<
   AssetRecord,
   "id" | "projectId" | "createdAt"
 >;
+
+/**
+ * Phase 2C0.5: reserving one logical paid image intent — the durable
+ * at-most-once claim taken BEFORE any paid provider call.
+ */
+export interface ReservePaidImageIntentInput {
+  generationJobId: string;
+  /** Deterministic — see `buildPaidImageIntentKey`. */
+  intentKey: string;
+  intentKind: string;
+  directionKey: string;
+  /** 1-based budget slot; unique per job. */
+  paidIntentOrdinal: number;
+  providerKey: string;
+}
+
+/**
+ * Phase 2C0.5. Three genuinely different outcomes, modelled explicitly
+ * rather than as a nullable row, because the caller must behave differently
+ * for each and "no row" would conflate two of them:
+ *
+ *   "created"       — this is a brand-new logical intent; it has consumed a
+ *                     budget slot and may proceed to dispatch.
+ *   "existing"      — this exact intent already exists. Whether it may be
+ *                     dispatched again is decided from its own status and
+ *                     dispatch count, never from the fact that it was found.
+ *   "ordinal_taken" — a concurrent worker won this budget slot. The caller
+ *                     re-reads the job's intents and tries the next slot;
+ *                     no paid call has happened.
+ */
+export type PaidImageIntentReservation =
+  | { outcome: "created"; intent: PaidImageIntent }
+  | { outcome: "existing"; intent: PaidImageIntent }
+  | { outcome: "ordinal_taken" };
+
+/** Phase 2C0.5: terminal write for one logical paid image intent. */
+export interface CompletePaidImageIntentInput {
+  status: Extract<PaidImageIntentStatus, "succeeded" | "failed">;
+  /** Sanitized concept envelope — never prompt text, bytes, or credentials. */
+  result?: Record<string, unknown> | null;
+  providerRequestId?: string | null;
+  lastError?: string | null;
+}
 
 export interface ApproveDesignBriefInput {
   briefId: string;
@@ -338,6 +383,61 @@ export interface ProjectRepository {
    * recovered.
    */
   recoverAbandonedJobs(staleAfterMs: number): Promise<GenerationJob[]>;
+
+  // --- Phase 2C0.5: durable paid image intents -------------------------
+
+  /**
+   * Durably reserves ONE logical paid image intent, BEFORE any paid
+   * provider call. Never overwrites an existing intent: an intent key that
+   * already exists comes back as `"existing"` with whatever state it is
+   * genuinely in, which is what makes recovery reuse (rather than re-buy)
+   * an image the platform already owns.
+   *
+   * Implementations must make both uniqueness rules real, not advisory:
+   *   (project_id, intent_key)                → at-most-once paid identity
+   *   (generation_job_id, paid_intent_ordinal) → atomic budget-slot claim
+   *
+   * A lost race on the ordinal is reported as `"ordinal_taken"` rather than
+   * thrown, because it is an ordinary, expected outcome under concurrency
+   * and no paid call has happened.
+   */
+  reservePaidImageIntent(
+    projectId: string,
+    input: ReservePaidImageIntentInput,
+  ): Promise<PaidImageIntentReservation>;
+  /**
+   * Authorizes exactly one paid provider dispatch for an intent, and is the
+   * ONLY thing that may do so. Conditional by construction: succeeds only
+   * while the intent is still `"reserved"` and has dispatches remaining,
+   * and stamps a fresh `claimToken` that fences out any older worker still
+   * holding the previous one. Returns `null` when the dispatch is refused
+   * (already succeeded, already failed, or out of dispatches) — the caller
+   * must NOT call the provider in that case.
+   */
+  beginPaidImageIntentDispatch(
+    intentId: string,
+    claimToken: string,
+    maxDispatches: number,
+  ): Promise<PaidImageIntent | null>;
+  /**
+   * Terminal write for one intent, fenced on `claimToken`. A zombie worker
+   * whose job was reclaimed holds a stale token and gets `null` back rather
+   * than clobbering the live worker's result.
+   */
+  completePaidImageIntent(
+    intentId: string,
+    claimToken: string,
+    input: CompletePaidImageIntentInput,
+  ): Promise<PaidImageIntent | null>;
+  getPaidImageIntentByKey(
+    projectId: string,
+    intentKey: string,
+  ): Promise<PaidImageIntent | null>;
+  /** Every intent this job has ever reserved, oldest slot first. */
+  listPaidImageIntentsForJob(
+    projectId: string,
+    generationJobId: string,
+  ): Promise<PaidImageIntent[]>;
 
   /** Sprint 2H Part 1: real asset persistence, backing AssetCapability. */
   createAsset(projectId: string, input: CreateAssetInput): Promise<AssetRecord>;

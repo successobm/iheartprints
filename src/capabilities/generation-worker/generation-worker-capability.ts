@@ -4,6 +4,7 @@ import { PNG } from "pngjs";
 
 import type { ProjectRepository } from "@/lib/db/repository";
 import type {
+  ConceptDirectionKey,
   ConceptEvaluation,
   ConceptEvaluationStatus,
   ConversationPhase,
@@ -25,9 +26,20 @@ import type { ConceptGenerationProvider } from "@/capabilities/providers";
 import type {
   ConceptGenerationResult,
   GeneratedAssetPayload,
+  GeneratedConceptDraft,
   SourceArtworkImage,
 } from "@/capabilities/shared/contracts";
 import { MAX_GENERATION_ATTEMPTS } from "@/capabilities/shared/generation-retry-policy";
+import {
+  executePaidImageUnit,
+  PAID_IMAGE_CONCEPT_METADATA_KEY,
+  PAID_IMAGE_INTENT_BLOCKED_ERROR_PREFIX,
+  PAID_IMAGE_INTENT_METADATA_KEY,
+  PaidImageIntentBlockedError,
+  type PaidImageUnit,
+  type PersistedPaidConcept,
+} from "./paid-image-intent-executor";
+import { CONCEPT_DIRECTIONS } from "@/lib/domain/concept-directions";
 import type { PrintValidationCapability } from "@/capabilities/print-validation";
 import {
   assembleProvisionalPrintValidationInput,
@@ -138,6 +150,13 @@ export function createGenerationWorkerCapability(
     generationJobId: string,
     providerKey: string,
     asset: GeneratedAssetPayload | undefined,
+    /**
+     * Phase 2C0.5: extra SANITIZED provenance stamped onto the asset so a
+     * crash between "asset written" and "intent marked succeeded" leaves a
+     * recoverable trail instead of a paid-for, invisible image. Never
+     * prompt text, never credentials — see `paid-image-intent-executor`.
+     */
+    intentProvenance: Record<string, unknown> = {},
   ): Promise<{ primaryAssetId: string | null; thumbnailAssetId: string | null }> {
     if (!asset) return { primaryAssetId: null, thumbnailAssetId: null };
 
@@ -150,13 +169,107 @@ export function createGenerationWorkerCapability(
       hasTransparency: asset.hasTransparency,
       providerKey,
       generationJobId,
-      metadata: asset.providerMetadata,
+      metadata: { ...asset.providerMetadata, ...intentProvenance },
     });
 
     return {
       primaryAssetId: primary.id,
       thumbnailAssetId: thumbnail?.id ?? null,
     };
+  }
+
+  /**
+   * Phase 2C0.5: stores the bytes one paid intent just bought, and returns
+   * the sanitized envelope that becomes `PaidImageIntent.result`.
+   *
+   * Runs BEFORE the intent is marked succeeded, so "succeeded" always means
+   * "durably recoverable", never merely "the provider answered". Every
+   * primary asset is stamped with the intent key so the orphan-adoption
+   * path can recover it if the process dies in the gap between this
+   * function returning and the intent write landing.
+   */
+  async function persistPaidConcepts(
+    designId: string,
+    generationJobId: string,
+    providerKey: string,
+    drafts: readonly GeneratedConceptDraft[],
+    intentKey: string,
+  ): Promise<PersistedPaidConcept[]> {
+    const persisted: PersistedPaidConcept[] = [];
+    for (const draft of drafts) {
+      const envelope = {
+        title: draft.title,
+        summary: draft.summary,
+        placeholderLabel: draft.placeholderLabel,
+        accentColor: draft.accentColor,
+        kind: draft.kind,
+        directionKey: draft.directionKey ?? null,
+      };
+      const assetIds = await persistConceptAsset(
+        designId,
+        generationJobId,
+        providerKey,
+        draft.asset,
+        {
+          [PAID_IMAGE_INTENT_METADATA_KEY]: intentKey,
+          [PAID_IMAGE_CONCEPT_METADATA_KEY]: envelope,
+        },
+      );
+      persisted.push({
+        ...envelope,
+        primaryAssetId: assetIds.primaryAssetId,
+        thumbnailAssetId: assetIds.thumbnailAssetId,
+        contentType: draft.asset?.contentType ?? null,
+        widthPx: draft.asset?.widthPx ?? null,
+        heightPx: draft.asset?.heightPx ?? null,
+        hasTransparency: draft.asset?.hasTransparency ?? null,
+        providerRequestId: readProviderRequestId(draft),
+      });
+    }
+    return persisted;
+  }
+
+  /**
+   * Phase 2C0.5: which LOGICAL PAID INTENTS this job is made of.
+   *
+   * Before this phase the whole three-direction batch was one indivisible
+   * provider call, so nothing could record that Bold and Soft were already
+   * bought when Minimal failed. Splitting the job into explicit units is
+   * what makes per-direction durability possible.
+   *
+   * An adapter that exposes `generateDirection` (any adapter that actually
+   * spends money) gets one unit per direction. One that does not — the
+   * placeholder stub, and the fakes the existing test suite is written
+   * against — produces its batch atomically, so its honest identity is a
+   * single `"batch"` unit rather than three units that could never be
+   * checkpointed apart.
+   */
+  function planPaidImageUnits(
+    job: GenerationJob,
+    directionKey: ConceptDirectionKey | null,
+  ): PaidImageUnit[] {
+    if (job.targetArtworkVersionId) {
+      // A targeted revision is exactly one paid edit of exactly one
+      // concept. Binding the target into the identity is what keeps a
+      // second, genuinely different revision of the same concept a NEW paid
+      // intent rather than a recovery of the previous one.
+      return [
+        {
+          kind: "targeted_revision",
+          scopeKey: directionKey ?? "batch",
+          targetArtworkVersionId: job.targetArtworkVersionId,
+        },
+      ];
+    }
+
+    if (!provider.generateDirection) {
+      return [{ kind: "initial_concept", scopeKey: "batch" }];
+    }
+
+    return CONCEPT_DIRECTIONS.slice(0, job.conceptCount).map((direction) => ({
+      kind: "initial_concept" as const,
+      scopeKey: direction.key,
+    }));
   }
 
   /**
@@ -625,18 +738,74 @@ export function createGenerationWorkerCapability(
           ? await loadSourceArtwork(current, job.targetArtworkVersionId)
           : null;
 
-      const result: ConceptGenerationResult = await withPeriodicHeartbeat(
-        job.id,
-        () =>
-          provider.generate({
-            designId,
-            designBriefId: approvedVersion.id,
-            conceptCount: job.conceptCount,
-            prompt: promptRequest,
-            idempotencyKey: job.idempotencyKey,
-            sourceArtwork,
-          }),
+      const generationRequest = {
+        designId,
+        designBriefId: approvedVersion.id,
+        conceptCount: job.conceptCount,
+        prompt: promptRequest,
+        idempotencyKey: job.idempotencyKey,
+        sourceArtwork,
+      };
+
+      // Phase 2C0.5: PERSIST AS YOU GO. Each logical paid intent is
+      // reserved, dispatched, stored, and durably checkpointed on its own,
+      // in order — so a failure on the third direction can never make the
+      // platform pay for the first two again. Nothing here waits for all
+      // three provider responses before creating durable knowledge that
+      // directions one and two succeeded.
+      //
+      // The customer-visible lifecycle is unchanged: `ArtworkVersion` rows
+      // are still created in ONE batch below, after every unit resolves, so
+      // no partially-completed concept set is ever exposed.
+      const units = planPaidImageUnits(
+        job,
+        promptRequest.targetConceptDirectionKey ?? null,
       );
+      const paidConcepts: PersistedPaidConcept[] = [];
+      for (const unit of units) {
+        await repo.touchGenerationJobHeartbeat(job.id);
+        const executed = await withPeriodicHeartbeat(job.id, () =>
+          executePaidImageUnit(
+            {
+              repo,
+              job,
+              providerKey: provider.providerKey,
+              dispatch: async () => {
+                // Only a per-direction CONCEPT unit may use the
+                // per-direction entry point. A targeted revision keeps
+                // going through `generate`, which is what routes it to the
+                // provider's EDIT path — sending it to `generateDirection`
+                // would silently turn an edit of the customer's selected
+                // artwork back into a fresh text-to-image generation, the
+                // exact defect True Source-Image Targeted Revision exists
+                // to prevent.
+                const perDirection =
+                  unit.kind === "initial_concept" &&
+                  unit.scopeKey !== "batch" &&
+                  provider.generateDirection;
+                const result: ConceptGenerationResult = perDirection
+                  ? await perDirection.call(
+                      provider,
+                      generationRequest,
+                      unit.scopeKey as ConceptDirectionKey,
+                    )
+                  : await provider.generate(generationRequest);
+                return result.concepts;
+              },
+              persist: (drafts, intentKey) =>
+                persistPaidConcepts(
+                  designId,
+                  job.id,
+                  provider.providerKey,
+                  drafts,
+                  intentKey,
+                ),
+            },
+            unit,
+          ),
+        );
+        paidConcepts.push(...executed.concepts);
+      }
 
       const startingVersionNumber = current.artworkVersions.length;
       // Sequential, not `Promise.all` — asset registration is a
@@ -644,6 +813,12 @@ export function createGenerationWorkerCapability(
       // has no transactional isolation), so concurrent writes here can
       // race and silently drop data. One concept at a time also gives a
       // meaningful point to heartbeat between concepts.
+      //
+      // Phase 2C0.5: the assets themselves are already stored by this point
+      // (that is what "persist as you go" means). This loop now only
+      // evaluates and assembles the customer-visible batch — it makes no
+      // provider call and spends nothing, so a reclaim that reaches it a
+      // second time is free.
       const versionsInput: Parameters<ProjectRepository["addArtworkVersions"]>[1] =
         [];
       // Sprint 2M Phase 2A: per-concept data `runProvisionalPrintValidation`
@@ -660,26 +835,25 @@ export function createGenerationWorkerCapability(
         evaluationStatus: ConceptEvaluationStatus;
         evaluation: ConceptEvaluation;
       }> = [];
-      for (const [index, concept] of result.concepts.entries()) {
+      for (const [index, concept] of paidConcepts.entries()) {
         await repo.touchGenerationJobHeartbeat(job.id);
-        const assetIds = await persistConceptAsset(
-          designId,
-          job.id,
-          provider.providerKey,
-          concept.asset,
-        );
         // Sprint 2I Phase 1 pipeline:
         // Generation → Asset → Concept Evaluation → Persist evaluation.
         // Evaluation failure never discards the concept.
+        //
+        // Phase 2C0.5: evaluation is deliberately NOT cached on the paid
+        // intent and is always re-run here. It is non-billable, and a
+        // reused image must still be evaluated against whatever the brief
+        // says now — caching it would trade a free recomputation for a
+        // stale verdict. Evaluation can never cause regeneration.
         const evaluated = await evaluateConcept({
           brief: approvedVersion.content,
           title: concept.title,
           summary: concept.summary,
           placeholderLabel: concept.placeholderLabel,
-          primaryAssetId: assetIds.primaryAssetId,
-          thumbnailAssetId: assetIds.thumbnailAssetId,
+          primaryAssetId: concept.primaryAssetId,
+          thumbnailAssetId: concept.thumbnailAssetId,
           idempotencyKey: `${job.idempotencyKey}:concept:${index}`,
-          primaryBytes: concept.asset?.imageBytes ?? null,
         });
         versionsInput.push({
           versionNumber: startingVersionNumber + index + 1,
@@ -690,8 +864,8 @@ export function createGenerationWorkerCapability(
           accentColor: concept.accentColor,
           designBriefVersionId: approvedVersion.id,
           generationJobId: job.id,
-          primaryAssetId: assetIds.primaryAssetId,
-          thumbnailAssetId: assetIds.thumbnailAssetId,
+          primaryAssetId: concept.primaryAssetId,
+          thumbnailAssetId: concept.thumbnailAssetId,
           providerKey: provider.providerKey,
           evaluationStatus: evaluated.evaluationStatus,
           evaluation: evaluated.evaluation,
@@ -703,17 +877,18 @@ export function createGenerationWorkerCapability(
           conceptDirectionKey: concept.directionKey ?? null,
         });
         provisionalInputs.push({
-          // The just-uploaded asset's own metadata is already in scope —
-          // no extra repository round trip needed (`concept.asset` is
-          // `undefined` for the placeholder provider, which produces no
-          // real image bytes; provisional validation honestly reports
-          // that as a missing asset, not a failure).
-          asset: concept.asset
+          // Asset facts come from the durable paid-intent record rather
+          // than from in-memory provider output, so a REUSED concept and a
+          // freshly generated one produce identical provisional validation
+          // input. (`null` for the placeholder provider, which produces no
+          // real image bytes; provisional validation honestly reports that
+          // as a missing asset, not a failure.)
+          asset: concept.primaryAssetId
             ? {
-                contentType: concept.asset.contentType,
-                widthPx: concept.asset.widthPx,
-                heightPx: concept.asset.heightPx,
-                hasTransparency: concept.asset.hasTransparency,
+                contentType: concept.contentType,
+                widthPx: concept.widthPx,
+                heightPx: concept.heightPx,
+                hasTransparency: concept.hasTransparency,
               }
             : null,
           evaluationStatus: evaluated.evaluationStatus,
@@ -835,6 +1010,12 @@ function describeGenerationError(error: unknown): string {
   if (error instanceof GenerationUnavailableError) {
     return `${UNAVAILABLE_ERROR_PREFIX}${error.safeErrorCode}: ${error.message}`;
   }
+  // Phase 2C0.5: an actionable internal failure — the platform REFUSED to
+  // spend, rather than failing to. Greppable so an operator can tell a
+  // spend-guard stop apart from a provider outage at a glance.
+  if (error instanceof PaidImageIntentBlockedError) {
+    return `${PAID_IMAGE_INTENT_BLOCKED_ERROR_PREFIX}${error.reason}: ${error.message}`;
+  }
   // True Source-Image Targeted Revision: an actionable internal failure —
   // the revision could not be performed as an edit, and was NOT quietly
   // downgraded to a fresh text-to-image generation.
@@ -848,4 +1029,16 @@ function describeGenerationError(error: unknown): string {
     }
   }
   return "Generation failed for an unknown reason.";
+}
+
+/**
+ * Phase 2C0.5: the provider's own request id, when it exposed one, read
+ * from the SANITIZED metadata envelope a provider adapter already
+ * produces. Best-effort observability only — never load-bearing, and never
+ * part of the logical intent identity (it changes on every dispatch, which
+ * is exactly what the identity must not do).
+ */
+function readProviderRequestId(draft: GeneratedConceptDraft): string | null {
+  const value = draft.asset?.providerMetadata?.providerRequestId;
+  return typeof value === "string" && value.length > 0 ? value : null;
 }

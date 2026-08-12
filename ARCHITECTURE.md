@@ -677,11 +677,11 @@ subject matter or assert a placement the customer already decided.
 
 | | |
 |---|---|
-| **Responsibility** | Claim job → build GenerationIntent → translate → resolve source artwork (targeted revision only) → provider → assets → concept evaluation → artwork → assistant message |
+| **Responsibility** | Claim job → build GenerationIntent → translate → resolve source artwork (targeted revision only) → per-intent paid dispatch → assets → concept evaluation → artwork → assistant message |
 | **Inputs** | Claimed `GenerationJob` |
-| **Outputs** | Completed/failed job; artwork versions (with evaluation); assets; customer-safe messages |
+| **Outputs** | Completed/failed job; durable `PaidImageIntent` rows; artwork versions (with evaluation); assets; customer-safe messages |
 | **Dependencies** | ProjectRepository, PromptTranslation, ConceptGenerationProvider, AssetCapability, ConceptEvaluationCapability, RevisionIntelligence (regeneration path), RevisionTimeline + RegenerationIntelligence (via `buildGenerationIntentForJob`) |
-| **Owns** | Generation runtime business logic; initial vs regeneration intent assembly; resolving the source artwork bytes for a targeted revision |
+| **Owns** | Generation runtime business logic; initial vs regeneration intent assembly; resolving the source artwork bytes for a targeted revision; deciding whether a paid image is bought or reused |
 | **Must never own** | HTTP auth, cron scheduling, browser lifecycle; persisting timeline/plan/intent; provider dialect |
 
 Evaluation failure never discards concepts and never changes customer-facing
@@ -692,6 +692,84 @@ the selected concept's real image bytes through `AssetCapability` and passes
 them as `ConceptGenerationRequest.sourceArtwork`. Failure to do so throws
 `TargetedRevisionSourceError` and fails the job — there is deliberately no
 text-to-image fallback. See "Initial generation vs targeted revision".
+
+#### Paid image idempotency (Phase 2C0.5)
+
+Generation-job ENQUEUE has always been idempotent. Paid EXECUTION was not:
+initial generation dispatches three directions sequentially, so OpenAI could
+bill Bold and Soft and then Minimal could fail. Nothing durable recorded that
+Bold and Soft had already been bought, so a reclaim of that job regenerated —
+and re-billed — all three.
+
+The unit that fixes this is `PaidImageIntent`, one durable row per LOGICAL
+paid image, in its own `paid_image_intents` table. No existing table could
+carry it: `generation_jobs` is one row per job; `artwork_versions` are written
+once, in a batch, only after every direction already succeeded (and making
+them per-direction would expose a partially-completed concept set, which this
+phase must not do); `assets` are written only after the paid call returns,
+carry no direction identity, and have no uniqueness constraint. Making a paid
+call at-most-once needs a real UNIQUE constraint, so it needs a migration.
+
+**Identity** (`capabilities/shared/paid-image-intent.ts`) binds only durable,
+deterministic facts:
+
+```
+paid-image:v1:<projectId>:<generationJobId>:<kind>:e<epoch>:<scope>
+kind  = initial_concept | targeted_revision | replacement (reserved, Phase 2C)
+scope = d=<direction>                       (initial concept)
+        t=<targetArtworkVersionId>:d=<direction>  (targeted revision)
+        d=<direction>:r=<replacedArtworkVersionId> (Phase 2C replacement)
+```
+
+It never encodes an attempt number, timestamp, UUID, worker identity, or
+provider request id — every one of those changes on a reclaim, and any of
+them leaking in would make recovery re-buy artwork. Prompt text is
+deliberately not hashed: a genuinely different prompt means a different
+approved brief version, which means a different job, which is already a
+different key. An intentional Explore/new batch owns its own `GenerationJob`
+and so lands on different keys by construction.
+
+**Execution ordering** (`generation-worker/paid-image-intent-executor.ts`),
+which is where the whole guarantee lives:
+
+1. RESERVE before paying — a durable row exists before any request leaves.
+2. REUSE before paying — a succeeded intent short-circuits, no call made.
+3. ADOPT before paying — an orphaned asset stamped with the intent key is
+   recovered rather than re-bought.
+4. AUTHORIZE before paying — `beginPaidImageIntentDispatch` is a conditional
+   write; refused means the provider is never contacted.
+5. PERSIST before claiming success — "succeeded" means bytes are durably
+   stored, not merely returned.
+6. FENCE the success write — a `claimToken` refuses a zombie worker's late
+   write instead of letting it overwrite the live worker's result.
+
+There is deliberately no fallback that regenerates everything.
+
+**Budget.** Counting INTENTS rather than calls is what makes recovery free:
+recovering a succeeded intent matches the same row, and a transport retry
+bumps `dispatches` on the same row — only a genuinely new logical intent takes
+a new `paid_intent_ordinal`. `unique (generation_job_id, paid_intent_ordinal)`
+makes slot allocation atomic under concurrency, and a CHECK bounds it at 5:
+three initial directions plus the two replacements Phase 2C is budgeted for.
+Phase 2C itself is NOT implemented; this is only the primitive it will spend
+against.
+
+**Customer-visible behavior is unchanged.** `ArtworkVersion` rows are still
+created in one batch after every intent resolves, so no partially-completed
+concept set is ever exposed, and direction order is unchanged. Concept
+Evaluation is non-billable, is always re-run fresh (never cached on the
+intent), and can never cause regeneration.
+
+**Transport policy.** `ProviderError` now carries a `dispatch` state —
+`not_dispatched` / `dispatched_ambiguous` / `dispatched_billed` — separate
+from its classification, because "why did it fail" and "could it already have
+been billed" are different questions. Only provably pre-dispatch failures are
+retried at the transport layer; ambiguous and billed-unusable failures
+propagate to the paid-intent layer, which owns the durable, cross-worker
+dispatch ceiling. Residual risk is bounded and explicit: an ambiguous
+post-dispatch failure the provider actually billed can be paid for at most
+`MAX_PAID_DISPATCHES_PER_INTENT` times for one image. No provider-side
+idempotency key is claimed for this endpoint, because none is documented.
 
 ### ConceptEvaluationCapability — Active (architecture only)
 
@@ -1369,6 +1447,7 @@ Primary types live in `src/lib/domain/types.ts`.
 | `TShirtDesignBrief` | Mutable working Design Brief |
 | `DesignBriefVersion` | Immutable approved snapshot (`content` + version metadata) |
 | `GenerationJob` | Durable generation attempt (internal; not in customer snapshot) |
+| `PaidImageIntent` | Phase 2C0.5: durable at-most-once record of ONE paid image intent — the unit that makes recovery reuse an image instead of re-buying it (internal; not in snapshot) |
 | `ArtworkVersion` | Concept (or future revision/final) with brief/job/asset/evaluation provenance (internal) |
 | `CustomerArtworkVersion` | Customer-safe projection of `ArtworkVersion` (Sprint 2K Phase 1) |
 | `AssetRecord` | File metadata + opaque `storageKey` (internal; not in snapshot) |
@@ -1388,6 +1467,7 @@ Primary types live in `src/lib/domain/types.ts`.
 - Approval freezes `DesignBriefSnapshotContent` into a new `DesignBriefVersion`
 - Concepts (`ArtworkVersion`) reference `designBriefVersionId`
 - Generation jobs reference `designBriefVersionId` and produce artwork/assets
+- Generation jobs own zero or more `PaidImageIntent` rows — one per logical paid image, unique per `(project, intentKey)` and per `(job, budget slot)`
 - Assets may reference `generationJobId`; artwork may reference primary/thumbnail asset ids
 - Current vs previous concept batches are derived (not a separate table)
 - Explicit deferrals live on `brief.deferredSections`

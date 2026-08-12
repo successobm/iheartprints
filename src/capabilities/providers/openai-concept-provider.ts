@@ -13,13 +13,20 @@ import {
   type ConceptDirection,
 } from "@/lib/domain/concept-directions";
 import { analyzeDesignContent } from "@/lib/domain/design-content-contract";
-import type { GenerationPromptRequest } from "@/lib/domain/types";
+import type {
+  ConceptDirectionKey,
+  GenerationPromptRequest,
+} from "@/lib/domain/types";
 import {
   DEFAULT_OPENAI_CONCEPT_IMAGE_QUALITY,
   type OpenAIConceptImageQuality,
 } from "@/lib/config/openai-concept-image-quality";
 import type { ConceptGenerationProvider } from "./concept-generation-provider";
-import { isRetryableProviderError, ProviderError } from "./provider-error";
+import {
+  classifyFetchRejectionDispatch,
+  isRetryableProviderError,
+  ProviderError,
+} from "./provider-error";
 
 const MAX_ATTEMPTS_PER_IMAGE = 3;
 const IMAGE_SIZE = "1024x1024";
@@ -113,46 +120,74 @@ export class OpenAIConceptGenerationProvider
     const concepts: GeneratedConceptDraft[] = [];
 
     for (const [index, direction] of directions.entries()) {
-      const prompt = buildPrompt(request.prompt, direction);
-      const image = await withRetry(
-        (attempt) =>
-          this.requestImage(prompt, {
-            purpose: "initial_generation",
-            directionKey: direction.key,
-            designId: request.designId,
-            attempt,
-          }),
-        {
-          attempts: MAX_ATTEMPTS_PER_IMAGE,
-          isRetryable: isRetryableProviderError,
-          delayMs: (attempt) => 250 * attempt,
-          sleep: this.sleepImpl,
-        },
+      concepts.push(
+        await this.generateOneDirection(request, direction, index + 1),
       );
-
-      concepts.push({
-        versionNumber: index + 1,
-        title: direction.title,
-        summary: describeConceptDirection(direction, request.prompt),
-        placeholderLabel: direction.placeholderLabel,
-        accentColor: direction.accentColor,
-        kind: "concept",
-        directionKey: direction.key,
-        asset: {
-          imageBytes: image.bytes,
-          contentType: "image/png",
-          widthPx: image.widthPx,
-          heightPx: image.heightPx,
-          hasTransparency: true,
-          providerMetadata: image.metadata,
-        },
-      });
     }
 
     return {
       jobId: request.idempotencyKey,
       providerKey: this.providerKey,
       concepts,
+    };
+  }
+
+  /**
+   * Phase 2C0.5: exactly one paid dispatch, for exactly one direction — the
+   * unit `GenerationWorkerCapability` durably checkpoints. `generate` above
+   * is now just this method in a loop, so the two paths cannot drift in
+   * prompt dialect, retry policy, or error classification.
+   */
+  async generateDirection(
+    request: ConceptGenerationRequest,
+    directionKey: ConceptDirectionKey,
+  ): Promise<ConceptGenerationResult> {
+    const direction = resolveConceptDirection(directionKey);
+    return {
+      jobId: request.idempotencyKey,
+      providerKey: this.providerKey,
+      concepts: [await this.generateOneDirection(request, direction, 1)],
+    };
+  }
+
+  private async generateOneDirection(
+    request: ConceptGenerationRequest,
+    direction: ConceptDirection,
+    versionNumber: number,
+  ): Promise<GeneratedConceptDraft> {
+    const prompt = buildPrompt(request.prompt, direction);
+    const image = await withRetry(
+      (attempt) =>
+        this.requestImage(prompt, {
+          purpose: "initial_generation",
+          directionKey: direction.key,
+          designId: request.designId,
+          attempt,
+        }),
+      {
+        attempts: MAX_ATTEMPTS_PER_IMAGE,
+        isRetryable: isRetryableProviderError,
+        delayMs: (attempt) => 250 * attempt,
+        sleep: this.sleepImpl,
+      },
+    );
+
+    return {
+      versionNumber,
+      title: direction.title,
+      summary: describeConceptDirection(direction, request.prompt),
+      placeholderLabel: direction.placeholderLabel,
+      accentColor: direction.accentColor,
+      kind: "concept",
+      directionKey: direction.key,
+      asset: {
+        imageBytes: image.bytes,
+        contentType: "image/png",
+        widthPx: image.widthPx,
+        heightPx: image.heightPx,
+        hasTransparency: true,
+        providerMetadata: image.metadata,
+      },
     };
   }
 
@@ -242,10 +277,16 @@ export class OpenAIConceptGenerationProvider
           n: 1,
         }),
       });
-    } catch {
+    } catch (error) {
+      // Phase 2C0.5: a `fetch` rejection is NOT uniformly "we never sent
+      // it". DNS/connect failures provably never dispatched; a reset or
+      // timeout can happen after the provider already began billable work.
+      // Classifying honestly here is what lets `withRetry` retry the first
+      // kind and refuse the second.
       throw new ProviderError(
         "network",
         "The artwork provider could not be reached.",
+        classifyFetchRejectionDispatch(error),
       );
     }
 
@@ -306,10 +347,16 @@ export class OpenAIConceptGenerationProvider
         headers: { authorization: `Bearer ${this.apiKey}` },
         body: form,
       });
-    } catch {
+    } catch (error) {
+      // Phase 2C0.5: a `fetch` rejection is NOT uniformly "we never sent
+      // it". DNS/connect failures provably never dispatched; a reset or
+      // timeout can happen after the provider already began billable work.
+      // Classifying honestly here is what lets `withRetry` retry the first
+      // kind and refuse the second.
       throw new ProviderError(
         "network",
         "The artwork provider could not be reached.",
+        classifyFetchRejectionDispatch(error),
       );
     }
 
@@ -350,22 +397,36 @@ async function readImageResponse(
   response: Response,
   context: ImageResponseContext,
 ): Promise<OpenAIImageResult> {
+  // Phase 2C0.5: each status carries an explicit dispatch state, because
+  // "can this be safely retried" is not derivable from the failure reason
+  // alone. A rejected request costs nothing; a 5xx after the model already
+  // ran might not.
   if (response.status === 429) {
+    // The provider refused to do the work. Nothing was generated, so
+    // nothing was billed — bounded retry is genuinely safe here.
     throw new ProviderError(
       "rate_limited",
       "The artwork provider is rate-limiting requests right now.",
+      "not_dispatched",
     );
   }
   if (response.status >= 500) {
+    // The request unquestionably reached the provider. Whether it produced
+    // (and billed) an image before failing is not knowable from here, so
+    // this is ambiguous rather than safe — it is no longer blind-retried.
     throw new ProviderError(
       "unavailable",
       "The artwork provider is temporarily unavailable.",
+      "dispatched_ambiguous",
     );
   }
   if (!response.ok) {
+    // A 4xx is the provider rejecting the request itself — malformed
+    // parameters, bad model, unsupported size. No image was produced.
     throw new ProviderError(
       "malformed_response",
       `The artwork provider returned an unexpected status (${response.status}).`,
+      "not_dispatched",
     );
   }
 
@@ -373,17 +434,24 @@ async function readImageResponse(
   try {
     payload = await response.json();
   } catch {
+    // A SUCCESSFUL status whose body we could not read. The image was very
+    // likely produced and billed; retrying this in a loop is the single
+    // most expensive failure mode available, so it is never retried at the
+    // transport layer.
     throw new ProviderError(
       "malformed_response",
       "The artwork provider returned an unreadable response.",
+      "dispatched_billed",
     );
   }
 
   const image = extractImage(payload);
   if (!image) {
+    // Same reasoning: HTTP 200, no usable image. Treated as billed.
     throw new ProviderError(
       "malformed_response",
       "The artwork provider response did not include image data.",
+      "dispatched_billed",
     );
   }
 

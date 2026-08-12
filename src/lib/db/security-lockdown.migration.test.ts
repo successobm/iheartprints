@@ -95,9 +95,40 @@ describe("server-only RLS lockdown migration", () => {
     );
   });
 
-  it("is the latest migration, so it cannot be ordered before a table it locks down", () => {
+  /**
+   * Phase 2C0.5: this used to assert the lockdown was literally the LAST
+   * migration in the directory. That was a proxy for the real rule, and it
+   * only held while no table had been added since — the first additive
+   * migration after the lockdown (`paid_image_intents`) breaks the proxy
+   * without weakening the security posture by one bit.
+   *
+   * The rule the name actually states is asserted directly instead: every
+   * table the lockdown is responsible for must be CREATED by a migration
+   * that sorts before it, so the lockdown can never run against a table
+   * that does not exist yet. Tables introduced AFTER the lockdown are
+   * governed by the convention test at the bottom of this file, which
+   * requires each one to enable RLS and revoke `anon`/`authenticated` in
+   * its own migration — a stronger guarantee than "nothing may ever be
+   * added again", and one that does not silently expire.
+   */
+  it("is ordered after every table it locks down, so it can never run against a table that does not exist yet", () => {
     const names = migrationFilenames();
-    assert.equal(names[names.length - 1], LOCKDOWN_MIGRATION);
+    const lockdownIndex = names.indexOf(LOCKDOWN_MIGRATION);
+    assert.ok(lockdownIndex >= 0, `${LOCKDOWN_MIGRATION} is missing`);
+
+    const earlierSql = names
+      .slice(0, lockdownIndex)
+      .map((name) => readSqlWithoutComments(name))
+      .join("\n");
+
+    for (const table of APPLICATION_TABLES) {
+      assert.ok(
+        new RegExp(
+          `create\\s+table\\s+(?:if\\s+not\\s+exists\\s+)?public\\.${table}\\b`,
+        ).test(earlierSql),
+        `${table} is locked down but is not created by any earlier migration`,
+      );
+    }
   });
 
   // A

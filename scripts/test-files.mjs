@@ -192,4 +192,10 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/bowling-print-ready-regression.test.ts",
   "src/lib/db/supabase-client.security.test.ts",
   "src/lib/db/security-lockdown.migration.test.ts",
+  // Phase 2C0.5: paid image idempotency + spend bound hardening. Every one
+  // of these counts PAID PROVIDER DISPATCHES against a local double — no
+  // network, no credentials, no possibility of a real paid call.
+  "src/capabilities/shared/paid-image-intent.test.ts",
+  "src/capabilities/generation-worker/paid-image-idempotency.test.ts",
+  "src/capabilities/providers/transport-dispatch-classification.test.ts",
 ];

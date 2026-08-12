@@ -24,6 +24,8 @@ import type {
   GenerationJob,
   GenerationJobStatus,
   InterviewStateData,
+  PaidImageIntent,
+  PaidImageIntentStatus,
   PrintProject,
   ProductionAssetRole,
   ProductionAssetValidation,
@@ -39,9 +41,12 @@ import type {
   CreateFinalArtworkJobInput,
   CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
+  CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  PaidImageIntentReservation,
   ProjectRepository,
+  ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
   UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
@@ -151,6 +156,27 @@ type DbGenerationJob = {
   started_at: string | null;
   completed_at: string | null;
   heartbeat_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Phase 2C0.5 — see `supabase/migrations/20260812120000_paid_image_intents.sql`. */
+type DbPaidImageIntent = {
+  id: string;
+  project_id: string;
+  generation_job_id: string;
+  intent_key: string;
+  intent_kind: string;
+  direction_key: string;
+  paid_intent_ordinal: number;
+  status: PaidImageIntentStatus;
+  dispatches: number;
+  claim_token: string | null;
+  provider_key: string | null;
+  provider_request_id: string | null;
+  result: Record<string, unknown> | null;
+  last_error: string | null;
+  succeeded_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -357,6 +383,28 @@ function mapGenerationJob(row: DbGenerationJob): GenerationJob {
     startedAt: row.started_at,
     completedAt: row.completed_at,
     heartbeatAt: row.heartbeat_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapPaidImageIntent(row: DbPaidImageIntent): PaidImageIntent {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    generationJobId: row.generation_job_id,
+    intentKey: row.intent_key,
+    intentKind: row.intent_kind,
+    directionKey: row.direction_key,
+    paidIntentOrdinal: row.paid_intent_ordinal,
+    status: row.status,
+    dispatches: row.dispatches,
+    claimToken: row.claim_token,
+    providerKey: row.provider_key,
+    providerRequestId: row.provider_request_id,
+    result: row.result ?? null,
+    lastError: row.last_error,
+    succeededAt: row.succeeded_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1096,6 +1144,151 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (error) throw error;
 
     return ((data as DbGenerationJob[]) ?? []).map(mapGenerationJob);
+  }
+
+  // --- Phase 2C0.5: durable paid image intents -------------------------
+
+  async reservePaidImageIntent(
+    projectId: string,
+    input: ReservePaidImageIntentInput,
+  ): Promise<PaidImageIntentReservation> {
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .insert({
+        project_id: projectId,
+        generation_job_id: input.generationJobId,
+        intent_key: input.intentKey,
+        intent_kind: input.intentKind,
+        direction_key: input.directionKey,
+        paid_intent_ordinal: input.paidIntentOrdinal,
+        status: "reserved",
+        dispatches: 0,
+        provider_key: input.providerKey,
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        // Two different unique constraints can land here, and they mean
+        // genuinely different things — so resolve which one actually fired
+        // by re-reading, never by parsing the error text.
+        const existing = await this.getPaidImageIntentByKey(
+          projectId,
+          input.intentKey,
+        );
+        // (project_id, intent_key): this exact logical intent already
+        // exists. Reuse/retry is decided from its own state by the caller.
+        if (existing) return { outcome: "existing", intent: existing };
+        // (generation_job_id, paid_intent_ordinal): a concurrent worker won
+        // this budget slot with a DIFFERENT intent. No paid call happened.
+        return { outcome: "ordinal_taken" };
+      }
+      throw error;
+    }
+
+    return { outcome: "created", intent: mapPaidImageIntent(data as DbPaidImageIntent) };
+  }
+
+  async beginPaidImageIntentDispatch(
+    intentId: string,
+    claimToken: string,
+    maxDispatches: number,
+  ): Promise<PaidImageIntent | null> {
+    // Compare-and-set, the same optimistic-claim shape as
+    // `claimNextQueuedJob` — and for a stricter reason: this is the ONE
+    // gate that authorizes spending money, so it must never have a
+    // read-then-write gap two workers could both pass through. PostgREST
+    // cannot express `dispatches = dispatches + 1`, so the previously-read
+    // value goes into the WHERE clause instead: a concurrent worker that
+    // incremented first makes this update match zero rows, and a refused
+    // dispatch means no paid call, which is always the safe direction.
+    const { data: current, error: readError } = await this.client
+      .from("paid_image_intents")
+      .select("*")
+      .eq("id", intentId)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!current) return null;
+
+    const row = current as DbPaidImageIntent;
+    if (row.status !== "reserved") return null;
+    if (row.dispatches >= maxDispatches) return null;
+
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .update({
+        dispatches: row.dispatches + 1,
+        claim_token: claimToken,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", intentId)
+      .eq("status", "reserved")
+      .eq("dispatches", row.dispatches)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaidImageIntent(data as DbPaidImageIntent) : null;
+  }
+
+  async completePaidImageIntent(
+    intentId: string,
+    claimToken: string,
+    input: CompletePaidImageIntentInput,
+  ): Promise<PaidImageIntent | null> {
+    const payload: Record<string, unknown> = {
+      status: input.status,
+      updated_at: new Date().toISOString(),
+    };
+    if (input.result !== undefined) payload.result = input.result;
+    if (input.providerRequestId !== undefined) {
+      payload.provider_request_id = input.providerRequestId;
+    }
+    if (input.lastError !== undefined) payload.last_error = input.lastError;
+    if (input.status === "succeeded") {
+      payload.succeeded_at = new Date().toISOString();
+    }
+
+    // Fenced on `claim_token`: a zombie worker whose job was reclaimed
+    // holds the previous token, matches zero rows, and gets `null` back
+    // instead of overwriting the live worker's result.
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .update(payload)
+      .eq("id", intentId)
+      .eq("claim_token", claimToken)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaidImageIntent(data as DbPaidImageIntent) : null;
+  }
+
+  async getPaidImageIntentByKey(
+    projectId: string,
+    intentKey: string,
+  ): Promise<PaidImageIntent | null> {
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("intent_key", intentKey)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaidImageIntent(data as DbPaidImageIntent) : null;
+  }
+
+  async listPaidImageIntentsForJob(
+    projectId: string,
+    generationJobId: string,
+  ): Promise<PaidImageIntent[]> {
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("generation_job_id", generationJobId)
+      .order("paid_intent_ordinal", { ascending: true });
+    if (error) throw error;
+    return ((data as DbPaidImageIntent[]) ?? []).map(mapPaidImageIntent);
   }
 
   // --- Sprint 2H Part 1: assets ---------------------------------------

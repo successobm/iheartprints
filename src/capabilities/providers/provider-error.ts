@@ -54,22 +54,163 @@ export type ProviderErrorClassification =
    */
   | "invalid_request";
 
+/**
+ * Phase 2C0.5 (§6): how much the HTTP stack can HONESTLY say about whether
+ * a failed paid request ever reached the provider — and therefore about
+ * whether retrying it risks paying twice.
+ *
+ * This is deliberately a separate axis from `ProviderErrorClassification`.
+ * "Why did it fail" and "could it already have been billed" are different
+ * questions, and the same classification can answer the second one
+ * differently: a `network` failure at DNS resolution provably never
+ * dispatched, while a `network` failure mid-response provably did.
+ *
+ *   "not_dispatched"       No request reached the provider. Retrying cannot
+ *                          double-bill. Bounded retry is safe.
+ *   "dispatched_ambiguous" The request left this process and the outcome is
+ *                          unknown. The provider may or may not have
+ *                          produced (and billed) an image. NEVER blindly
+ *                          retried — a re-dispatch is a knowingly-bounded
+ *                          spend decision made one level up, by the paid
+ *                          intent layer.
+ *   "dispatched_billed"    The provider returned a success status we could
+ *                          not use (e.g. HTTP 200 with an empty/malformed
+ *                          body). Treat as billed. Never retried at the
+ *                          transport layer — an unusable success that
+ *                          retries in a loop is the most expensive possible
+ *                          failure mode.
+ *
+ * Nothing here claims certainty `fetch` cannot provide: anything not
+ * provably pre-dispatch is classified ambiguous, not safe.
+ */
+export type ProviderDispatchState =
+  | "not_dispatched"
+  | "dispatched_ambiguous"
+  | "dispatched_billed";
+
 export class ProviderError extends Error {
   readonly classification: ProviderErrorClassification;
+  /**
+   * Phase 2C0.5. Defaults to the conservative reading for the given
+   * classification (see `defaultDispatchState`) so every existing call site
+   * stays valid and none of them silently become "safe to retry".
+   */
+  readonly dispatch: ProviderDispatchState;
 
-  constructor(classification: ProviderErrorClassification, message: string) {
+  constructor(
+    classification: ProviderErrorClassification,
+    message: string,
+    dispatch?: ProviderDispatchState,
+  ) {
     super(message);
     this.name = "ProviderError";
     this.classification = classification;
+    this.dispatch = dispatch ?? defaultDispatchState(classification);
   }
 }
 
-/** Transient failures worth retrying; malformed responses and unknown errors are not. */
+/**
+ * The safe reading of a classification when a caller does not state the
+ * dispatch state explicitly.
+ *
+ * Everything the platform refuses to send, or that the provider rejected
+ * before doing any work, is `not_dispatched`. Anything that could plausibly
+ * have reached — and been charged by — the provider defaults to ambiguous.
+ */
+function defaultDispatchState(
+  classification: ProviderErrorClassification,
+): ProviderDispatchState {
+  switch (classification) {
+    // Never left this process, or was rejected by the provider before it
+    // did any billable work.
+    case "invalid_request":
+    case "auth":
+    case "insufficient_credits":
+    case "rate_limited":
+      return "not_dispatched";
+    // A success status we could not consume — assume it was billed.
+    case "malformed_response":
+      return "dispatched_billed";
+    // Everything else: the request may have reached the provider and the
+    // stack cannot prove otherwise.
+    default:
+      return "dispatched_ambiguous";
+  }
+}
+
+/**
+ * Phase 2C0.5: transport-level retry is now allowed ONLY for failures that
+ * provably never reached the provider.
+ *
+ * Before this phase every `network`/`rate_limited`/`unavailable` failure was
+ * retried up to three times regardless of whether the request had already
+ * been dispatched — so a single 5xx after a successful (billable) image
+ * generation could pay for the same image three times over.
+ *
+ * A dispatched-but-ambiguous failure is not "not retryable" in the sense of
+ * being hopeless; it is not retryable HERE. The decision to spend again on
+ * the same logical image belongs to the paid-intent layer, which has a
+ * durable, cross-worker dispatch budget (`MAX_PAID_DISPATCHES_PER_INTENT`)
+ * — the transport layer has only a local loop counter that resets on every
+ * reclaim, which is exactly why it must not be the thing deciding.
+ */
 export function isRetryableProviderError(error: unknown): boolean {
   return (
     error instanceof ProviderError &&
+    error.dispatch === "not_dispatched" &&
     (error.classification === "network" ||
       error.classification === "rate_limited" ||
       error.classification === "unavailable")
   );
+}
+
+/**
+ * Phase 2C0.5: whether this failure means a paid image may already have
+ * been produced and charged for. Used by the paid-intent layer to decide
+ * whether a re-dispatch is a bounded, knowingly-accepted spend risk.
+ */
+export function isPossiblyBilledProviderError(error: unknown): boolean {
+  return (
+    error instanceof ProviderError && error.dispatch !== "not_dispatched"
+  );
+}
+
+/**
+ * Phase 2C0.5: classifies a `fetch` rejection into a dispatch state.
+ *
+ * Undici surfaces the underlying cause on `error.cause.code`. Only codes
+ * that can ONLY occur before any bytes of the request were accepted by a
+ * remote peer are treated as provably pre-dispatch — DNS resolution
+ * failures, refused connections, and unreachable networks. A reset,
+ * timeout, or aborted socket can all happen after the request was fully
+ * sent (and after the provider began billable work), so they stay
+ * ambiguous, as does anything unrecognized.
+ */
+const PROVABLY_PRE_DISPATCH_CODES = new Set([
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ERR_INVALID_URL",
+]);
+
+export function classifyFetchRejectionDispatch(
+  error: unknown,
+): ProviderDispatchState {
+  const code = extractErrorCode(error);
+  if (code && PROVABLY_PRE_DISPATCH_CODES.has(code)) return "not_dispatched";
+  return "dispatched_ambiguous";
+}
+
+function extractErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const direct = (error as { code?: unknown }).code;
+  if (typeof direct === "string" && direct.length > 0) return direct;
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause && typeof cause === "object") {
+    const causeCode = (cause as { code?: unknown }).code;
+    if (typeof causeCode === "string" && causeCode.length > 0) return causeCode;
+  }
+  return null;
 }

@@ -2,6 +2,7 @@ import type {
   ConceptGenerationRequest,
   ConceptGenerationResult,
 } from "@/capabilities/shared/contracts";
+import type { ConceptDirectionKey } from "@/lib/domain/types";
 
 /**
  * Provider port for concept generation.
@@ -28,5 +29,30 @@ export interface ConceptGenerationProvider {
   readonly editsSourceArtwork: boolean;
   generate(
     request: ConceptGenerationRequest,
+  ): Promise<ConceptGenerationResult>;
+  /**
+   * Phase 2C0.5: generate EXACTLY ONE catalog direction.
+   *
+   * Why this exists: `generate` produces the whole three-direction batch in
+   * one call, which meant the platform could not durably record that Bold
+   * and Soft had already been paid for until Minimal also finished. A
+   * worker reclaim after a late failure therefore re-billed images the
+   * platform already owned. Driving the loop from
+   * `GenerationWorkerCapability` — one paid provider dispatch per call —
+   * is what lets each direction be checkpointed the moment it succeeds.
+   *
+   * OPTIONAL on purpose. An adapter that produces no real artwork (the
+   * placeholder and unavailable stubs) has no paid unit to split apart, and
+   * neither do the fake providers existing tests are written against.
+   * Where this is absent the worker treats the whole batch as ONE logical
+   * paid intent — still durable, still at-most-once, just coarser. Any
+   * adapter that actually spends money should implement it.
+   *
+   * Must produce exactly one concept, in `directionKey`, and must apply the
+   * same retry/error-classification rules as `generate`.
+   */
+  generateDirection?(
+    request: ConceptGenerationRequest,
+    directionKey: ConceptDirectionKey,
   ): Promise<ConceptGenerationResult>;
 }
