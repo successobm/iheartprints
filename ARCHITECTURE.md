@@ -814,6 +814,22 @@ concept corrected, not a different design, and no quality tier is bumped. The
 adapter owns the corrective wording, which names no threshold, reason code,
 or number.
 
+**Transparency / negative-space contract (Phase 2C.2A).** Live Harley
+forensics showed Phase 2B was correct: failing Bold/Soft concepts used large
+*opaque* garment-matching fills (black bike body, jacket, tires) where the
+garment should show through. A transparent outer canvas alone is not enough.
+For `printPaletteEnforcement === "hard"`, the OpenAI adapter now states an
+operational alpha rule in the hard print-palette section: required print
+colors are actual printed ink; garment-matching regions that are not required
+print colors must be encoded as transparent alpha, not opaque
+garment-colored RGB; subject-only colors remain semantic identity, not
+permission to paint excluded fills. Soft/none palettes do not invent this
+hard rule. When a garment color is itself listed in the required print
+palette, opaque use of that color remains intentional and allowed. The
+Phase 2C corrective block restates the same failure mode more strongly for
+replacements — still without validator numbers or reason codes. No worker,
+budget, model/quality, or Phase 2B threshold changes.
+
 **Outcome policy** for an evaluated replacement:
 
 | Verdict | Result |

@@ -707,9 +707,18 @@ function buildPrompt(
   // Centered composition is a provider DEFAULT — the lowest priority thing
   // in this prompt. When the customer has said where things go, asserting it
   // anyway is a direct contradiction of a higher-priority requirement.
+  //
+  // Phase 2C.2A: for a HARD print palette the closing restates that
+  // transparency is alpha (outer canvas AND internal garment-supplied
+  // negative space). Soft/none keep the shorter legacy closing.
+  const hardTransparency =
+    prompt.printPaletteEnforcement === "hard" && prompt.colors.length > 0;
+  const closingBase = hardTransparency
+    ? "Clean vector-style illustration on a fully transparent background — outer canvas and internal garment-supplied negative space must use alpha transparency, never opaque garment-colored fill"
+    : "Clean vector-style illustration, transparent background";
   const closing = contract.hasExplicitComposition
-    ? "Clean vector-style illustration, transparent background, arranged to match the customer's stated composition above, no watermark, no mockup, no photograph of a shirt — artwork only."
-    : "Clean vector-style illustration, transparent background, centered composition, no watermark, no mockup, no photograph of a shirt — artwork only.";
+    ? `${closingBase}, arranged to match the customer's stated composition above, no watermark, no mockup, no photograph of a shirt — artwork only.`
+    : `${closingBase}, centered composition, no watermark, no mockup, no photograph of a shirt — artwork only.`;
   sections.push(
     noText
       ? `${closing.slice(0, -1)}, and no text or lettering of any kind.`
@@ -854,8 +863,17 @@ function endWithPeriod(value: string): string {
 }
 
 /**
- * Phase 2A: hard print/render palette — subject semantics stay in REQUIRED
- * DESIGN CONTENT; this section owns ink. Creative directions must not dilute it.
+ * Phase 2A + Phase 2C.2A: hard print/render palette — subject semantics stay
+ * in REQUIRED DESIGN CONTENT; this section owns ink AND how garment-supplied
+ * negative space is encoded. Creative directions must not dilute either.
+ *
+ * Phase 2C.2A: a transparent OUTER canvas alone is not enough. Models were
+ * painting large opaque garment-colored fills inside the subject (black bike
+ * body on a black shirt, etc.) even when the hard print palette excluded
+ * that color. The transparency / negative-space block states the operational
+ * alpha rule: garment-matching empty regions must be alpha-transparent, not
+ * opaque garment-colored RGB — without deleting semantic subject colors from
+ * REQUIRED DESIGN CONTENT.
  */
 function buildHardPrintPaletteSection(prompt: GenerationPromptRequest): string {
   const palette = prompt.colors.join(", ");
@@ -879,11 +897,21 @@ function buildHardPrintPaletteSection(prompt: GenerationPromptRequest): string {
     );
   }
 
+  lines.push(
+    "TRANSPARENCY / NEGATIVE SPACE — HARD PRODUCTION RULE:",
+    "The required print palette lists the colors that should actually be PRINTED as ink.",
+    `Outer background: fully transparent (alpha), never an opaque fill matching the ${garment} garment.`,
+    "Internal garment-supplied negative space: when a real-world subject or object color matches the garment but is NOT among the required print colors, do not paint large interiors, shadows, or empty regions as opaque garment-colored RGB. Encode those areas as transparent alpha so the garment itself supplies that tone.",
+    "Preserve subject identity with the required printable colors — linework, contour, highlights, printable shading, and design structure — not with large opaque fills in excluded subject-only or garment-matching colors.",
+    "A transparent outer canvas alone is not enough: internal regions that should show the garment must also be transparent, not simulated with opaque paint the same color as the fabric.",
+    "If a color is explicitly listed in the required print palette above, using that color as printed ink is intentional and allowed. This rule only forbids substituting opaque garment-matching fill for transparency when that color is outside the required print palette.",
+  );
+
   return lines.join("\n");
 }
 
 /**
- * Phase 2C: the deterministic corrective instruction on an automatic
+ * Phase 2C / 2C.2A: the deterministic corrective instruction on an automatic
  * replacement. Fixed text — it takes no arguments, so it cannot vary with
  * anything the validator measured.
  *
@@ -898,13 +926,19 @@ function buildHardPrintPaletteSection(prompt: GenerationPromptRequest): string {
  *     ask for a different subject, layout, or treatment — the surrounding
  *     prompt (unchanged from the candidate this replaces) still governs all
  *     of that, and the last line says so explicitly.
+ *
+ * Phase 2C.2A strengthens the correction with the operational failure mode
+ * observed live: too much garment-matching color rendered as opaque printed
+ * artwork instead of transparent negative space.
  */
 function buildPrintPaletteCorrectionSection(): string {
   return [
-    "PRINT PALETTE CORRECTION — the previous candidate for this design failed the required print-palette / garment-contrast constraint. For this version:",
-    "- Follow the REQUIRED PRINT PALETTE above strictly — it governs the printed ink.",
-    "- Do not let ink matching the garment color dominate the artwork; the design must read clearly against the fabric.",
-    "- Preserve the subject's identity using the required printable palette — through linework, silhouette, shading, negative space, and print treatment.",
+    "PRINT PALETTE CORRECTION — the previous candidate for this design failed the required print-palette / garment-contrast constraint because too much garment-matching color was rendered as opaque printed artwork. For this version:",
+    "- Follow the REQUIRED PRINT PALETTE and the TRANSPARENCY / NEGATIVE SPACE rules above strictly — they govern printed ink and alpha.",
+    "- Do not use large opaque garment-matching fills for object interiors, shadows, clothing, tires, bags, logo interiors, or other regions the garment should supply.",
+    "- Do not paint subject areas in an excluded subject-only or garment-matching color merely because the real-world object is described that way — represent them with the required printable contours, highlights, and structure.",
+    "- Encode empty space and garment-supplied negative space as transparent alpha, not as opaque paint that matches the fabric. Transparency must be real alpha, not simulated by filling with the garment color.",
+    "- Preserve the subject's identity and the same creative direction using the required print palette — through linework, silhouette, shading, and print treatment.",
     "- Do not treat subject-object colors as literal print ink where they conflict with the required print palette.",
     "Keep the same creative direction, subject, composition, wording rules, and exclusions specified above. This is a corrected version of the same concept, not a different design.",
   ].join("\n");
