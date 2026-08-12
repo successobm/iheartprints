@@ -53,6 +53,10 @@ describe("GuidedCleanupWorkspace", () => {
 
     assert.match(html, /Clean up background/i);
     assert.match(html, /Click background to preview removing it/);
+    assert.match(html, /Cleanup Tool/);
+    assert.match(html, /Select Area/);
+    assert.match(html, /Magic Select/);
+    assert.match(html, /data-cleanup-tool="region"/);
     assert.match(html, /data-cleanup-viewport/);
     assert.match(html, /data-zoom-factor="1"/);
     assert.match(html, /data-zoom-percent="100%"/);
@@ -63,6 +67,56 @@ describe("GuidedCleanupWorkspace", () => {
     assert.match(html, new RegExp(GUIDED_CLEANUP_COPY.exitActionLabel));
     assert.doesNotMatch(html, /Use Prepared Artwork|Approve/i);
     assert.doesNotMatch(html, /brush|lasso|eraser|freehand/i);
+  });
+
+  it("Phase 1.7: Magic Select exposes Tolerance without RGB jargon", () => {
+    // SSR cannot click the tool switcher; pin the default Select Area chrome
+    // and the copy constants the switcher renders when Magic Select is active.
+    assert.match(GUIDED_CLEANUP_COPY.magicSelectHint, /Click a color/i);
+    assert.match(GUIDED_CLEANUP_COPY.toleranceLabel, /^Tolerance$/);
+    assert.match(GUIDED_CLEANUP_COPY.toleranceHelp, /similar color/i);
+    assert.doesNotMatch(GUIDED_CLEANUP_COPY.magicSelectHint, /RGB|Chebyshev|flood|alpha/i);
+    assert.doesNotMatch(GUIDED_CLEANUP_COPY.toleranceHelp, /connected|topology|thickness/i);
+  });
+
+  it("Phase 1.7B: no Connected/Similar toggle, lasso, or brush", () => {
+    const html = render();
+    assert.match(html, /Select Area/);
+    assert.match(html, /Magic Select/);
+    assert.doesNotMatch(html, /Connected|Similar mode|Magnetic|Global toggle|Lasso|Brush|Eraser/i);
+    assert.doesNotMatch(
+      GUIDED_CLEANUP_COPY.selectedPixelsLabel(730),
+      /RGB|flood|connected component/i,
+    );
+    assert.equal(
+      GUIDED_CLEANUP_COPY.selectedPixelsLabel(730),
+      "Selected 730 pixels",
+    );
+  });
+
+  it("Phase 1.7B: selected-count copy is prominent during Magic Select preview", () => {
+    const html = render({
+      cleanupMessage: "Selected 730 pixels. Remove this selection?",
+      pendingHighlight: {
+        bounds: { left: 10, top: 20, right: 40, bottom: 50, width: 30, height: 30 },
+        overlayDataUrl: "data:image/png;base64,abc",
+      },
+    });
+    assert.match(html, /Selected 730 pixels/);
+    assert.match(html, /Remove this selection\?/);
+    assert.match(html, /data:image\/png;base64,abc/);
+    for (const background of ["white", "gray", "black"] as const) {
+      const withBg = render({
+        initialPreviewBackground: background,
+        cleanupMessage: "Selected 730 pixels. Remove this selection?",
+        pendingHighlight: {
+          bounds: { left: 10, top: 20, right: 40, bottom: 50, width: 30, height: 30 },
+          overlayDataUrl: "data:image/png;base64,abc",
+        },
+      });
+      assert.match(withBg, new RegExp(`data-preview-background="${background}"`));
+      assert.match(withBg, /Selected 730 pixels/);
+    }
   });
 
   it("Phase 1.6B: the artwork surface advertises SELECTION, not dragging", () => {
@@ -90,6 +144,24 @@ describe("GuidedCleanupWorkspace", () => {
     assert.match(GUIDED_CLEANUP_COPY.panHint, /Space/);
     // ...and no production settings leak into the hint.
     assert.doesNotMatch(GUIDED_CLEANUP_COPY.panHint, /DPI|pixel|resolution|model/i);
+  });
+
+  it("Phase 1.7 UX: Ctrl/Cmd + wheel zoom is advertised; plain wheel is not hijacked", () => {
+    const html = render();
+    assert.match(html, /data-wheel-zoom="ctrl-meta"/);
+    assert.match(html, /data-wheel-zoom-hint/);
+    assert.match(html, /Ctrl \+ scroll to zoom/);
+    assert.match(html, /cursor-crosshair/);
+    assert.match(html, /data-primary-gesture="select"/);
+    assert.doesNotMatch(GUIDED_CLEANUP_COPY.wheelZoomHint, /pinch|All Similar|RGB/i);
+  });
+
+  it("Phase 1.7 UX: wheel zoom does not change preparedRevision or QA background", () => {
+    const html = render();
+    assert.match(html, /data-prepared-revision="rev-test"/);
+    assert.match(html, /data-preview-background="white"/);
+    assert.match(html, /data-cleanup-tool="region"/);
+    assert.match(html, /src="https:\/\/signed\.example\/prepared\.png"/);
   });
 
   it("A: workspace defaults to White QA background", () => {

@@ -51,23 +51,36 @@ import type {
 } from "@/lib/domain/types";
 
 import {
-  isolateBackground,
-  passThroughTransparentArtwork,
   previewGuidedRemovalAt,
   revalidateGuidedRemovalCandidate,
 } from "./background-isolation";
 import type { ArtworkAnalysis, RepairabilityAssessment } from "./contracts";
 import {
+  buildSelectionHighlight,
+  isMagicSelectCandidateClaims,
   mintGuidedCleanupCandidateToken,
+  mintMagicSelectCandidateToken,
   verifyGuidedCleanupCandidateToken,
   type GuidedCleanupHighlight,
 } from "./guided-cleanup-candidate";
-import type {
-  GuidedRemovalPoint,
-  GuidedRemovalRecord,
-} from "./guided-removal";
+import {
+  derivePreparedFromOperations,
+  isMagicColorOperation,
+  parseGuidedCleanupOperations,
+  regionOperations,
+  type GuidedCleanupOperation,
+  type GuidedCleanupTool,
+} from "./guided-cleanup-operations";
+import type { GuidedRemovalPoint } from "./guided-removal";
 import { decodePngUpload, encodeRgbaToPng } from "./image-decode";
 import { analyzeArtwork } from "./image-analysis";
+import {
+  clampMagicSelectTolerance,
+  MAGIC_SELECT_DEFAULT_TOLERANCE,
+  selectConnectedMagicColor,
+  selectMagicColor,
+  selectMagicColorByMode,
+} from "./magic-color-selection";
 import {
   describeArtworkForCustomer,
   describeGuidedCleanupOutcome,
@@ -81,6 +94,8 @@ import {
   sanitizeUploadFilename,
   validateUploadBytes,
 } from "./upload-limits";
+
+export type { GuidedCleanupTool };
 
 /**
  * Thrown when a request is well-formed but the current preparation state
@@ -182,11 +197,16 @@ export interface GuidedCleanupPreviewResult {
   candidateToken: string | null;
   /** Exact-region overlay. Null when the click was refused. */
   highlight: GuidedCleanupHighlight | null;
+  /** Phase 1.7: pixel count for Magic Select status copy. */
+  selectedPixelCount?: number;
 }
 
-/** Persisted shape of `ArtworkPreparation.guidedCleanup`. */
-interface GuidedCleanupRecord {
-  removals: GuidedRemovalRecord[];
+export interface GuidedCleanupPreviewInput {
+  point: GuidedRemovalPoint;
+  /** Defaults to Select Area (`region`). */
+  tool?: GuidedCleanupTool;
+  /** Magic Select only. Clamped server-side. */
+  tolerance?: number;
 }
 
 /** The production context an uploaded-artwork customer states. Never a creative brief. */
@@ -236,11 +256,11 @@ export interface ArtworkPreparationCapability {
    */
   previewGuidedCleanup(
     designId: string,
-    point: GuidedRemovalPoint,
+    input: GuidedRemovalPoint | GuidedCleanupPreviewInput,
   ): Promise<GuidedCleanupPreviewResult>;
   /**
-   * Existing Artwork → Print Ready Phase 1.3: redeem a preview token and
-   * apply the existing Phase 1.2 guided-removal persistence path.
+   * Existing Artwork → Print Ready Phase 1.3 / 1.7: redeem a preview token and
+   * apply the guided-cleanup persistence path (region or magic_color).
    *
    * Revalidates the candidate against the current preparation before any
    * write. Stale, forged, cross-project, or already-removed tokens do not
@@ -305,7 +325,7 @@ export function createArtworkPreparationCapability(
   ): Promise<ArtworkPreparationView> {
     const analysis = preparation.analysis as unknown as ArtworkAnalysis;
     const assessment = classifyRepairability(analysis);
-    const removals = readGuidedRemovals(preparation);
+    const removals = readGuidedOperations(preparation);
 
     return {
       guidedCleanup: {
@@ -381,12 +401,11 @@ export function createArtworkPreparationCapability(
    * Runs the deterministic pipeline over the IMMUTABLE original and persists
    * the result as a NEW asset.
    *
-   * The single derivation path: automatic preparation calls it with no clicks,
-   * guided cleanup calls it with the customer's whole click history. That is
-   * what makes the two produce byte-identical output for the same inputs, and
-   * what makes a reload safe — the prepared asset is always a pure function of
-   * (original bytes, background model, click list), never of how many times
-   * anything ran.
+   * The single derivation path: automatic preparation calls it with no ops,
+   * guided cleanup calls it with the customer's whole operation history. That
+   * is what makes reload safe — the prepared asset is always a pure function
+   * of (original bytes, background model, ordered ops), never of how many
+   * times anything ran.
    *
    * A NEW asset every time, never an overwrite: the original is immutable by
    * contract, and a superseded prepared asset stays in place so lineage
@@ -397,29 +416,25 @@ export function createArtworkPreparationCapability(
     preparation: ArtworkPreparation,
     analysis: ArtworkAnalysis,
     assessment: RepairabilityAssessment,
-    guidedRemovalPoints: readonly GuidedRemovalPoint[],
+    operations: readonly GuidedCleanupOperation[],
   ) {
     const image = await loadOriginalImage(preparation);
-    const isolated =
-      assessment.backgroundTreatment === "already_transparent"
-        ? passThroughTransparentArtwork(
-            image,
-            analysis.estimatedBackgroundColor,
-            analysis.backgroundTolerance,
-          )
-        : isolateBackground(image, {
-            backgroundColor: analysis.estimatedBackgroundColor,
-            tolerance: analysis.backgroundTolerance,
-            guidedRemovalPoints,
-          });
+    const derived = derivePreparedFromOperations({
+      image,
+      backgroundColor: analysis.estimatedBackgroundColor,
+      tolerance: analysis.backgroundTolerance,
+      alreadyTransparent:
+        assessment.backgroundTreatment === "already_transparent",
+      operations,
+    });
 
-    assertPreservesGeometry(image, isolated.image);
+    assertPreservesGeometry(image, derived.image);
 
     // Derived prepared assets are IMMUTABLE. Each persisted derivation needs
     // a unique storage object identity — never `…-${applied.length}` alone.
     // Supabase Storage uses upsert:false; a deterministic key collides with
     // orphans/history and blocks confirm/undo. Application-level idempotency
-    // (candidate token + guided_cleanup region list) prevents duplicate
+    // (candidate token + guided_cleanup op list) prevents duplicate
     // successful mutations; storage-path collision must never be that gate.
     //
     // Ordering: upload bytes → create AssetRecord → repoint preparation.
@@ -427,63 +442,81 @@ export function createArtworkPreparationCapability(
     // next retry uses a fresh UUID and existing DB state stays authoritative.
     const asset = await assets.uploadCustomerArtwork(designId, {
       conceptId: `prepared-${preparation.id}-${randomUUID()}`,
-      bytes: encodeRgbaToPng(isolated.image),
+      bytes: encodeRgbaToPng(derived.image),
       contentType: "image/png",
-      widthPx: isolated.image.width,
-      heightPx: isolated.image.height,
+      widthPx: derived.image.width,
+      heightPx: derived.image.height,
       hasTransparency: true,
       kind: "png",
       metadata: {
         // Lineage lives on the preparation row; this mirror exists purely so
-        // an asset can be traced back without a join. The click list is
+        // an asset can be traced back without a join. The op list is
         // included because it is the other half of "what produced these
         // bytes" — the original alone no longer explains them.
         derivedFromAssetId: preparation.originalAssetId,
         artworkPreparationId: preparation.id,
-        preparation: isolated.record as unknown as Record<string, unknown>,
-        guidedRemovals: isolated.guided.applied as unknown as Record<
-          string,
-          unknown
-        >[],
+        preparation: derived.record as unknown as Record<string, unknown>,
+        guidedRemovals: derived.applied as unknown as Record<string, unknown>[],
       },
     });
 
-    return { asset, isolated };
+    return { asset, derived };
   }
 
   /**
-   * Re-derives the prepared asset from the customer's whole click history and
+   * Working prepared RGBA for the current op list — used by Magic Select
+   * preview/confirm so selection matches what the customer sees.
+   */
+  async function loadWorkingPreparedImage(
+    preparation: ArtworkPreparation,
+    operations: readonly GuidedCleanupOperation[],
+  ) {
+    const analysis = preparation.analysis as unknown as ArtworkAnalysis;
+    const assessment = classifyRepairability(analysis);
+    const image = await loadOriginalImage(preparation);
+    return derivePreparedFromOperations({
+      image,
+      backgroundColor: analysis.estimatedBackgroundColor,
+      tolerance: analysis.backgroundTolerance,
+      alreadyTransparent:
+        assessment.backgroundTreatment === "already_transparent",
+      operations,
+    }).image;
+  }
+
+  /**
+   * Re-derives the prepared asset from the customer's whole op history and
    * persists both. Shared by apply and undo so there is exactly one way the
-   * prepared bytes and the stored click list can change, and they cannot get
+   * prepared bytes and the stored op list can change, and they cannot get
    * out of step.
    */
   async function persistGuidedCleanup(
     designId: string,
     preparation: ArtworkPreparation,
     brief: TShirtDesignBrief,
-    removals: GuidedRemovalRecord[],
+    operations: GuidedCleanupOperation[],
     outcome: GuidedCleanupOutcomeCode,
   ): Promise<GuidedCleanupResult> {
     const analysis = preparation.analysis as unknown as ArtworkAnalysis;
     const assessment = classifyRepairability(analysis);
 
-    const { asset, isolated } = await derivePreparedAsset(
+    const { asset, derived } = await derivePreparedAsset(
       designId,
       preparation,
       analysis,
       assessment,
-      removals.map((removal) => removal.point),
+      operations,
     );
 
     const updated = await repo.updateArtworkPreparation(preparation.id, {
       preparedAssetId: asset.id,
-      preparation: isolated.record as unknown as Record<string, unknown>,
+      preparation: derived.record as unknown as Record<string, unknown>,
       // Stored as what the pipeline ACCEPTED, not as what the client sent —
       // a point that stopped resolving would otherwise linger forever.
       guidedCleanup:
-        isolated.guided.applied.length === 0
+        derived.applied.length === 0
           ? null
-          : ({ removals: isolated.guided.applied } as unknown as Record<
+          : ({ removals: derived.applied } as unknown as Record<
               string,
               unknown
             >),
@@ -515,7 +548,7 @@ export function createArtworkPreparationCapability(
       );
     }
 
-    return { brief, preparation, removals: readGuidedRemovals(preparation) };
+    return { brief, preparation, removals: readGuidedOperations(preparation) };
   }
 
   return {
@@ -615,10 +648,10 @@ export function createArtworkPreparationCapability(
         );
       }
 
-      // No clicks: automatic preparation is exactly this pipeline with an
-      // empty click list, which is why guided cleanup cannot change what an
+      // No ops: automatic preparation is exactly this pipeline with an empty
+      // operation list, which is why guided cleanup cannot change what an
       // untouched preparation produces.
-      const { asset, isolated } = await derivePreparedAsset(
+      const { asset, derived } = await derivePreparedAsset(
         designId,
         preparation,
         analysis,
@@ -629,24 +662,96 @@ export function createArtworkPreparationCapability(
       const updated = await repo.updateArtworkPreparation(preparation.id, {
         status: "prepared",
         preparedAssetId: asset.id,
-        preparation: isolated.record as unknown as Record<string, unknown>,
+        preparation: derived.record as unknown as Record<string, unknown>,
       });
 
       return toView(updated, brief);
     },
 
-    async previewGuidedCleanup(designId, point) {
+    async previewGuidedCleanup(designId, input) {
+      const previewInput = normalizeGuidedCleanupPreviewInput(input);
+      const tool: GuidedCleanupTool = previewInput.tool ?? "region";
+      const point = previewInput.point;
       const { brief, preparation, removals } = await requireCleanupTarget(designId);
-      const analysis = preparation.analysis as unknown as ArtworkAnalysis;
+      const view = await toView(preparation, brief);
 
+      if (tool === "magic_select") {
+        const tolerance = clampMagicSelectTolerance(
+          previewInput.tolerance ?? MAGIC_SELECT_DEFAULT_TOLERANCE,
+        );
+        const working = await loadWorkingPreparedImage(preparation, removals);
+        const selected = selectMagicColor(working, point, tolerance);
+
+        if (selected.outcome !== "eligible" || !selected.selection) {
+          const refused =
+            selected.outcome === "outside_image"
+              ? "outside_image"
+              : "already_removed";
+          return {
+            outcome: refused,
+            message: describeGuidedCleanupOutcome(refused),
+            view,
+            candidateToken: null,
+            highlight: null,
+          };
+        }
+
+        const selection = selected.selection;
+        if (
+          removals.some(
+            (op) =>
+              isMagicColorOperation(op) && op.selectionKey === selection.selectionKey,
+          )
+        ) {
+          return {
+            outcome: "already_removed",
+            message: describeGuidedCleanupOutcome("already_removed"),
+            view,
+            candidateToken: null,
+            highlight: null,
+          };
+        }
+
+        const candidateToken = mintMagicSelectCandidateToken({
+          projectId: designId,
+          preparationId: preparation.id,
+          preparedAssetId: preparation.preparedAssetId!,
+          point: selection.point,
+          tolerance: selection.tolerance,
+          selectionMode: selection.selectionMode,
+          ruleVersion: selection.ruleVersion,
+          referenceColor: selection.referenceColor,
+          selectionKey: selection.selectionKey,
+          pixelCount: selection.pixelCount,
+          removalCount: removals.length,
+        });
+
+        return {
+          outcome: "preview",
+          message: describeGuidedCleanupOutcome("preview", {
+            tool: "magic_select",
+            selectedPixelCount: selection.pixelCount,
+          }),
+          view,
+          candidateToken,
+          highlight: buildSelectionHighlight(
+            selection.mask,
+            working.width,
+            working.height,
+            selection.bounds,
+            "solid",
+          ),
+          selectedPixelCount: selection.pixelCount,
+        };
+      }
+
+      const analysis = preparation.analysis as unknown as ArtworkAnalysis;
       const image = await loadOriginalImage(preparation);
       const preview = previewGuidedRemovalAt(image, point, {
         backgroundColor: analysis.estimatedBackgroundColor,
         tolerance: analysis.backgroundTolerance,
-        applied: removals,
+        applied: regionOperations(removals),
       });
-
-      const view = await toView(preparation, brief);
 
       if (preview.resolution.outcome !== "eligible" || !preview.resolution.region) {
         return {
@@ -671,10 +776,11 @@ export function createArtworkPreparationCapability(
 
       return {
         outcome: "preview",
-        message: describeGuidedCleanupOutcome("preview"),
+        message: describeGuidedCleanupOutcome("preview", { tool: "region" }),
         view,
         candidateToken,
         highlight: preview.highlight,
+        selectedPixelCount: region.pixelCount,
       };
     },
 
@@ -691,10 +797,102 @@ export function createArtworkPreparationCapability(
 
       const { brief, preparation, removals } = await requireCleanupTarget(designId);
 
+      if (isMagicSelectCandidateClaims(claims)) {
+        if (
+          removals.some(
+            (op) =>
+              isMagicColorOperation(op) && op.selectionKey === claims.selectionKey,
+          )
+        ) {
+          return {
+            outcome: "already_removed",
+            message: describeGuidedCleanupOutcome("already_removed"),
+            view: await toView(preparation, brief),
+          };
+        }
+
+        if (
+          preparation.id !== claims.preparationId ||
+          preparation.preparedAssetId !== claims.preparedAssetId ||
+          removals.length !== claims.removalCount
+        ) {
+          return {
+            outcome: "stale_preview",
+            message: describeGuidedCleanupOutcome("stale_preview"),
+            view: await toView(preparation, brief),
+          };
+        }
+
+        const working = await loadWorkingPreparedImage(preparation, removals);
+        const selected =
+          claims.v === 3
+            ? selectMagicColorByMode(
+                working,
+                claims.point,
+                claims.tolerance,
+                claims.selectionMode,
+              )
+            : selectConnectedMagicColor(working, claims.point, claims.tolerance);
+
+        if (
+          selected.outcome !== "eligible" ||
+          !selected.selection ||
+          selected.selection.selectionKey !== claims.selectionKey ||
+          selected.selection.pixelCount !== claims.pixelCount ||
+          selected.selection.tolerance !== claims.tolerance ||
+          selected.selection.referenceColor.r !== claims.referenceColor.r ||
+          selected.selection.referenceColor.g !== claims.referenceColor.g ||
+          selected.selection.referenceColor.b !== claims.referenceColor.b ||
+          (claims.v === 3 &&
+            (selected.selection.selectionMode !== claims.selectionMode ||
+              selected.selection.ruleVersion !== claims.ruleVersion))
+        ) {
+          return {
+            outcome:
+              selected.outcome === "already_removed"
+                ? "already_removed"
+                : "stale_preview",
+            message: describeGuidedCleanupOutcome(
+              selected.outcome === "already_removed"
+                ? "already_removed"
+                : "stale_preview",
+            ),
+            view: await toView(preparation, brief),
+          };
+        }
+
+        return persistGuidedCleanup(
+          designId,
+          preparation,
+          brief,
+          [
+            ...removals,
+            {
+              kind: "magic_color",
+              point: selected.selection.point,
+              tolerance: selected.selection.tolerance,
+              selectionMode: selected.selection.selectionMode,
+              ruleVersion: selected.selection.ruleVersion,
+              connectedOnly: selected.selection.connectedOnly,
+              referenceColor: selected.selection.referenceColor,
+              selectionKey: selected.selection.selectionKey,
+              pixelCount: selected.selection.pixelCount,
+            },
+          ],
+          "removed",
+        );
+      }
+
       // Idempotent re-confirm: the region is already recorded under this
       // preparation. Prefer this over stale when the prepared asset advanced
       // because THIS confirm already succeeded.
-      if (removals.some((record) => record.regionKey === claims.regionKey)) {
+      if (
+        removals.some(
+          (record) =>
+            !isMagicColorOperation(record) &&
+            record.regionKey === claims.regionKey,
+        )
+      ) {
         return {
           outcome: "already_removed",
           message: describeGuidedCleanupOutcome("already_removed"),
@@ -719,13 +917,12 @@ export function createArtworkPreparationCapability(
       const resolution = revalidateGuidedRemovalCandidate(image, {
         backgroundColor: analysis.estimatedBackgroundColor,
         tolerance: analysis.backgroundTolerance,
-        applied: removals,
+        applied: regionOperations(removals),
         regionKey: claims.regionKey,
         point: claims.point,
       });
 
       if (resolution.outcome !== "eligible" || !resolution.region) {
-        // Region vanished or is no longer eligible under current state.
         return {
           outcome:
             resolution.outcome === "already_removed"
@@ -747,6 +944,7 @@ export function createArtworkPreparationCapability(
         [
           ...removals,
           {
+            kind: "region",
             point: claims.point,
             regionKey: resolution.region.regionKey,
             pixelCount: resolution.region.pixelCount,
@@ -886,30 +1084,34 @@ function assertPreservesGeometry(
 }
 
 /**
- * Narrows the loosely-typed `guidedCleanup` column back into records.
+ * Narrows the loosely-typed `guidedCleanup` column back into operations.
  *
  * Total and forgiving by design: anything malformed reads as "no cleanup"
  * rather than throwing, because a corrupt diagnostics blob must never make a
  * customer's artwork unopenable. Nothing here is trusted anyway — a stored
- * point is re-resolved against the real image on every derivation, so a bogus
+ * op is re-resolved against the real image on every derivation, so a bogus
  * coordinate simply resolves to nothing and drops out.
  */
-function readGuidedRemovals(preparation: ArtworkPreparation): GuidedRemovalRecord[] {
-  const stored = preparation.guidedCleanup as GuidedCleanupRecord | null;
-  if (!stored || !Array.isArray(stored.removals)) return [];
+function readGuidedOperations(
+  preparation: ArtworkPreparation,
+): GuidedCleanupOperation[] {
+  return parseGuidedCleanupOperations(preparation.guidedCleanup);
+}
 
-  return stored.removals.flatMap((removal) => {
-    const x = removal?.point?.x;
-    const y = removal?.point?.y;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
-    return [
-      {
-        point: { x: Math.floor(x), y: Math.floor(y) },
-        regionKey: typeof removal.regionKey === "string" ? removal.regionKey : "",
-        pixelCount: Number.isFinite(removal.pixelCount) ? removal.pixelCount : 0,
-      },
-    ];
-  });
+function normalizeGuidedCleanupPreviewInput(
+  input: GuidedRemovalPoint | GuidedCleanupPreviewInput,
+): GuidedCleanupPreviewInput {
+  if (
+    input &&
+    typeof input === "object" &&
+    "point" in input &&
+    input.point &&
+    typeof input.point === "object" &&
+    Number.isFinite((input.point as GuidedRemovalPoint).x)
+  ) {
+    return input;
+  }
+  return { point: input as GuidedRemovalPoint };
 }
 
 function randomSuffix(): string {

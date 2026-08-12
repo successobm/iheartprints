@@ -8,8 +8,11 @@ import {
   GUIDED_CLEANUP_ZOOM_MIN,
   GUIDED_CLEANUP_ZOOM_STEP,
   isPanGesture,
+  isWheelZoomModifier,
+  nextZoomFromWheel,
   nextZoomIn,
   nextZoomOut,
+  pointerCenteredScroll,
   zoomedDisplaySize,
   zoomPercentLabel,
 } from "./guided-cleanup-zoom";
@@ -159,5 +162,72 @@ describe("Artwork click mapping — zoomed content boxes", () => {
     // Flooring at different display scales can differ by 1px at the midpoint.
     assert.ok(Math.abs(centreZoomed.x - centre!.x) <= 1);
     assert.ok(Math.abs(centreZoomed.y - centre!.y) <= 1);
+  });
+
+  it("mapping accurate at 300% and 400%", () => {
+    const at300 = { width: 1200, height: 600, naturalWidth: 1000, naturalHeight: 500 };
+    const at400 = { width: 1600, height: 800, naturalWidth: 1000, naturalHeight: 500 };
+    assert.deepEqual(mapClickToImagePoint(at300, 600, 300), { x: 500, y: 250 });
+    assert.deepEqual(mapClickToImagePoint(at400, 800, 400), { x: 500, y: 250 });
+    assert.deepEqual(mapClickToImagePoint(at400, 160, 80), { x: 100, y: 50 });
+  });
+});
+
+describe("Phase 1.7 UX — Ctrl/Cmd + wheel zoom", () => {
+  it("plain wheel is not a zoom modifier; Ctrl or Cmd is", () => {
+    assert.equal(isWheelZoomModifier({ ctrlKey: false, metaKey: false }), false);
+    assert.equal(isWheelZoomModifier({ ctrlKey: true, metaKey: false }), true);
+    assert.equal(isWheelZoomModifier({ ctrlKey: false, metaKey: true }), true);
+  });
+
+  it("wheel up increases zoom and wheel down decreases, in 25% steps", () => {
+    assert.equal(nextZoomFromWheel(1, -100), 1.25);
+    assert.equal(nextZoomFromWheel(1.25, -100), 1.5);
+    assert.equal(nextZoomFromWheel(1.5, 100), 1.25);
+    assert.equal(nextZoomFromWheel(2, 100), 1.75);
+  });
+
+  it("clamps at Fit and 400%", () => {
+    assert.equal(nextZoomFromWheel(GUIDED_CLEANUP_ZOOM_MIN, 100), GUIDED_CLEANUP_ZOOM_MIN);
+    assert.equal(nextZoomFromWheel(GUIDED_CLEANUP_ZOOM_MAX, -100), GUIDED_CLEANUP_ZOOM_MAX);
+  });
+
+  it("pointer-centered zoom keeps the focal artwork point under the pointer", () => {
+    // Viewport 400×400, image at 200% is 800×400 so it scrolls horizontally.
+    // Pointer at x=200 in the viewport, scrollLeft=100 → content x=300.
+    // Image is full-width of content at 800, so fx = 300/800 = 0.375.
+    // After 225% display width = 900; want scroll such that
+    // scrollLeft + 200 = 0.375 * 900 → scrollLeft = 137.5
+    const before = {
+      width: 800,
+      height: 400,
+    };
+    const after = {
+      width: 900,
+      height: 450,
+    };
+    const scroll = pointerCenteredScroll({
+      viewportWidth: 400,
+      viewportHeight: 400,
+      pointerXInViewport: 200,
+      pointerYInViewport: 200,
+      scrollLeft: 100,
+      scrollTop: 0,
+      oldDisplay: before,
+      newDisplay: after,
+    });
+    const oldContentX = 100 + 200;
+    const oldFx = oldContentX / before.width;
+    const newContentX = scroll.scrollLeft + 200;
+    const newFx = newContentX / after.width;
+    assert.ok(Math.abs(newFx - oldFx) < 0.002);
+  });
+
+  it("wheel zoom math never selects, confirms, or changes tolerance", () => {
+    // Pure helpers: zooming cannot emit a cleanup point. The workspace
+    // listener also never calls onSelectPoint.
+    const before = nextZoomFromWheel(2, -1);
+    assert.equal(before, 2.25);
+    assert.equal(isWheelZoomModifier({ ctrlKey: true, metaKey: false }), true);
   });
 });

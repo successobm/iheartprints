@@ -15,6 +15,11 @@ import {
   undoGuidedCleanup,
 } from "@/lib/services/artwork-preparation-service";
 import { MAX_IMAGE_DIMENSION_PX } from "@/capabilities/artwork-preparation";
+import {
+  MAGIC_SELECT_DEFAULT_TOLERANCE,
+  MAGIC_SELECT_TOLERANCE_MAX,
+  MAGIC_SELECT_TOLERANCE_MIN,
+} from "@/capabilities/artwork-preparation/magic-color-selection";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
@@ -73,6 +78,13 @@ const bodySchema = z.discriminatedUnion("action", [
     action: z.literal("cleanup_preview"),
     x: z.number().int().min(0).max(MAX_IMAGE_DIMENSION_PX),
     y: z.number().int().min(0).max(MAX_IMAGE_DIMENSION_PX),
+    tool: z.enum(["region", "magic_select"]).optional(),
+    tolerance: z
+      .number()
+      .int()
+      .min(MAGIC_SELECT_TOLERANCE_MIN)
+      .max(MAGIC_SELECT_TOLERANCE_MAX)
+      .optional(),
   }),
   z.object({
     action: z.literal("cleanup_confirm"),
@@ -98,7 +110,11 @@ function runPreparationAction(projectId: string, action: PreparationAction) {
     case "print_ready":
       return prepareUploadedArtworkForPrint(projectId);
     case "cleanup_preview":
-      return previewGuidedCleanup(projectId, { x: action.x, y: action.y });
+      return previewGuidedCleanup(projectId, {
+        point: { x: action.x, y: action.y },
+        tool: action.tool ?? "region",
+        tolerance: action.tolerance ?? MAGIC_SELECT_DEFAULT_TOLERANCE,
+      });
     case "cleanup_confirm":
       return confirmGuidedCleanup(projectId, action.candidateToken);
     case "undo_cleanup":

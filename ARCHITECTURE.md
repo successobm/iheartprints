@@ -4334,6 +4334,34 @@ refuse, so the artwork Phase 2 consumes can never change underneath it.
 > preparation record is the honest, durable statement of how much of it went on
 > their authority rather than on measured evidence.
 
+**Magic Select (Phase 1.7 / 1.7B).** A second cleanup tool beside Select Area.
+The customer clicks a colour they want gone and sets a Tolerance (Chebyshev RGB
+distance only; default 8, range 0–40). There is no Connected/Similar toggle,
+no lasso, and no editor expansion.
+
+The server classifies the seed from generic raster properties (visible alpha,
+distance to transparency, local thickness and 4-connected component size
+inside a fixed seed-colour class that is independent of Tolerance; thickness
+uses dark-ink runs when the seed itself is dark) — never bowling coordinates,
+OCR, or product semantics:
+
+- **Residue-like** (thin ≤ 2, touches exterior transparency, small component):
+  magnetic global selection of the same structural class within colour
+  tolerance (`selectionMode: "similar"`, `ruleVersion: "magic-select:v2"`).
+- **Otherwise** (thick outlines, enclosed interiors, finger-hole fills): the
+  original 4-connected wand (`selectionMode: "connected"`,
+  `ruleVersion: "magic-select:v1"`).
+
+Naive "select all similar RGB" is rejected: colour-only matching selects
+legitimate outlines and enclosed dark artwork. Topology/thickness/size gates
+do not loosen when Tolerance increases. Preview remains mutation-free; the
+server owns the mask; confirm redeems a signed `v: 3` token that binds the
+resolved mode, rule version, selection key, and tolerance. Replay uses the
+**persisted** `selectionMode` and never re-infers it. Phase 1.7 connected ops
+without those fields still replay as connected. `guided_cleanup` JSONB — no
+migration. Highlight for Magic Select is a solid amber overlay so scattered
+1px islands stay visible on White/Gray/Black QA.
+
 ### Repairability
 
 Precedence, highest first, biased one way on purpose: when the deterministic

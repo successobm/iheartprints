@@ -4,9 +4,11 @@ export {
   ArtworkUploadRejectedError,
   type ArtworkPreparationCapability,
   type ArtworkPreparationView,
+  type GuidedCleanupPreviewInput,
   type GuidedCleanupPreviewResult,
   type GuidedCleanupResult,
   type GuidedCleanupStateView,
+  type GuidedCleanupTool,
   type UploadArtworkInput,
   type UploadedArtworkContextInput,
 } from "./artwork-preparation-capability";
@@ -22,6 +24,28 @@ export type {
   GuidedRemovalRegion,
   GuidedRemovalResolution,
 } from "./guided-removal";
+export type {
+  GuidedCleanupOperation,
+  GuidedMagicColorCleanupOperation,
+  GuidedRegionCleanupOperation,
+} from "./guided-cleanup-operations";
+export {
+  MAGIC_SELECT_DEFAULT_TOLERANCE,
+  MAGIC_SELECT_RESIDUE_MAX_COMPONENT,
+  MAGIC_SELECT_RESIDUE_MAX_THICKNESS,
+  MAGIC_SELECT_STRUCTURAL_COLOR_GATE,
+  MAGIC_SELECT_RULE_V1,
+  MAGIC_SELECT_RULE_V2,
+  MAGIC_SELECT_TOLERANCE_MAX,
+  MAGIC_SELECT_TOLERANCE_MIN,
+  MAGIC_SELECT_TOLERANCE_STEP,
+  clampMagicSelectTolerance,
+  selectConnectedMagicColor,
+  selectMagicColor,
+  selectMagicColorByMode,
+  selectSimilarMagicColor,
+} from "./magic-color-selection";
+export type { MagicSelectionMode } from "./magic-color-selection";
 export type {
   ArtworkAnalysis,
   ArtworkBounds,

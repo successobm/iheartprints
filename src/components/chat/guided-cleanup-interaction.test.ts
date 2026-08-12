@@ -148,6 +148,34 @@ describe("5 + 6: Space + drag", () => {
   });
 });
 
+describe("Phase 1.7 UX: wheel zoom does not participate in pointer selection", () => {
+  it("click after a zoomed view still selects; Space+drag and middle pan still pan", () => {
+    const afterZoom = performGesture({ zoomFactor: 3, path: [] });
+    assert.equal(afterZoom.selected, true);
+    assert.deepEqual(afterZoom.scrolls, []);
+
+    const spacePan = performGesture({ spaceHeld: true, zoomFactor: 3, path: [[70, 60]] });
+    assert.equal(spacePan.selected, false);
+    assert.equal(spacePan.scrolls.length, 1);
+
+    const middlePan = performGesture({ button: 1, zoomFactor: 4, path: [[70, 60]] });
+    assert.equal(middlePan.selected, false);
+    assert.equal(middlePan.scrolls.length, 1);
+  });
+
+  it("touch tap still selects and touch drag still pans", () => {
+    const tap = performGesture({ pointerType: "touch", path: [] });
+    assert.equal(tap.selected, true);
+
+    const drag = performGesture({
+      pointerType: "touch",
+      path: [[100 + GUIDED_CLEANUP_PAN_THRESHOLD_PX + 4, 100]],
+    });
+    assert.equal(drag.selected, false);
+    assert.ok(drag.scrolls.length >= 1);
+  });
+});
+
 describe("7: releasing Space restores selection", () => {
   it("resolves each gesture by the modifier state at the moment it began", () => {
     const held = performGesture({ spaceHeld: true, path: [[70, 60]] });

@@ -669,7 +669,10 @@ export function ChatApp() {
    * Existing Artwork → Print Ready Phase 1.3: the customer clicked an area to
    * PREVIEW. Sends a COORDINATE only. Nothing is removed until they confirm.
    */
-  async function previewGuidedCleanup(point: ImagePoint) {
+  async function previewGuidedCleanup(
+    point: ImagePoint,
+    options?: { tool?: "region" | "magic_select"; tolerance?: number },
+  ) {
     if (!snapshot) return;
     await submitPreparationAction(
       () =>
@@ -680,6 +683,10 @@ export function ChatApp() {
             action: "cleanup_preview",
             x: point.x,
             y: point.y,
+            tool: options?.tool ?? "region",
+            ...(options?.tool === "magic_select"
+              ? { tolerance: options.tolerance }
+              : {}),
           }),
         }),
       "We couldn't preview that area. Please try again.",
@@ -1128,7 +1135,9 @@ export function ChatApp() {
                 onPrepare={() => void prepareUploadedArtwork()}
                 onApprove={() => void approvePreparedArtwork()}
                 onReconsider={() => setReconsideringUpload(true)}
-                onCleanupPoint={(point) => void previewGuidedCleanup(point)}
+                onCleanupPoint={(point, options) =>
+                  void previewGuidedCleanup(point, options)
+                }
                 onConfirmCleanup={() => void confirmGuidedCleanup()}
                 onCancelCleanupPreview={cancelGuidedCleanupPreview}
                 onUndoCleanup={() => void undoGuidedCleanup()}

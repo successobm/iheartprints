@@ -1,11 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import {
   GUIDED_CLEANUP_COPY,
   type ArtworkBounds,
+  type GuidedCleanupTool,
 } from "@/capabilities/artwork-preparation";
+import {
+  MAGIC_SELECT_DEFAULT_TOLERANCE,
+  MAGIC_SELECT_TOLERANCE_MAX,
+  MAGIC_SELECT_TOLERANCE_MIN,
+  MAGIC_SELECT_TOLERANCE_STEP,
+  clampMagicSelectTolerance,
+} from "@/capabilities/artwork-preparation/magic-color-selection";
 import {
   mapClickToImagePoint,
   mapImageBoundsToCssPercent,
@@ -23,8 +31,11 @@ import {
   fitDisplaySize,
   GUIDED_CLEANUP_ZOOM_MAX,
   GUIDED_CLEANUP_ZOOM_MIN,
+  isWheelZoomModifier,
+  nextZoomFromWheel,
   nextZoomIn,
   nextZoomOut,
+  pointerCenteredScroll,
   zoomedDisplaySize,
   zoomPercentLabel,
 } from "./guided-cleanup-zoom";
@@ -39,17 +50,19 @@ import {
 } from "./guided-cleanup-interaction";
 
 /**
- * Existing Artwork → Print Ready Phase 1.4: the LARGE guided-cleanup
+ * Existing Artwork → Print Ready Phase 1.4 / 1.7: the LARGE guided-cleanup
  * workspace.
  *
  * This is the canonical customer path for removing leftover background.
  * Compare's small tile is no longer the place customers are expected to
  * click; Enlarge stays a separate read-only viewer. Presentation only —
  * every preview/confirm/undo call is owned by the parent and uses the
- * existing Phase 1.3 server pipeline.
+ * existing Phase 1.3 / 1.7 server pipeline.
  *
  * Not an image editor: no brush, no lasso, no freehand mask. Fit / Zoom /
  * pan exist only so customers can inspect small details and click accurately.
+ * Phase 1.7 adds Select Area vs Magic Select — still preview-then-confirm,
+ * still no freehand editing.
  *
  * Zoom grows the rendered image content box inside a scrollable viewport
  * (never CSS `transform: scale`). Clicks use getBoundingClientRect +
@@ -64,6 +77,11 @@ import {
 export interface GuidedCleanupHighlightView {
   bounds: ArtworkBounds;
   overlayDataUrl: string;
+}
+
+export interface GuidedCleanupSelectOptions {
+  tool: GuidedCleanupTool;
+  tolerance: number;
 }
 
 export interface GuidedCleanupWorkspaceProps {
@@ -81,7 +99,10 @@ export interface GuidedCleanupWorkspaceProps {
   removalCount: number;
   cleanupMessage: string | null;
   pendingHighlight: GuidedCleanupHighlightView | null;
-  onSelectPoint: (point: ImagePoint) => void;
+  onSelectPoint: (
+    point: ImagePoint,
+    options: GuidedCleanupSelectOptions,
+  ) => void;
   onConfirm: () => void;
   onCancelPreview: () => void;
   onUndo: () => void;
@@ -115,6 +136,9 @@ export function GuidedCleanupWorkspace({
   initialPreviewBackground = DEFAULT_PREVIEW_BACKGROUND,
 }: GuidedCleanupWorkspaceProps) {
   const pendingConfirmation = pendingHighlight !== null;
+  const [cleanupTool, setCleanupTool] = useState<GuidedCleanupTool>("region");
+  const [tolerance, setTolerance] = useState(MAGIC_SELECT_DEFAULT_TOLERANCE);
+  const lastSelectPointRef = useRef<ImagePoint | null>(null);
   const [loadedForUrl, setLoadedForUrl] = useState<{
     url: string;
     revision: string;
@@ -144,6 +168,13 @@ export function GuidedCleanupWorkspace({
   // once called that helper as a bare identifier and crashed Clean Up Background).
   const artworkSurfaceStyle = previewBackgroundSurfaceStyle(previewBackground);
   const panSession = useRef<GestureSession | null>(null);
+  const zoomFactorRef = useRef(zoomFactor);
+  const displayRef = useRef({ width: 0, height: 0 });
+  const fitRef = useRef<ReturnType<typeof fitDisplaySize>>(null);
+  const busyRef = useRef(busy);
+  const pendingScrollRef = useRef<{ scrollLeft: number; scrollTop: number } | null>(
+    null,
+  );
   /**
    * Phase 1.6B: the explicit pan modifier. Selection is the default gesture at
    * every zoom level, so panning has to be asked for.
@@ -213,6 +244,70 @@ export function GuidedCleanupWorkspace({
   const atMinZoom = zoomFactor <= GUIDED_CLEANUP_ZOOM_MIN;
   const atMaxZoom = zoomFactor >= GUIDED_CLEANUP_ZOOM_MAX;
 
+  useLayoutEffect(() => {
+    const liveFit = fitDisplaySize(
+      naturalWidth,
+      naturalHeight,
+      viewportSize.width,
+      viewportSize.height,
+    );
+    const liveDisplay = liveFit
+      ? zoomedDisplaySize(liveFit, zoomFactor)
+      : { width: 0, height: 0 };
+    zoomFactorRef.current = zoomFactor;
+    displayRef.current = liveDisplay;
+    fitRef.current = liveFit;
+    busyRef.current = busy;
+
+    const pending = pendingScrollRef.current;
+    const viewport = viewportRef.current;
+    if (!pending || !viewport) return;
+    pendingScrollRef.current = null;
+    viewport.scrollLeft = pending.scrollLeft;
+    viewport.scrollTop = pending.scrollTop;
+  }, [
+    zoomFactor,
+    naturalWidth,
+    naturalHeight,
+    viewportSize.width,
+    viewportSize.height,
+    busy,
+  ]);
+
+  useEffect(() => {
+    const attached = viewportRef.current;
+    if (!attached) return;
+    const viewportNode: HTMLDivElement = attached;
+
+    function onWheel(event: WheelEvent) {
+      if (busyRef.current) return;
+      if (!isWheelZoomModifier(event)) return;
+      event.preventDefault();
+
+      const currentFit = fitRef.current;
+      if (!currentFit) return;
+      const current = zoomFactorRef.current;
+      const next = nextZoomFromWheel(current, event.deltaY);
+      if (next === current) return;
+
+      const rect = viewportNode.getBoundingClientRect();
+      pendingScrollRef.current = pointerCenteredScroll({
+        viewportWidth: rect.width,
+        viewportHeight: rect.height,
+        pointerXInViewport: event.clientX - rect.left,
+        pointerYInViewport: event.clientY - rect.top,
+        scrollLeft: viewportNode.scrollLeft,
+        scrollTop: viewportNode.scrollTop,
+        oldDisplay: displayRef.current,
+        newDisplay: zoomedDisplaySize(currentFit, next),
+      });
+      setZoomFactor(next);
+    }
+
+    viewportNode.addEventListener("wheel", onWheel, { passive: false });
+    return () => viewportNode.removeEventListener("wheel", onWheel);
+  }, []);
+
   function resetToFit() {
     setZoomFactor(GUIDED_CLEANUP_ZOOM_MIN);
     const viewport = viewportRef.current;
@@ -245,8 +340,49 @@ export function GuidedCleanupWorkspace({
       clientX - rect.left,
       clientY - rect.top,
     );
-    if (point) onSelectPoint(point);
+    if (!point) return;
+    lastSelectPointRef.current = point;
+    onSelectPoint(point, {
+      tool: cleanupTool,
+      tolerance: clampMagicSelectTolerance(tolerance),
+    });
   }
+
+  function changeTool(next: GuidedCleanupTool) {
+    if (next === cleanupTool) return;
+    if (pendingConfirmation) onCancelPreview();
+    lastSelectPointRef.current = null;
+    setCleanupTool(next);
+  }
+
+  function adjustTolerance(delta: number) {
+    const next = clampMagicSelectTolerance(tolerance + delta);
+    if (next === tolerance) return;
+    setTolerance(next);
+    if (
+      cleanupTool === "magic_select" &&
+      pendingConfirmation &&
+      lastSelectPointRef.current
+    ) {
+      onSelectPoint(lastSelectPointRef.current, {
+        tool: "magic_select",
+        tolerance: next,
+      });
+    }
+  }
+
+  const hintText = pendingConfirmation
+    ? cleanupTool === "magic_select"
+      ? GUIDED_CLEANUP_COPY.magicSelectConfirmPrompt
+      : GUIDED_CLEANUP_COPY.confirmPrompt
+    : cleanupTool === "magic_select"
+      ? GUIDED_CLEANUP_COPY.magicSelectHint
+      : GUIDED_CLEANUP_COPY.activeHint;
+
+  const confirmLabel =
+    cleanupTool === "magic_select"
+      ? GUIDED_CLEANUP_COPY.magicSelectConfirmActionLabel
+      : GUIDED_CLEANUP_COPY.confirmActionLabel;
 
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
     const viewport = viewportRef.current;
@@ -335,11 +471,7 @@ export function GuidedCleanupWorkspace({
             <p className="text-sm font-semibold text-ink">
               {GUIDED_CLEANUP_COPY.workspaceTitle}
             </p>
-            <p className="mt-0.5 text-xs text-muted">
-              {pendingConfirmation
-                ? GUIDED_CLEANUP_COPY.confirmPrompt
-                : GUIDED_CLEANUP_COPY.activeHint}
-            </p>
+            <p className="mt-0.5 text-xs text-muted">{hintText}</p>
           </div>
           <button
             type="button"
@@ -355,50 +487,130 @@ export function GuidedCleanupWorkspace({
         </div>
 
         <div className="flex flex-wrap items-end justify-between gap-3 border-b border-black/8 px-4 py-2">
-          <div
-            className="flex flex-wrap items-center gap-2"
-            role="toolbar"
-            aria-label="Artwork zoom"
-          >
-            <button
-              type="button"
-              disabled={busy}
-              onClick={resetToFit}
-              aria-label={GUIDED_CLEANUP_COPY.fitActionLabel}
-              className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <div
+              className="flex flex-wrap items-center gap-2"
+              role="group"
+              aria-label={GUIDED_CLEANUP_COPY.toolGroupLabel}
+              data-cleanup-tool={cleanupTool}
             >
-              {GUIDED_CLEANUP_COPY.fitActionLabel}
-            </button>
-            <button
-              type="button"
-              disabled={busy || atMinZoom}
-              onClick={() => setZoomFactor((current) => nextZoomOut(current))}
-              aria-label={GUIDED_CLEANUP_COPY.zoomOutActionLabel}
-              className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {GUIDED_CLEANUP_COPY.zoomOutActionLabel}
-            </button>
-            <button
-              type="button"
-              disabled={busy || atMaxZoom}
-              onClick={() => setZoomFactor((current) => nextZoomIn(current))}
-              aria-label={GUIDED_CLEANUP_COPY.zoomInActionLabel}
-              className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {GUIDED_CLEANUP_COPY.zoomInActionLabel}
-            </button>
-            <span
-              className="text-xs tabular-nums text-muted"
-              data-zoom-percent={zoomPercentLabel(zoomFactor)}
-              aria-live="polite"
-            >
-              {zoomPercentLabel(zoomFactor)}
-            </span>
-            {!atMinZoom ? (
-              <span className="text-xs text-muted" data-pan-hint>
-                {GUIDED_CLEANUP_COPY.panHint}
+              <span className="text-xs font-medium text-ink">
+                {GUIDED_CLEANUP_COPY.toolGroupLabel}
               </span>
+              <button
+                type="button"
+                disabled={busy}
+                aria-pressed={cleanupTool === "region"}
+                onClick={() => changeTool("region")}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                  cleanupTool === "region"
+                    ? "border-ink bg-ink text-white"
+                    : "border-black/10 text-ink enabled:hover:border-ink/30"
+                }`}
+              >
+                {GUIDED_CLEANUP_COPY.selectAreaToolLabel}
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                aria-pressed={cleanupTool === "magic_select"}
+                onClick={() => changeTool("magic_select")}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                  cleanupTool === "magic_select"
+                    ? "border-ink bg-ink text-white"
+                    : "border-black/10 text-ink enabled:hover:border-ink/30"
+                }`}
+              >
+                {GUIDED_CLEANUP_COPY.magicSelectToolLabel}
+              </button>
+            </div>
+
+            {cleanupTool === "magic_select" ? (
+              <div
+                className="flex flex-wrap items-center gap-2"
+                data-magic-tolerance={tolerance}
+              >
+                <span className="text-xs font-medium text-ink">
+                  {GUIDED_CLEANUP_COPY.toleranceLabel}
+                </span>
+                <button
+                  type="button"
+                  disabled={busy || tolerance <= MAGIC_SELECT_TOLERANCE_MIN}
+                  aria-label="Decrease tolerance"
+                  onClick={() => adjustTolerance(-MAGIC_SELECT_TOLERANCE_STEP)}
+                  className="min-h-9 min-w-9 rounded-full border border-black/10 text-sm font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  −
+                </button>
+                <span
+                  className="min-w-8 text-center text-xs tabular-nums text-ink"
+                  aria-live="polite"
+                >
+                  {tolerance}
+                </span>
+                <button
+                  type="button"
+                  disabled={busy || tolerance >= MAGIC_SELECT_TOLERANCE_MAX}
+                  aria-label="Increase tolerance"
+                  onClick={() => adjustTolerance(MAGIC_SELECT_TOLERANCE_STEP)}
+                  className="min-h-9 min-w-9 rounded-full border border-black/10 text-sm font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  +
+                </button>
+                <span className="text-xs text-muted">
+                  {GUIDED_CLEANUP_COPY.toleranceHelp}
+                </span>
+              </div>
             ) : null}
+
+            <div
+              className="flex flex-wrap items-center gap-2"
+              role="toolbar"
+              aria-label="Artwork zoom"
+            >
+              <button
+                type="button"
+                disabled={busy}
+                onClick={resetToFit}
+                aria-label={GUIDED_CLEANUP_COPY.fitActionLabel}
+                className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {GUIDED_CLEANUP_COPY.fitActionLabel}
+              </button>
+              <button
+                type="button"
+                disabled={busy || atMinZoom}
+                onClick={() => setZoomFactor((current) => nextZoomOut(current))}
+                aria-label={GUIDED_CLEANUP_COPY.zoomOutActionLabel}
+                className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {GUIDED_CLEANUP_COPY.zoomOutActionLabel}
+              </button>
+              <button
+                type="button"
+                disabled={busy || atMaxZoom}
+                onClick={() => setZoomFactor((current) => nextZoomIn(current))}
+                aria-label={GUIDED_CLEANUP_COPY.zoomInActionLabel}
+                className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {GUIDED_CLEANUP_COPY.zoomInActionLabel}
+              </button>
+              <span
+                className="text-xs tabular-nums text-muted"
+                data-zoom-percent={zoomPercentLabel(zoomFactor)}
+                aria-live="polite"
+              >
+                {zoomPercentLabel(zoomFactor)}
+              </span>
+              <span className="text-xs text-muted" data-wheel-zoom-hint>
+                {GUIDED_CLEANUP_COPY.wheelZoomHint}
+              </span>
+              {!atMinZoom ? (
+                <span className="text-xs text-muted" data-pan-hint>
+                  {GUIDED_CLEANUP_COPY.panHint}
+                </span>
+              ) : null}
+            </div>
           </div>
           <PreviewBackgroundControl
             idPrefix="guided-cleanup-preview-bg"
@@ -412,6 +624,7 @@ export function GuidedCleanupWorkspace({
           ref={viewportRef}
           data-cleanup-viewport
           data-zoom-factor={clampZoomFactor(zoomFactor)}
+          data-wheel-zoom="ctrl-meta"
           data-preview-background={previewBackground}
           data-qa-surface="preview-background"
           className="min-h-[50vh] flex-1 overflow-auto overscroll-contain"
@@ -527,7 +740,7 @@ export function GuidedCleanupWorkspace({
                   onClick={onConfirm}
                   className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {GUIDED_CLEANUP_COPY.confirmActionLabel}
+                  {confirmLabel}
                 </button>
                 <button
                   type="button"
@@ -571,7 +784,9 @@ export function GuidedCleanupWorkspace({
           ) : null}
           {pendingConfirmation ? (
             <p className="sr-only" role="status" aria-live="polite">
-              {GUIDED_CLEANUP_COPY.confirmPrompt}
+              {cleanupTool === "magic_select"
+                ? GUIDED_CLEANUP_COPY.magicSelectConfirmPrompt
+                : GUIDED_CLEANUP_COPY.confirmPrompt}
             </p>
           ) : null}
         </div>

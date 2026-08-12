@@ -13,6 +13,7 @@ import { getCapabilityGraph } from "@/capabilities/composition";
 import type {
   ArtworkPreparationView,
   GuidedCleanupOutcomeCode,
+  GuidedCleanupTool,
   GuidedRemovalPoint,
   UploadArtworkInput,
   UploadedArtworkContextInput,
@@ -88,17 +89,38 @@ export interface GuidedCleanupResponse extends ApiProjectSnapshot {
       };
       overlayDataUrl: string;
     };
+    /** Phase 1.7: authoritative selected pixel count for Magic Select. */
+    selectedPixelCount?: number;
   };
+}
+
+export interface PreviewGuidedCleanupInput {
+  point: GuidedRemovalPoint;
+  tool?: GuidedCleanupTool;
+  tolerance?: number;
 }
 
 export async function previewGuidedCleanup(
   projectId: string,
-  point: GuidedRemovalPoint,
+  input: GuidedRemovalPoint | PreviewGuidedCleanupInput,
 ): Promise<GuidedCleanupResponse> {
+  const normalized =
+    input &&
+    typeof input === "object" &&
+    "point" in input &&
+    input.point &&
+    typeof input.point === "object"
+      ? (input as PreviewGuidedCleanupInput)
+      : { point: input as GuidedRemovalPoint };
+
   const result =
     await getCapabilityGraph().artworkPreparation.previewGuidedCleanup(
       projectId,
-      point,
+      {
+        point: normalized.point,
+        tool: normalized.tool,
+        tolerance: normalized.tolerance,
+      },
     );
   return {
     ...(await requireSnapshot(projectId)),
@@ -109,6 +131,9 @@ export async function previewGuidedCleanup(
         ? { candidateToken: result.candidateToken }
         : {}),
       ...(result.highlight ? { highlight: result.highlight } : {}),
+      ...(typeof result.selectedPixelCount === "number"
+        ? { selectedPixelCount: result.selectedPixelCount }
+        : {}),
     },
   };
 }

@@ -592,6 +592,8 @@ describe("Guided cleanup — Phase 1.3 preview / confirmation safety", () => {
     });
     const claims = verifyGuidedCleanupCandidateToken(token);
     assert.ok(claims);
+    assert.equal(claims.v, 1);
+    if (claims.v !== 1) throw new Error("expected region token");
     assert.equal(claims.regionKey, "p12");
 
     const tampered = `${token.slice(0, -4)}abcd`;

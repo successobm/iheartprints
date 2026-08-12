@@ -119,18 +119,23 @@ export function describePrintReadyPreparation(
 }
 
 /**
- * Existing Artwork → Print Ready Phase 1.2–1.4: the guided background
+ * Existing Artwork → Print Ready Phase 1.2–1.7: the guided background
  * cleanup surface, in customer language.
  *
  * Nothing here names a cavity, a connected component, a wall ratio, a flood
- * fill, an alpha value or a tolerance. The customer is told what they can see
- * ("some background is still showing") and what to do about it.
+ * fill, or an alpha value. The customer is told what they can see ("some
+ * background is still showing") and what to do about it.
  *
  * Phase 1.3: a click only PREVIEWS. Removal happens only after an explicit
- * "Remove This Area" confirmation.
+ * confirmation.
  *
  * Phase 1.4: cleanup happens in a LARGE focused workspace opened by
  * "Clean Up Background", not by silently clicking the small compare tile.
+ *
+ * Phase 1.7: Magic Select exposes a customer-controlled "Tolerance" label —
+ * that word is the plain name for how broadly similar colour is included.
+ * It is not the automatic background-detection threshold, and we still never
+ * mention RGB, Chebyshev, flood fill, or connectivity.
  */
 export const GUIDED_CLEANUP_COPY = {
   /** Sits under the prepared preview whenever cleanup is available. */
@@ -160,6 +165,19 @@ export const GUIDED_CLEANUP_COPY = {
    * have to be told about. Plain language: no talk of modifiers or gestures.
    */
   panHint: "Hold Space and drag to move around while zoomed in.",
+  /** Phase 1.7 UX: Ctrl/Cmd + wheel zooms; plain wheel still scrolls. */
+  wheelZoomHint: "Ctrl + scroll to zoom.",
+  /** Phase 1.7 — tool switcher. */
+  toolGroupLabel: "Cleanup Tool",
+  selectAreaToolLabel: "Select Area",
+  magicSelectToolLabel: "Magic Select",
+  magicSelectHint: "Click a color you want to remove.",
+  magicSelectConfirmPrompt: "Remove this selection?",
+  magicSelectConfirmActionLabel: "Remove Selection",
+  toleranceLabel: "Tolerance",
+  toleranceHelp: "More / less similar color",
+  selectedPixelsLabel: (count: number) =>
+    `Selected ${count.toLocaleString("en-US")} pixel${count === 1 ? "" : "s"}`,
 } as const;
 
 /**
@@ -181,9 +199,17 @@ export type GuidedCleanupOutcomeCode =
 
 export function describeGuidedCleanupOutcome(
   outcome: GuidedCleanupOutcomeCode,
+  options?: { selectedPixelCount?: number; tool?: "region" | "magic_select" },
 ): string {
   switch (outcome) {
     case "preview":
+      if (options?.tool === "magic_select") {
+        const count = options.selectedPixelCount;
+        if (typeof count === "number" && count > 0) {
+          return `${GUIDED_CLEANUP_COPY.selectedPixelsLabel(count)}. ${GUIDED_CLEANUP_COPY.magicSelectConfirmPrompt}`;
+        }
+        return GUIDED_CLEANUP_COPY.magicSelectConfirmPrompt;
+      }
       return GUIDED_CLEANUP_COPY.confirmPrompt;
     case "removed":
       return "Removed. If that wasn't right, undo it.";

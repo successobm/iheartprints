@@ -79,7 +79,10 @@ export interface UploadedArtworkPanelProps {
    * Existing Artwork → Print Ready Phase 1.3: the customer pointed at an
    * area to PREVIEW — not yet remove. Receives SOURCE IMAGE pixels.
    */
-  onCleanupPoint?: (point: ImagePoint) => void;
+  onCleanupPoint?: (
+    point: ImagePoint,
+    options: { tool: "region" | "magic_select"; tolerance: number },
+  ) => void;
   /** Confirm the pending previewed removal. */
   onConfirmCleanup?: () => void;
   /** Dismiss the pending preview without mutating. */
@@ -369,7 +372,10 @@ function CompareStep({
   preparedRevision: string | null;
   onApprove: () => void;
   onReconsider: () => void;
-  onCleanupPoint?: (point: ImagePoint) => void;
+  onCleanupPoint?: (
+    point: ImagePoint,
+    options: { tool: "region" | "magic_select"; tolerance: number },
+  ) => void;
   onConfirmCleanup?: () => void;
   onCancelCleanupPreview?: () => void;
   onUndoCleanup?: () => void;
