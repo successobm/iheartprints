@@ -149,6 +149,35 @@ export interface CompletePaidImageIntentInput {
   lastError?: string | null;
 }
 
+/**
+ * Phase 2C.2C: durable failure evidence for one logical paid image intent —
+ * the NON-terminal counterpart to `CompletePaidImageIntentInput`.
+ *
+ * This exists because `completePaidImageIntent` could only ever write a
+ * TERMINAL status, so a dispatch that failed with retries still remaining
+ * had nowhere to record what happened. The live consequence: a Soft
+ * replacement that OpenAI billed and answered, whose local persistence then
+ * failed, left `provider_request_id = null` and `last_error = null` on a row
+ * still reading `reserved`. The paid request id existed in memory at the
+ * moment of failure and was simply dropped.
+ */
+export interface RecordPaidImageIntentFailureInput {
+  /** Sanitized classification + description — see `describePaidImageFailure`. */
+  lastError: string;
+  /**
+   * The provider's own request id, when the dispatch got far enough to
+   * learn one. Never clears a previously-recorded id: `null`/omitted means
+   * "nothing new to say", not "forget what you knew".
+   */
+  providerRequestId?: string | null;
+  /**
+   * `true` marks the intent terminally `"failed"`. Omitted/`false` leaves
+   * the status untouched, so an intent whose parent job still intends to
+   * retry stays retry-eligible within its existing dispatch budget.
+   */
+  terminal?: boolean;
+}
+
 export interface ApproveDesignBriefInput {
   briefId: string;
   versionNumber: number;
@@ -428,6 +457,24 @@ export interface ProjectRepository {
     intentId: string,
     claimToken: string,
     input: CompletePaidImageIntentInput,
+  ): Promise<PaidImageIntent | null>;
+  /**
+   * Phase 2C.2C: records durable failure evidence on an intent WITHOUT
+   * necessarily ending its life. Fenced on `claimToken` exactly as
+   * `completePaidImageIntent` is — a zombie worker holding a stale token
+   * gets `null` back and cannot overwrite newer state.
+   *
+   * Implementations must guarantee all four:
+   *   - a `"succeeded"` intent is never modified (a durable success can
+   *     never be downgraded by a late failure write from any worker);
+   *   - `providerRequestId` is only ever written, never cleared;
+   *   - `terminal !== true` leaves `status` exactly as it was;
+   *   - `terminal === true` writes `status = "failed"`.
+   */
+  recordPaidImageIntentFailure(
+    intentId: string,
+    claimToken: string,
+    input: RecordPaidImageIntentFailureInput,
   ): Promise<PaidImageIntent | null>;
   getPaidImageIntentByKey(
     projectId: string,

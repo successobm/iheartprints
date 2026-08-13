@@ -17,10 +17,16 @@ import {
   type PaidImageIntentScopeKey,
 } from "@/capabilities/shared/paid-image-intent";
 import {
+  classifyPaidImagePersistenceFailure,
+  classifyProviderDispatchFailure,
+  describePaidImageFailure,
+  isPossiblyBilledFailureClass,
+  type PaidImageFailureClass,
+} from "@/capabilities/shared/paid-image-failure";
+import {
   logPaidImageIntentDecision,
   logPaidImageIntentOutcome,
 } from "@/lib/config/paid-image-intent-logging";
-import { ProviderError } from "@/capabilities/providers";
 
 /**
  * Phase 2C0.5: the metadata key under which a persisted concept asset
@@ -262,44 +268,102 @@ export async function executePaidImageUnit(
     paidIntentOrdinal: claimed.paidIntentOrdinal,
   });
 
-  // --- 5. Dispatch, then persist BEFORE claiming success ---------------
-  let persisted: PersistedPaidConcept[];
-  try {
-    const drafts = await deps.dispatch();
-    persisted = await deps.persist(drafts, intentKey);
-  } catch (error) {
+  // Phase 2C.2C: every failure below this line goes through here, so a
+  // dispatch that has begun ALWAYS leaves durable evidence — not only one
+  // that exhausts the dispatch ceiling.
+  //
+  // Best-effort by construction: it must never mask the failure it is
+  // describing. `intent_completion_failure` is the case that proves the
+  // point — if the intent write just failed because persistence is down,
+  // this write will fail too, and the original error is still what the
+  // caller must see.
+  const recordFailure = async (
+    failureClass: PaidImageFailureClass,
+    error: unknown,
+    providerRequestId: string | null,
+  ): Promise<boolean> => {
+    // Terminal ONLY at the dispatch ceiling. A parent job that still intends
+    // to retry keeps this intent retry-eligible — parent-COMPLETION hygiene
+    // is a separate decision made by the worker (see
+    // `terminalizeStrandedPaidIntents`), never guessed at here.
+    const terminal = claimed.dispatches >= MAX_PAID_DISPATCHES_PER_INTENT;
+    const lastError = describePaidImageFailure(failureClass, error);
+    try {
+      await repo.recordPaidImageIntentFailure(intent.id, claimToken, {
+        lastError,
+        providerRequestId,
+        terminal,
+      });
+    } catch {
+      // Swallowed deliberately — see above.
+    }
     logPaidImageIntentOutcome({
       projectId,
       generationJobId: job.id,
       logicalPaidIntentKey: intentKey,
       directionKey: unit.scopeKey,
+      generationKind: unit.kind,
+      paidIntentOrdinal: intent.paidIntentOrdinal,
       transportAttempt: claimed.dispatches,
       outcome: "failed",
-      failureClassification:
-        error instanceof ProviderError ? error.classification : "local_failure",
+      failureClassification: failureClass,
+      possiblyBilled: isPossiblyBilledFailureClass(failureClass),
+      providerRequestId,
+      lastErrorSummary: lastError,
+      terminalized: terminal,
     });
-    // Out of dispatches: mark the intent terminally failed so a later
-    // reclaim stops rather than looping. Otherwise leave it "reserved" —
-    // a bounded re-dispatch of the SAME intent stays available, and it
-    // still consumes no budget.
-    if (claimed.dispatches >= MAX_PAID_DISPATCHES_PER_INTENT) {
-      await repo.completePaidImageIntent(intent.id, claimToken, {
-        status: "failed",
-        lastError: describePaidIntentFailure(error),
-      });
-    }
+    return terminal;
+  };
+
+  // --- 5a. Dispatch ----------------------------------------------------
+  let drafts: GeneratedConceptDraft[];
+  try {
+    drafts = await deps.dispatch();
+  } catch (error) {
+    await recordFailure(classifyProviderDispatchFailure(error), error, null);
+    throw error;
+  }
+
+  // Phase 2C.2C, and the single most important line in this function: the
+  // provider's request id is captured HERE, from the provider's own answer,
+  // BEFORE anything local can fail. It used to be read only from the
+  // successfully-persisted concepts, which meant the one case where it
+  // matters most — the provider billed us and local persistence then died —
+  // was structurally incapable of recording it.
+  const providerRequestId = readDraftsProviderRequestId(drafts);
+
+  // --- 5b. Persist BEFORE claiming success -----------------------------
+  let persisted: PersistedPaidConcept[];
+  try {
+    persisted = await deps.persist(drafts, intentKey);
+  } catch (error) {
+    await recordFailure(
+      classifyPaidImagePersistenceFailure(error),
+      error,
+      providerRequestId,
+    );
     throw error;
   }
 
   // --- 6. Fenced success write ----------------------------------------
-  const providerRequestId =
+  const persistedRequestId =
     persisted.find((concept) => concept.providerRequestId)?.providerRequestId ??
-    null;
-  const completed = await repo.completePaidImageIntent(intent.id, claimToken, {
-    status: "succeeded",
-    result: { concepts: persisted },
-    providerRequestId,
-  });
+    providerRequestId;
+  let completed: PaidImageIntent | null;
+  try {
+    completed = await repo.completePaidImageIntent(intent.id, claimToken, {
+      status: "succeeded",
+      result: { concepts: persisted },
+      providerRequestId: persistedRequestId,
+    });
+  } catch (error) {
+    // The bytes ARE durable and stamped with this intent key at this point,
+    // so the next claim adopts the orphan and pays nothing. Recording the
+    // failure is what makes that recoverable state legible instead of
+    // looking like a silent loss.
+    await recordFailure("intent_completion_failure", error, persistedRequestId);
+    throw error;
+  }
 
   if (!completed) {
     // Fenced out: this worker's job was reclaimed while its paid call was
@@ -307,14 +371,24 @@ export async function executePaidImageUnit(
     // worker bought is deliberately discarded in favour of the live
     // worker's — which is the correct trade, since two workers writing
     // competing results for one concept is worse than one wasted image.
+    //
+    // Deliberately NOT recorded onto the intent: a newer worker owns that
+    // row, and the fencing that just refused this write would refuse a
+    // failure write for exactly the same (correct) reason. The log line IS
+    // the durable record for this case.
     logPaidImageIntentOutcome({
       projectId,
       generationJobId: job.id,
       logicalPaidIntentKey: intentKey,
       directionKey: unit.scopeKey,
+      generationKind: unit.kind,
+      paidIntentOrdinal: intent.paidIntentOrdinal,
       transportAttempt: claimed.dispatches,
       outcome: "fenced_out",
-      providerRequestId,
+      failureClassification: "fenced_out",
+      possiblyBilled: true,
+      providerRequestId: persistedRequestId,
+      terminalized: false,
     });
     const refreshed = await repo.getPaidImageIntentByKey(projectId, intentKey);
     const recovered = reuseCompletedIntent(refreshed);
@@ -331,12 +405,63 @@ export async function executePaidImageUnit(
     generationJobId: job.id,
     logicalPaidIntentKey: intentKey,
     directionKey: unit.scopeKey,
+    generationKind: unit.kind,
+    paidIntentOrdinal: intent.paidIntentOrdinal,
     transportAttempt: claimed.dispatches,
     outcome: "succeeded",
-    providerRequestId,
+    possiblyBilled: true,
+    providerRequestId: persistedRequestId,
+    terminalized: false,
   });
 
   return { concepts: persisted, paidCallMade: true };
+}
+
+/**
+ * Phase 2C.2C: how many times this logical intent has been dispatched to the
+ * provider, read from DURABLE state.
+ *
+ * This is the authoritative answer to "did we pay?" and the reason the live
+ * replacement log said `paidCallMade: false` about an image OpenAI had
+ * already billed: the caller inferred payment from whether the replacement
+ * ASSET completed, which is a different question entirely. Comparing this
+ * before and after gives the right answer for every failure shape, including
+ * ones that throw before any value can be returned.
+ *
+ * Best-effort — observability must never fail a job — so an unreadable
+ * intent reports `0` rather than throwing.
+ */
+export async function readPaidIntentDispatches(
+  repo: ProjectRepository,
+  projectId: string,
+  intentKey: string,
+): Promise<number> {
+  try {
+    const intent = await repo.getPaidImageIntentByKey(projectId, intentKey);
+    return intent?.dispatches ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The provider's own request id, read from the SANITIZED metadata envelope a
+ * provider adapter already produces, straight off the drafts it returned.
+ *
+ * Never part of the logical intent identity (it changes on every dispatch,
+ * which is exactly what the identity must not do) — but on a failure path it
+ * is the only handle that joins a durable row to a provider-side usage
+ * record, which is what makes "we paid; why did the result disappear?"
+ * answerable at all.
+ */
+function readDraftsProviderRequestId(
+  drafts: readonly GeneratedConceptDraft[],
+): string | null {
+  for (const draft of drafts) {
+    const value = draft.asset?.providerMetadata?.providerRequestId;
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
 }
 
 /**
@@ -478,16 +603,4 @@ async function adoptOrphanedPaidAsset(
   }
 
   return concepts.length > 0 ? concepts : null;
-}
-
-/** Sanitized, non-secret failure description safe to persist on the intent. */
-function describePaidIntentFailure(error: unknown): string {
-  if (error instanceof ProviderError) {
-    return `${error.classification}/${error.dispatch}`;
-  }
-  if (error && typeof error === "object" && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string" && message.length > 0) return message;
-  }
-  return "Paid image intent failed for an unknown reason.";
 }

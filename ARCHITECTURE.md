@@ -768,6 +768,77 @@ non-billable and is always re-run fresh (never cached on the intent). It can
 never cause an unbounded regeneration — the one thing it *can* cause is a
 single bounded replacement, described next.
 
+#### Failed paid-intent durability (Phase 2C.2C)
+
+Phase 2C0.5 made the paid DECISION durable. It did not make the paid FAILURE
+durable, and a live run showed what that costs. A Soft replacement (ordinal 4,
+epoch 1) reached OpenAI, was issued a request id, and was billed. Local
+persistence then failed, and the durable row ended `status = reserved`,
+`provider_request_id = null`, `last_error = null`, `result = null` — attached
+to a `completed` job, under a `concepts_ready` project, with the direction
+withheld and the replacement log reporting `paidCallMade: false`. Money had
+moved and nothing durable said so.
+
+Three gaps, each fixed at its own layer. **No migration**: every field used
+already exists on `paid_image_intents`.
+
+**1. Evidence is written on every begun dispatch, not only at the ceiling.**
+`completePaidImageIntent` could only write a TERMINAL status, so a failure
+with retries remaining had nowhere to go. The new
+`ProjectRepository.recordPaidImageIntentFailure` is its non-terminal
+counterpart: same `claimToken` fencing, writes `last_error` and
+`provider_request_id`, and touches `status` only when the caller asks for a
+terminal write. It never modifies a `succeeded` intent (a durable success is
+never downgraded by a late writer) and never clears a request id it already
+knows.
+
+The executor also captures the provider request id from the drafts the
+provider RETURNED, before persistence runs. Previously it was read only from
+successfully-persisted concepts, which made the one case where it matters most
+— billed, then local failure — structurally incapable of recording it.
+
+**2. Failures are classified by WHERE they happened**
+(`capabilities/shared/paid-image-failure.ts`), not collapsed into an opaque
+`local_failure`: `provider_not_dispatched`, `provider_ambiguous`,
+`provider_billed_unusable`, `local_decode_failure`, `storage_upload_failure`,
+`asset_persistence_failure`, `intent_completion_failure`, `fenced_out`,
+`budget_blocked`, `unknown_local_failure`. `ProviderError` remains the sole
+authority on provider-side failure and is read rather than replaced; the one
+new error type, `PaidImagePersistenceError`, exists because from outside
+`AssetCapability` "storage refused the bytes" and "the database refused the
+row" are indistinguishable — and those are the two failures that most need
+telling apart once money has moved. `describePaidImageFailure` is the single
+sanitization choke point: no keys, headers, bytes, base64, or prompt text ever
+reach `last_error` or a log line.
+
+**3. `paidCallMade` reflects payment, not asset success.** The replacement
+path inferred payment from whether the replacement ASSET completed. It now
+reads durable state: the intent's `dispatches` counter moving, AND the
+recorded failure class not proving the request never left the process (a DNS
+failure increments the counter but bills nothing). An unclassified failure
+defaults to "billed" — the expensive reading is the safe one.
+
+**Terminalization is parent-completion hygiene, and only that.**
+`recoverAbandonedJobs` only ever sweeps `running` jobs, so a paid intent left
+`reserved` with `dispatches > 0` when its job intentionally completes is not
+outstanding work — it is a permanently stranded row that reads like outstanding
+work. `GenerationWorkerCapability.completeGenerationJob` (the one place a job
+is marked completed) fails those intents while preserving `last_error`,
+`provider_request_id` and `dispatches`. Each condition is load-bearing:
+
+- only at INTENTIONAL completion — a job that fails or is reclaimed still
+  intends recovery, and its intents stay retry-eligible within their existing
+  dispatch budget;
+- only `dispatches > 0` — failing a never-dispatched reservation would invent
+  a spend record;
+- fenced on the row's own `claimToken` — if a worker began a dispatch in
+  between, the fenced write returns `null` and the live dispatch is left alone.
+
+This changes no budget: 3 initial + at most 2 replacements, 5 logical intents
+per job, 3 dispatches per intent, replacement epoch 1. It does not claim
+exactly-once external billing — an ambiguous post-dispatch failure remains
+re-dispatchable within the unchanged per-intent ceiling.
+
 #### Automatic hard-fail concept replacement (Phase 2C)
 
 Phase 2B made a deterministic, pixel-level print-palette verdict available

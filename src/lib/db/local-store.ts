@@ -39,6 +39,7 @@ import type {
   CreateProductionAssetValidationInput,
   PaidImageIntentReservation,
   ProjectRepository,
+  RecordPaidImageIntentFailureInput,
   ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
   UpdateArtworkPreparationInput,
@@ -855,6 +856,33 @@ export class LocalProjectRepository implements ProjectRepository {
     }
     if (input.lastError !== undefined) intent.lastError = input.lastError;
     if (input.status === "succeeded") intent.succeededAt = nowIso();
+    intent.updatedAt = nowIso();
+    await writeDb(db);
+    return intent;
+  }
+
+  async recordPaidImageIntentFailure(
+    intentId: string,
+    claimToken: string,
+    input: RecordPaidImageIntentFailureInput,
+  ): Promise<PaidImageIntent | null> {
+    const db = await readDb();
+    const intent = db.paidImageIntents.find((item) => item.id === intentId);
+    if (!intent) return null;
+    // Same fencing as `completePaidImageIntent`: a zombie worker holding the
+    // previous token is refused.
+    if (intent.claimToken !== claimToken) return null;
+    // A durable success is never downgraded by a late failure write — the
+    // bytes exist and are reusable, whatever this worker went on to hit.
+    if (intent.status === "succeeded") return null;
+
+    intent.lastError = input.lastError;
+    // Only ever written, never cleared: the id of a request we already know
+    // was billed is the single most valuable field on this row.
+    if (input.providerRequestId) {
+      intent.providerRequestId = input.providerRequestId;
+    }
+    if (input.terminal === true) intent.status = "failed";
     intent.updatedAt = nowIso();
     await writeDb(db);
     return intent;

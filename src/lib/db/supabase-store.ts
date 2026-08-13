@@ -46,6 +46,7 @@ import type {
   CreateProductionAssetValidationInput,
   PaidImageIntentReservation,
   ProjectRepository,
+  RecordPaidImageIntentFailureInput,
   ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
   UpdateArtworkPreparationInput,
@@ -1257,6 +1258,52 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .update(payload)
       .eq("id", intentId)
       .eq("claim_token", claimToken)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaidImageIntent(data as DbPaidImageIntent) : null;
+  }
+
+  async recordPaidImageIntentFailure(
+    intentId: string,
+    claimToken: string,
+    input: RecordPaidImageIntentFailureInput,
+  ): Promise<PaidImageIntent | null> {
+    // Read first, for two reasons that both need the current row: a durable
+    // success must never be downgraded by a late failure write, and a
+    // provider request id must never be cleared by a later failure that
+    // learned less than an earlier one did.
+    const { data: current, error: readError } = await this.client
+      .from("paid_image_intents")
+      .select("*")
+      .eq("id", intentId)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!current) return null;
+
+    const row = current as DbPaidImageIntent;
+    if (row.status === "succeeded") return null;
+
+    const payload: Record<string, unknown> = {
+      last_error: input.lastError,
+      updated_at: new Date().toISOString(),
+    };
+    if (input.providerRequestId) {
+      payload.provider_request_id = input.providerRequestId;
+    }
+    // Absent `terminal`, `status` is deliberately not in the payload at all
+    // — an intent whose parent job still intends to retry keeps whatever
+    // status it has and stays retry-eligible.
+    if (input.terminal === true) payload.status = "failed";
+
+    // Fenced on `claim_token`, and additionally guarded against a success
+    // that landed between the read above and this write.
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .update(payload)
+      .eq("id", intentId)
+      .eq("claim_token", claimToken)
+      .neq("status", "succeeded")
       .select("*")
       .maybeSingle();
     if (error) throw error;

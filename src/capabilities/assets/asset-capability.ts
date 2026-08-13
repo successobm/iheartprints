@@ -12,6 +12,7 @@
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { AssetKind, AssetRecord, ProductionAssetRole } from "@/lib/domain/types";
 import type { AssetStorageProvider } from "@/capabilities/asset-storage";
+import { asPaidImagePersistenceError } from "@/capabilities/shared/paid-image-failure";
 import type { ThumbnailGenerator } from "./thumbnail-generator";
 
 /** Signed URLs default to a short lifetime — "Signed URLs should expire." */
@@ -178,13 +179,26 @@ export function createAssetCapability(
     },
 
     async uploadConceptImage(designId, input) {
-      const uploadedOriginal = await storage.upload({
-        projectId: designId,
-        conceptId: input.conceptId,
-        fileName: `original${extensionForContentType(input.contentType)}`,
-        bytes: input.bytes,
-        contentType: input.contentType,
-      });
+      // Phase 2C.2C: the two stages are tagged, not merely allowed to
+      // propagate. A concept image is very often something a paid provider
+      // has ALREADY been billed for by the time this runs, and from outside
+      // this capability "storage refused the bytes" and "the database
+      // refused the row" are indistinguishable — yet they are the two
+      // failures an operator most needs told apart when money has moved.
+      // The original message and stack are preserved (see
+      // `asPaidImagePersistenceError`); only a classification is added.
+      let uploadedOriginal: { objectKey: string };
+      try {
+        uploadedOriginal = await storage.upload({
+          projectId: designId,
+          conceptId: input.conceptId,
+          fileName: `original${extensionForContentType(input.contentType)}`,
+          bytes: input.bytes,
+          contentType: input.contentType,
+        });
+      } catch (error) {
+        throw asPaidImagePersistenceError(error, "storage_upload_failure");
+      }
 
       let primary: AssetRecord;
       try {
@@ -208,7 +222,7 @@ export function createAssetCapability(
         // Asset Cleanup: bytes landed in storage but the record that would
         // reference them never did — never leave that orphaned.
         await safeDelete(storage, uploadedOriginal.objectKey);
-        throw error;
+        throw asPaidImagePersistenceError(error, "asset_persistence_failure");
       }
 
       const thumbnail = await tryCreateThumbnail(

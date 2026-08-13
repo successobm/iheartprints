@@ -10,6 +10,7 @@ import type {
   ConversationPhase,
   DesignBriefSnapshotContent,
   GenerationJob,
+  PaidImageIntent,
 } from "@/lib/domain/types";
 import type { AssetCapability } from "@/capabilities/assets";
 import type { ConceptEvaluationCapability } from "@/capabilities/concept-evaluation";
@@ -41,11 +42,18 @@ import {
   REPLACEMENT_PAID_INTENT_EPOCH,
 } from "@/capabilities/shared/paid-image-intent";
 import {
+  describePaidImageFailure,
+  isPossiblyBilledFailureClass,
+  readPaidImageFailureClass,
+} from "@/capabilities/shared/paid-image-failure";
+import { logPaidImageIntentOutcome } from "@/lib/config/paid-image-intent-logging";
+import {
   executePaidImageUnit,
   PAID_IMAGE_CONCEPT_METADATA_KEY,
   PAID_IMAGE_INTENT_BLOCKED_ERROR_PREFIX,
   PAID_IMAGE_INTENT_METADATA_KEY,
   PaidImageIntentBlockedError,
+  readPaidIntentDispatches,
   type PaidImageUnit,
   type PersistedPaidConcept,
 } from "./paid-image-intent-executor";
@@ -693,6 +701,21 @@ export function createGenerationWorkerCapability(
         paidCallMade: null,
       });
 
+      // Phase 2C.2C: the DURABLE dispatch count before this attempt.
+      //
+      // "Did we pay?" and "did we end up with a usable replacement?" are
+      // different questions, and this path used to answer the first with the
+      // second. A live Soft replacement that OpenAI billed and answered, and
+      // whose local persistence then failed, was logged `paidCallMade:
+      // false` — the single most misleading field the phase produced.
+      // Comparing this count before and after is authoritative for every
+      // failure shape, including ones that throw before any value returns.
+      const dispatchesBefore = await readPaidIntentDispatches(
+        repo,
+        input.designId,
+        replacementPaidIntentKey,
+      );
+
       let executed: {
         concepts: PersistedPaidConcept[];
         paidCallMade: boolean;
@@ -742,17 +765,25 @@ export function createGenerationWorkerCapability(
         candidate.skipReason = outOfBudget
           ? "paid_budget_exhausted"
           : "replacement_generation_failed";
+        // Read AFTER the failure, from the same durable counter. A refusal
+        // to spend leaves it untouched (nothing was dispatched); a provider
+        // call that happened and then failed locally has already
+        // incremented it, whatever became of the image afterwards.
+        const failedIntent = await repo
+          .getPaidImageIntentByKey(input.designId, replacementPaidIntentKey)
+          .catch(() => null);
         logConceptReplacement({
           ...logBase,
           decision: "replacement_unavailable",
           deterministicStatusAfter: null,
-          paidIntentOrdinal: null,
+          paidIntentOrdinal: failedIntent?.paidIntentOrdinal ?? null,
           paidIntentBudgetRemaining: await countRemainingPaidIntents(
             input.designId,
             input.job.id,
             budget,
           ),
-          paidCallMade: false,
+          paidCallMade: didPaidCallHappen(failedIntent, dispatchesBefore),
+          providerRequestId: failedIntent?.providerRequestId ?? null,
           skipReason: candidate.skipReason,
         });
         // The budget is spent for this whole job, not just this direction —
@@ -861,6 +892,136 @@ export function createGenerationWorkerCapability(
         providerRequestId: replacement.providerRequestId,
       });
     }
+  }
+
+  /**
+   * Phase 2C.2C: whether a paid provider call actually happened for this
+   * replacement attempt, decided from DURABLE state alone.
+   *
+   * Two durable facts, and both are needed:
+   *
+   *   1. the dispatch counter moved — the platform authorized and attempted
+   *      a paid call, whatever became of it afterwards. This alone is what
+   *      the live log got wrong: it inferred payment from whether the
+   *      replacement ASSET completed, so a billed image whose persistence
+   *      failed was reported as free.
+   *   2. the recorded failure class does not PROVE the request never left
+   *      the process. A DNS failure increments the counter but bills
+   *      nothing, and claiming otherwise would be its own lie.
+   *
+   * An unclassified failure (or none) defaults to "billed" — the expensive
+   * reading is the safe one, and the reason this function exists at all is
+   * that the cheap reading was wrong.
+   */
+  function didPaidCallHappen(
+    intent: PaidImageIntent | null,
+    dispatchesBefore: number,
+  ): boolean {
+    if ((intent?.dispatches ?? 0) <= dispatchesBefore) return false;
+    const failureClass = readPaidImageFailureClass(intent?.lastError);
+    return failureClass === null || isPossiblyBilledFailureClass(failureClass);
+  }
+
+  /**
+   * Phase 2C.2C: PARENT-COMPLETION HYGIENE.
+   *
+   * A generation job that intentionally completes will never be claimed
+   * again — `recoverAbandonedJobs` only ever sweeps `"running"` jobs. So a
+   * paid intent left `"reserved"` with `dispatches > 0` at that moment is not
+   * "still going to resolve"; it is a permanently stranded row that reads
+   * like outstanding work. That is precisely the state the live Harley run
+   * ended in: a Soft replacement OpenAI had billed, sitting `reserved`,
+   * attached to a `completed` job, under a `concepts_ready` project, with
+   * its direction withheld.
+   *
+   * Terminalizing it says the true thing — this image was dispatched, it
+   * never produced durable artwork, and nothing is going to retry it — while
+   * PRESERVING every piece of evidence about why (`last_error`,
+   * `provider_request_id`, `dispatches`).
+   *
+   * Deliberately narrow, and each condition is load-bearing:
+   *
+   *   - only at INTENTIONAL completion. A job that fails, or is reclaimed,
+   *     still intends recovery, and its intents must stay retry-eligible
+   *     within their existing dispatch budget (nothing here runs on those
+   *     paths).
+   *   - only `dispatches > 0`. An intent reserved but never dispatched cost
+   *     nothing and means nothing; failing it would invent a spend record.
+   *   - fenced on the row's own `claimToken`. If a worker began a dispatch
+   *     between the read and the write, the token changed, the fenced write
+   *     returns `null`, and the live dispatch is left alone — refusing to
+   *     terminalize an actively-running intent is the correct outcome, not
+   *     an error.
+   *
+   * Best-effort throughout: hygiene must never fail a job that has genuinely
+   * completed and whose concepts are already customer-visible.
+   */
+  async function terminalizeStrandedPaidIntents(
+    projectId: string,
+    job: GenerationJob,
+  ): Promise<void> {
+    let intents: PaidImageIntent[];
+    try {
+      intents = await repo.listPaidImageIntentsForJob(projectId, job.id);
+    } catch {
+      return;
+    }
+
+    for (const intent of intents) {
+      if (intent.status !== "reserved") continue;
+      if (intent.dispatches <= 0) continue;
+      if (!intent.claimToken) continue;
+
+      try {
+        const terminalized = await repo.recordPaidImageIntentFailure(
+          intent.id,
+          intent.claimToken,
+          {
+            lastError:
+              intent.lastError ??
+              describePaidImageFailure(
+                "unknown_local_failure",
+                "A paid dispatch left no durable artwork and its parent job completed without retrying it.",
+              ),
+            terminal: true,
+          },
+        );
+        if (!terminalized) continue;
+        logPaidImageIntentOutcome({
+          projectId,
+          generationJobId: job.id,
+          logicalPaidIntentKey: intent.intentKey,
+          directionKey: intent.directionKey,
+          generationKind: intent.intentKind,
+          paidIntentOrdinal: intent.paidIntentOrdinal,
+          transportAttempt: intent.dispatches,
+          outcome: "terminalized",
+          failureClassification: "intent_stranded_on_parent_completion",
+          possiblyBilled: true,
+          providerRequestId: terminalized.providerRequestId,
+          lastErrorSummary: terminalized.lastError,
+          terminalized: true,
+          parentOutcome: "completed",
+        });
+      } catch {
+        // Best-effort — see above.
+      }
+    }
+  }
+
+  /**
+   * The one place a generation job is intentionally marked completed, so the
+   * stranded-intent sweep can never be forgotten on a future completion path.
+   */
+  async function completeGenerationJob(
+    projectId: string,
+    job: GenerationJob,
+  ): Promise<void> {
+    await terminalizeStrandedPaidIntents(projectId, job);
+    await repo.updateGenerationJob(job.id, {
+      status: "completed",
+      completedAt: new Date().toISOString(),
+    });
   }
 
   /** Budget slots this job has left. Best-effort observability only. */
@@ -1115,10 +1276,7 @@ export function createGenerationWorkerCapability(
           });
         }
       }
-      await repo.updateGenerationJob(job.id, {
-        status: "completed",
-        completedAt: new Date().toISOString(),
-      });
+      await completeGenerationJob(designId, job);
       return;
     }
 
@@ -1425,10 +1583,7 @@ export function createGenerationWorkerCapability(
         // understood, not just now at completion.)
         await repo.supersedeActiveFinalDirectionApproval(designId);
       }
-      await repo.updateGenerationJob(job.id, {
-        status: "completed",
-        completedAt: new Date().toISOString(),
-      });
+      await completeGenerationJob(designId, job);
 
       await repo.setProjectStatus(designId, "concepts_ready");
       await repo.updateConversationPhase(designId, phaseAfterGeneration(job));

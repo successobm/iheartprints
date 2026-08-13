@@ -203,4 +203,8 @@ export const TEST_FILES = [
   // local double, so no paid call is possible.
   "src/capabilities/generation-worker/hard-fail-concept-replacement.test.ts",
   "src/capabilities/providers/print-palette-correction-prompt.test.ts",
+  // Phase 2C.2C: failed paid-intent durability and terminal state. Written
+  // against the live ordinal-4 failure shape — a billed provider response
+  // whose local persistence died, leaving no durable evidence at all.
+  "src/capabilities/generation-worker/paid-intent-failure-durability.test.ts",
 ];

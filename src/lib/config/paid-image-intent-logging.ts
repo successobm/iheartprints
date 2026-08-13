@@ -96,10 +96,34 @@ export interface PaidImageIntentOutcomeLogDetails {
   directionKey: string;
   transportAttempt: number;
   /** `"succeeded"` means the bytes are durably persisted, not merely returned. */
-  outcome: "succeeded" | "failed" | "fenced_out";
+  outcome: "succeeded" | "failed" | "fenced_out" | "terminalized";
   providerRequestId?: string | null;
   /** Sanitized classification only — never a raw provider error body. */
   failureClassification?: string | null;
+  /** `"initial_concept" | "targeted_revision" | "replacement"`. */
+  generationKind?: string | null;
+  paidIntentOrdinal?: number | null;
+  /**
+   * Phase 2C.2C: whether a paid provider response may already have been
+   * billed for this attempt. Deliberately separate from `outcome` — a failed
+   * outcome says nothing on its own about whether money moved, and that
+   * conflation is exactly what made the live Soft replacement look free.
+   */
+  possiblyBilled?: boolean | null;
+  /**
+   * Phase 2C.2C: the same sanitized string persisted to
+   * `PaidImageIntent.lastError`, so log and durable row can be reconciled
+   * without a query. Never a raw provider body, never bytes, never a key.
+   */
+  lastErrorSummary?: string | null;
+  /** Phase 2C.2C: whether this write left the intent terminally `failed`. */
+  terminalized?: boolean | null;
+  /**
+   * Phase 2C.2C: why the intent was terminalized, for the
+   * `"terminalized"` outcome — e.g. the parent job intentionally completing
+   * with this direction withheld.
+   */
+  parentOutcome?: string | null;
 }
 
 /**
@@ -111,6 +135,11 @@ export interface PaidImageIntentOutcomeLogDetails {
  * refused the durable write. Worth its own outcome because it is the one
  * state where money was spent and the resulting image is deliberately
  * discarded in favour of the live worker's.
+ *
+ * Phase 2C.2C added `"terminalized"`: an intent that had dispatched, never
+ * produced durable artwork, and whose parent job then intentionally
+ * completed. It is not a fourth kind of failure — it is the moment a
+ * stranded `reserved` row stops pretending it is still going to resolve.
  */
 export function logPaidImageIntentOutcome(
   details: PaidImageIntentOutcomeLogDetails,
@@ -120,9 +149,15 @@ export function logPaidImageIntentOutcome(
     generationJobId: details.generationJobId,
     logicalPaidIntentKey: details.logicalPaidIntentKey,
     directionKey: details.directionKey,
+    generationKind: details.generationKind ?? null,
+    paidIntentOrdinal: details.paidIntentOrdinal ?? null,
     transportAttempt: details.transportAttempt,
     outcome: details.outcome,
     providerRequestId: details.providerRequestId ?? null,
     failureClassification: details.failureClassification ?? null,
+    possiblyBilled: details.possiblyBilled ?? null,
+    lastErrorSummary: details.lastErrorSummary ?? null,
+    terminalized: details.terminalized ?? null,
+    parentOutcome: details.parentOutcome ?? null,
   });
 }
