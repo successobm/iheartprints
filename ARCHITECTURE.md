@@ -119,7 +119,7 @@ Derived from the Constitution and enforced by the current implementation:
 | Next.js application | HTTP API, UI, composition root host | Framework choice is infrastructure; domain lives under `src/capabilities` |
 | Supabase database | Optional durable Postgres persistence | Swappable via `ProjectRepository` (`local` JSON when unset) |
 | Supabase Storage | Optional private object storage for generated assets | Swappable via `AssetStorageProvider` |
-| DigitalOcean App Platform | Documented deployment host for web + scheduled worker invocation | Hosting topology; does not own business logic |
+| DigitalOcean App Platform | Verified production host for the web app; GitHub `main` auto-deploys. Procedure: [`DEPLOYMENT.md`](./DEPLOYMENT.md). Worker scheduling is separate | Hosting topology; does not own business logic |
 | Generation providers | Produce concept image bytes (placeholder or OpenAI adapter) | Behind `ConceptGenerationProvider` |
 | Browser client | Conversation UI, read-only status polling | Presentation only |
 | Scheduled worker invocation | Cron/HTTP or standalone process calling the worker scheduler | Topology only; logic stays in `GenerationWorkerCapability` |
@@ -6025,6 +6025,7 @@ prevails until intentionally amended.
 
 - [`IHEARTPRINTS_CONSTITUTION.md`](./IHEARTPRINTS_CONSTITUTION.md)
 - [`AGENTS.md`](./AGENTS.md)
+- [`DEPLOYMENT.md`](./DEPLOYMENT.md) — verified production host, URL, and release procedure
 - [`docs/deployment/generation-worker.md`](./docs/deployment/generation-worker.md)
 - [`docs/deployment/final-artwork-worker.md`](./docs/deployment/final-artwork-worker.md)
 - [`docs/database/MIGRATION_WORKFLOW.md`](./docs/database/MIGRATION_WORKFLOW.md)
