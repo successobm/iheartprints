@@ -10,6 +10,7 @@ import { COLOR_WORD_PATTERN } from "@/capabilities/shared/color-families";
 import { extractRevisionDelta } from "@/capabilities/shared/revision-delta";
 
 import { extractCreativeReferences } from "./creative-reference-extraction";
+import { deriveExplicitInkRestriction } from "./explicit-ink-restriction";
 import type { GenerationIntent } from "./generation-intent";
 import { derivePrintPalette } from "./print-palette-constraint";
 
@@ -102,6 +103,9 @@ export function translateApprovedBrief(
   // `derivePrintPalette` decides hard vs soft from existing brief fields —
   // no migration, no new brief columns.
   const printPalette = derivePrintPalette(content);
+  // Phase 2C.3A: explicit literal ink restriction (spend authority) is
+  // separate from inferred hard/soft prompt emphasis.
+  const explicitInk = deriveExplicitInkRestriction(content);
 
   return {
     product: content.productSummary?.trim() || "a custom t-shirt",
@@ -109,6 +113,9 @@ export function translateApprovedBrief(
     style: deferred.has("style") ? null : styleSplit.content || null,
     colors: printPalette.colors,
     printPaletteEnforcement: printPalette.enforcement,
+    explicitInkRestriction: explicitInk
+      ? { kind: explicitInk.kind }
+      : null,
     subjectOnlyColors: printPalette.subjectOnlyColors,
     productColor: content.shirtColor?.trim() || null,
     requiredWording: wording.mode === "provided" ? wording.text : null,

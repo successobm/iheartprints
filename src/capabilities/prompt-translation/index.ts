@@ -14,3 +14,8 @@ export {
   type DerivedPrintPalette,
   type PrintPaletteEnforcement,
 } from "./print-palette-constraint";
+export {
+  deriveExplicitInkRestriction,
+  type ExplicitInkRestriction,
+  type ExplicitInkRestrictionKind,
+} from "./explicit-ink-restriction";

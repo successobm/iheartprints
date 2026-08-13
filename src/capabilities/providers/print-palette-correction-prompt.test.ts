@@ -131,30 +131,16 @@ describe("Phase 2C — replacement prompt contract", () => {
 
     const prompt = sent[0]!;
     assert.match(prompt, /PRINT PALETTE CORRECTION/);
+    assert.match(prompt, /violated an explicit customer ink restriction/);
     assert.match(
       prompt,
-      /failed the required print-palette \/ garment-contrast constraint because too much garment-matching color was rendered as opaque printed artwork/,
+      /Follow the REQUIRED PRINT PALETTE and any EXPLICIT INK RESTRICTION rules above strictly/,
     );
+    assert.match(prompt, /Keep the outer canvas fully transparent/);
+    assert.match(prompt, /Do not use prohibited ink colors as printed artwork/);
     assert.match(
       prompt,
-      /Follow the REQUIRED PRINT PALETTE and the TRANSPARENCY \/ NEGATIVE SPACE rules above strictly/,
-    );
-    assert.match(prompt, /Do not use large opaque garment-matching fills/);
-    assert.match(
-      prompt,
-      /Encode empty space and garment-supplied negative space as transparent alpha/,
-    );
-    assert.match(
-      prompt,
-      /Transparency must be real alpha, not simulated by filling with the garment color/,
-    );
-    assert.match(
-      prompt,
-      /Preserve the subject's identity and the same creative direction using the required print palette/,
-    );
-    assert.match(
-      prompt,
-      /Do not treat subject-object colors as literal print ink where they conflict/,
+      /Preserve the subject's identity and the same creative direction using the allowed print palette/,
     );
     assert.match(
       prompt,
@@ -235,7 +221,7 @@ describe("Phase 2C — replacement prompt contract", () => {
 
     await provider.generateDirection(request(correction), "minimal_badge");
     assert.match(sent[0]!, /Avoid: no skulls\./);
-    assert.match(sent[0]!, /REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT/);
+    assert.match(sent[0]!, /REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE/);
     assert.match(
       sent[0]!,
       /No creative direction may override the required print palette/,
@@ -282,13 +268,13 @@ describe("Phase 2C — replacement prompt contract", () => {
 
   // --- Z / AA. Untouched earlier phases ------------------------------------
 
-  it("Z: Phase 2A hard-palette prompt rules remain, with Phase 2C.2A transparency hardening", async () => {
+  it("Z: Phase 2A hard-palette prompt rules remain, with Phase 2C.3A outer-canvas transparency", async () => {
     const { provider, prompts: sent } = capturingProvider();
     const { original } = prompts(hardPaletteBrief());
 
     await provider.generateDirection(request(original), "bold_direct");
     const prompt = sent[0]!;
-    assert.match(prompt, /REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT:/);
+    assert.match(prompt, /REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE:/);
     assert.match(prompt, /Render the printable artwork primarily in: White\./);
     assert.match(
       prompt,
@@ -296,18 +282,19 @@ describe("Phase 2C — replacement prompt contract", () => {
     );
     assert.match(
       prompt,
-      /The required print palette overrides literal subject-object color where the two conflict\./,
+      /Prefer the required print palette where subject-object color and preferred colors conflict\./,
     );
-    assert.match(prompt, /Subject-only colors \(identity, not dominant ink\)/);
-    assert.match(prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
+    assert.match(prompt, /Subject-only colors \(identity, not preferred dominant ink\)/);
+    assert.match(prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
+    assert.match(prompt, /Outer background: fully transparent \(alpha\)/);
     assert.match(
       prompt,
-      /A transparent outer canvas alone is not enough/,
+      /Intentional opaque ink inside the artwork[\s\S]*is allowed as printed design/,
     );
   });
 });
 
-describe("Phase 2C.2A — transparency / negative-space prompt contract", () => {
+describe("Phase 2C.2A/2C.3A — transparency / outer-canvas prompt contract", () => {
   const translate = createPromptTranslationCapability();
 
   function prompts(brief: DesignBriefSnapshotContent) {
@@ -333,18 +320,43 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
   }
 
   // A / B. Black subject + black garment + hard white palette
-  it("A/B: black Harley on black garment keeps semantic black and bans opaque black print fill", async () => {
+  it("A/B: black Harley on black garment keeps semantic black; outer canvas transparent; dark fills allowed without explicit ban", async () => {
     const { prompt } = await capture(hardPaletteBrief({ exactText: "" }), "bold_direct", false);
     assert.match(prompt, /black 2005 Harley Road Glide/i);
     assert.match(prompt, /black leather/i);
     assert.match(prompt, /black helmet/i);
-    assert.match(prompt, /Subject-only colors \(identity, not dominant ink\): black/);
+    assert.match(prompt, /Subject-only colors \(identity, not preferred dominant ink\): black/);
     assert.match(prompt, /Render the printable artwork primarily in: White\./);
-    assert.match(prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
-    assert.match(prompt, /do not paint large interiors[\s\S]*opaque garment-colored RGB/);
-    assert.match(prompt, /Encode those areas as transparent alpha/);
+    assert.match(prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
     assert.match(prompt, /Outer background: fully transparent \(alpha\)/);
-    assert.match(prompt, /internal garment-supplied negative space/i);
+    assert.match(
+      prompt,
+      /Intentional opaque ink inside the artwork[\s\S]*is allowed as printed design/,
+    );
+    assert.doesNotMatch(prompt, /EXPLICIT INK RESTRICTION/);
+  });
+
+  it("A2: explicit WHITE INK ONLY adds stronger prohibition wording", async () => {
+    const { prompt } = await capture(
+      hardPaletteBrief({
+        exactText: "",
+        additionalInstructions: "ONE COLOR WHITE INK ONLY. DO NOT USE BLACK INK.",
+      }),
+      "soft_illustrated",
+      false,
+    );
+    assert.equal(
+      prompts(
+        hardPaletteBrief({
+          additionalInstructions:
+            "ONE COLOR WHITE INK ONLY. DO NOT USE BLACK INK.",
+        }),
+      ).original.explicitInkRestriction?.kind,
+      "white_ink_only",
+    );
+    assert.match(prompt, /REQUIRED PRINT PALETTE — EXPLICIT CUSTOMER INK RESTRICTION/);
+    assert.match(prompt, /EXPLICIT INK RESTRICTION — WHITE INK ONLY/);
+    assert.match(prompt, /Do not use black or other non-white colors as printed ink/);
   });
 
   // C. White garment + hard black palette (inverse)
@@ -361,8 +373,9 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
     );
     assert.match(prompt, /Render the printable artwork primarily in: Black\./);
     assert.match(prompt, /Garment: White/);
-    assert.match(prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
-    assert.match(prompt, /Outer background: fully transparent \(alpha\), never an opaque fill matching the White garment/);
+    assert.match(prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
+    assert.match(prompt, /Outer background: fully transparent \(alpha\)/);
+    assert.match(prompt, /never an opaque fill matching the garment/);
     assert.match(prompt, /white swan/i);
   });
 
@@ -379,8 +392,9 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
       false,
     );
     assert.match(prompt, /Garment: Navy/);
-    assert.match(prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
-    assert.match(prompt, /never an opaque fill matching the Navy garment/);
+    assert.match(prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
+    assert.match(prompt, /Outer background: fully transparent \(alpha\)/);
+    assert.match(prompt, /never an opaque fill matching the garment/);
   });
 
   // E. Red subject + hard white print
@@ -397,8 +411,8 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
     );
     assert.match(prompt, /bright red fire truck/i);
     assert.match(prompt, /Render the printable artwork primarily in: White\./);
-    assert.match(prompt, /Subject-only colors \(identity, not dominant ink\): red/);
-    assert.match(prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
+    assert.match(prompt, /Subject-only colors \(identity, not preferred dominant ink\): red/);
+    assert.match(prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
   });
 
   // F. Multicolor subject + monochrome palette
@@ -418,7 +432,7 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
     assert.match(prompt, /gold scales/i);
     assert.match(prompt, /blue wings/i);
     assert.match(prompt, /Render the printable artwork primarily in: White\./);
-    assert.match(prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
+    assert.match(prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
   });
 
   // G. Garment color included in hard print palette — do not falsely prohibit
@@ -436,14 +450,10 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
       false,
     );
     assert.match(prompt, /Render the printable artwork primarily in: White, Black\./);
-    assert.match(prompt, /REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT/);
+    assert.match(prompt, /REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE/);
     assert.match(
       prompt,
-      /If a color is explicitly listed in the required print palette above, using that color as printed ink is intentional and allowed/,
-    );
-    assert.match(
-      prompt,
-      /This rule only forbids substituting opaque garment-matching fill for transparency when that color is outside the required print palette/,
+      /Intentional opaque ink inside the artwork[\s\S]*is allowed as printed design/,
     );
   });
 
@@ -467,8 +477,8 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
       ).original.printPaletteEnforcement,
       "soft",
     );
-    assert.doesNotMatch(prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
-    assert.doesNotMatch(prompt, /REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT/);
+    assert.doesNotMatch(prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
+    assert.doesNotMatch(prompt, /REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE/);
     assert.match(prompt, /transparent background/);
   });
 
@@ -484,8 +494,8 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
       "bold_direct",
       false,
     );
-    assert.doesNotMatch(prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
-    assert.doesNotMatch(prompt, /REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT/);
+    assert.doesNotMatch(prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
+    assert.doesNotMatch(prompt, /REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE/);
   });
 
   // J / K / L. No-text, wording, exclusions preserved under hardening
@@ -496,12 +506,12 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
       false,
     );
     assert.match(noText.prompt, /NO TEXT — the customer explicitly asked/);
-    assert.match(noText.prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
+    assert.match(noText.prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
 
     const wording = await capture(hardPaletteBrief(), "soft_illustrated", false);
     assert.match(wording.prompt, /REQUIRED WORDING[\s\S]*"IRON HORSE"/);
     assert.match(wording.prompt, /Avoid: no skulls\./);
-    assert.match(wording.prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
+    assert.match(wording.prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
   });
 
   // M. All three directions inherit
@@ -516,7 +526,7 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
       const { prompt } = await capture(brief, direction, false);
       const block = prompt
         .split("\n\n")
-        .find((part) => part.includes("TRANSPARENCY / NEGATIVE SPACE — HARD PRODUCTION RULE"));
+        .find((part) => part.includes("TRANSPARENCY / OUTER CANVAS — REQUIRED"));
       assert.ok(block, direction);
       sections.push(block!);
       assert.match(prompt, new RegExp(`Creative direction — .+`));
@@ -531,19 +541,19 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
     const initial = await capture(brief, "soft_illustrated", false);
     const replacement = await capture(brief, "soft_illustrated", true);
 
-    assert.match(initial.prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
+    assert.match(initial.prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
     assert.doesNotMatch(initial.prompt, /PRINT PALETTE CORRECTION/);
-    assert.match(replacement.prompt, /TRANSPARENCY \/ NEGATIVE SPACE — HARD PRODUCTION RULE/);
+    assert.match(replacement.prompt, /TRANSPARENCY \/ OUTER CANVAS — REQUIRED/);
     assert.match(replacement.prompt, /PRINT PALETTE CORRECTION/);
     assert.match(
       replacement.prompt,
-      /because too much garment-matching color was rendered as opaque printed artwork/,
+      /violated an explicit customer ink restriction/,
     );
 
     const initialWithoutClosingNoise = initial.prompt;
     assert.ok(
       replacement.prompt.includes(initialWithoutClosingNoise.split("PRINT PALETTE CORRECTION")[0]!.trim()) ||
-        replacement.prompt.includes("TRANSPARENCY / NEGATIVE SPACE — HARD PRODUCTION RULE"),
+        replacement.prompt.includes("TRANSPARENCY / OUTER CANVAS — REQUIRED"),
       "base contract remains present on replacement",
     );
   });
@@ -589,8 +599,8 @@ describe("Phase 2C.2A — transparency / negative-space prompt contract", () => 
     );
     assert.match(
       prompt,
-      /The required print palette overrides literal subject-object color where the two conflict/,
+      /Prefer the required print palette where subject-object color and preferred colors conflict/,
     );
-    assert.match(prompt, /Subject-only colors \(identity, not dominant ink\): black/);
+    assert.match(prompt, /Subject-only colors \(identity, not preferred dominant ink\): black/);
   });
 });

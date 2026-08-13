@@ -70,6 +70,7 @@ describe("Phase 2C0 paid-image arming + quality resolve", () => {
           style: null,
           colors: [],
           printPaletteEnforcement: "none",
+          explicitInkRestriction: null,
           subjectOnlyColors: [],
           productColor: null,
           requiredWording: null,

@@ -65,7 +65,8 @@ import {
 } from "@/capabilities/print-validation";
 import {
   classifyReplacementAcceptance,
-  isHardPrintPaletteFailure,
+  deriveExplicitInkRestriction,
+  isAutomaticInkRestrictionReplacementEligible,
   type ReplacementSkipReason,
 } from "./hard-palette-replacement-policy";
 import { logConceptGenerationUnavailable } from "@/lib/config/generation-provider-logging";
@@ -624,10 +625,16 @@ export function createGenerationWorkerCapability(
     // palette verdict. Phase 2C replaces INITIAL concepts only.
     if (input.job.targetArtworkVersionId) return;
 
+    // Phase 2C.3A: inferred hard palette FAIL is advisory. Only an EXPLICIT
+    // ink restriction + deterministic violation may purchase a replacement.
+    const explicitInkRestriction = deriveExplicitInkRestriction(input.brief);
     const failing = input.candidates.filter(
       (candidate) =>
         candidate.directionKey !== null &&
-        isHardPrintPaletteFailure(candidate.evaluated.evaluation),
+        isAutomaticInkRestrictionReplacementEligible(
+          candidate.evaluated.evaluation,
+          input.brief,
+        ),
     );
     if (failing.length === 0) return;
 
@@ -844,7 +851,10 @@ export function createGenerationWorkerCapability(
         idempotencyKey: `${input.job.idempotencyKey}:replacement:${directionKey}`,
       });
       const compliance = evaluated.evaluation.printPaletteCompliance ?? null;
-      const acceptance = classifyReplacementAcceptance(compliance);
+      const acceptance = classifyReplacementAcceptance(
+        compliance,
+        explicitInkRestriction,
+      );
 
       if (acceptance === "reject") {
         // One automatic replacement per direction is the entire budget for

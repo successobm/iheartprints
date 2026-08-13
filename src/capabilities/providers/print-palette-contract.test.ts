@@ -177,7 +177,7 @@ describe("print-palette provider contract — Phase 2A", () => {
     );
 
     assertAllContain(prompts, [
-      "REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT",
+      "REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE",
       "Render the printable artwork primarily in: White",
       "Garment: Black",
       "Harley Road Glide",
@@ -200,11 +200,11 @@ describe("print-palette provider contract — Phase 2A", () => {
       assert.match(prompt, /in black with silver trim/i);
     }
 
-    // Subject-only colors called out; dominant black ink discouraged.
+    // Subject-only colors called out; preferred palette emphasized.
     assertAllContain(prompts, [
       "Subject-only colors",
       "not literal print ink",
-      "overrides literal subject-object color",
+      "Prefer the required print palette where subject-object color and preferred colors conflict",
     ]);
   });
 
@@ -223,7 +223,7 @@ describe("print-palette provider contract — Phase 2A", () => {
       assert.match(prompt, /Bold & Direct|Soft & Illustrated|Minimal Badge/);
       assert.match(
         prompt,
-        /REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT/,
+        /REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE/,
         CONCEPT_DIRECTIONS[index]!.title,
       );
       assert.match(prompt, /Print palette \/ dominant ink color is not among them/);
@@ -231,7 +231,7 @@ describe("print-palette provider contract — Phase 2A", () => {
 
     // Creative density still differs — Soft is richest — without dropping palette.
     assert.match(prompts[1]!, /richest|full scenic|warm, illustrated/i);
-    assert.match(prompts[1]!, /REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT/);
+    assert.match(prompts[1]!, /REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE/);
   });
 
   it("D: white garment + black artwork hard contract", async () => {
@@ -253,7 +253,7 @@ describe("print-palette provider contract — Phase 2A", () => {
       }),
     );
     assertAllContain(prompts, [
-      "REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT",
+      "REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE",
       "primarily in: Black",
       "Garment: White",
       "white swan",
@@ -282,7 +282,7 @@ describe("print-palette provider contract — Phase 2A", () => {
       }),
     );
     assertAllContain(prompts, [
-      "REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT",
+      "REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE",
       "primarily in: White",
       "red 1988 Toyota MR2",
       "Subject-only colors",
@@ -337,7 +337,7 @@ describe("print-palette provider contract — Phase 2A", () => {
       "Preferred colors: Gold, Cream",
     ]);
     assertNoneContain(prompts, [
-      "REQUIRED PRINT PALETTE — HARD PRODUCTION CONSTRAINT",
+      "REQUIRED PRINT PALETTE — STRONG DESIGN GUIDANCE",
     ]);
   });
 

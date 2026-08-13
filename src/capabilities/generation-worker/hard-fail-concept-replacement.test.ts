@@ -46,6 +46,7 @@ import {
 } from "./generation-worker-capability";
 import {
   classifyReplacementAcceptance,
+  isAutomaticInkRestrictionReplacementEligible,
   isHardPrintPaletteFailure,
 } from "./hard-palette-replacement-policy";
 
@@ -120,11 +121,22 @@ function hardWhiteOnBlackBrief(): Partial<DesignBriefSnapshotContent> {
     productSummary: "T-shirts",
     // Names subject-object colors outside the print palette, which is what
     // makes Phase 2A derive HARD enforcement (see `derivePrintPalette`).
+    // Phase 2C.3A: this is inferred contrast guidance ONLY — not an explicit
+    // ink restriction, and must not alone purchase a replacement.
     designDescription:
       "A black motorcycle with a black leather seat and a black helmet",
     exactText: "IRON HORSE",
     shirtColor: "Black",
     preferredColors: ["White"],
+  };
+}
+
+/** Same design, plus explicit customer production ink restriction. */
+function explicitWhiteInkOnlyBrief(): Partial<DesignBriefSnapshotContent> {
+  return {
+    ...hardWhiteOnBlackBrief(),
+    additionalInstructions:
+      "ONE COLOR WHITE INK ONLY. DO NOT USE BLACK INK.",
   };
 }
 
@@ -387,9 +399,12 @@ describe("Phase 2C — automatic hard-fail concept replacement", () => {
     };
   }
 
-  async function approvedHardPaletteProject(repo: ProjectRepository) {
+  async function approvedHardPaletteProject(
+    repo: ProjectRepository,
+    brief: Partial<DesignBriefSnapshotContent> = explicitWhiteInkOnlyBrief(),
+  ) {
     const created = await repo.createProject();
-    await repo.updateBrief(created.project.id, hardWhiteOnBlackBrief());
+    await repo.updateBrief(created.project.id, brief);
     const version = await createDesignBriefCapability(repo).approveWorkingBrief(
       created.project.id,
     );
@@ -415,9 +430,10 @@ describe("Phase 2C — automatic hard-fail concept replacement", () => {
       assets: AssetCapability,
       repo: ProjectRepository,
     ) => AssetCapability,
+    brief: Partial<DesignBriefSnapshotContent> = explicitWhiteInkOnlyBrief(),
   ) {
     const { capability, worker } = buildPipeline(repo, provider, wrapAssets);
-    const { projectId, version } = await approvedHardPaletteProject(repo);
+    const { projectId, version } = await approvedHardPaletteProject(repo, brief);
     await capability.generatePlaceholders(projectId, version.id);
     const [job] = await repo.listGenerationJobs(projectId);
     assert.ok(job);
@@ -501,9 +517,69 @@ describe("Phase 2C — automatic hard-fail concept replacement", () => {
     );
   });
 
-  // --- C / F / X. One hard FAIL, replacement passes ----------------------
+  // --- Phase 2C.3A: advisory inferred-hard FAIL must not spend ------------
 
-  it("C/F/X: one hard FAIL is replaced once — 4 paid calls, and the customer sees the REPLACEMENT", async () => {
+  it("2C.3A: Soft FAIL without explicit ink restriction — KEEP, 3 paid, ~$0.126", async () => {
+    const repo = await freshRepo();
+    const provider = new PaletteScriptedProvider();
+    provider.initial.set("bold_direct", "warn");
+    provider.initial.set("soft_illustrated", "fail");
+    provider.initial.set("minimal_badge", "pass");
+    const { projectId, job } = await runInitialJob(
+      repo,
+      provider,
+      undefined,
+      hardWhiteOnBlackBrief(),
+    );
+
+    assert.equal(provider.replacementDispatches.length, 0);
+    assert.equal(provider.totalDispatches, 3, "advisory MUST NOT buy a 4th image");
+
+    const intents = await repo.listPaidImageIntentsForJob(projectId, job.id);
+    assert.equal(intents.length, 3);
+    assert.ok(intents.every((intent) => intent.intentKind === "initial_concept"));
+
+    const snapshot = await repo.getProject(projectId);
+    assert.equal(snapshot?.artworkVersions.length, 3, "customer receives all 3 concepts");
+    assert.deepEqual(
+      snapshot?.artworkVersions.map((artwork) => artwork.conceptDirectionKey),
+      [...DIRECTIONS],
+    );
+    assert.equal(
+      snapshot?.artworkVersions.find(
+        (artwork) => artwork.conceptDirectionKey === "soft_illustrated",
+      )?.evaluation?.printPaletteCompliance?.status,
+      "fail",
+      "Soft FAIL is retained as advisory evaluation, not withheld",
+    );
+  });
+
+  it("2C.3A: imperfect preferred-palette dominance without explicit restriction — 3 paid", async () => {
+    // Synthetic FAIL encodes both garment-matching and low coverage shapes.
+    const repo = await freshRepo();
+    const provider = new PaletteScriptedProvider();
+    provider.initial.set("soft_illustrated", "fail");
+    const { projectId, job } = await runInitialJob(
+      repo,
+      provider,
+      undefined,
+      hardWhiteOnBlackBrief(),
+    );
+
+    assert.equal(provider.totalDispatches, 3);
+    assert.equal(
+      (await repo.listPaidImageIntentsForJob(projectId, job.id)).length,
+      3,
+    );
+    assert.equal(
+      (await repo.getProject(projectId))?.artworkVersions.length,
+      3,
+    );
+  });
+
+  // --- C / F / X. One EXPLICIT restriction FAIL, replacement passes ------
+
+  it("C/F/X: one explicit ink-restriction FAIL is replaced once — 4 paid calls, and the customer sees the REPLACEMENT", async () => {
     const repo = await freshRepo();
     const provider = new PaletteScriptedProvider();
     provider.initial.set("soft_illustrated", "fail");
@@ -1133,51 +1209,167 @@ describe("Phase 2C — automatic hard-fail concept replacement", () => {
 
   // --- Policy unit rules ---------------------------------------------------
 
-  it("policy: only HARD enforcement + deterministic FAIL is an automatic-replacement trigger", () => {
+  it("policy: only EXPLICIT ink restriction + violating FAIL is an automatic-replacement trigger", () => {
+    const advisoryBrief = {
+      designDescription:
+        "A black motorcycle with a black leather seat and a black helmet",
+      additionalInstructions: null,
+      exclusions: null,
+    };
+    const explicitBrief = {
+      ...advisoryBrief,
+      additionalInstructions:
+        "ONE COLOR WHITE INK ONLY. DO NOT USE BLACK INK.",
+    };
     const compliance = (
       status: "pass" | "warn" | "fail" | "not_applicable",
       enforcement: "hard" | "soft" | "none",
+      reasons: string[] = ["excessive_garment_matching_ink"],
+      metrics: Record<string, number> = {
+        nearBlackPixelFraction: 0.7,
+        darkPixelFraction: 0.7,
+        garmentMatchingFraction: 0.7,
+        paletteCoverageFraction: 0.2,
+      },
     ) =>
       ({
         printPaletteCompliance: {
           status,
-          reasons: [],
-          metrics: { enforcement },
+          reasons,
+          metrics: { enforcement, ...metrics },
         },
       }) as never;
 
-    assert.equal(isHardPrintPaletteFailure(compliance("fail", "hard")), true);
-    assert.equal(isHardPrintPaletteFailure(compliance("warn", "hard")), false);
-    assert.equal(isHardPrintPaletteFailure(compliance("pass", "hard")), false);
+    // Inferred hard + FAIL without explicit restriction → no spend.
     assert.equal(
-      isHardPrintPaletteFailure(compliance("not_applicable", "hard")),
+      isAutomaticInkRestrictionReplacementEligible(
+        compliance("fail", "hard"),
+        advisoryBrief,
+      ),
       false,
     );
-    assert.equal(isHardPrintPaletteFailure(compliance("fail", "soft")), false);
-    assert.equal(isHardPrintPaletteFailure(compliance("fail", "none")), false);
+    assert.equal(
+      isHardPrintPaletteFailure(compliance("fail", "hard"), advisoryBrief),
+      false,
+    );
+
+    // Explicit restriction + violating FAIL → eligible.
+    assert.equal(
+      isAutomaticInkRestrictionReplacementEligible(
+        compliance("fail", "hard"),
+        explicitBrief,
+      ),
+      true,
+    );
+
+    // Explicit restriction but PASS/WARN → keep.
+    assert.equal(
+      isAutomaticInkRestrictionReplacementEligible(
+        compliance("warn", "hard"),
+        explicitBrief,
+      ),
+      false,
+    );
+    assert.equal(
+      isAutomaticInkRestrictionReplacementEligible(
+        compliance("pass", "hard"),
+        explicitBrief,
+      ),
+      false,
+    );
+    assert.equal(
+      isAutomaticInkRestrictionReplacementEligible(
+        compliance("not_applicable", "hard"),
+        explicitBrief,
+      ),
+      false,
+    );
+
+    // Soft/none enforcement still never spends without restriction evidence;
+    // without restriction, soft FAIL is also non-eligible.
+    assert.equal(
+      isAutomaticInkRestrictionReplacementEligible(
+        compliance("fail", "soft"),
+        advisoryBrief,
+      ),
+      false,
+    );
     assert.equal(isHardPrintPaletteFailure(null), false);
-    assert.equal(isHardPrintPaletteFailure({ printPaletteCompliance: null } as never), false);
+    assert.equal(
+      isHardPrintPaletteFailure({ printPaletteCompliance: null } as never),
+      false,
+    );
   });
 
-  it("policy: PASS and WARN replacements are accepted, FAIL is rejected, NOT_APPLICABLE is unverified", () => {
-    const at = (status: "pass" | "warn" | "fail" | "not_applicable") =>
-      ({ status, reasons: [], metrics: {} }) as never;
-    assert.equal(classifyReplacementAcceptance(at("pass")), "accept");
-    assert.equal(classifyReplacementAcceptance(at("warn")), "accept");
-    assert.equal(classifyReplacementAcceptance(at("fail")), "reject");
+  it("policy: PASS and WARN replacements are accepted; EXPLICIT FAIL is rejected; advisory FAIL is accepted", () => {
+    const restriction = {
+      kind: "white_ink_only" as const,
+      sourceField: "additionalInstructions" as const,
+      matchedPhrase: "white ink only",
+    };
+    const at = (
+      status: "pass" | "warn" | "fail" | "not_applicable",
+      metrics: Record<string, number> = {},
+      reasons: string[] = [],
+    ) =>
+      ({
+        status,
+        reasons,
+        metrics: {
+          nearBlackPixelFraction: 0,
+          darkPixelFraction: 0,
+          garmentMatchingFraction: 0,
+          paletteCoverageFraction: 1,
+          ...metrics,
+        },
+      }) as never;
+
+    assert.equal(classifyReplacementAcceptance(at("pass"), restriction), "accept");
+    assert.equal(classifyReplacementAcceptance(at("warn"), restriction), "accept");
     assert.equal(
-      classifyReplacementAcceptance(at("not_applicable")),
+      classifyReplacementAcceptance(
+        at(
+          "fail",
+          {
+            nearBlackPixelFraction: 0.7,
+            garmentMatchingFraction: 0.7,
+            paletteCoverageFraction: 0.2,
+          },
+          ["excessive_garment_matching_ink"],
+        ),
+        restriction,
+      ),
+      "reject",
+    );
+    assert.equal(
+      classifyReplacementAcceptance(
+        at(
+          "fail",
+          {
+            nearBlackPixelFraction: 0.7,
+            garmentMatchingFraction: 0.7,
+            paletteCoverageFraction: 0.2,
+          },
+          ["excessive_garment_matching_ink"],
+        ),
+        null,
+      ),
+      "accept",
+      "advisory FAIL after replacement must not withhold",
+    );
+    assert.equal(
+      classifyReplacementAcceptance(at("not_applicable"), restriction),
       "accept_unverified",
     );
     assert.equal(classifyReplacementAcceptance(null), "accept_unverified");
   });
 
-  // --- Harley decision regression (Step 17) --------------------------------
+  // --- Harley decision regression (Step 17 / Phase 2C.3A) -----------------
   //
   // The live Phase 2B calibration rasters are customer assets and are
   // gitignored, so this runs only where they exist. It calls NO provider —
   // it drives the real validator over the real pixels and asserts the Phase
-  // 2C DECISION each verdict produces.
+  // 2C.3A DECISION each verdict produces.
 
   const harleyFiles = {
     bold: path.join(HARLEY_DIR, "bold_direct.png"),
@@ -1190,7 +1382,7 @@ describe("Phase 2C — automatic hard-fail concept replacement", () => {
     existsSync(harleyFiles.minimal);
 
   it(
-    "Harley regression: Bold keep, Soft replaced once, Minimal keep — 4 logical paid intents",
+    "Harley regression (advisory): Bold keep, Soft KEEP, Minimal keep — exactly 3 paid intents",
     { skip: !harleyPresent },
     () => {
       const brief = {
@@ -1222,23 +1414,51 @@ describe("Phase 2C — automatic hard-fail concept replacement", () => {
 
       const decisions = DIRECTIONS.map((direction) => ({
         direction,
-        replace: isHardPrintPaletteFailure({
-          printPaletteCompliance: verdicts[direction],
-        } as never),
+        replace: isAutomaticInkRestrictionReplacementEligible(
+          { printPaletteCompliance: verdicts[direction] } as never,
+          brief,
+        ),
       }));
       assert.deepEqual(decisions, [
         { direction: "bold_direct", replace: false },
-        { direction: "soft_illustrated", replace: true },
+        { direction: "soft_illustrated", replace: false },
         { direction: "minimal_badge", replace: false },
       ]);
 
       const paidIntents = 3 + decisions.filter((d) => d.replace).length;
-      assert.equal(paidIntents, 4, "3 initial + 1 replacement");
+      assert.equal(paidIntents, 3, "3 initial + 0 replacement ≈ $0.126");
       assert.ok(paidIntents <= ABSOLUTE_MAX_PAID_INTENTS_PER_JOB);
     },
   );
 
-  it("Harley regression: the same decision holds for synthetic equivalents of the live verdicts", () => {
+  it(
+    "Harley regression (explicit WHITE INK ONLY): Soft FAIL becomes replacement-eligible",
+    { skip: !harleyPresent },
+    () => {
+      const brief = {
+        ...explicitWhiteInkOnlyBrief(),
+        designDescription:
+          "A black 2005 Harley Road Glide with black leather and black helmet",
+        exactText: "",
+        deferredSections: [],
+      } as DesignBriefSnapshotContent;
+
+      const soft = evaluatePrintPaletteCompliance({
+        image: decodeRgba(readFileSync(harleyFiles.soft)),
+        brief,
+      });
+      assert.equal(soft.status, "fail");
+      assert.equal(
+        isAutomaticInkRestrictionReplacementEligible(
+          { printPaletteCompliance: soft } as never,
+          brief,
+        ),
+        true,
+      );
+    },
+  );
+
+  it("Harley regression: synthetic WARN/FAIL/PASS — advisory Soft FAIL does not replace", () => {
     // The committed half of the regression above: the WARN / FAIL / PASS
     // shapes the live rasters produce, reproduced from pixels this repo
     // actually carries, so the decision rule stays covered everywhere.
@@ -1253,18 +1473,52 @@ describe("Phase 2C — automatic hard-fail concept replacement", () => {
     };
     const decisions = DIRECTIONS.map((direction) => ({
       direction,
-      replace: isHardPrintPaletteFailure({
-        printPaletteCompliance: evaluatePrintPaletteCompliance({
-          image: decodeRgba(palettePng(shapes[direction])),
-          brief,
-        }),
-      } as never),
+      replace: isAutomaticInkRestrictionReplacementEligible(
+        {
+          printPaletteCompliance: evaluatePrintPaletteCompliance({
+            image: decodeRgba(palettePng(shapes[direction])),
+            brief,
+          }),
+        } as never,
+        brief,
+      ),
     }));
     assert.deepEqual(decisions, [
       { direction: "bold_direct", replace: false },
-      { direction: "soft_illustrated", replace: true },
+      { direction: "soft_illustrated", replace: false },
       { direction: "minimal_badge", replace: false },
     ]);
+  });
+
+  it("Harley regression: synthetic Soft FAIL + explicit WHITE INK ONLY → replace once eligible", () => {
+    const brief = {
+      ...explicitWhiteInkOnlyBrief(),
+      deferredSections: [],
+    } as DesignBriefSnapshotContent;
+    assert.equal(
+      isAutomaticInkRestrictionReplacementEligible(
+        {
+          printPaletteCompliance: evaluatePrintPaletteCompliance({
+            image: decodeRgba(palettePng("fail")),
+            brief,
+          }),
+        } as never,
+        brief,
+      ),
+      true,
+    );
+    assert.equal(
+      isAutomaticInkRestrictionReplacementEligible(
+        {
+          printPaletteCompliance: evaluatePrintPaletteCompliance({
+            image: decodeRgba(palettePng("pass")),
+            brief,
+          }),
+        } as never,
+        brief,
+      ),
+      false,
+    );
   });
 
   // --- AC. No paid provider is reachable from a test/verify run ------------

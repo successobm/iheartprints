@@ -12,6 +12,7 @@ function prompt(overrides: Partial<GenerationPromptRequest> = {}): GenerationPro
     style: "retro",
     colors: [],
     printPaletteEnforcement: "none",
+    explicitInkRestriction: null,
     subjectOnlyColors: [],
     productColor: "Black",
     requiredWording: "My 3 Sons",

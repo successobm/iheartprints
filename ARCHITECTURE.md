@@ -839,31 +839,47 @@ per job, 3 dispatches per intent, replacement epoch 1. It does not claim
 exactly-once external billing — an ambiguous post-dispatch failure remains
 re-dispatchable within the unchanged per-intent ceiling.
 
-#### Automatic hard-fail concept replacement (Phase 2C)
+#### Automatic hard-fail concept replacement (Phase 2C / 2C.3A)
 
 Phase 2B made a deterministic, pixel-level print-palette verdict available
-but deliberately acted on nothing. Phase 2C acts on exactly one case: a
-customer must not be shown a concept that violates a HARD production
-constraint when the platform can automatically replace it.
+but deliberately acted on nothing. Phase 2C originally treated inferred
+`printPaletteEnforcement === "hard"` + deterministic `"fail"` as automatic
+paid-replacement authority. **Phase 2C.3A corrects that authority:**
+
+Inferred `"hard"` remains **prompt emphasis / contrast guidance** to the
+image model. It is **not**, by itself, authority to purchase another image.
 
 **Trigger** (`generation-worker/hard-palette-replacement-policy.ts`), both
 conditions required:
 
 ```
-printPaletteEnforcement === "hard"      (Phase 2A, from the approved brief)
-printPaletteCompliance.status === "fail" (Phase 2B, from actual pixels)
+deriveExplicitInkRestriction(brief) ≠ null   (high-precision customer language)
+AND
+deterministic FAIL with evidence that violates that restriction
 ```
 
-`warn`, `not_applicable`, soft enforcement, an absent verdict, and every
-subjective/vision judgement are explicitly NOT triggers. Vision can neither
-cause a replacement nor reverse a hard FAIL (Phase 2B precedence, unchanged).
+Explicit restriction is derived from existing brief text
+(`additionalInstructions`, `exclusions`, `designDescription`) — phrases such
+as "white ink only", "one color white ink only", "no black ink", "do not use
+black ink". Preferred colors, garment color, subject color words ("black
+Harley", "use white so it shows"), and inferred hard enforcement alone are
+**not** restrictions.
+
+`warn`, `not_applicable`, soft enforcement, an absent verdict, advisory
+garment-matching / imperfect palette-dominance FAILs without an explicit
+restriction, and every subjective/vision judgement are explicitly NOT
+triggers. Vision can neither cause a replacement nor reverse a hard FAIL
+(Phase 2B precedence, unchanged). Phase 2B **measurements** are retained for
+diagnostics; only their **spend authority** changed.
 
 **Where it runs.** After every candidate in the batch has been evaluated and
 *before* a single `ArtworkVersion` row is written. That position is the whole
-design: a customer never sees a hard-failing concept that later disappears,
-because it was never presented. The rejected original stays fully intact
-internally — its `PaidImageIntent` row, its stored bytes, and its evaluation
-are all preserved for lineage; nothing is deleted or mutated.
+design: a customer never sees an *explicit-restriction-violating* concept that
+later disappears when it can be replaced. Advisory palette FAILs remain
+customer-visible. The rejected original (when withheld after a failed
+explicit-restriction replacement) stays fully intact internally — its
+`PaidImageIntent` row, its stored bytes, and its evaluation are all preserved
+for lineage; nothing is deleted or mutated.
 
 **Bounds.** One replacement per failed direction (epoch fixed at `1` — there
 is no epoch 2 and nothing computes one), at most two per job, at most five
@@ -885,21 +901,16 @@ concept corrected, not a different design, and no quality tier is bumped. The
 adapter owns the corrective wording, which names no threshold, reason code,
 or number.
 
-**Transparency / negative-space contract (Phase 2C.2A).** Live Harley
-forensics showed Phase 2B was correct: failing Bold/Soft concepts used large
-*opaque* garment-matching fills (black bike body, jacket, tires) where the
-garment should show through. A transparent outer canvas alone is not enough.
-For `printPaletteEnforcement === "hard"`, the OpenAI adapter now states an
-operational alpha rule in the hard print-palette section: required print
-colors are actual printed ink; garment-matching regions that are not required
-print colors must be encoded as transparent alpha, not opaque
-garment-colored RGB; subject-only colors remain semantic identity, not
-permission to paint excluded fills. Soft/none palettes do not invent this
-hard rule. When a garment color is itself listed in the required print
-palette, opaque use of that color remains intentional and allowed. The
-Phase 2C corrective block restates the same failure mode more strongly for
-replacements — still without validator numbers or reason codes. No worker,
-budget, model/quality, or Phase 2B threshold changes.
+**Transparency / outer-canvas contract (Phase 2C.2A + 2C.3A).** Outer canvas
+must be real alpha — never an opaque plate, shirt photo, or mockup.
+Phase 2C.3A softens the earlier universal ban on garment-matching subject
+interiors: intentional dark / garment-matching printed artwork is allowed
+unless the customer stated an **explicit ink restriction**. Stronger
+prohibition wording is added only when `explicitInkRestriction` is present
+on the prompt. Soft/none palettes do not invent the hard outer-canvas block.
+The Phase 2C corrective block applies on replacements (now reserved for
+explicit-restriction violations) — still without validator numbers or reason
+codes. No worker budget, model/quality, or Phase 2B threshold changes.
 
 **Outcome policy** for an evaluated replacement:
 
@@ -907,26 +918,36 @@ budget, model/quality, or Phase 2B threshold changes.
 |---|---|
 | `pass` | accepted, customer-visible |
 | `warn` | accepted — WARN is customer-visible for an original, so applying a stricter bar to a replacement would be incoherent |
-| `fail` | rejected; **no second replacement**; the direction is withheld |
+| `fail` that still violates the explicit ink restriction | rejected; **no second replacement**; the direction is withheld |
+| advisory `fail` without explicit-restriction evidence | accepted (customer judges) |
 | `not_applicable` | accepted but forced to `needs_review` — never claimed as verified-compliant |
 
-**Degraded outcomes.** A direction that cannot be rescued is withheld rather
-than shown, so the customer may receive two concepts instead of three; the
-completion message is phrased to match what they can actually see, and the
-message metadata carries a `conceptsWithheld` count for a later UI phase. If
+**Degraded outcomes.** A direction that cannot be rescued after an
+*explicit-restriction* replacement failure is withheld rather than shown, so
+the customer may receive two concepts instead of three; the completion
+message is phrased to match what they can actually see, and the message
+metadata carries a `conceptsWithheld` count for a later UI phase. If
 *no* direction can be delivered, the job fails with
 `CONCEPT_SET_UNRESOLVABLE:` rather than completing with an empty set. A
 failure while trying to *improve* the batch never destroys it: replacement
 resolution cannot throw, and the healthy concepts are always delivered.
+Advisory garment-matching alone never withholds and never buys a 4th image.
 
-**No migration.** Phase 2C adds no column and no table. Spend identity lives
-in the existing `paid_image_intents`; verdicts live in the existing
-`ArtworkVersion.evaluation` JSONB; the degraded-set signal lives in existing
+**No migration.** Phase 2C / 2C.3A adds no column and no table. Spend identity
+lives in the existing `paid_image_intents`; verdicts live in the existing
+`ArtworkVersion.evaluation` JSONB; explicit restriction is derived in-memory
+from existing brief text. The degraded-set signal lives in existing
 conversation-message metadata. Observability is
 `[concept-generation] hard-palette-replacement` and
 `[concept-generation] concept-set-outcome`
 (`lib/config/concept-replacement-logging.ts`) — whitelisted fields only,
 never prompt text, bytes, or credentials.
+
+**Unit economics (GPT Image 1 medium ≈ $0.042).** Normal 3-concept success and
+advisory palette/contrast issues stay at **3 paid intents ≈ $0.126**. One
+explicit-restriction replacement ≈ **$0.168**. Two replacements hit the
+ceiling at **5 intents ≈ $0.210**. Design-quality heuristics must not turn a
+3-call generation into a 4th or 5th paid call.
 
 **Transport policy.** `ProviderError` now carries a `dispatch` state —
 `not_dispatched` / `dispatched_ambiguous` / `dispatched_billed` — separate

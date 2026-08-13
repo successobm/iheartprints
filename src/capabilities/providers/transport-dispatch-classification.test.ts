@@ -58,6 +58,7 @@ function prompt(): GenerationPromptRequest {
     exclusions: null,
     notes: null,
     printPaletteEnforcement: "soft",
+    explicitInkRestriction: null,
   } as unknown as GenerationPromptRequest;
 }
 

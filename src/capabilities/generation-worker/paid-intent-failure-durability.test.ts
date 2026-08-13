@@ -114,7 +114,11 @@ function palettePng(outcome: PaletteOutcome): Buffer {
   return PNG.sync.write(png);
 }
 
-/** Names subject colors outside the print palette → HARD enforcement. */
+/**
+ * Names subject colors outside the print palette → HARD enforcement, PLUS
+ * an explicit ink restriction so Phase 2C.3A still authorizes the
+ * replacement path these durability tests exercise.
+ */
 function hardWhiteOnBlackBrief(): Partial<DesignBriefSnapshotContent> {
   return {
     productSummary: "T-shirts",
@@ -123,6 +127,8 @@ function hardWhiteOnBlackBrief(): Partial<DesignBriefSnapshotContent> {
     exactText: "IRON HORSE",
     shirtColor: "Black",
     preferredColors: ["White"],
+    additionalInstructions:
+      "ONE COLOR WHITE INK ONLY. DO NOT USE BLACK INK.",
   };
 }
 

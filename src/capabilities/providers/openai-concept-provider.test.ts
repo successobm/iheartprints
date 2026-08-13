@@ -11,6 +11,7 @@ function prompt(overrides: Partial<GenerationPromptRequest> = {}): GenerationPro
     style: "hand-drawn",
     colors: ["gold", "forest green"],
     printPaletteEnforcement: "soft",
+    explicitInkRestriction: null,
     subjectOnlyColors: [],
     productColor: "Navy",
     requiredWording: "Camp Wildwood 2026",

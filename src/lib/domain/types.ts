@@ -251,13 +251,25 @@ export interface ConversationMessage {
  * generation provider. Derived by Prompt Translation from the approved
  * brief — never persisted on the brief itself.
  *
- * - `"hard"` — required print/render palette; overrides literal subject-
- *   object color where the two conflict (e.g. black Harley subject + white
- *   ink on a black shirt after an explicit contrast resolution).
+ * - `"hard"` — strong print/render palette emphasis for the image model
+ *   when subject-object colors conflict with preferredColors (prompt
+ *   guidance). Phase 2C.3A: inferred `"hard"` alone does NOT authorize
+ *   automatic paid replacement — that requires `explicitInkRestriction`.
  * - `"soft"` — casual preferred-color preference; not a hard ink override.
  * - `"none"` — no artwork palette preference (or colors deferred).
  */
 export type PrintPaletteEnforcement = "hard" | "soft" | "none";
+
+/**
+ * Phase 2C.3A: customer language that literally restricts printable ink.
+ * Derived by Prompt Translation from existing brief text — never persisted.
+ * Distinct from preferredColors / inferred `printPaletteEnforcement`.
+ */
+export type ExplicitInkRestrictionKind = "white_ink_only" | "no_black_ink";
+
+export interface ExplicitInkRestrictionSummary {
+  kind: ExplicitInkRestrictionKind;
+}
 
 export interface GenerationPromptRequest {
   product: string;
@@ -267,8 +279,16 @@ export interface GenerationPromptRequest {
   /**
    * Phase 2A: hard/soft/none treatment for `colors`. Providers must not
    * phrase a `"hard"` palette as optional "preferred colors".
+   * Phase 2C.3A: this is prompt emphasis, not automatic spend authority.
    */
   printPaletteEnforcement: PrintPaletteEnforcement;
+  /**
+   * Phase 2C.3A: explicit literal ink restriction when the customer used
+   * restrictive language (e.g. "white ink only"). Null for ordinary
+   * preferred-color / contrast guidance. Spend authority and stronger
+   * prohibition wording key off this field — not inferred `"hard"` alone.
+   */
+  explicitInkRestriction: ExplicitInkRestrictionSummary | null;
   /**
    * Phase 2A: color words that appear in subject semantics but are NOT part
    * of the print palette. Empty unless `printPaletteEnforcement` is
