@@ -129,6 +129,19 @@ describe("deriveChatAffordances", () => {
     );
   });
 
+  it("retryable_failure keeps artwork surfaces and does not enter delivery mode", () => {
+    const failed = deriveChatAffordances({
+      ...AFTER_REVISION,
+      finalDirectionConfirmed: true,
+      finalizationRequested: true,
+      finalizationStatus: "retryable_failure",
+    });
+    assert.equal(failed.showArtworkSurfaces, true);
+    assert.equal(failed.showDeliveryCard, false);
+    assert.equal(failed.showChangeSelection, false);
+    assert.equal(failed.canRequestFinalArtwork, false);
+  });
+
   it("I/J: print_ready delivery mode hides the composer and shows the delivery card", () => {
     const delivery = deriveChatAffordances({
       ...AFTER_REVISION,

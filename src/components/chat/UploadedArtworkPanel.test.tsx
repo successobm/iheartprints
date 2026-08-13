@@ -95,13 +95,14 @@ function render(
   phase2: {
     printReadySize?: PrintReadySizeView | null;
     finalizationStatus?: CustomerFinalizationStatus;
+    busy?: boolean;
   } = {},
 ) {
   return renderToString(
     createElement(UploadedArtworkPanel, {
       step,
       preparation: preparation(overrides),
-      busy: false,
+      busy: phase2.busy ?? false,
       printReadySize:
         "printReadySize" in phase2 ? phase2.printReadySize! : printReadySize(),
       finalizationStatus: phase2.finalizationStatus ?? "not_requested",
@@ -440,7 +441,35 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     assert.match(html, /needs attention before we can finish/);
     assert.match(html, /uploaded artwork and the prepared version are both safe/);
     assert.match(html, /Try Again/);
+    assert.doesNotMatch(html, /Retry Preparation/);
     assert.doesNotMatch(html, /is ready|print-ready file is ready/i);
+  });
+
+  it("retryable_failure shows Retry Preparation and not the preparing spinner", () => {
+    const html = render("approved", approvedState, {}, {
+      finalizationStatus: "retryable_failure",
+    });
+
+    assert.match(html, /Print-ready preparation couldn/);
+    assert.match(html, /Retry Preparation/);
+    assert.match(html, /type="button"/);
+    assert.doesNotMatch(html, /Preparing your print-ready artwork/);
+    assert.doesNotMatch(html, /Try Again/);
+    assert.doesNotMatch(
+      html,
+      /topaz|supabase|fetch failed|provider|job id|system error/i,
+    );
+  });
+
+  it("retryable_failure pending request disables duplicate Retry clicks", () => {
+    const html = render("approved", approvedState, {}, {
+      finalizationStatus: "retryable_failure",
+      busy: true,
+    });
+
+    assert.match(html, /Retry Preparation/);
+    assert.match(html, /disabled/);
+    assert.match(html, /aria-busy="true"/);
   });
 
   it("keeps the size control but drops the primary action once artwork is print-ready", () => {

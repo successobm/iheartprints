@@ -283,4 +283,270 @@ describe("conversation-service — finalization status polling", () => {
     assert.equal(serialized.includes("topaz"), false);
     assert.equal(serialized.includes("provider"), false);
   });
+
+  async function currentGeneratedJob(projectId: string) {
+    const { getProjectRepository } = await import("@/lib/db");
+    const repo = getProjectRepository();
+    const approval = await repo.getActiveFinalDirectionApproval(projectId);
+    assert.ok(approval);
+    const job = await repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
+    assert.ok(job);
+    return { repo, job };
+  }
+
+  it("finalizing + queued reports preparing", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    const { job } = await currentGeneratedJob(projectId);
+    assert.equal(job.status, "queued");
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "preparing",
+    });
+  });
+
+  it("finalizing + running reports preparing", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    const { repo, job } = await currentGeneratedJob(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "running" });
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "preparing",
+    });
+  });
+
+  it("finalizing + recoverable reports preparing", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    const { repo, job } = await currentGeneratedJob(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "recoverable" });
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "preparing",
+    });
+  });
+
+  it("finalizing + failed reports retryable_failure without leaking internals", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    const { repo, job } = await currentGeneratedJob(projectId);
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "failed",
+      lastError: "Production asset could not be persisted: fetch failed",
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: "019ff909-already-submitted",
+    });
+
+    const view = await conversationService.getFinalizationStatus(projectId);
+    assert.deepEqual(view, { status: "retryable_failure" });
+    const snapshot = await conversationService.getConversation(projectId);
+    assert.equal(snapshot?.finalization.status, "retryable_failure");
+    const serialized = JSON.stringify(view) + JSON.stringify(snapshot?.finalization);
+    assert.equal(serialized.includes("fetch failed"), false);
+    assert.equal(serialized.includes("topaz"), false);
+    assert.equal(serialized.includes(job.id), false);
+    assert.equal(serialized.includes("019ff909-already-submitted"), false);
+    assert.equal(serialized.includes("lastError"), false);
+  });
+
+  it("retryable_failure reuses Prepare and preserves job identity + providerRequestId", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    const { repo, job } = await currentGeneratedJob(projectId);
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "failed",
+      lastError: "Production asset could not be persisted: fetch failed",
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: "already-submitted-id",
+    });
+
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "retryable_failure",
+    });
+
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+
+    const revived = await repo.getFinalArtworkJob(job.id);
+    assert.equal(revived?.id, job.id);
+    assert.equal(revived?.status, "queued");
+    assert.equal(revived?.providerRequestId, "already-submitted-id");
+    assert.equal(revived?.providerKey, "topaz_transparency_upscale");
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "preparing",
+    });
+  });
+
+  it("print_ready overrides a stale failed FinalArtworkJob", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    const { repo, job } = await currentGeneratedJob(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "failed", lastError: "stale" });
+    await repo.setProjectStatus(projectId, "print_ready");
+
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "print_ready",
+    });
+  });
+
+  it("finalization_required remains needs_review even if a job is failed", async () => {
+    const { projectId, artworkVersionId, conversationService } =
+      await projectWithSelectedConcept();
+    await conversationService.approveFinalDirection(projectId, artworkVersionId);
+    const { repo, job } = await currentGeneratedJob(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "failed", lastError: "stale" });
+    await repo.setProjectStatus(projectId, "finalization_required");
+
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "needs_review",
+    });
+  });
+
+  it("a newer running job overrides an older failed job on the same preparation", async () => {
+    const { resetCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+    const conversationService = await import("./conversation-service");
+    const started = await conversationService.startConversation();
+    const projectId = started.project.id;
+    const { getProjectRepository } = await import("@/lib/db");
+    const repo = getProjectRepository();
+
+    const preparation = await repo.createArtworkPreparation(projectId, {
+      originalAssetId: "00000000-0000-0000-0000-000000000001",
+      originalFilename: "logo.png",
+      analysis: { widthPx: 1000, heightPx: 1000 },
+    });
+    const [artwork] = await repo.addArtworkVersions(projectId, [
+      {
+        versionNumber: 1,
+        kind: "prepared_upload",
+        title: "Your artwork, prepared",
+        summary: "Your uploaded artwork with its background removed.",
+        placeholderLabel: "Your artwork",
+        accentColor: "#173F35",
+        designBriefVersionId: null,
+        generationJobId: null,
+        providerKey: null,
+        primaryAssetId: null,
+        thumbnailAssetId: null,
+        sourceArtworkVersionId: null,
+        conceptDirectionKey: null,
+      },
+    ]);
+    await repo.updateArtworkPreparation(preparation.id, {
+      status: "approved",
+      preparedArtworkVersionId: artwork!.id,
+      approvedAt: new Date().toISOString(),
+    });
+
+    const failed = await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "prepared_upload",
+      artworkPreparationId: preparation.id,
+      artworkVersionId: artwork!.id,
+      productionWidthIn: 10.5,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const running = await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "prepared_upload",
+      artworkPreparationId: preparation.id,
+      artworkVersionId: artwork!.id,
+      productionWidthIn: 12,
+    });
+    await repo.updateFinalArtworkJob(failed.id, { status: "failed", lastError: "old" });
+    await repo.updateFinalArtworkJob(running.id, { status: "running" });
+    await repo.setProjectStatus(projectId, "finalizing");
+
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "preparing",
+    });
+  });
+
+  it("prepared_upload finalizing + failed reports retryable_failure", async () => {
+    const { resetCapabilityGraphForTests } = await import(
+      "@/capabilities/composition"
+    );
+    resetCapabilityGraphForTests();
+    const conversationService = await import("./conversation-service");
+    const started = await conversationService.startConversation();
+    const projectId = started.project.id;
+    const { getProjectRepository } = await import("@/lib/db");
+    const repo = getProjectRepository();
+
+    const preparation = await repo.createArtworkPreparation(projectId, {
+      originalAssetId: "00000000-0000-0000-0000-000000000002",
+      originalFilename: "logo.png",
+      analysis: { widthPx: 1000, heightPx: 1000 },
+    });
+    const [artwork] = await repo.addArtworkVersions(projectId, [
+      {
+        versionNumber: 1,
+        kind: "prepared_upload",
+        title: "Your artwork, prepared",
+        summary: "Your uploaded artwork with its background removed.",
+        placeholderLabel: "Your artwork",
+        accentColor: "#173F35",
+        designBriefVersionId: null,
+      },
+    ]);
+    await repo.updateArtworkPreparation(preparation.id, {
+      status: "approved",
+      preparedArtworkVersionId: artwork!.id,
+      approvedAt: new Date().toISOString(),
+    });
+    const job = await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "prepared_upload",
+      artworkPreparationId: preparation.id,
+      artworkVersionId: artwork!.id,
+      productionWidthIn: 10.5,
+    });
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "failed",
+      lastError: "Production asset could not be persisted: fetch failed",
+    });
+    await repo.setProjectStatus(projectId, "finalizing");
+
+    assert.deepEqual(await conversationService.getFinalizationStatus(projectId), {
+      status: "retryable_failure",
+    });
+  });
+});
+
+describe("toCustomerFinalizationView", () => {
+  it("derives customer status from project status and the current job", async () => {
+    const { toCustomerFinalizationView } = await import("./conversation-service");
+
+    assert.deepEqual(toCustomerFinalizationView("finalizing", "queued"), {
+      status: "preparing",
+    });
+    assert.deepEqual(toCustomerFinalizationView("finalizing", "running"), {
+      status: "preparing",
+    });
+    assert.deepEqual(toCustomerFinalizationView("finalizing", "recoverable"), {
+      status: "preparing",
+    });
+    assert.deepEqual(toCustomerFinalizationView("finalizing", "cancelled"), {
+      status: "preparing",
+    });
+    assert.deepEqual(toCustomerFinalizationView("finalizing", null), {
+      status: "preparing",
+    });
+    assert.deepEqual(toCustomerFinalizationView("finalizing", "failed"), {
+      status: "retryable_failure",
+    });
+    assert.deepEqual(toCustomerFinalizationView("print_ready", "failed"), {
+      status: "print_ready",
+    });
+    assert.deepEqual(
+      toCustomerFinalizationView("finalization_required", "failed"),
+      { status: "needs_review" },
+    );
+    assert.deepEqual(toCustomerFinalizationView("approved", "failed"), {
+      status: "not_requested",
+    });
+  });
 });

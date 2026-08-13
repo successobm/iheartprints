@@ -336,12 +336,16 @@ describe("FinalArtworkCapability.requestFinalArtwork (Sprint 2M Phase 2B)", () =
     await repo.updateFinalArtworkJob(first.job.id, {
       status: "failed",
       lastError: "simulated infrastructure failure",
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: "already-submitted-id",
     });
     await repo.setProjectStatus(projectId, "finalizing");
 
     const retry = await finalArtwork.requestFinalArtwork(projectId, artworkId);
     assert.equal(retry.job.id, first.job.id); // same job, revived — never duplicated
     assert.equal(retry.job.status, "queued");
+    assert.equal(retry.job.providerKey, "topaz_transparency_upscale");
+    assert.equal(retry.job.providerRequestId, "already-submitted-id");
 
     const project = await repo.getProject(projectId);
     assert.equal(project?.project.status, "finalizing");

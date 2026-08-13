@@ -45,3 +45,14 @@ export const TARGETED_REVISION_WAITING_MESSAGE = `Updating your selected concept
 
 /** Production finalization — the print-ready artwork pipeline. */
 export const PRINT_READY_WAITING_MESSAGE = `Preparing your print-ready artwork. ${APPROXIMATE_WAIT_NOTE}`;
+
+/**
+ * Infrastructure/processing failure while the project is still finalizing.
+ * The existing Prepare action is the retry — never a second API, never a
+ * provider name, never the internal error string.
+ */
+export const PRINT_READY_RETRY_MESSAGE =
+  "Print-ready preparation couldn't finish.";
+export const PRINT_READY_RETRY_SUPPORTING_MESSAGE =
+  "Your design is safe. Try preparing the file again.";
+export const PRINT_READY_RETRY_ACTION_LABEL = "Retry Preparation";

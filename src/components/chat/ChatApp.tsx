@@ -167,10 +167,11 @@ export function ChatApp() {
   }, [isClient, snapshot?.project.status, snapshot?.project.id]);
 
   // While customer-safe finalization status is "preparing", poll the
-  // lightweight finalization status endpoint until it reaches a terminal
-  // customer state (print_ready / needs_review / not_requested), then
-  // refresh the snapshot once. Never enqueues work and never calls a
-  // provider — same read-only contract as generation status polling.
+  // lightweight finalization status endpoint until it leaves that
+  // in-progress state (print_ready / needs_review / retryable_failure /
+  // not_requested), then refresh the snapshot once. retryable_failure is
+  // terminal for polling — the customer must click Retry Preparation.
+  // Never enqueues work and never calls a provider.
   useEffect(() => {
     if (!isClient || !snapshot || snapshot.finalization.status !== "preparing") {
       return;
@@ -484,7 +485,8 @@ export function ChatApp() {
    * Sprint 2M Phase 2B: the customer's explicit "this is my final direction"
    * action — independent of chat, same shape as `selectConcept`/
    * `regenerateConcepts`. Idempotent server-side, so a stray double click
-   * here is always safe.
+   * here is always safe. Retry Preparation after `retryable_failure` uses
+   * this same POST `/finalize` path — there is no second retry endpoint.
    */
   async function approveFinalDirection() {
     const artworkVersionId = snapshot?.project.selectedArtworkVersionId;

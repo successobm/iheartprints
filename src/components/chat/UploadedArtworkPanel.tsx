@@ -11,7 +11,12 @@ import {
   type ArtworkPreparationView,
 } from "@/capabilities/artwork-preparation";
 import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size";
-import { PRINT_READY_WAITING_MESSAGE } from "@/capabilities/shared/waiting-copy";
+import {
+  PRINT_READY_RETRY_ACTION_LABEL,
+  PRINT_READY_RETRY_MESSAGE,
+  PRINT_READY_RETRY_SUPPORTING_MESSAGE,
+  PRINT_READY_WAITING_MESSAGE,
+} from "@/capabilities/shared/waiting-copy";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
 import type { PrintPlacement } from "@/lib/domain/types";
 import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
@@ -600,6 +605,28 @@ function PrintReadyStep({
           <span className="animate-pulse [animation-delay:300ms]">●</span>
         </span>
         {PRINT_READY_WAITING_MESSAGE}
+      </div>
+    );
+  }
+
+  if (finalizationStatus === "retryable_failure") {
+    return (
+      <div className="mt-4 space-y-3 border-t border-black/8 pt-4">
+        <p className="text-sm text-ink" role="alert">
+          {PRINT_READY_RETRY_MESSAGE}
+        </p>
+        <p className="text-sm text-muted">{PRINT_READY_RETRY_SUPPORTING_MESSAGE}</p>
+        {onPrepareForPrint ? (
+          <button
+            type="button"
+            disabled={busy}
+            aria-busy={busy}
+            onClick={onPrepareForPrint}
+            className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {PRINT_READY_RETRY_ACTION_LABEL}
+          </button>
+        ) : null}
       </div>
     );
   }
