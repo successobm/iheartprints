@@ -20,11 +20,24 @@ iHeartPrints is an independent **apparel-design** product. The customer uses
 or buys the **artwork**. It does not sell physical garments, is not a
 Print'em All feature, and is not a general print-shop operating system.
 
-The current V1 deliverable is a validated transparent apparel PNG at the
-selected physical print dimensions, targeted at 300 PPI. Do not expand into
-signs, banners, large-format, promotional products, embroidery digitization,
-screen-print separations, vector/SVG/PDF production, or physical-product
-commerce without an explicit Constitution amendment.
+Product scope is not current production capability. The product serves the
+apparel-design market; V1 implements one production profile inside it —
+raster garment decoration, focused initially on DTF and DTG workflows.
+
+The current V1 deliverable is a validated transparent PNG at the selected
+physical print dimensions, targeted at 300 PPI. `print_ready` is scoped to
+that supported raster profile; never write copy or comments implying a file
+is ready for every apparel-decoration method, and never claim control over
+downstream production variables (printer, ink, film, powder, pretreatment,
+RIP, ICC profiles, press settings, garment compatibility).
+
+Do not expand into signs, banners, large-format, promotional products,
+general commercial printing, or physical-product commerce — those are
+outside the product. Do not implement embroidery digitization, screen-print
+separations, sublimation-specific preparation, or vector/SVG/PDF production
+either: they are apparel capabilities for a later, explicit production
+profile, not V1 work. Either kind of expansion needs an explicit
+Constitution amendment.
 
 Reusable architecture may remain broader than active product scope. Dormant
 hooks (reserved vector/PDF roles, Print Vault and Ownership stubs, broader

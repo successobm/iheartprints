@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.1
+Version 1.2
 August 2026
 
 ## Document Position
@@ -32,18 +32,38 @@ uses or buys the **artwork**. iHeartPrints does not sell physical garments
 and is not a Print'em All feature, print-shop operating system, or
 physical-product retailer.
 
-The current product deliverable is the **iHeartPrints Apparel Print-Ready
-PNG**: a validated transparent RGB PNG sized to the selected apparel print
-dimensions and targeted at **300 PPI**, where pixel geometry (`production
-pixels ÷ intended physical inches`) is authoritative. Embedded PNG density
-metadata is a hint, never the readiness proof.
+**Product scope is not current production capability** (Constitution
+§7.13). The product serves the apparel-design market. V1 implements one
+production profile within that market: **raster garment decoration**,
+focused initially on **DTF** and **DTG** workflows, because those consume
+exactly what this engine produces — a transparent RGB raster file at a
+known physical size. Additional apparel production profiles may be added
+deliberately later; the current profile is a capability boundary, not the
+permanent product boundary. Non-apparel print categories are different:
+they are excluded by scope and adding capability would not admit them.
+
+The current product deliverable is the **iHeartPrints Production PNG** for
+that supported raster profile: a validated transparent RGB PNG sized to the
+selected apparel print dimensions and targeted at **300 PPI**, where pixel
+geometry (`production pixels ÷ intended physical inches`) is authoritative.
+Embedded PNG density metadata is a hint, never the readiness proof.
 
 `print_ready` means that production validation passed on the production
-asset for the current approved apparel production intent, and the customer
-may download that PNG. It does **not** mean embroidery digitization,
-screen-print separations, SVG/vector/PDF production, CMYK, ICC profiles, a
-RIP preset, signs/banners/large-format readiness, promotional-product
-readiness, or universal print-method compatibility.
+asset for the current approved apparel production intent within the
+supported raster profile, and the customer may download that PNG. It is
+**not** a claim of readiness for every apparel-decoration method. It does
+**not** mean embroidery digitization, screen-print separations,
+sublimation-specific preparation, SVG/vector/PDF production, CMYK, ICC
+profiles, a RIP preset, a specific decorator's press/ink/film/powder/
+pretreatment settings, garment compatibility, signs/banners/large-format
+readiness, promotional-product readiness, or universal print-method
+compatibility.
+
+What the system controls is the file: format, transparency, pixel
+dimensions, intended physical dimensions, pixel-density target, and the
+validation it performs itself. Everything downstream of the file belongs to
+the decorator. Decoration-method vocabulary (including "DTF" and "DTG") is
+internal — it is a production-profile fact, never customer-facing copy.
 
 Reusable architectural seams (reserved `production_svg` /
 `production_pdf` roles, `vectorAssetId`, Print Vault and Ownership stubs,
@@ -1190,16 +1210,22 @@ was added to `PrintValidationCapability`, `production-requirements.ts`, or
 `production-requirements.ts` currently classifies a `ProductionCategory`
 (`apparel_raster` / `apparel_vector` / `signage` / `logo_vector` /
 `unknown`) from already-collected brief text by keyword matching. **Current
-iHeartPrints V1 production is apparel raster PNG only.** Non-apparel and
+iHeartPrints V1 production is the apparel raster PNG profile only** — the
+DTF/DTG-oriented workflows described under Product Scope. Non-apparel and
 vector categories are dormant classifier branches and reserved validation
 hooks — not unfinished iHeartPrints V1 deliverables, and not permission to
-broaden the product into signs, banners, embroidery digitization, or
-screen-print separations.
+broaden the product into signs, banners, or general commercial printing.
+The `embroidery` / `screen_print` classifier branches recognize apparel
+methods the product may support later; recognizing a method is not
+producing for it, and those briefs deliberately fail closed rather than
+reaching `print_ready` (see §13c).
 
 When the text does not support a confident method, `printMethodConfidence`
 is honestly `"unknown"` and an apparel-raster profile is assumed as the
 one production path this product actually generates artwork for today
-(never marked `"confirmed"`).
+(never marked `"confirmed"`). `printMethod` values (`dtf`, `dtg`,
+`sublimation`, …) are internal production facts and never customer-facing
+copy; V1 does not ask the customer to choose a decoration method.
 
 Target physical print dimensions come from `shared/print-placement-dimensions.ts`,
 keyed by `PrintPlacement` and overridden by the customer's own chosen
@@ -3505,10 +3531,20 @@ storage, or validation rule ever reaches this view.
 
 ### Unsupported methods (Goal 17)
 
-Current V1 production is **raster apparel PNG only**. SVG, PDF, embroidery
-digitization, screen-print separations, banner/sign production, CMYK, and
-vector logos are out of **product** scope — not unfinished iHeartPrints V1
-deliverables. Today the worker still completes without an asset when
+Current V1 production is the **raster apparel PNG profile only** (DTF/DTG
+focus). Two different reasons put everything else outside it:
+
+- **Outside product scope**: banner/sign production, large format,
+  promotional products, general commercial printing, and universal
+  vector-production. These stay out permanently.
+- **Outside current production capability**: embroidery digitization,
+  screen-print separations, sublimation-specific preparation, and
+  SVG/PDF/CMYK production for apparel. These are apparel-decoration
+  concerns the product may take on later as explicit production profiles
+  (Constitution §16.6). They are not unfinished V1 deliverables and must
+  not be described as supported today.
+
+Today the worker still completes without an asset when
 `requirements.category !== "apparel_raster"` so it cannot falsely claim
 `print_ready` for those categories. That fail-closed behavior is honesty
 about the current classifier, not a roadmap to implement those outputs.
@@ -5996,7 +6032,8 @@ This section is **not** an iHeartPrints delivery plan for signs, vector,
 embroidery, or physical-product commerce. It records (a) what is already
 current V1 architecture and (b) dormant seams that may serve iHeartPrints
 later or other systems later. Broader architecture is not permission to
-broaden the product.
+broaden the product — and equally, a dormant seam is not evidence that the
+capability exists.
 
 ### Current iHeartPrints V1 (implemented)
 
@@ -6016,6 +6053,7 @@ broaden the product.
 |---|---|
 | Customer identity / project ownership | No `owner_user_id` today; UUID knowledge is not identity. Required before public accounts. |
 | Project / design library | Not implemented. Print Vault is a stub and remains **future**. |
+| Additional apparel production profiles | The V1 profile is DTF/DTG-oriented raster. Other apparel-decoration methods (embroidery digitization, screen-print separations, sublimation-specific preparation) would each arrive as an explicit new production profile with its own requirements, transforms, and validation. Recognized by the classifier today; produced by nothing. |
 | Generation-cost metering and monetization | Spend *controls* exist; dollar accounting does not. |
 | JPEG / WebP upload | PNG only today. |
 | AI photographic background segmentation | Artwork preparation has no provider port; that absence is structural. |
@@ -6041,7 +6079,8 @@ schedule them as iHeartPrints V1.
 generate or transform anything Print Validation itself decided. Print
 Validation must remain pure validation. They must never treat vector,
 embroidery, screen-print separations, or physical-product purchasing as
-iHeartPrints V1 work.
+iHeartPrints V1 work, and must never let a non-`apparel_raster` brief reach
+`print_ready` on the strength of the raster pipeline alone.
 
 ---
 
@@ -6062,8 +6101,9 @@ Before implementing a change, check:
 11. Does environment selection stay in composition/config (not UI/conversation)?
 12. Does it require updating this architecture document?
 13. Does it remain consistent with the Constitution?
-14. Does it keep iHeartPrints an independent apparel-design product (artwork, not physical goods; not signs/banners/embroidery digitization/screen-print separations/vector V1)?
+14. Does it keep iHeartPrints an independent apparel-design product (artwork, not physical goods; not signs/banners/large-format/general commercial printing at all; not embroidery digitization, screen-print separations, sublimation-specific preparation, or vector production in V1)?
 15. If it touches a broader architectural hook, does it leave that hook dormant rather than turning it into an iHeartPrints V1 requirement?
+16. Does any wording it introduces claim readiness beyond the supported apparel raster production profile?
 
 ---
 

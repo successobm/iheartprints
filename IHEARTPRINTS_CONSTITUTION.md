@@ -1,6 +1,6 @@
 # iHeartPrints Constitution
 
-**Version 2.0**
+**Version 2.1**
 
 ## 1. Purpose of the Constitution
 
@@ -26,7 +26,7 @@ Anyone with an idea for apparel artwork should be able to create or prepare some
 
 ## 4. Mission
 
-iHeartPrints is an independent conversational apparel-design product. It helps people create or prepare artwork and produce a validated print-ready transparent PNG for apparel raster production.
+iHeartPrints is an independent conversational apparel-design product. It helps people create or prepare artwork and produce a validated transparent PNG for the apparel raster decoration workflows iHeartPrints currently supports.
 
 Unlike traditional AI image generators that begin with a prompt, iHeartPrints begins with a Design Interview when the customer is creating new artwork.
 
@@ -69,7 +69,7 @@ Conversation is the product. Artwork is the outcome.
 
 Customers are not buying AI. They are buying apparel artwork that can be printed.
 
-Every major product decision should improve the path from intent to a validated print-ready apparel PNG. Novelty, spectacle, or model capability that does not improve that path is secondary.
+Every major product decision should improve the path from intent to a validated production PNG for the supported apparel raster profile (§16). Novelty, spectacle, or model capability that does not improve that path is secondary.
 
 ### 7.2 Conversation Is the Product
 
@@ -132,7 +132,11 @@ For current iHeartPrints, production awareness centers on apparel:
 - transparent raster production
 - whether the artwork is actually ready to print
 
-The customer should not need to understand decoration-method internals. V1 does not collect a decoration method as an output contract, and it does not treat embroidery, screen-print separations, signage, or vector production as iHeartPrints deliverables.
+The current production focus is raster garment decoration—initially DTF (direct-to-film) and DTG (direct-to-garment) workflows—because those workflows consume exactly what the system produces: a transparent RGB raster file at a known physical size.
+
+The customer should not need to understand decoration-method internals, and decoration-method names are not customer-facing vocabulary. V1 does not collect a decoration method as an output contract, and it does not produce embroidery digitization, screen-print separations, or vector production as deliverables.
+
+iHeartPrints is responsible for the artwork file. It is not responsible for, and must not claim authority over, downstream production variables it does not operate: printer hardware, ink systems, film, powder, pretreatment, RIP configuration, printer-specific color management, ICC profiles, transfer temperature/time/pressure, garment compatibility, or a specific shop's production settings.
 
 ### 7.10 Concepts Must Respect the Brief
 
@@ -151,6 +155,19 @@ Prior versions should remain available and must not be destructively overwritten
 Artwork may only be treated as print-ready after authoritative production validation of the production asset, plus the customer’s explicit approval of the design (Create New) or prepared artwork (Existing Artwork).
 
 No concept should be described as print-ready merely because an image model generated it. No uploaded file should be described as print-ready merely because it was uploaded or had its background removed.
+
+### 7.13 Product Scope Is Not Current Production Capability
+
+Two things must never be confused:
+
+- **Product scope** — the market iHeartPrints serves: apparel design and artwork preparation.
+- **Production capability** — the apparel production profiles the system can actually produce and validate today.
+
+The current production capability is narrower than the product scope, and deliberately so. A present production limitation is a capability statement, not a permanent product boundary. New apparel production profiles may be added intentionally as decoration technology and customer demand evolve.
+
+The reverse also holds: capability may not be assumed from scope. Nothing may be described as supported, ready, or validated for an apparel production profile the system does not actually produce and validate.
+
+Non-apparel print categories are a different matter entirely. They are excluded by product scope (§20), not by current capability, and adding capability would not bring them in.
 
 ## 8. The Role of the Design Assistant
 
@@ -249,7 +266,7 @@ Examples:
 
 The system should connect these layers without exposing unnecessary complexity. Customers should experience one coherent product; the product should maintain the structured separation behind the scenes.
 
-Decoration method, RIP presets, CMYK conversion, and vector/separation pipelines are not iHeartPrints V1 production requirements.
+Decoration method as a customer-selected output contract, RIP presets, CMYK conversion, and vector/separation pipelines are not iHeartPrints V1 production requirements. The V1 profile targets DTF/DTG raster decoration; the customer chooses the garment, placement, and physical size, not the decoration method.
 
 ## 13. Product and Print Intelligence
 
@@ -283,7 +300,15 @@ Prior versions remain available. The system must not silently overwrite history.
 
 ## 16. V1 Production Contract
 
-The current iHeartPrints production deliverable is the **iHeartPrints Apparel Print-Ready PNG**.
+### 16.1 The supported production profile
+
+V1 supports one production profile: **raster garment decoration**, targeted initially at **DTF (direct-to-film)** and **DTG (direct-to-garment)** workflows. Those workflows consume exactly what iHeartPrints produces—a transparent RGB raster file at a known physical size—which is why they are the launch focus.
+
+This is the current capability, not the permanent limit of the product (§7.13).
+
+### 16.2 The deliverable
+
+The current iHeartPrints production deliverable is the **iHeartPrints Production PNG** for the supported apparel raster profile.
 
 It is:
 
@@ -299,7 +324,22 @@ It is:
 
 Pixel geometry (`production pixels ÷ intended physical inches`) is the authority for the 300 PPI target. Embedded PNG density metadata may be written as a hint to graphics software. It must never be treated as proof of print resolution by itself.
 
-### What `print_ready` means
+### 16.3 What iHeartPrints controls
+
+The production contract covers only what iHeartPrints actually determines and can verify:
+
+- artwork file format
+- transparency
+- pixel dimensions
+- intended physical print dimensions
+- pixel-density target at those dimensions
+- the production validation iHeartPrints itself performs
+
+Everything downstream of the file belongs to the decorator, not to iHeartPrints: printer hardware, ink systems, film, powder, pretreatment, RIP configuration, printer-specific color management, ICC profiles, transfer temperature/time/pressure, garment compatibility, and shop-specific production settings. iHeartPrints must not make guarantees about them.
+
+### 16.4 What `print_ready` means
+
+`print_ready` is scoped to the **currently supported apparel raster production profile**. It is not a statement that a file is production-ready for every apparel-decoration method.
 
 For iHeartPrints V1, `print_ready` means:
 
@@ -311,17 +351,21 @@ For iHeartPrints V1, `print_ready` means:
 - production lineage remains tied to the approved design or prepared upload
 - the customer may download that production asset
 
-### What `print_ready` does not mean
+### 16.5 What `print_ready` does not mean
 
 `print_ready` does **not** guarantee:
 
+- readiness for apparel-decoration methods outside the supported raster profile
 - embroidery digitization
 - screen-print separations
+- sublimation-specific production preparation
 - SVG or other vector production
 - production PDF
 - CMYK
 - ICC profiles
 - a particular RIP preset
+- a particular decorator's press, ink, film, powder, pretreatment, or heat-press settings
+- garment or fabric compatibility
 - signs, banners, or large-format readiness
 - promotional-product readiness
 - universal compatibility with every printing method
@@ -332,6 +376,20 @@ For iHeartPrints V1, `print_ready` means:
 Those may exist as separate future systems elsewhere. They are not the iHeartPrints V1 contract.
 
 The product must not claim that generated artwork is print-ready without validation. Human review and explicit approval remain part of reaching print-ready.
+
+### 16.6 Apparel decoration methods: current versus future
+
+| Method | Category | V1 status |
+|---|---|---|
+| DTF (direct-to-film) | Apparel raster decoration | Target launch workflow for the supported raster profile |
+| DTG (direct-to-garment) | Apparel raster decoration | Target launch workflow for the supported raster profile |
+| Sublimation | Apparel / decoration | Not a V1 production contract. V1 performs no sublimation-specific preparation. |
+| Screen printing | Apparel decoration | Future production capability. V1 produces no separations or screens and claims no complete screen-print package. The PNG may be useful as design artwork; `print_ready` never implies separation-ready. |
+| Embroidery | Apparel decoration | Future production capability. V1 produces no digitized stitch files; `print_ready` never implies embroidery-ready. |
+| Other apparel-decoration methods | Apparel decoration | May be added later as explicit production profiles. Not enumerated exhaustively, and not V1 commitments. |
+| Signs, banners, large format, promotional products, general commercial printing | Not apparel | Outside the product entirely (§20). Excluded by scope, not by capability. |
+
+Naming a method as a future capability is a scope statement, never a schedule and never a claim of present support.
 
 ## 17. Artwork Ownership and Licensing
 
@@ -377,8 +435,7 @@ iHeartPrints is not intended to become:
 - a garment catalog, inventory, pricing, cart, checkout, shipping, or fulfillment system
 - a SanMar or supplier-catalog shopping experience
 - a signs, banners, large-format, or promotional-products design product
-- an embroidery digitization product
-- a screen-print separation product
+- a general commercial-printing platform
 - a universal vector-production product
 - a general-purpose AI image generator
 - a prompt-engineering interface
@@ -388,6 +445,10 @@ iHeartPrints is not intended to become:
 - a stock-image website
 - an interface that exposes technical generation settings to ordinary customers
 - a platform that prioritizes novelty over printability
+
+These are scope exclusions: they stay out regardless of what the system becomes technically capable of.
+
+Embroidery digitization, screen-print separations, and sublimation-specific preparation are **not** on this list. They are apparel-decoration methods governed by §16.6 — outside current production capability, potentially inside the product later. Absence of capability is not permission to claim support for them today.
 
 Reusable technical architecture may remain broader than the active product. Broader architecture is not permission to broaden the product.
 
@@ -405,7 +466,7 @@ A successful iHeartPrints experience should allow a customer to:
 - request revisions conversationally
 - choose apparel placement and production dimensions
 - reach approved artwork without learning design software
-- download a validated print-ready apparel PNG
+- download a validated production PNG for the supported apparel raster profile
 - feel as though they worked with an experienced apparel designer
 
 If a feature improves internal sophistication but worsens this experience, it is not progress.
@@ -437,6 +498,7 @@ Temporary tactics, vendor changes, framework migrations, and sprint scope do not
 
 | Version | Summary |
 |---|---|
+| 2.1 | Production-authority clarification (sections affected: §4, §7.1, §7.9, new §7.13, §12, §16 restructured as §16.1–§16.6, §20, §21). Separates product scope (apparel design and artwork preparation) from current production capability (§7.13). Names DTF and DTG as the initial supported raster garment-decoration workflows, scopes `print_ready` to the supported raster production profile rather than to apparel generally, states what iHeartPrints controls versus downstream decorator variables, and classifies embroidery, screen printing, and sublimation as apparel methods outside current capability rather than permanent non-goals. Non-apparel categories remain excluded by scope. No change to the V1 deliverable or to product behavior. |
 | 2.0 | Product-identity amendment: iHeartPrints is an independent apparel-design product. The customer uses or buys artwork, not a physical garment. V1 deliverable is a validated transparent apparel PNG at selected physical dimensions targeting 300 PPI. Print Vault, ownership-class expansion, and design families are explicitly future. Physical-product commerce, signs/banners/large-format, embroidery digitization, screen-print separations, and vector production are removed from product authority. |
 | 1.0 | Initial Constitution establishing iHeartPrints as a conversational print-design platform governed by Design Interviews, Design Briefs, print-ready quality, explicit ownership, and the Print Vault vision. |
 

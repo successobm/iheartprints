@@ -2,16 +2,39 @@
 
 iHeartPrints is an apparel-design application. It helps people create new
 artwork through conversation, or prepare artwork they already have, and
-produce a **validated print-ready transparent PNG** for apparel raster
-production.
+produce a **validated transparent PNG** for apparel raster production.
 
 The customer uses the artwork. iHeartPrints does not sell physical garments,
 garment catalogs, or print-shop fulfillment.
 
-The current production deliverable is an RGB PNG sized to the selected
-apparel print dimensions and targeted at 300 pixels per inch. Pixel geometry
-is authoritative. iHeartPrints V1 does not produce vector/SVG, embroidery
-digitization, screen-print separations, or sign/banner artwork.
+## Product scope vs. current production capability
+
+iHeartPrints serves the **apparel-design** market. V1 implements one
+production profile inside that market: raster garment decoration, focused
+initially on **DTF** and **DTG** workflows, because those consume exactly
+what this engine produces.
+
+V1 produces a validated transparent PNG at the selected physical print
+dimensions with a 300 PPI target. Pixel geometry is authoritative; embedded
+PNG density metadata is a hint, never the proof.
+
+`print_ready` is scoped to that supported raster profile. It is not a claim
+that a file is production-ready for every apparel-decoration method.
+iHeartPrints controls the file — format, transparency, pixel dimensions,
+intended physical dimensions, density target, and its own validation. It
+does not control printer hardware, inks, film, powder, pretreatment, RIP
+configuration, ICC profiles, press temperature/time/pressure, or garment
+compatibility; those are the decorator's.
+
+V1 does not produce embroidery digitization, screen-print separations,
+sublimation-specific preparation, or vector/SVG/PDF output. Those are
+apparel-decoration capabilities the platform may add later as explicit
+production profiles — not present support. Signs, banners, large format,
+promotional products, and general commercial printing are outside the
+product entirely.
+
+Current V1 production capability is not the permanent limit of the product.
+See [Constitution §7.13 and §16](./IHEARTPRINTS_CONSTITUTION.md).
 
 All product, design, and architecture decisions must align with the
 [iHeartPrints Constitution](./IHEARTPRINTS_CONSTITUTION.md).
