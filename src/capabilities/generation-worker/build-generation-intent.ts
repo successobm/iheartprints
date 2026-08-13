@@ -91,7 +91,29 @@ export function buildGenerationIntentForJob(input: {
     },
   });
 
-  return createRegenerationGenerationIntent(approvedVersion.content, plan);
+  // Sprint 2G Live Acceptance Corrective Pass: a targeted single-concept
+  // revision must regenerate in the SAME catalog direction the customer
+  // already selected — resolved from the source artwork's own persisted
+  // `conceptDirectionKey`, never re-derived or guessed.
+  const targetConceptDirectionKey = job.targetArtworkVersionId
+    ? (project.artworkVersions.find((a) => a.id === job.targetArtworkVersionId)
+        ?.conceptDirectionKey ?? null)
+    : null;
+
+  // True Source-Image Targeted Revision: the customer's literal requested
+  // delta, durable on the job itself. Only meaningful for a targeted
+  // revision — a three-direction regeneration has no single source concept
+  // to apply a delta to.
+  const revisionInstruction = job.targetArtworkVersionId
+    ? (job.revisionInstruction?.trim() || null)
+    : null;
+
+  return createRegenerationGenerationIntent(
+    approvedVersion.content,
+    plan,
+    targetConceptDirectionKey,
+    revisionInstruction,
+  );
 }
 
 function deriveTimedRevisionImpacts(

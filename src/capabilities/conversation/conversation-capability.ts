@@ -21,15 +21,32 @@ import type { FinalArtworkCapability } from "@/capabilities/final-artwork";
 import type { IntentExtractionCapability } from "@/capabilities/intent-extraction";
 import type { InterviewIntelligenceCapability } from "@/capabilities/interview-intelligence";
 import type { RevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
-import { ALL_SECTIONS_IN_POLICY_ORDER } from "@/capabilities/shared/interview-coverage-policy";
 import {
+  CHAT_BLOCKED_PHASES as SHARED_CHAT_BLOCKED_PHASES,
+  REVISION_LOOP_PHASES as SHARED_REVISION_LOOP_PHASES,
+} from "@/capabilities/shared/chat-input-policy";
+import { ALL_SECTIONS_IN_POLICY_ORDER } from "@/capabilities/shared/interview-coverage-policy";
+import { diffEstablishedBriefSections } from "@/capabilities/shared/brief-diff";
+import { resolveProductionWidth } from "@/capabilities/shared/print-placement-dimensions";
+import { describePrintReadySize } from "@/capabilities/shared/print-ready-size";
+import {
+  detectProductionSizeIntent,
+  RELATIVE_SIZE_STEP_IN,
+} from "@/capabilities/shared/production-size-intent";
+import {
+  acknowledgeRequestedChanges,
   acknowledgeResolvedFields,
   acknowledgeRevision,
   conceptRegenerationPrompt,
   describeUndo,
   designerDecisionMessage,
+  productionSizeAcknowledgement,
+  revisionGeneratingMessage,
   shortAcknowledgement,
 } from "@/capabilities/shared/question-phrasing";
+import { productNameForQuestion } from "@/capabilities/shared/print-product-vocabulary";
+import { splitRequestedChanges } from "@/capabilities/shared/revision-delta";
+import { isExplicitRevisionIntent } from "@/capabilities/shared/revision-intent";
 import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
 import type {
   BriefSectionKey,
@@ -63,14 +80,12 @@ export interface ConversationCapabilityDeps {
   finalArtwork: FinalArtworkCapability;
 }
 
-/** Phases where free-text chat input is not the expected interaction. */
-const CHAT_BLOCKED_PHASES: ConversationPhase[] = [
-  "generating",
-  "skip_references",
-  "concepts_ready",
-  "awaiting_summary_confirmation",
-  "brief_approved",
-];
+/**
+ * Phases where free-text chat input is not the expected interaction.
+ * Shared with the composer's own enabled/disabled rule so the two can
+ * never disagree — see `chat-input-policy.ts`.
+ */
+const CHAT_BLOCKED_PHASES = SHARED_CHAT_BLOCKED_PHASES;
 
 /** Phases reachable only after at least one approved brief version exists. */
 const POST_APPROVAL_PHASES: ConversationPhase[] = [
@@ -82,10 +97,7 @@ const POST_APPROVAL_PHASES: ConversationPhase[] = [
 ];
 
 /** Post-concept revision loop — customer describing changes to an already-approved brief. */
-const REVISION_REQUEST_PHASES: ConversationPhase[] = [
-  "ask_revisions",
-  "revision_received",
-];
+const REVISION_REQUEST_PHASES = SHARED_REVISION_LOOP_PHASES;
 
 const KNOWN_SECTIONS = new Set<string>(ALL_SECTIONS_IN_POLICY_ORDER);
 
@@ -101,6 +113,31 @@ const REGENERATE_REQUEST_PATTERN =
   /\b(regenerate|update the concepts|new concepts|updated concepts|refresh the concepts|generate updated concepts)\b/i;
 const KEEP_CONCEPTS_PATTERN =
   /\bkeep (?:the )?(?:current|existing) concepts\b|\bleave (?:them|the concepts)(?: as (?:is|they are))?\b/i;
+
+/**
+ * Live Acceptance Corrective Pass (Section 3): a customer explicitly asking
+ * to see other creative directions — never a customer describing a change
+ * to make to the concept they already selected. Checked unconditionally
+ * (not gated by concept staleness) and takes priority over the default
+ * single-concept-revision path: "give me three different versions" must
+ * always explore, never just tweak the one already selected.
+ */
+const ALTERNATIVES_REQUEST_PATTERN =
+  /\b(?:show me (?:a few|some|three)?\s*(?:different\s+)?(?:versions|alternatives|options|directions)|(?:a )?few (?:other|different) (?:directions|versions|options)|three different (?:versions|directions|concepts)|other directions|different directions|other options|alternative directions|start over with new concepts|new set of concepts)\b/i;
+
+/**
+ * Live Acceptance Corrective Pass (Section 2): the customer's explicit "no
+ * more changes" confirmation, typed rather than clicked. Deliberately a
+ * short, closed list of unambiguous whole-message phrases (matched against
+ * the ENTIRE trimmed reply) rather than a loose keyword — a customer
+ * casually saying "looks good" mid-conversation must never be silently
+ * read as final approval (Constitution §15: print-ready is earned, not
+ * assumed). The `[Use This Design]` button drives the same confirmation
+ * through `ConversationCapability.confirmSelectedDirection` without relying
+ * on this pattern at all.
+ */
+const CONFIRM_FINAL_PATTERN =
+  /^(?:no changes(?: needed)?|use this (?:design|one|concept)|this is the one|i'?m happy with (?:it|this)|keep it as(?: it)? is|that'?s it,? use this one)[.!]?$/i;
 
 /**
  * Owns conversation lifecycle, messages, state, and orchestration.
@@ -140,6 +177,51 @@ export interface ConversationCapability {
     artworkVersionId: string,
   ): Promise<ProjectSnapshot>;
   /**
+   * Live Acceptance Cleanup (Issue 2): the explicit inverse of
+   * `selectConcept` — "Change Selection". Returns the project to "none
+   * selected" so the customer can compare the concepts again, or recover
+   * from a misclick, without Start Over.
+   *
+   * Semantics, all server-owned (never a client-only visual reset):
+   *   - `PrintProject.selectedArtworkVersionId` → `null`, every
+   *     `ArtworkVersion.isSelected` → `false`
+   *   - `finalDirectionConfirmed` → `false` (a confirmation can never
+   *     outlive the selection it was about), so revision and finalization
+   *     actions become unavailable, enforced server-side by
+   *     `FinalArtworkCapability` as well as by the UI
+   *   - any active `FinalDirectionApproval` is explicitly SUPERSEDED, never
+   *     silently orphaned
+   *   - nothing is deleted: every concept, batch, revision, and history
+   *     entry survives untouched and stays selectable
+   *   - no generation is triggered
+   *
+   * Refuses (rather than resolving quietly) while a revision is mid-flight
+   * or a finalization is running/complete — those own the selection right
+   * now, and invalidating them behind the customer's back is exactly the
+   * "silently invalidate a production approval" failure this must avoid.
+   */
+  unselectConcept(designId: string): Promise<ProjectSnapshot>;
+  /**
+   * Live Acceptance Cleanup (Issue 3): "Show Me 3 New Concepts" — the
+   * middle option between selecting one of the current three and Start
+   * Over. Keeps the approved Design Brief exactly as it is and explores a
+   * fresh batch of three directions from it. See
+   * `ConceptGenerationCapability.exploreNewConceptBatch`.
+   */
+  exploreNewConceptBatch(designId: string): Promise<ProjectSnapshot>;
+  /**
+   * Live Acceptance Cleanup (Issue 5): records the customer's chosen
+   * PRODUCTION print width, in inches — a production-specification change,
+   * never a creative revision. It produces no `ArtworkVersion`, calls no
+   * image provider, approves no brief version, and leaves the approved
+   * artwork exactly as it is. `null` returns the project to the placement
+   * default.
+   */
+  setProductionPrintWidth(
+    designId: string,
+    requestedWidthIn: number | null,
+  ): Promise<ProjectSnapshot>;
+  /**
    * Sprint 2M Phase 2B: the customer's explicit "this is my final direction
    * — prepare it for production" action. Distinct from `selectConcept` —
    * selecting only means "I want to work with this direction" and may
@@ -155,8 +237,29 @@ export interface ConversationCapability {
     designId: string,
     action: DesignBriefDecisionAction,
   ): Promise<ProjectSnapshot>;
+  /**
+   * Completes a generation request that a previous turn left half-applied
+   * — the durable authority to generate exists (an approved brief version,
+   * or a pending revision) but the `GenerationJob` it was supposed to
+   * create does not. Returns the project unchanged in every other
+   * situation, and `null` if it does not exist.
+   */
+  recoverInterruptedGenerationRequest(
+    designId: string,
+  ): Promise<ProjectSnapshot | null>;
   /** Explicit action behind the persistent "Generate Updated Concepts" control. */
   regenerateConcepts(designId: string): Promise<ProjectSnapshot>;
+  /**
+   * Live Acceptance Corrective Pass (Section 2): the customer's explicit
+   * "no more changes, use this design" confirmation — the [Use This
+   * Design] action. The sole way `PrintProject.finalDirectionConfirmed`
+   * becomes `true`; `FinalArtworkCapability.requestFinalArtwork` refuses to
+   * finalize without it, independent of `revisionPending`.
+   */
+  confirmSelectedDirection(
+    designId: string,
+    artworkVersionId: string,
+  ): Promise<ProjectSnapshot>;
   /** Explicit action behind an "Undo" control — undoes the most recent accepted revision, if any. */
   undoLastChange(designId: string): Promise<ProjectSnapshot>;
 }
@@ -282,17 +385,121 @@ export function createConversationCapability(
 
     await repo.updateConversationPhase(designId, "brief_approved");
     await repo.setProjectStatus(designId, "approved");
-    await repo.addMessage(designId, {
-      role: "assistant",
-      content:
-        "Thanks — I've approved this design brief and I'm creating three concept directions.",
-      metadata: { phase: "brief_approved" },
-    });
 
+    // Nothing here promises generation. The only "I'm creating three
+    // concept directions" acknowledgement is the one `enqueue` writes
+    // immediately after the durable `GenerationJob` exists — an
+    // acknowledgement written before that is a promise the platform
+    // cannot keep if the enqueue fails, and it survives the failed
+    // request to be replayed on every later read.
     return conceptGeneration.generatePlaceholders(designId, version.id);
   }
 
-  /** Re-approves the working brief and regenerates concepts against it. */
+  /**
+   * Repairs the one state approval can fail into: the brief version is
+   * durable and the customer was told nothing is left to decide, but the
+   * `GenerationJob` that approval was supposed to create does not exist.
+   * Nothing polls such a project (its status never reached "generating")
+   * and the Design Summary's Approve control is no longer rendered, so
+   * without this the customer's approval is silently lost.
+   *
+   * This is not system-initiated generation: the customer already gave
+   * explicit approval, and this only carries out the request the platform
+   * failed to complete. It is deliberately the narrowest possible repair —
+   * it refuses unless the project has an approved brief, no concepts at
+   * all, and *no generation job in any state*. That last condition is what
+   * keeps a read path from re-queueing a job that already failed and gave
+   * up, which would otherwise restart generation on every page load.
+   */
+  async function completeInterruptedApproval(
+    designId: string,
+    current: ProjectSnapshot,
+  ): Promise<ProjectSnapshot> {
+    if (!POST_APPROVAL_PHASES.includes(current.conversation.phase)) {
+      return current;
+    }
+    if (current.artworkVersions.length > 0) return current;
+
+    const approved = await designBrief.getLatestApprovedVersion(designId);
+    if (!approved) return current;
+
+    const jobs = await repo.listGenerationJobs(designId);
+    if (jobs.length > 0) return current;
+
+    return conceptGeneration.generatePlaceholders(designId, approved.id);
+  }
+
+  /**
+   * The revision counterpart of `completeInterruptedApproval`, for the same
+   * non-atomic window: `triggerAutomaticRevision` writes the durable
+   * pending-revision authority (`PrintProject.revisionPending`) and
+   * supersedes any active final-direction approval BEFORE the
+   * regeneration `GenerationJob` exists, so a failure in between leaves a
+   * project that is permanently barred from finalization
+   * (`FinalArtworkCapability.requestFinalArtwork` refuses while
+   * `revisionPending`) with nothing running to lift the bar. Nothing
+   * clears that flag except a regeneration that actually completes and
+   * produces artwork.
+   *
+   * The customer is not told to do anything about it — they were told the
+   * concept is being updated — so the only escape today is noticing the
+   * "Generate Updated Concepts" banner, which that very message implies is
+   * unnecessary.
+   *
+   * Narrow by construction, and never a way to retry a job that already
+   * exists: it refuses unless the pending revision has a source concept, a
+   * newer approved brief version, no artwork for that version, and *no
+   * generation job for that version in any state* — so a regeneration that
+   * already failed and exhausted its budget is left exactly as it is.
+   * `revisionPending` is never cleared here; only real revised artwork
+   * clears it (`GenerationWorkerCapability`).
+   */
+  async function completeInterruptedRevision(
+    designId: string,
+    current: ProjectSnapshot,
+  ): Promise<ProjectSnapshot> {
+    if (!current.project.revisionPending) return current;
+
+    const sourceArtworkVersionId = current.project.selectedArtworkVersionId;
+    if (!sourceArtworkVersionId) return current;
+
+    const approved = await designBrief.getLatestApprovedVersion(designId);
+    if (!approved) return current;
+
+    // Revised artwork already exists for this approval — the revision was
+    // carried out; nothing to re-request.
+    const alreadyRevised = current.artworkVersions.some(
+      (artwork) => artwork.designBriefVersionId === approved.id,
+    );
+    if (alreadyRevised) return current;
+
+    const jobs = await repo.listGenerationJobs(designId);
+    const alreadyRequested = jobs.some(
+      (job) => job.designBriefVersionId === approved.id,
+    );
+    if (alreadyRequested) return current;
+
+    // True Source-Image Targeted Revision: recover the delta too, not just
+    // the job. The instruction that triggered this revision is the most
+    // recent customer message — it is durable, and without it the resumed
+    // job would have a source image but nothing to change about it.
+    const revisionInstruction = latestCustomerMessage(current);
+
+    return conceptGeneration.reviseSelectedConcept(
+      designId,
+      approved.id,
+      sourceArtworkVersionId,
+      revisionInstruction,
+    );
+  }
+
+  /**
+   * Re-approves the working brief and explores three fresh directions.
+   * "Initial exploration" semantics — used pre-selection, and for an
+   * explicit "show me alternatives" request after selection (Live
+   * Acceptance Corrective Pass, Section 3). NOT the default post-selection
+   * revision operation — see `performSelectedConceptRevision`.
+   */
   async function performRegeneration(
     designId: string,
     state: InterviewStateData,
@@ -303,6 +510,279 @@ export function createConversationCapability(
       pendingSection: null,
     });
     return conceptGeneration.regenerateAfterRevision(designId, version.id);
+  }
+
+  /**
+   * Live Acceptance Corrective Pass (Section 3): re-approves the working
+   * brief and revises ONE customer-selected concept — the default
+   * post-selection revision operation. Produces exactly one new concept,
+   * tagged back to `sourceArtworkVersionId`, in that source's own creative
+   * direction. Never three unrelated directions (Constitution §14: a
+   * revision continues the same design relationship, it doesn't restart
+   * it).
+   */
+  async function performSelectedConceptRevision(
+    designId: string,
+    state: InterviewStateData,
+    sourceArtworkVersionId: string,
+    /**
+     * True Source-Image Targeted Revision: the customer's literal
+     * instruction, carried onto the durable `GenerationJob` so the worker
+     * can tell an image-edit provider what to actually change. The brief
+     * records design state, never the change itself.
+     */
+    revisionInstruction: string | null,
+  ): Promise<ProjectSnapshot> {
+    const version = await designBrief.approveWorkingBrief(designId);
+    await repo.updateConversationInterviewState(designId, {
+      ...state,
+      pendingSection: null,
+    });
+    return conceptGeneration.reviseSelectedConcept(
+      designId,
+      version.id,
+      sourceArtworkVersionId,
+      revisionInstruction,
+    );
+  }
+
+  /**
+   * Sprint 2M Phase 2G (Goal 3, 4, 6, 7): the customer's explicit revision
+   * instruction is authority to regenerate automatically.
+   *
+   * Marks the durable pending-revision authority (`PrintProject.revisionPending`)
+   * BEFORE enqueueing — a reload between this call and the worker finishing
+   * still truthfully shows a revision in progress (Goal 3) — and immediately
+   * supersedes any active `FinalDirectionApproval` (Goal 7): a still-running
+   * finalization job for the artwork the customer just superseded must never
+   * later win a race and write `print_ready`.
+   * `FinalArtworkWorkerCapability.maybeTransitionProjectStatus` already
+   * refuses to transition project status once its own approval is no longer
+   * the active one, so superseding it here (rather than only on regeneration
+   * completion, as before this sprint) is the entire fix — no worker change
+   * needed.
+   *
+   * Idempotent (Goal 4/8): if a regeneration is already in flight for this
+   * project (rapid duplicate submit, retried request), this never enqueues
+   * a second one — it only acknowledges and returns current state.
+   */
+  async function triggerAutomaticRevision(
+    designId: string,
+    current: ProjectSnapshot,
+    stateWithUndo: InterviewStateData,
+    impact: RevisionImpact,
+    summaryForAck: DesignSummaryView,
+    deferredDecision: { section: BriefSectionKey; message: string } | null,
+    /** The customer's literal revision instruction for this turn. */
+    revisionInstruction: string,
+  ): Promise<ProjectSnapshot> {
+    await repo.updateConversationPhase(designId, "revision_received");
+    await repo.updateConversationInterviewState(designId, {
+      ...stateWithUndo,
+      pendingSection: null,
+    });
+
+    const alreadyGenerating = current.project.status === "generating";
+
+    if (!alreadyGenerating) {
+      await repo.updateProject(designId, { revisionPending: true });
+      if (current.project.selectedArtworkVersionId) {
+        await repo.supersedeActiveFinalDirectionApproval(designId);
+      }
+    }
+
+    // True Source-Image Targeted Revision: on a revision turn the customer
+    // asked us to change the ARTWORK, so acknowledge the change — not the
+    // brief fields extraction happened to touch. "Got it — I have Red in
+    // the artwork and the design direction." describes our data model and
+    // reads as a misunderstanding. The field-based acknowledgements stay as
+    // the fallback for a revision that does not decompose into imperative
+    // change clauses, where they are still the most truthful thing to say.
+    const requestedChanges = splitRequestedChanges(revisionInstruction);
+    const ack =
+      acknowledgeRequestedChanges(requestedChanges) ??
+      acknowledgeResolvedFields(summaryForAck, impact.changedSections) ??
+      acknowledgeRevision(impact.changedSections);
+    // "I'm updating the concept now" is only true once something is
+    // actually queued. On the enqueue path below, `enqueue` says it itself
+    // the moment the job is durable, so claiming it here as well would
+    // both duplicate that and survive a failed enqueue as a promise the
+    // platform never kept. When a revision is already in flight there is
+    // no enqueue to wait for, and the claim is simply true.
+    await repo.addMessage(designId, {
+      role: "assistant",
+      content: alreadyGenerating ? `${ack} ${revisionGeneratingMessage()}` : ack,
+      metadata: {
+        phase: "revision_received",
+        act: "acknowledge",
+        updatedSections: impact.changedSections,
+        revisionPending: true,
+        ...(deferredDecision ? { deferredDecision } : {}),
+      },
+    });
+
+    if (alreadyGenerating) {
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new Error("Project not found");
+      return snapshot;
+    }
+
+    // Live Acceptance Corrective Pass (Section 3): an automatic revision is
+    // always a targeted revision of the concept the customer already
+    // selected — never a fresh three-direction exploration. A missing
+    // selection here is defensive only (this path only ever runs from
+    // `handleRevisionReply`, which is only reachable once a concept is
+    // selected).
+    return current.project.selectedArtworkVersionId
+      ? performSelectedConceptRevision(
+          designId,
+          stateWithUndo,
+          current.project.selectedArtworkVersionId,
+          revisionInstruction,
+        )
+      : performRegeneration(designId, stateWithUndo);
+  }
+
+  /**
+   * Live Acceptance Corrective Pass (Section 2): the customer's explicit
+   * "no more changes" confirmation — the sole action that may set
+   * `PrintProject.finalDirectionConfirmed = true`. Distinct from, and
+   * strictly stronger than, `selectConcept` — selecting only ever means "I
+   * want to work with this direction." Requires `artworkVersionId` to
+   * match the project's CURRENT selection (never a stale id from an older
+   * batch) and requires no revision to currently be pending — confirming
+   * "no changes" while a revision is mid-flight would confirm artwork the
+   * customer is about to see replaced.
+   */
+  async function applyConfirmSelectedDirection(
+    designId: string,
+    current: ProjectSnapshot,
+    artworkVersionId: string,
+  ): Promise<ProjectSnapshot> {
+    if (current.project.selectedArtworkVersionId !== artworkVersionId) {
+      throw new Error("Select this concept before confirming it");
+    }
+    if (current.project.revisionPending) {
+      throw new Error(
+        "A revision is still in progress — please wait for it to finish first",
+      );
+    }
+
+    await repo.updateProject(designId, { finalDirectionConfirmed: true });
+    await repo.addMessage(designId, {
+      role: "assistant",
+      content:
+        "Great — this is your confirmed direction. Whenever you're ready, I can start preparing your print-ready artwork.",
+      metadata: {
+        phase: current.conversation.phase,
+        act: "final_direction_confirmed",
+      },
+    });
+
+    const snapshot = await repo.getProject(designId);
+    if (!snapshot) throw new Error("Project not found");
+    return snapshot;
+  }
+
+  /**
+   * Live Acceptance Cleanup (Issue 5): applies a production-size change.
+   *
+   * The single most important property here is what it does NOT do. There is
+   * no `approveWorkingBrief`, no `reviseSelectedConcept`, no
+   * `revisionPending`, and no provider call anywhere on this path: "make the
+   * print 12 inches wide" adjusts the production specification and leaves
+   * the approved creative artwork exactly as it is. `intendedPrintWidthIn`
+   * is excluded from `DesignBriefSnapshotContent` and `diffBriefSections`,
+   * so it also cannot mark concepts stale or supersede an approved version.
+   *
+   * `finalDirectionConfirmed` is likewise untouched — the customer confirmed
+   * the DESIGN, and resizing the print does not un-confirm it.
+   */
+  async function applyProductionPrintWidth(
+    designId: string,
+    current: ProjectSnapshot,
+    requestedWidthIn: number | null,
+  ): Promise<ProjectSnapshot> {
+    const placement = current.brief.printPlacement;
+    if (!placement) {
+      throw new Error(
+        "I need to know where this prints before I can set a print size",
+      );
+    }
+
+    // Size is decided BEFORE production starts. Once a plate is being made
+    // (or has been made) at a given size, changing the number without
+    // re-preparing would make every displayed figure a lie.
+    if (current.project.status === "finalizing") {
+      throw new Error(
+        "Your print-ready artwork is being prepared right now — I can't change the print size until that finishes",
+      );
+    }
+    if (current.project.status === "print_ready") {
+      // Existing Artwork → Print Ready Phase 2: for uploaded artwork, changing
+      // the size after delivery is ALLOWED, and the guard above is what makes
+      // it safe.
+      //
+      // The asymmetry is real, not an oversight. A create_new customer who
+      // wants a different size goes through "Make Another Change", which
+      // reopens the creative loop they are still in. An upload customer has no
+      // creative loop to reopen — their design is finished and always was, so
+      // refusing here would leave them with no route to a different size at
+      // all except starting the whole project over.
+      //
+      // Nothing is overwritten by allowing it: the existing plate stays
+      // immutable, the new size gets its OWN finalization job (the
+      // preparation + width idempotency key), and until that job completes,
+      // `getCurrentProductionAssetId` resolves nothing for the new size —
+      // so the customer is never handed a file whose stated size is wrong.
+      const preparation = await repo.getArtworkPreparation(designId);
+      if (!preparation || preparation.status !== "approved") {
+        throw new Error(
+          "Your print-ready artwork is already prepared at the size you chose — choose Make Another Change to prepare it at a different size",
+        );
+      }
+      // Back to "artwork approved, production not yet requested" — the
+      // truthful description of a project that has an approved design and no
+      // print-ready file at the size now intended. The old plate is untouched
+      // and still resolvable if they change back.
+      await repo.setProjectStatus(designId, "approved");
+    }
+
+    const resolved = resolveProductionWidth(placement, requestedWidthIn);
+    if (!resolved) {
+      throw new Error(
+        "I need to know where this prints before I can set a print size",
+      );
+    }
+
+    await designBrief.setIntendedPrintWidth(
+      designId,
+      requestedWidthIn === null ? null : resolved.widthIn,
+    );
+
+    const updated = await designBrief.getWorkingBrief(designId);
+    const size = describePrintReadySize({
+      printPlacement: updated.printPlacement,
+      intendedPrintWidthIn: updated.intendedPrintWidthIn,
+      artworkWidthPx: null,
+      artworkHeightPx: null,
+    });
+
+    await repo.addMessage(designId, {
+      role: "assistant",
+      content: productionSizeAcknowledgement(resolved, size?.dpi ?? null),
+      metadata: {
+        phase: current.conversation.phase,
+        act: "production_size_set",
+        // Never an ArtworkVersion, never a revision — recorded explicitly so
+        // the transcript itself shows this was a production-spec change.
+        productionSizeOnly: true,
+      },
+    });
+
+    const snapshot = await repo.getProject(designId);
+    if (!snapshot) throw new Error("Project not found");
+    return snapshot;
   }
 
   /** Restores the brief to its state before the most recently accepted revision, if any. */
@@ -487,7 +967,14 @@ export function createConversationCapability(
     if (act.type === "summarize") {
       await presentDesignSummary(designId, workingBrief, stateWithUndo, {
         previousBrief: current.brief,
-        updatedSections: impact.changedSections,
+        // Live Acceptance Cleanup (UPDATED badge): the summary highlights
+        // what the customer CHANGED, which is a strictly narrower set than
+        // what changed in the brief — answering a question for the first
+        // time populates a field, it does not update one.
+        updatedSections: diffEstablishedBriefSections(
+          current.brief,
+          workingBrief,
+        ),
       });
       const snapshot = await repo.getProject(designId);
       if (!snapshot) throw new Error("Project not found");
@@ -550,6 +1037,55 @@ export function createConversationCapability(
       return performUndo(designId, current);
     }
 
+    // Live Acceptance Corrective Pass (Section 2): checked unconditionally,
+    // ahead of everything else — an explicit "no changes" confirmation is
+    // never gated on concept staleness.
+    if (
+      CONFIRM_FINAL_PATTERN.test(trimmed) &&
+      current.project.selectedArtworkVersionId &&
+      !current.project.revisionPending
+    ) {
+      return applyConfirmSelectedDirection(
+        designId,
+        current,
+        current.project.selectedArtworkVersionId,
+      );
+    }
+
+    // Live Acceptance Corrective Pass (Section 3): an explicit request for
+    // alternatives always explores three fresh directions, even though the
+    // default post-selection revision now targets just the one selected
+    // concept. Checked unconditionally, ahead of the staleness-gated
+    // manual-regenerate pattern below.
+    if (ALTERNATIVES_REQUEST_PATTERN.test(trimmed)) {
+      return performRegeneration(designId, state);
+    }
+
+    // Live Acceptance Cleanup (Issue 5): a PRODUCTION-SIZE request is not a
+    // creative revision and must never reach the revision pipeline. Checked
+    // only once the customer has confirmed their final direction — that is
+    // the "Use This Design → Prepare Print-Ready" boundary where print size
+    // is the live question, and gating it there is what keeps an earlier
+    // "make it bigger" reading as the creative instruction it almost
+    // certainly is. See `shared/production-size-intent.ts`.
+    if (current.project.finalDirectionConfirmed) {
+      const sizeIntent = detectProductionSizeIntent(trimmed);
+      if (sizeIntent) {
+        const currentWidth = resolveProductionWidth(
+          current.brief.printPlacement,
+          current.brief.intendedPrintWidthIn,
+        );
+        const requestedWidthIn =
+          sizeIntent.kind === "absolute"
+            ? sizeIntent.widthIn
+            : (currentWidth?.widthIn ?? 0) +
+              (sizeIntent.direction === "larger"
+                ? RELATIVE_SIZE_STEP_IN
+                : -RELATIVE_SIZE_STEP_IN);
+        return applyProductionPrintWidth(designId, current, requestedWidthIn);
+      }
+    }
+
     const conceptStatus = conceptGeneration.describeConceptStatus(
       current.brief,
       current.artworkVersions,
@@ -557,7 +1093,24 @@ export function createConversationCapability(
     );
     if (conceptStatus.status === "needs_update") {
       if (REGENERATE_REQUEST_PATTERN.test(trimmed)) {
-        return performRegeneration(designId, state);
+        // Live Acceptance Corrective Pass (Section 3): the manual
+        // "regenerate" control defaults to revising the selected concept,
+        // same as the automatic path — never three unrelated directions,
+        // unless `ALTERNATIVES_REQUEST_PATTERN` (checked above) explicitly
+        // asked for that.
+        return current.project.selectedArtworkVersionId
+          ? performSelectedConceptRevision(
+              designId,
+              state,
+              current.project.selectedArtworkVersionId,
+              // No literal delta: "regenerate" is a command to apply
+              // changes already captured in the brief, not itself a
+              // description of a change. Prompt Translation falls back to
+              // the RegenerationPlan's section-level changes, which is the
+              // correct source for this path.
+              null,
+            )
+          : performRegeneration(designId, state);
       }
       if (KEEP_CONCEPTS_PATTERN.test(trimmed)) {
         await repo.addMessage(designId, {
@@ -661,6 +1214,26 @@ export function createConversationCapability(
     const shouldMentionRegeneration =
       impact.needsConceptRegeneration && hasExistingConcepts;
 
+    // Sprint 2M Phase 2G (Goal 3/4/6/7): an explicit, unambiguous customer
+    // instruction that touches a concept-relevant field is customer
+    // authority to regenerate automatically — no "Generate Updated
+    // Concepts" click required (AGENTS.md/ARCHITECTURE.md: system-initiated
+    // speculative regeneration remains forbidden; customer-requested
+    // conversational revision does not). "Maybe...", "I'm not sure...", and
+    // bare questions never reach this branch — see `isExplicitRevisionIntent`.
+    if (shouldMentionRegeneration && isExplicitRevisionIntent(trimmed)) {
+      const summaryForAck = designSummary.createSummary(updatedBrief, evaluation);
+      return triggerAutomaticRevision(
+        designId,
+        current,
+        stateWithUndo,
+        impact,
+        summaryForAck,
+        deferredDecision,
+        trimmed,
+      );
+    }
+
     await repo.updateConversationPhase(designId, "revision_received");
     await repo.updateConversationInterviewState(designId, {
       ...stateWithUndo,
@@ -725,7 +1298,16 @@ export function createConversationCapability(
       const current = await repo.getProject(designId);
       if (!current) throw new Error("Project not found");
 
-      if (current.conversation.phase !== "concepts_ready") {
+      // Live Acceptance Corrective Pass (Section 4, Goal 24): reachable
+      // from `concepts_ready` (the normal path) AND from the post-
+      // selection revision loop, so the customer can explicitly return to
+      // an earlier concept — original or a prior revision, any historical
+      // batch, never just the newest one (`artworkVersions` is never
+      // filtered to "current" below) — after deciding a revision was worse.
+      if (
+        current.conversation.phase !== "concepts_ready" &&
+        !REVISION_REQUEST_PHASES.includes(current.conversation.phase)
+      ) {
         throw new Error("Concepts are not ready for selection");
       }
 
@@ -735,6 +1317,11 @@ export function createConversationCapability(
       if (!exists) throw new Error("Concept not found");
 
       await repo.selectArtworkVersion(designId, artworkVersionId);
+      // Live Acceptance Corrective Pass (Section 2): every new selection —
+      // including re-selecting a different concept after a revision —
+      // starts unconfirmed. Only an explicit "no changes"/"Use This
+      // Design" action may set this back to true.
+      await repo.updateProject(designId, { finalDirectionConfirmed: false });
       await repo.updateConversationPhase(designId, "ask_revisions");
       await repo.addMessage(designId, {
         role: "assistant",
@@ -745,6 +1332,104 @@ export function createConversationCapability(
       const snapshot = await repo.getProject(designId);
       if (!snapshot) throw new Error("Project not found");
       return snapshot;
+    },
+
+    async unselectConcept(designId) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+
+      // Already unselected — idempotent, and never posts a second message.
+      if (!current.project.selectedArtworkVersionId) return current;
+
+      // A revision in flight was requested FOR the current selection.
+      // Dropping the selection underneath it would leave a running job
+      // producing artwork for a concept the project no longer points at.
+      if (current.project.revisionPending) {
+        throw new Error(
+          "I'm still updating this concept — once it's ready you can change your selection",
+        );
+      }
+
+      // Never silently invalidate production work. `finalizing` has a
+      // claimable/running FinalArtworkJob behind it, and `print_ready` has a
+      // delivered asset the customer is looking at; both are explicit
+      // lifecycle states with their own exits ("Make Another Change"), not
+      // something a selection change may quietly undo.
+      if (current.project.status === "finalizing") {
+        throw new Error(
+          "Your print-ready artwork is being prepared right now — I can't change the selection until that finishes",
+        );
+      }
+      if (current.project.status === "print_ready") {
+        throw new Error(
+          "Your print-ready artwork is already prepared — choose Make Another Change if you'd like to keep working on the design",
+        );
+      }
+
+      // An approval for a no-longer-selected concept must never stay active:
+      // `FinalArtworkWorkerCapability` only ever acts on the ACTIVE approval,
+      // so superseding here is what stops a late/recovered job from
+      // finalizing artwork the customer has stepped away from. Superseding
+      // never deletes the record (Constitution §6.11).
+      const activeApproval =
+        await repo.getActiveFinalDirectionApproval(designId);
+      if (activeApproval) {
+        await repo.supersedeActiveFinalDirectionApproval(designId);
+      }
+
+      await repo.clearArtworkSelection(designId);
+      await repo.updateConversationPhase(designId, "concepts_ready");
+      await repo.addMessage(designId, {
+        role: "assistant",
+        content:
+          "No problem — nothing is selected now. Take another look and choose the direction you'd like to work with.",
+        metadata: { phase: "concepts_ready", act: "selection_cleared" },
+      });
+
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new Error("Project not found");
+      return snapshot;
+    },
+
+    async exploreNewConceptBatch(designId) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+
+      const approved = await designBrief.getLatestApprovedVersion(designId);
+      if (!approved) {
+        throw new Error(
+          "Cannot generate concepts without an approved design brief",
+        );
+      }
+
+      // Idempotent at this boundary too, so a double click never even
+      // reaches the enqueue path (which is independently idempotent).
+      if (current.project.status === "generating") return current;
+      if (current.project.revisionPending) {
+        throw new Error(
+          "I'm still updating your concept — once it's ready I can explore new directions",
+        );
+      }
+      if (
+        current.project.status === "finalizing" ||
+        current.project.status === "print_ready"
+      ) {
+        throw new Error(
+          "Your print-ready artwork is already being prepared — choose Make Another Change if you'd like to keep exploring",
+        );
+      }
+
+      // Deliberately does NOT re-approve the working brief: the whole point
+      // is that the brief is right and only the creative directions were
+      // wrong. Nothing about the brief, the selection, or any prior batch
+      // changes here.
+      return conceptGeneration.exploreNewConceptBatch(designId, approved.id);
+    },
+
+    async setProductionPrintWidth(designId, requestedWidthIn) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+      return applyProductionPrintWidth(designId, current, requestedWidthIn);
     },
 
     async approveFinalDirection(designId, artworkVersionId) {
@@ -785,12 +1470,28 @@ export function createConversationCapability(
           return approveAndGenerate(designId);
         }
 
-        // Idempotent retry: approval (and generation) already happened for
-        // this brief content — return the current state rather than
-        // re-running generation and duplicating concepts.
+        // Idempotent retry: approval already happened for this brief
+        // content — never re-approve, never duplicate concepts.
         if (POST_APPROVAL_PHASES.includes(phase)) {
           const latest = await designBrief.getLatestApprovedVersion(designId);
           if (latest) {
+            // An approved brief does not prove generation was ever
+            // requested. Approval and enqueue are separate writes with no
+            // shared transaction, so an earlier attempt can have persisted
+            // the version, phase, and status and then failed before the
+            // `GenerationJob` existed — a project stuck forever, since
+            // nothing downstream polls a project that never reached
+            // "generating". Re-entering enqueue is what makes Approve
+            // retry-safe. It is idempotent per (project, approved
+            // version): an existing queued/running job is returned
+            // untouched rather than duplicated.
+            if (current.artworkVersions.length === 0) {
+              return conceptGeneration.generatePlaceholders(
+                designId,
+                latest.id,
+              );
+            }
+
             const snapshot = await repo.getProject(designId);
             if (!snapshot) throw new Error("Project not found");
             return snapshot;
@@ -828,7 +1529,45 @@ export function createConversationCapability(
           "Cannot generate concepts without an approved design brief",
         );
       }
-      return performRegeneration(designId, current.conversation.interviewState);
+      // Sprint 2M Phase 2G (Goal 4/8): idempotent — a regeneration may
+      // already be in flight (e.g. auto-enqueued by an explicit
+      // conversational revision); pressing "Generate Updated Concepts" on
+      // top of that must never create a second brief version/job.
+      if (current.project.status === "generating") {
+        return current;
+      }
+      // Live Acceptance Corrective Pass (Section 3): the persistent
+      // "Generate Updated Concepts" control defaults to revising the
+      // selected concept, same as every other post-selection revision path
+      // — three-direction exploration only when nothing is selected yet
+      // (pre-selection edge case).
+      return current.project.selectedArtworkVersionId
+        ? performSelectedConceptRevision(
+            designId,
+            current.conversation.interviewState,
+            current.project.selectedArtworkVersionId,
+            // A button press carries no literal delta — the changes are
+            // already in the brief. See the same fallback above.
+            null,
+          )
+        : performRegeneration(designId, current.conversation.interviewState);
+    },
+
+    async recoverInterruptedGenerationRequest(designId) {
+      const current = await repo.getProject(designId);
+      if (!current) return null;
+
+      // Mutually exclusive in practice: the approval repair requires the
+      // project to have no generation job at all, which a project far
+      // enough along to have a pending revision never satisfies.
+      const afterApproval = await completeInterruptedApproval(designId, current);
+      return completeInterruptedRevision(designId, afterApproval);
+    },
+
+    async confirmSelectedDirection(designId, artworkVersionId) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+      return applyConfirmSelectedDirection(designId, current, artworkVersionId);
     },
 
     async undoLastChange(designId) {
@@ -931,10 +1670,16 @@ function withResolvedAcknowledgement(
 function naturalizeQuestion(act: InterviewAct, summary: DesignSummaryView): string {
   if (act.type !== "ask") return "message" in act ? act.message : "";
 
-  if (act.section === "productColor" && summary.product?.trim()) {
-    const product = summary.product.trim();
-    const plural = /s$/i.test(product) ? product : `${product}s`;
-    return `What color ${plural} will these print on?`;
+  if (act.section === "productColor") {
+    // Only a value that actually names a print product may be inflected
+    // into a question. Appending "s" to whatever the Product field held
+    // produced "What color Designs will these print on?" from a brief
+    // that had recorded the word "design" as the product — grammar
+    // derived from raw customer text, asked with total confidence.
+    // Anything else falls through to the generic phrasing, which is
+    // always true.
+    const product = productNameForQuestion(summary.product);
+    if (product) return `What color ${product} will you be printing on?`;
   }
 
   if (act.section === "graphics") {
@@ -1035,6 +1780,26 @@ function findRecommendationActions(
   findingId: string,
 ) {
   return assessment.recommendations.find((r) => r.id === findingId)?.actions ?? [];
+}
+
+/**
+ * True Source-Image Targeted Revision: the customer's most recent message.
+ *
+ * Used only by `completeInterruptedRevision`, where the durable
+ * `revisionInstruction` was never written because the process died between
+ * marking the revision pending and enqueueing the job. The message log is
+ * the durable record of what they asked for, and on that path the last
+ * customer message IS the revision request — resuming without it would
+ * hand the provider a source image and no delta.
+ */
+function latestCustomerMessage(project: ProjectSnapshot): string | null {
+  for (let i = project.messages.length - 1; i >= 0; i -= 1) {
+    const message = project.messages[i];
+    if (message?.role !== "user") continue;
+    const trimmed = message.content.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
 }
 
 // Re-exported only so downstream call sites can type revision-derived

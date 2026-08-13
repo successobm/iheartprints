@@ -6,7 +6,10 @@ export {
 } from "./openai-concept-provider";
 export {
   ProviderError,
+  classifyFetchRejectionDispatch,
+  isPossiblyBilledProviderError,
   isRetryableProviderError,
+  type ProviderDispatchState,
   type ProviderErrorClassification,
 } from "./provider-error";
 export {

@@ -86,9 +86,27 @@ Derived from the Constitution and enforced by the current implementation:
 12. **Composition owns environment-driven selection.** Conversation and UI
     code never inspect provider or storage environment variables.
 13. **Idempotency protects durable side effects.** Approval and generation
-    enqueue must tolerate retries without duplicating versions or concepts.
+    enqueue must tolerate retries without duplicating versions or concepts —
+    and, because they are separate writes with no shared transaction, a
+    retry must also *complete* an approval that a prior attempt left
+    half-applied. An approved brief version is never on its own proof that
+    generation was requested.
 14. **Browser closure must not strand generation.** Customer requests only
     enqueue work; an independent worker claims and completes it.
+15. **Customer content is authoritative.** What the customer asked to see in
+    the artwork outranks every downstream preference. Conversation
+    Understanding may reword, tidy, and remove conversational filler, but it
+    must preserve design-critical objects, categories, counts, positions and
+    relationships. Concept directions control creative *treatment*, never
+    required subject matter. Provider defaults (for example a centered
+    composition) are the lowest priority in the system and must never
+    contradict an explicit customer composition. See §13f.
+16. **Design intent accumulates across turns; text intent is explicit.** A
+    later customer turn ADDS to the design description, REFINES the part it
+    contradicts, or REPLACES it only when the customer says so — it never
+    silently overwrites what earlier turns established. And "no wording" is a
+    positive instruction meaning *no lettering of any kind*, never the same
+    thing as an unanswered wording question. See §13g.
 
 ---
 
@@ -157,6 +175,22 @@ Next.js Application
 
 ## 4. End-to-End Customer Workflow
 
+There are **two** first-class workflows. They share the Design Brief, asset
+storage, and print-sizing policy, and share nothing else — see §13h for why
+they are genuinely different operations rather than two entry points to one
+pipeline.
+
+```
+CREATE NEW ARTWORK       "design something for me"        (below)
+UPLOAD EXISTING ARTWORK  "make MY artwork printable"      (§13h)
+```
+
+Which workflow a project is in is **derived**, not stored: a project with an
+`ArtworkPreparation` row is an uploaded-artwork project. There is no workflow
+enum column.
+
+### Create New Artwork
+
 Currently implemented flow:
 
 ```
@@ -218,6 +252,7 @@ and intent remain ephemeral. See §5 and §13a.
 | Generation status | Read-only browser polling; never claims or runs jobs |
 | Finalization status | Read-only browser polling while `preparing`; never claims or runs jobs |
 | Post-approval revisions | Synchronous brief update; regeneration is enqueue-only |
+| Uploaded-artwork upload, analysis, background preparation, approval (§13h) | Synchronous within the customer request — local, deterministic pixel math with no provider call to wait on |
 
 Real provider generation is guarded by configuration
 (`CONCEPT_GENERATION_PROVIDER`, asset storage readiness, and
@@ -425,8 +460,8 @@ Composed into the worker for regeneration jobs only. See §13a.
 | **Inputs** | Design id + approved brief version id |
 | **Outputs** | Snapshot with project status `generating`; `ConceptStatusView` |
 | **Dependencies** | ProjectRepository; concept-relevance policy (status) |
-| **Owns** | Idempotent job creation; status classification of concept batches |
-| **Must never own** | Calling providers; uploading assets; claiming jobs |
+| **Owns** | Idempotent job creation; status classification of concept batches; additional exploration batches for an already-generated brief version (`exploreNewConceptBatch`) |
+| **Must never own** | Calling providers; uploading assets; claiming jobs; mutating or re-approving the Design Brief |
 
 Does not invoke providers. Workers do.
 
@@ -460,6 +495,151 @@ Sprint 2K Phase 3 adds two provider-neutral fields to `GenerationPromptRequest`
   beyond `requiredWording`, rather than an ad hoc prompt hack living inside
   one adapter.
 
+Phase 2A (Create New Artwork print-palette contract) adds two more
+provider-neutral fields, also derived here from existing brief state — **no
+migration**:
+
+- `printPaletteEnforcement: "hard" | "soft" | "none"` — whether
+  `preferredColors` is a required print/render palette (hard), a casual
+  preference (soft), or absent. Hard is derived when preferred colors
+  contrast with the garment **and** the design description still names
+  subject/object colors that are not the print palette (including the
+  live contrast-resolution pattern: black subject objects + white
+  artwork on a black shirt).
+- `subjectOnlyColors: string[]` — color words that appear in subject
+  semantics but are not part of the print palette (empty unless
+  enforcement is `"hard"`). Adapters must preserve subject identity while
+  forbidding those colors as dominant ink.
+
+Garment color (`productColor` / `shirtColor`), subject/object color in
+`designDescription`, and rendered print palette are three distinct
+concepts. Creative directions may vary composition and density; they must
+not dilute a hard print palette, no-text, or exclusions.
+
+### Initial generation vs targeted revision (True Source-Image Targeted Revision)
+
+Generation has **two distinct modes**. They are different operations, not
+two settings of one operation, and nothing in the pipeline may blur them.
+
+```
+INITIAL GENERATION  (and explicit "show me alternatives")
+  approved brief
+    → text-to-image
+    → 3 concept directions
+
+TARGETED REVISION  (the default post-selection revision)
+  selected source artwork (real image bytes)
+  + explicit revision delta
+  + preservation contract
+    → image edit
+    → 1 revised concept
+```
+
+The revision contract is:
+
+> **REVISED ARTWORK = SELECTED SOURCE ARTWORK + CUSTOMER'S REQUESTED DELTA**
+>
+> Preserve everything the customer did not ask to change.
+
+**A targeted revision must never silently degrade to text-to-image.** That
+degradation is the specific defect this architecture exists to prevent: it
+returns an unrelated reinterpretation of the brief that *looks* like a
+successful revision, which is strictly worse than a visible failure. Three
+independent guards enforce it:
+
+1. `GenerationWorkerCapability` resolves the source image before calling the
+   provider and throws `TargetedRevisionSourceError` if it cannot — the job
+   fails, `revisionPending` stays true, and the customer keeps the concept
+   they already had.
+2. `ConceptGenerationProvider.editsSourceArtwork` declares whether an
+   adapter performs a real edit. Any adapter that calls an image model must
+   declare `true`. Only the placeholder/unavailable stubs — which produce no
+   image bytes at all and are unreachable in a configured production
+   environment — declare `false`.
+3. An edit-capable adapter independently refuses a targeted revision that
+   arrives without source artwork (`ProviderError("invalid_request")`), so
+   the guarantee never rests on the worker alone.
+
+#### Where the delta comes from
+
+The Design Brief records design **state** ("the design is a red badge"); it
+can never express a **change** ("change it to a shield"). `RegenerationPlan`
+knows only which brief *sections* were touched, and its descriptions are
+canned section-level sentences. So the delta is carried explicitly:
+
+```
+customer message
+  → GenerationJob.revisionInstruction   (durable, internal-only column)
+  → GenerationIntent.revisionInstruction
+  → PromptTranslation
+  → GenerationPromptRequest.revision : RevisionDirective
+  → image-edit adapter
+```
+
+`RevisionDirective` (`lib/domain/types.ts`) is provider-neutral plain
+language: `requestedChanges[]` (the distinct changes, so "change the font to
+retro and remove the sunset" arrives as **two**), `preserve[]`, `avoid[]`,
+`lockedWording`, `wordingChangeRequested`. `RegenerationPlan` remains the
+source of truth for preserve/avoid/wording and is the fallback for
+`requestedChanges` when there is no literal instruction (the "Generate
+Updated Concepts" button path). `shared/revision-delta.ts` owns the split
+into discrete changes — generic sentence-shape heuristics only, never
+product nouns.
+
+**Required wording protection.** `lockedWording` carries the exact wording
+forward unless the customer's own delta is about the wording itself. A
+typography change ("change the font to retro") is deliberately *not* a
+wording change. An explicit wording change ("change the text to MR2 TURBO")
+lifts the lock and becomes part of the requested delta.
+
+#### Where the source pixels come from
+
+```
+GenerationJob.targetArtworkVersionId
+  → ArtworkVersion (the exact selected concept)
+  → ArtworkVersion.primaryAssetId
+  → AssetCapability.downloadAssetBytes
+  → ConceptGenerationRequest.sourceArtwork : SourceArtworkImage
+```
+
+`SourceArtworkImage` is raw bytes + content type + provenance id — never an
+`ArtworkVersion`, an `AssetRecord`, a storage key, or a signed URL. This
+mirrors the OUTPUT side (`GeneratedAssetPayload`) exactly: resolving storage
+is `AssetCapability`'s job, never a provider adapter's.
+
+#### Lineage
+
+A targeted revision produces exactly **one** new `ArtworkVersion`, retaining
+`sourceArtworkVersionId` (the exact selected source) and
+`conceptDirectionKey` (the same direction lineage). Prior concepts are never
+replaced or deleted (Constitution §6.11).
+
+#### Where the customer lands afterwards
+
+The two modes also end in different conversation phases, because they ask
+the customer for different things:
+
+| Finished job | Conversation phase | Why |
+|---|---|---|
+| Initial generation, or explicit "show me alternatives" | `concepts_ready` | Three directions are waiting to be chosen between; chat is deliberately blocked in favour of choosing |
+| Targeted revision (success **or** failure) | `ask_revisions` | There is nothing to choose between — the single revised concept is auto-selected — and the customer needs to either describe another change or confirm this one |
+
+Leaving a finished targeted revision in `concepts_ready` is what produced
+the live "chat looks stuck" failure: the assistant asked "how does this
+version look?" while `CHAT_BLOCKED_PHASES` refused the answer server-side
+and the Use This Design action (gated on the revision loop) never
+appeared. The failure path needs `ask_revisions` for the same reason — its
+message invites the customer to try the change again.
+
+The completion **message** keeps `metadata.phase: "concepts_ready"` in
+both cases: that marks the "here is artwork" anchor the concept grid
+renders against, which is a property of the event rather than of the phase
+the conversation moves into next.
+
+Auto-selecting the revised concept never confirms it —
+`finalDirectionConfirmed` stays `false`, so Prepare Print-Ready Artwork
+remains unavailable until the customer explicitly says Use This Design.
+
 ### Concept-direction differentiation (Sprint 2K Phase 3)
 
 `lib/domain/concept-directions.ts` is the single, provider-neutral catalog
@@ -484,19 +664,303 @@ directions are applied identically on every generation attempt. Concept
 differentiation therefore survives regeneration automatically; no separate
 regeneration-specific direction logic exists or is needed.
 
+**Detailed-Description Fidelity (Phase 1) refinement.** A direction's fields
+are now its treatment for a single simple required subject; `sceneTreatment`
+and `customerComposedTreatment` state the same creative angle for content
+that requires several elements or that the customer has already positioned.
+`resolveDirectionTreatment(direction, contract)` is the one place they are
+resolved, against `DesignContentContract` (§13f). A direction may change how
+densely and how simply content is drawn; it may never remove required
+subject matter or assert a placement the customer already decided.
+
 ### GenerationWorkerCapability — Active
 
 | | |
 |---|---|
-| **Responsibility** | Claim job → build GenerationIntent → translate → provider → assets → concept evaluation → artwork → assistant message |
+| **Responsibility** | Claim job → build GenerationIntent → translate → resolve source artwork (targeted revision only) → per-intent paid dispatch → assets → concept evaluation → artwork → assistant message |
 | **Inputs** | Claimed `GenerationJob` |
-| **Outputs** | Completed/failed job; artwork versions (with evaluation); assets; customer-safe messages |
+| **Outputs** | Completed/failed job; durable `PaidImageIntent` rows; artwork versions (with evaluation); assets; customer-safe messages |
 | **Dependencies** | ProjectRepository, PromptTranslation, ConceptGenerationProvider, AssetCapability, ConceptEvaluationCapability, RevisionIntelligence (regeneration path), RevisionTimeline + RegenerationIntelligence (via `buildGenerationIntentForJob`) |
-| **Owns** | Generation runtime business logic; initial vs regeneration intent assembly |
-| **Must never own** | HTTP auth, cron scheduling, browser lifecycle; persisting timeline/plan/intent |
+| **Owns** | Generation runtime business logic; initial vs regeneration intent assembly; resolving the source artwork bytes for a targeted revision; deciding whether a paid image is bought or reused |
+| **Must never own** | HTTP auth, cron scheduling, browser lifecycle; persisting timeline/plan/intent; provider dialect |
 
 Evaluation failure never discards concepts and never changes customer-facing
 copy in Phase 1.
+
+For a targeted revision against an edit-capable provider, the worker resolves
+the selected concept's real image bytes through `AssetCapability` and passes
+them as `ConceptGenerationRequest.sourceArtwork`. Failure to do so throws
+`TargetedRevisionSourceError` and fails the job — there is deliberately no
+text-to-image fallback. See "Initial generation vs targeted revision".
+
+#### Paid image idempotency (Phase 2C0.5)
+
+Generation-job ENQUEUE has always been idempotent. Paid EXECUTION was not:
+initial generation dispatches three directions sequentially, so OpenAI could
+bill Bold and Soft and then Minimal could fail. Nothing durable recorded that
+Bold and Soft had already been bought, so a reclaim of that job regenerated —
+and re-billed — all three.
+
+The unit that fixes this is `PaidImageIntent`, one durable row per LOGICAL
+paid image, in its own `paid_image_intents` table. No existing table could
+carry it: `generation_jobs` is one row per job; `artwork_versions` are written
+once, in a batch, only after every direction already succeeded (and making
+them per-direction would expose a partially-completed concept set, which this
+phase must not do); `assets` are written only after the paid call returns,
+carry no direction identity, and have no uniqueness constraint. Making a paid
+call at-most-once needs a real UNIQUE constraint, so it needs a migration.
+
+**Identity** (`capabilities/shared/paid-image-intent.ts`) binds only durable,
+deterministic facts:
+
+```
+paid-image:v1:<projectId>:<generationJobId>:<kind>:e<epoch>:<scope>
+kind  = initial_concept | targeted_revision | replacement
+scope = d=<direction>                       (initial concept)
+        t=<targetArtworkVersionId>:d=<direction>  (targeted revision)
+        d=<direction>:ri=<replacedPaidIntentKey>  (Phase 2C replacement)
+        d=<direction>:r=<replacedArtworkVersionId> (replacement of a
+                                                    persisted ArtworkVersion)
+```
+
+A Phase 2C replacement names the intent it supersedes (`ri=`) rather than an
+`ArtworkVersion` id, because of *when* it happens: replacement is resolved
+before any `ArtworkVersion` row exists for the batch, so the thing being
+replaced has no customer-visible id yet. The initial intent's own key is the
+durable identity it does have, and it is pure over the same durable facts —
+so a reclaim rebuilds both keys byte-for-byte and reuses the image.
+
+It never encodes an attempt number, timestamp, UUID, worker identity, or
+provider request id — every one of those changes on a reclaim, and any of
+them leaking in would make recovery re-buy artwork. Prompt text is
+deliberately not hashed: a genuinely different prompt means a different
+approved brief version, which means a different job, which is already a
+different key. An intentional Explore/new batch owns its own `GenerationJob`
+and so lands on different keys by construction.
+
+**Execution ordering** (`generation-worker/paid-image-intent-executor.ts`),
+which is where the whole guarantee lives:
+
+1. RESERVE before paying — a durable row exists before any request leaves.
+2. REUSE before paying — a succeeded intent short-circuits, no call made.
+3. ADOPT before paying — an orphaned asset stamped with the intent key is
+   recovered rather than re-bought.
+4. AUTHORIZE before paying — `beginPaidImageIntentDispatch` is a conditional
+   write; refused means the provider is never contacted.
+5. PERSIST before claiming success — "succeeded" means bytes are durably
+   stored, not merely returned.
+6. FENCE the success write — a `claimToken` refuses a zombie worker's late
+   write instead of letting it overwrite the live worker's result.
+
+There is deliberately no fallback that regenerates everything.
+
+**Budget.** Counting INTENTS rather than calls is what makes recovery free:
+recovering a succeeded intent matches the same row, and a transport retry
+bumps `dispatches` on the same row — only a genuinely new logical intent takes
+a new `paid_intent_ordinal`. `unique (generation_job_id, paid_intent_ordinal)`
+makes slot allocation atomic under concurrency, and a CHECK bounds it at 5:
+three initial directions plus the two replacements Phase 2C spends.
+
+**Customer-visible behavior.** `ArtworkVersion` rows are still created in one
+batch after every intent resolves, so no partially-completed concept set is
+ever exposed, and direction order is unchanged. Concept Evaluation is
+non-billable and is always re-run fresh (never cached on the intent). It can
+never cause an unbounded regeneration — the one thing it *can* cause is a
+single bounded replacement, described next.
+
+#### Failed paid-intent durability (Phase 2C.2C)
+
+Phase 2C0.5 made the paid DECISION durable. It did not make the paid FAILURE
+durable, and a live run showed what that costs. A Soft replacement (ordinal 4,
+epoch 1) reached OpenAI, was issued a request id, and was billed. Local
+persistence then failed, and the durable row ended `status = reserved`,
+`provider_request_id = null`, `last_error = null`, `result = null` — attached
+to a `completed` job, under a `concepts_ready` project, with the direction
+withheld and the replacement log reporting `paidCallMade: false`. Money had
+moved and nothing durable said so.
+
+Three gaps, each fixed at its own layer. **No migration**: every field used
+already exists on `paid_image_intents`.
+
+**1. Evidence is written on every begun dispatch, not only at the ceiling.**
+`completePaidImageIntent` could only write a TERMINAL status, so a failure
+with retries remaining had nowhere to go. The new
+`ProjectRepository.recordPaidImageIntentFailure` is its non-terminal
+counterpart: same `claimToken` fencing, writes `last_error` and
+`provider_request_id`, and touches `status` only when the caller asks for a
+terminal write. It never modifies a `succeeded` intent (a durable success is
+never downgraded by a late writer) and never clears a request id it already
+knows.
+
+The executor also captures the provider request id from the drafts the
+provider RETURNED, before persistence runs. Previously it was read only from
+successfully-persisted concepts, which made the one case where it matters most
+— billed, then local failure — structurally incapable of recording it.
+
+**2. Failures are classified by WHERE they happened**
+(`capabilities/shared/paid-image-failure.ts`), not collapsed into an opaque
+`local_failure`: `provider_not_dispatched`, `provider_ambiguous`,
+`provider_billed_unusable`, `local_decode_failure`, `storage_upload_failure`,
+`asset_persistence_failure`, `intent_completion_failure`, `fenced_out`,
+`budget_blocked`, `unknown_local_failure`. `ProviderError` remains the sole
+authority on provider-side failure and is read rather than replaced; the one
+new error type, `PaidImagePersistenceError`, exists because from outside
+`AssetCapability` "storage refused the bytes" and "the database refused the
+row" are indistinguishable — and those are the two failures that most need
+telling apart once money has moved. `describePaidImageFailure` is the single
+sanitization choke point: no keys, headers, bytes, base64, or prompt text ever
+reach `last_error` or a log line.
+
+**3. `paidCallMade` reflects payment, not asset success.** The replacement
+path inferred payment from whether the replacement ASSET completed. It now
+reads durable state: the intent's `dispatches` counter moving, AND the
+recorded failure class not proving the request never left the process (a DNS
+failure increments the counter but bills nothing). An unclassified failure
+defaults to "billed" — the expensive reading is the safe one.
+
+**Terminalization is parent-completion hygiene, and only that.**
+`recoverAbandonedJobs` only ever sweeps `running` jobs, so a paid intent left
+`reserved` with `dispatches > 0` when its job intentionally completes is not
+outstanding work — it is a permanently stranded row that reads like outstanding
+work. `GenerationWorkerCapability.completeGenerationJob` (the one place a job
+is marked completed) fails those intents while preserving `last_error`,
+`provider_request_id` and `dispatches`. Each condition is load-bearing:
+
+- only at INTENTIONAL completion — a job that fails or is reclaimed still
+  intends recovery, and its intents stay retry-eligible within their existing
+  dispatch budget;
+- only `dispatches > 0` — failing a never-dispatched reservation would invent
+  a spend record;
+- fenced on the row's own `claimToken` — if a worker began a dispatch in
+  between, the fenced write returns `null` and the live dispatch is left alone.
+
+This changes no budget: 3 initial + at most 2 replacements, 5 logical intents
+per job, 3 dispatches per intent, replacement epoch 1. It does not claim
+exactly-once external billing — an ambiguous post-dispatch failure remains
+re-dispatchable within the unchanged per-intent ceiling.
+
+#### Automatic hard-fail concept replacement (Phase 2C / 2C.3A)
+
+Phase 2B made a deterministic, pixel-level print-palette verdict available
+but deliberately acted on nothing. Phase 2C originally treated inferred
+`printPaletteEnforcement === "hard"` + deterministic `"fail"` as automatic
+paid-replacement authority. **Phase 2C.3A corrects that authority:**
+
+Inferred `"hard"` remains **prompt emphasis / contrast guidance** to the
+image model. It is **not**, by itself, authority to purchase another image.
+
+**Trigger** (`generation-worker/hard-palette-replacement-policy.ts`), both
+conditions required:
+
+```
+deriveExplicitInkRestriction(brief) ≠ null   (high-precision customer language)
+AND
+deterministic FAIL with evidence that violates that restriction
+```
+
+Explicit restriction is derived from existing brief text
+(`additionalInstructions`, `exclusions`, `designDescription`) — phrases such
+as "white ink only", "one color white ink only", "no black ink", "do not use
+black ink". Preferred colors, garment color, subject color words ("black
+Harley", "use white so it shows"), and inferred hard enforcement alone are
+**not** restrictions.
+
+`warn`, `not_applicable`, soft enforcement, an absent verdict, advisory
+garment-matching / imperfect palette-dominance FAILs without an explicit
+restriction, and every subjective/vision judgement are explicitly NOT
+triggers. Vision can neither cause a replacement nor reverse a hard FAIL
+(Phase 2B precedence, unchanged). Phase 2B **measurements** are retained for
+diagnostics; only their **spend authority** changed.
+
+**Where it runs.** After every candidate in the batch has been evaluated and
+*before* a single `ArtworkVersion` row is written. That position is the whole
+design: a customer never sees an *explicit-restriction-violating* concept that
+later disappears when it can be replaced. Advisory palette FAILs remain
+customer-visible. The rejected original (when withheld after a failed
+explicit-restriction replacement) stays fully intact internally — its
+`PaidImageIntent` row, its stored bytes, and its evaluation are all preserved
+for lineage; nothing is deleted or mutated.
+
+**Bounds.** One replacement per failed direction (epoch fixed at `1` — there
+is no epoch 2 and nothing computes one), at most two per job, at most five
+logical paid images total. There is deliberately **no replacement counter in
+application code**: a replacement is attempted by reserving a paid-intent
+slot, and the durable budget refusing that reservation *is* the limit —
+refused before the provider is contacted. That is what makes the bound
+survive a crash, a reclaim, and two workers racing. Order is catalog
+direction order (Bold & Direct, Soft & Illustrated, Minimal Badge), fixed and
+independent of async timing, so when all three fail the same two directions
+are replaced on every run.
+
+**The replacement request** is the same request as the candidate it replaces
+plus one provider-neutral flag, `GenerationPromptRequest.printPaletteCorrection`
+(derived via `withPrintPaletteCorrection`, never assembled in the worker).
+Same brief, same direction, same hard palette, same wording contract, same
+exclusions, same model/quality/size/background — a replacement is that
+concept corrected, not a different design, and no quality tier is bumped. The
+adapter owns the corrective wording, which names no threshold, reason code,
+or number.
+
+**Transparency / outer-canvas contract (Phase 2C.2A + 2C.3A).** Outer canvas
+must be real alpha — never an opaque plate, shirt photo, or mockup.
+Phase 2C.3A softens the earlier universal ban on garment-matching subject
+interiors: intentional dark / garment-matching printed artwork is allowed
+unless the customer stated an **explicit ink restriction**. Stronger
+prohibition wording is added only when `explicitInkRestriction` is present
+on the prompt. Soft/none palettes do not invent the hard outer-canvas block.
+The Phase 2C corrective block applies on replacements (now reserved for
+explicit-restriction violations) — still without validator numbers or reason
+codes. No worker budget, model/quality, or Phase 2B threshold changes.
+
+**Outcome policy** for an evaluated replacement:
+
+| Verdict | Result |
+|---|---|
+| `pass` | accepted, customer-visible |
+| `warn` | accepted — WARN is customer-visible for an original, so applying a stricter bar to a replacement would be incoherent |
+| `fail` that still violates the explicit ink restriction | rejected; **no second replacement**; the direction is withheld |
+| advisory `fail` without explicit-restriction evidence | accepted (customer judges) |
+| `not_applicable` | accepted but forced to `needs_review` — never claimed as verified-compliant |
+
+**Degraded outcomes.** A direction that cannot be rescued after an
+*explicit-restriction* replacement failure is withheld rather than shown, so
+the customer may receive two concepts instead of three; the completion
+message is phrased to match what they can actually see, and the message
+metadata carries a `conceptsWithheld` count. **Phase 2D** renders that
+count as lightweight customer-safe short-set copy on the concept grid
+(never reason codes, evaluator verdicts, or thresholds). If
+*no* direction can be delivered, the job fails with
+`CONCEPT_SET_UNRESOLVABLE:` rather than completing with an empty set. A
+failure while trying to *improve* the batch never destroys it: replacement
+resolution cannot throw, and the healthy concepts are always delivered.
+Advisory garment-matching alone never withholds and never buys a 4th image.
+
+**No migration.** Phase 2C / 2C.3A adds no column and no table. Spend identity
+lives in the existing `paid_image_intents`; verdicts live in the existing
+`ArtworkVersion.evaluation` JSONB; explicit restriction is derived in-memory
+from existing brief text. The degraded-set signal lives in existing
+conversation-message metadata. Observability is
+`[concept-generation] hard-palette-replacement` and
+`[concept-generation] concept-set-outcome`
+(`lib/config/concept-replacement-logging.ts`) — whitelisted fields only,
+never prompt text, bytes, or credentials.
+
+**Unit economics (GPT Image 1 medium ≈ $0.042).** Normal 3-concept success and
+advisory palette/contrast issues stay at **3 paid intents ≈ $0.126**. One
+explicit-restriction replacement ≈ **$0.168**. Two replacements hit the
+ceiling at **5 intents ≈ $0.210**. Design-quality heuristics must not turn a
+3-call generation into a 4th or 5th paid call.
+
+**Transport policy.** `ProviderError` now carries a `dispatch` state —
+`not_dispatched` / `dispatched_ambiguous` / `dispatched_billed` — separate
+from its classification, because "why did it fail" and "could it already have
+been billed" are different questions. Only provably pre-dispatch failures are
+retried at the transport layer; ambiguous and billed-unusable failures
+propagate to the paid-intent layer, which owns the durable, cross-worker
+dispatch ceiling. Residual risk is bounded and explicit: an ambiguous
+post-dispatch failure the provider actually billed can be paid for at most
+`MAX_PAID_DISPATCHES_PER_INTENT` times for one image. No provider-side
+idempotency key is claimed for this endpoint, because none is documented.
 
 ### ConceptEvaluationCapability — Active (architecture only)
 
@@ -557,12 +1021,32 @@ See §13 for the full evaluation contract and §21 for configuration.
 
 | | |
 |---|---|
-| **Responsibility** | Persist asset metadata; upload concept images; signed URLs; cleanup |
+| **Responsibility** | Persist asset metadata; upload concept, production, and customer-supplied images; signed URLs; cleanup |
 | **Inputs** | Image bytes + metadata |
-| **Outputs** | `AssetRecord` pairs (primary + optional thumbnail) |
+| **Outputs** | `AssetRecord` pairs (primary + optional thumbnail); single production or customer-artwork `AssetRecord` |
 | **Dependencies** | ProjectRepository, AssetStorageProvider, ThumbnailGenerator |
 | **Owns** | Asset lifecycle boundary |
 | **Must never own** | Provider prompt dialect; brief mutation |
+
+`uploadCustomerArtwork` (§13h) is deliberately its own method rather than a
+reuse of `uploadConceptImage`: every provenance field on the latter
+(`providerKey`, `generationJobId`) is wrong for artwork the customer
+supplied, and no thumbnail companion is generated because a third asset with
+ambiguous provenance would add nothing.
+
+### ArtworkPreparationCapability — Active (Existing Artwork → Print Ready Phase 1)
+
+| | |
+|---|---|
+| **Responsibility** | The Upload Existing Artwork workflow: ingest, analyze, classify, isolate background, clean edges, record approval |
+| **Inputs** | Uploaded image bytes + declared content type + filename; production context (product, garment colour, print location) |
+| **Outputs** | `ArtworkPreparation` lifecycle record; immutable `customer_upload` asset; derived transparent `png` asset; `prepared_upload` `ArtworkVersion` on approval; already-phrased customer view |
+| **Dependencies** | ProjectRepository, AssetCapability, DesignBriefCapability |
+| **Owns** | Upload ingress safety, deterministic analysis, repairability classification, edge-connected background isolation, enclosed-cavity classification, fringe decontamination, prepared-artwork approval |
+| **Must never own** | Any provider port (it has none); GenerationJob/FinalArtworkJob creation; mutation of the uploaded original; creative reinterpretation of any kind; customer-facing phrasing of analysis internals |
+
+See §13h. Every operation is local and deterministic — there is no provider
+to configure, disable, or accidentally call.
 
 ### AssetStorageProvider — Partial
 
@@ -580,10 +1064,16 @@ Port + implementations:
 | Adapter | Role |
 |---|---|
 | `PlaceholderConceptProvider` | Deterministic placeholder concepts (no real images) |
-| `OpenAIConceptGenerationProvider` | Real image bytes via OpenAI Images API |
+| `OpenAIConceptGenerationProvider` | Real image bytes via OpenAI Images API — `/v1/images/generations` for initial generation, `/v1/images/edits` for a targeted revision |
 | `UnavailableConceptGenerationProvider` | Fail closed with safe error codes |
 
 Resolution: `resolveConceptGenerationProvider` in composition/config layer.
+
+Every `ConceptGenerationProvider` declares `editsSourceArtwork`. `true` means
+a targeted revision is performed as a real edit of the supplied source
+artwork, and the worker must supply `sourceArtwork` for every targeted
+revision (failing the job if it cannot). Any adapter that calls an image
+model must declare `true` — see "Initial generation vs targeted revision".
 
 ### PrintValidationCapability — Active architecture, wired as provisional intelligence (Sprint 2M Phase 1 + Phase 2A)
 
@@ -667,7 +1157,12 @@ one production path this product actually generates artwork for today
 (never marked `"confirmed"`).
 
 Target physical print dimensions come from `shared/print-placement-dimensions.ts`,
-keyed by `PrintPlacement` (`full_front`/`full_back`: 12×14in;
+keyed by `PrintPlacement` — and, since the Live Acceptance Cleanup,
+overridden by the customer's own chosen production width when they set one
+(`TShirtDesignBrief.intendedPrintWidthIn`, threaded in as
+`deriveProductionRequirements({ intendedPrintWidthIn })`; see the resolved
+audit finding below). The placement table supplies the default and the
+printable band (`full_front`/`full_back`: 12×14in;
 `left_chest`: 4×4in; `sleeve`: 3×3in — chosen so the sprint's own worked
 example, a 1024×1024px concept at a 12×14in full-back target ≈ 85 PPI,
 reproduces exactly). Banners/signs use a fixed generic placeholder size
@@ -808,16 +1303,37 @@ scenario driven end-to-end through the real worker pipeline, confirming
   provisional readiness at scale), it should introduce a distinctly named
   column or an explicit `{ stage: "provisional" | "final", status }` shape
   — never silently overload this one.
-- `TShirtDesignBrief.intendedPrintWidthIn` exists on the domain type but is
-  never populated by any extraction/interview path and is **not** carried
-  into `DesignBriefSnapshotContent` (the frozen approval snapshot) — so
-  even if a customer's intended print width were somehow captured, an
-  approved concept could not read it today. This is why target physical
-  dimensions in Phase 1 are derived from `PrintPlacement` (a coarse,
-  internal size table) rather than a customer-specified inch value. A
-  future sprint that wants a real customer-specified physical size needs to
-  both populate this field and add it to `DesignBriefSnapshotContent` — out
-  of scope for Phase 1.
+- **Resolved — Live Acceptance Cleanup (Issue 5).**
+  `TShirtDesignBrief.intendedPrintWidthIn` is now the authoritative,
+  persisted owner of customer-chosen production print WIDTH. It is written
+  only by `DesignBriefCapability.setIntendedPrintWidth`, driven by
+  `ConversationCapability.setProductionPrintWidth` (the "Change Size"
+  action, or a natural-language request at the final-direction stage), and
+  read by `FinalArtworkWorkerCapability` at run time.
+
+  It remains deliberately **excluded** from `DesignBriefSnapshotContent` and
+  from `diffBriefSections`, and that exclusion is load-bearing rather than
+  an oversight: physical size is a **production specification**, not creative
+  content. Because it is not versioned brief content, choosing a size can
+  never approve a new brief version, mark concepts stale, supersede a final
+  direction, create an `ArtworkVersion`, or reach an image provider —
+  exactly the separation the Constitution requires between "the approved
+  design" and "how it is manufactured". Size is read from the *working*
+  brief, not the frozen snapshot, for the same reason.
+
+  Bounds, defaults, and clamping live in `shared/print-placement-dimensions.ts`
+  (`defaultWidthIn` / `minWidthIn` / `maxWidthIn` per placement, resolved by
+  `resolveProductionWidth`), so there is exactly one definition of what a
+  placement can physically print. `sizingPolicyForPlacement(placement,
+  requestedWidthIn)` applies the choice; every downstream consumer
+  (`deriveProductionRequirements` → `ProductionRequirements.sizing` →
+  `normalizeProductionRaster`) already flowed from that policy, so the
+  300-PPI guarantee holds at any chosen width by construction (output pixels
+  are `targetWidthIn x targetPpi`; 12in → 3600px).
+
+  No size parameter exists anywhere on the finalize request path, so a stale
+  or forged request cannot override the persisted intent, and nothing is ever
+  inferred from whatever pixel dimensions a generator happened to produce.
 - **Sprint 2M Phase 2A:** `GenerationWorkerCapability` now calls
   `PrintValidationCapability` — via `runProvisionalPrintValidation`,
   immediately after Concept Evaluation completes for each concept, on both
@@ -923,6 +1439,14 @@ Not capabilities; pure data/phrasing imported by multiple capabilities:
 - `shared/field-normalization.ts` (Sprint 2K Phase 3) — deterministic
   product/color/print-location display normalization applied where a
   Design Brief field is written; required wording is never touched by it
+- `shared/chat-input-policy.ts` — the single rule for when free-text chat
+  is the expected interaction (`CHAT_BLOCKED_PHASES`,
+  `REVISION_LOOP_PHASES`). Imported by `ConversationCapability`, which
+  refuses a message in a blocked phase, AND by the chat UI, which disables
+  the composer in exactly the same phases. Deliberately shared: two copies
+  drifted apart, and a drifted copy reads to a customer as a broken
+  product (an input that throws on send, or a dead input the platform
+  would have accepted)
 - `lib/domain/concept-directions.ts` (Sprint 2K Phase 3) — provider-neutral
   concept-direction catalog + customer-facing description builder, shared
   by every `ConceptGenerationProvider` adapter (domain module, not
@@ -1093,8 +1617,10 @@ Test helpers: `resetCapabilityGraphForTests`,
 `cleanupTempWorkspace` (Windows-safe temp cleanup). Automated tests that
 need jobs to complete await `processNextJob` / `runBatch` or the worker
 route explicitly — they never auto-trigger. Interactive `next dev` may
-kick `workerScheduler.runBatch()` in-process after enqueue (see
-`local-generation-trigger.ts`); production remains scheduler/worker driven.
+kick `workerScheduler.runBatch()` / `finalArtworkScheduler.runBatch()`
+in-process after durable enqueue (see `local-generation-trigger.ts` and
+`local-final-artwork-trigger.ts`); production remains scheduler/worker
+driven.
 
 ---
 
@@ -1112,6 +1638,7 @@ Primary types live in `src/lib/domain/types.ts`.
 | `TShirtDesignBrief` | Mutable working Design Brief |
 | `DesignBriefVersion` | Immutable approved snapshot (`content` + version metadata) |
 | `GenerationJob` | Durable generation attempt (internal; not in customer snapshot) |
+| `PaidImageIntent` | Phase 2C0.5: durable at-most-once record of ONE paid image intent — the unit that makes recovery reuse an image instead of re-buying it (internal; not in snapshot) |
 | `ArtworkVersion` | Concept (or future revision/final) with brief/job/asset/evaluation provenance (internal) |
 | `CustomerArtworkVersion` | Customer-safe projection of `ArtworkVersion` (Sprint 2K Phase 1) |
 | `AssetRecord` | File metadata + opaque `storageKey` (internal; not in snapshot) |
@@ -1123,6 +1650,7 @@ Primary types live in `src/lib/domain/types.ts`.
 | `ApiProjectSnapshot` | Customer/API aggregate: same shape with sanitized `CustomerArtworkVersion[]` + a derived `finalization` view |
 | `FinalDirectionApproval` | Sprint 2M Phase 2B: durable, append-only "this is my final direction" decision, targeting one exact `ArtworkVersion` (internal; not in snapshot) |
 | `FinalArtworkJob` | Sprint 2M Phase 2B: idempotent production-finalization request keyed 1:1 to one approval (internal; not in snapshot; Phase 2B never claims/runs it) |
+| `ArtworkPreparation` | §13h: the Upload Existing Artwork lifecycle for one customer file — immutable original, derived prepared asset, analysis/preparation diagnostics, explicit approval. Its existence IS the workflow identity |
 
 ### Key relationships
 
@@ -1130,12 +1658,20 @@ Primary types live in `src/lib/domain/types.ts`.
 - Approval freezes `DesignBriefSnapshotContent` into a new `DesignBriefVersion`
 - Concepts (`ArtworkVersion`) reference `designBriefVersionId`
 - Generation jobs reference `designBriefVersionId` and produce artwork/assets
+- Generation jobs own zero or more `PaidImageIntent` rows — one per logical paid image, unique per `(project, intentKey)` and per `(job, budget slot)`
 - Assets may reference `generationJobId`; artwork may reference primary/thumbnail asset ids
 - Current vs previous concept batches are derived (not a separate table)
 - Explicit deferrals live on `brief.deferredSections`
 - Required wording is derived/normalized via `src/lib/domain/required-wording.ts`
 - One-level undo: `interviewState.lastRevision` stores previous brief snapshot
 - Conversation lifecycle: new projects use phase `interviewing`; legacy phases remain readable
+- §13h: an `ArtworkPreparation` references its immutable `originalAssetId`,
+  its derived `preparedAssetId`, and (once approved) a
+  `prepared_upload` `ArtworkVersion`. Original → prepared lineage lives here
+  rather than on `AssetRecord` (whose `vectorAssetId`/`printAssetId` both mean
+  something narrower) or on `ArtworkVersion.sourceArtworkVersionId` (which
+  means "a targeted revision of that artwork version"). A project with a
+  preparation is an uploaded-artwork project; there is no workflow enum
 - Sprint 2M Phase 2B: a `FinalDirectionApproval` references exactly one
   `artworkVersionId` + the `designBriefVersionId` it was generated against;
   at most one row per project is `"active"`. A `FinalArtworkJob` references
@@ -1231,6 +1767,44 @@ Clarifications:
   version must exist and belong to the project)
 - Approval and enqueue are idempotent: repeat approval/generate for the
   same version does not duplicate versions or concepts
+- Approval and enqueue are also retry-*completing*, not just
+  retry-tolerant: an approved version with no concepts and no
+  `GenerationJob` means an earlier attempt failed between the two writes,
+  so pressing Approve again enqueues exactly one job rather than returning
+  a snapshot as if generation were already underway. The customer-facing
+  "generating" acknowledgement is written only after the job is durable —
+  never by the approval step itself
+  (`conversation-capability.ts`'s `approveAndGenerate` /
+  `submitDesignBriefDecision`; regression test
+  `conversation/approval-enqueue-recovery.test.ts`)
+- Loading a project repairs that state too, because the customer has no
+  way to ask for it: once the phase moves past
+  `awaiting_summary_confirmation` the Design Summary's Approve control is
+  no longer rendered, and a project that never reached `generating` is
+  polled by nothing.
+  `ConversationCapability.recoverInterruptedGenerationRequest` (awaited by
+  `getConversation`) is therefore the one read path permitted to write, and
+  only in the provably-stranded shape: approved brief, zero concepts, and
+  **zero generation jobs in any state**. Keying off "no job at all" rather
+  than "no active job" is what stops a job that already failed and
+  exhausted its retry budget from restarting generation on every page load.
+  This is not system-initiated generation — the customer already approved;
+  the platform is completing a request it dropped (see §Constitution
+  alignment on speculative regeneration)
+- The same repair covers the identical window one step later, on revision:
+  `triggerAutomaticRevision` writes `PrintProject.revisionPending` (and
+  supersedes any active final-direction approval) before the regeneration
+  job exists, and only real revised artwork ever clears that flag — so a
+  failure in between bars finalization permanently with nothing running to
+  lift the bar. The revision arm requires a pending revision, a source
+  concept, and an approved brief version with **neither artwork nor a
+  generation job in any state**, then re-requests exactly that revision.
+  `revisionPending` is never cleared by the repair; a failed regeneration
+  keeps it true, because the customer's revision genuinely has not
+  happened. Correspondingly, the revision acknowledgement no longer claims
+  "I'm updating the concept now" on the enqueue path — that claim comes
+  from the enqueue announcement, after the job is durable
+  (regression test `conversation/revision-enqueue-recovery.test.ts`)
 
 ---
 
@@ -1798,16 +2372,390 @@ Current post-approval revision path:
 8. Customer may regenerate → new approved path / new job / new batch
 9. Prior batches preserved
 10. Single-level undo via `lastRevision`
-11. UI: RevisionTimeline, deferred decision cards, recommendation cards
+11. UI: DesignHistory (artwork-version-lineage milestones — see "Customer-
+    facing Design History" below), deferred decision cards, recommendation
+    cards
 
 Concept-relevance sections (`shared/concept-relevance.ts`) currently
 include product, productColor, colors, graphics, requiredWording, style,
-printLocation. Audience/purpose/exclusions/notes/references do not, by
-themselves, mark concepts stale under today’s generation implementation.
-These rules may expand once Concept Evaluation gating exists (Phase 2+).
+printLocation, and — as of Sprint 2M Phase 2G — **exclusions**.
+Audience/purpose/notes/references do not, by themselves, mark concepts
+stale under today's generation implementation; a change to any of them
+does not visibly change what a correct concept should contain. The rule
+(Sprint 2M Phase 2G, Goal 12): a field is concept-relevant exactly when a
+change to it changes what should or should not visibly appear in the
+artwork — a positive instruction (add this) and a negative one (never show
+this) are equally concept-relevant. `exclusions` was the one field this
+rule already covered in spirit but the implementation missed; nothing else
+changed by this sprint. These rules may expand further once Concept
+Evaluation gating exists (Phase 2+).
 
 `RevisionCapability` remains a future artwork-level lifecycle stub and is
 not the live revision path.
+
+### Concept batches, unselect, and "Show Me 3 New Concepts" (Live Acceptance Cleanup)
+
+Live acceptance found the customer had only two options once concepts
+existed: pick one, or Start Over. Both were wrong when the *Design Brief was
+correct and only the creative directions were not*, and there was no way
+back to "none selected" after a misclick.
+
+**A batch is now (approved brief version, generation job), not just approved
+brief version.** `shared/concept-batches.ts` is the single definition;
+`describeConceptStatus` returns only the newest batch as `currentConcepts`
+and moves earlier same-version batches into `previousBatches`. That was
+previously a distinction without a difference — one version could only ever
+have one batch — and `ConceptGenerationCapability.exploreNewConceptBatch`
+is what makes it real: a second batch of three from the SAME approved
+version, with no brief mutation, no re-approval, and no selection or final
+approval inferred. Prior batches are never deleted and stay selectable
+(Constitution §6.11).
+
+Two consequences worth stating explicitly, because both were latent
+assumptions rather than deliberate rules:
+
+- **`GenerationWorkerCapability`'s idempotency guard is keyed on the JOB**
+  (`artwork.generationJobId === job.id`), not on the approved brief version
+  having any artwork. Keying on the version would silently no-op every
+  additional batch. The job-level key is also the more precise statement of
+  what the guard was always for: "a previous run of this exact job already
+  succeeded and this claim lost the race."
+- **`CustomerArtworkVersion.conceptBatchOrdinal`** carries batch identity to
+  presentation surfaces. It is an opaque counter (1, 2, 3, …) assigned by
+  `assignConceptBatchOrdinals`, never the `generationJobId` it derives from —
+  the customer projection strips every internal id, but Design History and
+  the concept grid still have to tell one batch from another.
+
+**Unselect** (`ConversationCapability.unselectConcept` →
+`ProjectRepository.clearArtworkSelection`) is the explicit inverse of
+`selectConcept`. It is server-owned, never a client-side visual reset:
+`selectedArtworkVersionId` and every `ArtworkVersion.isSelected` are cleared
+together (the same reason `selectArtworkVersion` owns both writes), and
+`finalDirectionConfirmed` goes with them — a confirmation can never outlive
+the selection it was made about. Any active `FinalDirectionApproval` is
+explicitly SUPERSEDED rather than orphaned, since
+`FinalArtworkWorkerCapability` only ever acts on the active approval.
+
+It **refuses** — rather than resolving quietly — while a revision is pending
+or while `PrintProject.status` is `finalizing`/`print_ready`. Those states
+own the selection right now, and invalidating them behind the customer's
+back is precisely the "silently invalidate a production approval" failure
+the lifecycle rules in §12a exist to prevent. Nothing is ever deleted:
+concepts, batches, revisions, and history all survive untouched.
+
+---
+
+## 12a. Revision Lifecycle & Finalization Safety (Sprint 2M Phase 2G)
+
+### Why
+
+A live failure exposed that `PrintProject.status === "revision_requested"`
+— written on every message in the post-selection revision loop, including
+ones that changed nothing — was too weak a signal to gate finalization on,
+and that an explicit customer correction could silently fall through to
+`additionalInstructions` (invisible to concept-relevance) instead of
+updating the Design Brief field it was actually correcting. The customer
+said "the wording is the boat name shouldn't appear on the design... use
+the word GLORIOUS" after selecting a concept generated from a
+mis-extracted required-wording answer; the system replied "Got it — I've
+updated the notes," left "Prepare Print-Ready Artwork" available, and
+queued a `FinalArtworkJob` for artwork the customer had just rejected.
+
+### The clarified rule — durable, not just this sprint's fix
+
+The prior rule, "automatic regeneration is forbidden," is clarified (not
+reversed) to distinguish WHO initiates it:
+
+- **System-initiated speculative regeneration remains forbidden.** Nothing
+  regenerates because Design/Revision/Regeneration Intelligence merely
+  *thinks* a change might help.
+- **Customer-requested conversational revision may enqueue regeneration
+  automatically.** An explicit, unambiguous customer instruction is
+  customer authority — no separate "Generate Updated Concepts" click is
+  required for it, though that control remains available for anything this
+  automatic path doesn't cover. See `shared/revision-intent.ts`'s
+  `isExplicitRevisionIntent` — hedged language ("maybe", "I'm not sure") or
+  a bare question ("Do you think this needs more color?") is never
+  "explicit," and never auto-regenerates.
+
+### The enforced lifecycle
+
+```
+Concepts Ready
+  → customer selects one direction          (ArtworkVersion.isSelected)
+  → customer requests a revision            (explicit, unambiguous instruction)
+  → PrintProject.revisionPending = true     (durable — survives reload)
+  → any active FinalDirectionApproval is immediately superseded
+  → revision regeneration auto-enqueued     (no extra click required)
+  → new ArtworkVersion batch completes      → revisionPending cleared
+  → customer reviews / selects the revised direction
+  → customer explicitly clicks Prepare Print-Ready Artwork
+  → FinalDirectionApproval targets THAT exact revised ArtworkVersion
+  → Final Artwork Worker / Print Validation → print_ready
+```
+
+`SELECTED != REVISION_REQUESTED != REVISION_COMPLETE != FINAL_APPROVED !=
+PRINT_READY` — five distinct facts, never collapsed into one.
+
+### `PrintProject.revisionPending` — the durable pending-revision authority
+
+A new `boolean` column (`revision_pending`, migration
+`20260808120000_revision_pending.sql`), not a new status enum value and
+not a second table — the smallest durable authority that survives reload
+and is independently checkable without recomputing a brief diff. Written
+by `ConversationCapability`'s `triggerAutomaticRevision` the moment an
+explicit revision is understood (see `conversation-capability.ts`); cleared
+only by `GenerationWorkerCapability` when the regeneration job that
+revision enqueued actually completes and produces a new `ArtworkVersion`
+batch — never merely at enqueue time. `FinalArtworkCapability.requestFinalArtwork`
+checks it first, before any other validation, and refuses to create a
+`FinalDirectionApproval`/`FinalArtworkJob` while it is `true` — this is
+the authoritative, server-side gate; `ChatApp.tsx`'s
+`canRequestFinalArtwork` hiding the Prepare button is only the UI
+reflection of it, never the enforcement itself.
+
+### Revision during finalization (the race this sprint closes)
+
+If a customer requests a revision while a `FinalArtworkJob` is still
+running, `triggerAutomaticRevision` calls
+`repo.supersedeActiveFinalDirectionApproval` immediately — at the moment
+the revision is understood, not only later at regeneration completion (the
+prior, insufficient behavior). `FinalArtworkWorkerCapability.maybeTransitionProjectStatus`
+already re-reads the active approval immediately before writing
+`print_ready`/`finalization_required` and refuses to write either unless
+its own approval is still the active one (pre-existing safeguard, Sprint
+2M Phase 2C/2E) — superseding the approval earlier, at revision-request
+time rather than only at regeneration-completion time, is the entire fix:
+a still-in-flight (possibly paid) production job may complete, but its
+result can never win a race against newer customer intent and become
+`print_ready`. Historical preservation, not deletion: the superseded
+approval and any resulting production asset remain queryable internally —
+a paid provider call already in flight is never wasted or hidden, only
+never trusted as current.
+
+### Repeat Prepare is idempotent and truthful (Goal 8)
+
+`FinalArtworkCapability.requestFinalArtwork` only writes
+`PrintProject.status = "finalizing"` when the resolved `FinalArtworkJob` is
+actually claimable (`"queued"`/`"running"`/`"recoverable"`). A repeat
+request against an already-`"completed"` job (double click, reload,
+duplicate request) leaves `PrintProject.status` exactly as
+`FinalArtworkWorkerCapability` already, truthfully, set it
+(`print_ready` / `finalization_required`) rather than stomping it back to
+`"finalizing"` with no claimable job left to advance it — the stranding
+the Revision Lifecycle Audit found.
+
+### Required-wording semantics (Goal 1) and correction/exclusion semantics (Goal 2)
+
+`extraction.ts` distinguishes **contextual entity description** ("GLORIOUS
+is the boat name") from **literal required wording** ("GLORIOUS")
+structurally — `<entity> is the/our/my <descriptor> name/title`, in either
+order, with a self-referential-subject guard ("the wording is the boat
+name..." never names *itself* as the entity) — rather than a per-domain
+noun blacklist; the same reduction applies to whatever a correction cue
+("use the word X", "I meant X") captures, so "I meant GLORIOUS is the boat
+name" also reduces to `GLORIOUS`. Explicit quoted text always wins first
+and is never reduced (a genuine literal phrase that happens to contain "is
+the ... name" stays exact) — unless the quote is itself the target of a
+removal cue ("don't print 'is the boat name'"), in which case it is
+excluded, not adopted. Removal/correction cues ("don't print X", "X
+shouldn't appear", "remove X", "only use Y") update `requiredWording`
+and/or `exclusions` directly instead of falling through to
+`additionalInstructions` — the field that caused the original "Got it —
+I've updated the notes" bug, because `additionalNotes` is not
+concept-relevant and never gates staleness/regeneration. The same shape
+recognition is mirrored (not duplicated) in the OpenAI Conversation
+Understanding provider's prompt (`openai-conversation-understanding-provider.ts`)
+so the two extraction paths agree; the deterministic path never depends on
+the LLM path being configured.
+
+### Concept-relevance rule generalized
+
+See §12 above — `exclusions` is now concept-relevant, which is what lets a
+correction that only *removes* something (no new positive content) still
+mark concepts stale and participate in the auto-regeneration decision.
+
+---
+
+## 12b. Live Acceptance Corrective Pass — Final Direction Confirmation, Single-Concept Revision, Lineage
+
+Live browser acceptance testing of §12a's implementation exposed that
+"selected" and "final approved" were still conflated in practice (the
+Prepare action could appear immediately after selection, before any
+revision decision), that a normal post-selection revision regenerated
+three unrelated directions instead of revising the one concept the
+customer was looking at, and that revision history had no explicit
+lineage. This section is the corrective architecture.
+
+### Five distinct lifecycle facts, never collapsed
+
+```
+Concepts Ready
+  → concept selected                    ArtworkVersion.isSelected /
+  |                                      PrintProject.selectedArtworkVersionId
+  → awaiting revision decision          (selected, revisionPending=false,
+  |                                       finalDirectionConfirmed=false)
+  → revision requested                  PrintProject.revisionPending = true
+  → revision complete                   new ArtworkVersion, revisionPending
+  |                                      cleared, finalDirectionConfirmed
+  |                                      still false (never inherited)
+  → final direction confirmed           PrintProject.finalDirectionConfirmed
+  |                                      = true (customer explicit action only)
+  → Prepare Print-Ready Artwork         FinalArtworkCapability.requestFinalArtwork
+```
+
+`SELECTED != REVISION_REQUESTED != REVISION_COMPLETE != FINAL_DIRECTION_CONFIRMED
+!= PRINT_READY` — five facts, five independent transitions, never inferred
+from one another.
+
+### `PrintProject.finalDirectionConfirmed` — the confirmation gate
+
+A new `boolean` column (migration `20260808180000_revision_lineage_and_final_direction.sql`),
+independent of and strictly stronger than `revisionPending`. Selecting a
+concept (`ConversationCapability.selectConcept`) — including re-selecting a
+historical one — always sets it back to `false`; only the customer's
+explicit confirmation sets it `true`:
+
+- `ConversationCapability.confirmSelectedDirection(designId, artworkVersionId)` —
+  the `[Use This Design]` UI action, and `POST /api/projects/[id]/confirm-direction`.
+- A short, closed list of unambiguous whole-message chat phrases ("no
+  changes", "use this design", "this is the one", ...) — `CONFIRM_FINAL_PATTERN`
+  in `conversation-capability.ts`. Deliberately narrow: a customer casually
+  saying "looks good" mid-conversation must never read as final approval
+  (Constitution §15).
+
+`FinalArtworkCapability.requestFinalArtwork` checks `finalDirectionConfirmed`
+as its own, independent, final gate (after `revisionPending`, after
+artwork-identity/staleness/selection validation) — the authoritative,
+server-side enforcement. `ChatApp.tsx`'s `canRequestFinalArtwork` and the
+`showUseThisDesignAction` derived state are only the UI's reflection of it.
+
+### One targeted revision, never three unrelated directions
+
+The default post-selection revision operation — automatic (`triggerAutomaticRevision`)
+and manual (`regenerateConcepts()`, the "regenerate" chat pattern) alike —
+now revises the ONE selected concept, producing exactly one new
+`ArtworkVersion`, in that concept's own creative direction. The old
+three-direction "explore" operation (`ConceptGenerationCapability.regenerateAfterRevision`)
+still exists and still runs for: initial generation, and an EXPLICIT
+"show me alternatives" request (`ALTERNATIVES_REQUEST_PATTERN` — "show me
+a few different directions", "three different versions", "other options",
+...), checked ahead of (and independent from) the default single-concept
+path.
+
+```
+ConceptGenerationCapability
+  .generatePlaceholders          → 3 directions, no source        (initial)
+  .regenerateAfterRevision       → 3 directions, no source        (explicit "show me alternatives")
+  .reviseSelectedConcept         → 1 concept, source = selected   (default post-selection revision)
+```
+
+Mechanism: `GenerationJob.targetArtworkVersionId` (new, nullable) — when
+set, the job is a targeted single-concept revision:
+`conceptCount = 1`, and the worker resolves the source `ArtworkVersion`'s
+own `conceptDirectionKey` and threads it through `GenerationIntent.targetConceptDirectionKey`
+→ `GenerationPromptRequest.targetConceptDirectionKey` (both provider-neutral,
+`PromptTranslationCapability`-computed, same pattern as `allowAdditionalText`/
+`inspirationReferences`) → the concept-directions catalog resolves to that
+ONE direction (`resolveConceptDirection`) instead of iterating all three.
+Both the placeholder and OpenAI provider adapters honor this identically —
+neither invents its own three-vs-one logic. A resulting revision's
+`ArtworkVersion.kind` is `"revision"` (the catalog value reserved since
+Sprint 1, previously unused); an explore-batch concept's `kind` stays
+`"concept"`.
+
+On completion, a targeted revision auto-selects its one result (nothing
+else to choose from) but leaves `finalDirectionConfirmed` false — the
+customer still must explicitly confirm the revised artwork, never merely
+because it's now selected.
+
+### Revision lineage
+
+`ArtworkVersion.sourceArtworkVersionId` (new, nullable, self-referencing) —
+which artwork, if any, a given row is a targeted revision of. `null` for
+every original/explore-batch concept. This is the entire lineage model —
+no parallel history table: the original three concepts and every revision
+remain ordinary rows in `artwork_versions`, chained by this one column and
+by `designBriefVersionId` batch grouping (`ConceptGenerationCapability.describeConceptStatus`'s
+existing `currentConcepts`/`previousBatches` split, unchanged). Nothing is
+ever deleted (Constitution §6.11).
+
+`ConversationCapability.selectConcept` is now reachable not only from
+`concepts_ready` but also from the post-selection revision phases
+(`ask_revisions`/`revision_received`) — the customer can explicitly
+re-select ANY historical concept (the original, or an earlier revision),
+restoring it as the current selection (and resetting `finalDirectionConfirmed`
+to `false`, same as any new selection). `ChatApp.tsx` surfaces this via a
+"View design history" panel listing `conceptStatus.previousBatches`
+(already customer-safe), each batch rendered through the same `ConceptCards`
+component and `onSelect` handler as the live concept grid.
+
+### Canonical product / semantic wording extraction
+
+Two related deterministic-extraction fixes, both in `extraction.ts`:
+
+- **Canonical product**: `extractProduct` now tightens a reply down to the
+  short descriptor+product-word phrase around the product word
+  (`PRODUCT_PHRASE_PATTERN`) whenever the reply has more than one clause,
+  OR the product word isn't the LAST word of its clause
+  (`PRODUCT_WORD_AT_END_PATTERN`) — "lets create a t-shirt design" and "A
+  T-shirt for the school fair" both tighten to "T-shirt"; "Camp shirts" and
+  "black hoodies" (a genuine short direct answer, product word at the very
+  end, nothing trailing it) are kept verbatim. Naturalized customer-facing
+  questions (`naturalizeQuestion` in `conversation-capability.ts`) always
+  read from this canonical value, never a raw sentence fragment.
+- **Semantic wording generalization**: the entity-naming pattern set in
+  `extraction.ts` (already generalized once in Sprint 2M Phase 2G's "GLORIOUS
+  is the boat name") is generalized further to cover the reversed
+  "name of the X" order, relative-clause/appositive connectors ("X, which
+  is the Y name", "X — that's the Y name"), a generic (non-noun-gated)
+  descriptor for the "name is X"/"is called/named X" shapes (`GENERIC_DESCRIPTOR`,
+  with a closed-class function-word exclusion so "which is the name of the
+  boat" can never itself parse as a descriptor), and a bare typographic
+  imperative cue (`BARE_IMPERATIVE_ENTITY_PATTERN` — "Use GLORIOUS", "Put
+  ACME on it": capitalization signals literal text). All still structural,
+  none domain-specific — verified against boat/dog/company/person examples
+  in the test suite. `openai-conversation-understanding-provider.ts`'s
+  prompt documents the same shapes so the two extraction paths agree, but
+  the deterministic path is authoritative and never depends on the LLM
+  path being configured (§10a) — automated tests exercise only the
+  deterministic path.
+
+### Concept preview is read-only
+
+`ConceptPreviewModal.tsx` — opened via a dedicated expand affordance on
+each `ConceptCards` card, never by the card's own select-on-click. That
+affordance is a **sibling** of the card's select button, never a
+descendant of it, and this is load-bearing rather than cosmetic: nesting
+one button inside another made "previewing does not select" depend on
+event propagation surviving hydration, and made previewing impossible
+outright once the card rendered `disabled` (browsers do not dispatch
+clicks to descendants of a disabled control) — which is the state every
+auto-selected revised concept is in. Any visible `ArtworkVersion` with a
+renderable asset opens in this same viewer: original concept, revision,
+current version, or historical version.
+
+`object-contain` (never `cover`, so the whole design is always visible).
+**Phase 2D:** for apparel with a known approved garment color
+(`brief.shirtColor`), the primary surface is that garment color as a CSS
+background behind the unchanged transparent PNG — presentation only; never
+flattened into artwork bytes, never a new asset, never alpha rewrite.
+The expanded modal adds a local Preview background control
+(Garment / White / Gray / Black / Transparency) so customers can still
+inspect opaque ink vs transparent space. Non-apparel / deferred garment
+color keeps the historical checkerboard default. Switching backgrounds is
+component-local UI state only — reload may return to garment color; it
+never changes selection, evaluation, or paid generation.
+Escape and backdrop-click both close it, and a `[Select this concept]`
+action inside it calls the exact same `onSelect` handler the card itself
+uses. Opening, viewing, or closing the modal never calls any capability
+method or mutates any lifecycle state — it is pure client-side UI state
+(`previewId` in `ConceptCards`).
+
+Concept cards use the same garment-color surface by default (with a light
+"On {Color}" hint). Short sets (Phase 2C `conceptsWithheld` count on the
+`concepts_ready` message) render an honest customer-safe note and a
+1-/2-column grid without empty placeholders — never internal reason codes.
 
 ---
 
@@ -2325,13 +3273,15 @@ PrintProject.status = "print_ready"  ⟺  report.status === "ready"
 No new sizing table was invented. `deriveProductionRequirements` (Sprint
 2M Phase 1) already resolves target dimensions from
 `shared/print-placement-dimensions.ts`, keyed by the existing
-`PrintPlacement` enum:
+`PrintPlacement` enum.
 
-| Placement | Target size | @300 PPI minimum |
-|---|---|---|
-| `full_front` / `full_back` | 12x14in | 3600x4200px |
-| `left_chest` | 4x4in | 1200x1200px |
-| `sleeve` | 3x3in | 900x900px |
+> **Superseded by §13e (Print-Ready Normalization Phase 1).** Phase 2C
+> treated each placement's figures as a fixed *canvas* (`full_front` /
+> `full_back` = 12x14in → a 3600x4200px plate, artwork centred inside
+> transparent padding). The production deliverable is now sized by physical
+> print WIDTH with height derived from the artwork's own aspect ratio, and
+> those per-placement figures are the printable *envelope*, not the plate.
+> See §13e for the current contract and the current numbers.
 
 When `printPlacement` is unknown, or the production category isn't
 `apparel_raster`, the worker refuses to guess — it completes the job with
@@ -2341,14 +3291,19 @@ never a fabricated size (Goal 4).
 ### Raster production strategy (Goal 5/6)
 
 `LocalRasterInterpolationProvider` (`capabilities/final-artwork/local-raster-provider.ts`,
-math in `raster-transform.ts`) resamples the source concept to "contain"
-fit — preserving aspect ratio, never cropping — within the target canvas,
-inset by `ProductionRequirements.artworkBoundaryMarginPercent`, padded with
-verified-transparent pixels. It never redraws, regenerates, or reinterprets
-content (Goal 7 — the approved design is preserved exactly, just
-resampled), which is what lets required-wording verification honestly
+math in `raster-transform.ts`) resamples the source concept, preserving
+aspect ratio and never cropping. It never redraws, regenerates, or
+reinterprets content (Goal 7 — the approved design is preserved exactly,
+just resampled), which is what lets required-wording verification honestly
 transfer from Concept Evaluation (see below) rather than needing fresh OCR
 infrastructure this sprint doesn't have.
+
+> **Superseded by §13e.** Phase 2C fit the resampled artwork into a fixed
+> canvas inset by `ProductionRequirements.artworkBoundaryMarginPercent` and
+> padded the remainder with transparent pixels. Every provider now runs its
+> raster through the one shared production transform in
+> `final-artwork/production-normalization.ts` instead; the artwork defines the
+> canvas.
 
 `FinalArtworkProvider` (`capabilities/final-artwork/provider.ts`) is the
 replaceable boundary: domain code (`FinalArtworkWorkerCapability`) depends
@@ -2473,16 +3428,29 @@ standalone process (`npm run worker:final-artwork`) — never folded into the
 generation worker's endpoint/process. See
 `docs/deployment/final-artwork-worker.md`.
 
-### Download boundary (Goal 14)
+### Download boundary (Goal 14) + customer delivery mode
 
 `GET /api/projects/[projectId]/production-artwork/image` →
 `conversation-service.getProductionArtworkUrl` →
 `FinalArtworkCapability.getCurrentProductionAssetId` →
-`AssetCapability.getSignedUrl`. Only ever returns a signed URL once
-`PrintProject.status === "print_ready"`; every other case (not found, not
-ready yet) returns a uniform 404. Not linked from any UI — this proves the
-secure boundary exists ahead of a future purchasing/download product, per
-Goal 14's explicit scope limit.
+`AssetCapability.getSignedUrl`. Only ever returns a short-lived signed URL
+plus customer-safe metadata (`filename`, dimensions, transparency,
+placement/design labels) once `PrintProject.status === "print_ready"`;
+every other case (not found, not ready yet) returns a uniform 404. Never
+exposes asset/job/provider ids or storage paths.
+
+`GET /api/projects/[projectId]/production-artwork/download` streams the
+same authoritative production PNG with a sanitized
+`Content-Disposition` filename (e.g. `1988-toyota-mr2-print-ready.png`) —
+same authorization gates; never a raw bucket/path.
+
+When `print_ready`, ChatApp enters **delivery mode**:
+`FinalArtworkDeliveryCard` is the primary surface (production preview,
+metadata, download, Make Another Change). The revision composer is hidden
+until the customer explicitly chooses Make Another Change (client-only
+reopen; supersession still occurs only when they submit a real revision).
+Production output remains an `AssetRecord` and is **not** added to Design
+History (creative `ArtworkVersion` lineage only).
 
 ### Customer-safe finalization states (Goal 13)
 
@@ -2550,17 +3518,19 @@ a Topaz-produced asset:
 | Measurement | Example | Where it lives |
 |---|---|---|
 | Source / native | 1024x1024 | `FinalArtworkProviderOutput.nativeWidthPx/HeightPx` — the true, pre-reconstruction concept pixels |
-| Reconstructed | 4096x4096 | `FinalArtworkProviderOutput.reconstructedWidthPx/HeightPx` — Topaz's own genuine output, before canvas fit; `null` for a provider with no distinct reconstruction stage (local) |
-| Final production canvas | 3600x4200 | `widthPx`/`heightPx` — after deterministic contain + transparent pad |
+| Reconstructed | 4096x4096 | `FinalArtworkProviderOutput.reconstructedWidthPx/HeightPx` — Topaz's own genuine output, before production normalization; `null` for a provider with no distinct reconstruction stage (local) |
+| Normalized production artwork | 3150x3375 | `widthPx`/`heightPx` — the trimmed, physical-size-aware plate (§13e); the artwork's own dimensions, never a fixed canvas |
 
 `TopazTransparencyUpscaleProvider.produce()` performs reconstruction and
-canvas-fit as two internal, sequential steps — it calls Topaz once (a
-proportional 4x request derived from the source's own dimensions, capped to
-sane bounds, `crop_to_fill=false`, PNG output — the exact Phase 2D-tested
-configuration) and then reuses the SAME local, deterministic
-`resampleContainWithTransparentPadding` (`raster-transform.ts`)
-`LocalRasterInterpolationProvider` uses, never a second paid Topaz call
-merely to reach the production canvas size. Domain code
+production normalization as two internal, sequential steps — it calls Topaz
+once (a proportional 4x request derived from the source's own dimensions,
+capped to sane bounds, `crop_to_fill=false`, PNG output — the exact Phase
+2D-tested configuration) and then runs the SAME shared, deterministic
+`normalizeProductionRaster` (`final-artwork/production-normalization.ts`)
+`LocalRasterInterpolationProvider` runs, never a second paid Topaz call
+merely to reach the production size. Normalizing from the RECONSTRUCTED
+raster (the highest-quality raster available in the run) is what keeps the
+deliverable from being a crop of an already-padded plate. Domain code
 (`FinalArtworkWorkerCapability`) never sees this internal two-step shape —
 it only ever calls `provider.produce()` once per attempt.
 
@@ -2739,6 +3709,1357 @@ in any customer-facing string. `providerRequestId`, `providerKey`, and
 
 ---
 
+## 13e. Print-Ready Normalization (Phase 1)
+
+### Why
+
+The Print-Ready Production Output Audit measured the live production plate
+and found the deliverable contract was wrong. The plate was 3600x4200px —
+the fixed 12x14in canvas Phase 2C sized — while the visible artwork inside
+it occupied only ~2662x2861px. Roughly half the printer's file was
+transparent dead canvas, and because effective resolution was computed
+against the canvas rather than the artwork, that padding also inflated every
+readiness figure.
+
+For apparel raster output **the production artwork itself defines the
+canvas.** There is no fixed rectangle to centre artwork inside.
+
+### Three distinct artworks — never conflated
+
+| Artwork | What it is | Where it lives | Who may change it |
+|---|---|---|---|
+| **CREATIVE ARTWORK** | The approved design/revision the customer said yes to. The authoritative creative object. | The concept's own `AssetRecord` (`productionRole: null`), reached via `ArtworkVersion.primaryAssetId` | Concept generation / revision only. Production **never** modifies these bytes. |
+| **RECONSTRUCTED ARTWORK** | A high-resolution intermediate produced during finalization (e.g. Topaz Transparency Upscale's 4x super-resolution). Same composition, more real detail. | In memory inside `FinalArtworkProvider.produce()`; its dimensions are reported as `reconstructedWidthPx/HeightPx`. **Not persisted in Phase 1** — reconstruction-master persistence is explicitly out of scope. | The provider, once per finalization attempt |
+| **PRODUCTION ARTWORK** | The trimmed, normalized, physical-size-aware printer deliverable. | `AssetRecord` with `productionRole: "production_png"` + `finalArtworkJobId` | `FinalArtworkWorkerCapability` only |
+
+Design History remains creative-only: it never shows or references
+production artwork (§13c's download boundary is the only customer path to
+the deliverable, and only once validation says it is ready).
+
+### Transform order
+
+```
+CREATIVE ARTWORK (approved concept bytes — read-only)
+        ↓  FinalArtworkProvider.produce()
+RECONSTRUCTED ARTWORK (high-resolution raster; never the low-res concept)
+        ↓  ─────── normalizeProductionRaster() ───────
+        ↓  alpha trim            → the artwork's own bounds (alpha >= 8)
+        ↓  safety margin         → max(8px, 0.5% of the bbox's longest side),
+        ↓                          clamped to available source pixels
+        ↓  target dimensions     → width = targetWidthIn x targetPpi;
+        ↓                          height = width x artwork aspect ratio
+        ↓  proportional resample → resampleExact (no padding, no distortion)
+        ↓  PNG encode            → + pHYs density matching targetPpi
+PRODUCTION ARTWORK
+        ↓
+AssetCapability.uploadProductionAsset (normalization metadata travels with it)
+        ↓
+AUTHORITATIVE PrintValidationCapability.validateArtwork
+        ↓
+PrintProject.status = "print_ready"  ⟺  report.status === "ready"
+```
+
+The trim happens **after** reconstruction, never before: trimming the
+low-resolution concept first would throw away the very pixels the
+reconstruction needs. Nothing in this pipeline alters colours, wording,
+layout, composition, or any other creative content — it is strictly a
+production transformation.
+
+### Sizing contract: `width_constrained_preserve_aspect`
+
+`shared/print-placement-dimensions.ts` owns one policy table, and
+`ProductionRequirements.sizing` carries it through to the worker, so no
+apparel dimension is ever re-derived inside a worker or provider:
+
+| Placement | Target print width | Printable height bound | Target PPI | Plate width @300 PPI |
+|---|---|---|---|---|
+| `full_front` | 10.5in | 14in | 300 | 3150px |
+| `full_back` | 10.5in | 14in | 300 | 3150px |
+| `left_chest` | 4in | 4in | 300 | 1200px |
+| `sleeve` | 3in | 3in | 300 | 900px |
+
+Height is **always** derived from the trimmed artwork's aspect ratio.
+Artwork whose trimmed proportions are 10.5 x 11.25in produces a 3150x3375px
+plate — never 3150x4200, never stretched, never letterboxed.
+
+`maxHeightIn` is a garment-printability bound, not a canvas: only an
+unusually tall/narrow artwork reaches it, and when it does BOTH axes are
+reduced proportionally (`constrainedBy: "max_height"`, honestly recorded and
+honestly reported by validation) rather than the artwork being cropped or
+squashed to fit.
+
+The per-placement figures in §13c's table are now the printable
+**envelope** — the largest area artwork may occupy. Provisional
+(concept-stage) Print Validation still measures against the envelope, since
+a generated concept has not been normalized for production at all.
+
+### pixel dimensions ≠ physical dimensions ≠ DPI metadata
+
+Three different things, deliberately kept separate:
+
+- **Pixel dimensions** — how many pixels the file contains
+  (`AssetRecord.widthPx/heightPx`).
+- **Physical dimensions** — how large the artwork is *intended to print*
+  (`ProductionNormalizationSummary.intendedWidthIn/intendedHeightIn`).
+- **DPI/density metadata** — a tag inside the PNG (`pHYs`) telling graphics
+  software what physical size to open the file at.
+
+**Effective print resolution is calculated from pixels ÷ intended physical
+inches.** It is never read from density metadata: rewriting a density tag
+adds no image information. All three are made to agree by construction —
+physical inches are *derived* from the pixels actually produced
+(`widthPx / targetPpi`), and the density tag is written from the same
+`targetPpi` — but only pixel geometry is ever authoritative.
+
+`pHYs` is written by `final-artwork/production-png.ts`. `pngjs` (this
+repository's only PNG codec) has no `pHYs` support in either direction, so
+rather than swap the codec, that module appends the 9-byte ancillary chunk
+to bytes `pngjs` already produced, immediately after IHDR (spec-compliant:
+`pHYs` must precede IDAT). 300 PPI ≈ 11811 pixels per metre. The image data
+is untouched, and every existing decode path keeps working because
+conformant decoders — `pngjs` included — skip ancillary chunks they do not
+understand.
+
+### Validation: `print_ready` means the NORMALIZED artwork is ready
+
+`PrintValidationInput.productionNormalization` carries the transform's own
+measured geometry into authoritative validation, which **recomputes** rather
+than trusting any claim in it. Present only for production plates; when
+absent, every check behaves exactly as it did for provisional validation.
+
+New blocking checks (all with explicit tolerances — never float equality):
+
+| Check | Blocks when |
+|---|---|
+| `production_normalization` | The plate's recorded pixel dimensions disagree (>1px) with its recorded physical specification — i.e. something resized the file after normalization |
+| `alpha_bound_artwork` | The alpha bounding box is under 16px on either axis — not meaningful printable artwork |
+| `transparent_dead_canvas` | Artwork occupancy < 0.8 of the plate (the audited plate sat at ~0.50; a correctly normalized one sits above 0.97) |
+| `physical_width_policy` | Intended print width deviates from the placement target by more than `widthToleranceIn` (0.05in). A `max_height`-constrained plate passes with an honest explanation. |
+| `aspect_ratio_preserved` | Trimmed vs. produced aspect ratio differ by more than 1% — the artwork was distorted |
+
+Plus `density_metadata` at **info** severity only: it records whether the
+embedded density agrees with the intended PPI, and can confirm but never
+establish readiness. A plate with a wrong density tag and correct pixel
+geometry is still ready; a plate with a correct density tag and insufficient
+pixels never is.
+
+`effective_resolution` and `minimum_raster_dimensions` now measure a
+production plate against its **intended physical size**, not the placement
+envelope — so a legitimately wide plate is never failed for having fewer
+pixels than an envelope-shaped one would. Phase 2C's resolution-provenance
+honesty is unchanged and still applies first: an `interpolated_upscale`
+plate is still judged against its true pre-upscale source dimensions.
+
+### Safe/failure behavior
+
+- **Fully transparent artwork** fails safely: `trimToAlphaBounds` returns
+  `no_visible_artwork` (never a 0x0 image, never a crash), the provider
+  surfaces it as a transformation failure, and the job can be retried.
+- **Fully opaque artwork** is deterministic and documented: the alpha
+  bounding box is the whole image, so nothing is cropped and no margin can
+  be applied (the box already touches every edge); the artwork passes
+  through geometrically unchanged with `sourceFullyOpaque: true`.
+  Transparency remains a separately enforced production requirement — the
+  transform never fabricates it by padding.
+- **Soft glows / anti-aliased edges** survive: the alpha threshold is 8 (not
+  128), and the safety margin extends beyond the bounding box, so
+  outer pixels carrying very little alpha are preserved rather than cropped
+  into a hard edge. Sub-threshold noise outside the artwork does not defeat
+  trimming.
+
+### Existing production assets
+
+This phase applies to newly finalized output. No existing asset is
+invalidated, deleted, rewritten, or regenerated. If a job whose production
+asset predates this phase is ever re-run, the worker finds no recorded
+production geometry, reuses the existing asset untouched, and completes
+honestly as `finalization_required` (the plate genuinely is un-normalized)
+rather than re-affirming print-readiness for a canvas nobody measured.
+
+---
+
+## 13f. Detailed-Description Fidelity (Phase 1)
+
+### The invariant
+
+**Customer content is authoritative** (Principle 15). Everything the customer
+asked to see — named subjects, secondary objects, distinct object
+categories, counts, positions, orientations, relationships, scene structure,
+place context, and explicit include/exclude language — must survive every
+deterministic layer between the chat message and the provider request.
+
+Three layer-level rules follow from it:
+
+1. **Conversation Understanding may synthesize language, never content.**
+   Rewording, grammar cleanup, and filler removal are in scope. Dropping an
+   object, collapsing distinct categories into one ("ski boats, cruiser
+   boats and jet skis" → "boats"), losing a count, or discarding a stated
+   position is not.
+2. **Concept directions control creative treatment, not required subject
+   matter.** A direction may simplify *how* something is drawn; it may never
+   decide *what* is drawn.
+3. **Provider defaults cannot contradict explicit customer composition.** A
+   default such as "centered composition" applies only where the customer
+   stated nothing.
+
+### Why it exists
+
+The Discovery Bay live acceptance audit established that fidelity was lost
+*before* any image model was called. The customer described a lighthouse on
+the left, T-shaped waterways, a marina and its position, homes and their
+position, and three distinct boat types. Conversation Understanding —
+correctly following an instruction to produce "a short phrase a designer
+would actually write on a brief" — reduced this to roughly "A design
+featuring the Discovery Bay California lighthouse, water shaped like a T,
+ski boats, cruiser boats, and jet skis." Every position, the marina, and the
+homes were gone. Concept directions then amplified the loss: "Minimal Badge"
+instructed "a single small icon or mark, no scene" for a brief that required
+a multi-element scene, and the provider prompt's trailing "centered
+composition" default competed with "lighthouse on the left".
+
+No provider or model change addresses any of that.
+
+### Precedence (authoritative order)
+
+Applied by `openai-concept-provider.ts`'s `buildPrompt`, stated explicitly
+inside the prompt itself, and enforced structurally by
+`resolveDirectionTreatment`:
+
+1. Customer required wording and exclusions
+2. Customer design description (required content) and stated composition
+3. Customer style and color preferences
+4. Concept-direction treatment
+5. Provider defaults
+
+A lower layer may never contradict a higher one.
+
+### Mechanism
+
+- `lib/domain/design-content-contract.ts` — the one pure reader of a design
+  description. Answers `requiresScene`, `hasExplicitComposition`,
+  `compositionStatements` (the customer's own clauses, selected, never
+  synthesized), `requiredElementCount`, and `requestsRealWorldReference`.
+  Deliberately **not** a schema: nothing here is persisted and nothing
+  replaces `DesignBrief.designDescription`, which remains the authoritative
+  content contract. There is no scene graph, no `requiredVisualElements[]`,
+  and no `compositionConstraints[]` — the audit established the free-text
+  description can carry the contract on its own.
+- `intent-extraction/preserve-design-detail.ts` — the deterministic backstop
+  for Conversation Understanding. A strengthened provider prompt is a
+  request, not a guarantee, and cannot be regression-tested without a paid
+  network call. This module compares the synthesized value against the
+  customer's own message and restores only the design-critical clauses that
+  genuinely did not survive. It never appends the raw message, and excludes
+  garment-color, print-placement, required-wording, and palette-preference
+  clauses by construction. Applied on both paths — semantic
+  (`reconcile-understanding.ts`) and deterministic (`extraction.ts`) — so
+  fidelity does not depend on whether a Conversation Understanding provider
+  is configured.
+- `lib/domain/concept-directions.ts` — each direction now carries its base
+  treatment (correct for a single simple subject, where "one restrained
+  icon" is genuinely the right instruction) plus `sceneTreatment` and
+  `customerComposedTreatment` overrides. `resolveDirectionTreatment` is the
+  one place they are resolved against the content contract. The three
+  directions still differ sharply: fidelity is achieved by constraining what
+  a direction may *remove*, never by making the three prompts converge
+  (Constitution §13 still requires three genuinely useful options).
+- `providers/openai-concept-provider.ts` — the initial-generation prompt is
+  sectioned by priority (`REQUIRED DESIGN CONTENT`, `COMPOSITION`,
+  `REQUIRED WORDING`, `STYLE / CREATIVE TREATMENT`, `DO NOT OMIT`,
+  `PRIORITY`, `CREATIVE FREEDOM`) rather than one flat sentence in which
+  "Subject:" carried no more weight than "Iconography:". The customer's
+  additional instructions are now consumed on this path too, instead of
+  only on the edit path.
+
+### Real-world geography
+
+Text-only generation **cannot** guarantee real-world geographic accuracy
+without reference grounding. When a customer asks for a real place
+("make it like the actual area", "look up an aerial view"), the request is
+preserved rather than dropped, and the provider prompt answers it honestly:
+approximate the arrangement from the customer's own description, no external
+map or aerial reference is available, do not invent landmarks, do not imply
+survey accuracy. Reference-image grounding is a later phase; nothing in
+Phase 1 may claim map accuracy.
+
+### What the automated tests do and do not prove
+
+The regressions in
+`intent-extraction/detailed-description-fidelity.test.ts` and
+`providers/concept-prompt-fidelity.test.ts` prove what iHeartPrints
+**sends** — that customer requirements survive every deterministic layer and
+appear in all three provider prompts, and that no direction's styling
+contradicts them. They make no network calls and prove nothing about image
+model compliance. That remains a live-acceptance question. See §24.
+
+---
+
+## 13g. Multi-Turn Design Intent and Explicit No-Text (Phase 1.1)
+
+Two independent live failures, both structural rather than heuristic.
+
+### Multi-turn design intent
+
+**The failure.** A customer opened with Discovery Bay, its lighthouse, its
+waterways, and a request for the real area / an aerial idea of it. Their next
+turn described the channel to the marina, the homes, and boats. The second
+turn *replaced* `designDescription` outright, and the location, the
+waterways, and the real-area intent were gone from the brief before anything
+downstream ran.
+
+**The cause.** `designDescription` had only ever had assignment semantics —
+`fields.designDescription = <this turn's value>` — and nothing in the
+pre-approval path asked what the new turn was *doing* to the design.
+
+**The contract.** Compatible clarifications accumulate. Explicit refinements
+replace only the detail they contradict. Explicit replacement language
+supersedes prior content.
+
+| Operation | Customer language | Result |
+|---|---|---|
+| ADD | "also add homes on the left", "and include a marina" | both turns' content is kept |
+| REFINE | "move the lighthouse to the right", "make the marina smaller" | the contradicted detail is superseded; everything else survives |
+| REPLACE | "forget the lighthouse", "start over with a marina scene" | prior content is deliberately superseded |
+
+`intent-extraction/design-description-merge.ts` owns this, as a pure
+function, and is applied on both the semantic (`reconcile-understanding.ts`)
+and deterministic (`extraction.ts`) paths.
+
+**How contradictions are resolved.** The merge works at STATEMENT level. An
+existing statement is dropped only when a new statement shares a subject
+**and** constrains the same attribute *dimension* (position / shape / size /
+count / color) with a different value. That two-part test is what leaves
+exactly one lighthouse requirement after "move the lighthouse to the right",
+while "make the marina smaller" (size) leaves "marina on the right"
+(position) untouched. ADD and REFINE therefore share one algorithm — with no
+subject overlap nothing is dropped, which is exactly the ADD case — and the
+distinction between them is descriptive, not a separate code path.
+
+Deliberately **not** a scene graph and **not** a schema change: nothing here
+is persisted, and `designDescription` remains a single coherent free-text
+contract.
+
+This is **not** the post-selection revision path. That path
+(`revision-delta` / `revision-intent` / `buildEditPrompt`) assumes a selected
+`ArtworkVersion` and produces an image-edit delta; this one runs pre-approval
+where no artwork exists. The vocabulary is deliberately similar; the
+machinery is not shared, and the revision path is untouched.
+
+### Real-world / research requests
+
+Preserve the desired real-world fidelity honestly. Never claim external
+grounding unless a reference/research capability actually ran — and none
+exists yet. The customer's request now survives because the merge no longer
+discards earlier turns; the provider prompt continues to answer it with the
+§13f honesty line (approximate from the customer's own description; no map or
+aerial reference is available; invent no landmarks; imply no survey
+accuracy).
+
+### Explicit no-text
+
+**The failure.** Asked "what exact text should appear? Say 'none' if there is
+no text," the customer answered "No wording". The brief correctly stored
+`exactText: ""` and `deriveRequiredWording` correctly derived `mode: "none"`
+— and then `GenerationPromptRequest` flattened it back to
+`requiredWording: null`, which is *also* what an unanswered question
+produces. Downstream therefore read an explicit no-text request as merely
+"no required string": the prompt kept typography-forward direction language,
+told the model not to add text "beyond the exact wording specified above"
+when no wording was specified above, listed typography under creative
+freedom, and the artwork came back covered in invented lettering — which
+evaluation then passed, because "no required wording" read as "nothing to
+check". The concept card meanwhile claimed "No text lockup — graphic-led".
+
+**The semantics.** Three genuinely distinct states, now first-class as
+`RequiredWordingMode` on `GenerationPromptRequest.wordingMode`:
+
+| Mode | Storage | Meaning |
+|---|---|---|
+| `unknown` | `exactText === null` | not answered yet. **Never** a no-text request |
+| `provided` | non-empty `exactText` | this exact text must appear |
+| `none` | `exactText === ""` | **no text of any kind** may appear |
+
+`"none"` prohibits words, letters, numbers, typography, labels, captions,
+signage, monograms, dates, slogans, decorative lettering, and invented brand
+text — anywhere, including inside badges, banners, ribbons, borders, and on
+objects depicted in the scene. Required wording and explicit no-text are
+mutually exclusive customer intents; exactly one block ever appears in a
+prompt, and an unresolved wording question produces neither.
+
+Not sticky: a customer who said "none" can later add wording, and
+`wordingMode` follows the brief back to `"provided"` with typography
+available again.
+
+**Text policy precedence** (extends §13f):
+
+1. required wording / explicit no-text / exclusions
+2. required content + composition
+3. customer style and colors
+4. concept-direction treatment
+5. provider defaults
+
+**Layer behavior under `"none"`:**
+
+- *Prompt Translation* — `deriveRequiredWording` decides both
+  `requiredWording` and `wordingMode`. A `RegenerationPlan` removal of
+  required wording downgrades `"provided"` → `"unknown"`, never to `"none"`:
+  only the customer's own explicit answer may impose no-text. An
+  already-explicit `"none"` is never downgraded.
+- *Concept directions* — a fourth override layer, `noTextTreatment`, applied
+  **last** (above the scene and customer-composed overrides) because no-text
+  is precedence tier 1. `ConceptDirectionTreatment.typographyEmphasis`
+  becomes `string | null`, and `null` means consumers must omit typography
+  guidance entirely rather than filter a string that still authorizes
+  lettering. Only the fields that reference or authorize text are
+  overridden, so the three directions stay genuinely distinct on shape
+  language, density, framing, and hierarchy.
+- *Provider prompt* — a hard `NO TEXT` block replaces `REQUIRED WORDING`; the
+  typography line is dropped; typography is removed from `CREATIVE FREEDOM`;
+  the dangling "beyond the exact wording specified above" is replaced by a
+  sentence that is true of the actual wording state; and the closing line
+  adds "no text or lettering of any kind".
+- *Evaluation* — the existing `required_wording` criterion answers whichever
+  wording contract is in force, so no new criterion key, contract change, or
+  migration was needed. Under `"none"` the vision model reports a `noText`
+  signal; readable text it actually transcribed is decisive in code even if
+  it self-reports no violation, mirroring the required-wording cross-check.
+  Deliberately no OCR — judgment by the existing vision provider, and
+  conservative about incidental texture.
+- *Concept card copy* — "Graphic-only — no text." under `"none"`, so the
+  customer-facing summary matches the contract the provider was actually
+  given.
+
+---
+
+## 13h. Existing Artwork → Print Ready (Phase 1)
+
+### Why: two workflows, not two entry points
+
+iHeartPrints was built around one job — *"design something for me"* — and the
+whole architecture reflects it: interview, Design Brief, approval,
+generation, concepts, revision. A large share of real customers arrive with a
+different job entirely: *"I already have my artwork; make THAT printable."*
+
+Those are not two ways into one pipeline. Everything downstream of
+"understand what the customer wants" is different, and several steps are
+actively harmful when applied to the second job — asking someone to describe
+a design they are literally holding, offering them three creative directions
+for artwork they already chose, or asking them to retype the wording that is
+already in their file.
+
+Phase 1 therefore adds a genuinely second first-class workflow:
+
+```
+CREATE NEW ARTWORK  (unchanged)
+  conversation → Design Brief → approval → generation → concepts → revision
+
+UPLOAD EXISTING ARTWORK  (new)
+  upload → deterministic analysis → repairability classification
+         → exterior background isolation → edge cleanup
+         → Original vs Prepared → explicit customer approval
+```
+
+Phase 1 stops at approved prepared artwork. It does not enhance, upscale,
+validate, finalize, or produce a print-ready deliverable — and never says it
+does (Constitution §15).
+
+### The preservation contract
+
+Uploaded artwork is **pixel-authoritative**. The customer is not asking for a
+redesign.
+
+| Phase 1 may | Phase 1 must never |
+|---|---|
+| decode and normalize the source | change wording |
+| measure edge statistics and bounds | redraw objects |
+| identify an exterior background | shift colours globally |
+| remove it, creating transparency | alter composition |
+| clean the boundary it leaves behind | invent elements |
+| classify repairability | regenerate artwork |
+| preserve aspect ratio exactly | call an image model |
+| | overwrite the uploaded original |
+
+**The original upload is immutable.** Its `AssetRecord` (kind
+`customer_upload`) is written once and never updated; every transformation
+produces a new, separate asset. Asserted by hashing the stored bytes before
+and after a full prepare-and-approve run.
+
+### Workflow identity is derived, not stored
+
+There is deliberately **no `PrintProject.workflowKind` column**. A project
+with an `ArtworkPreparation` row *is* a `prepare_existing` project — a real
+domain fact rather than a speculative enum added ahead of a second consumer.
+
+The customer's choice *before* they upload anything is transient client state
+(`components/chat/uploaded-artwork-flow.ts`), because nothing durable exists
+to remember yet. A reload correctly returns them to the choice rather than
+trapping them in a workflow they never committed to.
+
+### Capability
+
+`ArtworkPreparationCapability` (`src/capabilities/artwork-preparation/`)
+depends on `ProjectRepository`, `AssetCapability`, and
+`DesignBriefCapability` — and on **no provider port at all**. Not an
+unconfigured one, not a stub. There is nothing in the module that could make
+a network call, which is what turns "zero paid-provider calls" from a policy
+into a structural property.
+
+| Module | Responsibility |
+|---|---|
+| `upload-limits.ts` | Size/format/dimension/pixel bounds, magic-signature sniffing, filename sanitization. Pure. |
+| `image-decode.ts` | The only place upload bytes become pixels. Header-bounds-check *before* decoding. |
+| `image-analysis.ts` | Deterministic measurement. Measures; never decides. |
+| `repairability.ts` | The conservative verdict. Reads analysis; touches no pixels. |
+| `pixel-metrics.ts` | The background-membership test and colour distances, in one place so both removal passes agree on them. Pure. |
+| `background-isolation.ts` | Edge-connected fill, fringe decontamination, RGB-only edge decontamination, residual edge islands, halo guard. Pure. |
+| `background-cavities.ts` | Enclosed background a foreground structure sealed off from the border — letter counters, ring interiors. Extends the mask; removes nothing on its own. Pure. |
+| `background-speckle.ts` | Isolated near-background flecks the fill tolerance just missed. Extends the mask. Pure. |
+| `guided-removal.ts` | Resolves a customer's click to one preserved enclosed candidate, or refuses it. Extends the mask. Pure. |
+| `preparation-copy.ts` | The one place analysis becomes customer language. |
+| `artwork-preparation-capability.ts` | Orchestration, persistence, ownership checks. |
+
+The three mask passes are deliberately **three modules and three test suites**,
+because they are three different kinds of evidence — measured geometry,
+measured isolation, and the customer's own judgement — and collapsing them
+would make it impossible to say which one removed a given pixel.
+
+### Background isolation: evidence, not similarity
+
+> **THE SAFETY INVARIANT.** Background removal may remove pixels only when the
+> system has **affirmative evidence that they belong to the detected
+> background**. Colour similarity alone is insufficient. Enclosure alone is
+> insufficient.
+
+The audited reference case is a customer's bowling logo — 979x1024, fully
+opaque, near-black exterior touching all four edges (edge mean ≈0.78, edge
+sigma ≈0.53), with **thousands of near-black pixels that are intentional
+interior line work**. "Remove every black pixel" would delete the customer's
+artwork.
+
+There are exactly **two** ways a region can earn that evidence, and they are
+deliberately separate passes. The first is **reachability from the image
+border**:
+
+1. Estimate the background from the border ring's *dominant* colour (the
+   mode's own mean, so one bright corner pixel cannot define it).
+2. Derive tolerance adaptively from measured edge deviation — a genuinely
+   flat export stays at the audited baseline of 12; noise widens it, up to a
+   hard ceiling past which the artwork is classified `NEEDS_REVIEW` instead.
+3. Multi-seed 4-connected flood fill from **every** matching border pixel.
+   4-connectivity, not 8: diagonal connectivity lets a fill squeeze through a
+   one-pixel anti-aliased gap in an outline and flood a design's interior,
+   which is the classic way this kind of tool eats artwork.
+4. Fringe decontamination, **only** within 2px of the removed region. For a
+   pixel `C` that is foreground `F` composited over background `B`,
+   `C = a·F + (1−a)·B`, so `a ≈ |C−B| / |F−B|` and the uncontaminated colour
+   is `B + (C−B)/a`, with `F` taken from a nearby genuinely-solid pixel.
+   **When no such reference exists, or the pixel is already essentially
+   solid, it is preserved unchanged.** Artwork fidelity outranks cleanup.
+
+   A composite also has to *be* one. `C = a·F + (1−a)·B` puts a blended pixel
+   **on the line between `B` and `F`**; a pixel that is its own colour is not,
+   and decontaminating it divides by a coverage that never existed. A 3px dark
+   outline — (16,8,0) against (1,1,1), with the letter's white fill inside the
+   2px reference window — resolves to a coverage of 0.038, and `B + (C−B)/a`
+   blows its warm tint up to a saturated (255,183,0) at alpha 10: the outline
+   is punched through from both sides. Pixels whose residual from the `B→F`
+   line exceeds 25% of their own background distance are therefore preserved
+   whole. Thick dark outlines were already safe by accident (no high-contrast
+   reference within the search window, so the pass declines); only thin ones
+   ever reached the broken path. The check changes **no** pixel count on the
+   audited bowling fixtures — genuine anti-aliased blends sit on the line.
+5. **RGB-only edge decontamination**, for the pixels step 4 just declined.
+   See below.
+6. **Residual edge islands** (Phase 1.6B), for the small dark components step 5
+   could not reason about from a single direction. See below.
+7. Halo guard: bleed retained RGB two pixels into the now-transparent
+   exterior. Transparent pixels still carry colour, and every resample in
+   this codebase interpolates RGB independently of alpha
+   (`raster-transform.ts` is straight, not premultiplied) — leaving the old
+   near-black behind a zero alpha is exactly how a dark halo reappears during
+   a later upscale.
+
+### RGB-only edge decontamination
+
+**ALPHA IS TOPOLOGY. RGB IS EDGE COLOUR.**
+
+The composite model above is the right tool when a fringe pixel really is
+`a·F + (1−a)·B`. It is not the only way a dark background contaminates an edge.
+Light artwork anti-aliased over near-black produces edge pixels whose channels
+**clip on the way down**: the audited bowling swoosh runs (11,5,0) → (18,11,0)
+→ (42,30,14) → (79,66,47) → gold across four pixels. The second of those is
+Chebyshev 17 from the (1,1,1) background — outside the tolerance of 12, so the
+fill correctly keeps it — and sits 9.9 off the `B→F` line against a background
+distance of 19.75, so `liesOnComposite` correctly refuses it. The result is a
+**fully opaque ring of the old background baked into the artwork**: invisible
+on a black garment, dark stipple on a white one.
+
+The post-delivery fidelity audit measured ~8,231 such pixels against ~6,324
+pixels of legitimate dark ink in the same image, and established that every
+**alpha**-based remedy destroys the second population to reach the first:
+widening the tolerance costs 34–46% of the real ink, deleting near-black pixels
+costs the bowling ball's finger holes, eroding the edge costs the small
+tagline. What is wrong with these pixels is not that they are opaque. It is
+their **colour**. So this pass corrects colour and nothing else.
+
+It runs **only where the composite model declined**, and requires all of:
+
+- **Visible**, and within the *same* 2px reach step 4 used. `FRINGE_RADIUS_PX`
+  is not widened; the 1,571 dark pixels the audit found at distance 3 are a
+  separate question and are left alone.
+- **Adjacent to confirmed exterior transparency** — the removed mask, or a
+  pixel the composite pass proved was pure background and feathered away.
+  Topology, never darkness: "this pixel is dark and near the edge" is exactly
+  the inference that deletes finger holes.
+- **Thin.** Local dark thickness — the dark extent through the pixel along each
+  axis, smaller of the two — must be ≤ 2. That minimum is stroke thickness
+  regardless of which way the stroke runs, which a run measured along one
+  chosen direction is not: a dark ring following a horizontal edge is 200px
+  "long" measured sideways, and a directional test that looked sideways would
+  protect the very contamination this exists to fix. A genuine 3px outline
+  measures 3 whichever way it runs, and is preserved.
+- **A strictly rising luminance ramp in the ORIGINAL**, from the background
+  pixel outside it, through the candidate, to the artwork behind. That monotone
+  climb is the actual evidence that this is light artwork composited over a
+  dark background rather than dark artwork in its own right. The **original**
+  is the authority: guided cleanup and the composite pass may both have altered
+  neighbours by now, and only the upload still carries the ramp the customer's
+  file actually had.
+- **An inward reference that is materially lighter**, checked against the exact
+  bytes about to be copied. An edge whose interior is equally dark is an edge
+  of dark artwork.
+
+Then it copies that reference's RGB and **writes no alpha at all**. The alpha
+plane is compared byte-for-byte before and after in
+`edge-rgb-decontamination.test.ts`; that invariant is not negotiable, because
+this pass may be wrong about a colour but must never be able to change the
+shape of the artwork.
+
+**Ambiguity preserves.** The audit found ~557 edge pixels with neither a clean
+rising ramp nor a clean plateau. They are counted
+(`fringeRgbFallbackPreservedAmbiguous`) and left exactly as they are.
+
+On the real bowling original, replaying only the legitimate guided removals,
+this neutralises **77.5%** of the measured contamination (6,367 of 8,215) with
+**zero** alpha bytes changed, zero loss of dark ink of thickness ≥ 3, and all
+three finger holes byte-identical.
+
+**Scope.** The forensics that justify this measured *dark* contamination over a
+dark background. The pass does not fire on light-background artwork, and
+inventing the inverse case without the same evidence is not something the
+codebase does.
+
+**Garment neutrality.** The algorithm receives no shirt colour, no preview
+background, no garment colour, and there is no parameter through which one
+could reach it. One prepared asset serves White, Grey and Black alike. The
+Phase 1.5 QA preview backgrounds are a **presentation safety layer** — they
+exist so a human can see a mistake like a lost finger hole before approving —
+and are never an input to image processing.
+
+### Residual edge islands (Phase 1.6B)
+
+The pass above reads its evidence along **one inward normal**: the first
+fixed-order direction with removed background behind it. That is the right
+shape for a contaminated pixel on a straight silhouette. Where the silhouette
+turns a corner, ends in a tip, or narrows to a one-pixel sliver, the chosen
+normal points *along* the edge instead of across it, and the ramp test is being
+asked a question the geometry cannot answer.
+
+Forensic classification of what survived Phase 1.6 on the real bowling asset —
+3,288 dark pixels still touching confirmed exterior transparency — attributed
+them to:
+
+| Rejected by | Pixels |
+| --- | --- |
+| dark run 3+ deep along that one normal | 1,071 |
+| handled by the composite model, not this pass | 821 |
+| local dark thickness over the limit (intentional stroke) | 529 |
+| luminance profile not strictly rising (ambiguous by design) | 408 |
+| the pixel inward along that normal is itself transparent | 305 |
+| the pixel outward along that normal is not darker | 154 |
+
+The last three describe a **chosen direction**, not the artwork. So Phase 1.6B
+replaces the directional question with a topological one: it examines the whole
+8-connected **dark component** in the output, and recolours it only when
+
+- every pixel of it was **declined by the composite model** — which also bounds
+  the whole component inside the same 2px fringe band, since that flag is only
+  ever set there;
+- the component **touches confirmed exterior transparency**;
+- the component is **small** (≤ 8px);
+- every pixel is dark in the original and passes the **same
+  `localDarkThickness` guard** Phase 1.6 uses, unchanged;
+- every pixel has its own **materially brighter opaque artwork neighbour** to
+  take colour from.
+
+Because the component is *maximal* among dark pixels, "brighter all around" is
+structural rather than sampled — any dark neighbour would be in the component.
+And because the whole component is bounded to the fringe band, recolouring it
+cannot leave a dark remainder just outside the pass's reach: the **inverted
+ring** that a merely-deeper ramp search would produce, and the reason the ramp
+ceiling equals the fringe radius rather than being a tuning knob.
+
+**Why it cannot reach the finger holes** — measured, not asserted. The three
+holes are 439/716/437 dark pixels forming components of 503/822/480, none of
+which touches exterior transparency at all: they are preserved cavities deep
+inside the ball. The audited parameter sweep recoloured **0** hole pixels at
+every island size from 1 to 128. **Why it cannot reach intentional outlines**:
+against the 9,987 pixels the orientation-independent ink classifier calls
+stroke, it changes **0**.
+
+On the real bowling original this takes the residue from 3,288 to 1,882 and the
+measured contamination from 1,926 to 1,094 — **88.1%** of the original
+population now neutralised — with zero alpha bytes changed, identical bounding
+box, and identical cavity, speckle, guided and feathering counts. After local
+production normalization to 3150px, dark pixels on the alpha edge fall from
+9,833 to 4,686 with the visible pixel count unchanged, so the fix survives
+resampling without thinning outlines.
+
+**What it deliberately does not solve.** Of the 3,288 residual pixels, 1,208
+have a local dark thickness of 3 or more. Those are the artwork's own dark
+outlines and shadows meeting the silhouette — broken into a dotted line by the
+fill, and therefore reading as stipple on white — and the audit found no
+evidence separating them from any other intentional dark stroke. They stay.
+Preservation outranks cosmetic cleanliness, and the honest position is that
+**this residue is artwork, not contamination**.
+
+Observability: `fringeRgbResidualCandidates`, `fringeRgbResidualPixels`,
+`fringeRgbResidualPreservedAmbiguous`. Diagnostic record metadata only — no
+migration, exactly like the Phase 1.6 counters.
+
+### Enclosed background cavities
+
+A border-seeded fill is, by construction, blind to background that a
+foreground shape has topologically **sealed off** from the border: the
+counters inside letterforms, the open middle of a ring or badge, the area a
+frame encloses. Visual acceptance of the bowling logo found exactly this — the
+exterior went transparent while the counters in `SPLIT DISTURBERS` and, worst,
+in the small `DISTURBING FROM DAY ONE` wording stayed black.
+
+`background-cavities.ts` extends the exterior mask with those regions, and
+with nothing else. It is a **mask extension, not a second removal pipeline**:
+one fringe pass, one halo guard, one set of audited edge behaviour still runs
+downstream, over a mask that now includes confirmed cavities.
+
+The hard part is not finding them; it is the **negative control**. A bowling
+ball's finger holes are enclosed, black, the same colour as the background,
+and surrounded entirely by foreground — and they are the customer's artwork.
+"Enclosed + background-coloured" describes a letter counter and a finger hole
+equally well, so it can never be the test. Four kinds of evidence are required
+of every region, all of them:
+
+1. **A confirmed exterior background exists.** With no exterior fill there is
+   no background model, and the pass does nothing at all.
+2. **Colour**: every pixel satisfies the *same* membership test the exterior
+   fill used — same estimated colour, same adaptive tolerance, from
+   `pixel-metrics.ts`. True by construction, since regions are grown with that
+   predicate.
+3. **A real foreground wall**: ≥75% of the enclosing boundary is
+   affirmatively **outside the background model** — the same
+   `matchesBackgroundColor` contract, not a contrast threshold.
+
+   This gate originally demanded ≥48 Euclidean RGB, borrowed from
+   `SOLID_REFERENCE_MIN_DISTANCE`, and **on the real bowling artwork it
+   rejected 129 of the file's counters**. Real typography is outlined in dark
+   ink: measured (16,8,0) and (24,8,0) against a (1,1,1) background. Those are
+   unambiguously foreground under the model (Chebyshev 15 and 23 against a
+   tolerance of 12) while sitting only ~17 and ~25 Euclidean from it. 48
+   answers "is there enough colour separation to divide by?" for fringe
+   decontamination — a different question, and borrowing it silently required
+   customer artwork to be high-contrast.
+
+   > **FOREGROUND STRUCTURE DOES NOT NEED TO BE HIGH-CONTRAST. IT ONLY NEEDS
+   > TO BE AFFIRMATIVELY OUTSIDE THE BACKGROUND MODEL.**
+4. **Shallow enclosure**: the thinnest foreground wall between the region and
+   the confirmed exterior is no thicker than the region itself —
+   `wall ≤ 1.75 · inradius + 6`, both measured by 4-connected BFS.
+
+   The base term moved from 4 to 6 on **measured real-file evidence**: two
+   genuine tagline counters in the customer's artwork (the enclosed slots in
+   the `R` and `B` of `DISTURBING FROM DAY ONE`) measure inradius 1 / wall 7,
+   so the ratio term contributes under two pixels and the base decided the case
+   alone — `1.75·1 + 4 = 5.75` refused them, `1.75·1 + 6 = 7.75` reaches them.
+   Because the base is a *constant* it is swamped by the ratio term everywhere
+   the cavity is not near-zero-sized, so the governing negative control barely
+   moves: the real finger hole at inradius 9 / wall 26 goes from an allowance
+   of 19.75 to 21.75 and stays preserved with 4px to spare.
+
+Rule 4 does the real work, and it is a statement about **topology, not
+typography**. Background shows through a hole in a *structure* — a stroke, a
+ring, a border — so the wall around it is on the order of the hole. A dark
+feature belonging to a solid object sits deep in that object's mass. On the
+acceptance fixture:
+
+| Region | Inradius | Wall | Outcome |
+|---|---|---|---|
+| display counter (plain stroke) | 30px | 11px | removed |
+| small-wording counter | 6px | 5px | removed |
+| dark-outlined tagline counter | 5px | 10px | removed |
+| dark-outlined display counter | 11px | 31px | **refused — open case, see limitations** |
+| ball outline crescent | 6px | 124px | preserved |
+| drop shadow band | 10px | 71px | preserved |
+| **finger hole** | 14px | 244–312px | **preserved** |
+
+No letter is identified, no glyph matched, nothing OCR'd, and no colour
+special-cased — a light background behind a dark logo runs the identical code
+path. A final ceiling refuses the whole pass if exterior plus cavities would
+consume >99.5% of the canvas, and a region no foreground path reaches (sealed
+behind another dark region) is preserved rather than guessed at.
+
+Every threshold is set so that **ambiguity preserves**. A missed cavity is a
+blemish the customer can point at; a destroyed one is artwork we cannot
+recreate.
+
+### Isolated near-background speckle
+
+The fill removes pixels *within* tolerance. A real export is not that tidy: on
+the audited artwork, background (1,1,1) with a tolerance of 12 left a scatter of
+pixels at Chebyshev 13–24 — invisible against the black they came from, and a
+dotted black outline traced around the whole design the moment the background
+went away. The prepared file carried **488 of them, 520 pixels**.
+
+Widening the tolerance is the wrong fix and would be a serious one: the same
+looser test would then apply to the customer's 34,392 dark foreground pixels
+and let the flood fill march through them. The residue is distinguishable not by
+its colour but by its **topology** — it is a fleck floating in space, attached
+to nothing. `background-speckle.ts` gates on exactly that:
+
+1. **Fully isolated.** Every neighbour outside the component is already-removed
+   background, or the image border. Not "mostly"; every one. A pixel touching
+   artwork *is* artwork and this pass cannot see it.
+2. **Tiny.** ≤ 4 pixels. The measured population ran 1px (463), 2px (19), 3px
+   (5), 4px (1) — and then **nothing at all until 21px**, where the artwork's
+   own smallest retained component begins. The bound sits inside a genuine
+   five-fold gap in the data rather than on a slope.
+3. **Near-background.** Every pixel within `2 × tolerance` of the confirmed
+   background colour — a multiple, not an absolute, so a noisy export gets
+   proportionally more room and a clean one gets almost none. A deliberate 1px
+   accent fails this by a mile.
+
+Rule 1 is what makes it safe and is why the pass needs no notion of "near an
+edge": an island enclosed by removed background is, by construction, adjacent to
+it. **One pass, never iterated** — removing an island cannot isolate anything
+that was not already isolated, and looping would creep outward from a boundary
+that just moved, which is precisely the erosion this must not do.
+
+### User-guided background cleanup
+
+> **Automatic classification fails toward preservation. For pixels it cannot
+> classify, the CUSTOMER is the authority.**
+
+Some enclosed regions are not ambiguous by accident; they are ambiguous to every
+measurement available. The full real-file audit settled this quantitatively.
+Across the customer's bowling artwork the wall/inradius statistic — the one rule
+4 gates on — measures:
+
+| Population | wall / inradius |
+|---|---|
+| genuine letter counters (6 regions) | 2.11 – 5.29 |
+| **bowling-ball finger holes (3 regions)** | **2.89 – 4.69** |
+
+The finger holes sit **inside** the counter range. The populations are *nested*,
+so no threshold on that statistic separates them, and no reparameterization of
+it can: raising the ratio far enough to reach the counters deletes the ball
+first. Several alternative statistics did separate on that one file (best:
+75th-percentile ray crossing thickness over inradius, ~2× margin), but on three
+negative controls from a single image — and a smaller ball icon with
+proportionally larger holes collapses the separation. **That is not enough
+evidence to spend a customer's artwork on.**
+
+So the system stops guessing and asks. Phase 1.3 makes the ask
+**preview-then-confirm**, not click-to-delete:
+
+- The browser sends an **image-space coordinate** for preview — never a region
+  id, a mask, an alpha value or an asset path. A made-up coordinate resolves to
+  whatever is genuinely there, and if that is artwork the answer is "no" with
+  no confirmation surface.
+- An eligible preview returns a **signed candidate token** plus an
+  **exact-region highlight** built from the same label map the mutation path
+  uses. The UI paints that overlay; it never flood-fills client-side.
+- **Clicking does not mutate.** Only an explicit "Remove This Area" redeems the
+  token. Cancel discards the transient preview with zero persistence.
+- Confirm revalidates server-side: project, preparation, prepared asset,
+  removal count, and region eligibility must still match. Stale or forged
+  tokens refuse without writing. Double-confirm is idempotent
+  (`already_removed`).
+- A click may resolve **only** to a region the automatic cavity pass already
+  identified as an enclosed background-coloured candidate and then declined on
+  geometry. Everything else in the image is inert — the customer's dark outline
+  measures Chebyshev 15 against a tolerance of 12, so it was never a candidate
+  and no click can reach it.
+- A click on a **finger hole is eligible**, and that is not a bug. A finger hole
+  is an enclosed background-coloured region preserved on ambiguity, exactly like
+  a counter; the system genuinely cannot tell them apart. What protects it is
+  the customer seeing the exact highlight and choosing Cancel. What the code
+  guarantees is that nothing is removed until they confirm, and undo remains
+  available before approval.
+
+**Pipeline order.** The mask is built by four passes that only ever *grow* it —
+exterior → cavities → guided → speckle — and not one of them reads or writes a
+colour. Only then do erase, fringe decontamination, RGB-only edge
+decontamination and the halo guard run. That
+split keeps the audited edge behaviour singular: an exterior pixel, a cavity
+pixel, a clicked pixel and a speckle pixel are indistinguishable by the time any
+colour is computed, so there is **one** fringe pass rather than four variants,
+and the composite guard that protects 10,449 opaque dark line-work pixels on the
+real file cannot be bypassed by the new passes. Speckle runs last of the four
+because "surrounded entirely by removed background" is not knowable until the
+mask is final — removing a large counter can strand a fleck inside it.
+
+**Persistence and lineage.** `artwork_preparations.guided_cleanup` stores the
+customer's ordered **clicks**, not the resulting mask. The clicks are the only
+thing the customer authored; replaying them through the deterministic pipeline
+over the immutable original reproduces the prepared bytes exactly. That one
+choice buys reload-safety, undo (drop the last point), idempotency (a repeat
+click resolves to a region already in the list and changes nothing) and
+auditability. A stored mask would give none of it and could silently disagree
+with the original it claims to describe.
+
+```
+customer_upload (IMMUTABLE, never rewritten)
+  └─ automatic preparation      → prepared asset #1
+       └─ + confirmed removal   → prepared asset #2   (preparedAssetId repoints)
+            └─ undo             → prepared asset #3   (≡ #1, byte-for-byte)
+                 └─ APPROVED    → prepared_upload ArtworkVersion → Phase 2
+```
+
+Every cleanup derives a **new** asset; superseded ones are left in place, so
+lineage stays readable and nothing is overwritten. Each persisted derivation
+uses a **unique storage object identity** (`prepared-{preparationId}-{uuid}`
+as the storage `conceptId` folder). Storage backends keep `upsert: false` —
+paths are never reused as an idempotency mechanism; candidate tokens and the
+`guided_cleanup` click list are. An orphan object from a failed DB write after
+a successful upload must not block the next confirm: the next attempt mints a
+fresh UUID. Once `status = 'approved'` the preparation is history:
+`previewGuidedCleanup`, `confirmGuidedCleanup`, and `undoGuidedCleanup` all
+refuse, so the artwork Phase 2 consumes can never change underneath it.
+
+> **PREPARED ARTWORK MAY INCLUDE CUSTOMER-GUIDED CLEANUP BEFORE APPROVAL.** What
+> the customer approves is the prepared file as they last saw it — automatic
+> passes plus whatever they removed themselves. `guidedRegionsRemoved` on the
+> preparation record is the honest, durable statement of how much of it went on
+> their authority rather than on measured evidence.
+
+**Magic Select (Phase 1.7 / 1.7B).** A second cleanup tool beside Select Area.
+The customer clicks a colour they want gone and sets a Tolerance (Chebyshev RGB
+distance only; default 8, range 0–40). There is no Connected/Similar toggle,
+no lasso, and no editor expansion.
+
+The server classifies the seed from generic raster properties (visible alpha,
+distance to transparency, local thickness and 4-connected component size
+inside a fixed seed-colour class that is independent of Tolerance; thickness
+uses dark-ink runs when the seed itself is dark) — never bowling coordinates,
+OCR, or product semantics:
+
+- **Residue-like** (thin ≤ 2, touches exterior transparency, small component):
+  magnetic global selection of the same structural class within colour
+  tolerance (`selectionMode: "similar"`, `ruleVersion: "magic-select:v2"`).
+- **Otherwise** (thick outlines, enclosed interiors, finger-hole fills): the
+  original 4-connected wand (`selectionMode: "connected"`,
+  `ruleVersion: "magic-select:v1"`).
+
+Naive "select all similar RGB" is rejected: colour-only matching selects
+legitimate outlines and enclosed dark artwork. Topology/thickness/size gates
+do not loosen when Tolerance increases. Preview remains mutation-free; the
+server owns the mask; confirm redeems a signed `v: 3` token that binds the
+resolved mode, rule version, selection key, and tolerance. Replay uses the
+**persisted** `selectionMode` and never re-infers it. Phase 1.7 connected ops
+without those fields still replay as connected. `guided_cleanup` JSONB — no
+migration. Highlight for Magic Select is a solid amber overlay so scattered
+1px islands stay visible on White/Gray/Black QA.
+
+### Repairability
+
+Precedence, highest first, biased one way on purpose: when the deterministic
+evidence is ambiguous, prefer review over acting.
+
+| Verdict | Meaning |
+|---|---|
+| `NOT_REPAIRABLE` | No visible artwork at all. |
+| `NEEDS_REVIEW` | Complex/photographic exterior, or a fill that would remove ~everything or ~nothing. |
+| `REQUIRES_ENHANCEMENT` | Otherwise fine, but too few real pixels for the placement's production target. |
+| `PRINT_READY_ALREADY` | Already usably transparent, and big enough. |
+| `REPAIRABLE_AUTOMATICALLY` | Uniform, edge-connected exterior; sufficient resolution. |
+
+`backgroundTreatment` is **independent of** resolution: background
+preparation and enhancement are separate problems, so an artwork that needs
+enhancement can still have its background prepared honestly today. Print-size
+sufficiency reads `shared/print-placement-dimensions.ts` — artwork
+preparation never restates a print-sizing rule — and is measured against the
+**visible artwork's** width, never the padded canvas.
+
+### Persistence
+
+One new table, `artwork_preparations`, plus one new `artwork_kind` enum value
+(`prepared_upload`). The schema-discipline audit — what must survive reload,
+why existing tables cannot represent it honestly, and why this is the
+smallest additive change — is written out in full in the migration header
+(`20260810140000_uploaded_artwork_preparation.sql`) and in
+`ArtworkPreparation`'s doc comment. In short:
+
+- `AssetRecord` has no honest lineage slot (`vectorAssetId` means "an SVG
+  companion"; `printAssetId` means "a print-ready production asset").
+- The customer's prepared-artwork approval is not any existing flag.
+  `finalDirectionConfirmed` means "no more creative changes" and is reset by
+  concept selection; `selectedArtworkVersionId` means "the direction I'm
+  working with".
+
+### The prepared ArtworkVersion (the Phase 2 handoff)
+
+On approval, one `ArtworkVersion` is created with `kind: "prepared_upload"` —
+its own kind precisely so uploaded artwork can never be mislabelled as an
+AI-generated concept (Constitution §16). Its provenance is honest by
+omission: `generationJobId`, `providerKey`, and `designBriefVersionId` are
+all `null`, because no job, no provider, and no approved brief version
+authorized these pixels — the customer's own file did.
+`sourceArtworkVersionId` is also `null`: it means "a targeted revision of
+that artwork version", and the source here is an **asset**. Original →
+prepared lineage lives on `artwork_preparations`, where it is true.
+
+Phase 1 deliberately does **not** set `selectedArtworkVersionId` or
+`finalDirectionConfirmed` — both belong to the generated-concept lifecycle.
+Phase 2 adds exactly one lifecycle write here: approval moves
+`PrintProject.status` from `"intake"` to `"approved"`, meaning "the customer's
+creative decision is settled; production is the next step" — the same thing it
+means when `submitDesignBriefDecision` sets it in the other workflow. It is
+never `"finalizing"` (nothing has been requested) and never `"print_ready"`.
+
+### No required-wording contract
+
+Uploaded artwork never goes through Concept Evaluation's required-wording
+checks, and Phase 1 performs no OCR. The pixels are authoritative for visual
+content; the customer is never asked to retype text they already have, and
+the text is never modified.
+
+The architectural hook Phase 2 needs is exactly
+`ArtworkVersion.kind === "prepared_upload"` — an unambiguous, non-inferred
+signal for the uploaded-preserve print-validation applicability profile. Phase
+2 implements that profile; see §13i.
+
+### Formats
+
+**PNG only, and it says so.** The repository's one image codec is `pngjs`
+(`png-thumbnail-generator.ts`, `raster-transform.ts`, `production-png.ts`),
+which is PNG-only. JPEG/WebP support would mean adding a new decoder
+dependency and its entire security surface, which Phase 1 deliberately does
+not do. JPEG, WebP, and GIF are *detected* so the customer gets an honest
+"we can't take that yet" rather than a generic corruption error; SVG is
+detected and rejected explicitly.
+
+### Security boundary
+
+Every rule runs before any uncontrolled allocation:
+
+- **Scope.** Bound to `projectId` from the path; the capability re-verifies
+  ownership of every row it touches, and image reads additionally confirm the
+  asset belongs to the project. (This codebase has no user authentication
+  layer — see §23/§24 — so "authenticated" here means project-scoped
+  authorization, which is the strongest statement currently true.)
+- **Bytes are authoritative.** Declared `Content-Type` and filename are
+  untrusted claims. A declared type that disagrees with the signature is
+  rejected rather than silently corrected.
+- **Decompression bombs** are stopped at the PNG header: a 30000x30000 PNG is
+  a few hundred bytes on the wire and ~3.6 GB decoded, so checking the
+  decoded image would already be too late.
+- **Filenames** are sanitized for display only and never used to build a
+  storage path — object keys are always
+  `projects/{projectId}/concepts/{groupingId}/{name}` with a name this code
+  chooses.
+- Every image-read miss returns the same generic 404, so the endpoint cannot
+  be used to enumerate internal state.
+
+### UI
+
+`WorkflowChoiceCard` appears only at the very start of a project. Choosing
+"Create New Artwork" is a pure client-side dismissal — the existing interview
+is byte-for-byte unchanged for every customer who does not upload anything.
+
+`UploadedArtworkPanel` owns the surface once an upload exists, and the
+creative surfaces (concept grid, summary card, revision actions, composer)
+are hidden rather than merely unreachable.
+
+`ArtworkComparison` renders Original and Prepared side by side, both labelled.
+The Prepared tile uses a presentation-only **Preview Background** control
+(White / Gray / Black) so transparent regions and dark edge residue can be
+inspected before approval. The Original tile stays a faithful upload display
+and is not rewritten by that QA control. **Enlarging is not approving**:
+`ArtworkPreviewModal` has no approval affordance in it at all — a stronger
+version of the structural fix applied to `ConceptCards`, where the enlarge
+control had to become a sibling of the select control. Approval is only ever
+the explicit "Use Prepared Artwork" button.
+
+Guided background cleanup (Phase 1.4) is opened from compare via **Clean Up
+Background**, which mounts `GuidedCleanupWorkspace` — a large interactive
+surface for preview → confirm → undo, with Fit / Zoom In / Zoom Out and pan so
+small details stay clickable. Zoom grows the rendered image content box inside
+a scrollable viewport (not CSS `scale`), so `mapClickToImagePoint` stays
+authoritative — one coordinate mapper, and panning needs no term of its own
+because scrolling moves the element's own rect.
+
+Phase 1.6B makes the surface **selection-primary**. The workspace exists so a
+customer can point at leftover background; zoom and pan are there to make that
+pointing accurate, not to be the point. Phase 1.4 nonetheless swapped the
+cursor to `grab` above Fit, which advertised dragging as the primary gesture
+while a stationary click remained the only thing that did anything — the
+affordance and the behaviour disagreed. So the cursor is now **crosshair at
+every zoom level**, and panning must be asked for: hold **Space** (or press the
+middle button) to drag, during which the cursor is `grab`/`grabbing` and no
+cleanup can fire however still the pointer is. Touch has neither cursor nor
+modifier, so the gesture carries the meaning: a tap selects, a drag pans, and a
+drag can never select. No pinch zoom — the toolbar owns zoom. The rules live in
+`guided-cleanup-interaction.ts` as pure functions, for the reason
+`artwork-click-mapping.ts` states: with no DOM in the test runner, a gesture
+rule inside an event handler could only ever be verified by clicking around. Enlarge stays a separate read-only
+viewer; the small compare tiles are not the cleanup surface. Phase 1.5 adds
+the same White / Gray / Black Preview Background control inside the workspace
+(default White). Switching it never changes prepared bytes, `preparedRevision`,
+candidate tokens, zoom, or cleanup lifecycle.
+
+### Garment-neutral master (Phase 1.5)
+
+**GARMENT-NEUTRAL MASTER.** Prepared and final PNG bytes are independent of
+garment color. Garment / background color may affect preview, inspection, and
+QA only — never alpha, RGB, cleanup algorithms, validation results, or the
+stored prepared asset.
+
+**QA BACKGROUND.** White (`#FFFFFF`) / Gray (`#C8C8C8`) / Black (`#000000`)
+compositing is a presentation-only inspection aid (CSS under the transparent
+PNG). It is not persisted, not sent to the server, and not a garment-color
+product visualization. Actual garment color, when shown elsewhere, must not
+replace these contrasting inspection controls.
+
+**APPROVAL SAFETY.** Transparent artwork must be reviewed against a
+contrasting background before final approval. This reduces the class of
+misses where intentional dark holes and accidental transparent holes look
+identical on black — it does not by itself guarantee fidelity.
+
+The customer snapshot carries an opaque `preparedRevision` that changes on
+every confirm/undo (new prepared derivation) and is unchanged by preview.
+`ChatApp` reloads the prepared signed URL when that revision changes, so a
+later cleanup preview cannot resurrect a superseded automatic/prepared image.
+
+Every sentence the panel renders comes from the server
+(`preparation-copy.ts`). No copy is derived client-side from analysis
+numbers, because analysis numbers never reach the client at all.
+
+### Testing
+
+Fixture cases A–I (solid black exterior, internal outline, enclosed region,
+near-black, white background, already transparent, edge-touching subject,
+halo, photographic background) plus J (original immutability, verified by
+hash), a full security suite at both the pure and route layers, and a bowling
+acceptance regression against a **synthetic** fixture reproducing the audited
+properties at real dimensions — the customer's own file is deliberately not
+committed to the repository (privacy and ownership, Constitution §16).
+
+`no-paid-provider.test.ts` traps `fetch`, `http.request`, `https.request`,
+and `net.Socket.prototype.connect` for the duration of a full
+upload → analyze → prepare → approve run, so a paid call would fail the suite
+loudly instead of quietly spending money.
+
+---
+
+## 13i. Existing Artwork → Print Ready (Phase 2: production finalization)
+
+Phase 1 ends at an approved, background-prepared transparent PNG. Phase 2
+turns that into the file a printer can actually use, and it is the point where
+the two workflows finally converge.
+
+### Two authorities, one pipeline
+
+**PREPARED ARTWORK != PRINT-READY ARTWORK.**
+**PREPARED APPROVAL != `print_ready`.**
+
+```
+CREATE NEW ARTWORK                     UPLOAD EXISTING ARTWORK
+  selected concept                       uploaded original
+    ↓                                      ↓
+  final direction approval               prepared artwork
+  (FinalDirectionApproval)                 ↓
+    ↓                                    prepared approval
+    │                                    (ArtworkPreparation.status='approved')
+    │                                      ↓
+    └──────────────► FinalArtworkJob ◄─────┘
+                          ↓
+                 production requirements  (placement policy + chosen width)
+                          ↓
+                 enhancement decision     (visible pixels vs target pixels)
+                          ↓
+                 provider / normalization (trim → size → resample → pHYs)
+                          ↓
+                 production asset         (immutable, production_png)
+                          ↓
+                 AUTHORITATIVE Print Validation
+                          ↓
+                 print_ready  /  finalization_required
+```
+
+These are **parallel customer-authority boundaries**, not one gate with two
+doors. A create_new customer's authority is "I am done revising the design you
+made for me". An upload customer was never revising anything — their authority
+is "this prepared file faithfully represents the artwork I gave you". Asking
+the second customer the first question has no meaning.
+
+### The authority model (why no synthetic approval)
+
+`FinalArtworkJob` carries **either** a `final_direction_approval_id` **or** an
+`artwork_preparation_id`, with a database CHECK enforcing exactly one. The
+job's `sourceKind` is *derived* from which one is set, never stored, so there
+is no third fact that could disagree with the two keys.
+
+Three options were audited:
+
+| Option | Verdict |
+| --- | --- |
+| Reuse `FinalDirectionApproval` with a source kind | **Rejected.** Its `design_brief_version_id` is `NOT NULL` and honest for every existing row; uploaded artwork has no approved brief version, so this means weakening a real constraint AND fabricating a brief-version reference for artwork no brief describes. |
+| A generalized `ProductionApproval` abstraction | **Rejected.** A new table whose only content would be a foreign key to one of two records that already exist — indirection with no new fact in it. |
+| **`ArtworkPreparation` approval IS the authority** | **Chosen.** The row already records exactly this decision (`status`, `approved_at`, `prepared_artwork_version_id`), durably and auditably. Creating a second record for the same decision would be the duplicate competing authority this design exists to avoid. |
+
+`requestPreparedUploadFinalArtwork` therefore requires **none** of
+`selectedArtworkVersionId`, `finalDirectionConfirmed`, an approved
+`DesignBriefVersion`, or a `FinalDirectionApproval`. It requires the approved
+preparation, its prepared asset, and its `prepared_upload` `ArtworkVersion`.
+
+### Idempotency: approval + production size
+
+The upload workflow's idempotency key is **(project, preparation, production
+width)**, enforced by a partial unique index. Consequences, all intended:
+
+- Double click, reload, second tab, retry → the same job, and therefore never
+  a second paid reconstruction.
+- A `"failed"` job (infrastructure) revives to `"queued"` on the customer's
+  next press of the same button.
+- A `"completed"` job is returned as-is — that is a real verdict about this
+  artwork at this size, not a hiccup.
+- **A different print width is a different deliverable**, and gets its own
+  job. The older plate stays immutable and correct for the size it was made
+  at; `getCurrentProductionAssetId` resolves only the job matching the
+  CURRENT intent, so a mismatched plate is withheld rather than handed over
+  with a size on it that is a lie.
+
+`FinalArtworkJob.productionWidthIn` freezes each upload job's own target at
+enqueue, so a size change mid-flight cannot retroactively re-target a running
+job. (The create_new path is unchanged and still reads
+`TShirtDesignBrief.intendedPrintWidthIn` at run time.)
+
+### Source contract: the prepared PNG, never the original
+
+The enhancement source is the **approved prepared transparent PNG**. The
+customer already accepted that background isolation; starting from the opaque
+original would discard their decision, and re-running isolation would
+re-litigate it. The worker refuses to proceed if the preparation's prepared
+asset and the approved `ArtworkVersion`'s primary asset disagree, or if the
+prepared asset is the original.
+
+### Enhancement decision (cost policy, `enhancement-decision.ts`)
+
+Pure arithmetic on two numbers known before any provider is contacted:
+
+```
+visible artwork width (alpha bbox, in real source pixels)
+  vs
+targetWidthIn × targetPpi     e.g. 10.5in × 300 = 3150px
+```
+
+- `>= target` → **skipped**. No paid call at all; the local
+  normalization-only provider runs.
+- `< target` → **reconstructed**. The configured provider runs (Topaz
+  Transparency Upscale in live configuration).
+
+Visible width, never canvas width — transparent padding is not resolution.
+This is the same rule `image-analysis.ts` already applies when telling the
+customer whether enhancement will be needed, so what they were told before
+approving and what production does cannot disagree.
+
+There is **no retry ladder**. If a reconstruction still lands short of the
+target, the plate is produced honestly and authoritative validation fails it
+via `reconstruction_sufficiency` — never an escalating loop of paid calls.
+
+### Uploaded-preserve validation profile
+
+`PrintValidationInput.validationProfile` selects which checks *apply*. It is
+an applicability profile, not a strictness dial.
+
+Under `uploaded_preserve`, three checks are **not emitted** because they have
+no meaning for customer-supplied artwork — not because they are inconvenient:
+
+| Check | Why inapplicable |
+| --- | --- |
+| `brief_provenance` | No Design Brief version authorizes this artwork; the customer's file and their prepared-artwork approval do. |
+| `concept_evaluation_alignment` | "Does this match the brief we were given?" has no answer when no brief describes it and nothing generated it. |
+| `required_wording_verification` | The wording is already in the customer's pixels. They never typed it; asking them to, so we could check our own transform, would invent a requirement. Phase 2 performs no OCR. |
+
+Everything a print shop would actually reject a file for still **blocks**,
+unchanged: `content_type`, `raster_dimensions_known`, `transparency`,
+`effective_resolution`, `minimum_raster_dimensions`,
+`production_normalization`, `alpha_bound_artwork`, `transparent_dead_canvas`,
+`physical_width_policy`, `aspect_ratio_preserved`.
+
+Three preservation checks are **added** — so this profile is not weaker, it is
+different and in places stricter:
+
+- `source_lineage` — the plate provably derives from the approved prepared
+  asset (never the original, never another project's), with a SHA-256 of the
+  exact source bytes. Missing lineage **fails**; "we didn't write it down" is
+  not a reason to certify.
+- `preserved_source_geometry` — the plate's own alpha bbox keeps the approved
+  artwork's proportions, so a crop, letterbox, or squash is caught.
+- `reconstruction_sufficiency` — the plate was not enlarged beyond the raster
+  it was built from.
+
+Every report also carries a `validation_profile` info check and a `profile`
+field, so **"not asked" is never indistinguishable from "passed"**.
+
+### Preservation honesty boundary
+
+Deterministic checks prove the pipeline used the artwork the customer
+approved, and that its geometry survived. They **do not** prove it still looks
+the same. A provider-hosted reconstruction is a genuine enhancement transform,
+and visual fidelity after it remains provider-dependent and unproven by
+arithmetic. This limitation is stated in
+`print-validation/contracts.ts` rather than papered over.
+
+### Project lifecycle
+
+No new statuses and no new conversation phase. `PrintProject.status` is the
+sole lifecycle authority for the upload workflow (the design-interview surface
+is structurally absent for these projects — the uploaded-artwork panel owns
+the screen and the composer is hidden):
+
+```
+intake → approved → finalizing → print_ready
+                              ↘ finalization_required   ("needs attention")
+```
+
+A size change after delivery returns an upload project to `approved`, which is
+truthful: an approved design, and no print-ready file *at the size now
+intended*. The previously produced plate is untouched.
+
+### Customer-facing surface
+
+The approved step of the uploaded-artwork panel gains the size card (reused
+from create_new) and one action, "Prepare Print-Ready Artwork". While
+production runs it shows the shared `PRINT_READY_WAITING_MESSAGE`; on failure
+it shows an honest needs-attention message that states both the original and
+the prepared artwork are safe, plus a retry. On success the existing
+`FinalArtworkDeliveryCard` renders — without "Make Another Change", which
+reopens a creative loop an upload customer does not have. The size control
+stays available, because it is their only route to a different size.
+
+The download filename prefers the customer's own sanitized upload name
+(`split-disturbers-print-ready.png`) over brief text, which for an upload
+project only ever describes the garment.
+
+### Migration
+
+One additive, forward-only migration
+(`20260810180000_prepared_upload_finalization.sql`): two nullable columns on
+`final_artwork_jobs`, one dropped `NOT NULL`, one CHECK, one partial unique
+index. No new table, no new enum. Every existing row satisfies the CHECK
+unchanged, and the create_new path gains no new behavior.
+
+---
+
 ## 14. Background Worker Architecture
 
 Two independent job queues, two independent workers — deliberately never
@@ -2772,10 +5093,12 @@ Mechanics (both queues, identical shape):
   in production. While customer-safe `finalization.status === "preparing"`,
   ChatApp polls `GET /api/projects/[projectId]/finalization/status` every
   few seconds and refreshes the snapshot once it leaves `preparing`.
-  Polling never claims jobs, never revives failed/running jobs, and never
-  calls a provider. Interactive `next dev` only may kick an in-process
-  batch when a job is still `queued` with `attempts=0` (missed trigger /
-  stale HMR) — see `maybeRecoverStrandedLocalGenerationJobs`.
+  Polling never revives failed/running/cancelled/completed jobs and never
+  calls a provider itself. Interactive `next dev` only may kick an
+  in-process final-artwork batch when a job is still `queued` with
+  `attempts=0` behind an active approval (missed trigger / stale HMR) —
+  see `maybeRecoverStrandedLocalFinalArtworkJobs`. Generation has the
+  parallel `maybeRecoverStrandedLocalGenerationJobs`.
 
 ### Deployment topologies
 
@@ -2785,10 +5108,14 @@ Mechanics (both queues, identical shape):
    hosting)
 2. **Standalone worker process** — `npm run worker` and/or
    `npm run worker:final-artwork`, run as separate processes
-3. **Interactive local `next dev` only** — after enqueue,
-   `maybeTriggerLocalGenerationWorker` may call `runBatch()` in-process
-   so Approve/Create Concepts progresses without a manual worker POST.
-   Suppressed in production and when `IHEARTPRINTS_AUTOMATED_TEST=1`.
+3. **Interactive local `next dev` only** — after durable enqueue,
+   `maybeTriggerLocalGenerationWorker` / `maybeTriggerLocalFinalArtworkWorker`
+   may call the matching scheduler's `runBatch()` in-process so Approve/
+   Create Concepts and Prepare Print-Ready progress without a manual
+   worker POST. Shared suppression policy
+   (`local-generation-trigger-policy.ts`): never in production, never when
+   `IHEARTPRINTS_AUTOMATED_TEST=1`. The web process is **not** the
+   production worker.
 4. **Future external queue** — only scheduler topology should need to
    change; worker business logic stays put
 
@@ -2832,6 +5159,12 @@ Deployment details: `docs/deployment/generation-worker.md`.
 - Signed URL defaults: 300s; hard max 900s
 - Raw object keys remain internal
 - Cleanup deletes storage bytes if DB persist fails after upload
+- §13h: customer-supplied artwork uses the same object hierarchy and the same
+  orphan-cleanup guarantee, via `uploadCustomerArtwork`. The `customer_upload`
+  original is written once and **never** updated, re-encoded in place, or
+  deleted; the prepared transparent PNG is always a separate asset. The
+  customer's filename is stored as display metadata only and never
+  contributes to an object key
 
 ### Customer-safe concept-image read path (Sprint 2K Phase 1)
 
@@ -2886,6 +5219,15 @@ Production-oriented implemented: `supabase_storage`. Reserved:
 - Filesystem signing via `ASSET_SIGNING_SECRET` (dev fallback when unset)
 - Customer snapshots never expose raw storage keys, asset ids, or signed
   URLs — only `hasImage` plus public concept presentation fields (§19)
+- §13h (customer-supplied binary ingress): encoded size bounded before and
+  after buffering; format determined by magic signature, not by the declared
+  `Content-Type` or filename, and a disagreement between them is a rejection
+  rather than a silent correction; SVG explicitly rejected; decoded
+  dimensions and total pixel count bounded against the image header before
+  any bitmap allocation (decompression-bomb guard); malformed and truncated
+  input rejected as a customer-facing 400, never an unhandled throw;
+  filenames sanitized for display only; uploaded-artwork image reads scoped
+  to the owning project with a uniform 404 on every miss
 
 Do not document or commit actual secrets.
 
@@ -2897,8 +5239,18 @@ Interface: `ProjectRepository` (`src/lib/db/repository.ts`)
 
 | Implementation | When selected |
 |---|---|
-| `LocalProjectRepository` | Supabase env not configured; `.data/sprint1-store.json` |
-| `SupabaseProjectRepository` | `NEXT_PUBLIC_SUPABASE_URL` + service-role or anon key |
+| `LocalProjectRepository` | Neither Supabase variable configured; `.data/sprint1-store.json` |
+| `SupabaseProjectRepository` | `NEXT_PUBLIC_SUPABASE_URL` **and** `SUPABASE_SERVICE_ROLE_KEY` |
+| *(refuses to start)* | URL configured, `SUPABASE_SERVICE_ROLE_KEY` missing |
+
+Selection is three-way, not two-way. A Supabase URL with no service-role key
+is a **misconfiguration**, not a request for local mode: it used to resolve to
+an anon-keyed client (which can no longer read a single application row — see
+§23.1) or to the on-disk store, meaning a deployment could believe it was
+persisting customer work to Supabase while writing to a directory the next
+deploy discards. `getProjectRepository()` now throws. Automated test runs are
+exempt and keep the local store, so the suite can never reach real
+infrastructure.
 
 Parity expectations: both implement the same repository contract including
 atomic job claim/heartbeat/recovery, asset CRUD, and Concept Evaluation
@@ -2923,9 +5275,18 @@ Other notes:
   table persists authoritative Print Validation runs; `project_status`
   gained `"finalization_required"` — see
   `supabase/migrations/20260807140000_final_artwork_production_pipeline.sql`
+- §13h: one new table, `artwork_preparations`, plus one new `artwork_kind`
+  enum value (`prepared_upload`) — see
+  `supabase/migrations/20260810140000_uploaded_artwork_preparation.sql`, whose
+  header carries the full schema-discipline audit (what must survive reload,
+  why existing tables cannot represent it honestly, why this is the smallest
+  additive change). Notably there is **no** workflow-kind column: the
+  preparation row's existence is the workflow identity
 - Derived values recomputed rather than stored as authority: concept
   status batches, brief evaluation, intelligence assessment, revision
-  impact, summary views, customer-facing `finalization` status
+  impact, summary views, customer-facing `finalization` status, uploaded-
+  artwork repairability (reclassified from the stored analysis on every read,
+  and the analysis itself re-measured whenever the print placement changes)
 
 ---
 
@@ -2946,8 +5307,12 @@ delegation to composed capabilities.
 | `GET /api/projects/[projectId]/finalization/status` | Read-only customer-safe finalization status (`not_requested` / `preparing` / `needs_review` / `print_ready`) |
 | `POST /api/projects/[projectId]/select` | Select concept |
 | `POST /api/projects/[projectId]/finalize` | Sprint 2M Phase 2B: explicit final-direction approval + idempotent finalization request |
-| `GET /api/projects/[projectId]/production-artwork/image` | Sprint 2M Phase 2C: mint short-lived production-PNG URL once print-ready (Goal 14 — not linked from any UI) |
+| `GET /api/projects/[projectId]/production-artwork/image` | Mint short-lived production-PNG URL + customer-safe metadata once print-ready (delivery preview) |
+| `GET /api/projects/[projectId]/production-artwork/download` | Stream print-ready production PNG with customer filename (`Content-Disposition`) |
 | `POST /api/projects/[projectId]/undo` | One-level undo |
+| `POST /api/projects/[projectId]/artwork-upload` | §13h: project-scoped multipart ingress for customer-supplied artwork (PNG only; bytes authoritative over declared type and filename) |
+| `POST /api/projects/[projectId]/artwork-preparation` | §13h: the uploaded-artwork actions — `context` (production details), `prepare` (deterministic background isolation), `cleanup_preview` / `cleanup_confirm` / `undo_cleanup` (customer-guided background removal with Phase 1.3 preview-then-confirm; preview carries a coordinate, confirm redeems a signed candidate, and neither grants authority beyond revalidated eligibility — see "User-guided background cleanup"), `approve` (explicit prepared-artwork approval), `print_ready` (Phase 2). All idempotent |
+| `GET /api/projects/[projectId]/artwork-preparation/image/[role]` | §13h: mint short-lived URL for `original` or `prepared`. The browser names a role, never an asset id; uniform 404 on every miss |
 | `GET /api/assets/[...objectKey]` | Serve filesystem signed assets |
 | `POST /api/worker/generation` | Independent concept-generation worker batch (secret-protected) |
 | `POST /api/worker/final-artwork` | Sprint 2M Phase 2C: independent final-artwork worker batch (secret-protected) |
@@ -2976,11 +5341,20 @@ Image route rules: mint on demand via `getConceptImageUrl` →
 `AssetCapability.getSignedUrl`; return `{ url }` only; never persist the
 URL; reject cross-project lookups; uniform 404 on every miss.
 
+`ApiProjectSnapshot` also carries `artworkPreparation` — an already-phrased
+uploaded-artwork view (§13h) containing no analysis numbers, asset ids, or
+storage keys. It is `null` for every Create New Artwork project, and that
+`null` is what the UI branches on.
+
 Rules:
 
 - Routes validate/translate requests (often with zod)
 - Services/facades call capabilities
 - Routes must not implement product rules
+- Binary ingress (`artwork-upload`) bounds `Content-Length` before buffering
+  and re-checks the buffered size; the real format comes from the magic
+  signature, never the declared type or filename; decode limits are enforced
+  against the image header before any bitmap is allocated (§13h)
 - Generation status polling is read-only in production / automated tests;
   interactive `next dev` may recover a stranded `queued`/`attempts=0` job
 - Finalization status polling is read-only and never dispatches work
@@ -2988,7 +5362,9 @@ Rules:
   (scheduler, protected endpoint, or standalone process)
 - Brief decision and regenerate routes never await generation; interactive
   `next dev` only may kick `workerScheduler.runBatch()` after enqueue
-  (`local-generation-trigger.ts`). Automated tests stay isolated.
+  (`local-generation-trigger.ts`). Finalize / finalization-status routes
+  mirror that for FinalArtworkJob (`local-final-artwork-trigger.ts`).
+  Automated tests stay isolated.
 - Snapshot-returning routes must not bypass `conversation-service`
   sanitization
 
@@ -3007,13 +5383,30 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 | `ConceptStatusBanner` | Needs-update + regenerate / keep current |
 | `RecommendationCard` | Advisory actions → normal chat replies |
 | `DesignerDecisionCard` | Deferred “designer will determine” display |
-| `RevisionTimeline` | Plain-language design history chips |
-| `ConceptCards` | Concept selection grid: loading state, real signed image, or safe placeholder fallback (Sprint 2K Phase 1); no customer-facing provider/settings |
+| `DesignHistory` | Single consolidated design-history surface — see below |
+| `ConceptCards` | Concept selection grid: loading state, real signed image, or safe placeholder fallback (Sprint 2K Phase 1); Phase 2D garment-color CSS preview + honest short-set note; no customer-facing provider/settings |
+| `ConceptPreviewBackgroundControl` | Phase 2D: Garment / White / Gray / Black / Transparency inspection radios (presentation only; local UI state) |
+| `concept-preview-surface` | Phase 2D: resolve approved `shirtColor` → CSS surface; short-set copy helper; never mutates assets |
 | `PrepareForPrintAction` | Sprint 2M Phase 2B: the one explicit "final direction approval" action + truthful "preparing"/"print ready" states; plain customer language only — never job/asset/validation terminology |
+| `WorkflowChoiceCard` | §13h: Create New Artwork vs Upload Existing Artwork, at project start only. "Create New" is a pure client-side dismissal — the existing interview is unchanged |
+| `UploadedArtworkPanel` | §13h: the Upload Existing Artwork surface (upload → production details → analysis → compare → approved). Renders only server-authored copy |
+| `ArtworkComparison` | §13h: labelled Original vs Prepared tiles; Prepared QA Preview Background (White/Gray/Black); `Enlarge` is a separate control from approval |
+| `ArtworkPreviewModal` | §13h: read-only full-size viewer with **no** approval or cleanup affordance — viewing can never approve or mutate; prepared enlarge may reuse QA Preview Background |
+| `GuidedCleanupWorkspace` | §13h Phase 1.4/1.5: large interactive cleanup surface (preview → confirm → undo → Done) with Fit/Zoom/pan and presentation-only Preview Background; presentation only over the Phase 1.3 API |
+| `PreviewBackgroundControl` | §13h Phase 1.5: accessible White/Gray/Black QA inspection control (presentation only) |
+| `guided-cleanup-interaction.ts` | §13h Phase 1.6B: pure selection-primary pointer rules (crosshair everywhere; Space/middle drag or touch drag pans; a pan never selects) — testable without a DOM |
+| `uploaded-artwork-flow.ts` | §13h: pure step derivation + "does the upload workflow own the surface?" — testable without a DOM, same reason as `chat-affordances.ts` |
 | `Composer` | Message input |
 | `chat-session.ts` | localStorage project id restore/create |
 | `status-poll-controller.ts` | Shared read-only generation + finalization status poller |
 | `use-is-client.ts` | Hydration gate |
+
+When the uploaded-artwork workflow owns the surface (§13h), the creative
+surfaces — concept grid, design summary, status banner, revision actions,
+Use This Design, Prepare Print-Ready, design history, and the composer — are
+hidden rather than merely unreachable. An uploaded-artwork customer already
+has their design and must never be walked through a design description, three
+concept directions, or a wording interview.
 
 Polling: while `project.status === "generating"`, poll generation status
 every few seconds; on exit from generating, refresh full snapshot. While
@@ -3035,6 +5428,28 @@ renders:
 
 After reload, cards refetch a fresh signed URL; signed URLs are never
 treated as durable client state.
+
+**Customer-facing Design History** (Live Acceptance Corrective Pass,
+Section 2): a single surface (`design-history.ts` → `buildDesignHistory`,
+rendered by `DesignHistory.tsx`) replaced two UI surfaces that used to
+render side by side under two different headings and two different data
+sources — a message-metadata-keyed timeline that turned every brief-field
+edit (including field-only edits like print location that never produced
+new artwork) into a milestone, and a separate, differently-labeled
+"previous batches" panel. `buildDesignHistory` derives milestones purely
+from existing `ArtworkVersion` fields already on the snapshot — `kind`,
+`sourceArtworkVersionId`, `designBriefVersionId`, `createdAt` — plus the
+project's current `selectedArtworkVersionId`; it never reads brief content
+or message metadata, so a brief-field-only edit that never produced a new
+artwork version is structurally invisible to it, by construction. Model:
+"Original Concepts → Selected Concept → Revision 1 → Revision 2 → Current
+Version" (`kind !== "final"` only — finalized/production artwork belongs
+to the separate finalization pipeline, not this narrative). No new
+persistence; the full internal audit history (every `DesignBriefVersion`,
+every field change) is untouched and still recorded exactly as before —
+this is only a customer-facing projection. Historical artwork stays
+viewable via the same `ConceptCards`/`ConceptPreviewModal` viewer used for
+the live concept grid.
 
 The client renders capability-produced facts. It does not decide domain
 readiness, approval validity, concept staleness, or generation
@@ -3146,6 +5561,70 @@ architecture.
 
 ## 23. Security Boundaries
 
+### 23.1 Current Data Access Model (server-only)
+
+```text
+Browser  ->  iHeartPrints Next.js server  ->  Supabase service role  ->  Postgres
+```
+
+Every public-schema application table is reachable **only** through the
+server. All twelve carry:
+
+- Row Level Security **enabled**
+- **Zero** policies
+- **No** table privileges for `anon` or `authenticated`
+
+`print_projects`, `tshirt_design_briefs`, `design_conversations`,
+`conversation_messages`, `artwork_versions`, `design_brief_versions`,
+`generation_jobs`, `assets`, `final_direction_approvals`,
+`final_artwork_jobs`, `production_asset_validations`, `artwork_preparations`.
+
+| Role | Direct PostgREST access |
+|---|---|
+| `anon` (incl. the publishable key) | denied — no privilege, no policy |
+| `authenticated` | denied — no privilege, no policy |
+| `service_role` | full; `BYPASSRLS` is the server-only boundary |
+
+**RLS with no policies is the design, not an unfinished state.** No policy
+means no row qualifies for any non-bypassing role, which is exactly the
+current contract. Nothing in the browser speaks to PostgREST, so there is no
+legitimate direct-access path to preserve.
+
+**Project UUID knowledge is NOT authorization.** A project id is not a
+secret — it appears in URLs and client state. No RLS policy, route check, or
+future ownership rule may treat possession of an id as identity.
+
+Two independent controls (RLS *and* revoked grants) rather than one: a
+permissive policy added by mistake later still cannot expose these tables,
+because the browser-facing roles hold no privilege on the relation to
+exercise.
+
+Enforced by `supabase/migrations/20260811191500_server_only_rls_lockdown.sql`,
+which asserts its own postconditions against `pg_class`, `pg_policies`, and
+`information_schema.role_table_grants` and aborts if they do not hold.
+
+**Convention for new tables.** Every new public application table must
+`ENABLE ROW LEVEL SECURITY` and `REVOKE ALL PRIVILEGES ... FROM anon,
+authenticated` in the same migration that creates it.
+`src/lib/db/security-lockdown.migration.test.ts` fails `npm run verify` when
+one does not — the incident below is not permitted to recur with table #13.
+
+**Origin.** A read-only audit found all twelve tables with RLS disabled, no
+policies, and full `anon`/`authenticated` privileges; anonymous PostgREST
+SELECT returned real customer data on every one, via both the legacy `anon`
+key and the newer publishable key.
+
+**Queued follow-up (blocks customer accounts, payment, and customer
+management).** Owner-scoped policies cannot be written today because no
+identity model exists — no `owner_user_id`, `user_id`, `tenant_id`, or
+`organization_id` on any table. Before launching customer accounts:
+implement real customer identity; add explicit project ownership; decide
+whether a tenant/org model is needed; enforce authenticated authorization at
+the app routes; and only then decide whether any direct Supabase client
+access is warranted at all. Until that phase lands, inventing an ownership
+column or a `using (true)` policy to satisfy a security advisor is
+prohibited.
+
 Summarized:
 
 - Service role stays server-side
@@ -3164,6 +5643,9 @@ Summarized:
   cross-project
 - Configuration fails closed in production for misconfigured real generation
   and missing worker secret
+- The privileged Supabase client never falls back to a browser-facing key:
+  `getSupabaseServiceClient()` demands `SUPABASE_SERVICE_ROLE_KEY` and throws
+  naming only the missing variable (never a value) — see §18 and §23.1
 - Sprint 2M Phase 2B: `POST /api/projects/[projectId]/finalize` resolves
   `artworkVersionId` only through that project's own snapshot — a
   foreign/forged id is indistinguishable from "not found" (404); no
@@ -3190,6 +5672,62 @@ Verified against the implementation:
   process; it is not started by customer HTTP requests
 - No live Supabase integration tests in CI
 - Filesystem/worker rate limiting is in-memory/single-instance
+- **Uploaded artwork (§13h) supports PNG only.** JPEG, WebP, and GIF are
+  detected and honestly refused; SVG is explicitly rejected. Adding a format
+  means adding a decoder dependency and its security surface
+- **Uploaded artwork stops at approved prepared artwork.** No enhancement, no
+  upscale, no 300 PPI production, no print validation, no download, no
+  billing — all Phase 2. Nothing in the flow describes prepared artwork as
+  print-ready
+- **Complex/photographic backgrounds are refused, not solved.** They classify
+  `NEEDS_REVIEW` with no automatic mask; AI segmentation is Phase 3 and would
+  require a provider port this capability deliberately does not have
+- A background-coloured stroke that genuinely touches the exterior background
+  is indistinguishable from the background itself and will be removed with
+  it. This is inherent to any reachability-based isolation; the mitigation is
+  the conservative classifier, not a cleverer fill
+- **Enclosed cavities are decided by wall thickness against cavity size, and
+  the ambiguous cases resolve toward preserving artwork.** A counter ringed by
+  an unusually heavy stroke (wall > 1.75x its inradius) is left black rather
+  than guessed at, and conversely an intentional dark speck sitting within a
+  few pixels of a shape's outer edge can be read as a cavity. Both directions
+  are documented consequences of the same ratio, and it is deliberately tuned
+  to fail toward the first
+- **RESOLVED, by asking rather than by tuning: display-scale counters inside a
+  compound stroke are never removed automatically.** The full real-file audit
+  measured wall/inradius at 2.11–5.29 for genuine letter counters and 2.89–4.69
+  for the bowling ball's finger holes — the finger holes sit *inside* the
+  counter range, so the populations are **nested** and no threshold on that
+  statistic can separate them. Alternative statistics did separate on that one
+  file (best: 75th-percentile ray crossing thickness over inradius, ~2× margin),
+  but on three negative controls from a single image, and a smaller ball icon
+  with proportionally larger holes collapses the margin. These regions are
+  therefore preserved and the customer removes them with a click (see
+  "User-guided background cleanup"). `darkOutlinedDisplayArtwork` remains the
+  characterization fixture; it now pins preservation as *correct*
+- **Guided cleanup can preview a finger hole if the customer clicks one.** This
+  is the unavoidable consequence of the finding above: the system cannot
+  distinguish it, so it cannot refuse it on the customer's behalf. Mitigations
+  are that nothing is ever removed automatically, the affected region is
+  highlighted from the server's authoritative mask before any mutation, removal
+  requires an explicit "Remove This Area" confirmation, and undo is always
+  available before approval.
+- **Speckle cleanup only reaches fully isolated flecks of ≤4px.** Residue still
+  *attached* to artwork — a one-pixel-wide dark protrusion along an outline — is
+  left alone, because it cannot be told apart from thin intentional detail. On
+  the audited file that leaves the retained-pixel islands at zero but does not
+  claim to remove every near-background pixel near an edge
+- Since the boundary gate became membership-based, a dark fill behind a thin
+  dark wall is no longer protected — its protection came entirely from the 48
+  threshold, and that threshold provably rejects the real file's counters. The
+  two requirements are mutually exclusive; the Original-vs-Prepared comparison
+  is the customer's safeguard
+- A cavity sealed behind another dark enclosed region (a dot inside a closed
+  black ring) has no measurable wall and is always preserved, even when it is
+  in fact background
+- Uploaded artwork is never OCR'd, so Phase 1 knows nothing about text inside
+  it. That is intentional (the pixels are authoritative), and Phase 2's
+  uploaded-preserve validation profile must not assume otherwise
 - PNG thumbnail resizing is basic (`PngThumbnailGenerator`)
 - S3 adapter is reserved but not implemented
 - Orphan asset cleanup cannot recover from a hard process crash after
@@ -3236,6 +5774,54 @@ Verified against the implementation:
   `ProjectStatus`'s `"finalizing"`/`"print_ready"` values are defined but
   never assigned anywhere in the codebase. Print Validation Phase 1
   deliberately does not invent a replacement for this gap (see §5's audit)
+- Detailed-Description Fidelity (Phase 1) guarantees only what iHeartPrints
+  **sends**. Every regression proves that customer requirements survive the
+  deterministic layers and reach all three provider prompts; none proves an
+  image model obeys them. Model compliance is a live-acceptance question
+- Detailed-Description Fidelity (Phase 1) has no reference grounding, so
+  **text-only generation cannot guarantee real-world geographic accuracy**.
+  A request to reproduce a real place is preserved and answered honestly in
+  the provider prompt (approximate from the customer's description; no map
+  or aerial reference available; invent no landmarks; imply no survey
+  accuracy) — it is not fulfilled. Reference-image upload/generation is a
+  later phase
+- `preserve-design-detail.ts` restores lost detail by clause, using generic
+  structure (position words, shape words, short-noun-phrase enumeration,
+  conversational filler) — not language understanding. Two consequences:
+  a multi-element description that states no position and no list (e.g. "a
+  bowling ball smashing pins") does not register as `requiresScene`, so a
+  direction's minimal treatment still applies to it (the prompt's
+  `DO NOT OMIT` / `PRIORITY` sections remain the protection there); and a
+  partially-lossy synthesis can be restored with some redundancy — the
+  restored clause is appended in the customer's own words even when most of
+  it was already present. Restating a detail is deliberately preferred over
+  risking its loss
+- Phase 1.1's multi-turn merge classifies ADD / REFINE / REPLACE from
+  generic English structure (supersede cues, refinement cues, subject and
+  attribute-dimension overlap) — not language understanding. A replacement
+  phrased without any recognized supersede cue reads as an addition, and the
+  superseded content stays in the brief; the Design Summary approval gate is
+  the customer's opportunity to catch that. Merged output can also read a
+  little seam-like ("Marina on the right. A smaller marina.") — preserving
+  the customer's stated detail is deliberately preferred over prose polish
+- Phase 1.1's no-text guarantee, like every other guarantee here, is about
+  what iHeartPrints **sends**. Nothing proves an image model will produce
+  lettering-free artwork; the `NO TEXT` block, the removal of every
+  text-authorizing phrase, and the evaluation check are the three
+  deterministic layers that make a violation detectable, not preventable
+- The no-text evaluation check is a vision-model judgment, **not OCR**. Small,
+  low-contrast, heavily stylized, or partially occluded lettering can be
+  missed, and the check is deliberately conservative about marks that merely
+  resemble letters. It reuses the `required_wording` criterion rather than
+  adding a criterion key, so a persisted evaluation does not distinguish
+  "wording missing" from "text present when none was allowed" by key alone —
+  the criterion notes and `missingRequirements` ("no text") carry that
+- Concept Evaluation now instructs the vision model that a named subject
+  which is absent, a wrong stated count, or a contradicted stated
+  relationship is a graphics *mismatch*. That is a prompt-level
+  strengthening only — **the system still cannot reliably verify every
+  spatial relation in generated output**, and no structural
+  composition/spatial verifier exists. Evaluation remains advisory
 - Generated concepts are not print-ready production assets
 - Print Vault behavior is not implemented
 - Ownership/licensing enforcement is not implemented
@@ -3314,23 +5900,33 @@ Verified against the implementation:
   before an unrelated, non-regenerating brief edit remains active. This is
   a deliberate scope boundary (Goal 4 talks about invalidating approval
   when "artwork changes," not any brief text edit), not an oversight.
-- Sprint 2M Phase 2C: the only implemented production transformation is
-  local, deterministic geometric resampling (`LocalRasterInterpolationProvider`)
-  — no provider-hosted reconstruction/regeneration exists, and the current
-  concept-generation provider (`gpt-image-1`, max `1536x1024`) cannot
-  natively reach full-back (3600x4200px) or left-chest (1200x1200px)
-  production resolution regardless. A full-back or left-chest concept
-  therefore honestly resolves `finalization_required`, not `print_ready`,
-  under Phase 2C — this is the system correctly refusing to fabricate
-  readiness, not a bug. Only a sleeve-placement concept (whose native
-  ~1024x1024px source already exceeds the 900x900px target) can
-  genuinely reach `print_ready` today without any future work.
-- Sprint 2M Phase 2C's raster transformation never crops content and never
-  distorts aspect ratio in the padding direction, but the "contain" resample
-  does not attempt any smarter aspect-ratio-aware composition (e.g.
-  re-flowing a square concept to a non-square target) — the customer
-  approved a square-ish concept and the production canvas is simply
-  centered within the target's margin-inset box.
+- Without a provider-hosted reconstruction provider configured
+  (`FINAL_ARTWORK_PROVIDER=local`), the only production transformation is
+  local geometric resampling, and the current concept-generation provider
+  (`gpt-image-1`, max `1536x1024`) cannot natively reach full-front/full-back
+  (3150px wide) or left-chest (1200px wide) production resolution in its
+  *visible artwork* regardless. A full-back or left-chest concept therefore
+  honestly resolves `finalization_required`, not `print_ready`, on the local
+  provider — this is the system correctly refusing to fabricate readiness, not
+  a bug. Only a sleeve-placement concept whose visible artwork already exceeds
+  900px can genuinely reach `print_ready` with no reconstruction. Note that
+  since §13e this is judged on *trimmed artwork* pixels, not padded canvas
+  pixels, so a concept with a wide transparent border needs correspondingly
+  more source resolution than its file dimensions suggest.
+- Print-Ready Normalization Phase 1 preserves the approved artwork's own
+  proportions exactly and never crops or distorts, but it does not attempt
+  any aspect-ratio-aware *composition* (e.g. re-flowing a square design into
+  a wider layout for a full-back print). The customer approved these
+  proportions; production honours them.
+- Print-Ready Normalization Phase 1 deliberately does not persist the
+  reconstruction master (§13e's RECONSTRUCTED ARTWORK is in-memory only), so
+  a re-run at a different physical size re-reconstructs (and, for a paid
+  provider, re-spends) rather than re-normalizing a stored intermediate.
+- Physical print size still comes from the placement policy table, not from
+  the customer: `TShirtDesignBrief.intendedPrintWidthIn` exists but is never
+  populated by the interview and is not carried into
+  `DesignBriefSnapshotContent`. Garment size is deliberately not asked in
+  Conversation Understanding.
 - Sprint 2M Phase 2C does not implement vectorization, embroidery
   digitization, screen-print separations, banner/sign production, PDF/SVG
   production output, CMYK conversion, or any paid/network provider call for
@@ -3361,7 +5957,9 @@ Describe attachment points only — not a delivery plan:
 | GenerationIntent | **Phase 3 done.** Sole PromptTranslation input; immutable; never persisted; never customer-facing |
 | PrintValidationCapability | **Sprint 2M Phase 1 (architecture) + Phase 2A (provisional intelligence) + Phase 2C (authoritative, production-asset-scoped run) done — see §5/§13c.** Authoritative status now persists on `ProductionAssetValidation`, never `ArtworkVersion.printValidationStatus` (confirmed correct across three sprints of audit). Future: extend `resolutionProvenance` to a real provider-reconstruction path once one exists; never mutate brief; never confuse with Concept Evaluation |
 | **FinalArtworkCapability** / **FinalArtworkWorkerCapability** | **Sprint 2M Phase 2B (approval + idempotent enqueue) + Phase 2C (real worker, raster production, authoritative validation, print-ready transition) done — see §13b/§13c.** Phase 2C supports raster apparel PNG only via one local, deterministic provider. Future: a provider-hosted reconstruction/regeneration `FinalArtworkProvider` (gated behind its own default-off env var, mirroring `CONCEPT_GENERATION_ENABLE_REAL`) that can genuinely exceed native source detail for full-back/left-chest placements; vector/PDF production (`"production_svg"`/`"production_pdf"` `ProductionAssetRole` values are reserved); embroidery digitization; a purchasing/download product built on the existing secure read boundary (§13c "Download boundary"). Must never generate/transform anything Print Validation itself decided; Print Validation must remain pure validation |
+| **ArtworkPreparationCapability** | **Existing Artwork → Print Ready Phase 1 (upload, analysis, repairability, background isolation, edge cleanup, approval) done — see §13h.** Phase 2: consume the approved `prepared_upload` `ArtworkVersion` through `FinalArtworkCapability` (enhancement/upscale, 300 PPI production, an uploaded-preserve print-validation applicability profile, download). Phase 3: AI segmentation / complex photographic background removal behind a NEW provider port — this capability has none today, and that absence is what makes "zero paid-provider calls" structural. Must never change wording, redraw, recolour, recompose, or regenerate; must never mutate the uploaded original |
 | Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider` (e.g. a dedicated OCR specialist, a different vision model); no domain change |
+| JPEG / WebP upload ingestion | A new decoder dependency behind `image-decode.ts` (the single decode choke point), with its own documented security surface. Phase 1 intentionally supports PNG only and says so rather than advertising formats it cannot decode |
 | Production file generation | New assets linked via `printAssetId` / dedicated kinds |
 | Vector output | `vectorAssetId` / SVG asset kinds |
 | Mockups | Presentation layer consuming artwork + product context |

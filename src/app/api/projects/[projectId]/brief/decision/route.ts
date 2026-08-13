@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 
 import { getPersistenceMode } from "@/lib/db";
 import { submitDesignBriefDecision } from "@/lib/services/conversation-service";
+import {
+  customerFacingDecisionMessage,
+  decisionFailureStatus,
+  describeDecisionFailure,
+} from "./decision-failure";
 import { briefDecisionBodySchema } from "./schema";
 
 type RouteContext = {
@@ -35,14 +40,14 @@ export async function POST(request: Request, context: RouteContext) {
       persistenceMode: getPersistenceMode(),
     });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to submit decision";
-    const status = message.includes("not found")
-      ? 404
-      : message.includes("not ready") || message.includes("Cannot ")
-        ? 409
-        : 500;
-    console.error("Failed to submit design brief decision", error);
-    return NextResponse.json({ error: message }, { status });
+    console.error(
+      "Failed to submit design brief decision",
+      describeDecisionFailure(error),
+      error,
+    );
+    return NextResponse.json(
+      { error: customerFacingDecisionMessage(error) },
+      { status: decisionFailureStatus(error) },
+    );
   }
 }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { PRINT_PLACEMENT_SIZING_POLICY } from "@/capabilities/shared/print-placement-dimensions";
+
 import { LocalRasterInterpolationProvider } from "./local-raster-provider";
 import { TopazTransparencyUpscaleProvider } from "./topaz-transparency-upscale-provider";
 import { UnavailableFinalArtworkProvider } from "./unavailable-final-artwork-provider";
@@ -31,9 +33,7 @@ describe("resolveFinalArtworkProvider (Sprint 2M Phase 2E)", () => {
         provider.produce({
           sourceBytes: Buffer.from(""),
           sourceContentType: "image/png",
-          targetWidthPx: 100,
-          targetHeightPx: 100,
-          marginFraction: 0.05,
+          sizing: PRINT_PLACEMENT_SIZING_POLICY.sleeve,
         }),
       /TOPAZ_API_KEY/i,
     );

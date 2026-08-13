@@ -240,6 +240,9 @@ describe("Release-blocker regression: automated tests never reach a real paid pr
             },
           ]);
           await repo.selectArtworkVersion(projectId, artwork!.id);
+          // Live Acceptance Corrective Pass (Section 2): selection alone
+          // is never final approval — confirm explicitly first.
+          await repo.updateProject(projectId, { finalDirectionConfirmed: true });
 
           await graph.finalArtwork.requestFinalArtwork(projectId, artwork!.id);
           await graph.finalArtworkWorker.processNextJob();

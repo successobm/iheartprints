@@ -4,9 +4,12 @@ import {
 } from "@/lib/domain/conversation";
 import { emptyInterviewState } from "@/lib/domain/types";
 import type {
+  ArtworkPreparation,
+  ArtworkPreparationStatus,
   ArtworkVersion,
   AssetKind,
   AssetRecord,
+  ConceptDirectionKey,
   ConceptEvaluation,
   ConceptEvaluationStatus,
   ConversationMessage,
@@ -21,6 +24,8 @@ import type {
   GenerationJob,
   GenerationJobStatus,
   InterviewStateData,
+  PaidImageIntent,
+  PaidImageIntentStatus,
   PrintProject,
   ProductionAssetRole,
   ProductionAssetValidation,
@@ -30,15 +35,21 @@ import type {
 } from "@/lib/domain/types";
 import type {
   ApproveDesignBriefInput,
+  CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
   CreateFinalArtworkJobInput,
   CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
+  CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  PaidImageIntentReservation,
   ProjectRepository,
+  RecordPaidImageIntentFailureInput,
+  ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
+  UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
 } from "./repository";
@@ -52,6 +63,10 @@ type DbProject = {
   name: string;
   status: ProjectStatus;
   selected_artwork_version_id: string | null;
+  /** Sprint 2M Phase 2G (Goal 3). */
+  revision_pending: boolean | null;
+  /** Sprint 2G Live Acceptance Corrective Pass. */
+  final_direction_confirmed: boolean | null;
   created_at: string;
   updated_at: string;
 };
@@ -118,6 +133,9 @@ type DbArtwork = {
   evaluation_evaluated_at: string | null;
   evaluation_provider_key: string | null;
   print_validation_status: string | null;
+  /** Sprint 2G Live Acceptance Corrective Pass. */
+  source_artwork_version_id: string | null;
+  concept_direction_key: ConceptDirectionKey | null;
   created_at: string;
 };
 
@@ -130,11 +148,36 @@ type DbGenerationJob = {
   concept_count: number;
   provider_key: string;
   idempotency_key: string;
+  /** Sprint 2G Live Acceptance Corrective Pass. */
+  target_artwork_version_id: string | null;
+  /** True Source-Image Targeted Revision. */
+  revision_instruction: string | null;
   attempts: number;
   last_error: string | null;
   started_at: string | null;
   completed_at: string | null;
   heartbeat_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Phase 2C0.5 — see `supabase/migrations/20260812120000_paid_image_intents.sql`. */
+type DbPaidImageIntent = {
+  id: string;
+  project_id: string;
+  generation_job_id: string;
+  intent_key: string;
+  intent_kind: string;
+  direction_key: string;
+  paid_intent_ordinal: number;
+  status: PaidImageIntentStatus;
+  dispatches: number;
+  claim_token: string | null;
+  provider_key: string | null;
+  provider_request_id: string | null;
+  result: Record<string, unknown> | null;
+  last_error: string | null;
+  succeeded_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -173,7 +216,11 @@ type DbFinalDirectionApproval = {
 type DbFinalArtworkJob = {
   id: string;
   project_id: string;
-  final_direction_approval_id: string;
+  /** Existing Artwork → Print Ready Phase 2: nullable — a prepared-upload job's authority is `artwork_preparation_id` instead. */
+  final_direction_approval_id: string | null;
+  artwork_preparation_id: string | null;
+  /** Postgres `numeric` arrives as a number or a string depending on driver/precision — normalized in `mapFinalArtworkJob`. */
+  production_width_in: number | string | null;
   artwork_version_id: string;
   status: FinalArtworkJobStatus;
   attempts: number;
@@ -200,6 +247,24 @@ type DbProductionAssetValidation = {
   created_at: string;
 };
 
+/** Existing Artwork → Print Ready Phase 1. */
+type DbArtworkPreparation = {
+  id: string;
+  project_id: string;
+  status: ArtworkPreparationStatus;
+  original_asset_id: string;
+  prepared_asset_id: string | null;
+  prepared_artwork_version_id: string | null;
+  original_filename: string | null;
+  analysis: Record<string, unknown> | null;
+  preparation: Record<string, unknown> | null;
+  /** Phase 1.2. Absent on rows written before the column existed. */
+  guided_cleanup?: Record<string, unknown> | null;
+  approved_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type DbDesignBriefVersion = {
   id: string;
   project_id: string;
@@ -217,6 +282,8 @@ function mapProject(row: DbProject): PrintProject {
     name: row.name,
     status: row.status,
     selectedArtworkVersionId: row.selected_artwork_version_id,
+    revisionPending: row.revision_pending ?? false,
+    finalDirectionConfirmed: row.final_direction_confirmed ?? false,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -294,6 +361,8 @@ function mapArtwork(row: DbArtwork): ArtworkVersion {
     evaluationEvaluatedAt: row.evaluation_evaluated_at ?? null,
     evaluationProviderKey: row.evaluation_provider_key ?? null,
     printValidationStatus: row.print_validation_status ?? null,
+    sourceArtworkVersionId: row.source_artwork_version_id ?? null,
+    conceptDirectionKey: row.concept_direction_key ?? null,
     createdAt: row.created_at,
   };
 }
@@ -308,11 +377,35 @@ function mapGenerationJob(row: DbGenerationJob): GenerationJob {
     conceptCount: row.concept_count,
     providerKey: row.provider_key,
     idempotencyKey: row.idempotency_key,
+    targetArtworkVersionId: row.target_artwork_version_id ?? null,
+    revisionInstruction: row.revision_instruction ?? null,
     attempts: row.attempts,
     lastError: row.last_error,
     startedAt: row.started_at,
     completedAt: row.completed_at,
     heartbeatAt: row.heartbeat_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapPaidImageIntent(row: DbPaidImageIntent): PaidImageIntent {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    generationJobId: row.generation_job_id,
+    intentKey: row.intent_key,
+    intentKind: row.intent_kind,
+    directionKey: row.direction_key,
+    paidIntentOrdinal: row.paid_intent_ordinal,
+    status: row.status,
+    dispatches: row.dispatches,
+    claimToken: row.claim_token,
+    providerKey: row.provider_key,
+    providerRequestId: row.provider_request_id,
+    result: row.result ?? null,
+    lastError: row.last_error,
+    succeededAt: row.succeeded_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -356,10 +449,15 @@ function mapFinalDirectionApproval(
 }
 
 function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
+  const artworkPreparationId = row.artwork_preparation_id ?? null;
   return {
     id: row.id,
     projectId: row.project_id,
-    finalDirectionApprovalId: row.final_direction_approval_id,
+    // Derived, never a stored column — see `FinalArtworkSourceKind`.
+    sourceKind: artworkPreparationId ? "prepared_upload" : "generated_concept",
+    finalDirectionApprovalId: row.final_direction_approval_id ?? null,
+    artworkPreparationId,
+    productionWidthIn: readNumericColumn(row.production_width_in),
     artworkVersionId: row.artwork_version_id,
     status: row.status,
     attempts: row.attempts,
@@ -375,6 +473,19 @@ function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
   };
 }
 
+/**
+ * Postgres `numeric` has no lossless JavaScript equivalent, so PostgREST may
+ * return it as a string. Normalized here rather than at every call site, and
+ * anything unparseable becomes `null` — never a silently wrong production
+ * size (Constitution §15: an unknown figure is stated as unknown, never
+ * guessed).
+ */
+function readNumericColumn(value: number | string | null): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function mapProductionAssetValidation(
   row: DbProductionAssetValidation,
 ): ProductionAssetValidation {
@@ -387,6 +498,24 @@ function mapProductionAssetValidation(
     report: row.report ?? {},
     validatedAt: row.validated_at,
     createdAt: row.created_at,
+  };
+}
+
+function mapArtworkPreparation(row: DbArtworkPreparation): ArtworkPreparation {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    status: row.status,
+    originalAssetId: row.original_asset_id,
+    preparedAssetId: row.prepared_asset_id,
+    preparedArtworkVersionId: row.prepared_artwork_version_id,
+    originalFilename: row.original_filename,
+    analysis: row.analysis ?? {},
+    preparation: row.preparation ?? null,
+    guidedCleanup: row.guided_cleanup ?? null,
+    approvedAt: row.approved_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -543,7 +672,14 @@ export class SupabaseProjectRepository implements ProjectRepository {
   async updateProject(
     projectId: string,
     patch: Partial<
-      Pick<PrintProject, "name" | "status" | "selectedArtworkVersionId">
+      Pick<
+        PrintProject,
+        | "name"
+        | "status"
+        | "selectedArtworkVersionId"
+        | "revisionPending"
+        | "finalDirectionConfirmed"
+      >
     >,
   ): Promise<PrintProject> {
     const payload: Record<string, unknown> = {
@@ -553,6 +689,12 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.status !== undefined) payload.status = patch.status;
     if (patch.selectedArtworkVersionId !== undefined) {
       payload.selected_artwork_version_id = patch.selectedArtworkVersionId;
+    }
+    if (patch.revisionPending !== undefined) {
+      payload.revision_pending = patch.revisionPending;
+    }
+    if (patch.finalDirectionConfirmed !== undefined) {
+      payload.final_direction_confirmed = patch.finalDirectionConfirmed;
     }
 
     const { data, error } = await this.client
@@ -696,6 +838,8 @@ export class SupabaseProjectRepository implements ProjectRepository {
           evaluation: version.evaluation ?? null,
           evaluation_evaluated_at: version.evaluationEvaluatedAt ?? null,
           evaluation_provider_key: version.evaluationProviderKey ?? null,
+          source_artwork_version_id: version.sourceArtworkVersionId ?? null,
+          concept_direction_key: version.conceptDirectionKey ?? null,
         })),
       )
       .select("*")
@@ -742,6 +886,26 @@ export class SupabaseProjectRepository implements ProjectRepository {
     await this.updateProject(projectId, {
       selectedArtworkVersionId: artworkVersionId,
       status: "revision_requested",
+    });
+
+    const snapshot = await this.getProject(projectId);
+    if (!snapshot) throw new Error("Project not found");
+    return snapshot;
+  }
+
+  async clearArtworkSelection(projectId: string): Promise<ProjectSnapshot> {
+    const { error: clearError } = await this.client
+      .from("artwork_versions")
+      .update({ is_selected: false })
+      .eq("project_id", projectId);
+    if (clearError) throw clearError;
+
+    await this.updateProject(projectId, {
+      selectedArtworkVersionId: null,
+      // See the local store's identical note: a confirmation can never
+      // outlive the selection it was made about.
+      finalDirectionConfirmed: false,
+      status: "concepts_ready",
     });
 
     const snapshot = await this.getProject(projectId);
@@ -826,6 +990,8 @@ export class SupabaseProjectRepository implements ProjectRepository {
         concept_count: input.conceptCount,
         provider_key: input.providerKey,
         idempotency_key: input.idempotencyKey,
+        target_artwork_version_id: input.targetArtworkVersionId ?? null,
+        revision_instruction: input.revisionInstruction ?? null,
         attempts: 0,
       })
       .select("*")
@@ -981,6 +1147,197 @@ export class SupabaseProjectRepository implements ProjectRepository {
     return ((data as DbGenerationJob[]) ?? []).map(mapGenerationJob);
   }
 
+  // --- Phase 2C0.5: durable paid image intents -------------------------
+
+  async reservePaidImageIntent(
+    projectId: string,
+    input: ReservePaidImageIntentInput,
+  ): Promise<PaidImageIntentReservation> {
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .insert({
+        project_id: projectId,
+        generation_job_id: input.generationJobId,
+        intent_key: input.intentKey,
+        intent_kind: input.intentKind,
+        direction_key: input.directionKey,
+        paid_intent_ordinal: input.paidIntentOrdinal,
+        status: "reserved",
+        dispatches: 0,
+        provider_key: input.providerKey,
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        // Two different unique constraints can land here, and they mean
+        // genuinely different things — so resolve which one actually fired
+        // by re-reading, never by parsing the error text.
+        const existing = await this.getPaidImageIntentByKey(
+          projectId,
+          input.intentKey,
+        );
+        // (project_id, intent_key): this exact logical intent already
+        // exists. Reuse/retry is decided from its own state by the caller.
+        if (existing) return { outcome: "existing", intent: existing };
+        // (generation_job_id, paid_intent_ordinal): a concurrent worker won
+        // this budget slot with a DIFFERENT intent. No paid call happened.
+        return { outcome: "ordinal_taken" };
+      }
+      throw error;
+    }
+
+    return { outcome: "created", intent: mapPaidImageIntent(data as DbPaidImageIntent) };
+  }
+
+  async beginPaidImageIntentDispatch(
+    intentId: string,
+    claimToken: string,
+    maxDispatches: number,
+  ): Promise<PaidImageIntent | null> {
+    // Compare-and-set, the same optimistic-claim shape as
+    // `claimNextQueuedJob` — and for a stricter reason: this is the ONE
+    // gate that authorizes spending money, so it must never have a
+    // read-then-write gap two workers could both pass through. PostgREST
+    // cannot express `dispatches = dispatches + 1`, so the previously-read
+    // value goes into the WHERE clause instead: a concurrent worker that
+    // incremented first makes this update match zero rows, and a refused
+    // dispatch means no paid call, which is always the safe direction.
+    const { data: current, error: readError } = await this.client
+      .from("paid_image_intents")
+      .select("*")
+      .eq("id", intentId)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!current) return null;
+
+    const row = current as DbPaidImageIntent;
+    if (row.status !== "reserved") return null;
+    if (row.dispatches >= maxDispatches) return null;
+
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .update({
+        dispatches: row.dispatches + 1,
+        claim_token: claimToken,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", intentId)
+      .eq("status", "reserved")
+      .eq("dispatches", row.dispatches)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaidImageIntent(data as DbPaidImageIntent) : null;
+  }
+
+  async completePaidImageIntent(
+    intentId: string,
+    claimToken: string,
+    input: CompletePaidImageIntentInput,
+  ): Promise<PaidImageIntent | null> {
+    const payload: Record<string, unknown> = {
+      status: input.status,
+      updated_at: new Date().toISOString(),
+    };
+    if (input.result !== undefined) payload.result = input.result;
+    if (input.providerRequestId !== undefined) {
+      payload.provider_request_id = input.providerRequestId;
+    }
+    if (input.lastError !== undefined) payload.last_error = input.lastError;
+    if (input.status === "succeeded") {
+      payload.succeeded_at = new Date().toISOString();
+    }
+
+    // Fenced on `claim_token`: a zombie worker whose job was reclaimed
+    // holds the previous token, matches zero rows, and gets `null` back
+    // instead of overwriting the live worker's result.
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .update(payload)
+      .eq("id", intentId)
+      .eq("claim_token", claimToken)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaidImageIntent(data as DbPaidImageIntent) : null;
+  }
+
+  async recordPaidImageIntentFailure(
+    intentId: string,
+    claimToken: string,
+    input: RecordPaidImageIntentFailureInput,
+  ): Promise<PaidImageIntent | null> {
+    // Read first, for two reasons that both need the current row: a durable
+    // success must never be downgraded by a late failure write, and a
+    // provider request id must never be cleared by a later failure that
+    // learned less than an earlier one did.
+    const { data: current, error: readError } = await this.client
+      .from("paid_image_intents")
+      .select("*")
+      .eq("id", intentId)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!current) return null;
+
+    const row = current as DbPaidImageIntent;
+    if (row.status === "succeeded") return null;
+
+    const payload: Record<string, unknown> = {
+      last_error: input.lastError,
+      updated_at: new Date().toISOString(),
+    };
+    if (input.providerRequestId) {
+      payload.provider_request_id = input.providerRequestId;
+    }
+    // Absent `terminal`, `status` is deliberately not in the payload at all
+    // — an intent whose parent job still intends to retry keeps whatever
+    // status it has and stays retry-eligible.
+    if (input.terminal === true) payload.status = "failed";
+
+    // Fenced on `claim_token`, and additionally guarded against a success
+    // that landed between the read above and this write.
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .update(payload)
+      .eq("id", intentId)
+      .eq("claim_token", claimToken)
+      .neq("status", "succeeded")
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaidImageIntent(data as DbPaidImageIntent) : null;
+  }
+
+  async getPaidImageIntentByKey(
+    projectId: string,
+    intentKey: string,
+  ): Promise<PaidImageIntent | null> {
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("intent_key", intentKey)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaidImageIntent(data as DbPaidImageIntent) : null;
+  }
+
+  async listPaidImageIntentsForJob(
+    projectId: string,
+    generationJobId: string,
+  ): Promise<PaidImageIntent[]> {
+    const { data, error } = await this.client
+      .from("paid_image_intents")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("generation_job_id", generationJobId)
+      .order("paid_intent_ordinal", { ascending: true });
+    if (error) throw error;
+    return ((data as DbPaidImageIntent[]) ?? []).map(mapPaidImageIntent);
+  }
+
   // --- Sprint 2H Part 1: assets ---------------------------------------
 
   async createAsset(
@@ -1103,25 +1460,51 @@ export class SupabaseProjectRepository implements ProjectRepository {
   ): Promise<FinalArtworkJob> {
     const { data, error } = await this.client
       .from("final_artwork_jobs")
-      .insert({
-        project_id: projectId,
-        final_direction_approval_id: input.finalDirectionApprovalId,
-        artwork_version_id: input.artworkVersionId,
-        status: "queued",
-      })
+      .insert(
+        input.sourceKind === "generated_concept"
+          ? {
+              project_id: projectId,
+              final_direction_approval_id: input.finalDirectionApprovalId,
+              artwork_version_id: input.artworkVersionId,
+              status: "queued",
+            }
+          : {
+              project_id: projectId,
+              artwork_preparation_id: input.artworkPreparationId,
+              production_width_in: input.productionWidthIn,
+              artwork_version_id: input.artworkVersionId,
+              status: "queued",
+            },
+      )
       .select("*")
       .single();
 
     if (error) {
       if (error.code === POSTGRES_UNIQUE_VIOLATION) {
         throw new UniqueConstraintViolationError(
-          "final_artwork_jobs_project_id_final_direction_approval_id",
+          input.sourceKind === "generated_concept"
+            ? "final_artwork_jobs_project_id_final_direction_approval_id"
+            : "final_artwork_jobs_project_id_artwork_preparation_id_width",
         );
       }
       throw error;
     }
 
     return mapFinalArtworkJob(data as DbFinalArtworkJob);
+  }
+
+  async listFinalArtworkJobsForPreparation(
+    projectId: string,
+    artworkPreparationId: string,
+  ): Promise<FinalArtworkJob[]> {
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("artwork_preparation_id", artworkPreparationId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbFinalArtworkJob[]) ?? []).map(mapFinalArtworkJob);
   }
 
   async getFinalArtworkJobByApprovalId(
@@ -1291,5 +1674,79 @@ export class SupabaseProjectRepository implements ProjectRepository {
     return data
       ? mapProductionAssetValidation(data as DbProductionAssetValidation)
       : null;
+  }
+
+  async createArtworkPreparation(
+    projectId: string,
+    input: CreateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation> {
+    const { data, error } = await this.client
+      .from("artwork_preparations")
+      .insert({
+        project_id: projectId,
+        status: "analyzed",
+        original_asset_id: input.originalAssetId,
+        original_filename: input.originalFilename,
+        analysis: input.analysis,
+      })
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapArtworkPreparation(data as DbArtworkPreparation);
+  }
+
+  async getArtworkPreparation(
+    projectId: string,
+  ): Promise<ArtworkPreparation | null> {
+    const { data, error } = await this.client
+      .from("artwork_preparations")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkPreparation(data as DbArtworkPreparation) : null;
+  }
+
+  async getArtworkPreparationById(
+    id: string,
+  ): Promise<ArtworkPreparation | null> {
+    const { data, error } = await this.client
+      .from("artwork_preparations")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkPreparation(data as DbArtworkPreparation) : null;
+  }
+
+  async updateArtworkPreparation(
+    id: string,
+    patch: UpdateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation> {
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (patch.status !== undefined) update.status = patch.status;
+    if (patch.preparedAssetId !== undefined) {
+      update.prepared_asset_id = patch.preparedAssetId;
+    }
+    if (patch.preparedArtworkVersionId !== undefined) {
+      update.prepared_artwork_version_id = patch.preparedArtworkVersionId;
+    }
+    if (patch.analysis !== undefined) update.analysis = patch.analysis;
+    if (patch.preparation !== undefined) update.preparation = patch.preparation;
+    if (patch.guidedCleanup !== undefined) {
+      update.guided_cleanup = patch.guidedCleanup;
+    }
+    if (patch.approvedAt !== undefined) update.approved_at = patch.approvedAt;
+
+    const { data, error } = await this.client
+      .from("artwork_preparations")
+      .update(update)
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapArtworkPreparation(data as DbArtworkPreparation);
   }
 }

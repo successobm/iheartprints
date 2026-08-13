@@ -388,6 +388,7 @@ describe("SupabaseProjectRepository — final direction approval + final artwork
     });
 
     const job = await repo.createFinalArtworkJob("project-1", {
+      sourceKind: "generated_concept",
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
     });
@@ -396,6 +397,7 @@ describe("SupabaseProjectRepository — final direction approval + final artwork
     await assert.rejects(
       () =>
         repo.createFinalArtworkJob("project-1", {
+          sourceKind: "generated_concept",
           finalDirectionApprovalId: approval.id,
           artworkVersionId: "artwork-1",
         }),
@@ -414,6 +416,7 @@ describe("SupabaseProjectRepository — final artwork worker (Sprint 2M Phase 2C
       designBriefVersionId: "version-1",
     });
     return repo.createFinalArtworkJob("project-1", {
+      sourceKind: "generated_concept",
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
     });

@@ -1,4 +1,5 @@
 import type { BriefConflict, BriefSectionKey, DesignSummaryView } from "./contracts";
+import { isChangeClause } from "./revision-delta";
 
 /**
  * Centralized, provider-neutral customer-facing phrasing (Sprint 2F).
@@ -198,6 +199,79 @@ export function acknowledgeRevision(changedSections: BriefSectionKey[]): string 
 /** Asked once, after a revision, only when concepts already exist and are now stale. */
 export function conceptRegenerationPrompt(): string {
   return "Your changes affect the current concepts. Would you like me to generate updated concepts?";
+}
+
+/**
+ * Sprint 2M Phase 2G (Goal 4/10): shown when an explicit customer revision
+ * request has just automatically enqueued regeneration — distinct from
+ * `conceptRegenerationPrompt` (which asks permission). States what is
+ * already happening, truthfully: the artwork is being revised, never
+ * implying final approval or that production has started.
+ */
+export function revisionGeneratingMessage(): string {
+  return "I'm updating the concept now.";
+}
+
+/**
+ * Live Acceptance Cleanup (Issue 5): confirms a PRODUCTION-SIZE change.
+ *
+ * Deliberately says nothing about the artwork changing — because it hasn't.
+ * Resolution is stated as a guarantee we keep at whatever size the customer
+ * chose, never offered as a setting for them to manage (Constitution §6.4 /
+ * AGENTS.md Goal 8). When a request fell outside what the placement can
+ * physically print, that is said plainly rather than silently honored.
+ */
+export function productionSizeAcknowledgement(
+  resolved: { widthIn: number; clamped: boolean; minWidthIn: number; maxWidthIn: number },
+  dpi: number | null,
+): string {
+  const width = formatInchesForCustomer(resolved.widthIn);
+  const quality = dpi ? ` It'll still be printed at full ${dpi} DPI quality.` : "";
+
+  if (resolved.clamped) {
+    return `${formatInchesForCustomer(resolved.minWidthIn)}" to ${formatInchesForCustomer(
+      resolved.maxWidthIn,
+    )}" wide is what fits this print location, so I've set your print to ${width}" wide.${quality}`;
+  }
+  return `Got it — I'll prepare your print at ${width}" wide. The design itself stays exactly as you approved it.${quality}`;
+}
+
+function formatInchesForCustomer(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+}
+
+/**
+ * True Source-Image Targeted Revision: acknowledges the DELTA the customer
+ * actually asked for, not the brief fields it happened to touch.
+ *
+ * The old behavior reported extraction results — "Got it — I have Red in
+ * the artwork and the design direction." — which describes our data model,
+ * not the customer's request, and reads as if we misunderstood them. A
+ * revision turn is a promise about the artwork, so it should restate the
+ * artwork change and the preservation guarantee that goes with it.
+ *
+ * Free: built from the customer's own already-parsed instruction (shared
+ * `splitRequestedChanges`), never a second paid model call.
+ *
+ * Returns `null` when the instruction does not decompose into imperative
+ * change clauses — callers fall back to the existing field-based
+ * acknowledgement, which is still truthful for those turns.
+ *
+ * Says nothing about generation starting: that claim is only true once the
+ * regeneration job is durably enqueued, and `enqueue` makes it itself.
+ */
+export function acknowledgeRequestedChanges(
+  requestedChanges: string[],
+): string | null {
+  const clauses = requestedChanges
+    .map((clause) => clause.trim())
+    .filter((clause) => clause.length > 0 && isChangeClause(clause));
+  if (clauses.length === 0) return null;
+
+  // Every clause is already a bare imperative ("make the border red",
+  // "remove the sunset"), so a single "I'll" carries the whole list.
+  const joined = joinNaturally(clauses.map(lowerFirst));
+  return `Got it — I'll ${joined}. Everything else in the design stays the same.`;
 }
 
 /**

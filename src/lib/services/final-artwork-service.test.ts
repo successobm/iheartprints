@@ -40,6 +40,7 @@ describe("conversation-service — final direction approval (Sprint 2M Phase 2B)
       handleUserMessage,
       submitDesignBriefDecision,
       selectConcept,
+      confirmSelectedDirection,
     } = conversationService;
 
     const { projectId } = await runAdaptiveInterviewToSummary({
@@ -52,6 +53,9 @@ describe("conversation-service — final direction approval (Sprint 2M Phase 2B)
     const generated = await conversationService.getConversation(projectId);
     const [concept] = generated!.artworkVersions;
     await selectConcept(projectId, concept!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is
+    // never final approval — confirm by default here.
+    await confirmSelectedDirection(projectId, concept!.id);
 
     return { projectId, artworkVersionId: concept!.id, conversationService };
   }

@@ -15,7 +15,10 @@
 
 import type { PrintPlacement } from "@/lib/domain/types";
 import { PRODUCT_NOUN_CANONICAL } from "@/capabilities/shared/field-normalization";
-import { targetDimensionsForPlacement } from "@/capabilities/shared/print-placement-dimensions";
+import {
+  sizingPolicyForPlacement,
+  targetDimensionsForPlacement,
+} from "@/capabilities/shared/print-placement-dimensions";
 import type { ProductionMethod } from "@/capabilities/shared/contracts";
 
 import { minimumRasterDimensionsFor } from "./effective-resolution";
@@ -154,6 +157,14 @@ export interface DeriveProductionRequirementsInput {
   printPlacement: PrintPlacement | null;
   productSummary: string | null;
   designDescription: string | null;
+  /**
+   * Live Acceptance Cleanup (Issue 5): the customer's chosen production
+   * print WIDTH in inches — authoritative production intent, persisted on
+   * `TShirtDesignBrief.intendedPrintWidthIn`. `null`/omitted means "they
+   * never expressed one", which resolves to the placement default exactly as
+   * before. Never derived from pixel dimensions.
+   */
+  intendedPrintWidthIn?: number | null;
 }
 
 /**
@@ -166,11 +177,13 @@ export function deriveProductionRequirements(
 ): ProductionRequirements {
   const classification = classifyProduction(input);
   const notes: string[] = [];
+  const intendedPrintWidthIn = input.intendedPrintWidthIn ?? null;
 
   switch (classification.category) {
     case "apparel_raster": {
       const targetDimensions = targetDimensionsForPlacement(
         input.printPlacement,
+        intendedPrintWidthIn,
       );
       if (!targetDimensions) {
         notes.push(
@@ -188,6 +201,17 @@ export function deriveProductionRequirements(
         printMethodConfidence: classification.printMethodConfidence,
         printLocation: input.printPlacement,
         targetDimensions,
+        // Print-Ready Normalization Phase 1: the production deliverable's
+        // sizing strategy, carried through from the one shared placement
+        // policy table so no worker/provider re-derives apparel dimensions.
+        // Live Acceptance Cleanup (Issue 5): carrying the customer's chosen
+        // width here is what makes their choice authoritative all the way to
+        // the plate — output pixels are `targetWidthIn x targetPpi`, so the
+        // 300-PPI guarantee holds at whatever width they picked.
+        sizing: sizingPolicyForPlacement(
+          input.printPlacement,
+          intendedPrintWidthIn,
+        ),
         requiredOutputType: "raster",
         targetPpi: targetDimensions ? APPAREL_RASTER_TARGET_PPI : null,
         minRasterDimensionsPx: targetDimensions
@@ -205,6 +229,7 @@ export function deriveProductionRequirements(
     case "apparel_vector": {
       const targetDimensions = targetDimensionsForPlacement(
         input.printPlacement,
+        intendedPrintWidthIn,
       );
       notes.push(
         "Vector/digitized source is the primary requirement for this method; raster resolution is not the blocking factor.",
@@ -215,6 +240,8 @@ export function deriveProductionRequirements(
         printMethodConfidence: classification.printMethodConfidence,
         printLocation: input.printPlacement,
         targetDimensions,
+        // Raster physical sizing does not apply to a vector deliverable.
+        sizing: null,
         requiredOutputType: "vector",
         targetPpi: null,
         minRasterDimensionsPx: null,
@@ -237,6 +264,8 @@ export function deriveProductionRequirements(
         printMethodConfidence: classification.printMethodConfidence,
         printLocation: null,
         targetDimensions: DEFAULT_SIGNAGE_TARGET_IN,
+        // Apparel placement sizing does not apply to signage.
+        sizing: null,
         requiredOutputType: "vector",
         targetPpi: SIGNAGE_TARGET_PPI,
         minRasterDimensionsPx: null,
@@ -259,6 +288,8 @@ export function deriveProductionRequirements(
         printMethodConfidence: classification.printMethodConfidence,
         printLocation: input.printPlacement,
         targetDimensions: null,
+        // Raster physical sizing does not apply to a vector/logo deliverable.
+        sizing: null,
         requiredOutputType: "vector",
         targetPpi: null,
         minRasterDimensionsPx: null,
@@ -282,6 +313,8 @@ export function deriveProductionRequirements(
         printMethodConfidence: "unknown",
         printLocation: input.printPlacement,
         targetDimensions: null,
+        // Nothing about this product is known well enough to size it.
+        sizing: null,
         requiredOutputType: "raster",
         targetPpi: null,
         minRasterDimensionsPx: null,

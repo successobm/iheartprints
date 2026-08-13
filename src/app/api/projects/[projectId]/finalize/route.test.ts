@@ -59,8 +59,13 @@ describe("POST /api/projects/[projectId]/finalize (Sprint 2M Phase 2B)", () => {
       "@/capabilities/composition"
     );
     resetCapabilityGraphForTests();
-    const { startConversation, handleUserMessage, submitDesignBriefDecision, selectConcept } =
-      await import("@/lib/services/conversation-service");
+    const {
+      startConversation,
+      handleUserMessage,
+      submitDesignBriefDecision,
+      selectConcept,
+      confirmSelectedDirection,
+    } = await import("@/lib/services/conversation-service");
 
     const { projectId } = await runAdaptiveInterviewToSummary({
       start: startConversation,
@@ -73,6 +78,9 @@ describe("POST /api/projects/[projectId]/finalize (Sprint 2M Phase 2B)", () => {
     const generated = await conversationService.getConversation(projectId);
     const [concept] = generated!.artworkVersions;
     await selectConcept(projectId, concept!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is
+    // never final approval — confirm explicitly first.
+    await confirmSelectedDirection(projectId, concept!.id);
 
     const response = await postFinalize(projectId, { artworkVersionId: concept!.id });
     assert.equal(response.status, 200);

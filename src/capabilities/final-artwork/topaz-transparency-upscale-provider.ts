@@ -36,9 +36,9 @@ import { withRetry } from "@/capabilities/shared/retry";
 import { ProviderError, isRetryableProviderError } from "@/capabilities/providers/provider-error";
 
 import {
-  hasAnyTransparentPixel,
-  resampleContainWithTransparentPadding,
-} from "./raster-transform";
+  encodeProductionPng,
+  normalizeProductionRaster,
+} from "./production-normalization";
 import type {
   FinalArtworkProvider,
   FinalArtworkProviderInput,
@@ -179,27 +179,30 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       );
     }
 
-    // Goal 5: reconstruction and deterministic production-canvas sizing are
-    // two distinct steps. The reconstructed bytes are never the final print
-    // canvas by themselves — this reuses the exact same local, deterministic
-    // "contain + transparent pad" transform `LocalRasterInterpolationProvider`
-    // uses, never a second Topaz call merely to reach the production canvas.
-    const fit = resampleContainWithTransparentPadding(
+    // Goal 5: reconstruction and deterministic production sizing are two
+    // distinct steps. The reconstructed bytes are never the print deliverable
+    // by themselves — Print-Ready Normalization Phase 1 runs them through the
+    // exact same shared local transform `LocalRasterInterpolationProvider`
+    // uses (alpha trim → safety margin → physical-width sizing →
+    // proportional resample), never a second Topaz call merely to reach the
+    // production size. Normalizing from THIS reconstructed raster (the
+    // highest-quality raster available in this finalization run) is what keeps
+    // the deliverable from being a crop of an already-padded plate.
+    const normalized = normalizeProductionRaster(
       { width: reconstructed.width, height: reconstructed.height, data: reconstructed.data },
-      input.targetWidthPx,
-      input.targetHeightPx,
-      input.marginFraction,
+      input.sizing,
     );
-    const output = new PNG({ width: fit.image.width, height: fit.image.height });
-    fit.image.data.copy(output.data);
-    const bytes = PNG.sync.write(output);
+    if (normalized.status === "no_visible_artwork") {
+      throw new ProviderError("malformed_response", normalized.reason);
+    }
+    const encoded = encodeProductionPng(normalized.result);
 
     return {
-      bytes,
+      bytes: encoded.bytes,
       contentType: "image/png",
-      widthPx: fit.image.width,
-      heightPx: fit.image.height,
-      hasTransparency: hasAnyTransparentPixel(fit.image),
+      widthPx: normalized.result.image.width,
+      heightPx: normalized.result.image.height,
+      hasTransparency: encoded.hasTransparency,
       nativeWidthPx: source.width,
       nativeHeightPx: source.height,
       reconstructedWidthPx: reconstructed.width,
@@ -210,6 +213,7 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       // independently against this reconstructed output.
       preservesApprovedContent: false,
       providerRequestId: processId,
+      normalization: normalized.result.metadata,
     };
   }
 

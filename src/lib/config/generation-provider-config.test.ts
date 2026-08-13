@@ -5,6 +5,7 @@ const ENV_KEYS = [
   "CONCEPT_GENERATION_PROVIDER",
   "OPENAI_API_KEY",
   "OPENAI_IMAGE_MODEL",
+  "OPENAI_CONCEPT_IMAGE_QUALITY",
   "NODE_ENV",
   "ASSET_STORAGE_MODE",
 ] as const;
@@ -80,10 +81,26 @@ describe("getConceptGenerationConfig", () => {
     );
     let config = getConceptGenerationConfig();
     assert.equal(config.mode === "openai" && config.model, "gpt-image-1");
+    assert.equal(config.mode === "openai" && config.quality, "medium");
 
     process.env.OPENAI_IMAGE_MODEL = "dall-e-3";
     config = getConceptGenerationConfig();
     assert.equal(config.mode === "openai" && config.model, "dall-e-3");
+    assert.equal(config.mode === "openai" && config.quality, "medium");
+  });
+
+  it("honors an explicit OPENAI_CONCEPT_IMAGE_QUALITY and rejects invalid values", async () => {
+    process.env.CONCEPT_GENERATION_PROVIDER = "openai";
+    process.env.OPENAI_API_KEY = "sk-test-key";
+    process.env.OPENAI_CONCEPT_IMAGE_QUALITY = "high";
+    const { getConceptGenerationConfig } = await import(
+      "./generation-provider-config"
+    );
+    const config = getConceptGenerationConfig();
+    assert.equal(config.mode === "openai" && config.quality, "high");
+
+    process.env.OPENAI_CONCEPT_IMAGE_QUALITY = "auto";
+    assert.throws(() => getConceptGenerationConfig(), /OPENAI_CONCEPT_IMAGE_QUALITY/);
   });
 
   describe("outside production (development / test / unset)", () => {
@@ -285,6 +302,7 @@ describe("getConceptGenerationConfig", () => {
         mode: "openai" as const,
         apiKey: "sk-real-key",
         model: "gpt-image-1",
+        quality: "medium" as const,
       };
       assert.deepEqual(evaluateGenerationReadiness(config), { ready: true });
       assert.equal(isProductionSafeForRealGeneration(config), true);

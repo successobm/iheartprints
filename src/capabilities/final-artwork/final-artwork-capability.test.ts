@@ -72,6 +72,11 @@ describe("FinalArtworkCapability.requestFinalArtwork (Sprint 2M Phase 2B)", () =
     const afterGeneration = await repo.getProject(projectId);
     const [firstConcept] = afterGeneration!.artworkVersions;
     await repo.selectArtworkVersion(projectId, firstConcept!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is never
+    // final approval — most scenarios in this file are about what happens
+    // once the customer HAS confirmed, so confirm by default here; the
+    // dedicated "not yet confirmed" test explicitly un-confirms instead.
+    await repo.updateProject(projectId, { finalDirectionConfirmed: true });
 
     return { projectId, versionId: version.id, artworkId: firstConcept!.id, worker, conceptGeneration };
   }
@@ -208,8 +213,137 @@ describe("FinalArtworkCapability.requestFinalArtwork (Sprint 2M Phase 2B)", () =
     );
     assert.ok(newBatch.length > 0);
     await repo.selectArtworkVersion(projectId, newBatch[0]!.id);
+    await repo.updateProject(projectId, { finalDirectionConfirmed: true });
     const secondApproval = await finalArtwork.requestFinalArtwork(projectId, newBatch[0]!.id);
     assert.notEqual(secondApproval.approval.id, firstApproval.approval.id);
     assert.equal(secondApproval.approval.status, "active");
+  });
+
+  // --- Sprint 2M Phase 2G, Goal 6: server-side revision-pending gate ------
+  it("L: refuses to create an approval/job while a revision is pending, even if the UI is bypassed", async () => {
+    const repo = await freshRepo();
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const { projectId, artworkId } = await projectWithSelectedConcept(repo);
+
+    await repo.updateProject(projectId, { revisionPending: true });
+
+    await assert.rejects(
+      () => finalArtwork.requestFinalArtwork(projectId, artworkId),
+      /reviewed before/i,
+    );
+
+    // No approval, no job, and no internal lifecycle terminology leaked
+    // into the rejection.
+    const active = await repo.getActiveFinalDirectionApproval(projectId);
+    assert.equal(active, null);
+    try {
+      await finalArtwork.requestFinalArtwork(projectId, artworkId);
+      assert.fail("expected rejection");
+    } catch (error) {
+      const message = (error as Error).message;
+      assert.doesNotMatch(message, /revisionPending|FinalDirectionApproval|FinalArtworkJob/);
+    }
+  });
+
+  it("Live Acceptance Corrective Pass (Section 2): refuses to finalize a merely-selected concept that was never explicitly confirmed", async () => {
+    const repo = await freshRepo();
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const { projectId, artworkId } = await projectWithSelectedConcept(repo);
+
+    // Undo the helper's default confirmation — this test is specifically
+    // about the unconfirmed state.
+    await repo.updateProject(projectId, { finalDirectionConfirmed: false });
+
+    await assert.rejects(
+      () => finalArtwork.requestFinalArtwork(projectId, artworkId),
+      /confirm this is your final direction/i,
+    );
+
+    const active = await repo.getActiveFinalDirectionApproval(projectId);
+    assert.equal(active, null);
+
+    // Explicit confirmation unblocks it.
+    await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    const result = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(result.approval.status, "active");
+  });
+
+  it("clearing revisionPending allows the same artwork to be requested afterward", async () => {
+    const repo = await freshRepo();
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const { projectId, artworkId } = await projectWithSelectedConcept(repo);
+
+    await repo.updateProject(projectId, { revisionPending: true });
+    await assert.rejects(() => finalArtwork.requestFinalArtwork(projectId, artworkId));
+
+    await repo.updateProject(projectId, { revisionPending: false });
+    const result = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(result.approval.status, "active");
+  });
+
+  // --- Sprint 2M Phase 2G, Goal 8: repeat Prepare is idempotent and truthful --
+  it("S: repeat Prepare on an already-completed job returns the existing ready state, never re-enters 'finalizing'", async () => {
+    const repo = await freshRepo();
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const { projectId, artworkId } = await projectWithSelectedConcept(repo);
+
+    const first = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(first.job.status, "queued");
+
+    // Simulate FinalArtworkWorkerCapability having already completed this
+    // job and truthfully transitioned the project to print_ready.
+    await repo.updateFinalArtworkJob(first.job.id, {
+      status: "completed",
+      completedAt: new Date().toISOString(),
+    });
+    await repo.setProjectStatus(projectId, "print_ready");
+
+    const repeat = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(repeat.alreadyRequested, true);
+    assert.equal(repeat.job.status, "completed");
+
+    const project = await repo.getProject(projectId);
+    // Must remain the worker's own truthful terminal state — never
+    // stomped back to "finalizing" with no claimable job left (Goal 8).
+    assert.equal(project?.project.status, "print_ready");
+  });
+
+  it("T: repeat Prepare on a needs_review (finalization_required) job returns that truthful state", async () => {
+    const repo = await freshRepo();
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const { projectId, artworkId } = await projectWithSelectedConcept(repo);
+
+    const first = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await repo.updateFinalArtworkJob(first.job.id, {
+      status: "completed",
+      completedAt: new Date().toISOString(),
+    });
+    await repo.setProjectStatus(projectId, "finalization_required");
+
+    const repeat = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(repeat.job.status, "completed");
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalization_required");
+  });
+
+  it("U: a failed job is revived to queued on retry and legitimately re-enters finalizing (not stranded)", async () => {
+    const repo = await freshRepo();
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const { projectId, artworkId } = await projectWithSelectedConcept(repo);
+
+    const first = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await repo.updateFinalArtworkJob(first.job.id, {
+      status: "failed",
+      lastError: "simulated infrastructure failure",
+    });
+    await repo.setProjectStatus(projectId, "finalizing");
+
+    const retry = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(retry.job.id, first.job.id); // same job, revived — never duplicated
+    assert.equal(retry.job.status, "queued");
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalizing");
   });
 });

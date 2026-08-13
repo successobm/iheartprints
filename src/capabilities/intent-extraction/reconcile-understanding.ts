@@ -5,12 +5,18 @@ import {
   normalizeProductAnswer,
   PRODUCT_NOUN_CANONICAL,
 } from "@/capabilities/shared/field-normalization";
+import {
+  namesAPrintProduct,
+  stripDesignArtifactWords,
+} from "@/capabilities/shared/print-product-vocabulary";
 import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
 import type { ConversationUnderstandingResult } from "@/capabilities/conversation-understanding";
 import type { BriefSectionKey } from "@/capabilities/shared/contracts";
 import type { PrintPlacement, TShirtDesignBrief } from "@/lib/domain/types";
 
 import type { BriefFieldPatch } from "./extraction";
+import { mergeDesignDescription } from "./design-description-merge";
+import { preserveDesignDetail } from "./preserve-design-detail";
 
 /**
  * Sprint 2L Phase 1: turns a (already-sanitized) `ConversationUnderstandingResult`
@@ -54,7 +60,12 @@ import type { BriefFieldPatch } from "./extraction";
  *          This still rejects a value with no relationship to the
  *          evidence at all (protects against outright hallucination)
  *          while allowing the exact normalization Sprint 2L Phase 1
- *          product regressions require.
+ *          product regressions require. Grounding alone is not enough,
+ *          though: it proves only that the value came from the customer's
+ *          own words, not that those words name something printable, so a
+ *          grounded value must additionally survive
+ *          `stripDesignArtifactWords` — see
+ *          `shared/print-product-vocabulary.ts`.
  *        - Every other field has no additional grounding check beyond
  *          "not ambiguous confidence" — they are free-text fields with no
  *          fixed canonical vocabulary to check against, and normalization
@@ -68,6 +79,17 @@ import type { BriefFieldPatch } from "./extraction";
  *   4. A deferral is only ever honored for a deferrable section
  *      (`isDeferrable`) — required sections can never be silently deferred
  *      just because a provider proposed it.
+ *   5. Detailed-Description Fidelity (Phase 1): `graphics` additionally
+ *      passes through `preserveDesignDetail`, which restores design-critical
+ *      objects, counts, positions and relationships the provider's synthesis
+ *      dropped. This is the ONE place the two layers are reconciled rather
+ *      than left to fight: the provider's polished designer-language value
+ *      is kept as the base (it reads far better than raw customer text), and
+ *      only the specific clauses it genuinely lost are added back from what
+ *      the customer actually said. The raw message is never appended
+ *      wholesale, and garment-color / print-placement / required-wording
+ *      clauses are excluded by construction — see
+ *      `preserve-design-detail.ts`.
  */
 
 /** The only Design Brief sections Conversation Understanding may ever touch — sections with no backing field (`references`, `production`, `layoutPreference`) are never accepted, matching `NO_FIELD_SECTIONS` in Brief Evaluation. */
@@ -115,12 +137,22 @@ type RejectionCode =
   | "empty_value"
   | "wording_not_grounded"
   | "product_not_grounded"
+  | "product_not_a_print_product"
   | "empty_wording_requires_explicit"
   | "unresolvable_print_location";
 
 export function reconcileUnderstanding(
   understanding: ConversationUnderstandingResult | null,
-  context: { brief: TShirtDesignBrief },
+  context: {
+    brief: TShirtDesignBrief;
+    /**
+     * The customer's own message this interpretation came from. Optional so
+     * existing callers/tests that only reconcile a provider result keep
+     * working; when supplied it is used ONLY as the source of design-critical
+     * detail a lossy `graphics` synthesis dropped (see `preserveDesignDetail`).
+     */
+    message?: string | null;
+  },
 ): ReconciledUnderstanding {
   if (!understanding) return EMPTY;
 
@@ -145,7 +177,7 @@ export function reconcileUnderstanding(
     const reject = (code: RejectionCode) => rejected.push({ section: update.section, code });
 
     switch (update.section) {
-      case "product":
+      case "product": {
         if (!value) {
           reject("empty_value");
           continue;
@@ -154,17 +186,41 @@ export function reconcileUnderstanding(
           reject("product_not_grounded");
           continue;
         }
-        fields.productSummary = normalizeProductAnswer(value);
+        // Grounding proves the value came from what the customer said; it
+        // does not prove the value names something printable. "create a
+        // design of a red 1988 Toyota MR2" grounds "Design" perfectly
+        // well, and stored it as the Product. Stripping first also
+        // canonicalizes the common "t-shirt design" shape down to the
+        // product noun the customer actually named.
+        if (!namesAPrintProduct(value)) {
+          reject("product_not_a_print_product");
+          continue;
+        }
+        fields.productSummary = normalizeProductAnswer(
+          stripDesignArtifactWords(value),
+        );
         accepted.push("product");
         break;
-      case "graphics":
+      }
+      case "graphics": {
         if (!value) {
           reject("empty_value");
           continue;
         }
-        fields.designDescription = value;
+        // Phase 1: restore design-critical detail a lossy synthesis dropped.
+        // Phase 1.1: then merge that against what the brief ALREADY says
+        // rather than overwriting it — the live multi-turn failure was a
+        // straight assignment here, which is why turn 2 deleted turn 1's
+        // Discovery Bay / waterways / aerial context outright.
+        const restored = preserveDesignDetail(value, context.message);
+        fields.designDescription = mergeDesignDescription(
+          context.brief.designDescription,
+          restored,
+          context.message ?? restored,
+        );
         accepted.push("graphics");
         break;
+      }
       case "style":
         if (!value) {
           reject("empty_value");

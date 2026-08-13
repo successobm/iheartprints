@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Matches .gitignore: local acceptance / forensic harnesses must not
+    // fail lint for developers who keep observational tooling on disk.
+    ".local-acceptance/**",
   ]),
 ]);
 

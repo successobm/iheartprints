@@ -20,6 +20,12 @@ import type {
   FinalArtworkProviderOutput,
 } from "@/capabilities/final-artwork/provider";
 import {
+  encodeProductionPng,
+  normalizeProductionRaster,
+} from "@/capabilities/final-artwork/production-normalization";
+import { readPhysicalPixelDensity } from "@/capabilities/final-artwork/production-png";
+import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
+import {
   createConceptEvaluationCapability,
   type ConceptEvaluationProvider,
   type ConceptEvaluationRequest,
@@ -66,28 +72,137 @@ class FakeReconstructionProvider implements FinalArtworkProvider {
 
     const source = PNG.sync.read(input.sourceBytes);
     const hasTransparency = this.behavior.hasTransparency ?? true;
-    const canvas = new PNG({ width: input.targetWidthPx, height: input.targetHeightPx });
-    for (let i = 0; i < canvas.data.length; i += 4) {
-      canvas.data[i] = 5;
-      canvas.data[i + 1] = 5;
-      canvas.data[i + 2] = 5;
-      canvas.data[i + 3] = hasTransparency ? 128 : 255;
+
+    // Print-Ready Normalization Phase 1: a faithful stand-in for Topaz —
+    // "reconstruct" proportionally (2x here, for test cost), then run the
+    // SAME shared production normalization the real adapter runs, so this
+    // test exercises the real trim/size/encode path rather than a
+    // hand-built canvas.
+    const reconstructed = reconstructForFake(source, hasTransparency);
+    const normalized = normalizeProductionRaster(reconstructed, input.sizing);
+    if (normalized.status !== "normalized") {
+      throw new Error(normalized.reason);
+    }
+    const encoded = encodeProductionPng(normalized.result);
+
+    return {
+      bytes: encoded.bytes,
+      contentType: "image/png",
+      widthPx: normalized.result.image.width,
+      heightPx: normalized.result.image.height,
+      hasTransparency: encoded.hasTransparency,
+      nativeWidthPx: source.width,
+      nativeHeightPx: source.height,
+      reconstructedWidthPx: reconstructed.width,
+      reconstructedHeightPx: reconstructed.height,
+      resolutionProvenance: "reconstructed",
+      transformationMethod: "fake_topaz_reconstruction_v1",
+      preservesApprovedContent: false,
+      providerRequestId: requestId,
+      normalization: normalized.result.metadata,
+    };
+  }
+}
+
+/**
+ * Builds a "reconstructed" raster from the source fixture: 2x dimensions,
+ * with the source's own transparent border preserved (so alpha trimming has
+ * something real to trim) and an opaque — or, for the opaque-output scenario,
+ * fully opaque — artwork region.
+ */
+function reconstructForFake(source: PNG, hasTransparency: boolean): RgbaImage {
+  const scale = 2;
+  const width = source.width * scale;
+  const height = source.height * scale;
+  const data = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const sourceIdx =
+        (Math.min(source.height - 1, Math.floor(y / scale)) * source.width +
+          Math.min(source.width - 1, Math.floor(x / scale))) *
+        4;
+      const idx = (y * width + x) * 4;
+      data[idx] = 5;
+      data[idx + 1] = 5;
+      data[idx + 2] = 5;
+      data[idx + 3] = hasTransparency ? source.data[sourceIdx + 3] : 255;
+    }
+  }
+  return { width, height, data };
+}
+
+/**
+ * A provider that deliberately produces the PRE-normalization deliverable
+ * shape: artwork centred inside a large fixed transparent canvas, with
+ * normalization metadata honestly describing that padding. Exists so the
+ * dead-canvas validation rule is proven against the exact defect the
+ * Print-Ready Production Output Audit found, rather than only against
+ * hand-written summary numbers.
+ */
+class DeadCanvasProvider implements FinalArtworkProvider {
+  readonly providerKey = "fake_dead_canvas";
+
+  async produce(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput> {
+    const source = PNG.sync.read(input.sourceBytes);
+    const widthPx = Math.round(input.sizing.targetWidthIn * input.sizing.targetPpi);
+    const heightPx = Math.round(input.sizing.maxHeightIn * input.sizing.targetPpi);
+
+    // Artwork covering ~half the canvas, centred — the audited shape.
+    const artworkWidth = Math.round(widthPx * 0.7);
+    const artworkHeight = Math.round(heightPx * 0.7);
+    const left = Math.floor((widthPx - artworkWidth) / 2);
+    const top = Math.floor((heightPx - artworkHeight) / 2);
+    const canvas = new PNG({ width: widthPx, height: heightPx });
+    for (let y = top; y < top + artworkHeight; y += 1) {
+      for (let x = left; x < left + artworkWidth; x += 1) {
+        const idx = (y * widthPx + x) * 4;
+        canvas.data[idx + 3] = 255;
+      }
     }
 
     return {
       bytes: PNG.sync.write(canvas),
       contentType: "image/png",
-      widthPx: input.targetWidthPx,
-      heightPx: input.targetHeightPx,
-      hasTransparency,
+      widthPx,
+      heightPx,
+      hasTransparency: true,
       nativeWidthPx: source.width,
       nativeHeightPx: source.height,
       reconstructedWidthPx: source.width * 4,
       reconstructedHeightPx: source.height * 4,
       resolutionProvenance: "reconstructed",
-      transformationMethod: "fake_topaz_reconstruction_v1",
-      preservesApprovedContent: false,
-      providerRequestId: requestId,
+      transformationMethod: "fake_dead_canvas_v1",
+      preservesApprovedContent: true,
+      providerRequestId: null,
+      normalization: {
+        strategy: "width_constrained_preserve_aspect",
+        sourceWidthPx: source.width,
+        sourceHeightPx: source.height,
+        alphaThreshold: 8,
+        alphaBBoxWidthPx: artworkWidth,
+        alphaBBoxHeightPx: artworkHeight,
+        trimmedWidthPx: widthPx,
+        trimmedHeightPx: heightPx,
+        requestedMarginPx: 0,
+        appliedMarginPx: { left: 0, top: 0, right: 0, bottom: 0 },
+        artworkOccupancy: (artworkWidth * artworkHeight) / (widthPx * heightPx),
+        transparentPaddingFraction:
+          1 - (artworkWidth * artworkHeight) / (widthPx * heightPx),
+        sourceFullyOpaque: false,
+        trimmedAspectRatio: widthPx / heightPx,
+        outputAspectRatio: widthPx / heightPx,
+        outputWidthPx: widthPx,
+        outputHeightPx: heightPx,
+        targetWidthIn: input.sizing.targetWidthIn,
+        targetPpi: input.sizing.targetPpi,
+        intendedWidthIn: widthPx / input.sizing.targetPpi,
+        intendedHeightIn: heightPx / input.sizing.targetPpi,
+        constrainedBy: "width",
+        effectivePpiWidth: input.sizing.targetPpi,
+        effectivePpiHeight: input.sizing.targetPpi,
+        densityPixelsPerMetre: null,
+        contentScale: 1,
+      },
     };
   }
 }
@@ -144,7 +259,18 @@ function failingProductionEvaluationResult(): ConceptEvaluationResult {
  * 20/W) — `LocalRasterInterpolationProvider` is local/deterministic and
  * `PrintValidationCapability` is pure.
  */
-function buildFixturePng(size = 1024): Buffer {
+/**
+ * Print-Ready Normalization Phase 1: the default source size for scenarios
+ * that expect a genuinely print-ready sleeve plate. The fixture's visible
+ * artwork is only 80% of its canvas, and production sizing is now measured
+ * against the TRIMMED artwork, so a 1024px fixture's ~820px of real artwork no
+ * longer honestly covers a 3in sleeve at 300 PPI (900px). 1400px does
+ * (~1120px of artwork), which is the point: sufficiency is judged on artwork
+ * pixels, never on padded canvas pixels.
+ */
+const DEFAULT_SOURCE_PX = 1400;
+
+function buildFixturePng(size = DEFAULT_SOURCE_PX): Buffer {
   const png = new PNG({ width: size, height: size });
   const margin = Math.floor(size * 0.1);
   for (let y = 0; y < size; y += 1) {
@@ -255,10 +381,10 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     if (options.withSourceAsset !== false) {
       const { primary } = await assets.uploadConceptImage(projectId, {
         conceptId: randomUUID(),
-        bytes: options.sourceBytesOverride ?? buildFixturePng(1024),
+        bytes: options.sourceBytesOverride ?? buildFixturePng(),
         contentType: "image/png",
-        widthPx: 1024,
-        heightPx: 1024,
+        widthPx: DEFAULT_SOURCE_PX,
+        heightPx: DEFAULT_SOURCE_PX,
         hasTransparency: true,
         providerKey: "test",
         generationJobId: null,
@@ -287,6 +413,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       },
     ]);
     await repo.selectArtworkVersion(projectId, artwork!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is
+    // never final approval — confirm by default so this file's scenarios
+    // (all about what the worker does once finalization is authorized)
+    // continue to exercise `requestFinalArtwork` the same way as before.
+    await repo.updateProject(projectId, { finalDirectionConfirmed: true });
 
     return { projectId, versionId: version.id, artworkId: artwork!.id, primaryAssetId };
   }
@@ -339,6 +470,7 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const { projectId, artworkId } = await setupProjectWithConcept(repo, assets);
 
     const job = await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "generated_concept",
       finalDirectionApprovalId: "00000000-0000-0000-0000-000000000000",
       artworkVersionId: artworkId,
     });
@@ -433,6 +565,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       },
     ]);
     await repo.selectArtworkVersion(projectId, artwork!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is
+    // never final approval — confirm by default so this file's scenarios
+    // (all about what the worker does once finalization is authorized)
+    // continue to exercise `requestFinalArtwork` the same way as before.
+    await repo.updateProject(projectId, { finalDirectionConfirmed: true });
 
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artwork!.id);
     await worker.processNextJob();
@@ -443,7 +580,7 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
   });
 
   // --- G: target print dimensions resolved correctly ----------------------
-  it("G: full-back placement resolves to 3600x4200px; sleeve resolves to 900x900px", async () => {
+  it("G: sleeve resolves to 900px wide (3in); full-back resolves to 3150px wide (10.5in), with height from the artwork", async () => {
     const repoA = await freshRepo();
     const { assets: assetsA, finalArtwork: finalArtworkA, worker: workerA } = buildPipeline(repoA);
     const sleeve = await setupProjectWithConcept(repoA, assetsA, { printPlacement: "sleeve" });
@@ -463,8 +600,170 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const fullBackAsset = (await repoB.listAssets(fullBack.projectId)).find(
       (a) => a.productionRole === "production_png",
     );
-    assert.equal(fullBackAsset?.widthPx, 3600);
-    assert.equal(fullBackAsset?.heightPx, 4200);
+    // 10.5in at 300 PPI. The fixture's artwork is square, so the plate is
+    // square too — NEVER forced to the old fixed 3600x4200 canvas.
+    assert.equal(fullBackAsset?.widthPx, 3150);
+    assert.equal(fullBackAsset?.heightPx, 3150);
+    assert.notEqual(fullBackAsset?.heightPx, 4200);
+  });
+
+  /**
+   * Live Acceptance Cleanup — Issue 5, end to end.
+   *
+   * The customer's chosen production WIDTH is authoritative, and the 300-DPI
+   * guarantee holds at whatever they chose. The width reaches the worker only
+   * through persisted production intent (`TShirtDesignBrief.intendedPrintWidthIn`)
+   * — there is no size parameter anywhere on the finalize request path, so a
+   * stale or forged request cannot override it, and nothing is ever inferred
+   * from the pixels the generator happened to produce.
+   */
+  it("18/20: a chosen 12in width produces a 3600px-wide plate at 300 DPI", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "full_front",
+    });
+
+    await repo.updateBrief(projectId, { intendedPrintWidthIn: 12 });
+
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const plate = (await repo.listAssets(projectId)).find(
+      (asset) => asset.productionRole === "production_png",
+    );
+    assert.equal(plate?.widthPx, 3600, "12in x 300 PPI");
+    // The fixture artwork is square, so the plate is too.
+    assert.equal(plate?.heightPx, 3600);
+    // And never the standard default the customer chose away from.
+    assert.notEqual(plate?.widthPx, 3150);
+
+    const normalization = plate!.metadata.normalization as Record<string, unknown>;
+    assert.equal(normalization.targetWidthIn, 12);
+    assert.equal(normalization.intendedWidthIn, 12);
+    assert.equal(normalization.targetPpi, 300);
+    // Effective resolution is arithmetic on the plate itself, never a claim.
+    assert.equal(
+      (plate!.widthPx as number) / (normalization.intendedWidthIn as number),
+      300,
+    );
+  });
+
+  it("22: with no chosen width the placement default still applies, unchanged", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "full_front",
+    });
+
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const plate = (await repo.listAssets(projectId)).find(
+      (asset) => asset.productionRole === "production_png",
+    );
+    assert.equal(plate?.widthPx, 3150, "10.5in x 300 PPI");
+  });
+
+  // --- Print-Ready Normalization Phase 1: plate geometry and metadata -------
+  it("the production plate is trimmed to the artwork, carries 300-PPI density, and records its own geometry", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const asset = (await repo.listAssets(projectId)).find(
+      (a) => a.productionRole === "production_png",
+    )!;
+    const normalization = (asset.metadata as Record<string, unknown>)
+      .normalization as Record<string, unknown>;
+
+    assert.equal(normalization.strategy, "width_constrained_preserve_aspect");
+    assert.equal(normalization.intendedWidthIn, 3);
+    assert.equal(normalization.intendedHeightIn, 3);
+    assert.equal(normalization.targetPpi, 300);
+    // The fixture is 1400px with a 10% transparent border on each side.
+    assert.equal(normalization.alphaBBoxWidthPx, 1120);
+    assert.equal(normalization.trimmedWidthPx, 1136, "1120 + 8px safety margin per edge");
+    assert.ok((normalization.artworkOccupancy as number) > 0.97);
+
+    const bytes = await assets.downloadAssetBytes(asset.id);
+    const density = readPhysicalPixelDensity(bytes!.bytes);
+    assert.equal(density?.pixelsPerMetreX, 11811, "~300 PPI in pixels per metre");
+
+    // N: the normalized plate passes authoritative validation, including every
+    // new normalization check.
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation?.status, "ready");
+    const report = validation!.report as { checks: { check: string; status: string }[] };
+    for (const check of [
+      "production_normalization",
+      "alpha_bound_artwork",
+      "transparent_dead_canvas",
+      "physical_width_policy",
+      "aspect_ratio_preserved",
+      "effective_resolution",
+    ]) {
+      assert.equal(
+        report.checks.find((c) => c.check === check)?.status,
+        "pass",
+        `${check} should pass for a correctly normalized plate`,
+      );
+    }
+    assert.equal(
+      report.checks.find((c) => c.check === "density_metadata")?.status,
+      "pass",
+    );
+  });
+
+  // --- O: the approved creative source is never modified --------------------
+  it("O: the approved concept's own asset bytes are untouched by production normalization", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId, primaryAssetId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+
+    const before = await assets.downloadAssetBytes(primaryAssetId!);
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    const after = await assets.downloadAssetBytes(primaryAssetId!);
+
+    assert.deepEqual(after!.bytes, before!.bytes, "creative source bytes are unchanged");
+    assert.deepEqual(before!.bytes, buildFixturePng(), "and still the original fixture");
+
+    const sourceAsset = await repo.getAssetById(primaryAssetId!);
+    assert.equal(sourceAsset?.widthPx, DEFAULT_SOURCE_PX);
+    assert.equal(sourceAsset?.productionRole, null);
+  });
+
+  // --- M: excessive transparent dead canvas fails validation ---------------
+  it("M: a plate that is mostly transparent dead canvas fails validation and never reaches print_ready", async () => {
+    const repo = await freshRepo();
+    // A provider that skips normalization entirely and emits the old-style
+    // fixed padded canvas — exactly the shape the Print-Ready Production
+    // Output Audit found in production.
+    const { assets, finalArtwork, worker } = buildPipeline(repo, new DeadCanvasProvider());
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation?.status, "finalization_required");
+    const report = validation!.report as { checks: { check: string; status: string }[] };
+    assert.equal(
+      report.checks.find((c) => c.check === "transparent_dead_canvas")?.status,
+      "fail",
+    );
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalization_required");
+    assert.notEqual(project?.project.status, "print_ready");
   });
 
   // --- H/Q: effective-resolution honesty; not-ready never sets print_ready --
@@ -627,6 +926,78 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     );
     assert.equal(secondAssets.length, 1, "no duplicate production asset on retry");
     assert.equal(secondAssets[0]!.id, firstAssetId, "the same asset is reused");
+
+    // Print-Ready Normalization Phase 1 (P): the reused plate's own persisted
+    // normalization geometry is read back, so the retry re-reaches the SAME
+    // honest verdict instead of re-deriving or losing it.
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation?.status, "ready");
+    const report = validation!.report as { checks: { check: string; status: string }[] };
+    assert.equal(
+      report.checks.find((c) => c.check === "production_normalization")?.status,
+      "pass",
+    );
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "print_ready");
+  });
+
+  // --- Print-Ready Normalization Phase 1: pre-normalization plates ----------
+  it("a production asset predating normalization is honestly reported as needing re-preparation, and is never deleted or rewritten", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+
+    // A plate created before this phase: real bytes, real provenance, but no
+    // recorded production geometry. Seeded directly so the worker takes its
+    // idempotent "reuse the existing production asset" path (Goal 16) against
+    // pre-normalization metadata.
+    const legacyBytes = buildFixturePng(900);
+    const legacyAsset = await assets.uploadProductionAsset(projectId, {
+      conceptId: job.finalDirectionApprovalId!,
+      bytes: legacyBytes,
+      contentType: "image/png",
+      widthPx: 900,
+      heightPx: 900,
+      hasTransparency: true,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {
+        transformationMethod: "local_raster_contain_resample_v1",
+        providerKey: "local_raster_interpolation",
+        resolutionProvenance: "native",
+        nativeWidthPx: 1400,
+        nativeHeightPx: 1400,
+        reconstructedWidthPx: null,
+        reconstructedHeightPx: null,
+        preservesApprovedContent: true,
+        providerRequestId: null,
+      },
+    });
+
+    await worker.processNextJob();
+
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed?.status, "completed");
+    assert.match(completed?.lastError ?? "", /predates print-ready normalization/i);
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalization_required");
+
+    // The existing asset is untouched — never invalidated, deleted, or
+    // regenerated by this phase.
+    const stillThere = await repo.getAssetById(legacyAsset.id);
+    assert.ok(stillThere);
+    assert.deepEqual(
+      (await assets.downloadAssetBytes(legacyAsset.id))!.bytes,
+      legacyBytes,
+    );
+    const productionAssets = (await repo.listAssets(projectId)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(productionAssets.length, 1, "no replacement plate was produced");
   });
 
   // --- S: stale-job recovery -------------------------------------------------
@@ -803,6 +1174,11 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
       },
     ]);
     await repo.selectArtworkVersion(projectId, artwork!.id);
+    // Live Acceptance Corrective Pass (Section 2): selection alone is
+    // never final approval — confirm by default so this file's scenarios
+    // (all about what the worker does once finalization is authorized)
+    // continue to exercise `requestFinalArtwork` the same way as before.
+    await repo.updateProject(projectId, { finalDirectionConfirmed: true });
 
     return { projectId, artworkId: artwork!.id };
   }
@@ -828,12 +1204,14 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     assert.equal(meta.resolutionProvenance, "reconstructed");
     assert.equal(meta.nativeWidthPx, 1024);
     assert.equal(meta.nativeHeightPx, 1024);
-    assert.equal(meta.reconstructedWidthPx, 4096);
-    assert.equal(meta.reconstructedHeightPx, 4096);
-    // Full-back production canvas — distinct from both source (1024) and
-    // reconstructed (4096) dimensions.
-    assert.equal(asset!.widthPx, 3600);
-    assert.equal(asset!.heightPx, 4200);
+    assert.equal(meta.reconstructedWidthPx, 2048);
+    assert.equal(meta.reconstructedHeightPx, 2048);
+    // Normalized full-back plate — distinct from both source (1024) and
+    // reconstructed (2048) dimensions, sized to 10.5in at 300 PPI with height
+    // from the artwork's own (square) proportions, never a fixed 4200px canvas.
+    assert.equal(asset!.widthPx, 3150);
+    assert.equal(asset!.heightPx, 3150);
+    assert.notEqual(asset!.heightPx, 4200);
   });
 
   // --- M: source eligibility gate prevents a paid call --------------------

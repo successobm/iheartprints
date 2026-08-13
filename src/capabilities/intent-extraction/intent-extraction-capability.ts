@@ -80,6 +80,10 @@ export function createIntentExtractionCapability(): IntentExtractionCapability {
         brief,
         reply,
         pendingSection: pendingSection ?? null,
+        // Sprint 2M Phase 2G (Goal 2): derived from `phase`, not a new
+        // public input — only the post-concept-selection revision loop
+        // gets the design-change-imperative → `designDescription` fallback.
+        isPostSelectionRevision: phase === "ask_revisions" || phase === "revision_received",
       });
       traceConversationUnderstanding({
         stage: "deterministic_extraction",
@@ -95,7 +99,13 @@ export function createIntentExtractionCapability(): IntentExtractionCapability {
       // understanding did not confidently resolve, and is the *only*
       // source when `understanding` is absent (provider skipped/
       // unconfigured/failed) — today's exact pre-Sprint-2L behavior.
-      const reconciled = reconcileUnderstanding(understanding ?? null, { brief });
+      const reconciled = reconcileUnderstanding(understanding ?? null, {
+        brief,
+        // Detailed-Description Fidelity (Phase 1): reconciliation needs the
+        // customer's own words to notice what a polished-but-lossy graphics
+        // synthesis dropped. Read-only — see `preserveDesignDetail`.
+        message: reply,
+      });
       const fields: BriefFieldPatch = {
         ...deterministic.fields,
         ...reconciled.fields,

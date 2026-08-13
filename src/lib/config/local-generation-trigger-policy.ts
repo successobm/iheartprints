@@ -14,18 +14,21 @@ export type LocalGenerationTriggerDecision =
   | { allowed: false; reason: LocalGenerationTriggerSuppressionReason };
 
 /**
- * Pure policy: whether interactive local `next dev` may kick
- * `workerScheduler.runBatch()` after a GenerationJob is durably enqueued.
+ * Pure policy: whether interactive local `next dev` may kick an in-process
+ * worker scheduler after a durable job enqueue (GenerationJob →
+ * `workerScheduler`, FinalArtworkJob → `finalArtworkScheduler`).
  *
  * - Production: never. Scheduler/cron or standalone worker only.
  * - Automated tests (`IHEARTPRINTS_AUTOMATED_TEST=1`): never. Tests stay
  *   isolated from paid/network providers and must await `processNextJob` /
  *   `runBatch` / the worker route explicitly.
- * - Interactive `next dev` only: yes, so Approve/Create Concepts can
- *   progress without a second terminal or a manual PowerShell POST.
+ * - Interactive `next dev` only: yes, so Approve/Create Concepts and
+ *   Prepare Print-Ready can progress without a second terminal or a
+ *   manual PowerShell POST.
  *
- * Independent of `shouldAwaitGenerationWorkerBatch` (HTTP route lifecycle).
- * No extra env var.
+ * Environment-scoped, not queue-specific — both local trigger helpers
+ * share this decision. Independent of `shouldAwaitGenerationWorkerBatch`
+ * (HTTP route lifecycle). No extra env var.
  */
 export function resolveLocalGenerationTriggerDecision(
   input: LocalGenerationTriggerPolicyInput,

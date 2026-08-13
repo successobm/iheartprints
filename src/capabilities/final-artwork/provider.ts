@@ -7,7 +7,19 @@
  * anything else. Mirrors `ConceptGenerationProvider` /
  * `ConceptEvaluationProvider`'s "provider owns 100% of its own mechanism;
  * domain code sees only provider-neutral input/output" shape.
+ *
+ * Print-Ready Normalization Phase 1: a provider owns RECONSTRUCTION only.
+ * The production transform that follows it (alpha trim → safety margin →
+ * physical-width sizing → proportional resample → PNG encode) is one shared,
+ * auditable implementation in `production-normalization.ts` that every
+ * provider runs its reconstructed raster through, so the printer's
+ * deliverable is never per-provider geometry.
  */
+
+import type {
+  ProductionNormalizationMetadata,
+  ProductionSizingRequest,
+} from "./production-normalization";
 
 export interface FinalArtworkProviderResumeContext {
   /**
@@ -26,11 +38,15 @@ export interface FinalArtworkProviderResumeContext {
 export interface FinalArtworkProviderInput {
   sourceBytes: Buffer;
   sourceContentType: string;
-  /** Target production canvas, in pixels — already resolved by the caller from `ProductionRequirements`. */
-  targetWidthPx: number;
-  targetHeightPx: number;
-  /** Safe-margin-from-edge, as a fraction (0–1) of the target canvas — from `ProductionRequirements.artworkBoundaryMarginPercent`. */
-  marginFraction: number;
+  /**
+   * Print-Ready Normalization Phase 1: the placement's production SIZING
+   * POLICY (target physical print width, PPI, printable-height bound) — not a
+   * pre-computed pixel canvas. Output pixel dimensions cannot be known until
+   * the artwork has been alpha-trimmed, so a provider resolves them via
+   * `normalizeProductionRaster` rather than being handed a fixed
+   * `targetWidthPx`/`targetHeightPx` frame to pad artwork into.
+   */
+  sizing: ProductionSizingRequest;
   /**
    * Sprint 2M Phase 2E (Goal 3): a prior in-flight or completed paid-request
    * identity recorded for this exact `FinalArtworkJob`, if any — `null` on a
@@ -57,7 +73,11 @@ export interface FinalArtworkProviderInput {
 export interface FinalArtworkProviderOutput {
   bytes: Buffer;
   contentType: string;
-  /** The produced file's actual pixel dimensions — always exactly `targetWidthPx`x`targetHeightPx`. */
+  /**
+   * The produced file's actual pixel dimensions — the normalized artwork's
+   * own dimensions (`normalization.outputWidthPx`/`outputHeightPx`), never a
+   * fixed canvas the artwork was padded into.
+   */
   widthPx: number;
   heightPx: number;
   /** Verified by actually scanning the output's alpha channel — never assumed (Goal 9). */
@@ -106,6 +126,15 @@ export interface FinalArtworkProviderOutput {
    * request concept (e.g. local raster interpolation).
    */
   providerRequestId: string | null;
+  /**
+   * Print-Ready Normalization Phase 1: the production transform's own
+   * measurements — where the artwork actually was, the safety margin applied,
+   * the intended physical print size, and the density written into the file.
+   * `FinalArtworkWorkerCapability` persists this on the production asset and
+   * hands it to authoritative Print Validation, which RECOMPUTES from it
+   * rather than trusting any claim in it.
+   */
+  normalization: ProductionNormalizationMetadata;
 }
 
 export interface FinalArtworkProvider {

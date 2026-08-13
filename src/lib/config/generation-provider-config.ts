@@ -36,6 +36,10 @@ import {
   isProductionSafeAssetStorageMode,
   type AssetStorageMode,
 } from "./asset-storage-config";
+import {
+  resolveOpenAIConceptImageQuality,
+  type OpenAIConceptImageQuality,
+} from "./openai-concept-image-quality";
 
 /**
  * Sprint 2H Part 1B: the class of blocker behind an `unavailable` result —
@@ -67,6 +71,13 @@ export type ConceptGenerationConfig =
       mode: "openai";
       apiKey: string;
       model: string;
+      /**
+       * Phase 2C0: explicit OpenAI image `quality` for concept generation /
+       * concept edits. Never omitted (OpenAI would default to `auto`).
+       * Final-artwork reconstruction is a separate provider boundary and
+       * does not read this field.
+       */
+      quality: OpenAIConceptImageQuality;
     }
   | {
       mode: "unavailable";
@@ -115,7 +126,10 @@ export function getConceptGenerationConfig(
     };
   }
 
-  return { mode: "openai", apiKey, model };
+  // Resolve quality only when openai will actually be selected — invalid
+  // values fail closed here rather than silently becoming `auto`.
+  const quality = resolveOpenAIConceptImageQuality();
+  return { mode: "openai", apiKey, model, quality };
 }
 
 /**

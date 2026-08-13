@@ -12,6 +12,7 @@
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { AssetKind, AssetRecord, ProductionAssetRole } from "@/lib/domain/types";
 import type { AssetStorageProvider } from "@/capabilities/asset-storage";
+import { asPaidImagePersistenceError } from "@/capabilities/shared/paid-image-failure";
 import type { ThumbnailGenerator } from "./thumbnail-generator";
 
 /** Signed URLs default to a short lifetime — "Signed URLs should expire." */
@@ -68,6 +69,31 @@ export interface UploadProductionAssetInput {
   metadata: Record<string, unknown>;
 }
 
+/**
+ * Existing Artwork → Print Ready Phase 1: input for persisting artwork the
+ * CUSTOMER supplied, or a deterministic derivative of it. Deliberately its
+ * own input type rather than a reuse of `UploadConceptAssetInput`, because
+ * every provenance field on that one is wrong here: there is no
+ * `providerKey`, no `generationJobId`, and no generation of any kind.
+ */
+export interface UploadCustomerArtworkInput {
+  /** Internal storage-grouping id — see `AssetStorageProvider`'s `UploadAssetInput.conceptId` doc. */
+  conceptId: string;
+  bytes: Buffer;
+  contentType: string;
+  widthPx: number | null;
+  heightPx: number | null;
+  hasTransparency: boolean | null;
+  /**
+   * `"customer_upload"` for the immutable original; `"png"` for a derived,
+   * background-prepared asset. Always explicit — never inferred from the
+   * content type or from whether other fields happen to be set.
+   */
+  kind: Extract<AssetKind, "customer_upload" | "png">;
+  /** Sanitized, non-secret provenance only. Never a raw filename used as a path. */
+  metadata: Record<string, unknown>;
+}
+
 export interface AssetCapability {
   listAssets(designId: string): Promise<AssetRecord[]>;
   registerAsset(
@@ -99,6 +125,21 @@ export interface AssetCapability {
   uploadProductionAsset(
     designId: string,
     input: UploadProductionAssetInput,
+  ): Promise<AssetRecord>;
+  /**
+   * Existing Artwork → Print Ready Phase 1: persists customer-supplied
+   * artwork (or a deterministic derivative of it). No thumbnail companion —
+   * an uploaded original and its prepared counterpart are both rendered
+   * through their own short-lived signed URLs, and a thumbnail would only
+   * add a third asset whose provenance is ambiguous.
+   *
+   * Same orphan-cleanup guarantee as `uploadConceptImage`: if the metadata
+   * write fails after bytes land in storage, the upload is cleaned up and
+   * the error rethrown.
+   */
+  uploadCustomerArtwork(
+    designId: string,
+    input: UploadCustomerArtworkInput,
   ): Promise<AssetRecord>;
   /**
    * A short-lived, expiring URL a browser can fetch directly — never a raw
@@ -138,13 +179,26 @@ export function createAssetCapability(
     },
 
     async uploadConceptImage(designId, input) {
-      const uploadedOriginal = await storage.upload({
-        projectId: designId,
-        conceptId: input.conceptId,
-        fileName: `original${extensionForContentType(input.contentType)}`,
-        bytes: input.bytes,
-        contentType: input.contentType,
-      });
+      // Phase 2C.2C: the two stages are tagged, not merely allowed to
+      // propagate. A concept image is very often something a paid provider
+      // has ALREADY been billed for by the time this runs, and from outside
+      // this capability "storage refused the bytes" and "the database
+      // refused the row" are indistinguishable — yet they are the two
+      // failures an operator most needs told apart when money has moved.
+      // The original message and stack are preserved (see
+      // `asPaidImagePersistenceError`); only a classification is added.
+      let uploadedOriginal: { objectKey: string };
+      try {
+        uploadedOriginal = await storage.upload({
+          projectId: designId,
+          conceptId: input.conceptId,
+          fileName: `original${extensionForContentType(input.contentType)}`,
+          bytes: input.bytes,
+          contentType: input.contentType,
+        });
+      } catch (error) {
+        throw asPaidImagePersistenceError(error, "storage_upload_failure");
+      }
 
       let primary: AssetRecord;
       try {
@@ -168,7 +222,7 @@ export function createAssetCapability(
         // Asset Cleanup: bytes landed in storage but the record that would
         // reference them never did — never leave that orphaned.
         await safeDelete(storage, uploadedOriginal.objectKey);
-        throw error;
+        throw asPaidImagePersistenceError(error, "asset_persistence_failure");
       }
 
       const thumbnail = await tryCreateThumbnail(
@@ -210,6 +264,41 @@ export function createAssetCapability(
         });
       } catch (error) {
         // Same orphan-cleanup guarantee as uploadConceptImage.
+        await safeDelete(storage, uploaded.objectKey);
+        throw error;
+      }
+    },
+
+    async uploadCustomerArtwork(designId, input) {
+      const uploaded = await storage.upload({
+        projectId: designId,
+        conceptId: input.conceptId,
+        fileName: `${
+          input.kind === "customer_upload" ? "source" : "prepared"
+        }${extensionForContentType(input.contentType)}`,
+        bytes: input.bytes,
+        contentType: input.contentType,
+      });
+
+      try {
+        return await repo.createAsset(designId, {
+          kind: input.kind,
+          storageKey: uploaded.objectKey,
+          contentType: input.contentType,
+          isThumbnail: false,
+          widthPx: input.widthPx,
+          heightPx: input.heightPx,
+          hasTransparency: input.hasTransparency,
+          // Nothing generated these pixels — the customer supplied them.
+          providerKey: null,
+          generationJobId: null,
+          metadata: input.metadata,
+          vectorAssetId: null,
+          printAssetId: null,
+          finalArtworkJobId: null,
+          productionRole: null,
+        });
+      } catch (error) {
         await safeDelete(storage, uploaded.objectKey);
         throw error;
       }

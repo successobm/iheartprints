@@ -271,7 +271,8 @@ describe("Sprint 2L Phase 1A — live acceptance failure regression (Product res
       "A T-shirt for the school fair",
     );
 
-    assert.equal(afterReply.brief.productSummary, "A T-shirt for the school fair");
+    // Canonical product value (Live Acceptance Corrective Pass), not the raw sentence.
+    assert.equal(afterReply.brief.productSummary, "T-shirt");
     const lastMessage = afterReply.messages.at(-1);
     assert.doesNotMatch(
       String(lastMessage?.content),

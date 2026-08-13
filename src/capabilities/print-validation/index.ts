@@ -15,6 +15,8 @@ export {
   assembleAuthoritativeProductionPrintValidationInput,
   type AssembleAuthoritativeProductionPrintValidationInputParams,
   type ProductionAssetSummaryInput,
+  assembleUploadedPreserveProductionPrintValidationInput,
+  type AssembleUploadedPreserveProductionPrintValidationInputParams,
 } from "./assemble-input";
 export {
   calculateEffectiveResolution,
@@ -40,5 +42,8 @@ export {
   type PrintValidationReport,
   type PrintValidationAssetSummary,
   type PrintValidationInput,
+  type PrintValidationProfile,
+  type ProductionNormalizationSummary,
   type ResolutionProvenance,
+  type UploadedPreserveEvidence,
 } from "./contracts";

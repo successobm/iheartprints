@@ -8,6 +8,7 @@ import {
 } from "@/lib/domain/conversation";
 import { emptyInterviewState } from "@/lib/domain/types";
 import type {
+  ArtworkPreparation,
   ArtworkVersion,
   AssetRecord,
   ConversationMessage,
@@ -18,6 +19,7 @@ import type {
   FinalDirectionApproval,
   GenerationJob,
   InterviewStateData,
+  PaidImageIntent,
   PrintProject,
   ProductionAssetValidation,
   ProjectSnapshot,
@@ -26,15 +28,21 @@ import type {
 } from "@/lib/domain/types";
 import type {
   ApproveDesignBriefInput,
+  CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
   CreateFinalArtworkJobInput,
   CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
+  CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  PaidImageIntentReservation,
   ProjectRepository,
+  RecordPaidImageIntentFailureInput,
+  ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
+  UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
 } from "./repository";
@@ -49,12 +57,16 @@ interface LocalDatabase {
   designBriefVersions: DesignBriefVersion[];
   /** Sprint 2H Part 1. */
   generationJobs: GenerationJob[];
+  /** Phase 2C0.5. */
+  paidImageIntents: PaidImageIntent[];
   assets: AssetRecord[];
   /** Sprint 2M Phase 2B. */
   finalDirectionApprovals: FinalDirectionApproval[];
   finalArtworkJobs: FinalArtworkJob[];
   /** Sprint 2M Phase 2C. */
   productionAssetValidations: ProductionAssetValidation[];
+  /** Existing Artwork → Print Ready Phase 1. */
+  artworkPreparations: ArtworkPreparation[];
 }
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -73,10 +85,12 @@ function emptyDb(): LocalDatabase {
     artworkVersions: [],
     designBriefVersions: [],
     generationJobs: [],
+    paidImageIntents: [],
     assets: [],
     finalDirectionApprovals: [],
     finalArtworkJobs: [],
     productionAssetValidations: [],
+    artworkPreparations: [],
   };
 }
 
@@ -88,7 +102,14 @@ async function readDb(): Promise<LocalDatabase> {
     // artwork designBriefVersionId / Sprint 2F brief fields / interview
     // state so resume does not crash on older on-disk data.
     return {
-      projects: parsed.projects ?? [],
+      // Sprint 2M Phase 2G / Live Acceptance Corrective Pass: default the
+      // new lifecycle markers for on-disk data written before they existed,
+      // so resume never crashes.
+      projects: (parsed.projects ?? []).map((project) => ({
+        ...project,
+        revisionPending: project.revisionPending ?? false,
+        finalDirectionConfirmed: project.finalDirectionConfirmed ?? false,
+      })),
       briefs: (parsed.briefs ?? []).map((brief) => ({
         ...brief,
         audience: brief.audience ?? null,
@@ -123,6 +144,9 @@ async function readDb(): Promise<LocalDatabase> {
         evaluationEvaluatedAt: artwork.evaluationEvaluatedAt ?? null,
         evaluationProviderKey: artwork.evaluationProviderKey ?? null,
         printValidationStatus: artwork.printValidationStatus ?? null,
+        // Sprint 2G Live Acceptance Corrective Pass.
+        sourceArtworkVersionId: artwork.sourceArtworkVersionId ?? null,
+        conceptDirectionKey: artwork.conceptDirectionKey ?? null,
       })),
       designBriefVersions: parsed.designBriefVersions ?? [],
       // Sprint 2H Part 2A: default new job fields for on-disk data written
@@ -133,7 +157,13 @@ async function readDb(): Promise<LocalDatabase> {
         startedAt: job.startedAt ?? null,
         completedAt: job.completedAt ?? null,
         heartbeatAt: job.heartbeatAt ?? null,
+        targetArtworkVersionId: job.targetArtworkVersionId ?? null,
+        revisionInstruction: job.revisionInstruction ?? null,
       })),
+      // Phase 2C0.5: absent in every store written before paid image
+      // intents existed. A pre-existing completed job simply has no
+      // intents, which is exactly right — it has nothing left to pay for.
+      paidImageIntents: parsed.paidImageIntents ?? [],
       // Sprint 2M Phase 2B/2C: default the new reserved fields for on-disk
       // data written before they existed, so resume never crashes.
       assets: (parsed.assets ?? []).map((asset) => ({
@@ -155,8 +185,19 @@ async function readDb(): Promise<LocalDatabase> {
         providerKey: job.providerKey ?? null,
         providerRequestId: job.providerRequestId ?? null,
         providerStatus: job.providerStatus ?? null,
+        // Existing Artwork → Print Ready Phase 2: every job written before
+        // the upload workflow existed is, by definition, a generated-concept
+        // job — its authority is the approval id it already carries.
+        finalDirectionApprovalId: job.finalDirectionApprovalId ?? null,
+        artworkPreparationId: job.artworkPreparationId ?? null,
+        productionWidthIn: job.productionWidthIn ?? null,
+        sourceKind:
+          job.artworkPreparationId != null ? "prepared_upload" : "generated_concept",
       })),
       productionAssetValidations: parsed.productionAssetValidations ?? [],
+      // Existing Artwork → Print Ready Phase 1: absent in every store
+      // written before uploaded-artwork preparation existed.
+      artworkPreparations: parsed.artworkPreparations ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -259,6 +300,8 @@ export class LocalProjectRepository implements ProjectRepository {
       name: "Untitled T-shirt design",
       status: "intake",
       selectedArtworkVersionId: null,
+      revisionPending: false,
+      finalDirectionConfirmed: false,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -336,7 +379,14 @@ export class LocalProjectRepository implements ProjectRepository {
   async updateProject(
     projectId: string,
     patch: Partial<
-      Pick<PrintProject, "name" | "status" | "selectedArtworkVersionId">
+      Pick<
+        PrintProject,
+        | "name"
+        | "status"
+        | "selectedArtworkVersionId"
+        | "revisionPending"
+        | "finalDirectionConfirmed"
+      >
     >,
   ): Promise<PrintProject> {
     const db = await readDb();
@@ -454,6 +504,8 @@ export class LocalProjectRepository implements ProjectRepository {
       evaluationEvaluatedAt: version.evaluationEvaluatedAt ?? null,
       evaluationProviderKey: version.evaluationProviderKey ?? null,
       printValidationStatus: null,
+      sourceArtworkVersionId: version.sourceArtworkVersionId ?? null,
+      conceptDirectionKey: version.conceptDirectionKey ?? null,
       createdAt: timestamp,
     }));
 
@@ -499,6 +551,29 @@ export class LocalProjectRepository implements ProjectRepository {
 
     project.selectedArtworkVersionId = artworkVersionId;
     project.status = "revision_requested";
+    project.updatedAt = nowIso();
+    await writeDb(db);
+
+    const result = snapshot(db, projectId);
+    if (!result) throw new Error("Project not found");
+    return result;
+  }
+
+  async clearArtworkSelection(projectId: string): Promise<ProjectSnapshot> {
+    const db = await readDb();
+    const project = db.projects.find((item) => item.id === projectId);
+    if (!project) throw new Error("Project not found");
+
+    for (const version of db.artworkVersions) {
+      if (version.projectId === projectId) version.isSelected = false;
+    }
+
+    project.selectedArtworkVersionId = null;
+    // Selection is a prerequisite for final-direction confirmation, so
+    // dropping the selection necessarily drops the confirmation with it —
+    // never leave a project "confirmed" with nothing selected.
+    project.finalDirectionConfirmed = false;
+    project.status = "concepts_ready";
     project.updatedAt = nowIso();
     await writeDb(db);
 
@@ -586,6 +661,8 @@ export class LocalProjectRepository implements ProjectRepository {
       conceptCount: input.conceptCount,
       providerKey: input.providerKey,
       idempotencyKey: input.idempotencyKey,
+      targetArtworkVersionId: input.targetArtworkVersionId ?? null,
+      revisionInstruction: input.revisionInstruction ?? null,
       attempts: 0,
       lastError: null,
       startedAt: null,
@@ -689,6 +766,153 @@ export class LocalProjectRepository implements ProjectRepository {
 
     if (recovered.length > 0) await writeDb(db);
     return recovered;
+  }
+
+  // --- Phase 2C0.5: durable paid image intents -------------------------
+
+  async reservePaidImageIntent(
+    projectId: string,
+    input: ReservePaidImageIntentInput,
+  ): Promise<PaidImageIntentReservation> {
+    const db = await readDb();
+
+    const existing = db.paidImageIntents.find(
+      (intent) =>
+        intent.projectId === projectId && intent.intentKey === input.intentKey,
+    );
+    if (existing) return { outcome: "existing", intent: existing };
+
+    // Mirrors the Supabase unique (generation_job_id, paid_intent_ordinal)
+    // constraint: a slot another worker already took is a lost race, not an
+    // error, and no paid call has happened.
+    const ordinalTaken = db.paidImageIntents.some(
+      (intent) =>
+        intent.generationJobId === input.generationJobId &&
+        intent.paidIntentOrdinal === input.paidIntentOrdinal,
+    );
+    if (ordinalTaken) return { outcome: "ordinal_taken" };
+
+    const timestamp = nowIso();
+    const intent: PaidImageIntent = {
+      id: randomUUID(),
+      projectId,
+      generationJobId: input.generationJobId,
+      intentKey: input.intentKey,
+      intentKind: input.intentKind,
+      directionKey: input.directionKey,
+      paidIntentOrdinal: input.paidIntentOrdinal,
+      status: "reserved",
+      dispatches: 0,
+      claimToken: null,
+      providerKey: input.providerKey,
+      providerRequestId: null,
+      result: null,
+      lastError: null,
+      succeededAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.paidImageIntents.push(intent);
+    await writeDb(db);
+    return { outcome: "created", intent };
+  }
+
+  async beginPaidImageIntentDispatch(
+    intentId: string,
+    claimToken: string,
+    maxDispatches: number,
+  ): Promise<PaidImageIntent | null> {
+    const db = await readDb();
+    const intent = db.paidImageIntents.find((item) => item.id === intentId);
+    if (!intent) return null;
+    // Exactly the Supabase conditional update's WHERE clause: still
+    // reserved, and dispatches remaining. Anything else refuses the paid
+    // call rather than making it.
+    if (intent.status !== "reserved") return null;
+    if (intent.dispatches >= maxDispatches) return null;
+
+    intent.dispatches += 1;
+    intent.claimToken = claimToken;
+    intent.updatedAt = nowIso();
+    await writeDb(db);
+    return intent;
+  }
+
+  async completePaidImageIntent(
+    intentId: string,
+    claimToken: string,
+    input: CompletePaidImageIntentInput,
+  ): Promise<PaidImageIntent | null> {
+    const db = await readDb();
+    const intent = db.paidImageIntents.find((item) => item.id === intentId);
+    if (!intent) return null;
+    // Fencing: a zombie worker holding the previous token is refused.
+    if (intent.claimToken !== claimToken) return null;
+
+    intent.status = input.status;
+    if (input.result !== undefined) intent.result = input.result;
+    if (input.providerRequestId !== undefined) {
+      intent.providerRequestId = input.providerRequestId;
+    }
+    if (input.lastError !== undefined) intent.lastError = input.lastError;
+    if (input.status === "succeeded") intent.succeededAt = nowIso();
+    intent.updatedAt = nowIso();
+    await writeDb(db);
+    return intent;
+  }
+
+  async recordPaidImageIntentFailure(
+    intentId: string,
+    claimToken: string,
+    input: RecordPaidImageIntentFailureInput,
+  ): Promise<PaidImageIntent | null> {
+    const db = await readDb();
+    const intent = db.paidImageIntents.find((item) => item.id === intentId);
+    if (!intent) return null;
+    // Same fencing as `completePaidImageIntent`: a zombie worker holding the
+    // previous token is refused.
+    if (intent.claimToken !== claimToken) return null;
+    // A durable success is never downgraded by a late failure write — the
+    // bytes exist and are reusable, whatever this worker went on to hit.
+    if (intent.status === "succeeded") return null;
+
+    intent.lastError = input.lastError;
+    // Only ever written, never cleared: the id of a request we already know
+    // was billed is the single most valuable field on this row.
+    if (input.providerRequestId) {
+      intent.providerRequestId = input.providerRequestId;
+    }
+    if (input.terminal === true) intent.status = "failed";
+    intent.updatedAt = nowIso();
+    await writeDb(db);
+    return intent;
+  }
+
+  async getPaidImageIntentByKey(
+    projectId: string,
+    intentKey: string,
+  ): Promise<PaidImageIntent | null> {
+    const db = await readDb();
+    return (
+      db.paidImageIntents.find(
+        (intent) =>
+          intent.projectId === projectId && intent.intentKey === intentKey,
+      ) ?? null
+    );
+  }
+
+  async listPaidImageIntentsForJob(
+    projectId: string,
+    generationJobId: string,
+  ): Promise<PaidImageIntent[]> {
+    const db = await readDb();
+    return db.paidImageIntents
+      .filter(
+        (intent) =>
+          intent.projectId === projectId &&
+          intent.generationJobId === generationJobId,
+      )
+      .sort((a, b) => a.paidIntentOrdinal - b.paidIntentOrdinal);
   }
 
   // --- Sprint 2H Part 1: assets ---------------------------------------
@@ -797,22 +1021,50 @@ export class LocalProjectRepository implements ProjectRepository {
     input: CreateFinalArtworkJobInput,
   ): Promise<FinalArtworkJob> {
     const db = await readDb();
-    const duplicate = db.finalArtworkJobs.find(
-      (item) =>
-        item.projectId === projectId &&
-        item.finalDirectionApprovalId === input.finalDirectionApprovalId,
-    );
-    if (duplicate) {
-      throw new UniqueConstraintViolationError(
-        "final_artwork_jobs_project_id_final_direction_approval_id",
+    if (input.sourceKind === "generated_concept") {
+      const duplicate = db.finalArtworkJobs.find(
+        (item) =>
+          item.projectId === projectId &&
+          item.finalDirectionApprovalId === input.finalDirectionApprovalId,
       );
+      if (duplicate) {
+        throw new UniqueConstraintViolationError(
+          "final_artwork_jobs_project_id_final_direction_approval_id",
+        );
+      }
+    } else {
+      // Existing Artwork → Print Ready Phase 2: the upload workflow's
+      // idempotency key is (project, preparation, production width) — the
+      // local-store equivalent of the partial unique index the migration
+      // adds. Widths are compared with the same explicit tolerance the
+      // capability uses rather than float equality.
+      const duplicate = db.finalArtworkJobs.find(
+        (item) =>
+          item.projectId === projectId &&
+          item.artworkPreparationId === input.artworkPreparationId &&
+          item.productionWidthIn !== null &&
+          Math.abs(item.productionWidthIn - input.productionWidthIn) < 1e-6,
+      );
+      if (duplicate) {
+        throw new UniqueConstraintViolationError(
+          "final_artwork_jobs_project_id_artwork_preparation_id_width",
+        );
+      }
     }
 
     const timestamp = nowIso();
     const job: FinalArtworkJob = {
       id: randomUUID(),
       projectId,
-      finalDirectionApprovalId: input.finalDirectionApprovalId,
+      sourceKind: input.sourceKind,
+      finalDirectionApprovalId:
+        input.sourceKind === "generated_concept"
+          ? input.finalDirectionApprovalId
+          : null,
+      artworkPreparationId:
+        input.sourceKind === "prepared_upload" ? input.artworkPreparationId : null,
+      productionWidthIn:
+        input.sourceKind === "prepared_upload" ? input.productionWidthIn : null,
       artworkVersionId: input.artworkVersionId,
       status: "queued",
       attempts: 0,
@@ -843,6 +1095,20 @@ export class LocalProjectRepository implements ProjectRepository {
           item.finalDirectionApprovalId === finalDirectionApprovalId,
       ) ?? null
     );
+  }
+
+  async listFinalArtworkJobsForPreparation(
+    projectId: string,
+    artworkPreparationId: string,
+  ): Promise<FinalArtworkJob[]> {
+    const db = await readDb();
+    return db.finalArtworkJobs
+      .filter(
+        (item) =>
+          item.projectId === projectId &&
+          item.artworkPreparationId === artworkPreparationId,
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   async getFinalDirectionApprovalById(
@@ -958,5 +1224,61 @@ export class LocalProjectRepository implements ProjectRepository {
       )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     return matches.at(-1) ?? null;
+  }
+
+  async createArtworkPreparation(
+    projectId: string,
+    input: CreateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation> {
+    const db = await readDb();
+    const timestamp = nowIso();
+    const preparation: ArtworkPreparation = {
+      id: randomUUID(),
+      projectId,
+      status: "analyzed",
+      originalAssetId: input.originalAssetId,
+      preparedAssetId: null,
+      preparedArtworkVersionId: null,
+      originalFilename: input.originalFilename,
+      analysis: input.analysis,
+      preparation: null,
+      guidedCleanup: null,
+      approvedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.artworkPreparations.push(preparation);
+    await writeDb(db);
+    return preparation;
+  }
+
+  async getArtworkPreparation(
+    projectId: string,
+  ): Promise<ArtworkPreparation | null> {
+    const db = await readDb();
+    const matches = db.artworkPreparations
+      .filter((item) => item.projectId === projectId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return matches.at(-1) ?? null;
+  }
+
+  async getArtworkPreparationById(
+    id: string,
+  ): Promise<ArtworkPreparation | null> {
+    const db = await readDb();
+    return db.artworkPreparations.find((item) => item.id === id) ?? null;
+  }
+
+  async updateArtworkPreparation(
+    id: string,
+    patch: UpdateArtworkPreparationInput,
+  ): Promise<ArtworkPreparation> {
+    const db = await readDb();
+    const preparation = db.artworkPreparations.find((item) => item.id === id);
+    if (!preparation) throw new Error("Artwork preparation not found");
+
+    Object.assign(preparation, patch, { updatedAt: nowIso() });
+    await writeDb(db);
+    return preparation;
   }
 }
