@@ -938,9 +938,23 @@ export function ChatApp() {
     affordances.showArtworkSurfaces &&
     !uploadedArtworkActive;
 
-  const lastConceptsReadyMessageId = [...(snapshot?.messages ?? [])]
+  const lastConceptsReadyMessage = [...(snapshot?.messages ?? [])]
     .reverse()
-    .find((message) => message.metadata?.phase === "concepts_ready")?.id;
+    .find((message) => message.metadata?.phase === "concepts_ready");
+  const lastConceptsReadyMessageId = lastConceptsReadyMessage?.id;
+  const conceptsWithheldRaw = lastConceptsReadyMessage?.metadata?.conceptsWithheld;
+  const conceptsWithheld =
+    typeof conceptsWithheldRaw === "number" && conceptsWithheldRaw > 0
+      ? conceptsWithheldRaw
+      : null;
+  const garmentPreviewInput = snapshot?.brief
+    ? {
+        shirtColor: snapshot.brief.shirtColor,
+        deferredSections: snapshot.brief.deferredSections,
+        productSummary: snapshot.brief.productSummary,
+        designDescription: snapshot.brief.designDescription,
+      }
+    : null;
 
   // Live Acceptance Corrective Pass (Section 2): one artwork-version-
   // lineage-based history, replacing the old message-metadata-keyed
@@ -1075,6 +1089,8 @@ export function ChatApp() {
                       selectable={phase === "concepts_ready"}
                       busy={sending}
                       onSelect={(id) => void selectConcept(id)}
+                      garmentPreviewInput={garmentPreviewInput}
+                      conceptsWithheld={conceptsWithheld}
                     />
                   ) : null}
                   {showSummaryCard ? (
@@ -1271,6 +1287,7 @@ export function ChatApp() {
                 }
                 busy={sending}
                 onSelect={(id) => void selectConcept(id)}
+                garmentPreviewInput={garmentPreviewInput}
               />
             ) : null}
 

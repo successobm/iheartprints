@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import type { CustomerArtworkVersion } from "@/capabilities/shared/contracts";
 import { ConceptCards } from "./ConceptCards";
+import type { ConceptPreviewSurfaceInput } from "./concept-preview-surface";
 import type { DesignHistoryEntry } from "./design-history";
 
 interface DesignHistoryProps {
@@ -14,6 +15,7 @@ interface DesignHistoryProps {
   selectable: boolean;
   busy: boolean;
   onSelect: (artworkVersionId: string) => void;
+  garmentPreviewInput?: ConceptPreviewSurfaceInput | null;
 }
 
 /**
@@ -35,6 +37,7 @@ export function DesignHistory({
   selectable,
   busy,
   onSelect,
+  garmentPreviewInput = null,
 }: DesignHistoryProps) {
   const [open, setOpen] = useState(false);
 
@@ -95,6 +98,8 @@ export function DesignHistory({
                   selectable={selectable}
                   busy={busy}
                   onSelect={onSelect}
+                  garmentPreviewInput={garmentPreviewInput}
+                  showShortSetNote={false}
                 />
               </div>
             );

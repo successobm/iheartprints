@@ -926,7 +926,9 @@ codes. No worker budget, model/quality, or Phase 2B threshold changes.
 *explicit-restriction* replacement failure is withheld rather than shown, so
 the customer may receive two concepts instead of three; the completion
 message is phrased to match what they can actually see, and the message
-metadata carries a `conceptsWithheld` count for a later UI phase. If
+metadata carries a `conceptsWithheld` count. **Phase 2D** renders that
+count as lightweight customer-safe short-set copy on the concept grid
+(never reason codes, evaluator verdicts, or thresholds). If
 *no* direction can be delivered, the job fails with
 `CONCEPT_SET_UNRESOLVABLE:` rather than completing with an empty set. A
 failure while trying to *improve* the batch never destroys it: replacement
@@ -2733,13 +2735,27 @@ auto-selected revised concept is in. Any visible `ArtworkVersion` with a
 renderable asset opens in this same viewer: original concept, revision,
 current version, or historical version.
 
-`object-contain` (never `cover`, so the whole design is always visible), a
-neutral checkerboard surface behind the (possibly transparent) artwork,
+`object-contain` (never `cover`, so the whole design is always visible).
+**Phase 2D:** for apparel with a known approved garment color
+(`brief.shirtColor`), the primary surface is that garment color as a CSS
+background behind the unchanged transparent PNG — presentation only; never
+flattened into artwork bytes, never a new asset, never alpha rewrite.
+The expanded modal adds a local Preview background control
+(Garment / White / Gray / Black / Transparency) so customers can still
+inspect opaque ink vs transparent space. Non-apparel / deferred garment
+color keeps the historical checkerboard default. Switching backgrounds is
+component-local UI state only — reload may return to garment color; it
+never changes selection, evaluation, or paid generation.
 Escape and backdrop-click both close it, and a `[Select this concept]`
 action inside it calls the exact same `onSelect` handler the card itself
 uses. Opening, viewing, or closing the modal never calls any capability
 method or mutates any lifecycle state — it is pure client-side UI state
 (`previewId` in `ConceptCards`).
+
+Concept cards use the same garment-color surface by default (with a light
+"On {Color}" hint). Short sets (Phase 2C `conceptsWithheld` count on the
+`concepts_ready` message) render an honest customer-safe note and a
+1-/2-column grid without empty placeholders — never internal reason codes.
 
 ---
 
@@ -5368,7 +5384,9 @@ Primary surface: `src/components/chat/ChatApp.tsx` (rendered from
 | `RecommendationCard` | Advisory actions → normal chat replies |
 | `DesignerDecisionCard` | Deferred “designer will determine” display |
 | `DesignHistory` | Single consolidated design-history surface — see below |
-| `ConceptCards` | Concept selection grid: loading state, real signed image, or safe placeholder fallback (Sprint 2K Phase 1); no customer-facing provider/settings |
+| `ConceptCards` | Concept selection grid: loading state, real signed image, or safe placeholder fallback (Sprint 2K Phase 1); Phase 2D garment-color CSS preview + honest short-set note; no customer-facing provider/settings |
+| `ConceptPreviewBackgroundControl` | Phase 2D: Garment / White / Gray / Black / Transparency inspection radios (presentation only; local UI state) |
+| `concept-preview-surface` | Phase 2D: resolve approved `shirtColor` → CSS surface; short-set copy helper; never mutates assets |
 | `PrepareForPrintAction` | Sprint 2M Phase 2B: the one explicit "final direction approval" action + truthful "preparing"/"print ready" states; plain customer language only — never job/asset/validation terminology |
 | `WorkflowChoiceCard` | §13h: Create New Artwork vs Upload Existing Artwork, at project start only. "Create New" is a pure client-side dismissal — the existing interview is unchanged |
 | `UploadedArtworkPanel` | §13h: the Upload Existing Artwork surface (upload → production details → analysis → compare → approved). Renders only server-authored copy |

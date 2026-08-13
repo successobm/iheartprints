@@ -5,6 +5,7 @@ import { renderToString } from "react-dom/server";
 
 import type { CustomerArtworkVersion } from "@/capabilities/shared/contracts";
 import { ConceptPreviewModal } from "./ConceptPreviewModal";
+import { resolveGarmentPreviewColor } from "./concept-preview-surface";
 
 /**
  * Live Acceptance UX Pass: one viewer serves every artwork version —
@@ -41,6 +42,10 @@ function render(overrides: {
       isSelected: overrides.isSelected ?? false,
       canSelect: overrides.canSelect ?? true,
       busy: overrides.busy ?? false,
+      garmentPreview: resolveGarmentPreviewColor({
+        shirtColor: null,
+        productSummary: "yard sign",
+      }),
       onSelect: () => {
         throw new Error("onSelect must never fire from rendering");
       },
@@ -59,10 +64,11 @@ describe("ConceptPreviewModal", () => {
     assert.match(html, /https:\/\/signed\.example\/artwork\.png/);
   });
 
-  it("G: keeps transparency visible behind the artwork", () => {
-    // A checkerboard, not a solid fill that could pass off a background as
-    // part of the design.
+  it("G: keeps transparency visible behind the artwork when garment preview is off", () => {
+    // Non-apparel / deferred defaults to checkerboard so transparency
+    // inspection remains available.
     assert.match(render(), /linear-gradient\(45deg/);
+    assert.match(render(), /data-concept-preview-surface="transparency"/);
   });
 
   it("identifies which version is being viewed, and offers a way out", () => {

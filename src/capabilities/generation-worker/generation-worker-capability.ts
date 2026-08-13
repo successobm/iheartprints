@@ -1606,10 +1606,10 @@ export function createGenerationWorkerCapability(
         content: conceptsReadyContent(job, createdVersions.length),
         metadata: {
           phase: "concepts_ready",
-          // Phase 2C: durable, non-technical UX data so a later phase can
-          // explain a short set without re-deriving it. Nothing renders it
-          // today, and it is deliberately a count — never a reason code, a
-          // validator verdict, or any production setting (Constitution §8).
+          // Phase 2C/2D: durable, non-technical UX data. Phase 2D renders
+          // this count as customer-safe short-set copy. Deliberately a
+          // count — never a reason code, validator verdict, or production
+          // setting (Constitution §8).
           ...(withheld.length > 0 ? { conceptsWithheld: withheld.length } : {}),
         },
       });
