@@ -38,7 +38,9 @@ describe("resolveAssetStorageProvider", () => {
 
   it("resolves a Supabase-backed provider for mode 'supabase_storage'", () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
-    process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role-key";
+    const encode = (value: object) =>
+      Buffer.from(JSON.stringify(value)).toString("base64url");
+    process.env.SUPABASE_SERVICE_ROLE_KEY = `${encode({ alg: "none", typ: "JWT" })}.${encode({ role: "service_role" })}.sig`;
     assert.equal(
       resolveAssetStorageProvider("supabase_storage").storageKey,
       "supabase_storage",

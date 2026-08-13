@@ -91,8 +91,8 @@ DigitalOcean App Platform app at the V1 finalization deployment:
 | Name | Role |
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Required server persistence/storage key when a Supabase URL is set. If the URL is set and this is missing, the app **fails closed** rather than falling back to the local on-disk store |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Present on the app; **not** sufficient for server table/storage access |
+| `SUPABASE_SERVICE_ROLE_KEY` | Required server persistence/storage key when a Supabase URL is set. The *value* must be the service-role secret (JWT `role` claim `service_role`, or `sb_secret_…`), not the anon/publishable key. If the URL is set and this is missing or has the wrong authority, the app **fails closed** rather than falling back to the local on-disk store or querying as `anon` |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Present on the app; **not** sufficient for server table/storage access. Must not be copied into `SUPABASE_SERVICE_ROLE_KEY` |
 | `ASSET_STORAGE_MODE` | Asset backend (`supabase_storage` required for real production images) |
 | `CONCEPT_GENERATION_ENABLE_REAL` | Kill switch for paid OpenAI concept generation |
 | `CONCEPT_EVALUATION_PROVIDER` | Concept Evaluation adapter (`placeholder` or `openai`) |

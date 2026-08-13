@@ -5247,17 +5247,18 @@ Interface: `ProjectRepository` (`src/lib/db/repository.ts`)
 | Implementation | When selected |
 |---|---|
 | `LocalProjectRepository` | Neither Supabase variable configured; `.data/sprint1-store.json` |
-| `SupabaseProjectRepository` | `NEXT_PUBLIC_SUPABASE_URL` **and** `SUPABASE_SERVICE_ROLE_KEY` |
-| *(refuses to start)* | URL configured, `SUPABASE_SERVICE_ROLE_KEY` missing |
+| `SupabaseProjectRepository` | `NEXT_PUBLIC_SUPABASE_URL` **and** a `SUPABASE_SERVICE_ROLE_KEY` whose JWT/`sb_*` authority is `service_role` |
+| *(refuses to start)* | URL configured, `SUPABASE_SERVICE_ROLE_KEY` missing **or** present with anon/publishable/unrecognized authority |
 
-Selection is three-way, not two-way. A Supabase URL with no service-role key
-is a **misconfiguration**, not a request for local mode: it used to resolve to
-an anon-keyed client (which can no longer read a single application row — see
-§23.1) or to the on-disk store, meaning a deployment could believe it was
-persisting customer work to Supabase while writing to a directory the next
-deploy discards. `getProjectRepository()` now throws. Automated test runs are
-exempt and keep the local store, so the suite can never reach real
-infrastructure.
+Selection is three-way, not two-way. A Supabase URL with no service-role key,
+or with a key whose JWT `role` is `anon`, is a **misconfiguration**, not a
+request for local mode: it used to resolve to an anon-keyed client (which can
+no longer read a single application row — see §23.1) or to the on-disk store,
+meaning a deployment could believe it was persisting customer work to
+Supabase while writing to a directory the next deploy discards — or, after
+the name-only check, while querying Postgres as `anon` (`42501`).
+`getProjectRepository()` now throws. Automated test runs are exempt and keep
+the local store, so the suite can never reach real infrastructure.
 
 Parity expectations: both implement the same repository contract including
 atomic job claim/heartbeat/recovery, asset CRUD, and Concept Evaluation
@@ -5489,7 +5490,7 @@ Relevant environment variables (names only; never commit secrets):
 | `WORKER_HEARTBEAT_INTERVAL` | Default 15000 ms |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server persistence/storage |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Allowed for repository selection fallback; insufficient for private storage |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Present on some hosts; never used for server table/storage access. A copy of this value in `SUPABASE_SERVICE_ROLE_KEY` is rejected (JWT `role` must be `service_role`) |
 
 ### Readiness matrix (summary)
 
@@ -5651,8 +5652,10 @@ Summarized:
 - Configuration fails closed in production for misconfigured real generation
   and missing worker secret
 - The privileged Supabase client never falls back to a browser-facing key:
-  `getSupabaseServiceClient()` demands `SUPABASE_SERVICE_ROLE_KEY` and throws
-  naming only the missing variable (never a value) — see §18 and §23.1
+  `getSupabaseServiceClient()` demands `SUPABASE_SERVICE_ROLE_KEY`, inspects
+  JWT/`sb_*` authority, and throws if the named variable is missing *or*
+  authenticates as `anon`/`publishable` (never a secret value) — see §18
+  and §23.1
 - Sprint 2M Phase 2B: `POST /api/projects/[projectId]/finalize` resolves
   `artworkVersionId` only through that project's own snapshot — a
   foreign/forged id is indistinguishable from "not found" (404); no
