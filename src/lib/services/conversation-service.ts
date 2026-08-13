@@ -11,7 +11,13 @@ import {
   describePrintReadySize,
   type PrintReadySizeView,
 } from "@/capabilities/shared/print-ready-size";
-import type { ProjectSnapshot, ProjectStatus } from "@/lib/domain/types";
+import { getProjectRepository } from "@/lib/db";
+import type {
+  FinalArtworkJob,
+  FinalArtworkJobStatus,
+  ProjectSnapshot,
+  ProjectStatus,
+} from "@/lib/domain/types";
 import { printPlacementLabel } from "@/lib/domain/print-placement";
 import {
   maybeRecoverStrandedLocalFinalArtworkJobs,
@@ -42,19 +48,19 @@ import { buildPrintReadyFilename } from "@/lib/services/print-ready-filename";
  */
 
 /**
- * Sprint 2M Phase 2B/2C: customer-safe finalization state, derived entirely
- * from `PrintProject.status` — never a raw job/approval id, internal job
- * status string, validation rule id, or other detail (Goal 13/16).
- * `"preparing"` covers both "still in progress" and, honestly, "genuinely
- * unfinished infrastructure state" — it is never claimed until authoritative
- * Print Validation actually returns `ready` (Constitution §15).
- * `"needs_review"` (Sprint 2M Phase 2C) is the truthful third state Phase 2B
- * could not yet produce: the worker ran to completion and a real production
- * asset exists, but it honestly is not print-ready yet.
+ * Sprint 2M Phase 2B/2C: customer-safe finalization state. Project terminal
+ * states (`print_ready`, `finalization_required`) remain authoritative.
+ * While the project is still `finalizing`, the current FinalArtworkJob
+ * distinguishes in-progress work from a retryable infrastructure failure
+ * — never a raw job id, provider name, `lastError`, or validation rule
+ * (Goal 13/16). `"needs_review"` is a print-readiness verdict, not a
+ * storage hiccup; `"retryable_failure"` is the latter and reuses the
+ * existing Prepare action (no second retry API).
  */
 export type CustomerFinalizationStatus =
   | "not_requested"
   | "preparing"
+  | "retryable_failure"
   | "needs_review"
   | "print_ready";
 
@@ -62,13 +68,61 @@ export interface CustomerFinalizationView {
   status: CustomerFinalizationStatus;
 }
 
-function toCustomerFinalizationView(
-  status: ProjectStatus,
+/**
+ * Pure customer-view derivation. Exported for tests; routes still go
+ * through `getFinalizationStatus` / the snapshot choke point.
+ */
+export function toCustomerFinalizationView(
+  projectStatus: ProjectStatus,
+  latestJobStatus: FinalArtworkJobStatus | null = null,
 ): CustomerFinalizationView {
-  if (status === "finalizing") return { status: "preparing" };
-  if (status === "finalization_required") return { status: "needs_review" };
-  if (status === "print_ready") return { status: "print_ready" };
+  if (projectStatus === "print_ready") return { status: "print_ready" };
+  if (projectStatus === "finalization_required") return { status: "needs_review" };
+  if (projectStatus === "finalizing") {
+    if (latestJobStatus === "failed") return { status: "retryable_failure" };
+    return { status: "preparing" };
+  }
   return { status: "not_requested" };
+}
+
+/**
+ * The job that currently owns customer-facing finalization: active Create
+ * New approval's job, or the newest job on an approved upload preparation.
+ * Older failed jobs on a superseded approval or earlier print size must
+ * not leak into the view.
+ */
+async function resolveCurrentFinalArtworkJob(
+  projectId: string,
+): Promise<FinalArtworkJob | null> {
+  try {
+    const repo = getProjectRepository();
+    const approval = await repo.getActiveFinalDirectionApproval(projectId);
+    if (approval) {
+      return repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
+    }
+
+    const preparation = await repo.getArtworkPreparation(projectId);
+    if (!preparation || preparation.status !== "approved") return null;
+
+    const jobs = await repo.listFinalArtworkJobsForPreparation(
+      projectId,
+      preparation.id,
+    );
+    return jobs.at(-1) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function customerFinalizationViewForProject(
+  projectId: string,
+  projectStatus: ProjectStatus,
+): Promise<CustomerFinalizationView> {
+  const job =
+    projectStatus === "finalizing"
+      ? await resolveCurrentFinalArtworkJob(projectId)
+      : null;
+  return toCustomerFinalizationView(projectStatus, job?.status ?? null);
 }
 
 export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
@@ -107,7 +161,10 @@ async function withConceptStatus(
     ...snapshot,
     artworkVersions: toCustomerArtworkVersions(snapshot.artworkVersions),
     conceptStatus: toCustomerConceptStatusView(conceptStatus),
-    finalization: toCustomerFinalizationView(snapshot.project.status),
+    finalization: await customerFinalizationViewForProject(
+      snapshot.project.id,
+      snapshot.project.status,
+    ),
     printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
     artworkPreparation,
   };
@@ -475,7 +532,10 @@ export async function getFinalizationStatus(
   if (snapshot.project.status === "finalizing") {
     void maybeRecoverStrandedLocalFinalArtworkJobs(projectId, "status_poll");
   }
-  return toCustomerFinalizationView(snapshot.project.status);
+  return customerFinalizationViewForProject(
+    projectId,
+    snapshot.project.status,
+  );
 }
 
 export interface ConceptImageView {

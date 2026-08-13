@@ -112,6 +112,35 @@ describe("GET /api/projects/[projectId]/finalization/status", () => {
     assert.equal(snapshot?.finalization.status, "print_ready");
   });
 
+  it("retryable_failure after a failed FinalArtworkJob stops the preparing contract", async () => {
+    const { projectId, artworkVersionId } = await projectWithSelectedConcept();
+    const { approveFinalDirection } = await import(
+      "@/lib/services/conversation-service"
+    );
+    await approveFinalDirection(projectId, artworkVersionId);
+
+    const { getProjectRepository } = await import("@/lib/db");
+    const repo = getProjectRepository();
+    const approval = await repo.getActiveFinalDirectionApproval(projectId);
+    assert.ok(approval);
+    const job = await repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
+    assert.ok(job);
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "failed",
+      lastError: "Production asset could not be persisted: fetch failed",
+    });
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new Request(`http://localhost/api/projects/${projectId}/finalization/status`),
+      { params: Promise.resolve({ projectId }) },
+    );
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body), ["status"]);
+    assert.equal(body.status, "retryable_failure");
+    assert.equal(JSON.stringify(body).includes("fetch failed"), false);
+  });
+
   it("C: needs_review after persisted finalization_required updates the poll response", async () => {
     const { projectId, artworkVersionId } = await projectWithSelectedConcept();
     const { approveFinalDirection } = await import("@/lib/services/conversation-service");

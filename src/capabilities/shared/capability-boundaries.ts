@@ -576,8 +576,10 @@
  *   - No new customer-facing job/approval ids, internal statuses, or
  *     storage details are exposed. `conversation-service.ts` derives a
  *     customer-safe `CustomerFinalizationStatus` (`not_requested` /
- *     `preparing` / `print_ready`) purely from `PrintProject.status` —
- *     never from a raw `FinalDirectionApproval`/`FinalArtworkJob` row.
+ *     `preparing` / `retryable_failure` / `needs_review` / `print_ready`)
+ *     from `PrintProject.status` plus, while still `finalizing`, the
+ *     current FinalArtworkJob's status enum only — never a job id,
+ *     `lastError`, provider name, or provider request id.
  *   - `FinalArtworkCapability` must never select concepts, interpret
  *     conversation, evaluate creative quality, decide customer intent
  *     (the caller already decided; this capability only validates and
@@ -673,9 +675,13 @@
  *     Concept Evaluation which only ever needed a URL. Only
  *     `AssetCapability.downloadAssetBytes` calls it.
  *   - New customer-safe finalization status `"needs_review"` (`conversation-service.ts`),
- *     derived purely from `PrintProject.status === "finalization_required"`
+ *     derived from `PrintProject.status === "finalization_required"`
  *     — same sanitization choke point as `"preparing"`/`"print_ready"`, no
  *     new job/asset/validation detail added to the customer view.
+ *     `"retryable_failure"` is not `"needs_review"`: it means the current
+ *     FinalArtworkJob failed while the project is still `finalizing`, and
+ *     the existing Prepare action may be invoked again. Polling stops;
+ *     nothing auto-retries.
  *   - Read-only `GET /api/projects/[projectId]/finalization/status` →
  *     `conversation-service.getFinalizationStatus` returns that same
  *     customer-safe view. Browser polling never claims, recovers, or

@@ -11,8 +11,9 @@ type RouteContext = {
  * finalization counterpart of `GET .../generation/status`. Cheap enough
  * for the conversation to check every few seconds while a FinalArtworkJob
  * runs in the background. Returns only `{ status }` from the customer-safe
- * `CustomerFinalizationStatus` vocabulary: never a job id, provider name,
- * queue name, storage key, or any other internal detail.
+ * `CustomerFinalizationStatus` vocabulary (`not_requested` / `preparing` /
+ * `retryable_failure` / `needs_review` / `print_ready`): never a job id,
+ * provider name, queue name, storage key, or any other internal detail.
  *
  * Production and automated tests: purely read-only. Interactive `next dev`
  * only may kick a stranded `queued`/`attempts=0` FinalArtworkJob via

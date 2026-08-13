@@ -3153,14 +3153,16 @@ validation," "production asset," "vectorize," "upscale," "300 DPI," or
 
 `conversation-service.ts` derives a customer-safe
 `CustomerFinalizationStatus` (`"not_requested"` / `"preparing"` /
-`"print_ready"`) purely from `PrintProject.status` — never from a raw
-`FinalDirectionApproval`/`FinalArtworkJob` row, id, or internal status
-string. `"preparing"` (not `"print_ready"`) is what Phase 2B ever shows,
-because nothing may claim readiness it hasn't earned (Constitution §15) —
-see `PrepareForPrintAction`'s "Preparing your print-ready artwork…" state,
-which is not a permanent fake loading screen: it is the honest state of an
-intentionally-not-yet-executable job, and it will become real once a future
-phase adds the worker that claims `FinalArtworkJob` rows.
+`"retryable_failure"` / `"needs_review"` / `"print_ready"`). Terminal
+project states remain authoritative (`print_ready`,
+`finalization_required` → `"needs_review"`). While the project is still
+`finalizing`, the **current** FinalArtworkJob's status distinguishes
+in-progress work (`"preparing"`) from a retryable infrastructure failure
+(`"retryable_failure"`). The customer view never includes a job id,
+`lastError`, provider name, or provider request id. `"retryable_failure"`
+reuses the existing Prepare action — there is no second retry API, and
+polling stops so the customer is not left on an infinite "Preparing"
+spinner.
 
 ### `ArtworkVersion.printValidationStatus` — re-confirmed, sharper reason (Goal 10)
 
@@ -3455,11 +3457,13 @@ History (creative `ArtworkVersion` lineage only).
 ### Customer-safe finalization states (Goal 13)
 
 `CustomerFinalizationStatus` gained `"needs_review"` (→ "We need to review
-your artwork before it can be finalized"), derived purely from
+your artwork before it can be finalized"), derived from
 `PrintProject.status === "finalization_required"` at the same
-`conversation-service.ts` choke point as `"preparing"`/`"print_ready"`. No
-PPI, dimensions, provider, storage, or validation rule ever reaches this
-view.
+`conversation-service.ts` choke point as `"preparing"`/`"print_ready"`.
+`"retryable_failure"` is a later, separate state: the project is still
+`finalizing` and the current FinalArtworkJob failed for an infrastructure
+reason — not a print-readiness verdict. No PPI, dimensions, provider,
+storage, or validation rule ever reaches this view.
 
 ### Unsupported methods (Goal 17)
 
@@ -5092,9 +5096,12 @@ Mechanics (both queues, identical shape):
 - Browser polling (generation status and finalization status) is read-only
   in production. While customer-safe `finalization.status === "preparing"`,
   ChatApp polls `GET /api/projects/[projectId]/finalization/status` every
-  few seconds and refreshes the snapshot once it leaves `preparing`.
-  Polling never revives failed/running/cancelled/completed jobs and never
-  calls a provider itself. Interactive `next dev` only may kick an
+  few seconds and refreshes the snapshot once it leaves `preparing`
+  (`print_ready`, `needs_review`, `retryable_failure`, or `not_requested`).
+  `retryable_failure` stops polling so the customer can click Retry
+  Preparation (the existing Prepare/finalize action — never a second API
+  and never an automatic retry). Polling never revives
+  failed/running/cancelled/completed jobs and never calls a provider itself. Interactive `next dev` only may kick an
   in-process final-artwork batch when a job is still `queued` with
   `attempts=0` behind an active approval (missed trigger / stale HMR) —
   see `maybeRecoverStrandedLocalFinalArtworkJobs`. Generation has the
@@ -5304,7 +5311,7 @@ delegation to composed capabilities.
 | `POST /api/projects/[projectId]/concepts/regenerate` | Explicit updated-concept enqueue |
 | `GET /api/projects/[projectId]/concepts/[artworkVersionId]/image` | Mint short-lived concept image URL (Sprint 2K Phase 1) |
 | `GET /api/projects/[projectId]/generation/status` | Read-only generation status |
-| `GET /api/projects/[projectId]/finalization/status` | Read-only customer-safe finalization status (`not_requested` / `preparing` / `needs_review` / `print_ready`) |
+| `GET /api/projects/[projectId]/finalization/status` | Read-only customer-safe finalization status (`not_requested` / `preparing` / `retryable_failure` / `needs_review` / `print_ready`) |
 | `POST /api/projects/[projectId]/select` | Select concept |
 | `POST /api/projects/[projectId]/finalize` | Sprint 2M Phase 2B: explicit final-direction approval + idempotent finalization request |
 | `GET /api/projects/[projectId]/production-artwork/image` | Mint short-lived production-PNG URL + customer-safe metadata once print-ready (delivery preview) |

@@ -121,7 +121,9 @@ export function deriveChatAffordances(
   // (the phase leaves the revision loop), and both `finalizing` and
   // `print_ready` are covered by `finalizationRequested`/`inDeliveryMode`.
   const finalizationInProgress =
-    finalizationStatus === "preparing" || finalizationStatus === "print_ready";
+    finalizationStatus === "preparing" ||
+    finalizationStatus === "retryable_failure" ||
+    finalizationStatus === "print_ready";
 
   const showChangeSelection =
     showArtworkSurfaces &&

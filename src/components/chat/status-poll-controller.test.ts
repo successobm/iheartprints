@@ -68,6 +68,35 @@ describe("createStatusPollController (finalization / generation polling)", () =>
     assert.equal(polls, pollsAfterReady, "polling must stop after print_ready");
   });
 
+  it("retryable_failure refreshes the snapshot and stops polling", async () => {
+    let polls = 0;
+    let refreshes = 0;
+    const controller = createStatusPollController({
+      inProgressStatus: "preparing",
+      intervalMs: 20,
+      pollStatus: async () => {
+        polls += 1;
+        return polls === 1 ? "preparing" : "retryable_failure";
+      },
+      refreshSnapshot: async () => {
+        refreshes += 1;
+      },
+    });
+
+    const stop = controller.start();
+    await sleep(80);
+    const pollsAfterFailure = polls;
+    await sleep(50);
+    stop();
+
+    assert.equal(refreshes, 1);
+    assert.equal(
+      polls,
+      pollsAfterFailure,
+      "polling must stop after retryable_failure",
+    );
+  });
+
   it("C: needs_review refreshes the snapshot and stops polling", async () => {
     let polls = 0;
     let refreshes = 0;
