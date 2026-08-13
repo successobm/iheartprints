@@ -53,13 +53,24 @@ function migrationFilenames(): string[] {
     .sort();
 }
 
-/** Strips `--` line comments so prose about SQL is never mistaken for SQL. */
-function readSqlWithoutComments(filename: string): string {
-  return readFileSync(path.join(MIGRATIONS_DIR, filename), "utf8")
+/**
+ * Strips `--` line comments so prose about SQL is never mistaken for SQL.
+ * Normalizes CRLF/CR to LF first so `$` and `.` behave the same on Windows
+ * checkouts as on LF-only trees (JS `.` does not match `\r`).
+ */
+function sqlWithoutComments(sql: string): string {
+  return sql
+    .replace(/\r\n?/g, "\n")
     .split("\n")
     .map((line) => line.replace(/--.*$/, ""))
     .join("\n")
     .toLowerCase();
+}
+
+function readSqlWithoutComments(filename: string): string {
+  return sqlWithoutComments(
+    readFileSync(path.join(MIGRATIONS_DIR, filename), "utf8"),
+  );
 }
 
 const lockdownSql = readSqlWithoutComments(LOCKDOWN_MIGRATION);
@@ -86,6 +97,56 @@ function revokesFrom(sql: string, table: string, role: string): boolean {
     .map((entry) => entry.trim())
     .includes(role);
 }
+
+describe("sqlWithoutComments CRLF hygiene", () => {
+  it("A: strips LF SQL line comments", () => {
+    const out = sqlWithoutComments(
+      "-- owner_user_id comment\nSELECT 1;\n",
+    );
+    assert.equal(out.includes("owner_user_id"), false);
+    assert.match(out, /select\s+1/);
+  });
+
+  it("B: strips CRLF SQL line comments", () => {
+    const out = sqlWithoutComments(
+      "-- owner_user_id comment\r\nSELECT 1;\r\n",
+    );
+    assert.equal(out.includes("owner_user_id"), false);
+    assert.match(out, /select\s+1/);
+  });
+
+  it("C: preserves executable owner_user_id", () => {
+    const out = sqlWithoutComments(
+      "-- prose only\r\nalter table t add column owner_user_id uuid;\r\n",
+    );
+    assert.match(out, /add\s+column\s+owner_user_id/);
+  });
+
+  it("D: preserves executable tenant_id", () => {
+    const out = sqlWithoutComments(
+      "-- prose only\nalter table t add column tenant_id uuid;\n",
+    );
+    assert.match(out, /add\s+column\s+tenant_id/);
+  });
+
+  it("E: comment-only identity words do not survive stripping", () => {
+    const out = sqlWithoutComments(
+      [
+        "-- model yet: no `owner_user_id`, `tenant_id`, or `organization_id`",
+        "--   * An invented `owner_user_id` column",
+        "alter table public.print_projects enable row level security;",
+      ].join("\r\n"),
+    );
+    for (const column of ["owner_user_id", "tenant_id", "organization_id"]) {
+      assert.equal(
+        out.includes(column),
+        false,
+        `comment-only ${column} must not remain after stripping`,
+      );
+    }
+    assert.match(out, /enable\s+row\s+level\s+security/);
+  });
+});
 
 describe("server-only RLS lockdown migration", () => {
   it("exists in the migrations directory", () => {
