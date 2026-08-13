@@ -17,7 +17,7 @@ const body = Source_Sans_3({
 
 export const metadata: Metadata = {
   title: "iHeartPrints",
-  description: "Print-ready artwork, starting with T-shirt designs.",
+  description: "Create or prepare apparel artwork and download a validated print-ready PNG.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

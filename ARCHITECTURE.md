@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.0  
+Version 1.1
 August 2026
 
 ## Document Position
@@ -22,6 +22,37 @@ This is not a roadmap, sprint report, or generic Next.js guide. It
 documents the iHeartPrints system as implemented in this repository. The
 code is the source of truth for behavior; this document explains how that
 behavior is organized to uphold the Constitution.
+
+---
+
+## Product Scope
+
+iHeartPrints is an independent **apparel-design** product. The customer
+uses or buys the **artwork**. iHeartPrints does not sell physical garments
+and is not a Print'em All feature, print-shop operating system, or
+physical-product retailer.
+
+The current product deliverable is the **iHeartPrints Apparel Print-Ready
+PNG**: a validated transparent RGB PNG sized to the selected apparel print
+dimensions and targeted at **300 PPI**, where pixel geometry (`production
+pixels ÷ intended physical inches`) is authoritative. Embedded PNG density
+metadata is a hint, never the readiness proof.
+
+`print_ready` means that production validation passed on the production
+asset for the current approved apparel production intent, and the customer
+may download that PNG. It does **not** mean embroidery digitization,
+screen-print separations, SVG/vector/PDF production, CMYK, ICC profiles, a
+RIP preset, signs/banners/large-format readiness, promotional-product
+readiness, or universal print-method compatibility.
+
+Reusable architectural seams (reserved `production_svg` /
+`production_pdf` roles, `vectorAssetId`, Print Vault and Ownership stubs,
+broader validation categories) may remain in the codebase. They are
+**dormant hooks**, not unfinished iHeartPrints V1 requirements. Broader
+architecture must not broaden the product.
+
+Print'em All may separately use iHeartPrints technology. That relationship
+does not define this product.
 
 ---
 
@@ -72,9 +103,11 @@ Derived from the Constitution and enforced by the current implementation:
    are separate concerns.** Brief Evaluation does not recommend; Design
    Intelligence does not ask; Interview Intelligence does not generate;
    Print Validation does not mutate briefs and does not transform artwork.
-8. **Customer complexity stays hidden.** Model names, DPI, formats,
-   provider keys, job ids, object keys, and storage modes are not
-   customer-facing.
+8. **Customer complexity stays hidden.** Model names, provider keys, job
+   ids, object keys, and storage modes are not customer-facing. Apparel
+   placement and physical print size **are** customer decisions. The
+   production density contract is 300 PPI of the selected physical size,
+   judged from pixel geometry, never from PNG density metadata alone.
 9. **Versions are preserved rather than destructively replaced.** Approved
    brief versions and prior concept batches remain available.
 10. **Production concerns remain server-side.** Service-role keys, worker
@@ -182,7 +215,7 @@ pipeline.
 
 ```
 CREATE NEW ARTWORK       "design something for me"        (below)
-UPLOAD EXISTING ARTWORK  "make MY artwork printable"      (§13h)
+UPLOAD EXISTING ARTWORK  "make MY artwork printable"      (§13h / §13i)
 ```
 
 Which workflow a project is in is **derived**, not stored: a project with an
@@ -212,9 +245,16 @@ Conversation
   → Concept Evaluation (real vision-based scoring when configured, otherwise
     placeholder; persisted; still does not block presentation)
   → Concepts Ready
-  → Customer Review
-  → Revision Intelligence
-  → Updated Working Brief / optional regeneration
+  → Customer Review / select concept
+  → Revision Intelligence / targeted revision
+  → Final direction confirmation
+  → Apparel placement already on the brief; customer chooses production width
+  → FinalArtworkJob
+  → Reconstruction if required
+  → Production PNG
+  → Authoritative Print Validation
+  → print_ready
+  → Download
 ```
 
 Sprint 2L Phase 1 introduces `ConversationUnderstandingCapability`, a
@@ -260,10 +300,12 @@ Real provider generation is guarded by configuration
 mode uses the placeholder provider.
 
 Generated concepts are options for human review. They are **not**
-print-ready production assets. Concept Evaluation (Phase 1 architecture;
-Phase 2 first real evaluator) records whether each concept aligns with the
-approved Design Brief but does **not** block customer presentation. Print
-Validation is not implemented.
+print-ready production assets. Concept Evaluation records whether each
+concept aligns with the approved Design Brief but does **not** block
+customer presentation. Print Validation is implemented in two roles:
+provisional (logged-only, against generated concepts) and authoritative
+(against the production PNG; the only run that may set `print_ready`).
+See §5 and §13c.
 
 ---
 
@@ -981,8 +1023,8 @@ Answers (product quality):
 - Does requested style / color palette / composition appear?
 - Should the customer see this concept? *(Phase 1 always says yes — results are persisted only.)*
 
-Does **not** answer: DPI, transparency, vector quality, print size, embroidery
-limits, raster quality — those belong exclusively to PrintValidationCapability.
+Does **not** answer: PPI, transparency, print size, or raster production
+geometry — those belong exclusively to PrintValidationCapability.
 
 Provider model (mirrors generation):
 
@@ -1075,7 +1117,7 @@ artwork, and the worker must supply `sourceArtwork` for every targeted
 revision (failing the job if it cannot). Any adapter that calls an image
 model must declare `true` — see "Initial generation vs targeted revision".
 
-### PrintValidationCapability — Active architecture, wired as provisional intelligence (Sprint 2M Phase 1 + Phase 2A)
+### PrintValidationCapability — Active (provisional concept-stage intelligence and authoritative production-asset validation)
 
 Real, deterministic, provider-neutral. Answers "can this artwork be
 produced correctly for the intended print application?" — never "did we
@@ -1105,14 +1147,15 @@ PrintValidationReport { ready | finalization_required | blocked }
         │  logged internally only (whitelisted fields; never persisted,
         │  never customer-facing) — see `print-validation-logging.ts`
         ↓
-Customer selects / approves a concept direction  (unchanged — still just
-concept selection, not "final artwork approval"; see the lifecycle audit)
+Customer selects a concept, then explicitly confirms final direction
         ↓
-(Reserved, not implemented) Future FinalArtworkCapability /
-ProductionArtworkCapability — transforms/upscales/vectorizes/reconstructs
-per requiredTransformations, then produces authoritative production
-artwork and re-runs Print Validation against *that* — only that later run
-may ever justify `PrintProject.status = "print_ready"`
+FinalArtworkCapability.requestFinalArtwork  (durable approval + job)
+        ↓
+FinalArtworkWorkerCapability  (raster apparel PNG only)
+        ↓
+Authoritative PrintValidationCapability.validateArtwork on the production asset
+        ↓
+PrintProject.status = print_ready  only if that report is "ready"
 ```
 
 | | |
@@ -1139,39 +1182,34 @@ was added to `PrintValidationCapability`, `production-requirements.ts`, or
 | Concern | Concept Evaluation | Print Validation |
 |---|---|---|
 | Brief alignment / exclusions / wording / style / palette | Yes | No (reads Concept Evaluation's already-persisted `required_wording` criterion and `evaluationStatus`, but never re-scores brief alignment itself) |
-| DPI / transparency / print size / embroidery / raster / vector | No | Yes |
-| Status | Active architecture; results persisted on `ArtworkVersion`; does not block UI | Active architecture; pure/recomputed; run automatically after generation (Phase 2A) but never persisted, never blocks UI, never authoritative |
+| PPI / transparency / print size / raster production geometry | No | Yes |
+| Status | Active; results persisted on `ArtworkVersion`; does not block UI | Active; pure/recomputed. Provisional concept-stage runs are logged only and never persisted. Authoritative runs persist on `ProductionAssetValidation` and are the only path to `print_ready`. |
 
 #### Production Requirements (`ProductionRequirements`)
 
-`production-requirements.ts` deterministically classifies a
-`ProductionCategory` (`apparel_raster` / `apparel_vector` / `signage` /
-`logo_vector` / `unknown`) from `productSummary`/`designDescription` text
-the customer already gave in ordinary conversation — keyword matching only
-(apparel nouns reuse `field-normalization.ts`'s `PRODUCT_NOUN_CANONICAL`;
-method keywords like "embroidered", "screen print", "banner" are matched
-literally). This is never a customer-facing question (Constitution §6.6) —
-when the text does not support a confident method, `printMethodConfidence`
-is honestly `"unknown"` and a DTF-style raster profile is assumed as the
+`production-requirements.ts` currently classifies a `ProductionCategory`
+(`apparel_raster` / `apparel_vector` / `signage` / `logo_vector` /
+`unknown`) from already-collected brief text by keyword matching. **Current
+iHeartPrints V1 production is apparel raster PNG only.** Non-apparel and
+vector categories are dormant classifier branches and reserved validation
+hooks — not unfinished iHeartPrints V1 deliverables, and not permission to
+broaden the product into signs, banners, embroidery digitization, or
+screen-print separations.
+
+When the text does not support a confident method, `printMethodConfidence`
+is honestly `"unknown"` and an apparel-raster profile is assumed as the
 one production path this product actually generates artwork for today
 (never marked `"confirmed"`).
 
 Target physical print dimensions come from `shared/print-placement-dimensions.ts`,
-keyed by `PrintPlacement` — and, since the Live Acceptance Cleanup,
-overridden by the customer's own chosen production width when they set one
-(`TShirtDesignBrief.intendedPrintWidthIn`, threaded in as
-`deriveProductionRequirements({ intendedPrintWidthIn })`; see the resolved
-audit finding below). The placement table supplies the default and the
-printable band (`full_front`/`full_back`: 12×14in;
-`left_chest`: 4×4in; `sleeve`: 3×3in — chosen so the sprint's own worked
-example, a 1024×1024px concept at a 12×14in full-back target ≈ 85 PPI,
-reproduces exactly). Banners/signs use a fixed generic placeholder size
-(36×72in) since neither `PrintPlacement` nor the Design Brief currently
-capture a customer-specified sign size (see the audit finding below).
-Target resolution is 300 PPI for raster apparel methods (matching the
-Constitution's own 3600×4200px full-back example exactly) and not
-applicable (raster resolution is not the blocking factor) for any
-vector-required category.
+keyed by `PrintPlacement` and overridden by the customer's own chosen
+production width when they set one (`TShirtDesignBrief.intendedPrintWidthIn`,
+threaded in as `deriveProductionRequirements({ intendedPrintWidthIn })`).
+The placement table supplies the default and the printable band. Current
+defaults are adult-apparel widths (`full_front`/`full_back`: 10.5in
+default, 14in max height; `left_chest`: 4in; `sleeve`: 3in). Target
+resolution is **300 PPI** for apparel raster production. Pixel geometry
+is authoritative; PNG density metadata is not.
 
 #### Effective resolution (Goal 7)
 
@@ -1196,13 +1234,12 @@ rest. Every other check is `"blocking"`, `"warning"`, or `"info"` severity;
 6/10), so it produces `"finalization_required"` exactly like a `"fail"`.
 
 `requiredTransformations` is a set of `FinalizationTransformation` string
-values (`regenerate_at_production_dimensions`, `upscale_raster_artwork`,
-`remove_background`, `create_vector_version`, `verify_or_recreate_text`,
-`convert_fonts_to_outlines`, `resize_to_final_dimensions`,
-`create_production_png`, `create_vector_or_pdf_asset`,
-`require_human_review`) — described, never executed. No upscaling,
-vectorization, SVG/PDF/PNG production, font outlining, embroidery
-digitization, or CMYK conversion happens in Phase 1.
+values. Print Validation describes them; it never executes them. Vector,
+font-outline, SVG/PDF, embroidery, and CMYK transformation names that still
+appear in that set are reserved vocabulary from the validation contract —
+not iHeartPrints V1 production work. The live Final Artwork worker produces
+a raster apparel PNG and re-runs this same capability authoritatively
+against that asset.
 
 #### Provisional Print Readiness vs. Final Print Validation (Sprint 2M Phase 2A)
 
@@ -1214,8 +1251,8 @@ avoid:
 |---|---|---|---|
 | **Concept Evaluation** | Is this generated concept an acceptable design — does it match the approved Design Brief? | `ConceptEvaluationCapability` | Active; persisted on `ArtworkVersion.evaluationStatus`/`evaluation` |
 | **Provisional Print Readiness** | If we tried to produce *this generated concept* right now, what production work would be required? | `PrintValidationCapability`, run by `GenerationWorkerCapability` immediately after Concept Evaluation | Active (Phase 2A); computed and logged internally only; **never persisted, never authoritative** |
-| **Final Artwork / Production Artwork** *(not implemented)* | The customer has confirmed a design direction — produce the actual production-ready asset (upscale, vectorize, outline fonts, etc.) | Reserved `FinalArtworkCapability`/`ProductionArtworkCapability` | Not implemented — see §25 |
-| **Final Print Validation** *(not implemented)* | Is the *resulting production asset* actually print-ready? | Same `PrintValidationCapability`, re-run against the production asset once one exists | Not implemented — only this later run may ever justify `PrintProject.status = "print_ready"` |
+| **Final Artwork / Production Artwork** | The customer has confirmed a design direction (or approved prepared upload) — produce the actual production PNG | `FinalArtworkCapability` + `FinalArtworkWorkerCapability` | **Active.** Raster apparel PNG only. Reconstruction when source pixels are insufficient. See §13c / §13d / §13i. |
+| **Final Print Validation** | Is the *resulting production asset* actually print-ready? | Same `PrintValidationCapability`, re-run against the production asset | **Active.** Only this run may set `PrintProject.status = "print_ready"`. |
 
 Provisional Print Readiness reuses the exact same `PrintValidationCapability`
 and `PrintValidationReport` shape a future Final Print Validation run would
@@ -1238,20 +1275,20 @@ Concretely, in Phase 2A:
 - Nothing transitions `PrintProject.status` to `"finalizing"` or
   `"print_ready"` in Phase 2A. Those remain unused, reserved for whenever
   Final Artwork / Final Print Validation exist.
-- Nothing marks an `ArtworkVersion` as "final" — `isSelected` /
-  `selectedArtworkVersionId` (concept selection) are unchanged and remain
-  the closest existing mechanism to "customer picked a direction," which
-  is still not the same thing as "this is the confirmed final artwork" (see
-  the Phase 1 lifecycle audit below, unchanged in Phase 2A).
-- `requiredTransformations` is **never executed** — Phase 2A only computes
-  and logs it as intelligence for a future Final Artwork capability to
-  consume.
+- Phase 2A did not mark an `ArtworkVersion` as "final." Later sprints added
+  `finalDirectionConfirmed` (Create New) and prepared-upload approval
+  (Existing Artwork). Concept selection is still not print-ready.
+- `requiredTransformations` is **never executed by Print Validation** —
+  Phase 2A only computed and logged it. `FinalArtworkWorkerCapability` now
+  performs the apparel-raster production transform and re-validates the
+  production PNG.
 
 #### Current concept behavior (Goal 10)
 
-A real ~1024×1024px generated concept intended for a full-back print
-(12×14in target, 300 PPI) computes an effective resolution of ≈73–85 PPI —
-well under target — and correctly reports `finalization_required` with
+A real ~1024×1024px generated concept intended for a full-front or
+full-back print (current default 10.5in wide at 300 PPI) computes an
+effective resolution well under target — and correctly reports
+`finalization_required` with
 `regenerate_at_production_dimensions`/`upscale_raster_artwork` required,
 even when Concept Evaluation reports `passed`/`needs_review` for the same
 concept. Verified by test at two levels: `print-validation-capability.test.ts`
@@ -2831,8 +2868,8 @@ Generation Worker
 | | Concept Evaluation | Print Validation |
 |---|---|---|
 | Question | Does this concept match the approved Design Brief? | Is this artwork production-/print-ready? |
-| Criteria | wording, style, graphics, palette, composition, readability, exclusions, product compatibility, overall alignment | DPI, transparency, vector/raster quality, print size, embroidery limits |
-| Phase 1/2 | Architecture, persistence, and a real evaluator; still no UI gating | Sprint 2M Phase 1: real deterministic capability; pure/recomputed, not persisted, not wired into any pipeline yet — see §5 |
+| Criteria | wording, style, graphics, palette, composition, readability, exclusions, product compatibility, overall alignment | PPI (pixel geometry), transparency, apparel print size, raster production geometry |
+| Status | Architecture, persistence, and a real evaluator; still no UI gating | Provisional concept-stage runs are logged only. Authoritative production-asset runs persist on `ProductionAssetValidation` and may set `print_ready`. See §5. |
 
 Persistence on `ArtworkVersion` (provider-neutral, unchanged since Phase 1):
 
@@ -3148,8 +3185,9 @@ selected, current concept exists: "This is the design you want? I can
 start preparing your print-ready artwork." → **Prepare Print-Ready
 Artwork**. No separate confirmation dialog (Goal 11): the button's own
 label already states the commitment. Never says "finalize raster," "print
-validation," "production asset," "vectorize," "upscale," "300 DPI," or
-"execute final artwork job."
+validation," "production asset," "vectorize," "upscale," or
+"execute final artwork job." Customer-facing size copy may state the 300
+PPI guarantee in plain language; it is not a customer-operated control.
 
 `conversation-service.ts` derives a customer-safe
 `CustomerFinalizationStatus` (`"not_requested"` / `"preparing"` /
@@ -3467,11 +3505,13 @@ storage, or validation rule ever reaches this view.
 
 ### Unsupported methods (Goal 17)
 
-Phase 2C supports **raster apparel production PNG only**. SVG, PDF,
-embroidery, screen-print separations, banner/sign production, CMYK, and
-vector logos are all explicitly out of scope — `requirements.category !==
-"apparel_raster"` completes the job honestly without an asset and without
-ever reaching `"print_ready"`.
+Current V1 production is **raster apparel PNG only**. SVG, PDF, embroidery
+digitization, screen-print separations, banner/sign production, CMYK, and
+vector logos are out of **product** scope — not unfinished iHeartPrints V1
+deliverables. Today the worker still completes without an asset when
+`requirements.category !== "apparel_raster"` so it cannot falsely claim
+`print_ready` for those categories. That fail-closed behavior is honesty
+about the current classifier, not a roadmap to implement those outputs.
 
 ---
 
@@ -3797,7 +3837,7 @@ The per-placement figures in §13c's table are now the printable
 (concept-stage) Print Validation still measures against the envelope, since
 a generated concept has not been normalized for production at all.
 
-### pixel dimensions ≠ physical dimensions ≠ DPI metadata
+### pixel dimensions ≠ physical dimensions ≠ density metadata
 
 Three different things, deliberately kept separate:
 
@@ -3805,8 +3845,9 @@ Three different things, deliberately kept separate:
   (`AssetRecord.widthPx/heightPx`).
 - **Physical dimensions** — how large the artwork is *intended to print*
   (`ProductionNormalizationSummary.intendedWidthIn/intendedHeightIn`).
-- **DPI/density metadata** — a tag inside the PNG (`pHYs`) telling graphics
-  software what physical size to open the file at.
+- **Density metadata** — a tag inside the PNG (`pHYs`) telling graphics
+  software what physical size to open the file at. This is not the 300 PPI
+  contract.
 
 **Effective print resolution is calculated from pixels ÷ intended physical
 inches.** It is never read from density metadata: rewriting a density tag
@@ -5746,44 +5787,34 @@ Verified against the implementation:
   vision-based evaluator when configured — but still does not block, reject,
   rank, or hide concepts from customers; no UI scoring yet. Remains
   advisory-only until a future phase decides to act on it
-- Print Validation (Sprint 2M Phase 1) is real, tested, deterministic
-  architecture. **Sprint 2M Phase 2A** wires it into
-  `GenerationWorkerCapability`, run automatically after Concept Evaluation
-  for every generated concept — but only as provisional, logged-only
-  intelligence (see §5's "Provisional Print Readiness vs. Final Print
-  Validation"). No route or UI calls it. Nothing persists
-  `ArtworkVersion.printValidationStatus` — that decision was re-audited in
-  Phase 2A, not merely carried over, and remains `null` by design (§5).
-  There is still no Final Artwork / Production Artwork capability to act on
-  `requiredTransformations`, and no authoritative (post-finalization) Print
-  Validation run exists yet — see the Phase 2A report for what that would
-  require
-- Print Validation infers production category/method from free-text
-  Design Brief fields via deterministic keyword matching — not a
-  customer-collected production-method field (none exists; Constitution
-  §6.6 says it shouldn't). A product description that never uses a
-  recognized keyword (e.g. "embroider", "screen print", "banner") is
-  correctly classified `"unknown"`/`printMethodConfidence: "unknown"` and
-  assumed to be DTF-style raster (the one production path this product
-  actually generates artwork for today) rather than left unclassifiable
-  outright — this is a coarse heuristic, not language understanding
-- `TShirtDesignBrief.intendedPrintWidthIn` exists but is never populated by
-  any extraction/interview path and is not carried into
-  `DesignBriefSnapshotContent` — Print Validation's target physical
-  dimensions are derived from `PrintPlacement` only (a coarse internal size
-  table, `shared/print-placement-dimensions.ts`), never a real
-  customer-specified physical size
-- Banner/sign target dimensions are a single fixed placeholder size
-  (36×72in) — the Design Brief has no field for a customer-specified sign
-  size, and `PrintPlacement` does not model non-apparel placements at all
-- There is no distinct "customer confirmed this as final artwork
-  direction" state — `ArtworkVersion.isSelected` /
-  `PrintProject.selectedArtworkVersionId` (concept selection) is the
-  closest existing mechanism, but selecting a concept only starts the
-  revision conversation; it does not freeze or "approve" anything.
-  `ProjectStatus`'s `"finalizing"`/`"print_ready"` values are defined but
-  never assigned anywhere in the codebase. Print Validation Phase 1
-  deliberately does not invent a replacement for this gap (see §5's audit)
+- Print Validation is real, tested, and deterministic. **Provisional**
+  runs happen inside `GenerationWorkerCapability` after Concept Evaluation
+  (logged only; never persisted; never customer-facing).
+  `ArtworkVersion.printValidationStatus` remains reserved `null` by design.
+  **Authoritative** runs happen inside `FinalArtworkWorkerCapability`
+  against the production PNG and persist on `ProductionAssetValidation`.
+  Only those authoritative runs may set `PrintProject.status = "print_ready"`.
+- Print Validation still infers a production category from free-text brief
+  fields by keyword matching. That classifier still contains dormant
+  `apparel_vector` / `signage` / `logo_vector` branches. They are reusable
+  hooks, not iHeartPrints V1 output contracts. Current V1 production is
+  apparel raster PNG. A later policy sprint may stop those branches from
+  refusing a valid apparel PNG; this document does not treat them as
+  unfinished V1 deliverables.
+- `TShirtDesignBrief.intendedPrintWidthIn` **is** populated. The customer
+  chooses production width via `PrintReadySizeCard` / Change Size (or a
+  natural-language size request at the final-direction stage).
+  `DesignBriefCapability.setIntendedPrintWidth` persists it. It is
+  deliberately **not** part of `DesignBriefSnapshotContent`: physical size
+  is a production specification, not creative content. Placement defaults
+  apply when the customer never chooses a width.
+- `PrintPlacement` models apparel placements only (full front, full back,
+  left chest, sleeve). Non-apparel sizes are not an iHeartPrints V1
+  product requirement.
+- Final direction is distinct from concept selection.
+  `PrintProject.finalDirectionConfirmed` is the Create New gate;
+  prepared-upload approval is the Existing Artwork gate. `print_ready` is
+  set only by `FinalArtworkWorkerCapability` after authoritative validation.
 - Detailed-Description Fidelity (Phase 1) guarantees only what iHeartPrints
   **sends**. Every regression proves that customer requirements survive the
   deterministic layers and reach all three provider prompts; none proves an
@@ -5876,9 +5907,11 @@ Verified against the implementation:
   is deterministic-fixture-based (scripted provider responses), matching
   every other provider in this codebase; a live acceptance test (§ below)
   is the current way to judge real-provider quality end to end.
-- Sprint 2L Phase 1 does not change Print Validation, Print Vault,
-  Ownership, purchasing/download, concept ranking, or automatic
-  regeneration — none of that was in scope.
+- Sprint 2L Phase 1 did not change Print Validation, Print Vault,
+  Ownership, concept ranking, or automatic regeneration — none of that was
+  in that sprint's scope. Download of a validated production PNG later
+  shipped with final-artwork delivery and is current V1 behavior, not a
+  purchasing/commerce product.
 - Sprint 2L Phase 1B: `naturalizeQuestion`'s contextual rephrasing covers
   only the `productColor` and `graphics` questions — every other question
   keeps its Sprint 2F-era generic phrasing. Broader contextual phrasing
@@ -5895,13 +5928,10 @@ Verified against the implementation:
   does not synthesize and may still surface closer-to-verbatim values for
   `graphics`/`style`/`purpose`/`audience` when a customer volunteers them
   directly rather than through a rich, understood message.
-- Sprint 2M Phase 2B: `FinalArtworkCapability.requestFinalArtwork` performs
-  no production transformation. Every `FinalArtworkJob` it creates stays
-  `"queued"` forever until a future phase adds a worker that claims it — no
-  route, scheduler, or standalone process consumes this table yet (mirrors
-  how Phase 2A's `PrintValidationCapability` had complete architecture
-  before anything called it). `PrintProject.status` can now reach
-  `"finalizing"` but nothing in the codebase ever sets `"print_ready"`.
+- Sprint 2M Phase 2B historically only enqueued `FinalArtworkJob` rows.
+  **That gap is closed.** `FinalArtworkWorkerCapability` claims those jobs,
+  produces the production PNG, runs authoritative Print Validation, and is
+  the sole writer of `PrintProject.status = "print_ready"`.
 - Sprint 2M Phase 2B: an ordinary post-approval brief revision that does
   *not* trigger regeneration does not retroactively invalidate an existing
   active `FinalDirectionApproval` — only a genuinely new concept batch
@@ -5932,54 +5962,86 @@ Verified against the implementation:
   reconstruction master (§13e's RECONSTRUCTED ARTWORK is in-memory only), so
   a re-run at a different physical size re-reconstructs (and, for a paid
   provider, re-spends) rather than re-normalizing a stored intermediate.
-- Physical print size still comes from the placement policy table, not from
-  the customer: `TShirtDesignBrief.intendedPrintWidthIn` exists but is never
-  populated by the interview and is not carried into
-  `DesignBriefSnapshotContent`. Garment size is deliberately not asked in
-  Conversation Understanding.
-- Sprint 2M Phase 2C does not implement vectorization, embroidery
+- Physical print **width** is a customer decision persisted on
+  `TShirtDesignBrief.intendedPrintWidthIn`. Unchosen width falls back to
+  the placement default. Garment *body* size (S/M/L retail) is not asked
+  and is not part of V1. Height is derived from the artwork's own aspect
+  ratio. `intendedPrintWidthIn` remains excluded from
+  `DesignBriefSnapshotContent` on purpose.
+- iHeartPrints V1 does not implement vectorization, embroidery
   digitization, screen-print separations, banner/sign production, PDF/SVG
-  production output, CMYK conversion, or any paid/network provider call for
-  final artwork (Goal 17/20) — `FinalArtworkProvider` is replaceable
-  (`resolveFinalArtworkProvider`), but no second implementation exists yet.
-- Sprint 2M Phase 2C's secure production-asset download boundary
-  (`GET /api/projects/[projectId]/production-artwork/image`) exists and is
-  tested but is not linked from any UI — no purchasing/download product
-  exists yet (Goal 14's explicit scope limit).
-- Sprint 2M Phase 2C's `FinalArtworkCapability.getCurrentProductionAssetId`
-  resolves only the *current* active approval's job's production asset —
-  there is no customer-facing history of prior production attempts from a
-  superseded approval.
+  production output, or CMYK conversion. Those are **out of product
+  scope**, not unfinished V1 work. `FinalArtworkProvider` is replaceable;
+  the live paid path is Topaz reconstruction for insufficient source
+  pixels (`FINAL_ARTWORK_PROVIDER=topaz`), independent of concept
+  generation. Reserved `production_svg` / `production_pdf` roles and
+  `vectorAssetId` remain dormant architectural seams.
+- Production PNG preview and download **are wired**.
+  `GET /api/projects/[projectId]/production-artwork/image` and
+  `.../download` are gated on `print_ready`. `FinalArtworkDeliveryCard`
+  is the customer delivery surface. This is artwork download, not
+  physical-product purchasing or checkout.
+- `FinalArtworkCapability.getCurrentProductionAssetId` resolves only the
+  *current* active approval's (or current prepared-upload job's) production
+  asset — there is no customer-facing history of prior production attempts
+  from a superseded approval.
 
 Do not treat future work as completed architecture.
 
 ---
 
-## 25. Planned Extension Points
+## 25. Current V1 vs reusable extension points
 
-Describe attachment points only — not a delivery plan:
+This section is **not** an iHeartPrints delivery plan for signs, vector,
+embroidery, or physical-product commerce. It records (a) what is already
+current V1 architecture and (b) dormant seams that may serve iHeartPrints
+later or other systems later. Broader architecture is not permission to
+broaden the product.
 
-| Extension | Attach where |
+### Current iHeartPrints V1 (implemented)
+
+| Area | Status |
 |---|---|
-| ConceptEvaluationCapability | **Phase 1 (architecture) + Phase 2 (first real evaluator) done.** Phase 3+: gating/ranking/regeneration decisions driven by evaluation results; never mutate brief |
-| RegenerationIntelligenceCapability | **Phase 1–3 done — see §13a.** Live on explicit regeneration only. Future: richer evaluation-driven guidance / RejectedConceptMemory population; never auto-retry; never generate artwork itself; never mutate the brief |
-| RevisionTimelineCapability | **Phase 2–3 done.** Derive ephemeral timelines on regeneration only; never persist |
-| GenerationIntent | **Phase 3 done.** Sole PromptTranslation input; immutable; never persisted; never customer-facing |
-| PrintValidationCapability | **Sprint 2M Phase 1 (architecture) + Phase 2A (provisional intelligence) + Phase 2C (authoritative, production-asset-scoped run) done — see §5/§13c.** Authoritative status now persists on `ProductionAssetValidation`, never `ArtworkVersion.printValidationStatus` (confirmed correct across three sprints of audit). Future: extend `resolutionProvenance` to a real provider-reconstruction path once one exists; never mutate brief; never confuse with Concept Evaluation |
-| **FinalArtworkCapability** / **FinalArtworkWorkerCapability** | **Sprint 2M Phase 2B (approval + idempotent enqueue) + Phase 2C (real worker, raster production, authoritative validation, print-ready transition) done — see §13b/§13c.** Phase 2C supports raster apparel PNG only via one local, deterministic provider. Future: a provider-hosted reconstruction/regeneration `FinalArtworkProvider` (gated behind its own default-off env var, mirroring `CONCEPT_GENERATION_ENABLE_REAL`) that can genuinely exceed native source detail for full-back/left-chest placements; vector/PDF production (`"production_svg"`/`"production_pdf"` `ProductionAssetRole` values are reserved); embroidery digitization; a purchasing/download product built on the existing secure read boundary (§13c "Download boundary"). Must never generate/transform anything Print Validation itself decided; Print Validation must remain pure validation |
-| **ArtworkPreparationCapability** | **Existing Artwork → Print Ready Phase 1 (upload, analysis, repairability, background isolation, edge cleanup, approval) done — see §13h.** Phase 2: consume the approved `prepared_upload` `ArtworkVersion` through `FinalArtworkCapability` (enhancement/upscale, 300 PPI production, an uploaded-preserve print-validation applicability profile, download). Phase 3: AI segmentation / complex photographic background removal behind a NEW provider port — this capability has none today, and that absence is what makes "zero paid-provider calls" structural. Must never change wording, redraw, recolour, recompose, or regenerate; must never mutate the uploaded original |
-| Additional concept evaluation providers | New adapter behind `ConceptEvaluationProvider` (e.g. a dedicated OCR specialist, a different vision model); no domain change |
-| JPEG / WebP upload ingestion | A new decoder dependency behind `image-decode.ts` (the single decode choke point), with its own documented security surface. Phase 1 intentionally supports PNG only and says so rather than advertising formats it cannot decode |
-| Production file generation | New assets linked via `printAssetId` / dedicated kinds |
-| Vector output | `vectorAssetId` / SVG asset kinds |
-| Mockups | Presentation layer consuming artwork + product context |
-| Print Vault | Replace `PrintVaultCapability` stub; ingest only with Ownership rules |
-| Additional generation providers | New adapter + config branch; no domain change |
-| Real queue/worker service | Replace scheduler topology only |
+| Create New (conversation → brief → concepts → revision → final direction → size → FinalArtworkJob → reconstruction if required → production PNG → authoritative validation → `print_ready` → download) | Active |
+| Existing Artwork (upload → immutable original → preparation → transparency → approval → size → same production pipeline) | Active |
+| Print Validation, provisional and authoritative | Active. Authoritative status on `ProductionAssetValidation`, never `ArtworkVersion.printValidationStatus` |
+| Topaz reconstruction when visible source pixels are insufficient | Active behind `FINAL_ARTWORK_PROVIDER=topaz` |
+| Production PNG preview + download | Active. Artwork download, not physical-product checkout |
+| Conversation Understanding | Architecture + first real provider done; provider remains opt-in |
+| Concept Evaluation | Advisory; persisted; does not block presentation |
+
+### iHeartPrints product later (not V1 requirements)
+
+| Extension | Notes |
+|---|---|
+| Customer identity / project ownership | No `owner_user_id` today; UUID knowledge is not identity. Required before public accounts. |
+| Project / design library | Not implemented. Print Vault is a stub and remains **future**. |
+| Generation-cost metering and monetization | Spend *controls* exist; dollar accounting does not. |
+| JPEG / WebP upload | PNG only today. |
+| AI photographic background segmentation | Artwork preparation has no provider port; that absence is structural. |
+| “Need a printer?” directory | Allowed by the Constitution as future; not current work. |
+
+### Reusable / dormant architectural hooks (not iHeartPrints V1 unfinished work)
+
+These may remain. Do not delete them to “narrow the product.” Do not
+schedule them as iHeartPrints V1.
+
+| Hook | Attach where |
+|---|---|
+| Reserved `production_svg` / `production_pdf` roles, `vectorAssetId` | Asset / production-role model |
+| Broader `ProductionCategory` values (`apparel_vector`, `signage`, `logo_vector`) | Print Validation classifier — dormant for iHeartPrints V1 |
+| Print Vault stub | `PrintVaultCapability`; ingest only with Ownership rules if ever built |
+| Ownership stub | `OwnershipCapability`; default remains customer-owned |
+| Additional generation, evaluation, or conversation-understanding providers | Existing provider ports |
 | Additional product rule packs | `shared/product-rule-packs` + ProductIntelligence |
-| Ownership/licensing enforcement | Replace Ownership stub; gate vault/public surfaces |
-| ConversationUnderstandingCapability | **Phase 1 (architecture + first real provider) done — see §10a.** Future: expand the supported-section allowlist as new brief sections gain backing fields; richer bounded-context selection; a labeled-dataset evaluation harness; never let it write a `BriefPatchProposal` directly |
-| Additional conversation understanding providers | New adapter behind `ConversationUnderstandingProvider`; no domain change |
+| Real queue/worker service | Scheduler topology only |
+| Presentation mockups | Presentation layer consuming artwork + garment color; not a catalog |
+
+`FinalArtworkCapability` / `FinalArtworkWorkerCapability` must never
+generate or transform anything Print Validation itself decided. Print
+Validation must remain pure validation. They must never treat vector,
+embroidery, screen-print separations, or physical-product purchasing as
+iHeartPrints V1 work.
 
 ---
 
@@ -6000,6 +6062,8 @@ Before implementing a change, check:
 11. Does environment selection stay in composition/config (not UI/conversation)?
 12. Does it require updating this architecture document?
 13. Does it remain consistent with the Constitution?
+14. Does it keep iHeartPrints an independent apparel-design product (artwork, not physical goods; not signs/banners/embroidery digitization/screen-print separations/vector V1)?
+15. If it touches a broader architectural hook, does it leave that hook dormant rather than turning it into an iHeartPrints V1 requirement?
 
 ---
 

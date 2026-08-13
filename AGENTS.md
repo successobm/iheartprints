@@ -16,17 +16,32 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 current domain boundaries, capability responsibilities, dependency direction,
 persistence, generation runtime, and security architecture.
 
+iHeartPrints is an independent **apparel-design** product. The customer uses
+or buys the **artwork**. It does not sell physical garments, is not a
+Print'em All feature, and is not a general print-shop operating system.
+
+The current V1 deliverable is a validated transparent apparel PNG at the
+selected physical print dimensions, targeted at 300 PPI. Do not expand into
+signs, banners, large-format, promotional products, embroidery digitization,
+screen-print separations, vector/SVG/PDF production, or physical-product
+commerce without an explicit Constitution amendment.
+
+Reusable architecture may remain broader than active product scope. Dormant
+hooks (reserved vector/PDF roles, Print Vault and Ownership stubs, broader
+validation categories) are not unfinished V1 requirements and must not be
+deleted merely to narrow the product.
+
 Before proposing significant product, UX, domain-model, or architecture changes:
 
 1. Read `IHEARTPRINTS_CONSTITUTION.md`.
 2. Read `ARCHITECTURE.md`.
 3. Evaluate the proposal against the Constitutional Test in the Constitution.
-4. Identify potential product drift toward non-goals such as general-purpose image generation, prompt-engineering UX, or exposing technical generation settings.
+4. Identify potential product drift toward non-goals such as general-purpose image generation, prompt-engineering UX, exposing technical generation settings, physical-product retail, or general print categories.
 5. State clearly when a user request conflicts with the Constitution or the documented architecture.
-6. Preserve the Design Brief as the authoritative domain object. Images and chat messages are inputs or outputs; they do not replace the brief.
+6. Preserve the Design Brief as the authoritative domain object on the Create New path. Images and chat messages are inputs or outputs; they do not replace the brief. On the Existing Artwork path, uploaded pixels are the visual specification.
 7. Prefer conversation and Design Interview flows over complicated forms.
-8. Hide image-model, DPI, format, resolution, and other production settings from ordinary customers unless a meaningful customer decision requires a plain-language explanation.
-9. Do not describe generated concepts as print-ready without validation and appropriate approval.
+8. Hide image-model, provider, format, and generation settings from ordinary customers. Apparel placement and physical print size are meaningful customer decisions. The 300 PPI density target is a guarantee judged from pixel geometry, not a customer-operated control and not a PNG-metadata promise.
+9. Do not describe generated concepts as print-ready without authoritative production validation and appropriate approval.
 10. Preserve capability dependency direction from `ARCHITECTURE.md` / `src/capabilities/shared/capability-boundaries.ts`.
 11. When architectural boundaries change, update `ARCHITECTURE.md` in the same change.
 

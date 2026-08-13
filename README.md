@@ -1,6 +1,17 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# iHeartPrints
 
-## Product Constitution
+iHeartPrints is an apparel-design application. It helps people create new
+artwork through conversation, or prepare artwork they already have, and
+produce a **validated print-ready transparent PNG** for apparel raster
+production.
+
+The customer uses the artwork. iHeartPrints does not sell physical garments,
+garment catalogs, or print-shop fulfillment.
+
+The current production deliverable is an RGB PNG sized to the selected
+apparel print dimensions and targeted at 300 pixels per inch. Pixel geometry
+is authoritative. iHeartPrints V1 does not produce vector/SVG, embroidery
+digitization, screen-print separations, or sign/banner artwork.
 
 All product, design, and architecture decisions must align with the
 [iHeartPrints Constitution](./IHEARTPRINTS_CONSTITUTION.md).
