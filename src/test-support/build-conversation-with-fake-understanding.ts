@@ -46,6 +46,7 @@ export async function buildConversationWithFakeUnderstanding(
     designSummary: graph.designSummary,
     conceptGeneration: graph.conceptGeneration,
     finalArtwork: graph.finalArtwork,
+    ipSafety: graph.ipSafety,
   });
 
   return { conversation, fake };

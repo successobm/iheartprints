@@ -20,6 +20,8 @@ import type { DesignSummaryCapability } from "@/capabilities/design-summary";
 import type { FinalArtworkCapability } from "@/capabilities/final-artwork";
 import type { IntentExtractionCapability } from "@/capabilities/intent-extraction";
 import type { InterviewIntelligenceCapability } from "@/capabilities/interview-intelligence";
+import type { IpSafetyCapability, IpSafetySignal } from "@/capabilities/ip-safety";
+import { describeIpSafetyDecisionForCustomer } from "@/capabilities/ip-safety";
 import type { RevisionIntelligenceCapability } from "@/capabilities/revision-intelligence";
 import {
   CHAT_BLOCKED_PHASES as SHARED_CHAT_BLOCKED_PHASES,
@@ -78,6 +80,12 @@ export interface ConversationCapabilityDeps {
   conceptGeneration: ConceptGenerationCapability;
   /** Sprint 2M Phase 2B: owns final-direction approval persistence + idempotent finalization request. */
   finalArtwork: FinalArtworkCapability;
+  /**
+   * Sprint A3: the IP / trademark safety boundary. Consulted on every
+   * customer turn that could become new design content, BEFORE any brief
+   * mutation and long before any paid generation. Pure and synchronous.
+   */
+  ipSafety: IpSafetyCapability;
 }
 
 /**
@@ -279,7 +287,65 @@ export function createConversationCapability(
     designSummary,
     conceptGeneration,
     finalArtwork,
+    ipSafety,
   } = deps;
+
+  /**
+   * Sprint A3 — THE CONVERSATIONAL GATE.
+   *
+   * Runs after the turn has been semantically interpreted (so the optional
+   * `ipSignal` from the already-required Conversation Understanding call is
+   * available at no extra cost) and BEFORE Intent Extraction's proposals are
+   * applied. Placement is the whole point: a blocked request never reaches
+   * the Design Brief, so it never becomes design content, never marks
+   * concepts stale, never triggers an automatic revision, and never reaches
+   * a generation fence at all.
+   *
+   * Correction 3: the whole conversation record is handed to the capability,
+   * which bounds and filters it itself (`safety-subject.ts`) — a request
+   * split across turns ("I want a Raiders design." → "Use their exact
+   * shield.") is one request and has to be seen as one. Turns that were
+   * themselves refused are excluded, so a customer is never punished for
+   * rephrasing.
+   *
+   * NOTHING DURABLE CHANGES on a block. No brief write, no phase change, no
+   * interview-state change, no status change — only an assistant message
+   * redirecting toward an original design. That is what makes "a project is
+   * never permanently poisoned by one blocked request" structural: the very
+   * next message is evaluated against an unchanged project, and the refused
+   * turn is not carried forward as context.
+   *
+   * Returns the refreshed snapshot when the turn was blocked, or `null` to
+   * carry on with the normal pipeline.
+   */
+  async function guardCustomerRequest(
+    designId: string,
+    current: ProjectSnapshot,
+    message: string,
+    semanticSignal: IpSafetySignal | null | undefined,
+  ): Promise<ProjectSnapshot | null> {
+    const decision = ipSafety.evaluateCustomerRequest({
+      message,
+      messages: current.messages,
+      semanticSignal: semanticSignal ?? null,
+    });
+    const customerMessage = describeIpSafetyDecisionForCustomer(decision);
+    if (!customerMessage) return null;
+
+    // Metadata stays deliberately generic. `ProjectSnapshot.messages`
+    // (metadata included) is client-visible, so a truthful-looking
+    // `act: "ip_safety_block"` or a reason code here would be exactly the
+    // internal-enum leak the boundary is required not to have.
+    await repo.addMessage(designId, {
+      role: "assistant",
+      content: customerMessage,
+      metadata: { phase: current.conversation.phase, act: "acknowledge" },
+    });
+
+    const snapshot = await repo.getProject(designId);
+    if (!snapshot) throw new Error("Project not found");
+    return snapshot;
+  }
 
   /**
    * Sprint 2L Phase 1: builds the bounded, provider-neutral interpretation
@@ -839,6 +905,12 @@ export function createConversationCapability(
     const current = await repo.getProject(designId);
     if (!current) throw new Error("Project not found");
 
+    // Sprint A3: the legacy ladder has no semantic interpretation step, so
+    // this gate is deterministic-only — which is exactly the floor every
+    // other path also enforces.
+    const blocked = await guardCustomerRequest(designId, current, trimmed, null);
+    if (blocked) return blocked;
+
     const extraction = intentExtraction.extract({
       brief: current.brief,
       phase,
@@ -913,6 +985,16 @@ export function createConversationCapability(
     }
 
     const understanding = await interpretReply(current, current.brief, pendingSection, trimmed);
+
+    // Sprint A3: before a single proposal touches the brief.
+    const blocked = await guardCustomerRequest(
+      designId,
+      current,
+      trimmed,
+      understanding.ipSignal,
+    );
+    if (blocked) return blocked;
+
     const extraction = intentExtraction.extract({
       brief: current.brief,
       phase,
@@ -1129,6 +1211,23 @@ export function createConversationCapability(
     const pendingSection = narrowSection(state.pendingSection);
 
     const understanding = await interpretReply(current, previousBrief, pendingSection, trimmed);
+
+    // Sprint A3: a safe project can be turned unsafe by a single revision
+    // ("now put the Raiders logo on it"). Blocking here — before extraction,
+    // before `triggerAutomaticRevision`, before any enqueue — is why a
+    // revision never reaches a paid provider. The selected concept, the
+    // brief, `revisionPending`, and any final-direction approval are all
+    // left exactly as they were (the `revision_requested` status above is
+    // written for every message in this loop and means only "the customer
+    // is talking about changes", never that one was accepted).
+    const blocked = await guardCustomerRequest(
+      designId,
+      current,
+      trimmed,
+      understanding.ipSignal,
+    );
+    if (blocked) return blocked;
+
     const extraction = intentExtraction.extract({
       brief: previousBrief,
       phase,

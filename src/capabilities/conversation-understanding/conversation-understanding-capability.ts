@@ -1,3 +1,8 @@
+import type {
+  IpSafetySignal,
+  IpSafetySignalConfidence,
+  IpSafetySignalKind,
+} from "@/capabilities/ip-safety/contracts";
 import type { BriefSectionKey, DesignSummaryView } from "@/capabilities/shared/contracts";
 import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
 import type { ConversationMessage } from "@/lib/domain/types";
@@ -39,6 +44,14 @@ const CONFIDENCE_VALUES = new Set<UnderstandingConfidence>([
   "inferred",
   "ambiguous",
 ]);
+/** Sprint A3: the only IP signal kinds a provider may report — anything else is discarded. */
+const IP_SIGNAL_KINDS = new Set<IpSafetySignalKind>([
+  "protected_mark_reproduction",
+  "protected_mark_imitation",
+  "protected_character_reproduction",
+  "protection_evasion",
+]);
+
 const CUSTOMER_INTENT_VALUES = new Set<CustomerIntent>([
   "provide_info",
   "correct",
@@ -223,6 +236,29 @@ function sanitizeResult(
       raw.answeredPendingSection && SUPPORTED_SECTIONS.has(raw.answeredPendingSection)
         ? raw.answeredPendingSection
         : null,
+    ipSignal: sanitizeIpSignal(raw.ipSignal),
+  };
+}
+
+/**
+ * Sprint A3: a malformed, unknown-kind, or unbounded IP signal is discarded
+ * rather than half-trusted — same defensive posture as every other field
+ * here, and the reason a provider can never invent a new refusal category.
+ */
+function sanitizeIpSignal(value: unknown): IpSafetySignal | null {
+  if (!value || typeof value !== "object") return null;
+  const signal = value as Partial<IpSafetySignal>;
+  if (!signal.kind || !IP_SIGNAL_KINDS.has(signal.kind)) return null;
+  if (!signal.confidence || !CONFIDENCE_VALUES.has(signal.confidence as UnderstandingConfidence)) {
+    return null;
+  }
+  return {
+    kind: signal.kind,
+    confidence: signal.confidence as IpSafetySignalConfidence,
+    evidence:
+      typeof signal.evidence === "string"
+        ? signal.evidence.trim().slice(0, MAX_EVIDENCE_CHARS)
+        : "",
   };
 }
 

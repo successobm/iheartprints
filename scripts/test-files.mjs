@@ -68,6 +68,21 @@ export const TEST_FILES = [
   "src/capabilities/providers/paid-image-arming.test.ts",
   "src/capabilities/concept-generation/concept-generation-unavailable.test.ts",
   "src/capabilities/concept-generation/concept-generation-production-safety.test.ts",
+  // Sprint A3: the IP / trademark product safety boundary. Detection and
+  // enforcement decisions, then the three fences that keep a blocked request
+  // away from a paid provider, then the Existing Artwork distinction between
+  // technical preparation and new protected-IP generation.
+  "src/capabilities/ip-safety/ip-safety-capability.test.ts",
+  "src/capabilities/ip-safety/ip-safety-generation-fence.test.ts",
+  // Correction 1: what the PRODUCT does after the worker fence refuses —
+  // terminal job, polling stops, concepts and selection intact, no permanent
+  // revisionPending bar, and the customer can keep working.
+  "src/capabilities/ip-safety/ip-safety-worker-lifecycle.test.ts",
+  // Correction 2: safe evidence about one occurrence must not immunize a
+  // different surviving request. End-to-end with a scripted semantic result,
+  // because the defect it closes was a SPEND defect.
+  "src/capabilities/ip-safety/ip-safety-semantic-scope-e2e.test.ts",
+  "src/capabilities/ip-safety/existing-artwork-ip-safety.test.ts",
   "src/capabilities/asset-storage/signed-url-token.test.ts",
   "src/capabilities/asset-storage/filesystem-asset-storage-provider.test.ts",
   "src/capabilities/asset-storage/resolve-asset-storage-provider.test.ts",

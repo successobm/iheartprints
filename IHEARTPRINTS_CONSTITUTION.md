@@ -1,6 +1,6 @@
 # iHeartPrints Constitution
 
-**Version 2.1**
+**Version 2.2**
 
 ## 1. Purpose of the Constitution
 
@@ -408,6 +408,29 @@ Ownership must never be inferred or left ambiguous.
 
 iHeartPrints does not make absolute legal claims about ownership based only on who operated the software. Ownership and license terms must be explicitly defined through product terms, customer agreements, provider terms, and applicable law. Reaching `print_ready` is not a legal-ownership verification.
 
+### 17.1 Third-party intellectual property
+
+iHeartPrints will not knowingly help a customer create artwork that reproduces, or deliberately imitates, recognizable third-party protected branding—a company's or team's logo, mark, or protected characters—and will not help a customer circumvent those protections.
+
+This is a **product boundary**, not a legal service. It describes what iHeartPrints will and will not make.
+
+Three limits keep it honest:
+
+- **iHeartPrints does not provide legal clearance.** It must never state or imply that artwork is legally safe, licensed, trademark-cleared, copyright-cleared, or owned. Allowing a request means only that it did not cross this boundary.
+- **The product must never accuse, and never teach evasion.** It does not tell a customer they have infringed anything, and it never states a threshold or amount of change that would make a refused request acceptable.
+- **Themes are not marks.** Styles, colors, cities, regions, sports, eras, moods, and generic visual concepts remain fully allowed—they are the product. So does a customer's own branding, and so does ordinary discussion of a brand that is context rather than the artwork being requested.
+
+When iHeartPrints declines, it redirects toward an original design rather than dead-ending the conversation.
+
+Two things that sound related are deliberately separate, and must not be merged:
+
+- **Ownership classification** (§17) is a provenance and licensing concept. It is not trademark or copyright verification.
+- **This boundary** is a use policy evaluated when artwork is about to be created. It is not a rights record.
+
+**Technical preparation is not an ownership determination.** Preparing artwork a customer supplied is a technical operation on the file they gave us. iHeartPrints does not verify who owns an uploaded file and must never claim to.
+
+Providers used for generation run their own independent safety systems. This boundary is additive and sits in front of them; it never weakens, bypasses, or substitutes for them, and a refusal by a provider is never answered with fabricated artwork.
+
 ## 18. The Print Vault Vision
 
 The Print Vault is a **future** strategic asset of iHeartPrints. It is not a current V1 requirement and must not gate present work.
@@ -445,6 +468,7 @@ iHeartPrints is not intended to become:
 - a stock-image website
 - an interface that exposes technical generation settings to ordinary customers
 - a platform that prioritizes novelty over printability
+- a trademark-clearance, rights-verification, or legal-advice service
 
 These are scope exclusions: they stay out regardless of what the system becomes technically capable of.
 
@@ -498,6 +522,7 @@ Temporary tactics, vendor changes, framework migrations, and sprint scope do not
 
 | Version | Summary |
 |---|---|
+| 2.2 | Third-party intellectual-property boundary (sections affected: new §17.1, §20). Reason: the product needed a durable statement of what it will and will not create with respect to other people's branding, and the existing text covered only what `print_ready` does not verify. States that iHeartPrints will not knowingly reproduce or deliberately imitate recognizable third-party protected branding and will not help circumvent those protections; that it provides no legal clearance, makes no accusation, and never states a threshold of change; that themes, styles, colors, places, and a customer's own branding remain allowed; that ownership classification and this use-policy boundary stay separate; that preparing supplied artwork is a technical operation rather than an ownership determination; and that provider safety remains independent and additive. Adds trademark clearance / rights verification / legal advice to the explicit non-goals. No change to the V1 deliverable, the production contract, or the two creation paths. |
 | 2.1 | Production-authority clarification (sections affected: §4, §7.1, §7.9, new §7.13, §12, §16 restructured as §16.1–§16.6, §20, §21). Separates product scope (apparel design and artwork preparation) from current production capability (§7.13). Names DTF and DTG as the initial supported raster garment-decoration workflows, scopes `print_ready` to the supported raster production profile rather than to apparel generally, states what iHeartPrints controls versus downstream decorator variables, and classifies embroidery, screen printing, and sublimation as apparel methods outside current capability rather than permanent non-goals. Non-apparel categories remain excluded by scope. No change to the V1 deliverable or to product behavior. |
 | 2.0 | Product-identity amendment: iHeartPrints is an independent apparel-design product. The customer uses or buys artwork, not a physical garment. V1 deliverable is a validated transparent apparel PNG at selected physical dimensions targeting 300 PPI. Print Vault, ownership-class expansion, and design families are explicitly future. Physical-product commerce, signs/banners/large-format, embroidery digitization, screen-print separations, and vector production are removed from product authority. |
 | 1.0 | Initial Constitution establishing iHeartPrints as a conversational print-design platform governed by Design Interviews, Design Briefs, print-ready quality, explicit ownership, and the Print Vault vision. |

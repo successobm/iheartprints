@@ -23,6 +23,7 @@
  *     like every other `BriefPatchProposal` source.
  */
 
+import type { IpSafetySignal } from "@/capabilities/ip-safety/contracts";
 import type { DesignSummaryView } from "@/capabilities/shared/contracts";
 import type { BriefSectionKey } from "@/capabilities/shared/contracts";
 
@@ -102,6 +103,25 @@ export interface ConversationUnderstandingResult {
    * `proposedUpdates`; this field never independently applies a value.
    */
   answeredPendingSection: BriefSectionKey | null;
+  /**
+   * Sprint A3: what this message appears to ask us to create with respect to
+   * third-party protected branding — carried on the ONE semantic
+   * interpretation call the turn already makes, so the IP safety boundary
+   * costs no additional paid model call (Goal 16).
+   *
+   * A HINT ONLY. It is type-only coupling to `@/capabilities/ip-safety`
+   * (contracts, not the capability), Conversation Understanding never
+   * interprets it, never enforces it, and never persists it — exactly like
+   * every other field here. `IpSafetyCapability` decides; the deterministic
+   * detector is the floor and the sole input to the pre-provider fence,
+   * because this field is absent whenever no provider is configured, the
+   * call is skipped, or the provider fails.
+   *
+   * OPTIONAL by design: a provider that says nothing about IP is reporting
+   * the common case, and every consumer must already behave identically
+   * whether the field is absent or `null`.
+   */
+  ipSignal?: IpSafetySignal | null;
 }
 
 /** A result meaning "nothing understood" — the safe default on skip/failure/malformed output. */
@@ -111,6 +131,7 @@ export const EMPTY_UNDERSTANDING_RESULT: ConversationUnderstandingResult = {
   ambiguities: [],
   customerIntent: "unclear",
   answeredPendingSection: null,
+  ipSignal: null,
 };
 
 /** One prior turn in the bounded conversation window sent to a provider. */

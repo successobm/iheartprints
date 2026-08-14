@@ -5,6 +5,11 @@ import type {
   ProjectSnapshot,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
+import {
+  createIpSafetyCapability,
+  describeIpSafetyDecisionForCustomer,
+  type IpSafetyCapability,
+} from "@/capabilities/ip-safety";
 import { diffBriefSections } from "@/capabilities/shared/brief-diff";
 import { groupConceptBatches } from "@/capabilities/shared/concept-batches";
 import { isConceptRelevantChange } from "@/capabilities/shared/concept-relevance";
@@ -141,7 +146,70 @@ export interface ConceptGenerationCapability {
 export function createConceptGenerationCapability(
   repo: ProjectRepository,
   providerKey: string,
+  /**
+   * Sprint A3 — THE ENQUEUE FENCE.
+   *
+   * This capability is enqueue-only and never calls a provider, which is
+   * precisely why the fence belongs here: no `GenerationJob` means no worker
+   * claim, which means no paid provider call, structurally rather than by
+   * policy. Every generation path in the product (initial, three-direction
+   * alternatives, additional exploration batch, targeted revision) funnels
+   * through the two functions below, so one fence covers all of them.
+   *
+   * Defaults to a fresh pure instance rather than being required: a call
+   * site that forgets to pass it gets the boundary anyway, which is the
+   * correct direction for a safety fence to fail.
+   */
+  ipSafety: IpSafetyCapability = createIpSafetyCapability(),
 ): ConceptGenerationCapability {
+  /**
+   * Evaluates the STRUCTURED generation intent — the approved brief version's
+   * generation-bearing design content plus this request's literal revision
+   * instruction — never the conversation transcript. Re-scanning old turns
+   * here would both resurrect requests the customer already retracted and
+   * miss design content that arrived structurally.
+   *
+   * Correction 2: the fields are composed into ONE canonical subject by
+   * `ip-safety/safety-subject.ts`, the same construction
+   * `GenerationWorkerCapability` uses, so a request split across fields
+   * ("Raiders" in the description, "use the exact shield" in the notes) is
+   * seen the way the prompt translator will see it — and the two fences
+   * cannot drift.
+   *
+   * Returns the customer-facing redirect when generation must not proceed.
+   */
+  function refuseUnsafeGeneration(
+    approvedContent: DesignBriefVersion["content"],
+    revisionInstruction: string | null,
+  ): string | null {
+    const decision = ipSafety.evaluateGenerationIntent({
+      designDescription: approvedContent.designDescription,
+      designStyle: approvedContent.designStyle,
+      additionalInstructions: approvedContent.additionalInstructions,
+      exclusions: approvedContent.exclusions,
+      revisionInstruction,
+    });
+    return describeIpSafetyDecisionForCustomer(decision);
+  }
+
+  async function announceIpSafetyRefusal(
+    designId: string,
+    content: string,
+  ): Promise<ProjectSnapshot> {
+    const current = await repo.getProject(designId);
+    if (!current) throw new Error("Project not found");
+    await repo.addMessage(designId, {
+      role: "assistant",
+      content,
+      // Generic metadata for the same reason the conversational gate uses
+      // generic metadata: `ProjectSnapshot.messages` is client-visible.
+      metadata: { phase: current.conversation.phase, act: "acknowledge" },
+    });
+    const snapshot = await repo.getProject(designId);
+    if (!snapshot) throw new Error("Project not found");
+    return snapshot;
+  }
+
   function buildIdempotencyKey(
     designId: string,
     approvedVersionId: string,
@@ -214,6 +282,14 @@ export function createConceptGenerationCapability(
         "Cannot generate concepts without an approved design brief",
       );
     }
+
+    // Sprint A3: refused BEFORE any job row exists, so a blocked request has
+    // nothing for a worker to claim and no paid provider call is reachable.
+    const refusal = refuseUnsafeGeneration(
+      approvedVersion.content,
+      revisionInstruction,
+    );
+    if (refusal) return announceIpSafetyRefusal(designId, refusal);
 
     const idempotencyKey = buildIdempotencyKey(designId, approvedVersion.id);
     let job = await repo.getGenerationJobByIdempotencyKey(
@@ -335,6 +411,12 @@ export function createConceptGenerationCapability(
     if (!approvedVersion || approvedVersion.projectId !== designId) {
       throw new Error("Cannot generate concepts without an approved design brief");
     }
+
+    // Sprint A3: "Show Me 3 New Concepts" re-generates from the SAME approved
+    // brief version, so it is exactly as capable of reaching a paid provider
+    // as initial generation and gets the same fence.
+    const refusal = refuseUnsafeGeneration(approvedVersion.content, null);
+    if (refusal) return announceIpSafetyRefusal(designId, refusal);
 
     const current = await repo.getProject(designId);
     if (!current) throw new Error("Project not found");

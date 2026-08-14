@@ -218,6 +218,13 @@ function buildMessages(
     'Use confidence "explicit" only when the customer directly stated the value. Use "inferred" when it is strongly implied by context (e.g. answering the pending question, or a deferral like "you choose" / "no preference" which should go in deferrals, not proposedUpdates). Use "ambiguous" — and do NOT rely on it being applied — whenever you are genuinely unsure.',
     'Colors play different roles — do not collapse them into one field. (1) "productColor" is the color of the physical garment/product itself ("the shirt is black"). (2) A color that describes the SUBJECT of the artwork or an object depicted within it (e.g. "a red car", "my red 1988 Toyota MR2", "a blue whale breaching") belongs to "graphics" as part of the subject description — never to "productColor", and never to "colors" either. (3) "colors" is the customer\'s stated palette PREFERENCE for how the artwork itself should be rendered ("use blue and gold in the design", "keep it black and white") — a preference about rendering, not a color that merely happens to be part of what the artwork depicts. When a message names an object\'s color as part of describing what the artwork should show, propose that color as part of the "graphics" value (the subject description), not as productColor or colors. A single message can correct more than one of these at once — attribute each color to its own role rather than defaulting to whichever is mentioned first.',
     "A correction (the customer changing a previously given answer) must be flagged isCorrection: true.",
+    // Sprint A3 (IP / trademark safety). Reported on this ALREADY-REQUIRED
+    // interpretation call so the safety boundary costs no extra model call.
+    // This is a hint to a deterministic product boundary, never the boundary
+    // itself — an omitted signal costs nothing, a wrong one refuses a paying
+    // customer's ordinary design, so precision matters far more than recall.
+    '"ipSignal" reports ONLY whether this message asks iHeartPrints to CREATE artwork that reproduces or deliberately imitates a specific, recognizable third-party brand, team mark, or protected character — or to help get around such protection. Use "protected_mark_reproduction" when the customer asks us to make a named third party\'s logo/emblem/crest/wordmark ("make me the Raiders logo", "use the Nike swoosh", "recreate this NFL team\'s mark"). Use "protected_mark_imitation" when they ask for something recognizably the same without saying "copy" ("make something almost identical to that brand\'s logo", "make the logo exactly the same"). Use "protected_character_reproduction" for a named third-party character, mascot, or franchise property ("Mickey Mouse in a football jersey"). Use "protection_evasion" when the request is explicitly about circumventing protection ("change it just enough that it\'s legal", "make it different enough to avoid copyright", "remove the trademark symbol", "a knockoff version", "almost identical but technically different"). Never state or imply a threshold or an amount of change that would be acceptable.',
+    'CRITICAL for "ipSignal" — set it to null in ALL of these, which are ordinary, allowed design work: a THEME, style, color scheme, city, region, sport, or era ("black and silver football design", "Las Vegas football", "pirate skull with crossed swords", "vintage Los Angeles basketball", "bold collegiate lettering", "a generic athletic motion mark"); a brand or team mentioned as CONTEXT rather than as artwork ("my company is doing a watch party for the Raiders", "I like black and silver"); NEGATION ("don\'t use the Raiders logo", "no team logos"); AVOIDANCE ("make this NOT look like the Raiders", "we want something completely original"); REMOVAL of branding so the result is unbranded ("remove the Nike logo from the reference"); and the customer\'s OWN branding ("recreate our logo", "this is my company\'s mark"). Brand vocabulary alone is never a reason to set a signal. When in any doubt, use null, or "ambiguous" confidence — an ambiguous signal is discarded.',
     "Never include your reasoning, chain-of-thought, or explanations of your own reasoning process anywhere in the response — `evidence` must be a short, direct quote or near-quote from the customer's message only.",
     "Worked examples (illustrative only — apply the same reasoning to any domain, not just these):",
     JSON.stringify(
@@ -367,6 +374,8 @@ function buildMessages(
         customerIntent:
           "provide_info | correct | defer | approve | request_revision | ask_question | unclear",
         answeredPendingSection: "string or null",
+        ipSignal:
+          "null, or { kind: protected_mark_reproduction | protected_mark_imitation | protected_character_reproduction | protection_evasion, confidence: explicit | inferred | ambiguous, evidence: short quote }",
       },
       null,
       2,
@@ -438,6 +447,12 @@ function normalizeRawInterpretation(raw: unknown): ConversationUnderstandingResu
     answeredPendingSection:
       typeof obj.answeredPendingSection === "string"
         ? (obj.answeredPendingSection as ConversationUnderstandingResult["answeredPendingSection"])
+        : null,
+    // Sprint A3: validated/clamped by `ConversationUnderstandingCapability`
+    // exactly like every other field — this adapter only passes it through.
+    ipSignal:
+      obj.ipSignal && typeof obj.ipSignal === "object"
+        ? (obj.ipSignal as ConversationUnderstandingResult["ipSignal"])
         : null,
   };
 }

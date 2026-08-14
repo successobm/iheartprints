@@ -58,4 +58,18 @@ Before proposing significant product, UX, domain-model, or architecture changes:
 10. Preserve capability dependency direction from `ARCHITECTURE.md` / `src/capabilities/shared/capability-boundaries.ts`.
 11. When architectural boundaries change, update `ARCHITECTURE.md` in the same change.
 
+iHeartPrints will not knowingly create artwork that reproduces or
+deliberately imitates recognizable third-party protected branding, and will
+not help a customer circumvent those protections (Constitution §17.1,
+`ARCHITECTURE.md` §23a, `src/capabilities/ip-safety/`). It is a product
+boundary, not legal clearance: never state or imply that artwork is legally
+safe, licensed, trademark-cleared, copyright-cleared, or owned; never accuse
+a customer of infringement; and never state a threshold or amount of change
+that would make a refused request acceptable. Themes, styles, colors, places,
+generic visual concepts, and a customer's own branding remain allowed.
+Ownership classification is separate architecture and is not rights
+verification; preparing uploaded artwork is a technical operation, not an
+ownership determination; provider safety systems remain independent and must
+not be weakened or bypassed.
+
 When another instruction, roadmap item, or implementation preference conflicts with the Constitution, the Constitution takes precedence unless it has been formally amended.

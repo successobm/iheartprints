@@ -1126,6 +1126,224 @@
  *   Asking an uploaded-artwork customer to type, confirm, or verify wording
  *     that is already in their own pixels (and no OCR)
  *   Treating a `uploaded_preserve` report's absent checks as passes
+ *
+ * ## Sprint A3 — IP / trademark safety (`IpSafetyCapability`)
+ *
+ * A PRODUCT SAFETY BOUNDARY, never a legal-clearance system. iHeartPrints
+ * will not knowingly help a customer create artwork that reproduces or
+ * deliberately imitates recognizable third-party protected branding, and
+ * will not help them evade those protections. It never determines, asserts,
+ * or implies that anything is legal, licensed, cleared, or owned. See
+ * ARCHITECTURE.md §17 and Constitution §17.
+ *
+ * DETECTION AND ENFORCEMENT ARE SEPARATE, deliberately:
+ *
+ *   detection  (`ip-safety/ip-safety-detection.ts`, pure)
+ *     "What does the customer appear to be asking us to create?"
+ *   enforcement (`IpSafetyCapability`, pure + the fences that consume it)
+ *     "May iHeartPrints send this request to the generation provider?"
+ *
+ * Flow — the boundary is strictly ADDITIVE in front of provider safety, and
+ * provider safety is unchanged:
+ *
+ *     customer intent
+ *       → iHeartPrints IP safety (deterministic, ours)
+ *       → allowed generation request
+ *       → the provider's own safety systems (independent, untouched)
+ *       → result
+ *
+ * THREE FENCES, one shared pure capability instance:
+ *
+ *   1. Conversational gate — `ConversationCapability`, after the turn is
+ *      semantically interpreted and BEFORE Intent Extraction's proposals are
+ *      applied. A blocked request never becomes Design Brief content.
+ *   2. Enqueue fence — `ConceptGenerationCapability`, before any
+ *      `GenerationJob` row exists. No job means no worker claim means no
+ *      paid call, structurally rather than by policy. Covers initial,
+ *      three-direction alternatives, additional exploration batch, and
+ *      targeted revision, because all four funnel through its two enqueue
+ *      functions.
+ *   3. Pre-provider fence — `GenerationWorkerCapability.runClaimedJob`,
+ *      before `planPaidImageUnits` and any dispatch. Unreachable in ordinary
+ *      operation; it exists because "no paid call happens" has to be a
+ *      property of the code that makes the call.
+ *
+ * AUTHORITY IS DERIVED, NOT PERSISTED. There is no `ip_safety` column and no
+ * migration. Both generation fences evaluate the STRUCTURED generation
+ * intent — the approved `DesignBriefVersion`'s generation-bearing design
+ * content plus the job's own `revisionInstruction` — never the conversation
+ * transcript. Re-scanning old turns at provider-call time would resurrect
+ * requests the customer already retracted; a stored verdict would have to be
+ * explicitly un-set. Recomputation is what makes both required transitions
+ * free:
+ *
+ *     unsafe → customer revises → safe → generation allowed
+ *     safe   → customer adds a protected-mark request → blocked
+ *
+ * ONE CANONICAL SUBJECT (Correction 2). `ip-safety/safety-subject.ts` is the
+ * single construction both generation fences use, so a request SPLIT across
+ * structured fields is seen the way `translateApprovedBrief` will see it —
+ * as one thing:
+ *
+ *     designDescription      = "Raiders"
+ *     additionalInstructions = "use the exact shield"
+ *
+ * Parts are joined with ", " deliberately: a comma is not a clause boundary
+ * (so cross-field association works) but IS an operator-scope terminator (so
+ * a negation in one field cannot leak into another). The customer's current
+ * instruction is composed FIRST, because operators scope forward and a
+ * corrective instruction ("remove the logo") must be able to govern the
+ * design context behind it. The module documents which brief fields are in
+ * the subject and — just as importantly — which are excluded (`exactText`,
+ * `preferredColors`, `productSummary`, `audience`, `purpose`) and why.
+ *
+ * SCOPING IS PER-OCCURRENCE, NEVER PER-CLAUSE (Correction 1). A neutralizing
+ * operator (negation, removal, avoidance) runs from where it appears to the
+ * next scope terminator and neutralizes only the referent occurrences inside
+ * it. A finding requires a SURVIVING referent and a SURVIVING binding. The
+ * original clause-wide rule let an unrelated trailing instruction unblock an
+ * explicit request ("Make me the Raiders logo, no text."), which is the
+ * worst possible direction to be wrong in. Contextual "safe words"
+ * (`themed`, `vibe`, `feel`, `inspired by`, `I like`, `said`, watch-party
+ * vocabulary) no longer disqualify anything at all — they never carried the
+ * allow-cases, which hold for the far better reason that they contain no
+ * protected referent.
+ *
+ * BOUNDED MULTI-TURN AUTHORITY (Correction 3). The conversational gate
+ * composes the current message with a bounded window of the customer's own
+ * recent turns, because a request can be split across turns ("I want a
+ * Raiders design." → "Use their exact shield."). The window is small, is
+ * derived from the conversation record rather than persisted, and EXCLUDES
+ * turns that were themselves refused — otherwise a blocked message would
+ * keep re-blocking the rephrasings that follow it. The gate deliberately
+ * does NOT fold in the Design Brief: a theme legitimately recorded there
+ * would combine with every later mention of "logo" for the life of the
+ * project. The brief is where the two GENERATION fences work instead, which
+ * is the moment it actually matters.
+ *
+ * ECONOMICS (Goal 16): A3 introduces NO new paid model call. The semantic
+ * layer rides on the ONE Conversation Understanding interpretation each
+ * pre-approval/revision turn already makes, as a new optional
+ * `ConversationUnderstandingResult.ipSignal`. That signal is a HINT only —
+ * it is absent whenever the provider is unconfigured (the default), the call
+ * is skipped, or it fails — so the deterministic detector is the floor and
+ * the sole input to both generation fences.
+ *
+ * SEMANTIC PRECEDENCE (Correction P2). The hint may EXTEND deterministic
+ * recall — it is the only way a mark nobody enumerated is caught — but it
+ * may never contradict safety the customer wrote plainly:
+ *
+ *   - a deterministic block always blocks; no signal can lift it;
+ *   - a malformed/unknown signal is sanitized to null and changes nothing;
+ *   - `"ambiguous"` never blocks;
+ *   - neither `"explicit"` nor `"inferred"` may block when deterministic
+ *     safe evidence explains THE SAME REQUEST the signal is about. "Don't
+ *     use the Raiders logo" must not be refused because a model guessed at
+ *     the sentence.
+ *
+ * SUPPRESSION IS SCOPED TO THE SAME REQUEST (Correction 3). Two weaker
+ * rules were tried and both leaked, in the expensive direction:
+ *
+ *     "there is safe structure somewhere in the subject"   (Correction 1)
+ *     "…and no surviving deterministic request structure"  (Correction 2)
+ *
+ *     "Recreate our logo, then reproduce theirs."
+ *      |-- owned, explained --|  |- someone else's, NOT explained -|
+ *
+ *     "Don't use the old logo, draw that famous cartoon mouse exactly."
+ *      |----- neutralized -----|  |- invisible to the lexicon entirely -|
+ *
+ * The second example is decisive: nothing deterministic exists for "that
+ * famous cartoon mouse", so no occurrence count, lexicon entry, or counter
+ * can represent it. The semantic signal's own `evidence` quote — already
+ * required by the `IpSafetySignal` contract — is the only handle on WHERE
+ * its request lives, so the rule is positional:
+ * `isCoveredBySafeEvidence(subject, quote)` asks whether the customer's
+ * quoted words sit inside a neutralizing operator's scope or inside an
+ * ownership-explained SEGMENT (the stretch between scope terminators — one
+ * instruction). Unlocatable evidence cannot establish safety and therefore
+ * does not suppress: the conservative direction on a spend boundary.
+ *
+ * Correction 4 hardened that lookup in two ways, both of which were
+ * exploitable and both of which are spend defects:
+ *   - EVERY occurrence of the quote is checked, not just the first. A safely
+ *     covered copy must not immunize an identical uncovered one later
+ *     ("Don't use the X logo, then recreate the X logo") — in either order.
+ *   - Coverage requires FULL containment (`start >= scope.start && end <=
+ *     scope.end`), not merely starting inside. Start-only matching let a
+ *     quote begin inside a negation and run straight out the other side of
+ *     it, carrying the unsafe half under cover of the safe half. Applied
+ *     identically to neutralizing scopes and ownership-explained segments.
+ *
+ * This subsumes any per-kind rule. A character request is blocked in the
+ * decoy sentence because it sits outside the negation's scope, not because
+ * it is a character; "Don't use that famous cartoon mouse" is allowed for
+ * the same positional reason, with no character lexicon involved in either.
+ * The DETERMINISTIC verdict is untouched by all of this — the locator only
+ * ever decides what the SEMANTIC layer may do.
+ *
+ * BUSINESS-NAME COLLISIONS. A recognized token immediately followed by a
+ * trade or legal-entity noun ("Raiders Plumbing LLC", "Supreme Roofing") is
+ * a customer business NAME, and that OCCURRENCE is not a protected referent.
+ * Occurrence-level, never clause-level, and narrow: "logo", "shield", and
+ * "crest" are not on the continuation list, so "the Raiders logo" is
+ * untouched. This is a reading of sentence structure, not an ownership or
+ * rights determination.
+ *
+ * NEVER CONFLATED WITH OWNERSHIP. `OwnershipCapability` remains reserved
+ * future provenance/licensing architecture and is UNCHANGED by A3. Ownership
+ * classification is not trademark or copyright verification; IP Safety is a
+ * generation/use-policy gate. Preparing uploaded artwork is a technical
+ * operation on bytes the customer supplied — never a determination that they
+ * own it.
+ *
+ * Allowed:
+ *   IpSafety → nothing. It is a leaf: pure, synchronous, zero dependencies,
+ *              `createIpSafetyCapability()` takes no arguments. Callers
+ *              resolve brief content and pass plain data, exactly like
+ *              `PrintValidationCapability`.
+ *   ConversationUnderstanding → `ip-safety/contracts` TYPE-ONLY, for the
+ *              `ipSignal` shape. It never interprets, enforces, or persists
+ *              it.
+ *   Conversation / ConceptGeneration / GenerationWorker → IpSafety
+ *
+ * Forbidden:
+ *   An internal `IpSafetyReason`, finding, evidence span, or confidence
+ *     reaching a customer-facing message, message metadata, or
+ *     `ProjectSnapshot` — `ip-safety/customer-response.ts` is the one place
+ *     a decision becomes language, and it deliberately emits the SAME
+ *     redirect for every reason so the classification cannot be read off
+ *     the prose either
+ *   Any customer-facing text stating or implying that artwork is legal,
+ *     licensed, trademark-cleared, copyright-cleared, or owned — or that
+ *     the customer has infringed anything
+ *   Stating a threshold, percentage, or amount of change that would make a
+ *     request acceptable
+ *   Persisting an IP safety decision, or gating generation on a stored one
+ *   Re-scanning the conversation transcript at provider-call time instead of
+ *     evaluating the structured generation intent
+ *   Making the boundary depend on a semantic/provider layer that may be
+ *     unconfigured, skipped, or failed
+ *   Weakening, bypassing, or substituting for a provider's own safety
+ *     systems, or fabricating artwork when a provider refuses
+ *   Turning `OwnershipCapability` into a rights-verification system, or
+ *     deriving ownership from an IP safety decision (in either direction)
+ *   Adding an IP safety gate to pure technical preparation of uploaded
+ *     artwork, which generates nothing and spends nothing
+ *   A `"review"` outcome, or any other decision value the product has no
+ *     real workflow behind
+ *   Clearing an entire clause because a disqualifying word appears somewhere
+ *     in it — scoping is per-occurrence (Correction 1)
+ *   Either generation fence building its own subject instead of calling
+ *     `safety-subject.ts` (Correction 2)
+ *   A semantic hint refusing a request whose safety the deterministic layer
+ *     established structurally (Correction P2)
+ *   Suppressing a semantic signal on safe evidence that does not cover that
+ *     signal's own request — including an ownership claim in a different
+ *     instruction of the same clause (Correction 3)
+ *   Locating a semantic signal's evidence by first match only, or treating a
+ *     quote that merely STARTS inside a safe scope as explained by it
+ *     (Correction 4)
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "2M2k" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "A3c4" as const;

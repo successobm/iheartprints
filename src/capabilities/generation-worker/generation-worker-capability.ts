@@ -80,6 +80,12 @@ import {
 } from "@/lib/config/print-validation-logging";
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
 
+import {
+  createIpSafetyCapability,
+  describeIpSafetyDecisionForCustomer,
+  type IpSafetyCapability,
+} from "@/capabilities/ip-safety";
+
 import { buildGenerationIntentForJob } from "./build-generation-intent";
 import {
   isSupportedSourceContentType,
@@ -270,6 +276,22 @@ export function createGenerationWorkerCapability(
    * call sites/tests need no wiring changes.
    */
   printValidation: PrintValidationCapability = createPrintValidationCapability(),
+  /**
+   * Sprint A3 — THE LAST FENCE BEFORE SPEND.
+   *
+   * `ConceptGenerationCapability` already refuses to create a job for an
+   * unsafe generation intent, so in ordinary operation this never fires.
+   * It exists because "no job was created" is a property of the enqueue
+   * path, while "no paid call happens" has to be a property of the code
+   * that actually makes the call: a job enqueued before a brief was
+   * revised, a recovered job, a future enqueue path, or a direct worker
+   * invocation must all still be fenced. Deterministic only — the semantic
+   * layer is a conversational hint and is deliberately unavailable here.
+   *
+   * Defaults to a fresh pure instance so existing call sites/tests need no
+   * wiring change.
+   */
+  ipSafety: IpSafetyCapability = createIpSafetyCapability(),
 ): GenerationWorkerCapability {
   async function persistConceptAsset(
     designId: string,
@@ -1206,6 +1228,53 @@ export function createGenerationWorkerCapability(
     });
   }
 
+  /**
+   * Sprint A3: terminates a claimed job that must never reach the provider.
+   *
+   * Deliberately NOT `failClaimedJob`: this is a product refusal, not an
+   * infrastructure problem, and telling the customer "we ran into a problem,
+   * try again" would be both untrue and an invitation to burn attempts on a
+   * request that will never be accepted. The job is marked failed with an
+   * internal-only reason, and the customer gets the same redirect every
+   * other IP safety boundary gives them.
+   *
+   * The project is left in a state the customer can act from — never
+   * stranded mid-`generating`, and never carrying a `revisionPending` that
+   * no future regeneration will ever clear. A blocked request costs the
+   * customer this one attempt, nothing more.
+   */
+  async function refuseClaimedJobForIpSafety(
+    job: GenerationJob,
+    designId: string,
+    customerMessage: string,
+  ): Promise<void> {
+    await repo.updateGenerationJob(job.id, {
+      status: "failed",
+      lastError: "Generation refused by the iHeartPrints IP safety boundary.",
+    });
+
+    if (job.kind === "initial") {
+      await repo.setProjectStatus(designId, "approved");
+      await repo.updateConversationPhase(designId, "edit_requested");
+    } else {
+      await repo.setProjectStatus(designId, "concepts_ready");
+      await repo.updateConversationPhase(designId, phaseAfterGeneration(job));
+      // The requested change will not be made, so a pending-revision
+      // authority nothing can ever resolve would permanently bar
+      // finalization of artwork the customer already has and still wants.
+      await repo.updateProject(designId, { revisionPending: false });
+    }
+
+    await repo.addMessage(designId, {
+      role: "assistant",
+      content: customerMessage,
+      metadata: {
+        phase: job.kind === "initial" ? "edit_requested" : "concepts_ready",
+        act: "acknowledge",
+      },
+    });
+  }
+
   async function runClaimedJob(job: GenerationJob): Promise<void> {
     const designId = job.projectId;
     const approvedVersion = await repo.getDesignBriefVersionById(
@@ -1287,6 +1356,27 @@ export function createGenerationWorkerCapability(
         }
       }
       await completeGenerationJob(designId, job);
+      return;
+    }
+
+    // Sprint A3: the last fence before any paid provider call. Evaluated
+    // against the STRUCTURED generation intent this job would actually be
+    // translated from — the approved brief version's generation-bearing
+    // design content plus the job's own literal revision instruction — never
+    // the transcript. Correction 2: composed into the identical canonical
+    // subject `ConceptGenerationCapability` uses, by the same module, so the
+    // enqueue fence and this one cannot disagree about what the request is.
+    const ipSafetyRefusal = describeIpSafetyDecisionForCustomer(
+      ipSafety.evaluateGenerationIntent({
+        designDescription: approvedVersion.content.designDescription,
+        designStyle: approvedVersion.content.designStyle,
+        additionalInstructions: approvedVersion.content.additionalInstructions,
+        exclusions: approvedVersion.content.exclusions,
+        revisionInstruction: job.revisionInstruction ?? null,
+      }),
+    );
+    if (ipSafetyRefusal) {
+      await refuseClaimedJobForIpSafety(job, designId, ipSafetyRefusal);
       return;
     }
 

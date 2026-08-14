@@ -28,6 +28,8 @@ export type { GenerationSchedulerCapability } from "./worker-scheduler";
 export type { PrintValidationCapability } from "./print-validation";
 export type { RevisionCapability } from "./revision";
 export type { PrintVaultCapability } from "./print-vault";
+/** Sprint A3: product safety boundary. Never an ownership or legal-clearance authority. */
+export type { IpSafetyCapability } from "./ip-safety";
 export type { AssetCapability } from "./assets";
 export type { OwnershipCapability } from "./ownership";
 export type { ConceptGenerationProvider } from "./providers";

@@ -30,6 +30,7 @@ import { createFinalArtworkWorkerCapability } from "@/capabilities/final-artwork
 import { createGenerationWorkerCapability } from "@/capabilities/generation-worker";
 import { createIntentExtractionCapability } from "@/capabilities/intent-extraction";
 import { createInterviewIntelligenceCapability } from "@/capabilities/interview-intelligence";
+import { createIpSafetyCapability } from "@/capabilities/ip-safety";
 import { createOwnershipCapability } from "@/capabilities/ownership";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import { createPrintVaultCapability } from "@/capabilities/print-vault";
@@ -80,6 +81,14 @@ export interface CapabilityGraph {
   revision: ReturnType<typeof createRevisionCapability>;
   printVault: ReturnType<typeof createPrintVaultCapability>;
   assets: ReturnType<typeof createAssetCapability>;
+  /**
+   * Sprint A3: the IP / trademark product safety boundary. Pure and
+   * synchronous. Deliberately separate from `ownership` below — ownership is
+   * future provenance/licensing architecture, this is a generation-time use
+   * policy, and merging them would turn a stub into a fake legal-rights
+   * verification system.
+   */
+  ipSafety: ReturnType<typeof createIpSafetyCapability>;
   ownership: ReturnType<typeof createOwnershipCapability>;
   /**
    * Existing Artwork → Print Ready Phase 1: the Upload Existing Artwork
@@ -120,10 +129,16 @@ export function createCapabilityGraph(
   const thumbnails = new PngThumbnailGenerator();
   const assets = createAssetCapability(repo, assetStorage, thumbnails);
 
+  // Sprint A3: one shared, pure instance. The same boundary decides the
+  // conversational gate, the enqueue fence, and the pre-provider fence, so
+  // the three can never drift into disagreeing about the same request.
+  const ipSafety = createIpSafetyCapability();
+
   const provider = resolveConceptGenerationProvider();
   const conceptGeneration = createConceptGenerationCapability(
     repo,
     provider.providerKey,
+    ipSafety,
   );
   // Sprint 2I Phase 2: resolves to a real (OpenAI vision) evaluator when
   // configured, otherwise the deterministic placeholder. Composition owns
@@ -145,6 +160,7 @@ export function createCapabilityGraph(
     conceptEvaluation,
     revisionIntelligence,
     printValidation,
+    ipSafety,
   );
   const workerScheduler = createGenerationSchedulerCapability(generationWorker);
 
@@ -182,6 +198,7 @@ export function createCapabilityGraph(
     designSummary,
     conceptGeneration,
     finalArtwork,
+    ipSafety,
   });
 
   return {
@@ -207,6 +224,7 @@ export function createCapabilityGraph(
     revision: createRevisionCapability(),
     printVault: createPrintVaultCapability(),
     assets,
+    ipSafety,
     ownership: createOwnershipCapability(),
     // Existing Artwork → Print Ready Phase 1: repository + assets + the one
     // brief-mutation boundary. No provider is resolved here, and none exists
