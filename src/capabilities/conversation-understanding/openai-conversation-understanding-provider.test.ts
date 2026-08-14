@@ -217,3 +217,172 @@ describe("OpenAIConversationUnderstandingProvider — failure classification (Go
     assert.equal(attempt, 1);
   });
 });
+
+/**
+ * Sprint A3.1 — SEMANTIC IP RECALL HARDENING (prompt contract).
+ *
+ * Controlled live acceptance found `ipSignal` recall to be probabilistic for
+ * a third party the model does not recognize: "Recreate the Fictitious
+ * Rovers badge exactly." produced the expected explicit signal in 3 of 4
+ * full-path runs and nothing in the fourth. The prompt described the target
+ * as a "recognizable" third party and illustrated it only with famous real
+ * brands, which invites the model to answer "do I know this brand?" rather
+ * than "is a reproduction being requested?".
+ *
+ * These are PROMPT-CONTRACT tests, not model tests. They cannot prove the
+ * model's behavior improved — only a live repeatability run can do that.
+ * What they do prove is that the guidance and few-shots the fix depends on
+ * are actually present in what gets sent, so a future edit cannot silently
+ * delete them. No network call is made: `fetch` is stubbed.
+ */
+describe("OpenAIConversationUnderstandingProvider — ipSignal prompt contract (Sprint A3.1)", () => {
+  /** Captures the exact system prompt sent, without any network call. */
+  async function capturedSystemPrompt(): Promise<string> {
+    let captured = "";
+    const fetchImpl = (async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      captured = body.messages.find((m) => m.role === "system")?.content ?? "";
+      return chatResponse({
+        proposedUpdates: [],
+        deferrals: [],
+        ambiguities: [],
+        customerIntent: "unclear",
+        answeredPendingSection: null,
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = new OpenAIConversationUnderstandingProvider({
+      apiKey: "sk-test",
+      model: "gpt-4o-mini",
+      fetchImpl,
+      sleepImpl: noopSleep,
+    });
+    await provider.interpret(request());
+    return captured;
+  }
+
+  it("tells the model an unfamiliar third-party name is still a reproduction request", async () => {
+    const prompt = await capturedSystemPrompt();
+    assert.match(prompt, /REPRODUCTION RELATIONSHIP, not whether you recognize the name/i);
+    assert.match(prompt, /do NOT need to know the organization/i);
+    assert.match(prompt, /even if the name is completely unfamiliar to you/i);
+    // The exact live failure, named in the prompt.
+    assert.match(prompt, /Recreate the Fictitious Rovers badge exactly/);
+  });
+
+  it("no longer gates the signal on the brand being 'recognizable'", async () => {
+    const prompt = await capturedSystemPrompt();
+    assert.doesNotMatch(prompt, /a specific, recognizable third-party brand/i);
+  });
+
+  it("keeps the counterweight: an unfamiliar proper noun alone is not protected IP", async () => {
+    const prompt = await capturedSystemPrompt();
+    assert.match(prompt, /an unfamiliar proper noun is NOT by itself protected IP/i);
+    assert.match(prompt, /needs BOTH a third-party referent AND a request to reproduce/i);
+    assert.match(prompt, /Possessives decide ownership/i);
+  });
+
+  it("carries the matched unknown-name few-shot pair — signal and null", async () => {
+    const prompt = await capturedSystemPrompt();
+    // Unknown third party -> signal.
+    assert.match(prompt, /"Recreate the Fictitious Rovers badge exactly\."/);
+    assert.match(prompt, /Copy Acme Falcons' club crest/);
+    // Equally unknown, customer-owned -> null.
+    assert.match(prompt, /Recreate our Rivera Plumbing logo/);
+    assert.match(prompt, /"ipSignal" worked examples/);
+  });
+
+  it("carries the safe negation, mixed, and character few-shots", async () => {
+    const prompt = await capturedSystemPrompt();
+    assert.match(prompt, /Don't use the Fictitious Rovers badge\. Make something original\./);
+    assert.match(prompt, /Don't use the old logo, recreate the Fictitious Rovers badge\./);
+    assert.match(prompt, /Draw that famous cartoon mouse exactly like the original\./);
+    assert.match(prompt, /protected_character_reproduction/);
+  });
+
+  it("preserves the existing false-positive guidance (negation, avoidance, removal, own branding)", async () => {
+    const prompt = await capturedSystemPrompt();
+    for (const pattern of [
+      /NEGATION/,
+      /AVOIDANCE/,
+      /REMOVAL of branding/,
+      /the customer's OWN branding/,
+      /Brand vocabulary alone is never a reason to set a signal/,
+      /an ambiguous signal is discarded/,
+    ]) {
+      assert.match(prompt, pattern);
+    }
+  });
+
+  it("requires evidence to be an exact verbatim substring, not a near-quote", async () => {
+    const prompt = await capturedSystemPrompt();
+    assert.match(prompt, /EXACT, short, VERBATIM substring copied character-for-character/i);
+    assert.match(prompt, /never a paraphrase/i);
+    assert.match(prompt, /exact verbatim substring of the customer message/i);
+    // "near-quote" actively invited the paraphrase that breaks the positional
+    // suppression rule in `ip-safety`.
+    assert.doesNotMatch(prompt, /near-quote/i);
+  });
+
+  it("still forbids reasoning and never states an acceptable amount of change", async () => {
+    const prompt = await capturedSystemPrompt();
+    assert.match(prompt, /Never include your reasoning, chain-of-thought/i);
+    assert.match(prompt, /Never state or imply a threshold or an amount of change/i);
+  });
+
+  it("makes exactly one model call per interpretation — no second call was added", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      return chatResponse({
+        proposedUpdates: [],
+        deferrals: [],
+        ambiguities: [],
+        customerIntent: "unclear",
+        answeredPendingSection: null,
+        ipSignal: {
+          kind: "protected_mark_reproduction",
+          confidence: "explicit",
+          evidence: "Recreate the Fictitious Rovers badge exactly",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = new OpenAIConversationUnderstandingProvider({
+      apiKey: "sk-test",
+      model: "gpt-4o-mini",
+      fetchImpl,
+      sleepImpl: noopSleep,
+    });
+    const result = await provider.interpret(request());
+
+    assert.equal(calls, 1);
+    assert.equal(result.ipSignal?.kind, "protected_mark_reproduction");
+    assert.equal(result.ipSignal?.confidence, "explicit");
+  });
+
+  it("parsing of a null / absent / malformed ipSignal is unchanged", async () => {
+    for (const ipSignal of [null, undefined, "not-an-object", 42]) {
+      const fetchImpl = (async () =>
+        chatResponse({
+          proposedUpdates: [],
+          deferrals: [],
+          ambiguities: [],
+          customerIntent: "unclear",
+          answeredPendingSection: null,
+          ...(ipSignal === undefined ? {} : { ipSignal }),
+        })) as unknown as typeof fetch;
+
+      const provider = new OpenAIConversationUnderstandingProvider({
+        apiKey: "sk-test",
+        model: "gpt-4o-mini",
+        fetchImpl,
+        sleepImpl: noopSleep,
+      });
+      const result = await provider.interpret(request());
+      assert.equal(result.ipSignal ?? null, null);
+    }
+  });
+});

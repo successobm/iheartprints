@@ -6202,6 +6202,14 @@ removal, or avoidance operator, or an ownership claim over branding nobody
 recognizes. "Don't use the Raiders logo" must not be refused because a model
 guessed at the sentence.
 
+Controlled live acceptance established a production-critical invariant: the
+semantic interpreter may conservatively emit a protected-mark signal for
+customer-owned branding, so signal presence alone is not sufficient to refuse
+a request. Ownership-scoped positional evidence suppression is part of the
+decision boundary. A semantic finding may be suppressed only when its exact
+evidence is fully covered by the ownership or safe scope that explains that
+same request.
+
 #### Suppression is scoped to the same request (Correction 3)
 
 Two weaker rules were tried, and both leaked in the expensive direction:

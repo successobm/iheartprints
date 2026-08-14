@@ -180,7 +180,33 @@ function isAbortError(error: unknown): boolean {
  * Provider-specific prompt dialect lives only here — never exported, never
  * persisted, never logged, never shown to a customer. The model is
  * explicitly instructed never to request or include chain-of-thought/
- * reasoning — `evidence` is a short quote, not an explanation.
+ * reasoning — `evidence` is an exact substring, not an explanation.
+ *
+ * Sprint A3.1 (semantic IP recall hardening) — prompt-only, no code path,
+ * no model change, no extra call. Controlled live acceptance showed
+ * `ipSignal` recall was PROBABILISTIC for a third party the model does not
+ * recognize: "Recreate the Fictitious Rovers badge exactly." produced the
+ * expected explicit signal in 3 of 4 full-path runs and nothing in the
+ * fourth. The prompt was the cause — it described the target as a
+ * "recognizable" third party, illustrated it exclusively with famous real
+ * brands, and closed with "when in any doubt, use null", which together
+ * invite the model to answer "do I know this brand?" instead of "is a
+ * reproduction being requested?".
+ *
+ * Three changes address that without trading away precision:
+ *   1. the reproduction RELATIONSHIP is named as the test, explicitly
+ *      independent of whether the model recognizes the organization;
+ *   2. an equally explicit counterweight — an unfamiliar proper noun alone
+ *      is never a signal; possessives decide ownership ("our" vs "their");
+ *   3. six compact `ipSignal` few-shots, deliberately built around a
+ *      matched unknown-name PAIR (unknown third party → signal, unknown
+ *      customer-owned brand → null) so recall and precision are taught by
+ *      the same example set.
+ *
+ * `evidence` also moved from "short, direct quote or near-quote" to an EXACT
+ * verbatim substring. "Near-quote" invited paraphrase, and a paraphrased
+ * quote cannot be located inside the customer's message — which is exactly
+ * what the positional suppression rule in `ip-safety` needs it for.
  */
 function buildMessages(
   request: ConversationUnderstandingRequest,
@@ -223,9 +249,74 @@ function buildMessages(
     // This is a hint to a deterministic product boundary, never the boundary
     // itself — an omitted signal costs nothing, a wrong one refuses a paying
     // customer's ordinary design, so precision matters far more than recall.
-    '"ipSignal" reports ONLY whether this message asks iHeartPrints to CREATE artwork that reproduces or deliberately imitates a specific, recognizable third-party brand, team mark, or protected character — or to help get around such protection. Use "protected_mark_reproduction" when the customer asks us to make a named third party\'s logo/emblem/crest/wordmark ("make me the Raiders logo", "use the Nike swoosh", "recreate this NFL team\'s mark"). Use "protected_mark_imitation" when they ask for something recognizably the same without saying "copy" ("make something almost identical to that brand\'s logo", "make the logo exactly the same"). Use "protected_character_reproduction" for a named third-party character, mascot, or franchise property ("Mickey Mouse in a football jersey"). Use "protection_evasion" when the request is explicitly about circumventing protection ("change it just enough that it\'s legal", "make it different enough to avoid copyright", "remove the trademark symbol", "a knockoff version", "almost identical but technically different"). Never state or imply a threshold or an amount of change that would be acceptable.',
+    '"ipSignal" reports ONLY whether this message asks iHeartPrints to CREATE artwork that reproduces or deliberately imitates a third party\'s brand, team mark, or protected character — or to help get around such protection. Use "protected_mark_reproduction" when the customer asks us to make a named third party\'s logo/emblem/crest/badge/shield/wordmark ("make me the Raiders logo", "use the Nike swoosh", "recreate this NFL team\'s mark"). Use "protected_mark_imitation" when they ask for something recognizably the same without saying "copy" ("make something almost identical to that brand\'s logo", "make the logo exactly the same"). Use "protected_character_reproduction" for a third-party character, mascot, or franchise property ("Mickey Mouse in a football jersey"). Use "protection_evasion" when the request is explicitly about circumventing protection ("change it just enough that it\'s legal", "make it different enough to avoid copyright", "remove the trademark symbol", "a knockoff version", "almost identical but technically different"). Never state or imply a threshold or an amount of change that would be acceptable.',
+    // Sprint A3.1: the observed live failure. The customer does not have to
+    // name a brand the model has heard of — judging by familiarity is what
+    // let "Recreate the Fictitious Rovers badge exactly." return null.
+    'CRITICAL for "ipSignal" — the test is the REPRODUCTION RELATIONSHIP, not whether you recognize the name. You do NOT need to know the organization. If the message names a third party (any club, team, company, league, brand, studio, or property that is not the customer\'s own) and asks us to reproduce or closely imitate its logo, badge, crest, shield, emblem, mark, wordmark, mascot, character, or other branded visual, emit the signal at "explicit" confidence even if the name is completely unfamiliar to you. "Recreate the Fictitious Rovers badge exactly." is a protected_mark_reproduction just as much as "Recreate the Manchester United crest exactly." — an unknown name is not evidence that nothing is protected.',
+    'EQUALLY CRITICAL, the other direction: an unfamiliar proper noun is NOT by itself protected IP. The signal needs BOTH a third-party referent AND a request to reproduce/imitate it. A name used as wording on the shirt, as the customer\'s own business, as a person, place, event, or theme, or as context is never a signal on its own. "Make a shirt for the Fictitious Rovers year-end party", "our team is called the Fictitious Rovers", and "Recreate our Rivera Plumbing logo" all get null. Possessives decide ownership: "our/my ..." is the customer\'s own branding (null); "their/its/<third party>\'s ..." is somebody else\'s.',
     'CRITICAL for "ipSignal" — set it to null in ALL of these, which are ordinary, allowed design work: a THEME, style, color scheme, city, region, sport, or era ("black and silver football design", "Las Vegas football", "pirate skull with crossed swords", "vintage Los Angeles basketball", "bold collegiate lettering", "a generic athletic motion mark"); a brand or team mentioned as CONTEXT rather than as artwork ("my company is doing a watch party for the Raiders", "I like black and silver"); NEGATION ("don\'t use the Raiders logo", "no team logos"); AVOIDANCE ("make this NOT look like the Raiders", "we want something completely original"); REMOVAL of branding so the result is unbranded ("remove the Nike logo from the reference"); and the customer\'s OWN branding ("recreate our logo", "this is my company\'s mark"). Brand vocabulary alone is never a reason to set a signal. When in any doubt, use null, or "ambiguous" confidence — an ambiguous signal is discarded.',
-    "Never include your reasoning, chain-of-thought, or explanations of your own reasoning process anywhere in the response — `evidence` must be a short, direct quote or near-quote from the customer's message only.",
+    // Sprint A3.1: compact ipSignal few-shots. The unknown-name pair is the
+    // whole point — one unfamiliar third party that IS a signal, one
+    // unfamiliar customer-owned brand that is NOT.
+    '"ipSignal" worked examples (message → ipSignal):',
+    JSON.stringify(
+      [
+        {
+          message: "Recreate the Fictitious Rovers badge exactly.",
+          note: "Unknown club, but the request is plainly to reproduce their badge.",
+          ipSignal: {
+            kind: "protected_mark_reproduction",
+            confidence: "explicit",
+            evidence: "Recreate the Fictitious Rovers badge exactly",
+          },
+        },
+        {
+          message: "Copy Acme Falcons' club crest.",
+          note: "Unknown team; possessive marks it as someone else's crest.",
+          ipSignal: {
+            kind: "protected_mark_reproduction",
+            confidence: "explicit",
+            evidence: "Copy Acme Falcons' club crest",
+          },
+        },
+        {
+          message: "Recreate our Rivera Plumbing logo.",
+          note: "Equally unknown, but \"our\" makes it the customer's own branding.",
+          ipSignal: null,
+        },
+        {
+          message: "Don't use the Fictitious Rovers badge. Make something original.",
+          note: "Negation plus a request for original work — nothing is being reproduced.",
+          ipSignal: null,
+        },
+        {
+          message: "Don't use the old logo, recreate the Fictitious Rovers badge.",
+          note: "The negation covers the old logo only; the second instruction still asks for a reproduction.",
+          ipSignal: {
+            kind: "protected_mark_reproduction",
+            confidence: "explicit",
+            evidence: "recreate the Fictitious Rovers badge",
+          },
+        },
+        {
+          message: "Draw that famous cartoon mouse exactly like the original.",
+          note: "No name given, but it identifies a specific third-party character to depict.",
+          ipSignal: {
+            kind: "protected_character_reproduction",
+            confidence: "explicit",
+            evidence: "Draw that famous cartoon mouse exactly like the original",
+          },
+        },
+      ],
+      null,
+      2,
+    ),
+    // Sprint A3.1: "near-quote" invited paraphrase, and a paraphrased quote
+    // cannot be located in the customer's message — the safety layer that
+    // consumes `ipSignal` decides whether the customer's own safe wording
+    // covers the request by finding this text inside it.
+    "Never include your reasoning, chain-of-thought, or explanations of your own reasoning process anywhere in the response. `evidence` must be an EXACT, short, VERBATIM substring copied character-for-character from the customer's current message — never a paraphrase, never a summary, never your own words, and never text from an earlier turn. For `ipSignal.evidence`, copy the specific span that contains the request itself (for \"Don't use the old logo, recreate the Fictitious Rovers badge.\" that is \"recreate the Fictitious Rovers badge\", not the whole sentence and not the negated half). If you cannot copy an exact substring, omit the field rather than inventing one.",
     "Worked examples (illustrative only — apply the same reasoning to any domain, not just these):",
     JSON.stringify(
       [
@@ -375,7 +466,7 @@ function buildMessages(
           "provide_info | correct | defer | approve | request_revision | ask_question | unclear",
         answeredPendingSection: "string or null",
         ipSignal:
-          "null, or { kind: protected_mark_reproduction | protected_mark_imitation | protected_character_reproduction | protection_evasion, confidence: explicit | inferred | ambiguous, evidence: short quote }",
+          "null, or { kind: protected_mark_reproduction | protected_mark_imitation | protected_character_reproduction | protection_evasion, confidence: explicit | inferred | ambiguous, evidence: exact verbatim substring of the customer message }",
       },
       null,
       2,
