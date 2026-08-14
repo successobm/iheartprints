@@ -222,6 +222,7 @@ describe("Sprint 2L Phase 1C — live-vs-test semantic divergence regression", (
         shirtColor: "Navy",
         printPlacement: "full_front" as const,
         intendedPrintWidthIn: null,
+        requestedProductionOutput: null,
         preferredColors: [],
         designStyle: null,
         additionalInstructions: null,

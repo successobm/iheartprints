@@ -12,11 +12,16 @@ import {
   type PrintReadySizeView,
 } from "@/capabilities/shared/print-ready-size";
 import { getProjectRepository } from "@/lib/db";
+import {
+  isUnsupportedRequestedProductionOutput,
+  productionIntentMatches,
+} from "@/lib/domain/types";
 import type {
   FinalArtworkJob,
   FinalArtworkJobStatus,
   ProjectSnapshot,
   ProjectStatus,
+  StoredRequestedProductionOutput,
 } from "@/lib/domain/types";
 import { printPlacementLabel } from "@/lib/domain/print-placement";
 import {
@@ -71,11 +76,86 @@ export interface CustomerFinalizationView {
 /**
  * Pure customer-view derivation. Exported for tests; routes still go
  * through `getFinalizationStatus` / the snapshot choke point.
+ *
+ * Sprint A2 Correction 2 (Goal 8 / Goal 18): this now answers "how is the
+ * customer's CURRENT request doing?", which is not the same question as
+ * "what is `project.status`?".
+ *
+ * `project.status` is a durable record of the last thing the pipeline
+ * achieved. It is genuinely useful and it is not wrong — but it is about the
+ * PAST. A customer who has a `print_ready` PNG and has since asked for
+ * separations has a real, valid plate on file AND an unmet request, and
+ * showing them "print ready" answers a question they stopped asking. So the
+ * derivation is anchored on current intent first:
+ *
+ *   1. Current request is unsupported (or unreadable) → `needs_review`,
+ *      regardless of `project.status`. We do not claim to have produced what
+ *      we do not produce. The previously produced PNG is NOT deleted — it
+ *      simply stops being the answer.
+ *   2. Otherwise the current request is the Production PNG, and the job
+ *      bound to THAT intent is what speaks. A stale `failed` job for an
+ *      abandoned intent cannot show a retry prompt for work nobody wants,
+ *      and a `cancelled` (superseded) job reads as "not requested" — the
+ *      customer can simply ask again.
+ *
+ * `projectStatus` still decides between `print_ready` and `needs_review`
+ * once the matching job has completed, because that is exactly the fact it
+ * durably records: whether authoritative validation passed.
  */
 export function toCustomerFinalizationView(
   projectStatus: ProjectStatus,
   latestJobStatus: FinalArtworkJobStatus | null = null,
+  currentRequestedProductionOutput: StoredRequestedProductionOutput | null = null,
+  /**
+   * Whether a FinalArtworkJob bound to the CURRENT requested output exists at
+   * all. Defaults to `true`, which preserves the pre-A2 contract for callers
+   * that only know a project status — every such caller predates requestable
+   * outputs, so "the job for what they are asking" is the only job there
+   * could be.
+   */
+  matchingJobExists: boolean = true,
+  /**
+   * Sprint A2 Correction 3: whether a completed job, under the current
+   * authority and bound to the current intent, has a production asset with
+   * `ready` authoritative validation. Defaults to `false` so callers that
+   * only know a project status keep their existing behavior.
+   */
+  currentRequestSatisfied: boolean = false,
 ): CustomerFinalizationView {
+  // (1) The current request is one this product does not produce — or one an
+  // older build cannot read (fail closed). Nothing achieved earlier, for a
+  // different request, can make THIS one satisfied.
+  if (isUnsupportedRequestedProductionOutput(currentRequestedProductionOutput)) {
+    return { status: "needs_review" };
+  }
+
+  // (2) Sprint A2 Correction 3: a completed job already satisfies the current
+  // request, proven by the same evidence the delivery routes use. Ahead of
+  // `project.status` deliberately — that status records what the pipeline
+  // last achieved, and after a PNG → unsupported → PNG round trip it is
+  // stale (`finalization_required`, written by the unsupported job) while
+  // the customer's actual plate is valid, current, and downloadable. Sharing
+  // one source with delivery is also what makes "says print_ready" and "the
+  // download works" impossible to disagree.
+  if (currentRequestSatisfied) return { status: "print_ready" };
+
+  // (3) Nothing has been enqueued for what the customer is asking for now.
+  // `project.status` may well be a terminal state — but it is a terminal
+  // state about a DIFFERENT request, and reporting it here would either
+  // claim work that was never done or strand the customer on a `needs_review`
+  // screen with no way to ask again. `not_requested` restores the Prepare
+  // action, which is exactly what they need.
+  if (!matchingJobExists) return { status: "not_requested" };
+
+  // (3) The matching job was superseded by an intent change and then not
+  // resumed. Same reasoning: offer the action rather than a stale verdict.
+  if (latestJobStatus === "cancelled") return { status: "not_requested" };
+
+  // (4) Project terminal states, which durably record what authoritative
+  // validation concluded for a job bound to this same intent. These stay
+  // ahead of job status on purpose: a `print_ready` project must not be
+  // dragged back to a retry prompt by an older failed attempt that a later
+  // one already superseded.
   if (projectStatus === "print_ready") return { status: "print_ready" };
   if (projectStatus === "finalization_required") return { status: "needs_review" };
   if (projectStatus === "finalizing") {
@@ -93,12 +173,24 @@ export function toCustomerFinalizationView(
  */
 async function resolveCurrentFinalArtworkJob(
   projectId: string,
+  currentIntent: StoredRequestedProductionOutput | null,
 ): Promise<FinalArtworkJob | null> {
   try {
     const repo = getProjectRepository();
+    // Sprint A2 Correction 2 (Goal 18): "the current job" means the job bound
+    // to the intent the customer is asking for NOW. A job created for a
+    // different requested output is not this project's current finalization,
+    // however recently it ran — that is precisely how a stale `failed` PNG
+    // job used to show a retry prompt to someone who had moved on to
+    // separations, and how a completed unsupported job used to speak for a
+    // customer who had retracted back to PNG.
+    const matchesIntent = (job: FinalArtworkJob) =>
+      productionIntentMatches(job.requestedProductionOutput, currentIntent);
+
     const approval = await repo.getActiveFinalDirectionApproval(projectId);
     if (approval) {
-      return repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
+      const jobs = await repo.listFinalArtworkJobsForApproval(projectId, approval.id);
+      return jobs.filter(matchesIntent).at(-1) ?? null;
     }
 
     const preparation = await repo.getArtworkPreparation(projectId);
@@ -108,7 +200,7 @@ async function resolveCurrentFinalArtworkJob(
       projectId,
       preparation.id,
     );
-    return jobs.at(-1) ?? null;
+    return jobs.filter(matchesIntent).at(-1) ?? null;
   } catch {
     return null;
   }
@@ -117,12 +209,31 @@ async function resolveCurrentFinalArtworkJob(
 async function customerFinalizationViewForProject(
   projectId: string,
   projectStatus: ProjectStatus,
+  currentIntent: StoredRequestedProductionOutput | null,
 ): Promise<CustomerFinalizationView> {
-  const job =
-    projectStatus === "finalizing"
-      ? await resolveCurrentFinalArtworkJob(projectId)
-      : null;
-  return toCustomerFinalizationView(projectStatus, job?.status ?? null);
+  // Sprint A2 Correction 2: the matching job is resolved for EVERY project
+  // status now, not only `"finalizing"`. A project sitting at `print_ready`
+  // still has to answer "…for the thing you are currently asking for?", and
+  // that answer lives in whether a job bound to the current intent exists and
+  // how it ended.
+  const job = await resolveCurrentFinalArtworkJob(projectId, currentIntent);
+  // Sprint A2 Correction 3: the same evidence the delivery routes resolve on,
+  // read through the same capability, so the state a customer is shown and
+  // the file they can actually download can never disagree.
+  const satisfied = await getCapabilityGraph()
+    .finalArtwork.resolveCurrentProductionDelivery(projectId)
+    .catch(() => null);
+  return toCustomerFinalizationView(
+    projectStatus,
+    job?.status ?? null,
+    currentIntent,
+    // Whether the project has ever had a job for THIS request. Distinguished
+    // from "the job exists and is in some state" because the two mean
+    // genuinely different things to a customer: nothing enqueued yet vs. a
+    // verdict already reached.
+    job !== null,
+    satisfied !== null,
+  );
 }
 
 export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
@@ -164,6 +275,7 @@ async function withConceptStatus(
     finalization: await customerFinalizationViewForProject(
       snapshot.project.id,
       snapshot.project.status,
+      snapshot.brief.requestedProductionOutput,
     ),
     printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
     artworkPreparation,
@@ -535,6 +647,7 @@ export async function getFinalizationStatus(
   return customerFinalizationViewForProject(
     projectId,
     snapshot.project.status,
+    snapshot.brief.requestedProductionOutput,
   );
 }
 
@@ -670,8 +783,21 @@ async function resolveCurrentProductionArtwork(projectId: string): Promise<{
 } | null> {
   const graph = getCapabilityGraph();
   const snapshot = await graph.conversation.get(projectId);
-  if (!snapshot || snapshot.project.status !== "print_ready") return null;
+  if (!snapshot) return null;
 
+  // Sprint A2 Correction 3 (Goal 5 / Goal 10): the ONLY gate is now whether a
+  // completed job satisfies the CURRENT request — current authority, matching
+  // bound intent, real asset, `ready` validation for that asset.
+  //
+  // `project.status === "print_ready"` used to guard this, and it is the
+  // wrong question in both directions. It said yes to a historical PNG when
+  // the customer had since asked for separations (the plate was still on
+  // file, so the status still read print_ready) — handing over an artifact as
+  // though it answered a request it does not. And it said no to a perfectly
+  // valid, current plate whose project status was left stale at
+  // `finalization_required` by an unsupported job that ran in between.
+  // `getCurrentProductionAssetId` is strictly stronger than the status check
+  // ever was, so nothing is loosened by dropping it.
   const assetId = await graph.finalArtwork.getCurrentProductionAssetId(projectId);
   if (!assetId) return null;
 

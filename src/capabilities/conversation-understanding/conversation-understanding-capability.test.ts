@@ -118,8 +118,10 @@ describe("ConversationUnderstandingCapability — malformed provider output is r
   it("drops a proposed update for an unsupported section", async () => {
     const provider = new RecordingProvider({
       proposedUpdates: [
+        // Sprint A2 made "production" a SUPPORTED section, so this test now
+        // uses two sections that remain dormant `BriefSectionKey` values.
         { section: "references", value: "x", confidence: "explicit", evidence: "x", isCorrection: false },
-        { section: "production", value: "x", confidence: "explicit", evidence: "x", isCorrection: false },
+        { section: "layoutPreference", value: "x", confidence: "explicit", evidence: "x", isCorrection: false },
       ],
       deferrals: [],
       ambiguities: [],

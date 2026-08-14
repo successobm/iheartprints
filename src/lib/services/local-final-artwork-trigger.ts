@@ -244,6 +244,16 @@ async function resolveStrandedJob(
 ): Promise<FinalArtworkJob | null> {
   const approval = await repo.getActiveFinalDirectionApproval(projectId);
   if (approval) {
+    // Sprint A2 Correction 3: this is the LAST remaining caller of
+    // `getFinalArtworkJobByApprovalId`, and it is deliberately allowed to
+    // stay. The helper returns the oldest job for an approval regardless of
+    // requested output, which is wrong for delivery (fixed — see
+    // `resolveCurrentMatchingProductionJob`) but harmless here: this is a
+    // `next dev` convenience that only ever re-triggers a job already sitting
+    // at `queued`/`attempts = 0`. Whichever job it picks, the worker's own
+    // stale-intent fence decides what actually happens, so picking a job for
+    // a superseded intent can at worst supersede it — never produce or
+    // deliver anything. Never runs in production or in tests.
     return repo.getFinalArtworkJobByApprovalId(projectId, approval.id);
   }
 

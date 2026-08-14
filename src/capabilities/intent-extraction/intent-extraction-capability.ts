@@ -12,6 +12,7 @@ import type {
   DetectedIntent,
   IntentExtractionResult,
 } from "@/capabilities/shared/contracts";
+import { detectRequestedProductionOutput } from "@/capabilities/shared/requested-production-output";
 import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
 import { extractAdaptive, type BriefFieldPatch } from "./extraction";
 import { reconcileUnderstanding } from "./reconcile-understanding";
@@ -110,6 +111,22 @@ export function createIntentExtractionCapability(): IntentExtractionCapability {
         ...deterministic.fields,
         ...reconciled.fields,
       };
+
+      // Sprint A2 (corrected): the structured requested production output.
+      // Same precedence rule as every other field — the semantic layer is
+      // authoritative when it resolved one, and this deterministic pass is
+      // the backstop that keeps an unmistakable request from being lost when
+      // understanding is offline, unconfigured, or silent.
+      //
+      // Only ever SET, never cleared to `null` here: `null` means "the
+      // customer never said", and a turn about garment colour must not erase
+      // what they asked for two turns ago. Retraction is an explicit act
+      // ("just give me the PNG"), which resolves to `"production_png"` — a
+      // real value, not an absence.
+      if (fields.requestedProductionOutput === undefined) {
+        const detected = detectRequestedProductionOutput(reply);
+        if (detected) fields.requestedProductionOutput = detected;
+      }
 
       const deferredSections = unionDeferredSections(
         brief.deferredSections,

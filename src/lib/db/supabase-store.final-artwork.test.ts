@@ -32,6 +32,8 @@ interface FakeJobRow {
   project_id: string;
   final_direction_approval_id: string;
   artwork_version_id: string;
+  /** Sprint A2 Correction 2: the job's immutable bound production intent. */
+  requested_production_output: string | null;
   status: string;
   attempts: number;
   last_error: string | null;
@@ -157,6 +159,26 @@ function createFakeClient() {
     async single() {
       return this.run();
     }
+    /**
+     * Sprint A2 Correction 2: an approval may now own more than one job (one
+     * per requested production output), so the store awaits the builder
+     * directly for a ROW ARRAY instead of calling `.maybeSingle()`, which
+     * throws on multiple rows against real Supabase. This makes the fake
+     * thenable so it models that usage rather than only the single-row one.
+     */
+    then<TResult>(
+      resolve: (value: { data: FakeJobRow[]; error: null }) => TResult,
+    ): Promise<TResult> {
+      return Promise.resolve(this.runList()).then(resolve);
+    }
+    private runList(): { data: FakeJobRow[]; error: null } {
+      let matched = jobs.filter((r) => this.matches(r));
+      if (this.ordered) {
+        matched = [...matched].sort((a, b) => a.created_at.localeCompare(b.created_at));
+      }
+      if (this.limitCount !== null) matched = matched.slice(0, this.limitCount);
+      return { data: matched, error: null };
+    }
     private matches(row: FakeJobRow): boolean {
       const eqOk = this.eqFilters.every(
         (f) => (row as unknown as Record<string, unknown>)[f.col] === f.val,
@@ -179,10 +201,16 @@ function createFakeClient() {
         return { data: matched[0] ?? null, error: null };
       }
       const payload = this.payload!;
+      // Sprint A2 Correction 2: mirrors the migration's coalesced unique
+      // index — intent is part of job identity, so a PNG job and a
+      // separations job for one approval are not duplicates of each other.
+      const intentOf = (v: unknown) => (v as string | null) ?? "production_png";
       const conflict = jobs.some(
         (r) =>
           r.project_id === payload.project_id &&
-          r.final_direction_approval_id === payload.final_direction_approval_id,
+          r.final_direction_approval_id === payload.final_direction_approval_id &&
+          intentOf(r.requested_production_output) ===
+            intentOf(payload.requested_production_output),
       );
       if (conflict) {
         return {
@@ -195,6 +223,8 @@ function createFakeClient() {
         project_id: payload.project_id as string,
         final_direction_approval_id: payload.final_direction_approval_id as string,
         artwork_version_id: payload.artwork_version_id as string,
+        requested_production_output:
+          (payload.requested_production_output as string | null) ?? null,
         status: "queued",
         attempts: 0,
         last_error: null,
@@ -391,6 +421,7 @@ describe("SupabaseProjectRepository — final direction approval + final artwork
       sourceKind: "generated_concept",
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
+      requestedProductionOutput: "production_png",
     });
     assert.equal(job.status, "queued");
 
@@ -400,6 +431,7 @@ describe("SupabaseProjectRepository — final direction approval + final artwork
           sourceKind: "generated_concept",
           finalDirectionApprovalId: approval.id,
           artworkVersionId: "artwork-1",
+          requestedProductionOutput: "production_png",
         }),
       UniqueConstraintViolationError,
     );
@@ -419,6 +451,7 @@ describe("SupabaseProjectRepository — final artwork worker (Sprint 2M Phase 2C
       sourceKind: "generated_concept",
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
+      requestedProductionOutput: "production_png",
     });
   }
 

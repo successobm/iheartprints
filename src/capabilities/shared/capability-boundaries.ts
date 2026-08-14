@@ -410,6 +410,27 @@
  *          → deriveProductionRequirements (pure; reads
  *            `shared/print-placement-dimensions` for placement-driven
  *            target size — never invents a second placement→size table)
+ *            Sprint A2 (corrected): this decides PRODUCT SCOPE from brief
+ *            text, and CONSUMES the already-resolved requested-production-
+ *            output authority — it does not interpret prose to find one.
+ *            A decoration method the customer merely names ("screen
+ *            printed", "embroidered") is recorded on `printMethod` and
+ *            changes no requirement; only `TShirtDesignBrief
+ *            .requestedProductionOutput` naming an artifact V1 does not
+ *            produce, or a non-apparel product, leaves the raster profile.
+ *
+ *            The authority chain runs the other way and ends here:
+ *              customer message
+ *                → ConversationUnderstanding (`production` section)
+ *                  / shared/requested-production-output.ts (deterministic
+ *                    backstop)
+ *                → TShirtDesignBrief.requestedProductionOutput (persisted)
+ *                → this function, read-only.
+ *            Interpreting the sentence again at this gate is what the A2
+ *            correction removed: prose here both refused valid jobs whose
+ *            text merely contained an artifact word and never saw requests
+ *            typed in chat. See ARCHITECTURE.md, "Decoration intent vs.
+ *            production-output request".
  *          → deterministic checks + `calculateEffectiveResolution`
  *            (pixel ÷ physical dimensions only — never PNG DPI metadata)
  *          ↓

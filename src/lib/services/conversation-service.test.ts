@@ -449,6 +449,7 @@ describe("conversation-service — finalization status polling", () => {
       artworkPreparationId: preparation.id,
       artworkVersionId: artwork!.id,
       productionWidthIn: 10.5,
+      requestedProductionOutput: "production_png",
     });
     await new Promise((resolve) => setTimeout(resolve, 5));
     const running = await repo.createFinalArtworkJob(projectId, {
@@ -456,6 +457,7 @@ describe("conversation-service — finalization status polling", () => {
       artworkPreparationId: preparation.id,
       artworkVersionId: artwork!.id,
       productionWidthIn: 12,
+      requestedProductionOutput: "production_png",
     });
     await repo.updateFinalArtworkJob(failed.id, { status: "failed", lastError: "old" });
     await repo.updateFinalArtworkJob(running.id, { status: "running" });
@@ -503,6 +505,7 @@ describe("conversation-service — finalization status polling", () => {
       artworkPreparationId: preparation.id,
       artworkVersionId: artwork!.id,
       productionWidthIn: 10.5,
+      requestedProductionOutput: "production_png",
     });
     await repo.updateFinalArtworkJob(job.id, {
       status: "failed",
@@ -529,8 +532,12 @@ describe("toCustomerFinalizationView", () => {
     assert.deepEqual(toCustomerFinalizationView("finalizing", "recoverable"), {
       status: "preparing",
     });
+    // Sprint A2 Correction 2 (Goal 19): a cancelled/superseded job used to
+    // read as "preparing" forever — nothing was going to move it, so the
+    // customer polled an animation that never resolved. It now reads as
+    // "not requested", which restores the Prepare action they need.
     assert.deepEqual(toCustomerFinalizationView("finalizing", "cancelled"), {
-      status: "preparing",
+      status: "not_requested",
     });
     assert.deepEqual(toCustomerFinalizationView("finalizing", null), {
       status: "preparing",

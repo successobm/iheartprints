@@ -9,6 +9,8 @@ import { PNG } from "pngjs";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
 import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
+import { createDesignBriefCapability } from "@/capabilities/design-brief";
+import { createIntentExtractionCapability } from "@/capabilities/intent-extraction";
 import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
 import type {
@@ -292,6 +294,15 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     /** Stop before customer approval, for the "unapproved cannot finalize" scenario. */
     approve?: boolean;
     originalFilename?: string | null;
+    /**
+     * Sprint A2 (corrected): a customer chat message driven through the real
+     * intent-extraction path. Existing Artwork shares the project, brief and
+     * conversation with Create New, so the SAME structured field carries an
+     * upload customer's production-output request — no ArtworkPreparation
+     * column and no fabricated `DesignBriefVersion`. Deterministic resolver
+     * only: no provider, no paid call.
+     */
+    customerMessage?: string;
   }
 
   /**
@@ -321,6 +332,20 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
         options.printPlacement === undefined ? "left_chest" : options.printPlacement,
       intendedPrintWidthIn: options.intendedPrintWidthIn ?? null,
     });
+
+    if (options.customerMessage !== undefined) {
+      const designBrief = createDesignBriefCapability(repo);
+      const extraction = createIntentExtractionCapability().extract({
+        brief: await designBrief.getWorkingBrief(projectId),
+        phase: "interviewing",
+        reply: options.customerMessage,
+        pendingSection: null,
+        understanding: null,
+      });
+      for (const proposal of extraction.proposals) {
+        await designBrief.applyProposal(projectId, proposal);
+      }
+    }
 
     const originalBytes = originalUploadPng(geometry);
     const original = await assets.uploadCustomerArtwork(projectId, {
@@ -513,6 +538,7 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       artworkPreparationId: victim.preparationId,
       artworkVersionId: attacker.artworkVersionId!,
       productionWidthIn: 4,
+      requestedProductionOutput: "production_png",
     });
 
     await worker.processNextJob();
@@ -592,6 +618,255 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
 
     const finished = await repo.getProject(setup.projectId);
     assert.equal(finished!.project.status, "print_ready");
+  });
+
+  // --- Sprint A2 (corrected): requested production output, upload workflow --
+
+  it("R/T/U: an upload customer's explicit separations request stops finalization, with no paid provider call", async () => {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+    // Deliberately UNDERSIZED artwork: without the output gate this job would
+    // reach the paid reconstruction path, so `produceCount === 0` below is a
+    // real assertion about ordering, not a vacuous one.
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: SMALL_FIXTURE,
+      printPlacement: "left_chest",
+      customerMessage: "can you create the color separations from this",
+    });
+
+    // R: the request reached the same structured field the Create New path uses.
+    assert.equal(
+      (await repo.getProject(setup.projectId))?.brief.requestedProductionOutput,
+      "screen_print_separations",
+    );
+
+    const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    await worker.processNextJob();
+
+    // U: nothing paid was dispatched, local or hosted.
+    assert.equal(provider.produceCount, 0, "no paid provider call");
+    assert.equal(provider.submitCount, 0);
+    assert.equal(local.calls, 0, "not even the local normalization path ran");
+
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed?.status, "completed");
+    assert.match(completed?.lastError ?? "", /does not produce/i);
+
+    // T: cannot reach print_ready, and no plate exists to be downloaded.
+    const finished = await repo.getProject(setup.projectId);
+    assert.equal(finished!.project.status, "finalization_required");
+    assert.ok(!(await productionAssetFor(repo, setup.projectId, job.id)));
+  });
+
+  it("R: an upload customer who only MENTIONS screen printing still gets their plate", async () => {
+    // Goal 11 of the original sprint, on the Existing Artwork path: the
+    // immutable original → prepared upload → Production PNG → validation →
+    // download chain must not be broken by a method word.
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: ALREADY_LARGE_ENOUGH_FIXTURE,
+      printPlacement: "sleeve",
+      customerMessage: "this is for screen printing later, I already have the DST file",
+    });
+
+    assert.equal(
+      (await repo.getProject(setup.projectId))?.brief.requestedProductionOutput,
+      null,
+      "context and possession are not production requests",
+    );
+
+    const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    await worker.processNextJob();
+
+    assert.ok(await productionAssetFor(repo, setup.projectId, job.id));
+    assert.equal(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "print_ready",
+    );
+  });
+
+  // --- Sprint A2 Correction 2: production-intent lifecycle, upload workflow -
+  // Goal 17 asks for the same lifecycle guarantees as Create New, plus the
+  // one that is unique to this path: the enhancement step here can spend real
+  // money, so the fence has to sit in front of it.
+
+  it("L: an upload job snapshots the current intent, and size + output both key the job", async () => {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork } = buildPipeline(repo, provider, local);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: SMALL_FIXTURE,
+      printPlacement: "left_chest",
+    });
+
+    const png = await finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    assert.equal(png.job.requestedProductionOutput, "production_png");
+
+    // M: same preparation, same width, different requested output → a
+    // different job. Size and output are independent specifications and both
+    // distinguish a deliverable.
+    await repo.updateBrief(setup.projectId, {
+      requestedProductionOutput: "screen_print_separations",
+    });
+    const seps = await finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    assert.notEqual(seps.job.id, png.job.id);
+    assert.equal(seps.job.requestedProductionOutput, "screen_print_separations");
+    assert.equal(seps.job.productionWidthIn, png.job.productionWidthIn);
+  });
+
+  it("N/U: a queued upload job whose intent changed is superseded before any paid work", async () => {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+    // Undersized on purpose: without the fence this job reaches the paid
+    // reconstruction path, so the zero counts below are real assertions.
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: SMALL_FIXTURE,
+      printPlacement: "left_chest",
+    });
+    const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+
+    await repo.updateBrief(setup.projectId, {
+      requestedProductionOutput: "screen_print_separations",
+    });
+    await worker.processNextJob();
+
+    assert.equal(provider.produceCount, 0, "no paid reconstruction for a stale job");
+    assert.equal(provider.submitCount, 0);
+    assert.equal(local.calls, 0);
+
+    const settled = await repo.getFinalArtworkJob(job.id);
+    assert.equal(settled?.status, "cancelled");
+    assert.match(settled?.lastError ?? "", /superseded/i);
+    assert.ok(!(await productionAssetFor(repo, setup.projectId, job.id)));
+    assert.notEqual(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "print_ready",
+    );
+  });
+
+  it("T/O: an upload retraction reuses the superseded job without a second paid submission", async () => {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: SMALL_FIXTURE,
+      printPlacement: "left_chest",
+    });
+    const first = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+
+    // Superseded before it ran — no paid work yet.
+    await repo.updateBrief(setup.projectId, {
+      requestedProductionOutput: "screen_print_separations",
+    });
+    await worker.processNextJob();
+    assert.equal(provider.submitCount, 0);
+
+    // The customer changes their mind back. The SAME job is revived rather
+    // than a second one created, so the (project, preparation, width, output)
+    // key still holds and no duplicate paid credit is possible.
+    await repo.updateBrief(setup.projectId, {
+      requestedProductionOutput: "production_png",
+    });
+    const again = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    assert.equal(again.job.id, first.job.id);
+    assert.equal(again.job.status, "queued");
+
+    await worker.processNextJob();
+    assert.equal(
+      provider.submitCount,
+      1,
+      "exactly one paid submission across the whole transition",
+    );
+    assert.ok(await productionAssetFor(repo, setup.projectId, again.job.id));
+    assert.equal(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "print_ready",
+    );
+  });
+
+  it("H: upload PNG → unsupported → PNG restores print_ready and delivery, with no second paid submission", async () => {
+    // Sprint A2 Correction 3, mirrored for Existing Artwork. Both workflows
+    // now share one reconciliation boundary, so this proves the shared path
+    // rather than a parallel implementation.
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: SMALL_FIXTURE,
+      printPlacement: "left_chest",
+    });
+    const conversationService = await import("@/lib/services/conversation-service");
+
+    const original = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    await worker.processNextJob();
+    assert.equal(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "print_ready",
+    );
+    const plate = await productionAssetFor(repo, setup.projectId, original.job.id);
+    assert.ok(plate);
+    assert.equal(provider.submitCount, 1);
+    assert.ok(await conversationService.getProductionArtworkUrl(setup.projectId));
+
+    // Unsupported request → the plate stops being the answer.
+    await repo.updateBrief(setup.projectId, {
+      requestedProductionOutput: "screen_print_separations",
+    });
+    await finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await worker.processNextJob();
+    assert.equal(
+      await conversationService.getProductionArtworkUrl(setup.projectId),
+      null,
+    );
+    assert.equal(
+      (await conversationService.getFinalizationStatus(setup.projectId))?.status,
+      "needs_review",
+    );
+
+    // Retraction → the same plate answers again, reconciled from evidence.
+    await repo.updateBrief(setup.projectId, {
+      requestedProductionOutput: "production_png",
+    });
+    const reused = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    assert.equal(reused.job.id, original.job.id);
+    assert.equal(reused.job.status, "completed", "not revived merely to restore state");
+    assert.equal(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "print_ready",
+    );
+    assert.equal(
+      (await conversationService.getFinalizationStatus(setup.projectId))?.status,
+      "print_ready",
+    );
+    assert.equal(provider.submitCount, 1, "no second paid reconstruction");
+    assert.equal(
+      (await productionAssetFor(repo, setup.projectId, original.job.id))?.id,
+      plate!.id,
+      "the same plate, never a duplicate",
+    );
+    assert.ok(await conversationService.getProductionArtworkUrl(setup.projectId));
   });
 
   // --- I/J/K/L: production geometry ----------------------------------------
@@ -1000,6 +1275,7 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       sourceKind: "generated_concept",
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
+      requestedProductionOutput: "production_png",
     });
 
     assert.equal(job.sourceKind, "generated_concept");

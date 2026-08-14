@@ -35,6 +35,7 @@ import { createHash } from "node:crypto";
 import { PNG } from "pngjs";
 
 import type { ProjectRepository } from "@/lib/db/repository";
+import { productionIntentMatches } from "@/lib/domain/types";
 import type {
   ArtworkVersion,
   AssetRecord,
@@ -54,6 +55,7 @@ import type {
   PrintValidationInput,
   PrintValidationReport,
   ProductionNormalizationSummary,
+  ProductionRequirements,
   ResolutionProvenance,
   UploadedPreserveEvidence,
 } from "@/capabilities/print-validation/contracts";
@@ -224,6 +226,50 @@ export function createFinalArtworkWorkerCapability(
   }
 
   /**
+   * Sprint A2 Correction 2 (Goal 6) — THE STALE-INTENT FENCE.
+   *
+   * Does this job's immutable bound intent still match what the project is
+   * currently asking for? Called immediately before any provider dispatch
+   * and again immediately before any project status transition, because
+   * those are the two moments where a job stops being a computation and
+   * starts costing money or making a claim to the customer.
+   *
+   * Returns `true` when the job is still answering the current question.
+   */
+  async function jobIntentIsCurrent(job: FinalArtworkJob): Promise<boolean> {
+    const snapshot = await repo.getProject(job.projectId);
+    if (!snapshot) return false;
+    return productionIntentMatches(
+      job.requestedProductionOutput,
+      snapshot.brief.requestedProductionOutput,
+    );
+  }
+
+  /**
+   * Sprint A2 Correction 2 (Goal 6): retires a job whose bound intent no
+   * longer matches the project's current request.
+   *
+   * `"cancelled"`, deliberately, and never `"failed"`: nothing failed. The
+   * customer changed their mind, which is allowed, and `"failed"` is the
+   * one status the customer-facing view reads as a retryable infrastructure
+   * problem — surfacing "something went wrong, try again" for a job the
+   * system itself set aside would be a lie about our own behavior.
+   *
+   * The job is not deleted. It remains historical evidence for the intent it
+   * was created for, and if the customer comes back to that intent it is
+   * re-queued rather than redone (see `createJobToleratingRace`) — which is
+   * what keeps an already-paid-for reconstruction from being paid for twice.
+   */
+  async function supersedeStaleJob(job: FinalArtworkJob): Promise<void> {
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "cancelled",
+      lastError:
+        "Superseded: the project's requested production output changed after this job was enqueued. No provider work was performed for the superseded intent.",
+      completedAt: new Date().toISOString(),
+    });
+  }
+
+  /**
    * Only ever transitions `PrintProject.status` when this job's approval is
    * still the project's current active one. A stale job recovered long
    * after the customer moved on (revised, regenerated, approved a
@@ -233,11 +279,18 @@ export function createFinalArtworkWorkerCapability(
    * customer's approval was superseded mid-flight from ever making the
    * project honestly appear print_ready for a stale result (Sprint 2M
    * Phase 2E Goal 12/W).
+   *
+   * Sprint A2 Correction 2 (Goal 7): the same reasoning now covers a change
+   * of REQUESTED OUTPUT, not just of approved direction. A PNG job that
+   * finishes after the customer asked for separations produced a perfectly
+   * good plate — for a question nobody is asking any more — and must not
+   * announce `print_ready` for it. The plate is kept; the claim is not made.
    */
   async function maybeTransitionProjectStatus(
     job: FinalArtworkJob,
     status: "print_ready" | "finalization_required",
   ): Promise<void> {
+    if (!(await jobIntentIsCurrent(job))) return;
     if (job.sourceKind === "prepared_upload") {
       if (!(await isPreparedUploadJobStillCurrent(job))) return;
       await repo.setProjectStatus(job.projectId, status);
@@ -604,6 +657,16 @@ export function createFinalArtworkWorkerCapability(
       return;
     }
 
+    // Sprint A2 Correction 2 (Goal 6): the stale-intent fence, placed here
+    // for the same reason the eligibility gate above is — BEFORE any
+    // provider call, local or paid. A job whose bound intent no longer
+    // matches the project's current request must not spend a cent, and must
+    // not produce a plate that would then be looking for a claim to make.
+    if (!(await jobIntentIsCurrent(job))) {
+      await supersedeStaleJob(job);
+      return;
+    }
+
     // Goal 4: the bounded apparel-placement policy already established by
     // `shared/print-placement-dimensions.ts` (full_front/full_back,
     // left_chest, sleeve) via `deriveProductionRequirements` — no new
@@ -621,20 +684,27 @@ export function createFinalArtworkWorkerCapability(
     // so a stale or forged finalize call cannot smuggle a different one in;
     // and nothing infers it from the pixels a generator happened to produce.
     const intendedPrintWidthIn = snapshot.brief.intendedPrintWidthIn;
+    // Sprint A2 Correction 2: the JOB'S OWN bound intent, snapshotted at
+    // enqueue — not the live working brief, which can move underneath a
+    // running job. The fence above has already established that the two
+    // agree; from here the job acts only on what it was created to satisfy.
+    //
+    // (Both A2 passes matter here. The first replaced regex-over-prose with
+    // structured state; this one made that state job-bound, so a change
+    // landing mid-flight supersedes the job instead of silently re-aiming it.)
+    const requestedProductionOutput = job.requestedProductionOutput;
     const requirements = deriveProductionRequirements({
       printPlacement: briefVersion.content.printPlacement,
       productSummary: briefVersion.content.productSummary,
       designDescription: briefVersion.content.designDescription,
       intendedPrintWidthIn,
+      requestedProductionOutput,
     });
 
     // Goal 17: Phase 2C supports raster apparel production only. An
     // unsupported method must never be silently marked print-ready.
     if (requirements.category !== "apparel_raster") {
-      await completeWithoutAsset(
-        job,
-        `Unsupported production method for automated raster finalization (category: ${requirements.category}); requires human production planning.`,
-      );
+      await completeWithoutAsset(job, unsupportedFinalizationReason(requirements));
       return;
     }
     // Goal 4: genuine customer input (print location) is required to
@@ -734,6 +804,12 @@ export function createFinalArtworkWorkerCapability(
       // The exact width this plate was sized from — validation judges it
       // against the intended size, never the placement default (Issue 5).
       intendedPrintWidthIn,
+      // Sprint A2: the same structured authority the category gate above
+      // already applied. Threaded through so the persisted validation report
+      // is self-describing and can never read `"ready"` for an artifact
+      // nobody asked us to produce — defense in depth behind the gate, not
+      // a second interpretation of it.
+      requestedProductionOutput,
       asset: {
         contentType: productionAsset.contentType,
         widthPx: productionAsset.widthPx,
@@ -877,19 +953,30 @@ export function createFinalArtworkWorkerCapability(
     // The width is the job's OWN frozen intent, not the live working brief: a
     // size change while this job is queued must produce a new job, never
     // silently re-target this one mid-flight.
+    // Sprint A2 Correction 2 (Goal 6 / Goal 17): the stale-intent fence, before
+    // `measurePreparedSource` and `decideEnhancement` — i.e. before the upload
+    // path's one genuinely expensive step. This is where a superseded upload
+    // job would otherwise buy a Topaz reconstruction nobody wants.
+    if (!(await jobIntentIsCurrent(job))) {
+      await supersedeStaleJob(job);
+      return;
+    }
+
     const intendedPrintWidthIn = job.productionWidthIn;
+    // Sprint A2 Correction 2: the job's OWN bound intent, exactly like the
+    // width above — not the live working brief. The fence just above proved
+    // the two agree; using the bound value from here on means nothing this
+    // job does can be re-targeted by a change that lands mid-flight.
     const requirements = deriveProductionRequirements({
       printPlacement: snapshot.brief.printPlacement,
       productSummary: snapshot.brief.productSummary,
       designDescription: null,
       intendedPrintWidthIn,
+      requestedProductionOutput: job.requestedProductionOutput,
     });
 
     if (requirements.category !== "apparel_raster") {
-      await completeWithoutAsset(
-        job,
-        `Unsupported production method for automated raster finalization (category: ${requirements.category}); requires human production planning.`,
-      );
+      await completeWithoutAsset(job, unsupportedFinalizationReason(requirements));
       return;
     }
     if (!requirements.sizing) {
@@ -977,6 +1064,9 @@ export function createFinalArtworkWorkerCapability(
       printPlacement: snapshot.brief.printPlacement,
       productSummary: snapshot.brief.productSummary,
       intendedPrintWidthIn,
+      // Sprint A2: see the Create New assembly above — same authority, same
+      // defense-in-depth reasoning, same field.
+      requestedProductionOutput: snapshot.brief.requestedProductionOutput,
       asset: {
         contentType: productionAsset.contentType,
         widthPx: productionAsset.widthPx,
@@ -1192,6 +1282,30 @@ function readUploadedPreserveEvidence(
     sourceAlphaBBoxHeightPx: meta.sourceAlphaBBoxHeightPx as number,
     enhancement: meta.enhancement,
   };
+}
+
+/**
+ * Sprint A2: why this job produced no production asset, in internal
+ * diagnostic language. Three genuinely different truths that were previously
+ * one message — and the first of them used to swallow ordinary garment
+ * designs whose customer merely mentioned screen printing or embroidery.
+ * Those now classify as `apparel_raster` and never reach here at all.
+ *
+ * Internal only: stored as `FinalArtworkJob.lastError`, never returned to a
+ * customer. The customer-facing surface stays the plain-language
+ * `needs_review` state (`toCustomerFinalizationView`) — no production
+ * category, method enum, or requested-output identifier crosses that line.
+ */
+function unsupportedFinalizationReason(
+  requirements: ProductionRequirements,
+): string {
+  if (requirements.category === "out_of_scope_product") {
+    return "Product is outside the iHeartPrints product scope (apparel artwork); no production artifact is produced for it.";
+  }
+  if (requirements.requestedUnsupportedOutput) {
+    return `Customer explicitly requested a production artifact iHeartPrints does not produce (${requirements.requestedUnsupportedOutput}); the raster Production PNG must not be presented as satisfying it.`;
+  }
+  return `No supported production profile for automated raster finalization (category: ${requirements.category}); requires human production planning.`;
 }
 
 /** Sanitized, non-secret description — safe to store as `FinalArtworkJob.lastError` (internal only). */

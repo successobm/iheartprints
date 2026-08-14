@@ -2,7 +2,10 @@ import {
   OPENING_PROMPT,
   projectNameFromBrief,
 } from "@/lib/domain/conversation";
-import { emptyInterviewState } from "@/lib/domain/types";
+import {
+  emptyInterviewState,
+  readStoredRequestedProductionOutput,
+} from "@/lib/domain/types";
 import type {
   ArtworkPreparation,
   ArtworkPreparationStatus,
@@ -82,6 +85,8 @@ type DbBrief = {
   shirt_color: string | null;
   print_placement: TShirtDesignBrief["printPlacement"];
   intended_print_width_in: number | null;
+  /** Sprint A2. Untyped `string | null` at the row boundary — narrowed by `readStoredRequestedProductionOutput`, which fails closed on anything unrecognized. */
+  requested_production_output: string | null;
   preferred_colors: string[] | null;
   design_style: string | null;
   additional_instructions: string | null;
@@ -221,6 +226,8 @@ type DbFinalArtworkJob = {
   artwork_preparation_id: string | null;
   /** Postgres `numeric` arrives as a number or a string depending on driver/precision — normalized in `mapFinalArtworkJob`. */
   production_width_in: number | string | null;
+  /** Sprint A2 Correction 2: raw column; narrowed fail-closed in `mapFinalArtworkJob`. */
+  requested_production_output: string | null;
   artwork_version_id: string;
   status: FinalArtworkJobStatus;
   attempts: number;
@@ -301,6 +308,12 @@ function mapBrief(row: DbBrief): TShirtDesignBrief {
     shirtColor: row.shirt_color,
     printPlacement: row.print_placement,
     intendedPrintWidthIn: row.intended_print_width_in,
+    // Sprint A2 Correction 2 (Goal 12): FAIL CLOSED. An unrecognized value
+    // becomes the sentinel, never `null` — an older build that cannot read
+    // what the customer asked for must refuse to produce, not assume PNG.
+    requestedProductionOutput: readStoredRequestedProductionOutput(
+      row.requested_production_output,
+    ),
     preferredColors: row.preferred_colors ?? [],
     designStyle: row.design_style,
     additionalInstructions: row.additional_instructions,
@@ -458,6 +471,12 @@ function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
     finalDirectionApprovalId: row.final_direction_approval_id ?? null,
     artworkPreparationId,
     productionWidthIn: readNumericColumn(row.production_width_in),
+    // Sprint A2 Correction 2: the immutable intent this job was created to
+    // satisfy. Fail-closed like the brief column — a value this build cannot
+    // read must never let a job be mistaken for a Production PNG job.
+    requestedProductionOutput: readStoredRequestedProductionOutput(
+      row.requested_production_output,
+    ),
     artworkVersionId: row.artwork_version_id,
     status: row.status,
     attempts: row.attempts,
@@ -731,6 +750,8 @@ export class SupabaseProjectRepository implements ProjectRepository {
       payload.print_placement = patch.printPlacement;
     if (patch.intendedPrintWidthIn !== undefined)
       payload.intended_print_width_in = patch.intendedPrintWidthIn;
+    if (patch.requestedProductionOutput !== undefined)
+      payload.requested_production_output = patch.requestedProductionOutput;
     if (patch.preferredColors !== undefined)
       payload.preferred_colors = patch.preferredColors;
     if (patch.designStyle !== undefined)
@@ -1466,6 +1487,10 @@ export class SupabaseProjectRepository implements ProjectRepository {
               project_id: projectId,
               final_direction_approval_id: input.finalDirectionApprovalId,
               artwork_version_id: input.artworkVersionId,
+              // Sprint A2 Correction 2: always written explicitly and always
+              // normalized, so the column's NULL is reserved for genuinely
+              // legacy rows and never means "this build forgot".
+              requested_production_output: input.requestedProductionOutput,
               status: "queued",
             }
           : {
@@ -1473,6 +1498,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
               artwork_preparation_id: input.artworkPreparationId,
               production_width_in: input.productionWidthIn,
               artwork_version_id: input.artworkVersionId,
+              requested_production_output: input.requestedProductionOutput,
               status: "queued",
             },
       )
@@ -1511,14 +1537,35 @@ export class SupabaseProjectRepository implements ProjectRepository {
     projectId: string,
     finalDirectionApprovalId: string,
   ): Promise<FinalArtworkJob | null> {
+    // Sprint A2 Correction 2: one approval may now own several jobs (one per
+    // requested production output), so `.maybeSingle()` — which THROWS on
+    // more than one row — is no longer safe here. Ordered + limited instead,
+    // returning the oldest, which is the historical behavior for the
+    // overwhelmingly common single-job case.
     const { data, error } = await this.client
       .from("final_artwork_jobs")
       .select("*")
       .eq("project_id", projectId)
       .eq("final_direction_approval_id", finalDirectionApprovalId)
-      .maybeSingle();
+      .order("created_at", { ascending: true })
+      .limit(1);
     if (error) throw error;
-    return data ? mapFinalArtworkJob(data as DbFinalArtworkJob) : null;
+    const row = (data as DbFinalArtworkJob[] | null)?.[0];
+    return row ? mapFinalArtworkJob(row) : null;
+  }
+
+  async listFinalArtworkJobsForApproval(
+    projectId: string,
+    finalDirectionApprovalId: string,
+  ): Promise<FinalArtworkJob[]> {
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("final_direction_approval_id", finalDirectionApprovalId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbFinalArtworkJob[]) ?? []).map(mapFinalArtworkJob);
   }
 
   async getFinalDirectionApprovalById(

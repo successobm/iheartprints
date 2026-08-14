@@ -17,6 +17,7 @@ function brief(overrides: Partial<TShirtDesignBrief> = {}): TShirtDesignBrief {
     shirtColor: null,
     printPlacement: null,
     intendedPrintWidthIn: null,
+    requestedProductionOutput: null,
     preferredColors: [],
     designStyle: null,
     additionalInstructions: null,
@@ -196,5 +197,99 @@ describe("IntentExtractionCapability — correction intent tagging from understa
       }),
     });
     assert.ok(result.intents.includes("correct"));
+  });
+});
+
+describe("Sprint A2 Correction 2 (Goal 15) — production-output precedence", () => {
+  /** The one field of the merged patch these tests are about. */
+  function outputFrom(result: ReturnType<typeof capability.extract>) {
+    return result.proposals[0]?.fields.requestedProductionOutput;
+  }
+
+  it("W: a validated EXPLICIT semantic result wins over the deterministic reading", () => {
+    const result = capability.extract({
+      brief: brief(),
+      phase: "interviewing",
+      reply: "can you make the color separations",
+      pendingSection: null,
+      understanding: understanding({
+        proposedUpdates: [
+          {
+            section: "production",
+            value: "embroidery_digitization",
+            confidence: "explicit",
+            evidence: "make the color separations",
+            isCorrection: false,
+          },
+        ],
+      }),
+    });
+    // The semantic layer read the conversation in context and is the primary
+    // interpreter; the deterministic pass would have said separations.
+    assert.equal(outputFrom(result), "embroidery_digitization");
+  });
+
+  it("W: an INFERRED semantic result never suppresses a high-confidence deterministic request", () => {
+    // The failure this guards against: a provider hedging at "inferred" would
+    // otherwise silently discard a request the deterministic layer read
+    // plainly, and the customer would receive a PNG they did not ask for.
+    const result = capability.extract({
+      brief: brief(),
+      phase: "interviewing",
+      reply: "can you make the color separations",
+      pendingSection: null,
+      understanding: understanding({
+        proposedUpdates: [
+          {
+            section: "production",
+            value: "production_png",
+            confidence: "inferred",
+            evidence: "make the color separations",
+            isCorrection: false,
+          },
+        ],
+      }),
+    });
+    assert.equal(outputFrom(result), "screen_print_separations");
+  });
+
+  it("W: an INVALID semantic value is rejected rather than coerced, and never leaks", () => {
+    // A hallucinated artifact, or a decoration method mistaken for an output.
+    // The closed vocabulary rejects both; the deterministic layer then speaks.
+    for (const hallucination of ["screen_print", "holographic_foil", "embroidery"]) {
+      const result = capability.extract({
+        brief: brief(),
+        phase: "interviewing",
+        reply: "please digitize this for embroidery",
+        pendingSection: null,
+        understanding: understanding({
+          proposedUpdates: [
+            {
+              section: "production",
+              value: hallucination,
+              confidence: "explicit",
+              evidence: "digitize this",
+              isCorrection: false,
+            },
+          ],
+        }),
+      });
+      assert.equal(
+        outputFrom(result),
+        "embroidery_digitization",
+        `"${hallucination}" must be rejected, not stored`,
+      );
+    }
+  });
+
+  it("W: neither layer resolving one leaves the field untouched", () => {
+    const result = capability.extract({
+      brief: brief(),
+      phase: "interviewing",
+      reply: "make it navy blue with a bear on the front",
+      pendingSection: null,
+      understanding: understanding(),
+    });
+    assert.equal(outputFrom(result), undefined);
   });
 });

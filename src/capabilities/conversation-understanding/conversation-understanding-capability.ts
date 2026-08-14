@@ -28,6 +28,10 @@ const SUPPORTED_SECTIONS = new Set<BriefSectionKey>([
   "exclusions",
   "additionalNotes",
   "printLocation",
+  // Sprint A2 (corrected): which production ARTIFACT the customer asked us to
+  // produce. Previously a dormant `BriefSectionKey`; now the structured
+  // authority that replaced regex-over-prose at the finalization gate.
+  "production",
 ]);
 
 const CONFIDENCE_VALUES = new Set<UnderstandingConfidence>([

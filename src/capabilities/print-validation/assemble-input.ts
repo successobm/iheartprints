@@ -14,7 +14,10 @@ import type {
   DesignBriefSnapshotContent,
 } from "@/lib/domain/types";
 
-import type { PrintPlacement } from "@/lib/domain/types";
+import type {
+  PrintPlacement,
+  StoredRequestedProductionOutput,
+} from "@/lib/domain/types";
 
 import type {
   PrintValidationAssetSummary,
@@ -40,6 +43,14 @@ export interface AssembleProvisionalPrintValidationInputParams {
   currentApprovedDesignBriefVersionId: string | null;
   /** Frozen brief snapshot content the concept was generated against. */
   brief: DesignBriefSnapshotContent;
+  /**
+   * Sprint A2 (corrected): the structured requested-production-output
+   * authority. Passed separately for the same reason `intendedPrintWidthIn`
+   * is — it lives on the mutable working brief, deliberately not in the
+   * frozen creative snapshot, because it is a production specification
+   * rather than creative content. Absent/`null` = supported Production PNG.
+   */
+  requestedProductionOutput?: StoredRequestedProductionOutput | null;
   /** `null` when no real image bytes exist (e.g. the placeholder provider). */
   asset: ProvisionalAssetSummaryInput | null;
   conceptEvaluationStatus: ConceptEvaluationStatus | null;
@@ -91,6 +102,7 @@ export function assembleProvisionalPrintValidationInput(
     conceptEvaluationStatus: params.conceptEvaluationStatus,
     conceptEvaluation: params.conceptEvaluation,
     intendedPrintWidthIn: params.intendedPrintWidthIn ?? null,
+    requestedProductionOutput: params.requestedProductionOutput ?? null,
     primaryAsset,
     // A generated concept has not been normalized for production at all —
     // never claim production geometry for it (Print-Ready Normalization
@@ -118,6 +130,14 @@ export interface AssembleAuthoritativeProductionPrintValidationInputParams {
   currentApprovedDesignBriefVersionId: string | null;
   /** Frozen brief snapshot content the source concept — and this production asset — was built against. */
   brief: DesignBriefSnapshotContent;
+  /**
+   * Sprint A2 (corrected): the structured requested-production-output
+   * authority. Passed separately for the same reason `intendedPrintWidthIn`
+   * is — it lives on the mutable working brief, deliberately not in the
+   * frozen creative snapshot, because it is a production specification
+   * rather than creative content. Absent/`null` = supported Production PNG.
+   */
+  requestedProductionOutput?: StoredRequestedProductionOutput | null;
   /** The real production asset just created. Never `null` — a validation run with no asset has nothing to validate. */
   asset: ProductionAssetSummaryInput;
   /**
@@ -183,6 +203,7 @@ export function assembleAuthoritativeProductionPrintValidationInput(
     conceptEvaluationStatus: params.conceptEvaluationStatus,
     conceptEvaluation: params.conceptEvaluation,
     intendedPrintWidthIn: params.intendedPrintWidthIn ?? null,
+    requestedProductionOutput: params.requestedProductionOutput ?? null,
     primaryAsset,
     productionNormalization: params.normalization,
   };
@@ -201,6 +222,8 @@ export interface AssembleUploadedPreserveProductionPrintValidationInputParams {
   productSummary: string | null;
   /** The production width this plate was sized from, in inches — the job's own frozen intent, never the live working brief. */
   intendedPrintWidthIn: number | null;
+  /** Sprint A2 (corrected): structured requested-production-output authority for the upload workflow. */
+  requestedProductionOutput?: StoredRequestedProductionOutput | null;
   asset: ProductionAssetSummaryInput;
   normalization: ProductionNormalizationSummary;
   uploadedPreserve: UploadedPreserveEvidence;
@@ -242,6 +265,7 @@ export function assembleUploadedPreserveProductionPrintValidationInput(
     conceptEvaluationStatus: null,
     conceptEvaluation: null,
     intendedPrintWidthIn: params.intendedPrintWidthIn,
+    requestedProductionOutput: params.requestedProductionOutput ?? null,
     primaryAsset: {
       contentType: params.asset.contentType,
       widthPx: params.asset.widthPx,

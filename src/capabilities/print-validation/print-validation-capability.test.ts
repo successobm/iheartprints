@@ -520,7 +520,12 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
   });
 
   // --- Goal 14 Scenario D --------------------------------------------------
-  it("D: a screen-print workflow requires vector artwork even though a raster concept exists", () => {
+  // Sprint A2 rewrote D and E. They previously asserted the defect this
+  // sprint removed: naming a decoration method pushed an ordinary garment
+  // design onto a vector deliverable nothing produces, so the customer's
+  // raster artwork could never be finalized. Mentioning screen printing or
+  // embroidery is now decoration CONTEXT and changes no requirement.
+  it("D: a screen-print MENTION is decoration context — the raster profile and its requirements are unchanged", () => {
     const report = printValidation.validateArtwork(
       baseInput({
         productSummary: "Screen printed T-shirt",
@@ -528,16 +533,35 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
       }),
     );
 
-    assert.equal(report.requirements.category, "apparel_vector");
+    assert.equal(report.requirements.category, "apparel_raster");
+    // The method is still recorded — it is useful to know — it simply does
+    // not select the artifact.
     assert.equal(report.requirements.printMethod, "screen_print");
-    assert.equal(report.status, "finalization_required");
+    assert.equal(report.requirements.requestedUnsupportedOutput, null);
+    assert.equal(report.requirements.requiredOutputType, "raster");
+    assert.deepEqual(report.requirements.allowedFileFormats, ["png"]);
     const vectorCheck = report.checks.find((c) => c.check === "vector_source");
-    assert.equal(vectorCheck?.status, "fail");
-    assert.ok(report.requiredTransformations.includes("create_vector_version"));
+    assert.equal(vectorCheck?.status, "pass");
+    assert.ok(!report.requiredTransformations.includes("create_vector_version"));
+
+    // Byte-for-byte the same requirements as the identical brief without the
+    // method word — the strongest statement that the mention changed nothing.
+    const withoutMention = printValidation.validateArtwork(
+      baseInput({
+        productSummary: "T-shirt",
+        designDescription: "Bold team logo",
+      }),
+    );
+    assert.equal(report.status, withoutMention.status);
+    assert.deepEqual(
+      report.requirements.minRasterDimensionsPx,
+      withoutMention.requirements.minRasterDimensionsPx,
+    );
+    assert.deepEqual(report.requirements.sizing, withoutMention.requirements.sizing);
   });
 
   // --- Goal 14 Scenario E --------------------------------------------------
-  it("E: an embroidery workflow requires vector/digitized artwork even though a raster concept exists", () => {
+  it("E: an embroidery MENTION keeps the raster profile, and never claims embroidery readiness", () => {
     const report = printValidation.validateArtwork(
       baseInput({
         productSummary: "Embroidered cap",
@@ -546,15 +570,25 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
       }),
     );
 
-    assert.equal(report.requirements.category, "apparel_vector");
+    assert.equal(report.requirements.category, "apparel_raster");
     assert.equal(report.requirements.printMethod, "embroidery");
-    assert.equal(report.status, "finalization_required");
+    assert.equal(report.requirements.requestedUnsupportedOutput, null);
+    assert.equal(report.requirements.requiredOutputType, "raster");
     const vectorCheck = report.checks.find((c) => c.check === "vector_source");
-    assert.equal(vectorCheck?.status, "fail");
+    assert.equal(vectorCheck?.status, "pass");
+
+    // Honesty: the deliverable is a raster design artifact. Nothing in the
+    // report may describe it as digitized or embroidery-ready.
+    const trail = [...report.requirements.notes, ...report.blockingIssues, ...report.warnings].join(" ");
+    assert.ok(!/digitiz/i.test(trail));
+    assert.ok(!/embroidery[\s-]?ready/i.test(trail));
+    assert.ok(/decoration context only \(embroidery\)/i.test(trail));
   });
 
   // --- Goal 14 Scenario F --------------------------------------------------
-  it("F: a banner/sign concept requires vector artwork at final size", () => {
+  // Sprint A2: a vinyl banner is not an apparel production profile awaiting
+  // implementation — it is a different product category, outside scope.
+  it("F: a banner is out of product scope, not a signage production job", () => {
     const report = printValidation.validateArtwork(
       baseInput({
         productSummary: "Vinyl banner",
@@ -563,12 +597,21 @@ describe("PrintValidationCapability (Sprint 2M Phase 1)", () => {
       }),
     );
 
-    assert.equal(report.requirements.category, "signage");
-    assert.equal(report.status, "finalization_required");
-    const vectorCheck = report.checks.find((c) => c.check === "vector_source");
-    assert.equal(vectorCheck?.status, "fail");
-    assert.ok(report.requiredTransformations.includes("convert_fonts_to_outlines"));
-    assert.ok(report.requiredTransformations.includes("resize_to_final_dimensions"));
+    assert.equal(report.requirements.category, "out_of_scope_product");
+    // `blocked`, not `finalization_required`: there is no amount of
+    // finalization work that turns this into something iHeartPrints makes.
+    assert.equal(report.status, "blocked");
+    assert.equal(
+      report.checks.find((c) => c.check === "product_scope")?.status,
+      "fail",
+    );
+    // No deliverable is described for it, in any format.
+    assert.deepEqual(report.requirements.allowedFileFormats, []);
+    assert.equal(report.requirements.targetDimensions, null);
+    assert.equal(report.requirements.sizing, null);
+    // It never enters a vector/signage production pipeline.
+    assert.ok(!report.requiredTransformations.includes("convert_fonts_to_outlines"));
+    assert.ok(!report.requiredTransformations.includes("resize_to_final_dimensions"));
   });
 
   // --- Goal 14 Scenario G --------------------------------------------------

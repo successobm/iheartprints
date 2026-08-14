@@ -1207,25 +1207,233 @@ was added to `PrintValidationCapability`, `production-requirements.ts`, or
 
 #### Production Requirements (`ProductionRequirements`)
 
-`production-requirements.ts` currently classifies a `ProductionCategory`
-(`apparel_raster` / `apparel_vector` / `signage` / `logo_vector` /
-`unknown`) from already-collected brief text by keyword matching. **Current
-iHeartPrints V1 production is the apparel raster PNG profile only** — the
-DTF/DTG-oriented workflows described under Product Scope. Non-apparel and
-vector categories are dormant classifier branches and reserved validation
-hooks — not unfinished iHeartPrints V1 deliverables, and not permission to
-broaden the product into signs, banners, or general commercial printing.
-The `embroidery` / `screen_print` classifier branches recognize apparel
-methods the product may support later; recognizing a method is not
-producing for it, and those briefs deliberately fail closed rather than
-reaching `print_ready` (see §13c).
+`production-requirements.ts` classifies a `ProductionCategory`
+(`apparel_raster` / `apparel_vector` / `out_of_scope_product` / `signage` /
+`logo_vector` / `unknown`) from already-collected brief text by deterministic
+keyword matching. **Current iHeartPrints V1 production is the apparel raster
+PNG profile only** — the DTF/DTG-oriented workflows described under Product
+Scope.
+
+##### Decoration intent vs. production-output request (Sprint A2)
+
+Three **orthogonal** questions, with sharply different sources. Answering all
+three from the same prose was the defect Sprint A2 corrected, and the
+separation of *sources* — not merely of concepts — is what makes it safe:
+
+| Question | Field | Source | May change the category? |
+| --- | --- | --- | --- |
+| Is this apparel at all? | `category` | brief text | Yes — `out_of_scope_product` |
+| Were we asked to PRODUCE an artifact we do not make? | `requestedUnsupportedOutput` | **structured state** | Yes — `apparel_vector` |
+| What will the customer decorate with? | `printMethod` | brief text | **No** |
+
+**Decoration context** is what the customer says their artwork is
+eventually for: "this will be screen printed", "I'm taking this to an
+embroidery shop", "the shop is using DTF". It is recorded on `printMethod`
+because knowing the intended decoration method is useful downstream
+intelligence — and it selects nothing. Before A2, any such phrase forced
+`apparel_vector`, whose vector deliverable nothing produces, so the Final
+Artwork worker refused the job: an ordinary garment design could not reach
+the one production artifact this product actually makes because its owner
+mentioned where they were taking it.
+
+**A production-output request** is the customer asking iHeartPrints to
+produce a specific artifact it does not make — screen-print colour
+separations, embroidery digitization (DST/PES/EXP), a vector/SVG production
+file, or sublimation-specific preparation. It is a **structured, persisted
+domain value**, `TShirtDesignBrief.requestedProductionOutput`, never a
+re-reading of brief prose at the finalization gate.
+
+###### Why structured state, and where it lives
+
+An independent audit of A2's first implementation found that deriving this
+from `productSummary`/`designDescription` with regex fails in both
+directions, and cannot be repaired by adding more patterns:
+
+- **False positives** — a valid raster job refused because its text merely
+  *contains* an artifact word: "no separations are needed", "I already have
+  the DST file", "use this SVG as a reference", a shirt whose printed wording
+  is `COLOR SEPARATIONS`, a customer called Screen Print Separations LLC.
+- **False negatives** — a real request typed in chat ("separate this into
+  screens", "create a DST") never reaches those two brief fields, so the
+  customer silently receives a PNG that does not answer what they asked.
+
+The interpretation therefore happens **once, where the customer speaks**, and
+is persisted:
+
+```
+customer message
+  → ConversationUnderstanding  (primary; `production` section, closed
+                                vocabulary, "explicit" confidence only)
+  → shared/requested-production-output.ts  (deterministic backstop when the
+                                semantic layer is offline/silent)
+  → TShirtDesignBrief.requestedProductionOutput   ← THE AUTHORITY
+  → deriveProductionRequirements / the worker gates  (read only)
+```
+
+The deterministic backstop is tuned for **precision, not recall**: a missed
+detection degrades to the Production PNG (the status quo, still correctable
+in conversation), while a false detection silently refuses paid work. It
+disqualifies negation, possession ("I already have"), reference/supplied
+files, quoted and ALL-CAPS artwork wording, business names, and statements
+about the customer's own business.
+
+**Owner: the mutable working brief**, deliberately *not* the immutable
+`DesignBriefSnapshotContent` — mirroring `intendedPrintWidthIn`, whose
+closest sibling this is. Both are production specifications rather than
+creative content, and two consequences make the working brief the only
+correct home:
+
+- Asking for separations must not restyle artwork, supersede an approved
+  brief version, or mark existing concepts stale. Nothing about the *design*
+  changed.
+- It must be **retractable**. "Actually, just give me the PNG" resolves to
+  `production_png`, which behaves identically to `null`. Frozen into an
+  approved version, one sentence would strand a project permanently.
+
+**One field serves both workflows.** Existing Artwork uploads share the
+project, brief, and conversation with Create New, so an upload customer's
+"create separations from this" lands on the same field and is honored at the
+same gate — no `ArtworkPreparation` column, and no fabricated
+`DesignBriefVersion`.
+
+`null` means *unspecified* — every historical project, and the default for
+every new one — and resolves to the supported Production PNG path exactly as
+before the field existed. An **unrecognized** stored value is a different
+thing entirely and must never be merged with it: `null` is a fact ("never
+asked"), while an unreadable string is an absence of knowledge ("asked for
+something this build cannot interpret"). It resolves to
+`UNRECOGNIZED_PRODUCTION_OUTPUT` and **fails closed** — no production, no
+`print_ready`, no provider dispatch. An older app that cannot tell what a
+customer requested must refuse rather than guess PNG on their behalf.
+
+###### Job-bound intent and the stale-intent fences (A2 Correction 2)
+
+The field above is deliberately mutable — customers change their minds, and a
+request must be retractable. That makes it unusable *on its own* as job
+authority: a job carried no record of what it was for, so it had to re-read a
+moving value and hope. Three failures followed, all temporal:
+
+1. A running PNG job could still set `print_ready` after the customer had
+   asked for separations.
+2. A completed unsupported job was returned as "already requested" after a
+   retraction to PNG, so finalization never re-ran and the project stuck.
+3. An existing `print_ready` PNG kept telling the customer their work was
+   done after they had asked for something else.
+
+`FinalArtworkJob.requestedProductionOutput` snapshots the project's current
+intent **at enqueue** and is immutable after
+(`UpdateFinalArtworkJobInput` cannot express a change to it). Every gate then
+asks one question — *does this job still answer what is being asked?* —
+via `productionIntentMatches`:
+
+| Moment | Rule |
+| --- | --- |
+| Job creation | Snapshot the server's current persisted intent. A stale tab cannot smuggle an outdated one — nothing is read from the caller. |
+| Queued, intent changed | Worker supersedes it. No provider work. |
+| Before provider dispatch | **Fence.** Mismatch → `cancelled`, before any call, local or paid. |
+| After provider submission | The work finishes and the plate is kept — but it does not become authoritative. Never a second submission. |
+| Before `print_ready` | **Fence.** Mismatch → no status transition. The artifact survives; the claim is not made. |
+| Completed | Historical evidence for the intent it was created for. Never satisfies a different one. |
+
+Superseded jobs are `cancelled`, never `failed`: nothing failed, and `failed`
+is the one status the customer view reads as a retryable infrastructure
+problem. They are not deleted either — coming back to that intent **re-queues
+the existing job**, which is what makes PNG → unsupported → PNG return the
+already-produced (and for uploads, already-paid-for) plate instead of buying
+it twice.
+
+Intent is therefore part of **job identity**, alongside the approval (or
+preparation + width). The unique indexes use
+`coalesce(requested_production_output, 'production_png')` so a legacy NULL row
+and an explicit `'production_png'` row remain one key — without that, an old
+row would stop deduplicating and a double click could produce a second job,
+and for uploads a second paid reconstruction. `normalizeProductionIntent`
+mirrors that expression in the domain; the two must not drift.
+
+Finally, the customer-facing state is derived from **current intent + the job
+bound to it**, not from `project.status` alone. `project.status` durably
+records what the pipeline last achieved — a fact about the past. A customer
+holding a `print_ready` PNG who has since asked for separations has both a
+valid artifact and an unmet request, and `toCustomerFinalizationView` reports
+the unmet one. The artifact is never deleted; it simply stops being the
+answer, and becomes the answer again on retraction.
+
+###### The delivery/reconciliation boundary (A2 Correction 3)
+
+One function answers *does an already-completed job currently satisfy this
+project's Production PNG request?* — `resolveSatisfiedProductionDelivery` in
+`FinalArtworkCapability`, serving both workflows. Five things must all hold:
+
+1. The current request is one this product produces at all.
+2. A job exists under the **current** authority — the active final-direction
+   approval, or the approved preparation at the **current width**.
+3. Its immutable bound intent matches the current request.
+4. It completed and a production asset really exists for it.
+5. Authoritative validation **for that exact asset** says `ready`.
+
+(5) is why this returns evidence rather than a job status. `completed` only
+means the worker reached a conclusion — `completeWithoutAsset` completes jobs
+that produced nothing. Restoring `print_ready` from completion alone would
+manufacture readiness the pipeline never asserted.
+
+Everything that could disagree now shares this one source:
+
+| Consumer | Previously | Now |
+| --- | --- | --- |
+| `getCurrentProductionAssetId` | oldest job for the approval, any intent | the satisfying job only |
+| image / download routes | gated on `project.status === "print_ready"` | gated on the same evidence |
+| `toCustomerFinalizationView` | project status ahead of everything | evidence ahead of project status |
+
+Two defects closed by that unification. **Delivery ignored intent**: the old
+path resolved through `getFinalArtworkJobByApprovalId`, which returns the
+*oldest* job regardless of requested output, so a historical PNG could be
+handed over as fulfillment of a separations request. **Reuse could not
+restore state**: after PNG → unsupported → PNG the correct completed job was
+found and reused, but `project.status` was left stale at
+`finalization_required` by the unsupported job that ran in between, stranding
+the customer on `needs_review` with a valid, already-paid-for plate on file.
+
+`reconcileCompletedProductionState` fixes the second **without reviving the
+job**. A completed job is never pushed back to `queued`/`running` merely to
+restore state — that would risk repeating production work and rewrite history
+that is still true. Status is reconciled from the job's own immutable
+evidence, and only ever to `print_ready`, and only when the full chain above
+holds.
+
+`getFinalArtworkJobByApprovalId` now has exactly one caller: the `next dev`
+stranded-job recovery, which only re-triggers an already-queued job and is
+fenced by the worker whichever job it picks. A test pins that count.
+
+An unsupported request classifies `apparel_vector` and fails the blocking
+`production_output_supported` check, so the raster Production PNG can never
+be presented as satisfying it. Both worker gates run **before** any provider
+dispatch, local or paid, and complete the job (never fail it) — so the
+customer reaches the terminal `needs_review` state rather than the retryable
+`retryable_failure` one, polling stops, and nothing auto-retries.
+
+**Out of product scope** (`out_of_scope_product`) is a non-apparel product —
+yard sign, banner, mug, sticker, vehicle graphic. It fails the blocking
+`product_scope` check *before* any production arithmetic runs, so a report
+can never read `"ready"` for something iHeartPrints does not make. This is a
+product-scope decision (Constitution §7.13) requiring an amendment, not a
+production profile awaiting implementation. `signage` and `logo_vector`
+remain reserved, dormant categories that no classification reaches today.
+
+`print_ready` is unchanged by all of this. It means exactly what it always
+has: the Production PNG passed authoritative Print Validation for the
+supported raster profile. A design whose customer mentioned embroidery is a
+validated raster design artifact — never a digitized, separated, or
+otherwise method-ready file.
 
 When the text does not support a confident method, `printMethodConfidence`
 is honestly `"unknown"` and an apparel-raster profile is assumed as the
 one production path this product actually generates artwork for today
 (never marked `"confirmed"`). `printMethod` values (`dtf`, `dtg`,
-`sublimation`, …) are internal production facts and never customer-facing
-copy; V1 does not ask the customer to choose a decoration method.
+`sublimation`, …) and `requestedUnsupportedOutput` values are internal
+production facts and never customer-facing copy; V1 does not ask the
+customer to choose a decoration method. Every unsupported outcome collapses
+to the customer-safe `needs_review` state — the internal reason lives only
+on `FinalArtworkJob.lastError`, which no customer surface reads.
 
 Target physical print dimensions come from `shared/print-placement-dimensions.ts`,
 keyed by `PrintPlacement` and overridden by the customer's own chosen
@@ -3543,6 +3751,16 @@ focus). Two different reasons put everything else outside it:
   concerns the product may take on later as explicit production profiles
   (Constitution §16.6). They are not unfinished V1 deliverables and must
   not be described as supported today.
+
+Sprint A2 sharpened when the second bullet actually applies: **only when the
+customer explicitly asks iHeartPrints to produce one of those artifacts**,
+as recorded in the structured `TShirtDesignBrief.requestedProductionOutput`.
+Naming a decoration method as downstream context ("this will be screen
+printed", "I might embroider it") never removes a garment design from the
+raster path — it is intent about the customer's own printing, not an order
+for a file this product does not sell. See "Decoration intent vs.
+production-output request" above for the full rule, the authority chain, and
+its two blocking checks (`product_scope`, `production_output_supported`).
 
 Today the worker still completes without an asset when
 `requirements.category !== "apparel_raster"` so it cannot falsely claim

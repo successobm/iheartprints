@@ -32,6 +32,7 @@ describe("Product vs design subject semantics", () => {
       shirtColor: null,
       printPlacement: null,
       intendedPrintWidthIn: null,
+      requestedProductionOutput: null,
       preferredColors: [],
       designStyle: null,
       additionalInstructions: null,

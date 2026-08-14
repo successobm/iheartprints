@@ -150,6 +150,12 @@ function snapshotAsBrief(version: DesignBriefVersion): TShirtDesignBrief {
     shirtColor: content.shirtColor,
     printPlacement: content.printPlacement,
     intendedPrintWidthIn: null,
+    // Sprint A2: `null`, exactly like `intendedPrintWidthIn` above and for
+    // the same reason — both are production specifications that the approved
+    // creative snapshot deliberately does not carry. Generation must not
+    // depend on either: which artifact a customer asked us to produce cannot
+    // change what the artwork looks like.
+    requestedProductionOutput: null,
     preferredColors: content.preferredColors,
     designStyle: content.designStyle,
     additionalInstructions: content.additionalInstructions,

@@ -1,0 +1,65 @@
+-- Sprint A2 (corrected) — structured requested production output.
+--
+-- WHY PERSISTENCE IS REQUIRED
+--
+-- The first A2 pass answered "what production artifact are we being asked to
+-- produce?" by running regexes over `product_summary` / `design_description`
+-- at finalization time. That is unsafe in both directions:
+--
+--   False positives — a valid raster job blocked because its prose merely
+--   CONTAINS an artifact word: "no separations are needed", "I already have
+--   the DST file", "use this SVG as a reference", a shirt whose printed
+--   wording is "COLOR SEPARATIONS", a customer named Screen Print
+--   Separations LLC.
+--
+--   False negatives — a real request typed in chat ("separate this into
+--   screens", "create a DST") never reaches those two brief fields at all,
+--   so the customer receives a Production PNG that does not answer what
+--   they asked for.
+--
+-- No amount of additional regex at the finalization gate fixes this, because
+-- the gate is reading the wrong thing: prose that was never the authority.
+-- The interpretation has to happen once, where the customer actually speaks,
+-- and be persisted as a value the finalization path can simply read.
+--
+-- OWNER: public.tshirt_design_briefs — the MUTABLE working brief.
+--
+-- Deliberately here and NOT in the immutable approved-version snapshot
+-- (`design_brief_versions.content`), mirroring `intended_print_width_in`,
+-- which this column is the closest sibling of. A requested production output
+-- is a PRODUCTION SPECIFICATION, not creative content:
+--
+--   - Asking for separations must not restyle artwork, supersede an approved
+--     brief version, or mark existing concepts stale — nothing about the
+--     design changed.
+--   - It must be retractable. "Actually, just give me the PNG" has to be
+--     expressible. Frozen into an immutable approved version, an unsupported
+--     request would poison the project permanently, recoverable only through
+--     an entire new approval cycle.
+--
+-- One column serves BOTH workflows: Existing Artwork uploads share the same
+-- project, brief, and conversation as Create New, so no ArtworkPreparation
+-- column and no fabricated DesignBriefVersion is needed.
+--
+-- BACKWARD COMPATIBILITY
+--
+-- Forward-only, additive, nullable, no default, no backfill. NULL means
+-- UNSPECIFIED — the customer never asked for a particular artifact — which
+-- resolves to the supported Production PNG path exactly as every project
+-- behaved before this column existed. Every historical row is therefore
+-- already correct, and no historical authority is fabricated: a brief
+-- approved before today cannot retroactively be claimed to have requested
+-- something.
+--
+-- No CHECK constraint on the value set, consistent with this schema's
+-- existing practice for provider-neutral/forward-compatible vocabularies
+-- (see `artwork_concept_evaluation`): the domain type
+-- `RequestedProductionOutput` is the authority, unrecognized values are
+-- rejected at the capability boundary and read back as NULL, and a future
+-- production profile must not require a migration merely to be namable.
+
+alter table public.tshirt_design_briefs
+  add column if not exists requested_production_output text null;
+
+comment on column public.tshirt_design_briefs.requested_production_output is
+  'Sprint A2: structured requested production artifact. NULL = unspecified = supported Production PNG path. Never a decoration method (screen_print/embroidery/dtf/dtg are NOT values here).';

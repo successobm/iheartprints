@@ -20,6 +20,7 @@ import type {
   ConceptEvaluation,
   ConceptEvaluationStatus,
   PrintPlacement,
+  StoredRequestedProductionOutput,
 } from "@/lib/domain/types";
 import type { ProductionMethod } from "@/capabilities/shared/contracts";
 import type { PlacementSizingPolicy } from "@/capabilities/shared/print-placement-dimensions";
@@ -28,13 +29,85 @@ import type { PlacementSizingPolicy } from "@/capabilities/shared/print-placemen
 // Production Requirements (Goal 2 / Goal 3 / Goal 8)
 // ---------------------------------------------------------------------------
 
-/** Internal print-production category. Never customer-facing terminology. */
+/**
+ * Internal print-production category — WHAT PRODUCTION ARTIFACT IS BEING
+ * ASKED FOR, never customer-facing terminology.
+ *
+ * Sprint A2 boundary, stated here because conflating the two is exactly the
+ * defect this category previously had: a category answers "what production
+ * artifact is iHeartPrints being asked to produce?", NOT "what might the
+ * customer eventually do with the artwork?". A decoration method the
+ * customer merely mentions ("this will be screen printed", "I might
+ * embroider it") is DECORATION CONTEXT — it is recorded on `printMethod`
+ * and must never move an ordinary garment design off `apparel_raster`.
+ * See `requestedUnsupportedOutput`.
+ */
 export type ProductionCategory =
-  | "apparel_raster" // DTF / DTG / sublimation-style: transparent raster PNG
-  | "apparel_vector" // Screen print / embroidery on apparel: vector/digitized source required
-  | "signage" // Banners/signs: vector at final size, fonts outlined
-  | "logo_vector" // Generic vector/logo output: physical raster size is not the primary requirement
+  /**
+   * The one production profile V1 implements: the transparent raster
+   * Production PNG for apparel decoration (DTF/DTG launch focus). This is
+   * where every ordinary garment design belongs, whatever decoration method
+   * the customer mentions in passing.
+   */
+  | "apparel_raster"
+  /**
+   * The customer explicitly asked iHeartPrints to PRODUCE an apparel
+   * production artifact it does not make — screen-print colour separations,
+   * a digitized embroidery/stitch file, or a vector production file. Named
+   * for the vector/digitized source such artifacts require. Reaching this
+   * category is an honest "we do not produce that", never a raster
+   * fallback: nothing downstream may satisfy it with a Production PNG.
+   */
+  | "apparel_vector"
+  /**
+   * The request is for a product outside the iHeartPrints product scope
+   * entirely (yard sign, banner, mug, sticker, vehicle graphic). Not an
+   * unimplemented production profile — a different product category, which
+   * per the Constitution needs an amendment rather than a pipeline.
+   */
+  | "out_of_scope_product"
+  /**
+   * Reserved, dormant. No classification produces this today — non-apparel
+   * print products resolve to `out_of_scope_product`. Retained as an
+   * architectural role, not an unfinished V1 requirement (AGENTS.md).
+   */
+  | "signage"
+  /**
+   * Reserved, dormant. See `signage` — retained for a future explicit
+   * vector production profile, produced by nothing today.
+   */
+  | "logo_vector"
   | "unknown";
+
+/**
+ * Sprint A2: which unsupported PRODUCTION ARTIFACT the customer explicitly
+ * asked iHeartPrints to produce, when they did. `null` — the overwhelmingly
+ * common case — means they asked for no such thing, including when they
+ * named a decoration method as downstream context.
+ *
+ * The distinction this type exists to hold:
+ *
+ *   "I need a screen printed T-shirt design."  → null (decoration context)
+ *   "Make the screen-print color separations." → "screen_print_separations"
+ *   "I want this embroidered on a hoodie."     → null (decoration context)
+ *   "Digitize this for embroidery."            → "embroidery_digitization"
+ *
+ * Internal only. Never a customer-facing string — it selects which honest
+ * plain-language explanation applies, it is not itself that explanation.
+ */
+export type UnsupportedProductionOutput =
+  | "embroidery_digitization"
+  | "screen_print_separations"
+  | "vector_production_file"
+  | "sublimation_production_prep"
+  /**
+   * Sprint A2 Correction 2 (Goal 12): the persisted request could not be
+   * interpreted by this build — a newer deploy wrote a production profile
+   * this app has never heard of. Treated as unsupported, deliberately: an
+   * app that cannot read what the customer asked for must refuse to produce
+   * rather than assume the answer is a PNG.
+   */
+  | "unrecognized_request";
 
 /**
  * How confidently `printMethod` / `category` were determined. The Design
@@ -71,8 +144,24 @@ export type ColorModeExpectation =
  */
 export interface ProductionRequirements {
   category: ProductionCategory;
+  /**
+   * The decoration method the customer's own words point at — DECORATION
+   * CONTEXT, not an output contract (Sprint A2). "This will be screen
+   * printed" records `screen_print` here and still produces the raster
+   * Production PNG; `category` is what decides the artifact. Kept because
+   * knowing the intended decoration method is genuinely useful downstream
+   * intelligence, not because it selects a pipeline.
+   */
   printMethod: ProductionMethod;
   printMethodConfidence: ProductionMethodConfidence;
+  /**
+   * Sprint A2: the unsupported production artifact the customer explicitly
+   * requested, or `null` when they requested none. Populated only alongside
+   * `category: "apparel_vector"`. Exists so an honest refusal can name what
+   * was actually asked for instead of collapsing every unsupported request
+   * into one vague "needs review".
+   */
+  requestedUnsupportedOutput: UnsupportedProductionOutput | null;
   printLocation: PrintPlacement | null;
   /**
    * The placement's printable ENVELOPE (largest area artwork may occupy) —
@@ -138,6 +227,23 @@ export type PrintValidationCheckSeverity = "info" | "warning" | "blocking";
 
 export const PRINT_VALIDATION_CHECK_CODES = [
   "asset_exists",
+  /**
+   * Sprint A2: is this product inside the iHeartPrints product scope at all?
+   * Blocking, and asked before any production arithmetic — a yard sign that
+   * happens to satisfy every raster check is still not something this product
+   * makes, and must never read as `"ready"`. Distinct from an unsupported
+   * apparel production profile, which is an apparel job asking for an
+   * artifact V1 does not produce (see `production_output_supported`).
+   */
+  "product_scope",
+  /**
+   * Sprint A2: was iHeartPrints asked to produce an artifact it does not
+   * make (screen-print separations, embroidery digitization, a vector
+   * production file)? Blocking, so the raster Production PNG can never be
+   * presented as satisfying such a request. Merely NAMING a decoration
+   * method never trips this — see `UnsupportedProductionOutput`.
+   */
+  "production_output_supported",
   "content_type",
   "raster_dimensions_known",
   "transparency",
@@ -476,9 +582,18 @@ export interface PrintValidationInput {
   currentApprovedDesignBriefVersionId: string | null;
   /** Print placement from the approved brief snapshot that authorized this concept, when resolvable. */
   printPlacement: PrintPlacement | null;
-  /** Free-text product description from the approved brief snapshot — used only for deterministic production-method inference (Goal 3). Never sent to a provider. */
+  /** Free-text product description from the approved brief snapshot — used only for deterministic product-scope and decoration-context inference (Goal 3). Never sent to a provider. */
   productSummary: string | null;
   designDescription: string | null;
+  /**
+   * Sprint A2 (corrected): the STRUCTURED requested-production-output
+   * authority, resolved from `TShirtDesignBrief.requestedProductionOutput` by
+   * the caller. Print Validation does not re-interpret prose to derive it —
+   * that was the defect this replaced. Absent/`null` means the customer never
+   * asked for a particular artifact, which is the supported Production PNG
+   * path and every historical project's behavior.
+   */
+  requestedProductionOutput?: StoredRequestedProductionOutput | null;
   /** Concept Evaluation state already computed and persisted for this concept, if any (Goal 6, Goal 14 Scenario I). Read-only — never recomputed here. */
   conceptEvaluationStatus: ConceptEvaluationStatus | null;
   conceptEvaluation: ConceptEvaluation | null;

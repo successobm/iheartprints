@@ -6,7 +6,10 @@ import {
   OPENING_PROMPT,
   projectNameFromBrief,
 } from "@/lib/domain/conversation";
-import { emptyInterviewState } from "@/lib/domain/types";
+import {
+  emptyInterviewState,
+  productionIntentMatches,
+} from "@/lib/domain/types";
 import type {
   ArtworkPreparation,
   ArtworkVersion,
@@ -319,6 +322,9 @@ export class LocalProjectRepository implements ProjectRepository {
       // no longer defaulted to "full_front" at creation.
       printPlacement: null,
       intendedPrintWidthIn: null,
+      // Sprint A2: unspecified — the customer has not asked for a particular
+      // production artifact, which is the supported Production PNG path.
+      requestedProductionOutput: null,
       preferredColors: [],
       designStyle: null,
       additionalInstructions: null,
@@ -1025,7 +1031,14 @@ export class LocalProjectRepository implements ProjectRepository {
       const duplicate = db.finalArtworkJobs.find(
         (item) =>
           item.projectId === projectId &&
-          item.finalDirectionApprovalId === input.finalDirectionApprovalId,
+          item.finalDirectionApprovalId === input.finalDirectionApprovalId &&
+          // Sprint A2 Correction 2: intent is part of job identity, mirroring
+          // the migration's coalesced unique index. A PNG job and a
+          // separations job for the same approval are different jobs.
+          productionIntentMatches(
+            item.requestedProductionOutput,
+            input.requestedProductionOutput,
+          ),
       );
       if (duplicate) {
         throw new UniqueConstraintViolationError(
@@ -1043,7 +1056,11 @@ export class LocalProjectRepository implements ProjectRepository {
           item.projectId === projectId &&
           item.artworkPreparationId === input.artworkPreparationId &&
           item.productionWidthIn !== null &&
-          Math.abs(item.productionWidthIn - input.productionWidthIn) < 1e-6,
+          Math.abs(item.productionWidthIn - input.productionWidthIn) < 1e-6 &&
+          productionIntentMatches(
+            item.requestedProductionOutput,
+            input.requestedProductionOutput,
+          ),
       );
       if (duplicate) {
         throw new UniqueConstraintViolationError(
@@ -1065,6 +1082,7 @@ export class LocalProjectRepository implements ProjectRepository {
         input.sourceKind === "prepared_upload" ? input.artworkPreparationId : null,
       productionWidthIn:
         input.sourceKind === "prepared_upload" ? input.productionWidthIn : null,
+      requestedProductionOutput: input.requestedProductionOutput,
       artworkVersionId: input.artworkVersionId,
       status: "queued",
       attempts: 0,
@@ -1094,6 +1112,18 @@ export class LocalProjectRepository implements ProjectRepository {
           item.projectId === projectId &&
           item.finalDirectionApprovalId === finalDirectionApprovalId,
       ) ?? null
+    );
+  }
+
+  async listFinalArtworkJobsForApproval(
+    projectId: string,
+    finalDirectionApprovalId: string,
+  ): Promise<FinalArtworkJob[]> {
+    const db = await readDb();
+    return db.finalArtworkJobs.filter(
+      (item) =>
+        item.projectId === projectId &&
+        item.finalDirectionApprovalId === finalDirectionApprovalId,
     );
   }
 

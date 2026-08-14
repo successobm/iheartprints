@@ -12,7 +12,11 @@ import {
 import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
 import type { ConversationUnderstandingResult } from "@/capabilities/conversation-understanding";
 import type { BriefSectionKey } from "@/capabilities/shared/contracts";
-import type { PrintPlacement, TShirtDesignBrief } from "@/lib/domain/types";
+import type {
+  PrintPlacement,
+  RequestedProductionOutput,
+  TShirtDesignBrief,
+} from "@/lib/domain/types";
 
 import type { BriefFieldPatch } from "./extraction";
 import { mergeDesignDescription } from "./design-description-merge";
@@ -105,6 +109,8 @@ const SUPPORTED_SECTIONS = new Set<BriefSectionKey>([
   "exclusions",
   "additionalNotes",
   "printLocation",
+  // Sprint A2 (corrected) — see the capability's own SUPPORTED_SECTIONS.
+  "production",
 ]);
 
 const PRINT_LOCATION_TEXT_PATTERNS: Array<[RegExp, PrintPlacement]> = [
@@ -139,7 +145,51 @@ type RejectionCode =
   | "product_not_grounded"
   | "product_not_a_print_product"
   | "empty_wording_requires_explicit"
-  | "unresolvable_print_location";
+  | "unresolvable_print_location"
+  | "unresolvable_production_output"
+  | "production_output_requires_explicit";
+
+/**
+ * Sprint A2 (corrected): the CLOSED vocabulary for the `production` section.
+ * Accepts the domain values themselves plus the small set of obvious
+ * synonyms a model reasonably emits — and nothing else.
+ *
+ * Decoration methods are deliberately absent and must stay absent. "screen
+ * print", "embroidery", "dtf" and "dtg" say where artwork is GOING; they do
+ * not order a file, and mapping them here would silently rebuild the exact
+ * conflation this correction removed.
+ */
+const REQUESTED_PRODUCTION_OUTPUT_SYNONYMS: Record<string, RequestedProductionOutput> = {
+  production_png: "production_png",
+  png: "production_png",
+  "production png": "production_png",
+  raster: "production_png",
+  embroidery_digitization: "embroidery_digitization",
+  "embroidery digitization": "embroidery_digitization",
+  "embroidery digitizing": "embroidery_digitization",
+  digitization: "embroidery_digitization",
+  dst: "embroidery_digitization",
+  screen_print_separations: "screen_print_separations",
+  "screen print separations": "screen_print_separations",
+  "color separations": "screen_print_separations",
+  "colour separations": "screen_print_separations",
+  separations: "screen_print_separations",
+  vector_output: "vector_output",
+  "vector output": "vector_output",
+  "vector file": "vector_output",
+  vector: "vector_output",
+  svg: "vector_output",
+  sublimation_specific: "sublimation_specific",
+  "sublimation specific": "sublimation_specific",
+  "sublimation production": "sublimation_specific",
+};
+
+function parseRequestedProductionOutput(
+  value: string,
+): RequestedProductionOutput | null {
+  const key = value.trim().toLowerCase().replace(/\s+/g, " ");
+  return REQUESTED_PRODUCTION_OUTPUT_SYNONYMS[key] ?? null;
+}
 
 export function reconcileUnderstanding(
   understanding: ConversationUnderstandingResult | null,
@@ -291,6 +341,35 @@ export function reconcileUnderstanding(
         );
         accepted.push("additionalNotes");
         break;
+      /**
+       * Sprint A2 (corrected): the structured requested production output.
+       *
+       * A CLOSED vocabulary, unlike every free-text section above. The
+       * provider may only name one of the values the domain defines; anything
+       * else — a decoration method, a paraphrase, an invented artifact — is
+       * rejected rather than coerced. That closure is the whole point: this
+       * field decides whether a customer's artwork gets produced, so it must
+       * never carry a value nobody validated.
+       *
+       * Requires `"explicit"` confidence. Refusing to produce someone's
+       * artwork on an INFERENCE about what they wanted is precisely the
+       * false-positive class this correction removes; when the model is
+       * merely fairly sure, the right answer is the supported default.
+       */
+      case "production": {
+        const output = parseRequestedProductionOutput(value);
+        if (!output) {
+          reject("unresolvable_production_output");
+          continue;
+        }
+        if (update.confidence !== "explicit") {
+          reject("production_output_requires_explicit");
+          continue;
+        }
+        fields.requestedProductionOutput = output;
+        accepted.push("production");
+        break;
+      }
       case "printLocation": {
         const placement = parsePrintPlacement(value);
         if (!placement) {

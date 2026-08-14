@@ -16,6 +16,7 @@ function brief(overrides: Partial<TShirtDesignBrief> = {}): TShirtDesignBrief {
     shirtColor: "Navy",
     printPlacement: "full_front",
     intendedPrintWidthIn: null,
+    requestedProductionOutput: null,
     preferredColors: ["Gold"],
     designStyle: "Rustic",
     additionalInstructions: null,

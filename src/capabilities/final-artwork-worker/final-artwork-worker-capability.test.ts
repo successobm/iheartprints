@@ -10,6 +10,7 @@ import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
 import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
+import { createIntentExtractionCapability } from "@/capabilities/intent-extraction";
 import {
   createFinalArtworkCapability,
   LocalRasterInterpolationProvider,
@@ -355,6 +356,14 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     withSourceAsset?: boolean;
     sourceBytesOverride?: Buffer;
     evaluationOverrides?: Partial<ConceptEvaluation>;
+    /**
+     * Sprint A2 (corrected): a customer message to drive through the REAL
+     * intent-extraction path before the brief is approved, so a test can
+     * prove the conversation → structured brief state → finalization → worker
+     * chain rather than hand-setting the field. Uses the deterministic
+     * resolver only — no provider, no paid call.
+     */
+    customerMessage?: string;
   }
 
   /** Drives a project to "a real selected concept with a real generated PNG asset", the exact state a customer's "Prepare Print-Ready Artwork" click starts from. */
@@ -375,6 +384,23 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     });
 
     const designBrief = createDesignBriefCapability(repo);
+
+    // Sprint A2 (corrected): the real authority path — a customer message is
+    // interpreted ONCE, here, and persisted on the working brief. Nothing
+    // downstream re-reads the sentence; the worker reads the stored value.
+    if (options.customerMessage !== undefined) {
+      const extraction = createIntentExtractionCapability().extract({
+        brief: await designBrief.getWorkingBrief(projectId),
+        phase: "interviewing",
+        reply: options.customerMessage,
+        pendingSection: null,
+        understanding: null,
+      });
+      for (const proposal of extraction.proposals) {
+        await designBrief.applyProposal(projectId, proposal);
+      }
+    }
+
     const version = await designBrief.approveWorkingBrief(projectId);
 
     let primaryAssetId: string | null = null;
@@ -473,6 +499,7 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       sourceKind: "generated_concept",
       finalDirectionApprovalId: "00000000-0000-0000-0000-000000000000",
       artworkVersionId: artworkId,
+      requestedProductionOutput: "production_png",
     });
 
     await worker.processNextJob();
@@ -856,8 +883,13 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     await repo.updateFinalArtworkJob(job.id, { status: "cancelled" });
   });
 
-  // --- O: unsupported production method never reaches print_ready ---------
-  it("O: an embroidery (unsupported) production method completes honestly without ever reaching print_ready", async () => {
+  // --- O: unsupported OUTPUT REQUEST never reaches print_ready -------------
+  // Sprint A2 split the original O in two. It used to assert that the words
+  // "Embroidered patch on a T-shirt" made a garment design unfinalizable —
+  // the exact defect this sprint removed. Mentioning a decoration method is
+  // context (O1); asking for a stitch file is an unsupported request (O2).
+
+  it("O1: an embroidery MENTION still produces the raster Production PNG and reaches print_ready", async () => {
     const repo = await freshRepo();
     const { assets, finalArtwork, worker } = buildPipeline(repo);
     const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
@@ -869,16 +901,179 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
 
     const completed = await repo.getFinalArtworkJob(job.id);
     assert.equal(completed?.status, "completed");
-    assert.match(completed?.lastError ?? "", /unsupported production method/i);
-
-    const project = await repo.getProject(projectId);
-    assert.equal(project?.project.status, "finalization_required");
-    assert.notEqual(project?.project.status, "print_ready");
 
     const productionAssets = (await repo.listAssets(projectId)).filter(
       (a) => a.productionRole === "production_png",
     );
-    assert.equal(productionAssets.length, 0, "never fabricates an asset for an unsupported method");
+    assert.equal(
+      productionAssets.length,
+      1,
+      "a decoration-method mention must not cost the customer their Production PNG",
+    );
+
+    // print_ready keeps its one meaning: this PNG passed authoritative
+    // validation for the supported RASTER profile. It is not, and is never
+    // described as, a digitized embroidery file.
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "print_ready");
+  });
+
+  // Sprint A2 (corrected) — Goal 15: the REAL authority chain, end to end.
+  // A customer sentence is interpreted once at the conversation layer,
+  // persisted as structured brief state, survives brief approval, and is what
+  // the worker gate reads. Nothing here re-interprets prose at finalization.
+  it("O2: a chat request for embroidery digitization persists and stops finalization at the worker", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      productSummary: "T-shirt",
+      printPlacement: "left_chest",
+      customerMessage: "please digitize this for embroidery and send me the DST",
+    });
+
+    // Q/P: the interpretation became durable structured state — and survived
+    // brief approval, which happens after it in `setupProjectWithConcept`.
+    const afterApproval = await repo.getProject(projectId);
+    assert.equal(
+      afterApproval?.brief.requestedProductionOutput,
+      "embroidery_digitization",
+      "the customer's request must be persisted, not re-derived later",
+    );
+
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed?.status, "completed");
+    assert.match(completed?.lastError ?? "", /does not produce/i);
+    assert.match(completed?.lastError ?? "", /embroidery_digitization/i);
+
+    // S: cannot reach print_ready.
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalization_required");
+    assert.notEqual(project?.project.status, "print_ready");
+
+    // U: no production asset, so no provider work was dispatched for it.
+    const productionAssets = (await repo.listAssets(projectId)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(
+      productionAssets.length,
+      0,
+      "never answers a request for a stitch file with a raster PNG",
+    );
+
+    // Goal 10: a deterministic unsupported request is not a retryable
+    // provider failure. The job is `completed`, so the customer view is the
+    // terminal `needs_review` rather than `retryable_failure`, polling stops,
+    // and nothing auto-retries or enqueues a duplicate.
+    assert.notEqual(completed?.status, "failed");
+
+    // Running the worker again must find nothing to do — a completed
+    // determination is terminal, never re-queued or retried.
+    await worker.processNextJob();
+    const stillCompleted = await repo.getFinalArtworkJob(job.id);
+    assert.equal(stillCompleted?.status, "completed");
+    assert.equal(stillCompleted?.attempts, completed?.attempts);
+    assert.equal(
+      (await repo.listAssets(projectId)).filter(
+        (a) => a.productionRole === "production_png",
+      ).length,
+      0,
+    );
+  });
+
+  it("O2b: a customer can retract the request and then finalize normally", async () => {
+    // The decisive reason this field lives on the mutable working brief
+    // rather than a frozen approved snapshot: one sentence must never strand
+    // a project permanently.
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      productSummary: "T-shirt",
+      printPlacement: "left_chest",
+      customerMessage: "can you make the color separations",
+    });
+    assert.equal(
+      (await repo.getProject(projectId))?.brief.requestedProductionOutput,
+      "screen_print_separations",
+    );
+
+    const designBrief = createDesignBriefCapability(repo);
+    const retraction = createIntentExtractionCapability().extract({
+      brief: await designBrief.getWorkingBrief(projectId),
+      phase: "interviewing",
+      reply: "never mind the separations, just give me the PNG",
+      pendingSection: null,
+      understanding: null,
+    });
+    for (const proposal of retraction.proposals) {
+      await designBrief.applyProposal(projectId, proposal);
+    }
+    assert.equal(
+      (await repo.getProject(projectId))?.brief.requestedProductionOutput,
+      "production_png",
+    );
+
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
+    const productionAssets = (await repo.listAssets(projectId)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(productionAssets.length, 1, "retraction restores the normal path");
+  });
+
+  it("O2c: chat that only MENTIONS a method never blocks finalization", async () => {
+    // The regression that started this sprint, proven through the real path.
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      productSummary: "T-shirt",
+      printPlacement: "left_chest",
+      customerMessage:
+        "I need a logo for a screen printed t-shirt, and no separations are needed since I already have the DST file",
+    });
+
+    assert.equal(
+      (await repo.getProject(projectId))?.brief.requestedProductionOutput,
+      null,
+      "decoration context, negation, and possession are not production requests",
+    );
+
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
+    const productionAssets = (await repo.listAssets(projectId)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(productionAssets.length, 1);
+    assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
+  });
+
+  it("O3: a non-apparel product is refused as out of product scope, not as an unbuilt production profile", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      productSummary: "Vinyl banner for a grand opening",
+      printPlacement: "left_chest",
+    });
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed?.status, "completed");
+    assert.match(completed?.lastError ?? "", /outside the iHeartPrints product scope/i);
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project?.project.status, "finalization_required");
+
+    const productionAssets = (await repo.listAssets(projectId)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(productionAssets.length, 0);
   });
 
   // --- P: validation ready → project print_ready ---------------------------
@@ -1079,6 +1274,508 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     assert.equal(serialized.includes(productionAsset.storageKey ?? " "), false);
     assert.equal(serialized.includes("finalArtworkJobId"), false);
     assert.deepEqual(Object.keys(snapshot!.finalization), ["status"]);
+  });
+
+  // =========================================================================
+  // Sprint A2 Correction 2 — production-intent lifecycle (Goals 5/6/7/16)
+  // =========================================================================
+  //
+  // `requestedProductionOutput` is mutable by design: customers change their
+  // minds. Every test below is a moment where that mutability could produce a
+  // lie — a job spending money on work nobody wants, or claiming `print_ready`
+  // for a question that is no longer being asked.
+
+  /**
+   * Every test in this describe shares one local DB, and the worker claims
+   * the globally-oldest queued job rather than a specific project's. These
+   * lifecycle tests each drive the worker deliberately, so anything left
+   * queued by an earlier test has to be retired first or it would be claimed
+   * instead. (Mirrors `prepared-upload-finalization.test.ts`'s own helper.)
+   */
+  async function retireQueuedJobs(
+    repo: Awaited<ReturnType<typeof freshRepo>>,
+  ): Promise<void> {
+    for (;;) {
+      const claimed = await repo.claimNextQueuedFinalArtworkJob();
+      if (!claimed) return;
+      await repo.updateFinalArtworkJob(claimed.id, {
+        status: "cancelled",
+        lastError: "Retired by test isolation.",
+        completedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  /** Change the project's CURRENT production intent, as a conversation turn would. */
+  async function setCurrentIntent(
+    repo: Awaited<ReturnType<typeof freshRepo>>,
+    projectId: string,
+    requestedProductionOutput: "production_png" | "screen_print_separations" | null,
+  ) {
+    await repo.updateBrief(projectId, { requestedProductionOutput });
+  }
+
+  async function customerStatus(projectId: string) {
+    const conversationService = await import("@/lib/services/conversation-service");
+    return (await conversationService.getFinalizationStatus(projectId))?.status;
+  }
+
+  it("K: a create_new job snapshots the current intent at enqueue and never re-reads it", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(job.requestedProductionOutput, "production_png");
+
+    // The project's intent moves; the JOB's does not.
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    const reread = await repo.getFinalArtworkJob(job.id);
+    assert.equal(reread?.requestedProductionOutput, "production_png");
+  });
+
+  it("C/N/P: a queued PNG job whose intent changed before the worker runs is superseded, not run", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    await worker.processNextJob();
+
+    const settled = await repo.getFinalArtworkJob(job.id);
+    // `cancelled`, never `failed`: nothing broke, and `failed` is the one
+    // status the customer view reads as "try again".
+    assert.equal(settled?.status, "cancelled");
+    assert.match(settled?.lastError ?? "", /superseded/i);
+
+    // N/P: no plate, and no print_ready claim.
+    assert.equal(
+      (await repo.listAssets(projectId)).filter(
+        (a) => a.productionRole === "production_png",
+      ).length,
+      0,
+    );
+    assert.notEqual((await repo.getProject(projectId))?.project.status, "print_ready");
+
+    // Q: the customer sees their CURRENT (unsupported) request's state.
+    assert.equal(await customerStatus(projectId), "needs_review");
+  });
+
+  it("F/P: a PNG job that finishes producing after the intent changed never claims print_ready", async () => {
+    // The post-provider case (Goal 5D): the work is already done and paid
+    // for. It is not thrown away — but it does not get to answer a question
+    // nobody asked. The plate stays; the claim does not happen.
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+
+    // Change the intent from inside the provider call — i.e. after dispatch,
+    // before the status transition. This is the exact race Codex found.
+    const racingWorker = createFinalArtworkWorkerCapability(
+      repo,
+      assets,
+      {
+        providerKey: "racing_local",
+        async produce(input) {
+          await setCurrentIntent(repo, projectId, "screen_print_separations");
+          return new LocalRasterInterpolationProvider().produce(input);
+        },
+      },
+      createPrintValidationCapability(),
+    );
+    await racingWorker.processNextJob();
+
+    // The plate really was produced — this is not a test of "nothing ran".
+    assert.equal(
+      (await repo.listAssets(projectId)).filter(
+        (a) => a.productionRole === "production_png",
+      ).length,
+      1,
+    );
+    // …and it did NOT flip the project to print_ready.
+    assert.notEqual((await repo.getProject(projectId))?.project.status, "print_ready");
+    assert.equal(await customerStatus(projectId), "needs_review");
+    assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
+
+    void worker;
+  });
+
+  it("G/Q/R: an existing print_ready PNG stops answering a new unsupported request, and returns when retracted", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
+    assert.equal(await customerStatus(projectId), "print_ready");
+
+    // G: the customer now asks for separations.
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    assert.equal(
+      await customerStatus(projectId),
+      "needs_review",
+      "a stale print_ready must not answer a new, unmet request",
+    );
+    // The artifact itself is NOT destroyed — only its claim to be the answer.
+    assert.equal(
+      (await repo.listAssets(projectId)).filter(
+        (a) => a.productionRole === "production_png",
+      ).length,
+      1,
+    );
+    assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
+
+    // R: they change their mind back. The already-produced plate answers again.
+    await setCurrentIntent(repo, projectId, "production_png");
+    assert.equal(await customerStatus(projectId), "print_ready");
+  });
+
+  it("I: PNG → unsupported → PNG reuses the existing job rather than paying again", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    const first = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    const unsupported = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.notEqual(
+      unsupported.job.id,
+      first.job.id,
+      "M: a different requested output is a different job, never the PNG job reinterpreted",
+    );
+    assert.equal(unsupported.job.requestedProductionOutput, "screen_print_separations");
+    await worker.processNextJob();
+    assert.notEqual((await repo.getProject(projectId))?.project.status, "print_ready");
+
+    await setCurrentIntent(repo, projectId, "production_png");
+    const back = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(back.job.id, first.job.id, "the original PNG job is reused");
+
+    // Exactly one plate ever existed — no duplicate production work.
+    assert.equal(
+      (await repo.listAssets(projectId)).filter(
+        (a) => a.productionRole === "production_png",
+      ).length,
+      1,
+    );
+  });
+
+  it("H: a completed unsupported job never blocks a retraction to PNG", async () => {
+    // The scenario Codex found broken: the unsupported job was returned as
+    // "already requested", so nothing ever ran and the project was stuck.
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    const unsupported = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    assert.equal((await repo.getFinalArtworkJob(unsupported.job.id))?.status, "completed");
+    assert.equal(await customerStatus(projectId), "needs_review");
+
+    await setCurrentIntent(repo, projectId, "production_png");
+    // The unsupported job is not the current one, so the customer is offered
+    // the action again rather than a stale verdict.
+    assert.equal(await customerStatus(projectId), "not_requested");
+
+    const png = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.notEqual(png.job.id, unsupported.job.id);
+    await worker.processNextJob();
+
+    assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
+    assert.equal(await customerStatus(projectId), "print_ready");
+  });
+
+  it("J: a stale tab's finalize request cannot restore an outdated intent", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+
+    // Tab B changes the intent. Tab A, still showing the old UI, clicks
+    // Prepare. The server's persisted authority — not the caller — decides.
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    const staleTabRequest = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+
+    assert.equal(
+      staleTabRequest.job.requestedProductionOutput,
+      "screen_print_separations",
+      "the job is bound to the CURRENT server-side intent, not the tab's stale view",
+    );
+    await worker.processNextJob();
+    assert.equal(
+      (await repo.listAssets(projectId)).filter(
+        (a) => a.productionRole === "production_png",
+      ).length,
+      0,
+    );
+    assert.equal(await customerStatus(projectId), "needs_review");
+  });
+
+  it("B/S: an unreadable stored intent fails closed and leaks nothing", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    // A value written by a newer deploy that this build has never heard of.
+    await repo.updateBrief(projectId, {
+      requestedProductionOutput:
+        "holographic_foil_separations" as unknown as "production_png",
+    });
+
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    // No plate, no print_ready — never a silent downgrade to "they must have
+    // wanted a PNG".
+    assert.equal(
+      (await repo.listAssets(projectId)).filter(
+        (a) => a.productionRole === "production_png",
+      ).length,
+      0,
+    );
+    assert.notEqual((await repo.getProject(projectId))?.project.status, "print_ready");
+    assert.equal(await customerStatus(projectId), "needs_review");
+
+    // S: the unreadable value never reaches the customer.
+    const conversationService = await import("@/lib/services/conversation-service");
+    const snapshot = await conversationService.getConversation(projectId);
+    const serialized = JSON.stringify(snapshot?.finalization);
+    assert.equal(serialized.includes("holographic_foil_separations"), false);
+    assert.equal(serialized.includes("unrecognized"), false);
+    void job;
+  });
+
+  // -------------------------------------------------------------------------
+  // Sprint A2 Correction 3 — completed-job reuse + delivery authority
+  // -------------------------------------------------------------------------
+
+  /** Counts production calls so "was work repeated?" is observable. */
+  class CountingProvider implements FinalArtworkProvider {
+    readonly providerKey = "local_raster_interpolation";
+    submitCount = 0;
+    private readonly inner = new LocalRasterInterpolationProvider();
+    async produce(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput> {
+      this.submitCount += 1;
+      return this.inner.produce(input);
+    }
+  }
+
+  it("A/B/C/D/M/N: PNG → unsupported → PNG restores print_ready, reusing the plate with no second submission", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const provider = new CountingProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    const conversationService = await import("@/lib/services/conversation-service");
+
+    // --- PNG produced and validated -----------------------------------------
+    const original = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
+    assert.equal(provider.submitCount, 1);
+
+    const plates = (await repo.listAssets(projectId)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(plates.length, 1);
+    const originalPlateId = plates[0]!.id;
+    // CASE A: delivery available for the current request.
+    assert.ok(await conversationService.getProductionArtworkUrl(projectId));
+
+    // --- customer asks for something we do not produce ----------------------
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    const unsupported = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.notEqual(unsupported.job.id, original.job.id);
+    await worker.processNextJob();
+
+    assert.equal(await customerStatus(projectId), "needs_review");
+    // E/F/CASE B: the historical plate still EXISTS, and is no longer offered
+    // as fulfillment of a request it does not answer.
+    assert.equal(
+      (await repo.listAssets(projectId)).filter(
+        (a) => a.productionRole === "production_png",
+      ).length,
+      1,
+    );
+    assert.equal(await conversationService.getProductionArtworkUrl(projectId), null);
+    assert.equal(await conversationService.getProductionArtworkDownload(projectId), null);
+    // O: the OLDEST job for this approval is the PNG job and it has an asset —
+    // resolving by "oldest" would wrongly hand it over. Intent decides.
+    assert.equal(await finalArtwork.getCurrentProductionAssetId(projectId), null);
+
+    // --- they change their mind back ----------------------------------------
+    await setCurrentIntent(repo, projectId, "production_png");
+    const reused = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(reused.job.id, original.job.id, "C: the original PNG job is reused");
+    assert.equal(reused.job.status, "completed", "Goal 4: not revived to queued/running");
+
+    // A: authoritative state is restored from the completed job's evidence.
+    assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
+    assert.equal(await customerStatus(projectId), "print_ready");
+
+    // B/M: no second production submission anywhere in the round trip.
+    assert.equal(provider.submitCount, 1);
+    // N/C: the same single plate, never a duplicate.
+    const platesAfter = (await repo.listAssets(projectId)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(platesAfter.length, 1);
+    assert.equal(platesAfter[0]!.id, originalPlateId);
+
+    // D/CASE C: delivery works again, pointing at the same plate.
+    assert.equal(await finalArtwork.getCurrentProductionAssetId(projectId), originalPlateId);
+    const delivered = await conversationService.getProductionArtworkUrl(projectId);
+    assert.ok(delivered);
+    assert.ok(await conversationService.getProductionArtworkDownload(projectId));
+    // No internal identifier rides along with the deliverable.
+    const serialized = JSON.stringify(delivered);
+    for (const internal of [
+      originalPlateId,
+      original.job.id,
+      "production_png",
+      "screen_print_separations",
+      "apparel_raster",
+    ]) {
+      assert.equal(serialized.includes(internal), false, `leaked ${internal}`);
+    }
+  });
+
+  it("K/L: the unsupported job never poisons the PNG job, and never borrows its plate", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    const unsupported = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // L: an unsupported request is satisfied by nothing, including a PNG.
+    assert.equal(await finalArtwork.getCurrentProductionAssetId(projectId), null);
+
+    // K: retracting leaves the PNG path completely unobstructed.
+    await setCurrentIntent(repo, projectId, "production_png");
+    const png = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.notEqual(png.job.id, unsupported.job.id);
+    await worker.processNextJob();
+
+    assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
+    assert.equal(await customerStatus(projectId), "print_ready");
+    assert.ok(await finalArtwork.getCurrentProductionAssetId(projectId));
+  });
+
+  it("I: a completed matching job WITHOUT ready validation never restores print_ready", async () => {
+    // Goal 12, and the whole reason reconciliation reads the validation record
+    // rather than the job status: `completed` only means the worker reached a
+    // conclusion. Here it concluded the plate is not print-ready.
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    // full_front needs an interpolated upscale from this source, so validation
+    // honestly lands short of ready.
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "full_front",
+    });
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
+    assert.equal(
+      (await repo.getProject(projectId))?.project.status,
+      "finalization_required",
+    );
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(
+      projectId,
+      job.id,
+    );
+    assert.notEqual(validation?.status, "ready");
+
+    // Re-requesting must NOT reconcile this into print_ready.
+    const again = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(again.job.id, job.id);
+    assert.equal(
+      (await repo.getProject(projectId))?.project.status,
+      "finalization_required",
+    );
+    assert.equal(await customerStatus(projectId), "needs_review");
+    // …and nothing is delivered for an unvalidated plate.
+    assert.equal(await finalArtwork.getCurrentProductionAssetId(projectId), null);
+  });
+
+  it("J/G: delivery resolves through the current-intent job, not the oldest approval job", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    const png = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    await setCurrentIntent(repo, projectId, "screen_print_separations");
+    await finalArtwork.requestFinalArtwork(projectId, artworkId);
+
+    // Both jobs belong to the same approval; the PNG one is oldest and owns
+    // the only plate. The deprecated oldest-job helper still returns it —
+    // which is exactly why delivery no longer goes through that helper.
+    const approval = await repo.getActiveFinalDirectionApproval(projectId);
+    const oldest = await repo.getFinalArtworkJobByApprovalId(projectId, approval!.id);
+    assert.equal(oldest?.id, png.job.id);
+    assert.equal(await finalArtwork.getCurrentProductionAssetId(projectId), null);
+  });
+
+  it("A/W: a legacy job with no bound intent still behaves as a Production PNG job", async () => {
+    const repo = await freshRepo();
+    await retireQueuedJobs(repo);
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "sleeve",
+    });
+    // A historical project's brief predates the column entirely.
+    await setCurrentIntent(repo, projectId, null);
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+
+    // The job's bound intent is IMMUTABLE — `UpdateFinalArtworkJobInput`
+    // deliberately cannot express a change to it, which is why this test
+    // cannot (and must not) mutate it. A legacy row's NULL and a new row's
+    // `"production_png"` are normalized to the same key on read, so the
+    // legacy half of this scenario is pinned in the domain unit tests
+    // (`normalizeProductionIntent` / `productionIntentMatches`) rather than
+    // faked here by writing a value the schema treats as write-once.
+    assert.equal(job.requestedProductionOutput, "production_png");
+
+    await worker.processNextJob();
+    assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
+    assert.equal(await customerStatus(projectId), "print_ready");
   });
 });
 

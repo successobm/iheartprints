@@ -102,6 +102,8 @@ export const TEST_FILES = [
   "src/capabilities/conversation/goal-directed-orchestration-regression.test.ts",
   "src/capabilities/conversation/live-vs-test-divergence-regression.test.ts",
   "src/capabilities/print-validation/print-validation-capability.test.ts",
+  "src/capabilities/print-validation/decoration-intent-vs-production-output.test.ts",
+  "src/capabilities/shared/requested-production-output.test.ts",
   "src/capabilities/print-validation/assemble-input.test.ts",
   "src/capabilities/generation-worker/generation-worker-print-validation.test.ts",
   "src/capabilities/final-artwork/final-artwork-capability.test.ts",

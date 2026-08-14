@@ -22,6 +22,7 @@ import type {
   ProductionAssetValidation,
   ProjectSnapshot,
   ProjectStatus,
+  StoredRequestedProductionOutput,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 
@@ -201,19 +202,34 @@ export interface CreateFinalDirectionApprovalInput {
  * `(project, approval)` for a generated concept, `(project, preparation,
  * production width)` for a prepared upload.
  */
+/**
+ * Sprint A2 Correction 2 (Goal 3): the production output this job is being
+ * created to satisfy, snapshotted from the project's CURRENT intent by the
+ * caller and immutable afterwards. Required on both variants — there is no
+ * "the caller forgot" path, because a job with no bound intent is exactly
+ * the ambiguity this correction removes.
+ *
+ * Always normalized (`normalizeProductionIntent`), so `"production_png"` is
+ * written rather than `null` for an ordinary request. `null` in the column
+ * is reserved for jobs enqueued before the column existed.
+ */
+type FinalArtworkJobProductionIntent = {
+  requestedProductionOutput: StoredRequestedProductionOutput;
+};
+
 export type CreateFinalArtworkJobInput =
-  | {
+  | ({
       sourceKind: "generated_concept";
       finalDirectionApprovalId: string;
       artworkVersionId: string;
-    }
-  | {
+    } & FinalArtworkJobProductionIntent)
+  | ({
       sourceKind: "prepared_upload";
       artworkPreparationId: string;
       artworkVersionId: string;
-      /** The production print width, in inches, this job is enqueued for — half of its idempotency key. */
+      /** The production print width, in inches, this job is enqueued for — part of its idempotency key. */
       productionWidthIn: number;
-    };
+    } & FinalArtworkJobProductionIntent);
 
 /**
  * Sprint 2M Phase 2C: mirrors `UpdateGenerationJobInput`. Sprint 2M Phase 2E
@@ -535,10 +551,43 @@ export interface ProjectRepository {
     projectId: string,
     input: CreateFinalArtworkJobInput,
   ): Promise<FinalArtworkJob>;
+  /**
+   * DEPRECATED for job resolution (Sprint A2 Correction 2). One approval may
+   * now own more than one job — one per requested production output — so
+   * "the job for this approval" is no longer a well-formed question. It
+   * returns the OLDEST matching row. Use `listFinalArtworkJobsForApproval`
+   * and match on bound intent when deciding whether a job satisfies a
+   * request.
+   *
+   * Sprint A2 Correction 3 removed its last production-behaviour caller:
+   * delivery resolution used to come through here and could hand a customer
+   * a historical PNG as fulfillment of a request it did not answer. Exactly
+   * ONE caller remains — `local-final-artwork-trigger.ts`'s `next dev`
+   * stranded-job recovery, which only re-triggers an already-queued job and
+   * is fenced by the worker regardless of which job it picks. That fact is
+   * pinned by a test; if a second caller ever appears, check it against
+   * `resolveCurrentMatchingProductionJob` first.
+   */
   getFinalArtworkJobByApprovalId(
     projectId: string,
     finalDirectionApprovalId: string,
   ): Promise<FinalArtworkJob | null>;
+  /**
+   * Sprint A2 Correction 2: every job ever enqueued for one
+   * `FinalDirectionApproval`, oldest first — the create_new counterpart of
+   * `listFinalArtworkJobsForPreparation`, and for the same reason it exists:
+   * an approval legitimately owns more than one job once the customer's
+   * requested production output changes, and matching them is a domain
+   * decision (`productionIntentMatches`) rather than something to express in
+   * the query.
+   *
+   * Always project-scoped — an approval id from another project can never
+   * return rows here.
+   */
+  listFinalArtworkJobsForApproval(
+    projectId: string,
+    finalDirectionApprovalId: string,
+  ): Promise<FinalArtworkJob[]>;
   /**
    * Existing Artwork → Print Ready Phase 2: every finalization job ever
    * enqueued for one `ArtworkPreparation`, oldest first. Returns the whole

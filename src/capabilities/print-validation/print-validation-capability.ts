@@ -92,6 +92,8 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     productSummary: input.productSummary,
     designDescription: input.designDescription,
     intendedPrintWidthIn: input.intendedPrintWidthIn ?? null,
+    // Sprint A2 (corrected): structured authority in, never re-derived here.
+    requestedProductionOutput: input.requestedProductionOutput ?? null,
   });
 
   const profile: PrintValidationProfile =
@@ -109,6 +111,54 @@ function validate(input: PrintValidationInput): PrintValidationReport {
   // --- Hard-block checks -------------------------------------------------
   // These represent "there is nothing here to finalize", not "this needs
   // more work" — Goal 5's `"blocked"` status.
+
+  // Sprint A2: asked before anything else, because for an out-of-scope
+  // product every downstream measurement is beside the point. A yard sign
+  // whose artwork happens to satisfy the raster checks is still not a thing
+  // iHeartPrints makes, and a report saying `"ready"` would be a lie of
+  // arithmetic. This is a product-scope decision (Constitution §7.13), not a
+  // production profile awaiting implementation.
+  if (requirements.category === "out_of_scope_product") {
+    checks.push({
+      check: "product_scope",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "Product is outside the iHeartPrints product scope (apparel artwork); no production artifact is produced for it.",
+    });
+    requiredTransformations.add("require_human_review");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+  }
+  checks.push({
+    check: "product_scope",
+    status: "pass",
+    severity: "blocking",
+    reason: "Product is within the iHeartPrints apparel product scope.",
+  });
+
+  // Sprint A2: the customer explicitly asked for a production artifact this
+  // product does not make. Blocking on its own terms — not because the raster
+  // artwork is deficient, but because handing them a Production PNG would be
+  // answering a question they did not ask. Emitted as a pass on every other
+  // run so "no unsupported artifact was requested" is stated, never inferred
+  // from the check's absence.
+  if (requirements.requestedUnsupportedOutput) {
+    checks.push({
+      check: "production_output_supported",
+      status: "fail",
+      severity: "blocking",
+      reason: `Customer explicitly requested ${requirements.requestedUnsupportedOutput}; iHeartPrints currently produces the raster Production PNG only, which must not be presented as satisfying that request.`,
+    });
+    requiredTransformations.add("require_human_review");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+  }
+  checks.push({
+    check: "production_output_supported",
+    status: "pass",
+    severity: "blocking",
+    reason:
+      "No unsupported production artifact was requested; the deliverable is the raster Production PNG.",
+  });
 
   if (!input.primaryAsset) {
     checks.push({

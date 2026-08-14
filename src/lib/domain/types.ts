@@ -147,6 +147,148 @@ export interface PrintProject {
   updatedAt: string;
 }
 
+/**
+ * Sprint A2 (corrected): WHAT PRODUCTION ARTIFACT THE CUSTOMER ASKED
+ * IHEARTPRINTS TO PRODUCE — structured, authoritative, and deliberately not
+ * a decoration method.
+ *
+ * This exists because the first A2 pass derived the same fact by running
+ * regexes over `productSummary`/`designDescription` at finalization time,
+ * which is wrong in both directions. It blocked valid jobs whose prose
+ * merely CONTAINED an artifact word ("no separations are needed", "I already
+ * have the DST file", a shirt whose wording is "COLOR SEPARATIONS", a
+ * customer called Screen Print Separations LLC), and it silently lost real
+ * requests typed in chat that never reached those two brief fields at all.
+ * Re-interpreting prose at the finalization gate cannot be made safe by
+ * adding more regex; the interpretation has to happen once, at the point the
+ * customer speaks, and be persisted as a value.
+ *
+ * `null` means UNSPECIFIED — the customer never asked for a particular
+ * artifact. That is the overwhelmingly common case, the default for every
+ * historical project, and it resolves to the supported Production PNG path
+ * exactly as it always has.
+ *
+ *   "This will be screen printed."      → null (decoration context)
+ *   "Just give me the PNG."             → "production_png"
+ *   "Make the screen-print separations." → "screen_print_separations"
+ *   "Digitize this for embroidery."     → "embroidery_digitization"
+ *
+ * A decoration method (`screen_print`, `embroidery`, `dtf`, `dtg`) is NEVER
+ * one of these values. Naming a method says where artwork is going; it does
+ * not order a file.
+ */
+export type RequestedProductionOutput =
+  /** The supported iHeartPrints V1 deliverable. Behaves identically to `null`. */
+  | "production_png"
+  | "embroidery_digitization"
+  | "screen_print_separations"
+  | "vector_output"
+  | "sublimation_specific";
+
+/** Every value that is not the supported V1 output. Used by the finalization gates. */
+export const UNSUPPORTED_REQUESTED_PRODUCTION_OUTPUTS = [
+  "embroidery_digitization",
+  "screen_print_separations",
+  "vector_output",
+  "sublimation_specific",
+] as const satisfies readonly RequestedProductionOutput[];
+
+/**
+ * Sprint A2 Correction 2 (Goal 12): a persisted requested-output value the
+ * RUNNING BUILD DOES NOT RECOGNIZE — a newer deploy wrote a production
+ * profile this older app has never heard of, or a row was hand-edited.
+ *
+ * This build never WRITES this value; it only ever reads it, as the result
+ * of failing to parse something. It exists because collapsing an
+ * unrecognized string to `null` — the previous behavior — is the single most
+ * dangerous thing this system could do with it: `null` means "the customer
+ * asked for nothing in particular", so an unknown production request would
+ * silently be answered with a Production PNG. An older app that cannot tell
+ * what a customer asked for must refuse to produce, not guess.
+ *
+ * Deliberately NOT the same as `null`. `null` is a fact ("never asked");
+ * this is an absence of knowledge ("asked for something we cannot read").
+ * They are backward-compatible in opposite directions and must never be
+ * merged.
+ */
+export const UNRECOGNIZED_PRODUCTION_OUTPUT = "unrecognized_production_output";
+
+export type UnrecognizedProductionOutput = typeof UNRECOGNIZED_PRODUCTION_OUTPUT;
+
+/**
+ * What a persisted requested-output column can hold once read back: a known
+ * value, or the fail-closed sentinel. `null` (never asked) is expressed by
+ * the surrounding `| null`, never by this type.
+ */
+export type StoredRequestedProductionOutput =
+  | RequestedProductionOutput
+  | UnrecognizedProductionOutput;
+
+/** Values this build knows how to write and act on. */
+const KNOWN_REQUESTED_PRODUCTION_OUTPUTS: readonly string[] = [
+  "production_png",
+  ...UNSUPPORTED_REQUESTED_PRODUCTION_OUTPUTS,
+];
+
+/**
+ * Narrows a raw persisted column to the domain vocabulary, FAILING CLOSED.
+ *
+ *   null/empty        → `null`   (never asked; every historical row)
+ *   recognized value  → that value
+ *   anything else     → the unrecognized sentinel, which no gate treats as
+ *                       producible
+ */
+export function readStoredRequestedProductionOutput(
+  raw: string | null | undefined,
+): StoredRequestedProductionOutput | null {
+  if (raw == null || raw === "") return null;
+  if (KNOWN_REQUESTED_PRODUCTION_OUTPUTS.includes(raw)) {
+    return raw as RequestedProductionOutput;
+  }
+  return UNRECOGNIZED_PRODUCTION_OUTPUT;
+}
+
+/**
+ * Whether this value blocks production of the supported Production PNG.
+ * `null` (never asked) and `"production_png"` do not; every unsupported
+ * value does, and so does the unrecognized sentinel — that is what "fail
+ * closed" means here.
+ */
+export function isUnsupportedRequestedProductionOutput(
+  value: StoredRequestedProductionOutput | null | undefined,
+): boolean {
+  if (value == null) return false;
+  return (
+    value === UNRECOGNIZED_PRODUCTION_OUTPUT ||
+    (UNSUPPORTED_REQUESTED_PRODUCTION_OUTPUTS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The single normalization used for JOB IDENTITY and for comparing bound
+ * intent against current intent. `null` and `"production_png"` are the same
+ * request — a customer who never mentioned an artifact and one who
+ * explicitly said "just the PNG" are asking for the identical deliverable —
+ * so they must resolve to one key, or a retraction would fail to match the
+ * PNG job it should reuse.
+ *
+ * Mirrors the migration's `coalesce(requested_production_output,
+ * 'production_png')` index expression exactly; the two must not drift.
+ */
+export function normalizeProductionIntent(
+  value: StoredRequestedProductionOutput | null | undefined,
+): StoredRequestedProductionOutput {
+  return value ?? "production_png";
+}
+
+/** Whether a job's bound intent still satisfies the project's current intent. */
+export function productionIntentMatches(
+  bound: StoredRequestedProductionOutput | null | undefined,
+  current: StoredRequestedProductionOutput | null | undefined,
+): boolean {
+  return normalizeProductionIntent(bound) === normalizeProductionIntent(current);
+}
+
 export interface TShirtDesignBrief {
   id: string;
   projectId: string;
@@ -163,6 +305,30 @@ export interface TShirtDesignBrief {
    */
   printPlacement: PrintPlacement | null;
   intendedPrintWidthIn: number | null;
+  /**
+   * Sprint A2 (corrected): the structured, authoritative answer to "what
+   * production artifact are we being asked to produce?". `null` =
+   * unspecified = the supported Production PNG path.
+   *
+   * Lives on the MUTABLE working brief and is deliberately absent from
+   * `DesignBriefSnapshotContent`, for the same reason `intendedPrintWidthIn`
+   * is: this is a production specification, not creative content. Two
+   * consequences make that the only correct home:
+   *
+   *   - Asking for separations must not restyle artwork, supersede an
+   *     approved brief version, or mark existing concepts stale. Nothing
+   *     about the DESIGN changed.
+   *   - It must be RETRACTABLE. A customer who says "actually, just give me
+   *     the PNG" has to be able to un-ask. Frozen into an immutable approved
+   *     version, an unsupported request would poison the project for good,
+   *     recoverable only through a whole new approval cycle.
+   *
+   * Both workflows read it from here: Create New via the project snapshot's
+   * working brief, and Existing Artwork the same way (uploads share the
+   * project, brief, and conversation — there is no second brief to keep in
+   * sync, and no fabricated `DesignBriefVersion`).
+   */
+  requestedProductionOutput: StoredRequestedProductionOutput | null;
   preferredColors: string[];
   designStyle: string | null;
   additionalInstructions: string | null;
@@ -978,6 +1144,31 @@ export interface FinalArtworkJob {
    * that path changes.
    */
   productionWidthIn: number | null;
+  /**
+   * Sprint A2 Correction 2 (Goal 1): the production output THIS JOB WAS
+   * CREATED TO SATISFY, snapshotted from the project's current intent at
+   * enqueue and immutable thereafter.
+   *
+   * `TShirtDesignBrief.requestedProductionOutput` is deliberately mutable —
+   * a customer must be able to change their mind. That makes it unusable on
+   * its own as job authority, which was the remaining defect: a job carried
+   * no record of what it was for, so a running PNG job could still flip a
+   * project to `print_ready` after the customer had asked for separations,
+   * and a completed unsupported job could be handed back as "already done"
+   * after they retracted. Bound intent is what lets every gate ask the only
+   * question that matters: *does this job still answer what is being asked?*
+   *
+   * It is also part of JOB IDENTITY (see the migration's unique indexes), so
+   * a PNG job and a separations job are different jobs rather than one row
+   * fighting over two meanings. That is what makes PNG → unsupported → PNG
+   * reuse the existing, already-paid-for plate instead of redoing it.
+   *
+   * `null` = a legacy job enqueued before this column existed. Those all
+   * predate any way to request anything else, so they mean `production_png`
+   * — normalized by `normalizeProductionIntent`, never by reading `null` as
+   * "unspecified" a second time.
+   */
+  requestedProductionOutput: StoredRequestedProductionOutput | null;
   /** Denormalized for convenient querying — always the same artwork the authorizing record references. */
   artworkVersionId: string;
   status: FinalArtworkJobStatus;
