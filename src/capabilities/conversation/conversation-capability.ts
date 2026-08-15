@@ -1416,13 +1416,19 @@ export function createConversationCapability(
       // value yet, and asking them for an address mid-wait would be a toll
       // booth in front of a promise we have not kept.
       //
+      // Sprint A4 Correction C2: this used to pass
+      // `current.artworkVersions.length > 0` as that condition — a second,
+      // staler copy of a rule the acquisition capability owns, which
+      // counted a `prepared_upload` row (the Existing Artwork customer's
+      // own pixels) and an artwork row written mid-generation as delivered
+      // free concepts. Delivery is now resolved inside the capability, from
+      // the session, so every surface that can ask for an address agrees.
+      //
       // The customer's message is refused BEFORE it is persisted — a turn
       // that is not going to be answered should not appear in the
       // transcript as if it had been.
-      const continuation = await acquisition.authorizeSessionContinuation(
-        designId,
-        current.artworkVersions.length > 0,
-      );
+      const continuation =
+        await acquisition.authorizeSessionContinuation(designId);
       if (!continuation.allowed) {
         await repo.addMessage(designId, {
           role: "assistant",

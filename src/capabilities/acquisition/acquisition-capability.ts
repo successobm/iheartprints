@@ -1,5 +1,6 @@
 import { randomBytes } from "crypto";
 
+import { hasDeliveredGeneratedConcept } from "@/capabilities/shared/concept-delivery";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { AcquisitionSession } from "@/lib/domain/types";
 
@@ -223,10 +224,14 @@ export interface AcquisitionCapability {
    * THE EMAIL GATE. Whether a further design turn may proceed. Refuses only
    * once the free concept has actually been delivered — a prospect whose
    * concept is still generating is not asked for anything.
+   *
+   * Sprint A4 Correction C2: takes no `conceptDelivered` argument. It used
+   * to, and the caller computed it as `artworkVersions.length > 0` — a
+   * second, staler copy of a rule this capability already owns. Delivery is
+   * now resolved here, from the SESSION, for every surface alike.
    */
   authorizeSessionContinuation(
     projectId: string,
-    conceptDelivered: boolean,
   ): Promise<{ allowed: true } | { allowed: false; customerMessage: string }>;
 
   captureEmail(projectId: string, rawEmail: unknown): Promise<EmailCaptureResult>;
@@ -234,10 +239,17 @@ export interface AcquisitionCapability {
   /** Grants the internal entitlement. Authorization happens in the route, never here. */
   grantInternalEntitlement(sessionId: string): Promise<AcquisitionSession | null>;
 
-  /** The customer-safe view attached to every project snapshot. */
+  /**
+   * The customer-safe view attached to every project snapshot.
+   *
+   * Sprint A4 Correction C2: `conceptDelivered` is likewise no longer an
+   * input. `generating` remains one because it is genuinely a property of
+   * the project being READ ("is this project busy right now"), not of the
+   * session's entitlement.
+   */
   describeForCustomer(
     projectId: string,
-    input: { conceptDelivered: boolean; generating: boolean },
+    input: { generating: boolean },
   ): Promise<CustomerAcquisitionView>;
 }
 
@@ -379,26 +391,106 @@ export function createAcquisitionCapability(
   }
 
   /**
-   * The two refusals for a session whose free concept is gone are genuinely
-   * different product states, and the customer is told the true one:
-   * somebody who never gave an address is asked for it, and somebody who did
-   * is told this is not sold yet rather than being asked again for something
-   * they already provided.
+   * Sprint A4 Correction C2: THE ONE ANSWER to "has this SESSION actually
+   * received the free concept it was promised?"
+   *
+   * WHY IT IS SESSION-LEVEL
+   *
+   * Correction C established what a delivered concept is
+   * (`hasDeliveredGeneratedConcept`) and wired it into exactly one consumer,
+   * the customer state view, from the project being read. That was too
+   * narrow in the one dimension that mattered: the entitlement belongs to
+   * the SESSION, not to a project. A prospect who starts a second design in
+   * the same browser is refused on project B for something that happened on
+   * project A, and project B's own snapshot contains no evidence of
+   * anything — no job, no artwork, no messages.
+   *
+   * The live consequence: the second project's card correctly read
+   * `continue_locked` while its TRANSCRIPT asked for an email, because the
+   * refusal path decided from `!session.email` alone and never asked
+   * whether a concept had been delivered at all. The customer was asked to
+   * pay with their address for something they had never been shown.
+   *
+   * So the question is asked of the session's free-concept PROJECT, through
+   * the same shared rule every other surface uses. Two existing authorities
+   * name that project, in decreasing directness:
+   *
+   *   freeConceptProjectId   the allocation, written atomically before any
+   *                          job exists.
+   *   the free-concept job   the reconciliation source, which survives a
+   *                          lost allocation marker (same fallback
+   *                          `freeConceptSpent` relies on).
+   *
+   * FAILS CLOSED FOR ASKING. Every unreadable case answers "not delivered",
+   * which can only ever SUPPRESS an email request — never grant spend, and
+   * never restore an entitlement. `freeConceptSpent` remains the sole
+   * authority for whether the free concept is gone, and it fails closed in
+   * the opposite direction, which is the correct direction for money.
    */
-  function refuseSpentFreeConcept(
+  async function freeConceptDelivered(
     session: AcquisitionSession,
-  ): ConceptGenerationAuthorization {
-    return session.email
-      ? {
-          allowed: false,
-          reason: "paid_access_required",
-          customerMessage: PAID_GENERATION_LOCKED_MESSAGE,
-        }
-      : {
-          allowed: false,
-          reason: "email_required",
-          customerMessage: EMAIL_REQUIRED_CONVERSATION_MESSAGE,
-        };
+  ): Promise<boolean> {
+    let projectId = session.freeConceptProjectId;
+    if (!projectId) {
+      try {
+        const job = await repo.getFreeConceptGenerationJob(session.id);
+        projectId = job?.projectId ?? null;
+      } catch {
+        return false;
+      }
+    }
+    if (!projectId) return false;
+
+    try {
+      const snapshot = await repo.getProject(projectId);
+      if (!snapshot) return false;
+      // The SAME rule the concept grid renders against — never a second
+      // definition of "delivered" (see `shared/concept-delivery.ts`).
+      return hasDeliveredGeneratedConcept({
+        status: snapshot.project.status,
+        artworkVersions: snapshot.artworkVersions,
+        messages: snapshot.messages,
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The refusals for a session whose free concept is gone are genuinely
+   * different product states, and the customer is told the true one.
+   *
+   * Sprint A4 Correction C2: there are THREE of them, not two. Asking for
+   * an address is only honest once the free concept has actually been
+   * delivered — an address unlocks continuing to work on a design the
+   * customer can see, and there is nothing to continue for somebody who was
+   * never shown one. A spent-but-undelivered session is told plainly that
+   * the free path is over, in the same sentence
+   * (`FREE_CONCEPT_SPENT_MESSAGE`) its customer state view already uses, so
+   * the transcript and the card cannot say different things.
+   */
+  async function refuseSpentFreeConcept(
+    session: AcquisitionSession,
+  ): Promise<ConceptGenerationAuthorization> {
+    if (session.email) {
+      return {
+        allowed: false,
+        reason: "paid_access_required",
+        customerMessage: PAID_GENERATION_LOCKED_MESSAGE,
+      };
+    }
+    if (await freeConceptDelivered(session)) {
+      return {
+        allowed: false,
+        reason: "email_required",
+        customerMessage: EMAIL_REQUIRED_CONVERSATION_MESSAGE,
+      };
+    }
+    return {
+      allowed: false,
+      reason: "paid_access_required",
+      customerMessage: FREE_CONCEPT_SPENT_MESSAGE,
+    };
   }
 
   return {
@@ -455,12 +547,12 @@ export function createAcquisitionCapability(
       // leaves the allocation intact and the marker unwritten, which the
       // allocation call alone would report as a resumable free concept.
       if (await freeConceptSpent(session)) {
-        return refuseSpentFreeConcept(session);
+        return await refuseSpentFreeConcept(session);
       }
 
       const allocation = await repo.allocateFreeConcept(session.id, projectId);
       if (allocation.outcome === "exhausted") {
-        return refuseSpentFreeConcept(allocation.session);
+        return await refuseSpentFreeConcept(allocation.session);
       }
 
       // "allocated" (first request) and "resumed" (reload, second tab,
@@ -506,7 +598,7 @@ export function createAcquisitionCapability(
       return { allowed: false, customerMessage: PAID_FINALIZATION_LOCKED_MESSAGE };
     },
 
-    async authorizeSessionContinuation(projectId, conceptDelivered) {
+    async authorizeSessionContinuation(projectId) {
       const authority = await resolveAuthority(projectId);
       if (authority.kind === "unavailable") {
         return { allowed: false, customerMessage: ACQUISITION_UNAVAILABLE_MESSAGE };
@@ -521,7 +613,13 @@ export function createAcquisitionCapability(
       // Reconciled rather than read off the marker alone, so a lost
       // consumption write cannot leave the gate permanently open.
       if (!(await freeConceptSpent(session))) return { allowed: true };
-      if (!conceptDelivered) return { allowed: true };
+      // Sprint A4 Correction C2: resolved HERE, from the session, rather
+      // than trusted from the caller. `ConversationCapability` used to pass
+      // `artworkVersions.length > 0` — the pre-Correction-C rule, which
+      // counted a `prepared_upload` row on an Existing Artwork project as a
+      // delivered free concept and refused the customer's message because
+      // of it.
+      if (!(await freeConceptDelivered(session))) return { allowed: true };
 
       return {
         allowed: false,
@@ -594,11 +692,17 @@ export function createAcquisitionCapability(
       // must agree with what the gates will actually do, including in the
       // crash window where the marker was never written.
       const freeConceptConsumed = await freeConceptSpent(session);
+      // Sprint A4 Correction C2: the SAME session-level answer the two
+      // transcript refusals now use. Previously the caller supplied this
+      // from the project being read, which made the card and the transcript
+      // disagree for every project that is not the one the free concept was
+      // spent on.
+      const conceptDelivered = await freeConceptDelivered(session);
 
       if (!freeConceptConsumed) {
         return { state: "open", message: null, emailCaptured };
       }
-      if (input.generating && !input.conceptDelivered) {
+      if (input.generating && !conceptDelivered) {
         return {
           state: "free_concept_generating",
           message: null,
@@ -608,7 +712,7 @@ export function createAcquisitionCapability(
       // Nothing generating, nothing delivered: the attempt is over without
       // producing artwork. WHY it is over decides what the customer is told,
       // and the two answers are genuinely different.
-      if (!input.conceptDelivered) {
+      if (!conceptDelivered) {
         // Sprint A4 Correction 3: if no physical dispatch was ever made, the
         // attempt was stopped by OUR local configuration before anything
         // reached a provider. Nothing was spent, the same authorized job is

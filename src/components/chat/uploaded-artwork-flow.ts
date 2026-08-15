@@ -48,6 +48,31 @@ export interface UploadedArtworkFlowInput {
 }
 
 /**
+ * Whether the project is still at its very start — the window in which the
+ * workflow choice is offered at all.
+ *
+ * A single customer reply closes that window, which is what makes the
+ * Create New button self-dismissing: submitting the intent
+ * (`create-new-intent.ts`) puts a user message in the transcript, so this
+ * turns false and the card stops rendering because the CONVERSATION moved,
+ * not because the client hid it. If that submission fails and the snapshot
+ * is restored, this is true again and the choice is correctly re-offered.
+ *
+ * Lives here rather than inline in `ChatApp` so the rule the card depends on
+ * is something tests can assert directly, in a repo whose test tooling has
+ * no DOM to click with.
+ */
+export function isAtProjectStart(input: {
+  messages: readonly { role: string }[];
+  artworkVersionCount: number;
+}): boolean {
+  return (
+    input.messages.every((message) => message.role !== "user") &&
+    input.artworkVersionCount === 0
+  );
+}
+
+/**
  * The step to render, or `null` when the uploaded-artwork surface should not
  * appear at all — which is every existing Create New Artwork project, so the
  * existing flow is untouched by construction.

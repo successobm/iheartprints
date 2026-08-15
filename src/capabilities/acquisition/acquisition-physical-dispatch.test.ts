@@ -432,7 +432,7 @@ describe("Sprint A4 Corrections 2/3 — one free concept, one physical dispatch"
     // is not — and the next thing they do must be allowed to work.
     const strandedView = await harness.acquisition.describeForCustomer(
       projectId,
-      { conceptDelivered: false, generating: false },
+      { generating: false },
     );
     assert.notEqual(strandedView.state, "continue_locked");
 
@@ -749,7 +749,6 @@ describe("Sprint A4 Corrections 2/3 — one free concept, one physical dispatch"
       false,
     );
     const view = await acquisition.describeForCustomer(projectId, {
-      conceptDelivered: false,
       generating: false,
     });
     assert.notEqual(view.state, "open");

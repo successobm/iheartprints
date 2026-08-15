@@ -19,6 +19,7 @@ import type {
 } from "@/lib/domain/types";
 
 import type { BriefFieldPatch } from "./extraction";
+import { textExpressesPaletteIntent } from "./extraction";
 import { mergeDesignDescription } from "./design-description-merge";
 import { preserveDesignDetail } from "./preserve-design-detail";
 
@@ -147,7 +148,9 @@ type RejectionCode =
   | "empty_wording_requires_explicit"
   | "unresolvable_print_location"
   | "unresolvable_production_output"
-  | "production_output_requires_explicit";
+  | "production_output_requires_explicit"
+  /** A4 Correction B: a subject's color proposed as the artwork's palette. */
+  | "colors_not_a_palette_preference";
 
 /**
  * Sprint A2 (corrected): the CLOSED vocabulary for the `production` section.
@@ -298,12 +301,36 @@ export function reconcileUnderstanding(
             .map((c) => normalizeColorAnswer(c.trim()))
             .filter(Boolean),
         );
-        if (colors.length > 0) {
-          fields.preferredColors = colors;
-          accepted.push("colors");
-        } else {
+        if (colors.length === 0) {
           reject("empty_value");
+          break;
         }
+        // A4 Correction B: the semantic layer is subject to the same
+        // subject-vs-palette rule the deterministic layer is.
+        //
+        // Understanding's fields WIN the merge in
+        // `IntentExtractionCapability.extract`, so without this the exact
+        // defect the deterministic fix removes could walk straight back in
+        // through a `colors: "Black"` proposal read off "black 2010 jeep
+        // wrangler". Deliberately narrow: the update survives if the
+        // customer was answering the colors question, or if ANY proposed
+        // color reads as palette intent in the provider's own evidence or
+        // in the customer's message. Only the pure false-inference case —
+        // no palette language anywhere — is refused, and refusing it falls
+        // back to deterministic extraction rather than to nothing.
+        if (
+          understanding.answeredPendingSection !== "colors" &&
+          !colors.some(
+            (color) =>
+              textExpressesPaletteIntent(update.evidence, color) ||
+              textExpressesPaletteIntent(context.message, color),
+          )
+        ) {
+          reject("colors_not_a_palette_preference");
+          continue;
+        }
+        fields.preferredColors = colors;
+        accepted.push("colors");
         break;
       }
       case "audience":

@@ -312,6 +312,24 @@ async function withConceptStatus(
  * disagrees with the server that produced it. A neutral "can't continue
  * right now" is the only honest thing to show when the server does not know
  * what this session may do.
+ *
+ * Sprint A4 Correction C established that row existence is not delivery:
+ * the generation worker writes artwork rows several separate writes before
+ * the project leaves `generating` and the `concepts_ready` anchor message
+ * the concept grid renders against exists, and a `prepared_upload` row is
+ * the Existing Artwork customer's OWN pixels rather than a free concept.
+ *
+ * Sprint A4 Correction C2 moved that question INSIDE the capability, so
+ * this function no longer supplies `conceptDelivered` at all. The
+ * entitlement belongs to the acquisition SESSION, not to the project being
+ * read: a prospect starting a second design in the same browser is refused
+ * on project B for something that happened on project A, and project B's
+ * snapshot holds no evidence of it. Computing delivery here could only ever
+ * answer for the wrong project — which is exactly how the card came to say
+ * `continue_locked` while the transcript asked for an email.
+ *
+ * `generating` stays an input because it genuinely is a property of THIS
+ * project ("is this one busy right now"), not of the session.
  */
 async function resolveAcquisitionView(
   snapshot: ProjectSnapshot,
@@ -319,10 +337,7 @@ async function resolveAcquisitionView(
   try {
     return await getCapabilityGraph().acquisition.describeForCustomer(
       snapshot.project.id,
-      {
-        conceptDelivered: snapshot.artworkVersions.length > 0,
-        generating: snapshot.project.status === "generating",
-      },
+      { generating: snapshot.project.status === "generating" },
     );
   } catch {
     return {

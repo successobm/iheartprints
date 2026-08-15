@@ -160,20 +160,44 @@ const DESIGN_ELEMENT_WORDS = [
   "palette",
   "scheme",
   "print",
+  /**
+   * A4 Correction B: whole-design referents. The customer is only ever
+   * describing artwork here, so "make everything blue" names the design as
+   * a whole exactly as "make the design blue" does. Listed because the
+   * undecided-clause path no longer promotes a bare color on its own — see
+   * `extractColors`.
+   */
+  "everything",
 ];
+
+/**
+ * One run of "color + separator" — the repeating middle of a color list.
+ * Hyphens count as separators: customers write "black-and-white" as often
+ * as "black and white".
+ */
+const COLOR_LIST_RUN = `(?:(?:${COLOR_WORDS.join("|")})[\\s,&\\-]+(?:and[\\s,&\\-]+)?)*`;
 
 /**
  * The rest of a color list, so the noun that closes it can be read as the
  * noun every color in it modifies: "red and gold lettering" and
- * "gold-and-white design" both attach to their final noun. Hyphens count
- * as separators — customers write "black-and-white" as often as "black and
- * white".
+ * "gold-and-white design" both attach to their final noun.
  */
-const COLOR_LIST_SEPARATOR = `[\\s,&\\-]*(?:and[\\s,&\\-]+)?(?:(?:${COLOR_WORDS.join("|")})[\\s,&\\-]+(?:and[\\s,&\\-]+)?)*`;
+const COLOR_LIST_SEPARATOR = `[\\s,&\\-]*(?:and[\\s,&\\-]+)?${COLOR_LIST_RUN}`;
 
-/** A design element within one word BEFORE the color: "the design mostly blue", "lettering in gold". */
+/**
+ * A design element within one word BEFORE the color: "the design mostly
+ * blue", "lettering in gold".
+ *
+ * A4 Correction B: the trailing `COLOR_LIST_RUN` is the mirror of what
+ * `DESIGN_ELEMENT_AFTER_COLOR` already does for a design element that
+ * CLOSES a list. Without it the one-word window reached the first color of
+ * "make the whole design black and gold" and no further, so Black was
+ * recorded as a palette preference and Gold — the same request, one word
+ * later — was silently dropped. The run only ever crosses COLOR words, so
+ * "gold lettering and a red car" still leaves the car's red on the car.
+ */
 const DESIGN_ELEMENT_BEFORE_COLOR = new RegExp(
-  `\\b(?:${DESIGN_ELEMENT_WORDS.join("|")})\\b(?:\\s+\\w+)?\\s*$`,
+  `\\b(?:${DESIGN_ELEMENT_WORDS.join("|")})\\b(?:\\s+\\w+)?\\s*${COLOR_LIST_RUN}$`,
   "i",
 );
 
@@ -185,6 +209,24 @@ const DESIGN_ELEMENT_BEFORE_COLOR = new RegExp(
  */
 const DESIGN_ELEMENT_AFTER_COLOR = new RegExp(
   `^${COLOR_LIST_SEPARATOR}(?:${DESIGN_ELEMENT_WORDS.join("|")})\\b`,
+  "i",
+);
+
+/**
+ * A4 Correction B: a clause that is NOTHING but colors and the words that
+ * join them — "gold and white", "white", "and blue".
+ *
+ * Clauses are split on `,.;`, so a customer listing colors mid-sentence
+ * ("…called My 3 Sons, gold and white, bowling ball smashing pins", "make
+ * the design red, white, and blue") hands the classifier fragments with no
+ * product word, no design word, and — the point — no noun of any kind. A
+ * color with nothing in its clause to modify is not a subject attribute,
+ * because there is no subject; it is the customer naming colors. That is
+ * the one safe way a bare color still reaches the palette now that the
+ * undecided path no longer promotes colors on sight.
+ */
+const BARE_COLOR_LIST = new RegExp(
+  `^\\s*(?:(?:and|or|plus|in|with)\\s+)?${COLOR_LIST_RUN}(?:${COLOR_WORDS.join("|")})[\\s.,;!]*$`,
   "i",
 );
 
@@ -890,6 +932,32 @@ function colorStatesAPalettePreference(clause: string, color: string): boolean {
   return DESIGN_ELEMENT_AFTER_COLOR.test(clause.slice(index + color.length));
 }
 
+/**
+ * A4 Correction B: the same authority, asked of a text that may not contain
+ * the color at all.
+ *
+ * `colorStatesAPalettePreference` answers `true` when the color is absent
+ * from the clause, because inside `extractColors` the color always IS in
+ * its clause and the branch is unreachable defensive cover. Callers outside
+ * that loop — the semantic-reconciliation guard — hand it a provider's
+ * `evidence` string, which may be anything at all, and for them "the color
+ * isn't in this text" must mean "this text is not evidence of palette
+ * intent", never "sure, go ahead".
+ */
+export function textExpressesPaletteIntent(
+  text: string | null | undefined,
+  color: string,
+): boolean {
+  if (!text) return false;
+  if (!text.toLowerCase().includes(color.toLowerCase())) return false;
+  // Same reasoning as the undecided-clause path: a text that is nothing
+  // but colors is the customer naming colors, because there is no noun in
+  // it for them to describe. Covers a provider echoing back the color list
+  // it read ("cream and orange") as its own evidence.
+  if (BARE_COLOR_LIST.test(text)) return true;
+  return colorStatesAPalettePreference(text, color);
+}
+
 function extractColors(
   positiveText: string,
   pendingSection: BriefSectionKey | null,
@@ -901,7 +969,13 @@ function extractColors(
 
   let productColor: string | null = null;
   const artworkColors: string[] = [];
-  const undecided: string[] = [];
+  /**
+   * A4 Correction B: the clause travels with the color. The undecided path
+   * used to collect bare color strings and push them straight into
+   * `artworkColors`, which threw away the only context that can tell "the
+   * Jeep is black" from "make the design black" — see below.
+   */
+  const undecided: Array<{ clause: string; color: string }> = [];
 
   for (const clause of clauses) {
     const colorsInClause = matchAllColors(clause);
@@ -951,16 +1025,46 @@ function extractColors(
         }
       }
     } else {
-      undecided.push(...colorsInClause);
+      for (const color of colorsInClause) undecided.push({ clause, color });
     }
   }
 
-  if (undecided.length > 0) {
-    if (pendingSection === "productColor" && !productColor) {
-      productColor = undecided[0] ?? null;
-      artworkColors.push(...undecided.slice(1));
-    } else {
-      artworkColors.push(...undecided);
+  /**
+   * A4 Correction B — the undecided clause: no product word, no design
+   * word, just a color and whatever it modifies.
+   *
+   * This used to promote every such color straight into `artworkColors`,
+   * bypassing `colorStatesAPalettePreference` entirely. Live acceptance:
+   * "black 2010 jeep wrangler unlimited with full racks…" recorded
+   * Preferred Colors = Black, the assistant replied "I have Black in the
+   * artwork", and when the customer later said the SHIRT was black, Brief
+   * Evaluation raised a blocking color clash against a palette preference
+   * the customer had never expressed. The Jeep's color is an attribute of
+   * the subject; `extractGraphics` already keeps it in the design
+   * description, so nothing is lost by declining to invent a palette.
+   *
+   * Two authorities can still land a color here, and only two:
+   *
+   *   the pending section  the customer was ASKED. "What colors?" answered
+   *                        with "forest green and cream" is a palette
+   *                        statement whatever the words look like, and
+   *                        "What color shirt?" answers the garment.
+   *   palette intent       the same guard the decided branches use, plus
+   *                        `BARE_COLOR_LIST` for the clause that contains
+   *                        no noun for the color to belong to.
+   */
+  const answeringColorQuestion = pendingSection === "colors";
+  for (const { clause, color } of undecided) {
+    if (pendingSection === "productColor" && productColor === null) {
+      productColor = color;
+      continue;
+    }
+    if (
+      answeringColorQuestion ||
+      BARE_COLOR_LIST.test(clause) ||
+      colorStatesAPalettePreference(clause, color)
+    ) {
+      artworkColors.push(color);
     }
   }
 

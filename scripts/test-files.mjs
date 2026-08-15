@@ -16,7 +16,7 @@
  */
 export const TEST_FILES = [
   "src/components/chat/chat-session.test.ts",
-  "src/components/chat/create-new-handoff.test.ts",
+  "src/components/chat/create-new-choice.test.tsx",
   "src/components/chat/ChatApp.ssr.test.tsx",
   "src/components/chat/chat-affordances.test.ts",
   "src/components/chat/ConceptCards.test.tsx",
@@ -34,11 +34,18 @@ export const TEST_FILES = [
   "src/capabilities/brief-evaluation/brief-evaluation-capability.test.ts",
   "src/capabilities/intent-extraction/intent-extraction-capability.test.ts",
   "src/capabilities/intent-extraction/product-vs-design-subject.test.ts",
+  // A4 Correction B: an object's color is a creative fact about the
+  // subject, never the design's global palette. Pure extraction +
+  // semantic-reconciliation matrix here; the live Jeep conversation it
+  // came from is replayed end to end in
+  // `conversation/subject-color-regression.test.ts` below.
+  "src/capabilities/intent-extraction/subject-color-vs-palette.test.ts",
   "src/capabilities/shared/brief-field-quality.test.ts",
   "src/capabilities/shared/field-normalization.test.ts",
   "src/components/chat/concept-image-fetch-controller.test.ts",
   "src/components/chat/status-poll-controller.test.ts",
   "src/capabilities/conversation/bowling-team-regression.test.ts",
+  "src/capabilities/conversation/subject-color-regression.test.ts",
   "src/capabilities/conversation/multi-scenario-regression.test.ts",
   "src/capabilities/interview-intelligence/interview-intelligence-capability.test.ts",
   "src/capabilities/product-intelligence/product-intelligence-capability.test.ts",
@@ -246,4 +253,15 @@ export const TEST_FILES = [
   // delete-then-reinsert rejection it depends on is proved against real
   // PostgreSQL by `scripts/verify-acquisition-authority-postgres.sql`.
   "src/capabilities/acquisition/acquisition-physical-dispatch.test.ts",
+  // Sprint A4 Correction C: the email gate may only appear once the free
+  // concept has actually been DELIVERED. The pure condition, then the same
+  // condition wired through the real customer read path against the safe
+  // local provider double — no network, no paid call.
+  "src/capabilities/shared/concept-delivery.test.ts",
+  "src/capabilities/acquisition/acquisition-concept-delivery.test.ts",
+  // Sprint A4 Correction C2: delivery is a property of the SESSION, and all
+  // three surfaces that can ask for an email read one answer. Asserts
+  // TRANSCRIPT CONTENT, not just `acquisition.state` — asserting state alone
+  // is what let the second-project defect through Correction C's suite.
+  "src/capabilities/acquisition/acquisition-session-delivery.test.ts",
 ];

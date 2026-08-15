@@ -26,6 +26,12 @@ export {
 } from "./product-rule-packs";
 export { diffBriefSections } from "./brief-diff";
 export {
+  GENERATED_CONCEPT_KINDS,
+  isGeneratedConcept,
+  hasDeliveredGeneratedConcept,
+  type ConceptDeliveryInput,
+} from "./concept-delivery";
+export {
   CONCEPT_RELEVANT_SECTIONS,
   isConceptRelevantChange,
 } from "./concept-relevance";

@@ -1,25 +1,14 @@
 "use client";
 
-import {
-  useState,
-  type FormEvent,
-  type KeyboardEvent,
-  type Ref,
-} from "react";
+import { useState, type FormEvent, type KeyboardEvent } from "react";
 
 interface ComposerProps {
   disabled: boolean;
   placeholder: string;
   onSend: (content: string) => Promise<void> | void;
-  textareaRef?: Ref<HTMLTextAreaElement>;
 }
 
-export function Composer({
-  disabled,
-  placeholder,
-  onSend,
-  textareaRef,
-}: ComposerProps) {
+export function Composer({ disabled, placeholder, onSend }: ComposerProps) {
   const [value, setValue] = useState("");
 
   async function submit() {
@@ -45,7 +34,6 @@ export function Composer({
     <form onSubmit={handleSubmit} className="mx-auto w-full max-w-2xl px-4 pb-6">
       <div className="flex items-end gap-2 rounded-3xl border border-black/8 bg-white p-2 shadow-sm">
         <textarea
-          ref={textareaRef}
           value={value}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={handleKeyDown}

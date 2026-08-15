@@ -6,9 +6,13 @@
  *
  * Two genuinely different jobs, stated in the customer's terms — "I want you
  * to make me a design" versus "I already have a design". Neither option is a
- * setting, a mode, or a technical toggle (Constitution §6.6), and choosing
- * "Create New Artwork" changes nothing at all: it simply dismisses this card
- * and the existing conversational interview continues exactly as before.
+ * setting, a mode, or a technical toggle (Constitution §6.6).
+ *
+ * Both buttons commit the customer to something real. "Create New Artwork"
+ * submits that answer into the conversation (`create-new-intent.ts`) and the
+ * interview replies; it is not a card-dismiss. An earlier version only hid
+ * this card, which left the customer looking at an unchanged screen with no
+ * indication their click had registered.
  */
 
 interface WorkflowChoiceCardProps {

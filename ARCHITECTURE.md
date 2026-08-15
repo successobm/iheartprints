@@ -2218,8 +2218,10 @@ already reconciles corrections vs. provided values.
 5. Grounding is field-specific, not one universal rule (Sprint 2L Phase 1A
    — see "Field-specific grounding policy" below): required wording is
    grounded by exact evidence containment; product is grounded by exact
-   containment OR a recognized product-noun synonym; every other field has
-   no additional grounding check beyond "not ambiguous confidence."
+   containment OR a recognized product-noun synonym; **artwork colors are
+   grounded by PALETTE INTENT** (A4 Correction B — see "Subject color is
+   not a palette preference" below); every other field has no additional
+   grounding check beyond "not ambiguous confidence."
 6. Every accepted value is normalized exactly the way a direct customer
    answer would be — `normalizeProductAnswer`, `normalizeColorAnswer`,
    `appendNote`, `PrintPlacement` text parsing. Conversation Understanding
@@ -2258,11 +2260,56 @@ field shape rather than one universal rule, since `product` and
 |---|---|---|
 | `requiredWording` | Exact (normalized) containment of `value` in `evidence` only | The literal print text must never be paraphrased, re-spelled, or invented — Constitution §6.12 |
 | `product` | Exact containment **OR** `evidence` contains a recognized product-noun synonym (`PRODUCT_NOUN_CANONICAL`, `shared/field-normalization.ts`) that canonicalizes to the same value | Product is a *canonicalized* field — "team t-shirts" must be able to ground a proposed "T-shirt" even though the word "T-shirt" never appears verbatim. A synonym match still requires the synonym's own canonical form to agree with the proposed value, so "team t-shirts" evidence can never ground a proposed "Hoodie" |
+| `colors` | Palette intent, in the provider's `evidence` **or** the customer's message — unless the update answered a pending colors question (A4 Correction B) | Same authority the deterministic layer uses (`textExpressesPaletteIntent`). Understanding's fields win the merge, so without this a `colors: "Black"` read off "black 2010 jeep wrangler" would undo the deterministic fix one layer later. Narrow by construction: the update survives if ANY proposed color reads as palette intent anywhere, so only the pure false-inference case is refused — and refusing it falls back to deterministic extraction, not to nothing |
 | Every other field | No additional check beyond "not ambiguous confidence" | Free-text fields with no fixed canonical vocabulary to check against; normalization (below) already keeps their shape consistent with a direct answer |
 
 Implemented in `reconcile-understanding.ts` (`productIsGrounded` /
-`requiredWordingIsGrounded`) — never in the provider adapter, which stays a
-thin, replaceable prompt/parsing layer.
+`requiredWordingIsGrounded` / `textExpressesPaletteIntent`) — never in the
+provider adapter, which stays a thin, replaceable prompt/parsing layer.
+
+### Subject color is not a palette preference (A4 Correction B)
+
+**A color describing what the artwork DEPICTS is a creative fact about the
+subject. It becomes `preferredColors` only when the customer expresses
+palette intent.** One authority, `colorStatesAPalettePreference` in
+`intent-extraction/extraction.ts`, decides that for every path — the
+deterministic clause branches, the previously-exempt "undecided" clause,
+and the semantic layer's `colors` proposal.
+
+Live acceptance: "black 2010 jeep wrangler unlimited with full racks and a
+inspired overland roof top tent" recorded Preferred Colors = Black. The
+clause names no garment and no design element, so it reached the undecided
+branch, which pushed its colors straight into the palette without ever
+consulting the guard. The assistant then said "I have Black in the
+artwork", and when the customer later chose a black shirt, Brief Evaluation
+raised a **blocking** `color_clash` against a preference they had never
+expressed and asked them to change their design.
+
+A color in an undecided clause now reaches the palette only through:
+
+| Signal | Example |
+|---|---|
+| `pendingSection === "colors"` — the customer was ASKED | "What colors?" → "forest green and cream" |
+| A design element or palette cue near the color | "make the design black and gold", "black and silver color scheme" |
+| A clause that is nothing but colors and connectors (`BARE_COLOR_LIST`) — no noun exists for the color to modify, so it is the customer naming colors | "…My 3 Sons, gold and white, bowling ball smashing pins" |
+
+Nothing is lost when the guard says no: `extractGraphics` keeps the words
+in the design description, which is what `PromptTranslationCapability`
+turns into the generation request's `subject` — so a black Jeep is still
+drawn black, without a global black palette reaching the image model.
+
+Two matching fixes shipped with it. `DESIGN_ELEMENT_BEFORE_COLOR` gained a
+trailing color-list run (the mirror of what `DESIGN_ELEMENT_AFTER_COLOR`
+already did), because its one-word window reached only the first color of
+"make the whole design black and gold" — Black was captured and Gold, the
+same request one word later, was dropped. And whole-design referents
+("everything") count as design elements, since the customer is only ever
+describing artwork here.
+
+**Brief Evaluation is unchanged.** `detectColorClash` was always correct;
+it was being fed a palette the customer never stated. An explicitly
+requested black artwork on a black shirt still raises the same blocking
+conflict.
 
 ### Debugging / structured tracing (Sprint 2L Phase 1A)
 
@@ -6859,7 +6906,7 @@ not the persisted enum:
 |---|---|
 | `open` | nothing is gated — a fresh prospect, an internal session, or a legacy project, indistinguishably |
 | `free_concept_generating` | their concept is being made |
-| `email_required` | their concept exists; an address unlocks continuing |
+| `email_required` | their concept has been **delivered** (see below); an address unlocks continuing |
 | `continue_locked` | further design work needs access not sold yet. **Correction 2:** also covers a spent free attempt that delivered nothing (a failed attempt, or a removed job) — that used to read `open`, which invited an action the gate would refuse. **Correction 3:** only when a physical dispatch actually happened — an attempt stopped by local configuration before any submission stays `open`, because that customer's free concept is intact and their next click will work |
 | `unavailable` | **Correction 1.** The server cannot establish what this session may do. **Correction 2:** also disables the composer and every paid-value control (`deriveChatAffordances`), so the UI never invites an action the server is known to refuse |
 
@@ -6874,6 +6921,84 @@ product-unsafe: `open` renders a UI offering actions the server is about to
 refuse, so the page and the server that produced it openly disagreed. The
 state is also derived through the same reconciliation the gates use, so
 "what the customer is shown" and "what the server will do" cannot drift.
+
+### What "delivered free concept" means (Correction C)
+
+**Delivery is customer-ready generated concept evidence — never the mere
+existence of an `ArtworkVersion` row, and never a prepared upload.**
+`shared/concept-delivery.ts` (`hasDeliveredGeneratedConcept`) is the single
+definition of what a customer-ready concept IS.
+
+All three must hold:
+
+| Fact | Why |
+|---|---|
+| `project.status !== "generating"` | the generation worker writes `ArtworkVersion` rows, then runs provisional validation, then completes the job, then sets `concepts_ready` — each a separate write. Rows genuinely exist while the project is still generating |
+| at least one artwork of a **generated** kind (`concept`, `revision`) | `prepared_upload` is the Existing Artwork customer's own pixels, never a free Create New concept (provenance is never inferred — Constitution §6.11 / §16) |
+| a `concepts_ready` anchor message exists | the message the concept grid is rendered against, and the **last** write of the completion sequence — requiring it closes the whole window rather than most of it |
+
+These are the same three facts `ChatApp`'s `showConcepts` renders against,
+so "delivered" cannot become true earlier than the customer can see
+anything. Deliberately **not** `status === "concepts_ready"`: continuing to
+work moves the project to `revision_requested`, `approved`, `finalizing`,
+`print_ready`, and an already-seen concept must not un-deliver itself.
+
+The rule this replaced was `artworkVersions.length > 0`, which produced the
+live defect the correction is named for: the customer was shown "Approved —
+generating concepts…" and "enter your email to keep working on your design"
+at the same moment, asking for the address before the free concept was
+visible. It also let technical upload preparation on the Existing Artwork
+path trip the Create New gate. This is presentation/state derivation only —
+no entitlement, spend, dispatch, or email-persistence behavior changes with
+it.
+
+### Delivery is a property of the SESSION (Correction C2)
+
+**"The free concept was delivered" is an acquisition-SESSION fact, resolved
+through the session's free-concept project and the shared customer-ready
+concept rule above. Every customer-facing email-required decision consumes
+that one authority.** It is `freeConceptDelivered(session)` inside
+`AcquisitionCapability`, and nothing outside that capability computes or
+supplies it.
+
+Correction C wired `hasDeliveredGeneratedConcept` into one consumer — the
+state view behind the email-gate card — from the project being read. Two
+other consumers of the same decision were left on their own rules, and both
+write into the TRANSCRIPT, which is what the customer actually reads:
+
+| Consumer | Surface | Old rule | Now |
+|---|---|---|---|
+| `describeForCustomer` | the `EmailContinuationGate` card | caller-supplied, project-scoped | `freeConceptDelivered(session)` |
+| `refuseSpentFreeConcept` (via `authorizeConceptGeneration`) | assistant message | `!session.email` alone — never asked about delivery | `!session.email && freeConceptDelivered(session)` |
+| `authorizeSessionContinuation` | assistant message | caller-supplied `artworkVersions.length > 0` (the pre-Correction-C rule) | `freeConceptDelivered(session)`; the parameter is gone |
+
+The entitlement belongs to the session, not to a project, so a project-scoped
+answer is answering about the wrong thing. A prospect who starts a second
+design in the same browser is refused on project B for something that
+happened on project A, and project B's snapshot holds no evidence of it at
+all. Live consequence: project B's card correctly read `continue_locked`
+while its transcript said "Like where this is going? Enter your email to
+keep working on your design." — on a project with no job, no artwork, and no
+concept, and never any.
+
+The session's free-concept project is resolved from
+`AcquisitionSession.freeConceptProjectId` (the allocation), falling back to
+the free-concept job's `projectId` (the same reconciliation source
+`freeConceptSpent` uses when the allocation marker was lost).
+
+**Fails closed for ASKING.** Every unreadable case — no project id, missing
+project, repository error — answers "not delivered", which can only suppress
+an email request. It never grants spend and never restores an entitlement:
+`freeConceptSpent` remains the sole authority for whether the free concept
+is gone, and it fails closed in the opposite direction, which is the correct
+direction for money.
+
+One customer-visible consequence beyond copy: once the session HAS been given
+its concept, the continuation gate now applies to a second project's first
+design turn rather than only to its approval. That is the intended funnel —
+further design work is what the address unlocks — and it was previously
+reachable only because the gate read the second project's own empty artwork
+list instead of the session's entitlement.
 
 ### Internal entitlement
 

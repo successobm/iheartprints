@@ -15,6 +15,7 @@ import { deriveChatAffordances } from "./chat-affordances";
 import { isStalePreparedImageResponse } from "@/capabilities/artwork-preparation";
 import {
   deriveUploadedArtworkStep,
+  isAtProjectStart,
   uploadedArtworkOwnsSurface,
   type WorkflowChoice,
 } from "./uploaded-artwork-flow";
@@ -25,7 +26,7 @@ import {
   planSessionBootstrap,
 } from "./chat-session";
 import { Composer } from "./Composer";
-import { handoffToCreateNewInterview } from "./create-new-handoff";
+import { CREATE_NEW_ARTWORK_INTENT } from "./create-new-intent";
 import { ConceptCards } from "./ConceptCards";
 import { ConceptStatusBanner } from "./ConceptStatusBanner";
 import { DesignerDecisionCard } from "./DesignerDecisionCard";
@@ -114,7 +115,6 @@ export function ChatApp() {
   });
   const previousConceptStatusRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   /** Latest prepared revision — used to drop stale signed-URL responses. */
   const preparedRevisionRef = useRef<string | null>(null);
 
@@ -804,13 +804,6 @@ export function ChatApp() {
     await bootstrap();
   }
 
-  function continueWithCreateNewInterview() {
-    handoffToCreateNewInterview({
-      selectCreateNew: () => setWorkflowChoice("create_new"),
-      getComposer: () => composerRef.current,
-    });
-  }
-
   const preparation = snapshot?.artworkPreparation ?? null;
   const preparationId = preparation?.preparationId ?? null;
   const hasPreparedArtwork = preparation?.hasPreparedArtwork ?? false;
@@ -903,8 +896,10 @@ export function ChatApp() {
   // itself is the durable workflow identity (see `uploaded-artwork-flow.ts`).
   const atProjectStart =
     !!snapshot &&
-    snapshot.messages.every((message) => message.role !== "user") &&
-    snapshot.artworkVersions.length === 0;
+    isAtProjectStart({
+      messages: snapshot.messages,
+      artworkVersionCount: snapshot.artworkVersions.length,
+    });
   const derivedUploadStep = deriveUploadedArtworkStep({
     preparation,
     choice: workflowChoice,
@@ -1184,14 +1179,21 @@ export function ChatApp() {
               );
             })}
 
-            {/* Existing Artwork → Print Ready Phase 1. The choice card is a
-                pure client-side branch: picking "Create New Artwork" only
-                dismisses it, so the existing interview is byte-for-byte
-                unchanged for every customer who does not upload anything. */}
+            {/* Existing Artwork → Print Ready Phase 1. The two sides of this
+                card are not symmetric, because the two answers are not.
+                "Upload Existing Artwork" opens a workflow whose identity
+                becomes durable the moment a file is uploaded, so it is a
+                client step until then. "Create New Artwork" is an answer to
+                the question already on screen, so it is submitted as one —
+                through the same path as every other customer turn. Sending
+                it is also what dismisses this card, because the reply then
+                exists server-side and `atProjectStart` is no longer true:
+                the card goes away because the conversation moved, never
+                because the client optimistically hid it. */}
             {uploadedArtworkStep === "choose_workflow" ? (
               <WorkflowChoiceCard
                 busy={sending}
-                onCreateNew={continueWithCreateNewInterview}
+                onCreateNew={() => void sendMessage(CREATE_NEW_ARTWORK_INTENT)}
                 onUploadExisting={() => setWorkflowChoice("upload_existing")}
               />
             ) : null}
@@ -1387,7 +1389,6 @@ export function ChatApp() {
 
       {!affordances.hideComposer && !uploadedArtworkActive ? (
         <Composer
-          textareaRef={composerRef}
           disabled={composerDisabled}
           placeholder={placeholder}
           onSend={sendMessage}

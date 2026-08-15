@@ -204,7 +204,6 @@ describe("Sprint A4 — one free concept, then an email gate", () => {
     assert.equal(session?.email, null);
 
     const view = await harness.acquisition.describeForCustomer(projectId, {
-      conceptDelivered: false,
       generating: false,
     });
     assert.equal(view.state, "open");
@@ -304,13 +303,31 @@ describe("Sprint A4 — one free concept, then an email gate", () => {
     // The one-click bypass a per-project entitlement would have: start
     // over, get another free concept. The session is the authority, so it
     // does not work.
-    const { projectId: secondProjectId } = await runAdaptiveInterviewToSummary(
-      harness.conversation,
-      {},
-      sessionId,
+    //
+    // Sprint A4 Correction C2: the refusal now lands at the SECOND
+    // project's first design turn rather than only at its approval. The
+    // session has already been given the concept it was promised, so
+    // further design work — on any project — is what the address unlocks.
+    // This used to be allowed all the way to approval only because the
+    // continuation gate read the second project's own (empty) artwork list
+    // instead of the session's entitlement.
+    const second = await harness.conversation.start(sessionId);
+    const secondProjectId = second.project.id;
+    const gated = await harness.conversation.handleUserMessage(
+      secondProjectId,
+      "I'd like a design for our hockey team",
     );
-    await approve(harness, secondProjectId);
 
+    assert.equal(
+      gated.messages.at(-1)?.content,
+      EMAIL_REQUIRED_CONVERSATION_MESSAGE,
+    );
+    // The turn is refused before it is persisted — a message that will not
+    // be answered must not sit in the transcript as if it had been.
+    assert.equal(
+      gated.messages.some((message) => message.role === "user"),
+      false,
+    );
     assert.equal(
       (await harness.repo.listGenerationJobs(secondProjectId)).length,
       0,
@@ -452,7 +469,6 @@ describe("Sprint A4 — one free concept, then an email gate", () => {
     // the card renders next to the concept rather than only appearing once
     // the customer bumps into a refusal.
     const view = await harness.acquisition.describeForCustomer(projectId, {
-      conceptDelivered: true,
       generating: false,
     });
     assert.equal(view.state, "email_required");
@@ -495,7 +511,6 @@ describe("Sprint A4 — one free concept, then an email gate", () => {
     // Value has been promised but not delivered. Asking for an address here
     // would be a toll booth in front of a promise we have not kept.
     const view = await harness.acquisition.describeForCustomer(projectId, {
-      conceptDelivered: false,
       generating: true,
     });
     assert.equal(view.state, "free_concept_generating");
@@ -750,7 +765,6 @@ describe("Sprint A4 — one free concept, then an email gate", () => {
 
     // And nothing is gated afterwards, including finalization.
     const view = await harness.acquisition.describeForCustomer(projectId, {
-      conceptDelivered: true,
       generating: false,
     });
     assert.equal(view.state, "open");
@@ -804,7 +818,6 @@ describe("Sprint A4 — one free concept, then an email gate", () => {
     await harness.acquisition.captureEmail(projectId, "eric@example.com");
 
     const view = await harness.acquisition.describeForCustomer(projectId, {
-      conceptDelivered: true,
       generating: false,
     });
 
@@ -868,7 +881,6 @@ describe("Sprint A4 — one free concept, then an email gate", () => {
 
     // Nothing is gated, and no gate copy is shown.
     const view = await harness.acquisition.describeForCustomer(projectId, {
-      conceptDelivered: true,
       generating: false,
     });
     assert.equal(view.state, "open");

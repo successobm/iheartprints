@@ -651,10 +651,7 @@ describe("Sprint A4 Correction 1 — acquisition spend authority", () => {
     // And continuing the session.
     assert.equal(
       (
-        await harness.acquisition.authorizeSessionContinuation(
-          created.project.id,
-          true,
-        )
+        await harness.acquisition.authorizeSessionContinuation(created.project.id)
       ).allowed,
       false,
     );
@@ -713,7 +710,7 @@ describe("Sprint A4 Correction 1 — acquisition spend authority", () => {
 
     const view = await harness.acquisition.describeForCustomer(
       created.project.id,
-      { conceptDelivered: false, generating: false },
+      { generating: false },
     );
     assert.equal(view.state, "unavailable");
     assert.equal(view.message, ACQUISITION_UNAVAILABLE_MESSAGE);
@@ -727,7 +724,7 @@ describe("Sprint A4 Correction 1 — acquisition spend authority", () => {
     );
     const view = await harness.acquisition.describeForCustomer(
       created.project.id,
-      { conceptDelivered: true, generating: false },
+      { generating: false },
     );
 
     const serialized = JSON.stringify(view);
@@ -772,7 +769,6 @@ describe("Sprint A4 Correction 1 — acquisition spend authority", () => {
 
     // Spent, no email → the view says email_required and the gate refuses.
     const view = await harness.acquisition.describeForCustomer(projectId, {
-      conceptDelivered: true,
       generating: false,
     });
     assert.equal(view.state, "email_required");
