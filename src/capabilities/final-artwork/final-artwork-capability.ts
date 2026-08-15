@@ -40,6 +40,10 @@ import type {
   FinalDirectionApproval,
   StoredRequestedProductionOutput,
 } from "@/lib/domain/types";
+import {
+  createAcquisitionCapability,
+  type AcquisitionCapability,
+} from "@/capabilities/acquisition";
 import { diffBriefSections } from "@/capabilities/shared/brief-diff";
 import { isConceptRelevantChange } from "@/capabilities/shared/concept-relevance";
 import { resolveProductionWidth } from "@/capabilities/shared/print-placement-dimensions";
@@ -197,11 +201,37 @@ export interface CurrentProductionDelivery {
 
 export function createFinalArtworkCapability(
   repo: ProjectRepository,
+  /**
+   * Sprint A4 — THE FINALIZATION FENCE.
+   *
+   * Both request methods below are the only paths that can ever create a
+   * `FinalArtworkJob`, and a `FinalArtworkJob` is what the final-artwork
+   * worker claims before dispatching paid production reconstruction
+   * (Topaz). So refusing here refuses that spend structurally, exactly as
+   * `ConceptGenerationCapability`'s enqueue fence does for image
+   * generation: no job, no claim, no paid call.
+   *
+   * Until payment entitlement exists (Sprint A5) this is available to
+   * internal-entitled and legacy-unbound projects only. Both the Create New
+   * path and the Upload Existing Artwork path are covered — an upload never
+   * consumes a free concept, so its ONLY acquisition gate is this one.
+   *
+   * Defaults to a fresh instance so a call site that forgets to pass one
+   * still gets the boundary.
+   */
+  acquisition: AcquisitionCapability = createAcquisitionCapability(repo),
 ): FinalArtworkCapability {
   return {
     async requestFinalArtwork(projectId, artworkVersionId) {
       const snapshot = await repo.getProject(projectId);
       if (!snapshot) throw new Error("Project not found");
+
+      // Checked before every other validation: a customer who may not
+      // finalize at all should be told that, not walked through
+      // increasingly specific reasons about artwork they are not going to
+      // be allowed to finalize either way.
+      const entitled = await acquisition.authorizeFinalization(projectId);
+      if (!entitled.allowed) throw new Error(entitled.customerMessage);
 
       // Sprint 2M Phase 2G (Goal 6): a pending revision means the customer
       // has explicitly said the current artwork is not what they want —
@@ -342,6 +372,13 @@ export function createFinalArtworkCapability(
     async requestPreparedUploadFinalArtwork(projectId) {
       const snapshot = await repo.getProject(projectId);
       if (!snapshot) throw new Error("Project not found");
+
+      // Sprint A4: same fence as the create_new path. An upload project
+      // never consumes a free concept, so this is the only acquisition gate
+      // standing between an anonymous prospect and paid production
+      // reconstruction.
+      const entitled = await acquisition.authorizeFinalization(projectId);
+      if (!entitled.allowed) throw new Error(entitled.customerMessage);
 
       const preparation = await repo.getArtworkPreparation(projectId);
       // Goal 18: `getArtworkPreparation` is already project-scoped, so a

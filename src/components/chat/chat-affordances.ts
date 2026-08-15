@@ -37,6 +37,20 @@ export interface ChatAffordanceInput {
    * supersession still happens only when they submit a real change.
    */
   deliveryEditingReopened?: boolean;
+  /**
+   * Sprint A4 Correction 2: the server could not establish what this session
+   * is allowed to do (`acquisition.state === "unavailable"`).
+   *
+   * Every paid-value action is independently refused server-side in that
+   * state, so this changes no guarantee — it stops the UI INVITING an action
+   * it knows will be refused. Offering a button that always fails is a worse
+   * experience than offering none, and it makes a transient infrastructure
+   * problem look like a broken product.
+   *
+   * Optional and defaulting to `false`, so every existing caller and test
+   * keeps its exact current behavior.
+   */
+  acquisitionUnavailable?: boolean;
 }
 
 export interface ChatAffordances {
@@ -78,12 +92,21 @@ export function deriveChatAffordances(
   const inDeliveryMode =
     finalizationStatus === "print_ready" && !deliveryEditingReopened;
 
+  // Sprint A4 Correction 2: an unresolvable acquisition authority disables
+  // every action the server would refuse anyway. Deliberately folded into
+  // the SAME booleans the rest of this module already computes, rather than
+  // added as a parallel gate in the component — the whole reason this policy
+  // was lifted out of `ChatApp` is that a second, independent chain is
+  // exactly how affordances and reality drift apart.
+  const acquisitionUnavailable = input.acquisitionUnavailable === true;
+
   const composerDisabled =
     !input.ready ||
     input.busy ||
     phase === undefined ||
     isChatBlockedPhase(phase) ||
-    inDeliveryMode;
+    inDeliveryMode ||
+    acquisitionUnavailable;
 
   const inRevisionLoop = phase !== undefined && isRevisionLoopPhase(phase);
   const showArtworkSurfaces =
@@ -95,6 +118,7 @@ export function deriveChatAffordances(
   // explicitly confirmed — selection is never, by itself, approval.
   const showUseThisDesign =
     input.ready &&
+    !acquisitionUnavailable &&
     !inDeliveryMode &&
     inRevisionLoop &&
     input.selectedArtworkVersionId !== null &&
@@ -108,6 +132,7 @@ export function deriveChatAffordances(
   // server-side; this is only the customer-facing reflection of it.
   const canRequestFinalArtwork =
     input.ready &&
+    !acquisitionUnavailable &&
     !inDeliveryMode &&
     input.selectedArtworkVersionId !== null &&
     !input.conceptsNeedUpdate &&
@@ -127,12 +152,16 @@ export function deriveChatAffordances(
 
   const showChangeSelection =
     showArtworkSurfaces &&
+    !acquisitionUnavailable &&
     input.selectedArtworkVersionId !== null &&
     !input.revisionPending &&
     !finalizationInProgress;
 
   const showExploreNewConcepts =
-    showArtworkSurfaces && !input.revisionPending && !finalizationInProgress;
+    showArtworkSurfaces &&
+    !acquisitionUnavailable &&
+    !input.revisionPending &&
+    !finalizationInProgress;
 
   return {
     composerDisabled,

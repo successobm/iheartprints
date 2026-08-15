@@ -11,6 +11,8 @@ import {
   productionIntentMatches,
 } from "@/lib/domain/types";
 import type {
+  AcquisitionFreeConceptClaim,
+  AcquisitionSession,
   ArtworkPreparation,
   ArtworkVersion,
   AssetRecord,
@@ -31,6 +33,7 @@ import type {
 } from "@/lib/domain/types";
 import type {
   ApproveDesignBriefInput,
+  CaptureAcquisitionEmailInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
@@ -40,6 +43,7 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  FreeConceptAllocation,
   PaidImageIntentReservation,
   ProjectRepository,
   RecordPaidImageIntentFailureInput,
@@ -49,7 +53,10 @@ import type {
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
 } from "./repository";
-import { UniqueConstraintViolationError } from "./repository";
+import {
+  FreeConceptAlreadyConsumedError,
+  UniqueConstraintViolationError,
+} from "./repository";
 
 interface LocalDatabase {
   projects: PrintProject[];
@@ -62,6 +69,10 @@ interface LocalDatabase {
   generationJobs: GenerationJob[];
   /** Phase 2C0.5. */
   paidImageIntents: PaidImageIntent[];
+  /** Sprint A4. */
+  acquisitionSessions: AcquisitionSession[];
+  /** Sprint A4 Correction 2 — the lifetime free-attempt tombstone. */
+  acquisitionFreeConceptClaims: AcquisitionFreeConceptClaim[];
   assets: AssetRecord[];
   /** Sprint 2M Phase 2B. */
   finalDirectionApprovals: FinalDirectionApproval[];
@@ -89,6 +100,8 @@ function emptyDb(): LocalDatabase {
     designBriefVersions: [],
     generationJobs: [],
     paidImageIntents: [],
+    acquisitionSessions: [],
+    acquisitionFreeConceptClaims: [],
     assets: [],
     finalDirectionApprovals: [],
     finalArtworkJobs: [],
@@ -112,6 +125,9 @@ async function readDb(): Promise<LocalDatabase> {
         ...project,
         revisionPending: project.revisionPending ?? false,
         finalDirectionConfirmed: project.finalDirectionConfirmed ?? false,
+        // Sprint A4: on-disk projects written before acquisition sessions
+        // existed are legacy — grandfathered, never "unentitled".
+        acquisitionSessionId: project.acquisitionSessionId ?? null,
       })),
       briefs: (parsed.briefs ?? []).map((brief) => ({
         ...brief,
@@ -162,11 +178,22 @@ async function readDb(): Promise<LocalDatabase> {
         heartbeatAt: job.heartbeatAt ?? null,
         targetArtworkVersionId: job.targetArtworkVersionId ?? null,
         revisionInstruction: job.revisionInstruction ?? null,
+        // Sprint A4 Correction 1: every job written before the acquisition
+        // funnel existed is an ordinary job, never a free-concept one.
+        acquisitionSessionId: job.acquisitionSessionId ?? null,
       })),
       // Phase 2C0.5: absent in every store written before paid image
       // intents existed. A pre-existing completed job simply has no
       // intents, which is exactly right — it has nothing left to pay for.
       paidImageIntents: parsed.paidImageIntents ?? [],
+      // Sprint A4: absent in every store written before acquisition
+      // sessions existed. No sessions means every pre-existing project is
+      // legacy/grandfathered, which is exactly the intended reading.
+      acquisitionSessions: parsed.acquisitionSessions ?? [],
+      // Sprint A4 Correction 2: absent in every store written before the
+      // free-attempt claim existed. No claims means no session has spent a
+      // free concept, which is exactly right for pre-A4 data.
+      acquisitionFreeConceptClaims: parsed.acquisitionFreeConceptClaims ?? [],
       // Sprint 2M Phase 2B/2C: default the new reserved fields for on-disk
       // data written before they existed, so resume never crashes.
       assets: (parsed.assets ?? []).map((asset) => ({
@@ -292,7 +319,9 @@ export class LocalProjectRepository implements ProjectRepository {
     });
   }
 
-  async createProject(): Promise<ProjectSnapshot> {
+  async createProject(
+    acquisitionSessionId: string | null = null,
+  ): Promise<ProjectSnapshot> {
     const db = await readDb();
     const timestamp = nowIso();
     const projectId = randomUUID();
@@ -305,6 +334,7 @@ export class LocalProjectRepository implements ProjectRepository {
       selectedArtworkVersionId: null,
       revisionPending: false,
       finalDirectionConfirmed: false,
+      acquisitionSessionId,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -657,6 +687,56 @@ export class LocalProjectRepository implements ProjectRepository {
     input: CreateGenerationJobInput,
   ): Promise<GenerationJob> {
     const db = await readDb();
+
+    // Sprint A4: mirrors the `unique (project_id, idempotency_key)`
+    // constraint `generation_jobs` has had since 20260805130000, and the
+    // Supabase store's handling of it — a duplicate returns the WINNER'S
+    // row rather than creating a second job.
+    //
+    // Without this the local store silently allowed something the database
+    // refuses, so two concurrent approvals (two tabs, a duplicated request)
+    // produced two jobs locally and one in production. Since a job is the
+    // unit that authorizes paid generation, that divergence meant the local
+    // store could not be used to prove a spend property at all.
+    const duplicate = db.generationJobs.find(
+      (existing) =>
+        existing.projectId === projectId &&
+        existing.idempotencyKey === input.idempotencyKey,
+    );
+    if (duplicate) return duplicate;
+
+    // Sprint A4 Correction 2: mirrors the `acquisition_free_concept_claims`
+    // PRIMARY KEY and the BEFORE INSERT trigger that takes it — the LIFETIME
+    // entitlement authority.
+    //
+    // Correction 1 checked the jobs list instead, mirroring the partial
+    // unique index. That index only constrains rows that EXIST, so deleting
+    // the free job freed the slot for another. The claim is owned by the
+    // session and holds no reference back to the job, so it keeps refusing
+    // after the job is gone.
+    //
+    // Checked AFTER the idempotency-key match on purpose, and in that order
+    // for the same reason the Supabase store re-reads before deciding: the
+    // two rules mean different things. The same logical job coming back is a
+    // RESUME and must succeed; a different job for a session that already has
+    // one is a SECOND FREE CONCEPT and must not. Reversing the order would
+    // refuse every legitimate retry.
+    //
+    // Deliberately NOT scoped to `projectId`. The bypass this closes is a
+    // second PROJECT in the same session, so it is session-wide exactly as
+    // the database's is.
+    //
+    // The claim is written in the SAME locked call that writes the job (this
+    // whole method runs behind `withLock`), which is the local equivalent of
+    // the trigger firing inside the insert's transaction. There is no window
+    // in which one exists without the other.
+    if (input.acquisitionSessionId) {
+      const claimed = db.acquisitionFreeConceptClaims.some(
+        (claim) => claim.acquisitionSessionId === input.acquisitionSessionId,
+      );
+      if (claimed) throw new FreeConceptAlreadyConsumedError();
+    }
+
     const timestamp = nowIso();
     const job: GenerationJob = {
       id: randomUUID(),
@@ -669,6 +749,7 @@ export class LocalProjectRepository implements ProjectRepository {
       idempotencyKey: input.idempotencyKey,
       targetArtworkVersionId: input.targetArtworkVersionId ?? null,
       revisionInstruction: input.revisionInstruction ?? null,
+      acquisitionSessionId: input.acquisitionSessionId ?? null,
       attempts: 0,
       lastError: null,
       startedAt: null,
@@ -678,8 +759,26 @@ export class LocalProjectRepository implements ProjectRepository {
       updatedAt: timestamp,
     };
     db.generationJobs.push(job);
+    if (input.acquisitionSessionId) {
+      db.acquisitionFreeConceptClaims.push({
+        acquisitionSessionId: input.acquisitionSessionId,
+        generationJobId: job.id,
+        claimedAt: timestamp,
+      });
+    }
     await writeDb(db);
     return job;
+  }
+
+  async getFreeConceptClaim(
+    acquisitionSessionId: string,
+  ): Promise<AcquisitionFreeConceptClaim | null> {
+    const db = await readDb();
+    return (
+      db.acquisitionFreeConceptClaims.find(
+        (claim) => claim.acquisitionSessionId === acquisitionSessionId,
+      ) ?? null
+    );
   }
 
   async getGenerationJobByIdempotencyKey(
@@ -772,6 +871,173 @@ export class LocalProjectRepository implements ProjectRepository {
 
     if (recovered.length > 0) await writeDb(db);
     return recovered;
+  }
+
+  // --- Sprint A4: acquisition sessions ---------------------------------
+  //
+  // Every method on this store already runs behind `withLock` (see the
+  // constructor's Proxy), so each read-modify-write below is atomic
+  // relative to every other one. That is what gives `allocateFreeConcept`
+  // the same "only one caller ever wins" guarantee Supabase gets from a
+  // single row-conditional UPDATE.
+
+  async createAcquisitionSession(
+    sessionToken: string,
+  ): Promise<AcquisitionSession> {
+    const db = await readDb();
+    const timestamp = nowIso();
+    const session: AcquisitionSession = {
+      id: randomUUID(),
+      sessionToken,
+      entitlement: "prospect",
+      freeConceptProjectId: null,
+      freeConceptAllocatedAt: null,
+      freeConceptGenerationJobId: null,
+      freeConceptConsumedAt: null,
+      email: null,
+      emailCapturedAt: null,
+      internalGrantedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.acquisitionSessions.push(session);
+    await writeDb(db);
+    return session;
+  }
+
+  async getAcquisitionSessionByToken(
+    sessionToken: string,
+  ): Promise<AcquisitionSession | null> {
+    const db = await readDb();
+    return (
+      db.acquisitionSessions.find(
+        (item) => item.sessionToken === sessionToken,
+      ) ?? null
+    );
+  }
+
+  async getAcquisitionSession(
+    sessionId: string,
+  ): Promise<AcquisitionSession | null> {
+    const db = await readDb();
+    return db.acquisitionSessions.find((item) => item.id === sessionId) ?? null;
+  }
+
+  async getFreeConceptGenerationJob(
+    acquisitionSessionId: string,
+  ): Promise<GenerationJob | null> {
+    const db = await readDb();
+    return (
+      db.generationJobs.find(
+        (job) => job.acquisitionSessionId === acquisitionSessionId,
+      ) ?? null
+    );
+  }
+
+  async allocateFreeConcept(
+    sessionId: string,
+    projectId: string,
+  ): Promise<FreeConceptAllocation> {
+    const db = await readDb();
+    const session = db.acquisitionSessions.find(
+      (item) => item.id === sessionId,
+    );
+    if (!session) throw new Error("Acquisition session not found");
+
+    // Consumption is checked FIRST and is unconditional. A session whose
+    // free concept was already spent by a durable job is exhausted even for
+    // the very project it was spent on — otherwise the second generation
+    // request on that project would resume an allocation that has nothing
+    // left in it.
+    //
+    // Sprint A4 Correction 1: consumption is now read from TWO sources, and
+    // either one alone is sufficient. `freeConceptConsumedAt` is the marker
+    // written right after the job insert; the free-concept job's existence
+    // is the fact the database itself guarantees. A crash between the two
+    // writes leaves the second true and the first false, and this must
+    // report exhausted in that state — otherwise the crash window is exactly
+    // the bypass.
+    //
+    // Sprint A4 Correction 2: the claim is consulted first and is the one
+    // that survives deletion of the job — mirroring the Postgres primary key
+    // the insert is actually checked against.
+    if (
+      db.acquisitionFreeConceptClaims.some(
+        (claim) => claim.acquisitionSessionId === sessionId,
+      ) ||
+      session.freeConceptConsumedAt ||
+      session.freeConceptGenerationJobId ||
+      db.generationJobs.some((job) => job.acquisitionSessionId === sessionId)
+    ) {
+      return { outcome: "exhausted", session };
+    }
+    if (session.freeConceptProjectId === projectId) {
+      return { outcome: "resumed", session };
+    }
+    if (session.freeConceptProjectId !== null) {
+      return { outcome: "exhausted", session };
+    }
+
+    session.freeConceptProjectId = projectId;
+    session.freeConceptAllocatedAt = nowIso();
+    session.updatedAt = session.freeConceptAllocatedAt;
+    await writeDb(db);
+    return { outcome: "allocated", session };
+  }
+
+  async recordFreeConceptConsumed(
+    sessionId: string,
+    generationJobId: string,
+  ): Promise<AcquisitionSession | null> {
+    const db = await readDb();
+    const session = db.acquisitionSessions.find(
+      (item) => item.id === sessionId,
+    );
+    if (!session) return null;
+    // Conditional: consumption is written once and never re-pointed.
+    if (session.freeConceptGenerationJobId) return session;
+
+    session.freeConceptGenerationJobId = generationJobId;
+    session.freeConceptConsumedAt = nowIso();
+    session.updatedAt = session.freeConceptConsumedAt;
+    await writeDb(db);
+    return session;
+  }
+
+  async captureAcquisitionEmail(
+    sessionId: string,
+    input: CaptureAcquisitionEmailInput,
+  ): Promise<AcquisitionSession | null> {
+    const db = await readDb();
+    const session = db.acquisitionSessions.find(
+      (item) => item.id === sessionId,
+    );
+    if (!session) return null;
+
+    const timestamp = nowIso();
+    session.email = input.email;
+    // Stamped on first capture only — a correction is not a new capture.
+    session.emailCapturedAt = session.emailCapturedAt ?? timestamp;
+    session.updatedAt = timestamp;
+    await writeDb(db);
+    return session;
+  }
+
+  async grantInternalEntitlement(
+    sessionId: string,
+  ): Promise<AcquisitionSession | null> {
+    const db = await readDb();
+    const session = db.acquisitionSessions.find(
+      (item) => item.id === sessionId,
+    );
+    if (!session) return null;
+
+    const timestamp = nowIso();
+    session.entitlement = "internal";
+    session.internalGrantedAt = session.internalGrantedAt ?? timestamp;
+    session.updatedAt = timestamp;
+    await writeDb(db);
+    return session;
   }
 
   // --- Phase 2C0.5: durable paid image intents -------------------------

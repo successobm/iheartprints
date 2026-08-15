@@ -11,6 +11,10 @@ import type {
   ProjectSnapshot,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
+import {
+  createAcquisitionCapability,
+  type AcquisitionCapability,
+} from "@/capabilities/acquisition";
 import type { BriefEvaluationCapability } from "@/capabilities/brief-evaluation";
 import type { ConceptGenerationCapability } from "@/capabilities/concept-generation";
 import type { ConversationUnderstandingCapability } from "@/capabilities/conversation-understanding";
@@ -86,6 +90,18 @@ export interface ConversationCapabilityDeps {
    * mutation and long before any paid generation. Pure and synchronous.
    */
   ipSafety: IpSafetyCapability;
+  /**
+   * Sprint A4: the acquisition entitlement boundary. Consulted here only
+   * for the email-to-continue gate — the generation and finalization
+   * fences live in `ConceptGenerationCapability` and
+   * `FinalArtworkCapability`, where the durable job that authorizes spend
+   * is actually created.
+   *
+   * Optional so existing composition/test call sites that predate A4 keep
+   * working; a missing dependency resolves to a fresh instance over the
+   * same repository, which is the correct direction for a gate to default.
+   */
+  acquisition?: AcquisitionCapability;
 }
 
 /**
@@ -174,7 +190,13 @@ const CONFIRM_FINAL_PATTERN =
  * revision.
  */
 export interface ConversationCapability {
-  start(): Promise<ProjectSnapshot>;
+  /**
+   * Sprint A4: `acquisitionSessionId` binds the new project to the session
+   * that created it — the durable authority every paid-value gate later
+   * resolves from. Omitted/`null` produces a legacy-unbound project, which
+   * is what internal callers and capability tests get.
+   */
+  start(acquisitionSessionId?: string | null): Promise<ProjectSnapshot>;
   get(designId: string): Promise<ProjectSnapshot | null>;
   handleUserMessage(
     designId: string,
@@ -289,6 +311,7 @@ export function createConversationCapability(
     finalArtwork,
     ipSafety,
   } = deps;
+  const acquisition = deps.acquisition ?? createAcquisitionCapability(repo);
 
   /**
    * Sprint A3 — THE CONVERSATIONAL GATE.
@@ -1357,8 +1380,8 @@ export function createConversationCapability(
   }
 
   return {
-    start() {
-      return repo.createProject();
+    start(acquisitionSessionId = null) {
+      return repo.createProject(acquisitionSessionId);
     },
 
     get(designId) {
@@ -1376,6 +1399,42 @@ export function createConversationCapability(
 
       if (CHAT_BLOCKED_PHASES.includes(phase)) {
         throw new Error("Please wait for the current step to finish");
+      }
+
+      // Sprint A4 — THE EMAIL GATE. Continuing the design conversation is
+      // the "next meaningful progression" the free concept is traded for,
+      // so this is the narrowest place the gate belongs (Goal 6).
+      //
+      // Deliberately NOT applied to reading the project, viewing the
+      // concept image, selecting, or unselecting: the customer must be able
+      // to actually SEE and consider what they were shown before being
+      // asked for anything, and none of those actions can reach paid work
+      // (generation and finalization carry their own independent fences).
+      //
+      // Also deliberately conditioned on the concept having been DELIVERED.
+      // A prospect whose concept is still generating has not received the
+      // value yet, and asking them for an address mid-wait would be a toll
+      // booth in front of a promise we have not kept.
+      //
+      // The customer's message is refused BEFORE it is persisted — a turn
+      // that is not going to be answered should not appear in the
+      // transcript as if it had been.
+      const continuation = await acquisition.authorizeSessionContinuation(
+        designId,
+        current.artworkVersions.length > 0,
+      );
+      if (!continuation.allowed) {
+        await repo.addMessage(designId, {
+          role: "assistant",
+          content: continuation.customerMessage,
+          // Generic metadata for the same reason the IP-safety gate uses
+          // generic metadata: `ProjectSnapshot.messages` is client-visible,
+          // so a reason code here would leak the internal state machine.
+          metadata: { phase, act: "acknowledge" },
+        });
+        const gated = await repo.getProject(designId);
+        if (!gated) throw new Error("Project not found");
+        return gated;
       }
 
       await repo.addMessage(designId, {

@@ -224,4 +224,25 @@ export const TEST_FILES = [
   // against the live ordinal-4 failure shape — a billed provider response
   // whose local persistence died, leaving no durable evidence at all.
   "src/capabilities/generation-worker/paid-intent-failure-durability.test.ts",
+  // Sprint A4: free-concept acquisition entitlement + email gate. The
+  // entitlement matrix counts PAID PROVIDER DISPATCHES against a local
+  // counting double — no network, no credentials, no possibility of a real
+  // paid call — and the other three files are pure units.
+  "src/capabilities/acquisition/acquisition-email.test.ts",
+  "src/lib/http/acquisition-session-cookie.test.ts",
+  "src/lib/config/internal-access-config.test.ts",
+  "src/capabilities/acquisition/acquisition-entitlement.test.ts",
+  // Sprint A4 Correction 1: acquisition spend authority. Counts PAID
+  // PROVIDER DISPATCHES against a local counting double and injects failures
+  // into the allocation → job → consumption sequence. The DATABASE-level
+  // invariants these rely on (unique free-concept job per session, FK
+  // deletion semantics) are proved separately against real PostgreSQL by
+  // `scripts/verify-acquisition-authority-postgres.sql`.
+  "src/capabilities/acquisition/acquisition-spend-authority.test.ts",
+  // Sprint A4 Correction 2: PHYSICAL provider submissions (not just logical
+  // paid intents) and the durable free-attempt tombstone. Counts real
+  // dispatches against a local double that can fail ambiguously; the
+  // delete-then-reinsert rejection it depends on is proved against real
+  // PostgreSQL by `scripts/verify-acquisition-authority-postgres.sql`.
+  "src/capabilities/acquisition/acquisition-physical-dispatch.test.ts",
 ];

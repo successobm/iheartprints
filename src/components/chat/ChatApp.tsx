@@ -31,6 +31,7 @@ import { DesignerDecisionCard } from "./DesignerDecisionCard";
 import { buildDesignHistory } from "./design-history";
 import { DesignHistory } from "./DesignHistory";
 import { DesignSummaryCard, type FieldTransition } from "./DesignSummaryCard";
+import { EmailContinuationGate } from "./EmailContinuationGate";
 import { MessageBubble } from "./MessageBubble";
 import { FinalArtworkDeliveryCard } from "./FinalArtworkDeliveryCard";
 import { PrepareForPrintAction } from "./PrepareForPrintAction";
@@ -279,6 +280,42 @@ export function ChatApp() {
       await refresh();
     } finally {
       setSending(false);
+    }
+  }
+
+  /**
+   * Sprint A4: submits the captured email and adopts the refreshed
+   * snapshot, so the gate disappears because the SERVER says the state
+   * changed — never because the client optimistically hid it.
+   *
+   * Returns a customer-safe message on failure (rendered by the gate
+   * itself) rather than routing through the page-level error banner: a
+   * mistyped address belongs next to the input it was typed into.
+   */
+  async function captureEmail(email: string): Promise<string | null> {
+    if (!snapshot) return "Something went wrong";
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/email`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        },
+      );
+
+      const data = await response.json();
+      if (!response.ok) {
+        return typeof data.error === "string"
+          ? data.error
+          : "We couldn't save that right now. Please try again.";
+      }
+
+      setSnapshot(data as ApiSnapshot);
+      return null;
+    } catch {
+      return "We couldn't save that right now. Please try again.";
     }
   }
 
@@ -847,6 +884,9 @@ export function ChatApp() {
     finalizationRequested: snapshot?.finalization.status !== "not_requested",
     finalizationStatus: snapshot?.finalization.status ?? "not_requested",
     deliveryEditingReopened,
+    // Sprint A4 Correction 2: the server cannot establish what this session
+    // may do, so the UI stops offering actions it knows will be refused.
+    acquisitionUnavailable: snapshot?.acquisition.state === "unavailable",
   });
 
   // Existing Artwork → Print Ready Phase 1. The workflow choice is offered
@@ -994,6 +1034,19 @@ export function ChatApp() {
   const canRequestFinalArtwork = affordances.canRequestFinalArtwork;
   const showUseThisDesignAction =
     affordances.showUseThisDesign && !uploadedArtworkActive;
+
+  // Sprint A4: the email continuation gate. Purely a mirror of a
+  // server-derived state — the client never decides that a gate applies,
+  // and the server refuses the same actions whether or not this renders.
+  const showEmailGate = snapshot?.acquisition.state === "email_required";
+  // Sprint A4 Correction 1: `unavailable` is shown with the same quiet note
+  // as `continue_locked`, deliberately. Both mean "not right now"; neither is
+  // the customer's fault; neither says anything about why.
+  const acquisitionNotice =
+    snapshot?.acquisition.state === "continue_locked" ||
+    snapshot?.acquisition.state === "unavailable"
+      ? snapshot.acquisition.message
+      : null;
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
@@ -1197,6 +1250,25 @@ export function ChatApp() {
                 onRegenerate={() => void regenerateConcepts()}
                 onKeepCurrent={() => setConceptBannerDismissed(true)}
               />
+            ) : null}
+
+            {/* Sprint A4: shown after the free concept, never before it —
+                the customer sees what they were promised first, then is
+                asked for an address to keep going. */}
+            {showEmailGate && snapshot ? (
+              <EmailContinuationGate
+                busy={sending}
+                onSubmit={(email) => captureEmail(email)}
+              />
+            ) : null}
+
+            {/* Address already given; further design work needs access this
+                product does not sell yet. A quiet note, not an error —
+                nothing has gone wrong. */}
+            {acquisitionNotice ? (
+              <p className="mt-3 rounded-2xl border border-black/8 bg-white p-4 text-sm text-muted shadow-sm">
+                {acquisitionNotice}
+              </p>
             ) : null}
 
             {showUseThisDesignAction ? (

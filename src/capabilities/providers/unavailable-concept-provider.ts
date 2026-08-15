@@ -29,8 +29,28 @@ export class UnavailableConceptGenerationProvider
     private readonly internalReason: string,
   ) {}
 
+  /**
+   * Sprint A4 Correction 3: this adapter is the canonical "local
+   * configuration is wrong" case, so it is the one that most needs to fail
+   * BEFORE a physical dispatch is claimed.
+   *
+   * Throws the identical error `generate` would have thrown — deliberately
+   * the same failure, just moved to the side of the paid boundary where it
+   * belongs. Nothing here contacts anything; there is nothing to contact.
+   */
+  async assertReadyToDispatch(): Promise<void> {
+    throw this.unavailable();
+  }
+
   async generate(): Promise<ConceptGenerationResult> {
-    throw new GenerationUnavailableError(
+    // Still throws, and must keep throwing: preflight is a courtesy that
+    // moves the failure earlier, never the only thing standing between a
+    // misconfigured deployment and a fabricated concept.
+    throw this.unavailable();
+  }
+
+  private unavailable(): GenerationUnavailableError {
+    return new GenerationUnavailableError(
       this.safeErrorCode,
       this.intendedProviderKey,
       this.internalReason,

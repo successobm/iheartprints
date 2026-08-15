@@ -1,3 +1,8 @@
+import { ACQUISITION_UNAVAILABLE_MESSAGE } from "@/capabilities/acquisition";
+import type {
+  CustomerAcquisitionView,
+  EmailCaptureResult,
+} from "@/capabilities/acquisition";
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
 import { getCapabilityGraph } from "@/capabilities/composition";
 import type { DesignBriefDecisionAction } from "@/capabilities/conversation";
@@ -257,6 +262,15 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * which is why Phase 1 needs no workflow enum anywhere.
    */
   artworkPreparation: ArtworkPreparationView | null;
+  /**
+   * Sprint A4: where this session stands in the acquisition funnel, already
+   * phrased for the customer. Never the persisted entitlement value, never
+   * the acquisition session id, never the captured email ADDRESS — the UI
+   * needs to know whether a gate is open, not who is behind it, and the
+   * cheapest way to keep an address out of caches, logs, and screenshots is
+   * to never put it in a response (Goal 19).
+   */
+  acquisition: CustomerAcquisitionView;
 };
 
 async function withConceptStatus(
@@ -279,7 +293,44 @@ async function withConceptStatus(
     ),
     printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
     artworkPreparation,
+    acquisition: await resolveAcquisitionView(snapshot),
   };
+}
+
+/**
+ * Sprint A4. Never allowed to take down a snapshot the customer is waiting
+ * on — same advisory-not-a-gate rule as `resolveArtworkPreparation`.
+ *
+ * Sprint A4 Correction 1: the failure degrades to `"unavailable"`, NOT to
+ * `"open"`.
+ *
+ * Degrading to `"open"` was spend-safe — every real paid-value decision is
+ * made independently by the capability that owns the spend, and those all
+ * fail closed — but it was product-unsafe in a way that matters: `"open"`
+ * renders a UI that offers actions the server is about to refuse. The
+ * customer clicks, gets a refusal, and the page they are looking at
+ * disagrees with the server that produced it. A neutral "can't continue
+ * right now" is the only honest thing to show when the server does not know
+ * what this session may do.
+ */
+async function resolveAcquisitionView(
+  snapshot: ProjectSnapshot,
+): Promise<CustomerAcquisitionView> {
+  try {
+    return await getCapabilityGraph().acquisition.describeForCustomer(
+      snapshot.project.id,
+      {
+        conceptDelivered: snapshot.artworkVersions.length > 0,
+        generating: snapshot.project.status === "generating",
+      },
+    );
+  } catch {
+    return {
+      state: "unavailable",
+      message: ACQUISITION_UNAVAILABLE_MESSAGE,
+      emailCaptured: false,
+    };
+  }
 }
 
 /**
@@ -372,8 +423,47 @@ async function resolvePrintReadySize(
   });
 }
 
-export async function startConversation(): Promise<ApiProjectSnapshot> {
-  return await withConceptStatus(await getCapabilityGraph().conversation.start());
+/**
+ * Sprint A4: `acquisitionSessionId` binds the new project to the session
+ * that created it, in the same insert that creates it. Every later
+ * paid-value gate resolves authority from that binding rather than from a
+ * cookie, which is what makes a direct API call no more powerful than the
+ * UI. Omitted only by internal callers and tests, which produce a
+ * legacy-unbound (grandfathered) project.
+ */
+export async function startConversation(
+  acquisitionSessionId: string | null = null,
+): Promise<ApiProjectSnapshot> {
+  return await withConceptStatus(
+    await getCapabilityGraph().conversation.start(acquisitionSessionId),
+  );
+}
+
+/**
+ * Sprint A4: the customer's email, captured so they can keep working on
+ * their design. Returns the refreshed snapshot on success so the caller
+ * renders state derived by the same path as every other read.
+ *
+ * Grants nothing. Capturing an address does not restore a spent free
+ * concept, does not authorize generation, and does not unlock finalization
+ * (Goal 14) — those remain the business of the capabilities that own the
+ * spend. It is also not marketing consent, and no claim of an account is
+ * made anywhere in this path.
+ */
+export async function captureAcquisitionEmail(
+  projectId: string,
+  rawEmail: unknown,
+): Promise<
+  | { ok: true; snapshot: ApiProjectSnapshot }
+  | { ok: false; message: string }
+> {
+  const result: EmailCaptureResult =
+    await getCapabilityGraph().acquisition.captureEmail(projectId, rawEmail);
+  if (!result.ok) return result;
+
+  const snapshot = await getConversation(projectId);
+  if (!snapshot) return { ok: false, message: "Project not found" };
+  return { ok: true, snapshot };
 }
 
 /**

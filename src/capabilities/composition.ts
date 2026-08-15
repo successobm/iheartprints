@@ -1,6 +1,7 @@
 import { getProjectRepository } from "@/lib/db";
 import type { ProjectRepository } from "@/lib/db/repository";
 
+import { createAcquisitionCapability } from "@/capabilities/acquisition";
 import { createArtworkPreparationCapability } from "@/capabilities/artwork-preparation";
 import { resolveAssetStorageProvider } from "@/capabilities/asset-storage";
 import {
@@ -89,6 +90,13 @@ export interface CapabilityGraph {
    * verification system.
    */
   ipSafety: ReturnType<typeof createIpSafetyCapability>;
+  /**
+   * Sprint A4: the acquisition entitlement boundary — one free concept,
+   * email to continue, paid access still to come (Sprint A5). Deliberately
+   * separate from `ownership` and from any future authentication: it is
+   * spend control over an anonymous session, not an identity model.
+   */
+  acquisition: ReturnType<typeof createAcquisitionCapability>;
   ownership: ReturnType<typeof createOwnershipCapability>;
   /**
    * Existing Artwork → Print Ready Phase 1: the Upload Existing Artwork
@@ -134,11 +142,19 @@ export function createCapabilityGraph(
   // the three can never drift into disagreeing about the same request.
   const ipSafety = createIpSafetyCapability();
 
+  // Sprint A4: one shared instance, for the same reason `ipSafety` is
+  // shared — the generation fence, the finalization fence, the email gate,
+  // and the customer-facing state view all have to agree about the same
+  // session, and three independently constructed instances would be three
+  // opportunities to drift.
+  const acquisition = createAcquisitionCapability(repo);
+
   const provider = resolveConceptGenerationProvider();
   const conceptGeneration = createConceptGenerationCapability(
     repo,
     provider.providerKey,
     ipSafety,
+    acquisition,
   );
   // Sprint 2I Phase 2: resolves to a real (OpenAI vision) evaluator when
   // configured, otherwise the deterministic placeholder. Composition owns
@@ -167,7 +183,7 @@ export function createCapabilityGraph(
   // Sprint 2M Phase 2B: pure repository-backed capability, no provider/I-O
   // dependency beyond the repository itself — mirrors DesignBriefCapability's
   // shape ("sole mutation path" for its own record).
-  const finalArtwork = createFinalArtworkCapability(repo);
+  const finalArtwork = createFinalArtworkCapability(repo, acquisition);
   // Sprint 2M Phase 2C: the independent worker that actually claims and
   // runs FinalArtworkJob rows — never invoked from a customer route (same
   // rule as generationWorker/workerScheduler below).
@@ -199,6 +215,7 @@ export function createCapabilityGraph(
     conceptGeneration,
     finalArtwork,
     ipSafety,
+    acquisition,
   });
 
   return {
@@ -225,6 +242,7 @@ export function createCapabilityGraph(
     printVault: createPrintVaultCapability(),
     assets,
     ipSafety,
+    acquisition,
     ownership: createOwnershipCapability(),
     // Existing Artwork → Print Ready Phase 1: repository + assets + the one
     // brief-mutation boundary. No provider is resolved here, and none exists

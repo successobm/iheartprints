@@ -257,6 +257,8 @@ Conversation
   → Design Summary
   → Customer Approval
   → Approved Design Brief Version
+  → Acquisition entitlement fence (Sprint A4, §23b — one free concept for an
+    anonymous prospect; refused here, before any job exists, once spent)
   → Queued Generation Job
   → Independent Worker
   → Prompt Translation
@@ -265,6 +267,8 @@ Conversation
   → Concept Evaluation (real vision-based scoring when configured, otherwise
     placeholder; persisted; still does not block presentation)
   → Concepts Ready
+  → Email required to continue (Sprint A4, §23b — after the free concept has
+    been delivered; not required of internal or legacy projects)
   → Customer Review / select concept
   → Revision Intelligence / targeted revision
   → Final direction confirmation
@@ -5572,8 +5576,42 @@ the name-only check, while querying Postgres as `anon` (`42501`).
 the local store, so the suite can never reach real infrastructure.
 
 Parity expectations: both implement the same repository contract including
-atomic job claim/heartbeat/recovery, asset CRUD, and Concept Evaluation
-updates (`updateArtworkEvaluation`).
+atomic job claim/heartbeat/recovery, asset CRUD, Concept Evaluation
+updates (`updateArtworkEvaluation`), and — Sprint A4 — the atomic
+free-concept allocation (`allocateFreeConcept`) and one-way consumption
+record (`recordFreeConceptConsumed`).
+
+Parity is not decorative here. Supabase gets these guarantees from real
+row-conditional UPDATEs and UNIQUE constraints; the local store gets them
+from its per-method mutex plus the same uniqueness rules written by hand.
+Sprint A4 found a live divergence and fixed it: the local store allowed two
+`generation_jobs` rows with the same `(project_id, idempotency_key)`, which
+the database has refused since 20260805130000. Because a job is the unit
+that authorizes paid generation, that divergence meant the local store could
+not be used to prove a spend property at all — two concurrent approvals
+produced two paid attempts locally and one in production.
+
+Correction 1 adds the second acquisition rule to both:
+`generation_jobs.acquisition_session_id` is unique wherever it is non-null,
+so the local store raises the same `FreeConceptAlreadyConsumedError` the
+database's partial unique index produces. It is checked *after* the
+idempotency-key match, deliberately: the same logical job coming back is a
+RESUME and must succeed, while a different job for a session that already
+has one is a SECOND FREE CONCEPT and must not. It is also deliberately not
+scoped to a project — the bypass it closes is a second *project* in the same
+session.
+
+Correction 2 adds the third rule: the free-attempt claim is written in the
+same locked `createGenerationJob` call that writes the job, which is the
+local equivalent of the Postgres trigger firing inside the insert's
+transaction. There is no window in which one exists without the other.
+
+**Deletion semantics are not representable in the local store** (the
+repository exposes no `deleteGenerationJob`, and the store has no foreign
+keys). Those invariants — including the delete-then-reinsert rejection that
+is the whole point of the claim — are proved directly against real PostgreSQL
+by `scripts/verify-acquisition-authority-postgres.sql`, run against a
+throwaway database with the complete migration history applied.
 
 Other notes:
 
@@ -5616,8 +5654,10 @@ delegation to composed capabilities.
 
 | Route | Responsibility |
 |---|---|
-| `POST /api/projects` | Start conversation/project |
+| `POST /api/projects` | Start conversation/project. Sprint A4: also the one place an acquisition session is issued (httpOnly `ihp_as` cookie) and bound to the new project, in the same INSERT (§23b) |
 | `GET /api/projects/[projectId]` | Load snapshot |
+| `POST /api/projects/[projectId]/email` | Sprint A4: capture the email required to continue the design session. Not sign-up, not verification, not marketing consent; grants no entitlement. Idempotent (§23b) |
+| `POST /api/internal/acquisition-access` | Sprint A4: grants the current session the internal entitlement against `IHEARTPRINTS_INTERNAL_ACCESS_KEY` (`x-iheartprints-internal-key`, constant-time). Unset by default with no dev fallback; uniform 401 on every refusal (§23b) |
 | `POST /api/projects/[projectId]/messages` | Handle user message |
 | `POST /api/projects/[projectId]/brief/decision` | Approve / edit on Design Summary (Sprint 2L Phase 1B: "continue" removed — see §10b) |
 | `POST /api/projects/[projectId]/concepts/regenerate` | Explicit updated-concept enqueue |
@@ -5664,6 +5704,20 @@ URL; reject cross-project lookups; uniform 404 on every miss.
 uploaded-artwork view (§13h) containing no analysis numbers, asset ids, or
 storage keys. It is `null` for every Create New Artwork project, and that
 `null` is what the UI branches on.
+
+Sprint A4 adds `acquisition` — a `CustomerAcquisitionView` (§23b) carrying a
+customer-safe state, already-phrased copy, and a boolean. It deliberately
+excludes:
+
+- the captured **email address** (only `emailCaptured: boolean` is returned)
+- the acquisition session id and session token
+- the persisted `entitlement` value — `internal` never appears on a customer
+  surface, and an internal or legacy project is indistinguishable from an
+  ungated prospect (`"open"`)
+- the free-concept allocation/consumption fields and the job that spent it
+
+The email address is never returned by any route, and never reaches a URL,
+an asset filename, a provider prompt, or a log line.
 
 Rules:
 
@@ -5797,6 +5851,8 @@ Relevant environment variables (names only; never commit secrets):
 | `ASSET_STORAGE_MODE` | `data_uri` (default), `filesystem`, `supabase_storage`, `s3` |
 | `ASSET_SIGNING_SECRET` | Filesystem signed-URL HMAC (dev fallback if unset) |
 | `WORKER_SECRET` | Worker endpoint auth (required in production) |
+| `OPENAI_CONCEPT_IMAGE_QUALITY` | `low` / `medium` (default) / `high` — explicit concept-image quality; `auto` is refused. Also the quality the Sprint A4 free concept is generated at (§23b) |
+| `IHEARTPRINTS_INTERNAL_ACCESS_KEY` | Sprint A4: the secret `POST /api/internal/acquisition-access` grants the internal entitlement against (§23b). **Unset by default, with no development fallback** — an unconfigured deployment cannot grant it in any environment. Minimum 24 characters |
 | `MAX_GENERATION_JOBS_PER_RUN` | Default 5 |
 | `WORKER_HEARTBEAT_INTERVAL` | Default 15000 ms |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
@@ -5887,7 +5943,7 @@ Browser  ->  iHeartPrints Next.js server  ->  Supabase service role  ->  Postgre
 ```
 
 Every public-schema application table is reachable **only** through the
-server. All twelve carry:
+server. Every one carries:
 
 - Row Level Security **enabled**
 - **Zero** policies
@@ -5896,7 +5952,20 @@ server. All twelve carry:
 `print_projects`, `tshirt_design_briefs`, `design_conversations`,
 `conversation_messages`, `artwork_versions`, `design_brief_versions`,
 `generation_jobs`, `assets`, `final_direction_approvals`,
-`final_artwork_jobs`, `production_asset_validations`, `artwork_preparations`.
+`final_artwork_jobs`, `production_asset_validations`, `artwork_preparations`,
+`paid_image_intents`, and — Sprint A4 — `acquisition_sessions` and
+`acquisition_free_concept_claims`.
+
+`acquisition_sessions` matters more than most: its rows hold email addresses
+and the bearer tokens that gate spend. It is locked down in the same
+migration that creates it, with no policy, for exactly the reason the
+lockdown migration states — possession of a token is not identity.
+
+`acquisition_free_concept_claims` is locked down the same way. Its
+`BEFORE INSERT` trigger on `generation_jobs` runs `SECURITY INVOKER`, so it
+depends on the writer already being `service_role`; that is deliberate, and
+`SECURITY DEFINER` must not be added to "make the trigger work" — if the
+trigger cannot write the table, the caller had no business inserting the job.
 
 | Role | Direct PostgREST access |
 |---|---|
@@ -6433,6 +6502,416 @@ forbidden list.
 
 ---
 
+## 23b. Acquisition Entitlement Boundary (Sprint A4)
+
+### What this is, and what it is not
+
+`AcquisitionCapability` (`src/capabilities/acquisition/`) implements the
+first controlled acquisition funnel:
+
+```
+anonymous visitor → design conversation → ONE free concept
+                  → email required to continue → paid access (Sprint A5)
+```
+
+It is **spend control**, not identity. It is explicitly **not**
+authentication, not an account system, not a customer identity model, not
+marketing consent, and not an anti-fraud platform. It holds no password, no
+verified identity, and no consent record, and no surface in the product may
+describe it as an account having been created.
+
+**Sprint A5 is not implemented.** There is no payment, checkout,
+subscription, pricing, or paid entitlement tier in this codebase. Every
+paid-value action beyond the one free concept is simply refused.
+
+### The domain model
+
+`AcquisitionSession` (`acquisition_sessions`) is an opaque, server-issued
+anonymous session. `print_projects.acquisition_session_id` binds each
+project to the session that created it.
+
+| Concept | Meaning |
+|---|---|
+| `entitlement` | `prospect` (ordinary visitor) or `internal` (explicit server-side grant) |
+| `freeConceptProjectId` | the free concept is **allocated** to this project |
+| `freeConceptGenerationJobId` | the free concept is **consumed** by this job |
+| `email` / `emailCapturedAt` | captured to continue the design session |
+| `internalGrantedAt` | audit trail for an internal grant |
+
+**Allocation vs consumption is the load-bearing distinction.** Conflating
+them would either burn a customer's free concept for a failure that was
+ours, or hand out a second one:
+
+```
+ALLOCATED   atomic claim (NULL -> project id), taken BEFORE any job exists.
+            Two racing requests resolve to one allocation. Costs nothing —
+            an enqueue that fails before a durable job exists leaves the
+            free concept intact, and re-requesting on the same project
+            resumes the same allocation.
+
+CONSUMED    a durable GenerationJob exists, bound to the session by
+            `generation_jobs.acquisition_session_id`. This is the moment the
+            platform committed to a recoverable, idempotent, spend-bounded
+            attempt. Irreversible: no second free generation is ever
+            authorized for this session, including on the same project.
+```
+
+### The authority is a database constraint, not an application write
+
+**Correction 1.** Consumption was originally recorded by a write
+(`acquisition_sessions.free_concept_consumed_at`) that happened *after* the
+job insert. Two separate writes with a crash window between them: if the job
+insert succeeded and the marker write failed, an executable job remained
+while the session still read as unspent — and could authorize a **second**
+free job.
+
+Ordering cannot close that window. The guarantee is now a constraint:
+
+```sql
+create unique index generation_jobs_acquisition_free_concept_idx
+  on public.generation_jobs (acquisition_session_id)
+  where acquisition_session_id is not null;
+```
+
+**At most one free-concept generation job per acquisition session, enforced
+by PostgreSQL.** The insert *is* the authority.
+`AcquisitionCapability.authorizeConceptGeneration` remains a pre-check that
+avoids doing work destined to fail; it is not the guarantee. A refused
+insert surfaces as `FreeConceptAlreadyConsumedError` and converts to a
+customer-safe refusal — nothing was spent, because no job means nothing for
+a worker to claim.
+
+Consumption is therefore answered from **two** independent sources, either
+sufficient:
+
+| Source | Survives |
+|---|---|
+| `acquisition_sessions.free_concept_consumed_at` | job deletion, session-row cleanup |
+| `generation_jobs.acquisition_session_id` | a lost or never-written marker |
+
+`recordFreeConceptConsumed` is now a denormalized marker rather than the
+authority, so its failure is logged and swallowed: the customer's job is
+already durable and queued, and failing their request would not un-spend it.
+`AcquisitionCapability` reconciles the missing marker from the job on the
+next read.
+
+### Deletion semantics
+
+Every FK in the acquisition graph was originally `ON DELETE SET NULL`, and
+each one could erase authority by removing a row:
+
+| Relationship | Rule | Why |
+|---|---|---|
+| `print_projects.acquisition_session_id` → session | **RESTRICT** | `SET NULL` let a deleted session manufacture the `NULL` that means "legacy, grandfathered" — deleting one row would have granted unlimited free generation |
+| `acquisition_sessions.free_concept_project_id` → project | **RESTRICT** | `SET NULL` let a deleted project clear an allocation, freeing the session to allocate again |
+| `generation_jobs.acquisition_session_id` → session | **RESTRICT** | `SET NULL` would convert the free job into an ordinary one and free the unique slot |
+| `acquisition_sessions.free_concept_generation_job_id` → job | **no FK** | Deliberately demoted to an immutable historical reference. `RESTRICT` would make an ordinary job undeletable forever to protect a field that is not the authority; the consumed timestamp beside it is, and nothing cascades to a timestamp |
+
+Acquisition sessions are not deletable as routine cleanup, by design.
+
+### Missing authority fails closed
+
+`PrintProject.acquisitionSessionId` has **three** meanings, and only one is
+permissive:
+
+| State | Reading |
+|---|---|
+| `NULL` | **legacy** — genuinely predates A4. Grandfathered, deliberately |
+| set, session loads | the real authority |
+| set, session does **not** load | **fails closed** — never legacy, never internal |
+
+Originally the third case returned the same `null` as the first, so a
+deleted, corrupted, or unreadable session *granted* unrestricted generation
+and finalization. Losing a row must never be the thing that hands out spend.
+A repository error while resolving authority is treated the same way.
+
+### Authority resolution — why the gate cannot be bypassed
+
+Every paid-value decision resolves authority from the **project**, via
+`PrintProject.acquisitionSessionId`, and never from anything the caller
+supplied. A cleared cookie, a forged cookie, or no cookie at all changes
+nothing, so a direct API call is no more powerful than the UI.
+
+The cookie (`ihp_as`; httpOnly, `SameSite=Lax`, `Secure` in production)
+decides only which session a **brand new** project is created under. It
+carries one opaque token and nothing else — no project id, no email, no
+entitlement state, no counter.
+
+`acquisition_session_id = NULL` means **legacy** (created before A4) and is
+grandfathered, never "unentitled". After A4 every project created through
+the customer API is bound in the same INSERT that creates it, so no new
+NULL can appear through a customer path.
+
+### "One free concept" means one concept AND one paid image dispatch
+
+Not one batch of three. `GenerationJob.conceptCount` already carries the
+customer-visible meaning end to end (targeted revisions have used it since
+the Live Acceptance Corrective Pass), so the free concept is expressed as
+`conceptCount: 1` — the same worker, the same prompt translation, the same
+paid-intent checkpointing, one direction instead of three. **No provider
+contract, interface, or pipeline was changed.** Quality is the configured
+default (`OPENAI_CONCEPT_IMAGE_QUALITY`, `medium`), deliberately not
+downgraded: a concept too weak to judge cannot demonstrate the product.
+
+**Correction 1: `conceptCount: 1` was never sufficient for the money.**
+`paidIntentBudgetForJob` adds the Phase 2C replacement allowance *on top of*
+the concept count, so a one-concept job carried a budget of `1 + 2 = 3` paid
+images. The promise was true of what the customer saw and false of what was
+spent.
+
+The budget is now resolved from durable job authority by
+`paidIntentBudgetForGenerationJob`, which returns **exactly 1** whenever
+`acquisitionSessionId` is set. Production code must call that function;
+`paidIntentBudgetForJob` remains the pure concept-count policy and cannot
+see the fact that overrides it.
+
+| Job | Paid-image budget |
+|---|---|
+| acquisition free concept | **1** |
+| initial / alternatives batch (3) | 5 (3 + 2 replacements) |
+| targeted revision (1) | 3 (1 + 2 replacements) |
+
+**Phase 2C replacement is not offered for the free concept, and the concept
+is not withheld either.** `GenerationWorkerCapability.maybeReplaceHardFailures`
+returns early for an acquisition job, beside the existing targeted-revision
+early return. Letting the budget merely *refuse* the reservation would take
+the withholding path, which is right for a batch of three (two good
+directions still reach the customer) and catastrophic for a batch of one:
+the customer's single free concept would be suppressed, they would see
+nothing, and their entitlement would already be spent — a quality defect
+converted into delivering nothing.
+
+So the free concept is delivered as generated. The deterministic palette
+verdict is still computed and still recorded on the artwork version; only
+the replacement *purchase* is withheld. The promise is one concept, not one
+concept with unlimited quality retries. **Ordinary paid jobs are entirely
+unaffected** — same budget, same replacement allowance, same withholding.
+
+**Correction 2: one paid INTENT is not one physical SUBMISSION.** A single
+logical intent may be dispatched `MAX_PAID_DISPATCHES_PER_INTENT` (3) times,
+because an ambiguous post-dispatch failure cannot be proven un-billed and the
+ordinary policy prefers retrying to stranding a paying customer. One free
+concept could therefore still reach three physical submissions.
+
+That trade is correct for paid work and wrong for a giveaway. For work
+somebody paid for, refusing to retry risks taking their money and delivering
+nothing, so the platform absorbs the duplicate-billing risk. For an
+acquisition attempt there is no such obligation.
+
+`maxPhysicalDispatchesForGenerationJob` returns **1** for an acquisition job
+and `MAX_PAID_DISPATCHES_PER_INTENT` for every other. It is resolved once per
+`executePaidImageUnit` and used at all four points that previously read the
+module constant, so the free path cannot silently regain submissions.
+
+**Correction 3: the claim must be taken after local preflight, not before.**
+The durable dispatch counter has to mean *"we have crossed the point where an
+external paid request may actually be sent"*, not *"we entered the code path
+that might eventually try"*. It previously meant the latter: an adapter that
+fails on local configuration — `UnavailableConceptGenerationProvider` is
+exactly that — threw from inside `dispatch`, which runs **after** the claim.
+A definite local failure therefore produced `dispatches = 1` with **zero**
+external submissions, spending the customer's only free attempt on our own
+misconfiguration.
+
+`ConceptGenerationProvider.assertReadyToDispatch?()` (optional) is a **local**
+readiness check run immediately before the claim. It confirms credentials,
+enablement, and local configuration are good enough to *attempt* a request —
+and it **must not make a network call**: a preflight that talked to the
+provider would either cost money or turn a remote hiccup into a refusal to
+attempt work the customer is waiting for.
+
+| Provider | Preflight |
+|---|---|
+| `UnavailableConceptGenerationProvider` | throws the same error `generate` would — the failure simply moves to the correct side of the boundary |
+| `OpenAIConceptGenerationProvider` | asserts API key and model, locally. Enablement, asset storage, and paid arming stay with `resolveConceptGenerationProvider`, which returns the unavailable stub when they fail — never duplicated in worker code |
+| `PlaceholderConceptProvider`, test fakes | omitted; absence reads as ready, which is true of them |
+
+Ordering is deliberate on both sides. Preflight runs **after** reuse and
+orphan adoption, so recovering an image the platform already bought is never
+blocked by a provider whose configuration has since broken (those paths
+contact nothing). It runs **immediately before** the claim, with nothing
+between them, so there is no window in which the claim is taken for a call
+that never happens.
+
+It does not weaken concurrency: two workers may both preflight, only one can
+win `beginPaidImageIntentDispatch`, and the loser never reaches the provider.
+The claim remains the sole concurrency authority.
+
+It claims no billing certainty. Preflight speaks only about this process.
+
+| Failure | Free job | Ordinary job |
+|---|---|---|
+| local config / missing credential / disabled provider (**pre-claim**) | retryable — dispatch count stays 0, entitlement intact, same job resumes after repair | retryable |
+| provably `not_dispatched` (never reached provider) | retryable — nothing billed, entitlement intact | retryable |
+| DNS, reset, timeout, 4xx, 5xx — anything after the claim | **terminal.** Counted as one dispatch; no second submission | retried within the ceiling |
+| ambiguous / possibly billed | **terminal.** No second submission | retried within the ceiling |
+| resume / orphan adoption | not a dispatch; reuses the same result | not a dispatch |
+
+Once the external boundary is crossed the free dispatch is consumed, and no
+attempt is made to infer whether a particular HTTP failure was billed.
+
+An ambiguous free failure is terminal in one attempt: the intent is marked
+`failed` at the ceiling, the job fails, the project reaches `failed`, and the
+customer gets the standard customer-safe message rather than an unresolving
+spinner. `ConceptGenerationCapability` additionally refuses to **re-queue** a
+failed acquisition job once `paid_image_intents.dispatches > 0` — re-queuing
+would burn two more job attempts being refused before any provider call, with
+a spinner running each time. A job whose dispatch count is still `0` is
+genuinely pre-dispatch and stays retryable.
+
+Residual risk, stated rather than hidden: an ambiguous failure the provider
+actually billed still costs one image. Unavoidable without provider-side
+idempotency this endpoint does not document — but bounded at one, not three.
+
+### The lifetime authority is a session-owned tombstone
+
+**Correction 2.** The partial unique index above only constrains rows that
+**exist**. Deleting the free `GenerationJob` freed the slot, so a direct
+insert could hand the same session a second free concept — the application's
+own consumed marker survived, but an application pre-check is not authority.
+
+```sql
+create table public.acquisition_free_concept_claims (
+  acquisition_session_id uuid primary key
+    references public.acquisition_sessions (id) on delete restrict,
+  generation_job_id uuid null,        -- historical evidence, NOT a foreign key
+  claimed_at timestamptz not null default now()
+);
+```
+
+The primary key **is** the invariant: one claim per session, for the lifetime
+of the session rather than the lifetime of a job. It holds no foreign key to
+the job, so it keeps enforcing after that job is gone, and a dangling
+`generation_job_id` is the correct record of what happened.
+
+The claim is taken by a `BEFORE INSERT` trigger on `generation_jobs`, so
+claim and job are created in **one statement and one transaction**. Two
+application writes would reintroduce the crash window in mirror image —
+claim-first burns the customer's free concept for our failure, job-first
+leaves an executable job with no claim. There is no ordering to get wrong.
+
+The trigger is `SECURITY INVOKER` with a pinned `search_path`, deliberately
+**not** `SECURITY DEFINER`: only `service_role` writes `generation_jobs`, and
+it holds `BYPASSRLS`, so no elevated execution path is needed or created.
+
+Job deletion is therefore an operational choice with an operational
+consequence (the job is unrecoverable) and never an entitlement one. The
+alternative — `ON DELETE RESTRICT` making free jobs permanently undeletable —
+would impose indefinite retention on an operational table to protect an
+invariant a session-owned row already protects.
+
+### Defence in depth
+
+Three independent layers, none compensating for another:
+
+| Layer | Guarantee | Enforced by |
+|---|---|---|
+| Lifetime authority | one free attempt per session, forever | `acquisition_free_concept_claims` primary key + BEFORE INSERT trigger |
+| Live authority | exactly one authorized `GenerationJob` while it exists | partial unique index on `generation_jobs.acquisition_session_id` |
+| Worker economics | one paid intent **and** one physical submission | `paidIntentBudgetForGenerationJob` + `maxPhysicalDispatchesForGenerationJob` + `paid_image_intents` |
+
+`AcquisitionCapability.freeConceptSpent` reads the **claim first** — the thing
+the insert is actually validated against — then the consumed marker, then the
+job. Any read failure resolves to CONSUMED: a database that cannot be read
+has not said yes.
+
+### The three fences
+
+Each sits where the durable record that authorizes spend is created, so a
+refusal removes the spend structurally rather than by policy.
+
+| Fence | Location | Refuses |
+|---|---|---|
+| Generation | `ConceptGenerationCapability` enqueue (with the A3 IP fence) | any new `GenerationJob` — initial, alternatives, exploration batch, targeted revision |
+| Finalization | `FinalArtworkCapability.requestFinalArtwork` / `requestPreparedUploadFinalArtwork` | any new `FinalArtworkJob`, which is what the final-artwork worker claims before dispatching paid Topaz reconstruction |
+| Email-to-continue | `ConversationCapability.handleUserMessage` | a further design turn once the free concept has been **delivered** and no address is on file |
+
+The generation fence runs **only when a genuinely new job would be
+created**. Resuming an existing job (reload, second tab, duplicate request,
+retry after failure, worker reclaim) never requires a second entitlement and
+never produces a second paid attempt — that job's spend is already bounded
+by its own `paid_image_intents` budget and `MAX_GENERATION_ATTEMPTS`.
+
+### Email capture
+
+Captured to continue the design session. Trimmed, lowercased, length-bounded,
+and checked against a deliberately permissive pattern
+(`capabilities/acquisition/acquisition-email.ts`) — a false rejection means a
+real customer cannot continue, which is worse than accepting an address
+nothing in A4 sends mail to.
+
+**Email is not marketing consent, and it is not an entitlement.** No
+verification message, no OTP, no account, no password, no CRM integration,
+no consent checkbox (there is no consent being collected). Capturing an
+address does not restore a spent free concept, authorize generation, or
+unlock finalization.
+
+The address is **never returned in any customer-facing response** — the
+snapshot carries only `acquisition.emailCaptured`. It never appears in a
+URL, an asset filename, a provider prompt, or a log line.
+
+### Customer-safe state
+
+`ApiProjectSnapshot.acquisition` is a `CustomerAcquisitionView`, deliberately
+not the persisted enum:
+
+| State | Meaning |
+|---|---|
+| `open` | nothing is gated — a fresh prospect, an internal session, or a legacy project, indistinguishably |
+| `free_concept_generating` | their concept is being made |
+| `email_required` | their concept exists; an address unlocks continuing |
+| `continue_locked` | further design work needs access not sold yet. **Correction 2:** also covers a spent free attempt that delivered nothing (a failed attempt, or a removed job) — that used to read `open`, which invited an action the gate would refuse. **Correction 3:** only when a physical dispatch actually happened — an attempt stopped by local configuration before any submission stays `open`, because that customer's free concept is intact and their next click will work |
+| `unavailable` | **Correction 1.** The server cannot establish what this session may do. **Correction 2:** also disables the composer and every paid-value control (`deriveChatAffordances`), so the UI never invites an action the server is known to refuse |
+
+Copy never mentions credits, quotas, spend, provider cost, entitlement rows,
+or abuse prevention. `internal` never appears on a customer surface.
+
+`unavailable` replaced a catch-to-`open` degradation in
+`conversation-service.resolveAcquisitionView`. That degradation was
+spend-safe — every real paid-value decision is made independently by the
+capability that owns the spend, and those all fail closed — but
+product-unsafe: `open` renders a UI offering actions the server is about to
+refuse, so the page and the server that produced it openly disagreed. The
+state is also derived through the same reconciliation the gates use, so
+"what the customer is shown" and "what the server will do" cannot drift.
+
+### Internal entitlement
+
+Granted by `POST /api/internal/acquisition-access` with the
+`x-iheartprints-internal-key` header, compared in constant time against
+`IHEARTPRINTS_INTERNAL_ACCESS_KEY`, and recorded with an audit timestamp on
+the session. **Unset by default, with no development fallback** — an
+unconfigured deployment cannot grant it in any environment.
+
+Deliberately not used, and not to be added later: a hardcoded operator
+email, a browser-local flag, a secret query string, or `NODE_ENV`. See
+`src/lib/config/internal-access-config.ts` for why each of those is not a
+control.
+
+### Stated limitation — no cross-device abuse claim
+
+Within a normal browser session the free entitlement does not reset on
+reload, navigation, reopening the project URL, repeated clicks, stale tabs,
+API retries, or starting a second project. Someone who clears cookies,
+switches browsers, or uses another device gets a new session and another
+free concept.
+
+That is accepted and documented rather than defended: A4 is spend control,
+not surveillance. **IP address is never treated as identity and the device
+is never fingerprinted.**
+
+### Dependency direction
+
+`AcquisitionCapability` depends only on `ProjectRepository`. It is depended
+on by `ConceptGenerationCapability`, `FinalArtworkCapability`,
+`ConversationCapability`, and the service facade. It never calls a provider,
+never interprets conversation, never mutates a Design Brief, and never makes
+an ownership or rights determination (that remains `OwnershipCapability`'s
+separate, dormant architecture). See
+`src/capabilities/shared/capability-boundaries.ts`.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:
@@ -6444,6 +6923,49 @@ Verified against the implementation:
   process; it is not started by customer HTTP requests
 - No live Supabase integration tests in CI
 - Filesystem/worker rate limiting is in-memory/single-instance
+- **There is no payment entitlement (Sprint A5 is not implemented).** After
+  the one free concept, every further concept generation, exploration,
+  generative revision, and print-ready finalization is refused for an
+  ordinary prospect. Only an internally granted session (§23b) can perform
+  them
+- **The acquisition entitlement makes no cross-device abuse claim.** It
+  survives reload, navigation, reopening a project URL, repeated clicks,
+  stale tabs, API retries, and starting a second project in the same
+  session. It does not survive cleared cookies, a different browser, or a
+  different device — deliberately: IP address is never identity and the
+  device is never fingerprinted (§23b)
+- **A refused revision leaves `revisionPending` set with no job behind it.**
+  The pending-revision authority is written before the enqueue fence is
+  reached, so a prospect whose revision is refused for lack of paid access
+  keeps that flag. It bars finalization, which is independently barred for
+  the same prospect anyway, and the refusal announcement is idempotent so
+  reloads do not repeat it. It clears when a revision genuinely completes
+- **A free concept allocated but never consumed pins the session to that
+  project.** If the durable `GenerationJob` insert fails, the allocation
+  stays on the project it was made for; the customer keeps their free
+  concept there, but a *different* project in the same session cannot claim
+  it. The original project remains fully usable
+- **A free concept that hard-fails print-palette validation is delivered as
+  generated.** Phase 2C replacement is not purchased for it (§23b), so a
+  customer whose one free concept violates an explicit ink restriction sees
+  that concept rather than a corrected one. Delivering it is the lesser
+  harm: the alternative path withholds it, which would show them nothing at
+  all with their entitlement already spent
+- **Acquisition sessions and their bound projects are not deletable through
+  ordinary cleanup.** `ON DELETE RESTRICT` on both directions is what stops
+  a deleted row from manufacturing legacy/unrestricted access, and the cost
+  is that data-retention work touching these tables needs a deliberate,
+  ordered procedure rather than a cascade. Generation jobs themselves stay
+  freely deletable (§23b) — the free-attempt claim outlives them
+- **An ambiguous free-concept failure is terminal and costs the attempt.**
+  If the single physical submission fails in a way that cannot be proven
+  un-billed, the customer does not get another — by design (§23b). They see
+  a customer-safe failure and the funnel ends there; A4 has no mechanism to
+  grant a replacement attempt, and A5 payment is not implemented
+- **Deleting a free generation job makes it unrecoverable.** The claim
+  survives and keeps enforcing, so no second free image is granted, but the
+  job, its concepts, and its paid-intent history are gone. Deletion is an
+  operational/destructive action and is treated as one
 - **IP safety (§23a) is a product boundary, not legal clearance.** It makes no
   determination about legality, licensing, ownership, or clearance, and must
   never be described as doing so

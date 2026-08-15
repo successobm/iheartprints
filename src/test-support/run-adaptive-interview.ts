@@ -36,8 +36,15 @@ export interface AdaptiveInterviewResult {
 export async function runAdaptiveInterviewToSummary(
   conversation: Pick<ConversationCapability, "start" | "handleUserMessage">,
   answerOverrides: Partial<Record<string, string>> = {},
+  /**
+   * Sprint A4: binds the project to an acquisition session, so a test can
+   * exercise the acquisition funnel. Omitted by every pre-A4 caller, which
+   * produces a legacy-unbound (grandfathered) project and leaves their
+   * behavior byte-for-byte unchanged.
+   */
+  acquisitionSessionId: string | null = null,
 ): Promise<AdaptiveInterviewResult> {
-  const started = await conversation.start();
+  const started = await conversation.start(acquisitionSessionId);
   const projectId = started.project.id;
   const answers = { ...REQUIRED_ANSWERS, ...answerOverrides };
 

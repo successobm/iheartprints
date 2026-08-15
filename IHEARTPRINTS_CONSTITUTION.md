@@ -1,6 +1,6 @@
 # iHeartPrints Constitution
 
-**Version 2.2**
+**Version 2.3**
 
 ## 1. Purpose of the Constitution
 
@@ -431,6 +431,22 @@ Two things that sound related are deliberately separate, and must not be merged:
 
 Providers used for generation run their own independent safety systems. This boundary is additive and sits in front of them; it never weakens, bypasses, or substitutes for them, and a refusal by a provider is never answered with fabricated artwork.
 
+### 17.2 Customer information and the terms of access
+
+iHeartPrints may ask a customer for information—today, an email address—as a condition of continuing a design session. When it does, three things are true and must stay true.
+
+**We say what it is for, and we mean only that.** Information asked for in order to continue the design session is used to continue the design session. Marketing consent is a separate, explicit decision a customer makes on its own terms. Collecting an address for one purpose and treating it as permission for another is not a growth tactic; it is a broken promise, and it is prohibited regardless of what conversion it would buy.
+
+**We never claim something exists that does not.** No account, membership, subscription, verified identity, or saved profile may be described to a customer unless it genuinely exists. Being recognized on return is not an account.
+
+**We collect only what the product needs, and we ask for it only after we have given something.** iHeartPrints does not demand personal information before a customer has seen what it can do for them, and it does not collect information it has no present use for.
+
+Access to paid work may be limited, and those limits are enforced by the product rather than merely presented by it. But limits are stated plainly and never dressed up: iHeartPrints does not explain itself to customers in the language of its own accounting—credits, quotas, spend, cost, or abuse prevention—and does not imply a customer has done something wrong by reaching the end of what is free.
+
+**iHeartPrints does not surveil to enforce a limit.** It does not treat an IP address as a person and does not fingerprint a device. Reasonable limits that a determined visitor can escape are preferable to accurate limits built on tracking people, and the gap is stated honestly rather than closed by those means.
+
+The particular commercial arrangement—what is free, what is paid, how much, and in what order—is business strategy, not constitutional identity. It belongs in operational documents and may change without amending this Constitution. The obligations above do not change with it.
+
 ## 18. The Print Vault Vision
 
 The Print Vault is a **future** strategic asset of iHeartPrints. It is not a current V1 requirement and must not gate present work.
@@ -469,6 +485,7 @@ iHeartPrints is not intended to become:
 - an interface that exposes technical generation settings to ordinary customers
 - a platform that prioritizes novelty over printability
 - a trademark-clearance, rights-verification, or legal-advice service
+- a marketing-automation, mailing-list, or customer-tracking platform
 
 These are scope exclusions: they stay out regardless of what the system becomes technically capable of.
 
@@ -522,6 +539,7 @@ Temporary tactics, vendor changes, framework migrations, and sprint scope do not
 
 | Version | Summary |
 |---|---|
+| 2.3 | Customer-information and terms-of-access boundary (sections affected: new §17.2, §20). Reason: the product began asking customers for information as a condition of continuing, and needed a durable statement of what that does and does not entitle iHeartPrints to — the existing text covered artwork rights but said nothing about the customer's own data or about how access limits may be presented. States that information asked for in order to continue is used only for that; that marketing consent is a separate explicit decision and may never be inferred from it; that no account, membership, or verified identity may be described unless it genuinely exists; that information is collected only after value has been given and only where the product needs it; that access limits are enforced by the product but never explained in the language of internal accounting; and that limits are never enforced by IP-address identity or device fingerprinting, with the resulting gap stated honestly rather than closed by those means. Adds marketing automation, mailing lists, and customer tracking to the explicit non-goals. **The commercial arrangement itself — what is free, what is paid, how much, in what order — is explicitly named as business strategy rather than constitutional identity, and may change without amendment.** No change to the V1 deliverable, the production contract, or the two creation paths. |
 | 2.2 | Third-party intellectual-property boundary (sections affected: new §17.1, §20). Reason: the product needed a durable statement of what it will and will not create with respect to other people's branding, and the existing text covered only what `print_ready` does not verify. States that iHeartPrints will not knowingly reproduce or deliberately imitate recognizable third-party protected branding and will not help circumvent those protections; that it provides no legal clearance, makes no accusation, and never states a threshold of change; that themes, styles, colors, places, and a customer's own branding remain allowed; that ownership classification and this use-policy boundary stay separate; that preparing supplied artwork is a technical operation rather than an ownership determination; and that provider safety remains independent and additive. Adds trademark clearance / rights verification / legal advice to the explicit non-goals. No change to the V1 deliverable, the production contract, or the two creation paths. |
 | 2.1 | Production-authority clarification (sections affected: §4, §7.1, §7.9, new §7.13, §12, §16 restructured as §16.1–§16.6, §20, §21). Separates product scope (apparel design and artwork preparation) from current production capability (§7.13). Names DTF and DTG as the initial supported raster garment-decoration workflows, scopes `print_ready` to the supported raster production profile rather than to apparel generally, states what iHeartPrints controls versus downstream decorator variables, and classifies embroidery, screen printing, and sublimation as apparel methods outside current capability rather than permanent non-goals. Non-apparel categories remain excluded by scope. No change to the V1 deliverable or to product behavior. |
 | 2.0 | Product-identity amendment: iHeartPrints is an independent apparel-design product. The customer uses or buys artwork, not a physical garment. V1 deliverable is a validated transparent apparel PNG at selected physical dimensions targeting 300 PPI. Print Vault, ownership-class expansion, and design families are explicitly future. Physical-product commerce, signs/banners/large-format, embroidery digitization, screen-print separations, and vector production are removed from product authority. |

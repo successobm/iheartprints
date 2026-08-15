@@ -22,6 +22,7 @@ import {
   type OpenAIConceptImageQuality,
 } from "@/lib/config/openai-concept-image-quality";
 import type { ConceptGenerationProvider } from "./concept-generation-provider";
+import { GenerationUnavailableError } from "./generation-unavailable-error";
 import {
   classifyFetchRejectionDispatch,
   isRetryableProviderError,
@@ -99,6 +100,36 @@ export class OpenAIConceptGenerationProvider
     this.quality = config.quality ?? DEFAULT_OPENAI_CONCEPT_IMAGE_QUALITY;
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.sleepImpl = config.sleepImpl ?? defaultSleep;
+  }
+
+  /**
+   * Sprint A4 Correction 3: local readiness only — no network call.
+   *
+   * The constructor already refuses to build without an API key, so in
+   * practice a constructed instance is ready; this states that explicitly
+   * rather than leaving it implied, and gives the model a place to be
+   * checked too. `resolveConceptGenerationProvider` owns every other
+   * configuration decision (enablement, asset storage, paid arming) and
+   * hands back `UnavailableConceptGenerationProvider` when they fail, so
+   * this deliberately does NOT duplicate those checks — provider-specific
+   * configuration knowledge stays with the provider and its resolver, never
+   * in generic worker code.
+   */
+  assertReadyToDispatch(): void {
+    if (!this.apiKey) {
+      throw new GenerationUnavailableError(
+        "GENERATION_PROVIDER_NOT_CONFIGURED",
+        this.providerKey,
+        "OpenAI concept generation is missing its API key.",
+      );
+    }
+    if (!this.model) {
+      throw new GenerationUnavailableError(
+        "GENERATION_PROVIDER_NOT_CONFIGURED",
+        this.providerKey,
+        "OpenAI concept generation is missing its image model.",
+      );
+    }
   }
 
   async generate(

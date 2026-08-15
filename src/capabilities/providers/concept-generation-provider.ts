@@ -27,6 +27,41 @@ export interface ConceptGenerationProvider {
    * guarantee never rests on the worker alone.
    */
   readonly editsSourceArtwork: boolean;
+  /**
+   * Sprint A4 Correction 3: LOCAL readiness to attempt an external request.
+   *
+   * WHAT IT ANSWERS
+   *
+   *   "Is this adapter configured well enough that calling `generate` would
+   *    actually put a request on the wire?"
+   *
+   * WHAT IT DOES NOT ANSWER, and must never be read as answering:
+   *
+   *   - whether the remote provider is up
+   *   - whether a request will succeed
+   *   - whether anything will be, or has been, billed
+   *
+   * MUST NOT make a network call of any kind — no probe request, no test
+   * generation, no health endpoint. A preflight that talks to the provider
+   * would either cost money or turn a remote hiccup into a refusal to
+   * attempt work the customer is waiting for. It checks credentials,
+   * enablement, and local configuration, and nothing else.
+   *
+   * Throws (conventionally `GenerationUnavailableError`) when it cannot.
+   * Returning normally is a statement about THIS PROCESS only.
+   *
+   * WHY IT EXISTS: the paid-image executor claims a durable physical
+   * dispatch immediately before calling `generate`, and for the acquisition
+   * free concept that claim is the customer's ONLY attempt. Without this,
+   * an adapter that fails on configuration — `UnavailableConceptGenerationProvider`
+   * is exactly that — consumed the attempt while making zero external
+   * requests: a definite local failure charged to the customer.
+   *
+   * OPTIONAL. An adapter that has no configuration to get wrong (the
+   * placeholder stub, the fakes tests are written against) can omit it, and
+   * absence is read as "ready" — which is true of them.
+   */
+  assertReadyToDispatch?(): Promise<void> | void;
   generate(
     request: ConceptGenerationRequest,
   ): Promise<ConceptGenerationResult>;

@@ -1346,4 +1346,211 @@
  *     (Correction 4)
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "A3c4" as const;
+/**
+ * Sprint A4 — AcquisitionCapability (`capabilities/acquisition/`).
+ *
+ * The acquisition entitlement boundary: one free concept, an email required
+ * to continue, and paid access still to come (Sprint A5). It is SPEND
+ * CONTROL over an anonymous session — not authentication, not an account
+ * system, not a customer identity model, not marketing consent, and not a
+ * fraud platform. See ARCHITECTURE.md §23b.
+ *
+ * DEPENDS ON
+ *   ProjectRepository — and nothing else.
+ *
+ * DEPENDED ON BY
+ *   ConceptGenerationCapability   the generation fence (enqueue)
+ *   FinalArtworkCapability        the finalization fence (Topaz spend)
+ *   ConversationCapability        the email-to-continue gate
+ *   conversation-service          the customer-safe state view
+ *
+ * THE AUTHORITY RULE, which every one of those callers obeys:
+ *
+ *   Authority is resolved from the PROJECT
+ *   (`PrintProject.acquisitionSessionId`), never from anything the caller
+ *   supplied. That is the single choice that makes a direct API call no
+ *   more powerful than the UI: a cleared, forged, or absent cookie changes
+ *   nothing about what a project's session is allowed to do.
+ *
+ * FENCE PLACEMENT, which is not negotiable:
+ *
+ *   Each fence sits where the DURABLE RECORD THAT AUTHORIZES SPEND is
+ *   created — a `GenerationJob` for images, a `FinalArtworkJob` for
+ *   production reconstruction. Refusing there removes the spend
+ *   structurally (no job, no worker claim, no paid call) rather than
+ *   relying on a downstream component to remember a policy.
+ *
+ * ALLOWED
+ *   Issuing and resolving anonymous sessions
+ *   Allocating, consuming, and refusing the one free concept
+ *   Capturing and normalizing an email address
+ *   Granting the internal entitlement (after the ROUTE has verified a
+ *     server-side secret — this capability performs no authorization of
+ *     its own)
+ *   Describing all of the above in customer-safe language
+ *
+ * FORBIDDEN
+ *   Calling any provider, or knowing that providers exist
+ *   Interpreting conversation, mutating a Design Brief, or deciding intent
+ *   Making an ownership, licensing, or rights determination — that is
+ *     `OwnershipCapability`'s separate, dormant architecture, and deriving
+ *     one from an entitlement would fabricate rights verification
+ *   Treating a captured email as consent, identity, verification, or an
+ *     account
+ *   Treating an IP address as identity, or fingerprinting a device
+ *   Returning the email address, the session token, or the persisted
+ *     entitlement value on any customer-facing surface
+ *   Inventing a payment/paid entitlement tier before Sprint A5 implements
+ *     one — a value nothing can legitimately write is a capability that
+ *     only looks implemented
+ *   Any bypass that is not the explicit server-side internal grant: a
+ *     hardcoded operator email, a browser-local flag, a secret query
+ *     string, or `NODE_ENV`
+ *   Re-authorizing an EXISTING generation job. Resuming one (reload, second
+ *     tab, duplicate request, retry, worker reclaim) must never require a
+ *     second entitlement — its spend is already bounded by its own
+ *     `paid_image_intents` budget and `MAX_GENERATION_ATTEMPTS`
+ *   Consuming the entitlement before a durable job exists, or leaving it
+ *     allocated after one does (see ALLOCATION vs CONSUMPTION in §23b)
+ *
+ * SPRINT A4 CORRECTION 1 — the rules an audit had to add.
+ *
+ * All four defects it found were the same mistake: the entitlement was
+ * APPLICATION state the database had no opinion about, so every guarantee
+ * depended on a write actually happening rather than on a constraint that
+ * cannot be circumvented. The rules below exist so that mistake cannot be
+ * made again in a different place.
+ *
+ *   THE AUTHORITY IS A CONSTRAINT, NOT A WRITE.
+ *     `generation_jobs.acquisition_session_id` carries a partial unique
+ *     index: at most one free-concept job per session, enforced by
+ *     PostgreSQL. `authorizeConceptGeneration` is a PRE-CHECK that avoids
+ *     doing work destined to fail — never the guarantee. Any future gate
+ *     whose correctness rests on "we wrote a marker afterwards" is wrong for
+ *     the same reason this one was.
+ *
+ *   FORBIDDEN: treating `recordFreeConceptConsumed` as authoritative. It is
+ *     a denormalized marker. Consumption is answered from EITHER the marker
+ *     OR the free-concept job, and a failure to read the job reconciliation
+ *     resolves to CONSUMED — the safe direction for an entitlement question
+ *     is always the one that does not spend money.
+ *
+ *   FORBIDDEN: `paidIntentBudgetForJob` in production code. It derives the
+ *     budget from `conceptCount` alone and adds the Phase 2C replacement
+ *     allowance on top, so it answers 3 for a one-concept free job. Call
+ *     `paidIntentBudgetForGenerationJob`, which reads the durable job
+ *     marker. ONE FREE CONCEPT MEANS ONE PAID IMAGE DISPATCH — the customer
+ *     -visible count and the money are two claims, and `conceptCount: 1`
+ *     only ever made the first one true.
+ *
+ *   FORBIDDEN: offering Phase 2C replacement for an acquisition free job,
+ *     and equally forbidden: letting the budget refuse it instead. The
+ *     refusal path WITHHOLDS the candidate, which on a batch of one delivers
+ *     nothing to a customer whose entitlement is already spent. The worker
+ *     returns early instead, and the concept ships as generated.
+ *
+ *   FORBIDDEN: reading a missing bound session as legacy. `NULL` means
+ *     legacy and is grandfathered; a non-null id whose session cannot be
+ *     loaded FAILS CLOSED. Losing a row must never be the thing that grants
+ *     spend — which is also why every acquisition foreign key is RESTRICT
+ *     rather than SET NULL, and why the historical job reference is not a
+ *     foreign key at all.
+ *
+ *   FORBIDDEN: degrading a failed authority resolution to a permissive
+ *     customer state. `unavailable` exists so the UI cannot offer an action
+ *     the server is about to refuse.
+ *
+ *   Ordinary paid jobs are untouched by all of the above. A correction that
+ *     changed normal generation economics to make the free path safe would
+ *     be a different, worse bug.
+ */
+
+/**
+ * SPRINT A4 CORRECTION 2 — two rules Correction 1 was still missing.
+ *
+ *   ONE FREE CONCEPT MEANS ONE PHYSICAL SUBMISSION, not one logical intent.
+ *     A single `paid_image_intent` may be dispatched
+ *     `MAX_PAID_DISPATCHES_PER_INTENT` times, because an ambiguous
+ *     post-dispatch failure cannot be proven un-billed — correct for paid
+ *     work, wrong for a giveaway. FORBIDDEN: passing
+ *     `MAX_PAID_DISPATCHES_PER_INTENT` to `beginPaidImageIntentDispatch`.
+ *     Call `maxPhysicalDispatchesForGenerationJob`, and resolve it ONCE per
+ *     execution — four call sites each reaching for the constant is four
+ *     chances for the free path to regain two submissions.
+ *
+ *     Keyed on `acquisitionSessionId`, never on `conceptCount`. A targeted
+ *     revision is also a one-concept job and MUST keep the ordinary retry
+ *     policy: it is paid work on a design the customer already chose.
+ *
+ *   THE LIFETIME AUTHORITY IS A SESSION-OWNED TOMBSTONE, not a constraint on
+ *     a deletable row. `acquisition_free_concept_claims` has the session as
+ *     its PRIMARY KEY and holds no foreign key to the job, so it keeps
+ *     refusing after that job is deleted — which the partial unique index on
+ *     `generation_jobs` cannot. FORBIDDEN: reintroducing an authority that
+ *     evaporates when a child row is removed, and equally forbidden:
+ *     `ON DELETE RESTRICT` on the job to prop one up, which would impose
+ *     permanent retention on an operational table.
+ *
+ *     The claim is taken by a BEFORE INSERT trigger so claim and job are ONE
+ *     statement. FORBIDDEN: splitting them into two application writes —
+ *     claim-first burns the customer's entitlement for our failure,
+ *     job-first leaves an executable job with no claim.
+ *
+ *     The trigger is SECURITY INVOKER with a pinned search_path. FORBIDDEN:
+ *     promoting it to SECURITY DEFINER. Only `service_role` writes
+ *     `generation_jobs`; if the trigger cannot write the claim, the caller
+ *     had no business inserting the job.
+ *
+ *   `freeConceptSpent` reads the CLAIM FIRST — the thing the insert is
+ *     actually validated against — so application state and database
+ *     enforcement cannot disagree. Every read failure resolves to CONSUMED.
+ *
+ *   FORBIDDEN: a customer state that invites an action the server will
+ *     refuse. A spent-but-undelivered attempt is `continue_locked`, not
+ *     `open`, and `unavailable` disables the controls rather than merely
+ *     printing a sentence above them.
+ */
+
+/**
+ * SPRINT A4 CORRECTION 3 — the paid boundary is where the request leaves the
+ * process, not where the code path begins.
+ *
+ *   THE DURABLE DISPATCH COUNTER MEANS "an external request may actually
+ *     have been sent". FORBIDDEN: claiming it before local provider
+ *     preflight has passed. A definite pre-provider failure (missing
+ *     credential, disabled provider, invalid local config) must leave the
+ *     count at 0 and the attempt retryable — for the acquisition free
+ *     concept, claiming first spent the customer's only attempt on our own
+ *     misconfiguration, with zero external submissions.
+ *
+ *   `assertReadyToDispatch` IS LOCAL ONLY. FORBIDDEN: making any network
+ *     call in it — no probe, no test generation, no health check. It states
+ *     that THIS PROCESS is configured to attempt a request, and nothing
+ *     about remote availability, success, or billing.
+ *
+ *   FORBIDDEN: duplicating provider configuration logic in the worker.
+ *     Enablement, storage, and arming decisions belong to
+ *     `resolveConceptGenerationProvider`, which already returns the
+ *     unavailable stub when they fail.
+ *
+ *   ORDERING IS THE CONTRACT: preflight runs AFTER reuse/adoption (so a
+ *     broken config never blocks recovering an image already bought) and
+ *     IMMEDIATELY BEFORE the claim (so no window exists in which the claim
+ *     is taken for a call that never happens). Nothing may be inserted
+ *     between preflight and the claim.
+ *
+ *   Preflight is ADVISORY, never the concurrency authority.
+ *     `beginPaidImageIntentDispatch` remains the only thing that decides who
+ *     may call the provider; two workers may both preflight and only one may
+ *     win.
+ *
+ *   AFTER the claim, every failure is possibly-billed. FORBIDDEN: inferring
+ *     that a particular HTTP status was not charged in order to justify a
+ *     second free submission.
+ *
+ *   Customer state follows the same boundary: an attempt stopped before any
+ *     dispatch reads `open` (their concept is intact and the next click
+ *     works), not `continue_locked`.
+ */
+
+export const CAPABILITY_BOUNDARY_VERSION = "A4c3" as const;

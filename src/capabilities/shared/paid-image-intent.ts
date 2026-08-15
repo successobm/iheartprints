@@ -227,6 +227,48 @@ export function paidIntentBudgetForJob(conceptCount: number): number {
 }
 
 /**
+ * Sprint A4 Correction 1: the acquisition free-concept budget. Exactly ONE
+ * paid image dispatch, for the whole job, forever.
+ *
+ * WHY THIS IS A SEPARATE NUMBER AND NOT `paidIntentBudgetForJob(1)`
+ *
+ * They are not the same value, and assuming they were is the defect this
+ * constant exists to close. `paidIntentBudgetForJob` adds the Phase 2C
+ * replacement allowance ON TOP OF the concept count, so a one-concept job
+ * gets `1 + 2 = 3`. The acquisition promise — "one free concept" — was
+ * therefore true of what the customer saw and false of what was spent: a
+ * single free attempt could buy three images.
+ *
+ * The promise is one concept, not one concept of guaranteed quality. A free
+ * concept may be imperfect; buying a second image to improve it is exactly
+ * the unbounded-free-spend loop the entitlement exists to prevent.
+ */
+export const ACQUISITION_FREE_CONCEPT_PAID_INTENT_BUDGET = 1;
+
+/**
+ * The budget for one REAL job, resolved from durable job authority.
+ *
+ * This is the function production code must call. `paidIntentBudgetForJob`
+ * above remains the pure concept-count policy (and the thing its own unit
+ * tests exercise), but it cannot see the one fact that overrides it, so a
+ * call site that reaches for it directly silently re-opens the defect.
+ *
+ * `acquisitionSessionId` is the durable marker, carried on the job row and
+ * enforced unique per session by the database — so a worker that claimed
+ * this job hours later, in another process, with no request context and no
+ * cookie, still resolves the same answer.
+ */
+export function paidIntentBudgetForGenerationJob(job: {
+  conceptCount: number;
+  acquisitionSessionId?: string | null;
+}): number {
+  if (job.acquisitionSessionId) {
+    return ACQUISITION_FREE_CONCEPT_PAID_INTENT_BUDGET;
+  }
+  return paidIntentBudgetForJob(job.conceptCount);
+}
+
+/**
  * Phase 2C0.5 (§6): how many times a single logical paid intent may ever be
  * DISPATCHED to the provider, across every worker, every reclaim, and every
  * transport attempt combined.
@@ -264,3 +306,58 @@ export function paidIntentBudgetForJob(conceptCount: number): number {
  * provider-side idempotency mechanism this endpoint does not document.
  */
 export const MAX_PAID_DISPATCHES_PER_INTENT = MAX_GENERATION_ATTEMPTS;
+
+/**
+ * Sprint A4 Correction 2: how many times the acquisition free concept may
+ * be PHYSICALLY SUBMITTED to an image provider. Once. Ever.
+ *
+ * WHY ONE INTENT WAS NOT ENOUGH
+ *
+ * Correction 1 capped the free job at one logical paid image INTENT, which
+ * made "one free concept" true of the artwork. It was still false of the
+ * money: a single intent may be dispatched `MAX_PAID_DISPATCHES_PER_INTENT`
+ * times, because an ambiguous post-dispatch failure cannot be proven
+ * un-billed and the ordinary policy prefers retrying to stranding a paying
+ * customer. One free concept could therefore still reach three physical
+ * submissions and three charges.
+ *
+ * That trade is correct for a paid job and wrong for a free one. For work
+ * somebody paid for, refusing to retry an ambiguous failure risks taking
+ * their money and delivering nothing — so the platform absorbs the
+ * duplicate-billing risk. For an acquisition giveaway there is no such
+ * obligation: the promise is one attempt at one concept. Preferring one
+ * possibly-failed attempt over silently buying another image is the whole
+ * point of the entitlement.
+ *
+ * The residual risk is stated rather than hidden: an ambiguous failure the
+ * provider actually billed still costs one image. That is unavoidable
+ * without provider-side idempotency this endpoint does not document — but
+ * it is now bounded at one instead of three.
+ */
+export const ACQUISITION_FREE_CONCEPT_MAX_PHYSICAL_DISPATCHES = 1;
+
+/**
+ * The physical-dispatch ceiling for one REAL job, resolved from durable job
+ * authority. THE ONLY thing production code may pass to
+ * `beginPaidImageIntentDispatch`.
+ *
+ * Centralized for the same reason `paidIntentBudgetForGenerationJob` is: the
+ * ceiling is read at four separate points in the executor (authorize, both
+ * refusal messages, and the terminal-status decision), and four call sites
+ * each reaching for the module constant is four chances for the free path to
+ * silently regain two extra submissions.
+ *
+ * Deliberately keyed on `acquisitionSessionId`, NOT on `conceptCount`. A
+ * targeted revision is also a one-concept job and must keep the ordinary
+ * retry policy — it is paid work on a design the customer already chose, and
+ * stranding it on one ambiguous transport failure would be the exact harm
+ * the ordinary policy exists to prevent.
+ */
+export function maxPhysicalDispatchesForGenerationJob(job: {
+  acquisitionSessionId?: string | null;
+}): number {
+  if (job.acquisitionSessionId) {
+    return ACQUISITION_FREE_CONCEPT_MAX_PHYSICAL_DISPATCHES;
+  }
+  return MAX_PAID_DISPATCHES_PER_INTENT;
+}

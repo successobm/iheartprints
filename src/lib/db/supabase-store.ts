@@ -7,6 +7,9 @@ import {
   readStoredRequestedProductionOutput,
 } from "@/lib/domain/types";
 import type {
+  AcquisitionEntitlement,
+  AcquisitionFreeConceptClaim,
+  AcquisitionSession,
   ArtworkPreparation,
   ArtworkPreparationStatus,
   ArtworkVersion,
@@ -38,6 +41,7 @@ import type {
 } from "@/lib/domain/types";
 import type {
   ApproveDesignBriefInput,
+  CaptureAcquisitionEmailInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
@@ -47,6 +51,7 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  FreeConceptAllocation,
   PaidImageIntentReservation,
   ProjectRepository,
   RecordPaidImageIntentFailureInput,
@@ -58,7 +63,10 @@ import type {
 } from "./repository";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { UniqueConstraintViolationError } from "./repository";
+import {
+  FreeConceptAlreadyConsumedError,
+  UniqueConstraintViolationError,
+} from "./repository";
 import { getSupabaseServiceClient, isSupabaseConfigured } from "./supabase-client";
 
 type DbProject = {
@@ -70,6 +78,35 @@ type DbProject = {
   revision_pending: boolean | null;
   /** Sprint 2G Live Acceptance Corrective Pass. */
   final_direction_confirmed: boolean | null;
+  /**
+   * Sprint A4. Optional in the row type (not merely nullable) so a build
+   * running against a database that has not yet applied the A4 migration
+   * reads `undefined` and maps to the legacy `null` rather than crashing.
+   */
+  acquisition_session_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Sprint A4 Correction 2. */
+type DbAcquisitionFreeConceptClaim = {
+  acquisition_session_id: string;
+  generation_job_id: string | null;
+  claimed_at: string;
+};
+
+/** Sprint A4. */
+type DbAcquisitionSession = {
+  id: string;
+  session_token: string;
+  entitlement: AcquisitionEntitlement;
+  free_concept_project_id: string | null;
+  free_concept_allocated_at: string | null;
+  free_concept_generation_job_id: string | null;
+  free_concept_consumed_at: string | null;
+  email: string | null;
+  email_captured_at: string | null;
+  internal_granted_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -157,6 +194,8 @@ type DbGenerationJob = {
   target_artwork_version_id: string | null;
   /** True Source-Image Targeted Revision. */
   revision_instruction: string | null;
+  /** Sprint A4 Correction 1. Optional so a build running against a database that has not applied the correction migration reads undefined rather than crashing. */
+  acquisition_session_id?: string | null;
   attempts: number;
   last_error: string | null;
   started_at: string | null;
@@ -291,6 +330,7 @@ function mapProject(row: DbProject): PrintProject {
     selectedArtworkVersionId: row.selected_artwork_version_id,
     revisionPending: row.revision_pending ?? false,
     finalDirectionConfirmed: row.final_direction_confirmed ?? false,
+    acquisitionSessionId: row.acquisition_session_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -392,11 +432,30 @@ function mapGenerationJob(row: DbGenerationJob): GenerationJob {
     idempotencyKey: row.idempotency_key,
     targetArtworkVersionId: row.target_artwork_version_id ?? null,
     revisionInstruction: row.revision_instruction ?? null,
+    acquisitionSessionId: row.acquisition_session_id ?? null,
     attempts: row.attempts,
     lastError: row.last_error,
     startedAt: row.started_at,
     completedAt: row.completed_at,
     heartbeatAt: row.heartbeat_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Sprint A4. Never returns `sessionToken` to anything customer-facing — that is the caller's boundary, enforced in `conversation-service`/routes. */
+function mapAcquisitionSession(row: DbAcquisitionSession): AcquisitionSession {
+  return {
+    id: row.id,
+    sessionToken: row.session_token,
+    entitlement: row.entitlement,
+    freeConceptProjectId: row.free_concept_project_id,
+    freeConceptAllocatedAt: row.free_concept_allocated_at,
+    freeConceptGenerationJobId: row.free_concept_generation_job_id,
+    freeConceptConsumedAt: row.free_concept_consumed_at,
+    email: row.email,
+    emailCapturedAt: row.email_captured_at,
+    internalGrantedAt: row.internal_granted_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -570,10 +629,23 @@ export class SupabaseProjectRepository implements ProjectRepository {
     this.client = client;
   }
 
-  async createProject(): Promise<ProjectSnapshot> {
+  async createProject(
+    acquisitionSessionId: string | null = null,
+  ): Promise<ProjectSnapshot> {
+    // Sprint A4: the binding is written in the SAME insert that creates the
+    // project, never as a follow-up update. A project that briefly existed
+    // unbound would be indistinguishable from a legacy project and would
+    // therefore be grandfathered — a free-generation hole opened by a
+    // partial failure.
     const { data: projectRow, error: projectError } = await this.client
       .from("print_projects")
-      .insert({ name: "Untitled T-shirt design", status: "intake" })
+      .insert({
+        name: "Untitled T-shirt design",
+        status: "intake",
+        ...(acquisitionSessionId
+          ? { acquisition_session_id: acquisitionSessionId }
+          : {}),
+      })
       .select("*")
       .single();
     if (projectError) throw projectError;
@@ -1013,26 +1085,86 @@ export class SupabaseProjectRepository implements ProjectRepository {
         idempotency_key: input.idempotencyKey,
         target_artwork_version_id: input.targetArtworkVersionId ?? null,
         revision_instruction: input.revisionInstruction ?? null,
+        // Sprint A4 Correction 1: only ever set for the acquisition free
+        // concept. A partial unique index on this column is what makes this
+        // INSERT the entitlement authority.
+        ...(input.acquisitionSessionId
+          ? { acquisition_session_id: input.acquisitionSessionId }
+          : {}),
         attempts: 0,
       })
       .select("*")
       .single();
 
     if (error) {
-      // Idempotent retry: a concurrent/duplicate call raced us to create
-      // the same (project, approved version) job. Return the winner's row
-      // rather than erroring, mirroring `approveDesignBrief`'s pattern.
       if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        // Sprint A4 Correction 1: TWO unique rules can land here and they
+        // mean genuinely different things, so which one fired is resolved by
+        // re-reading — never by parsing the error text (same discipline as
+        // `reservePaidImageIntent`).
+
+        // (project_id, idempotency_key): a concurrent or duplicate call
+        // raced us to create the SAME logical job. Return the winner's row
+        // rather than erroring — this is a resume, not a second request.
         const existing = await this.getGenerationJobByIdempotencyKey(
           projectId,
           input.idempotencyKey,
         );
         if (existing) return existing;
+
+        // Sprint A4 Correction 2: EITHER the partial unique index on
+        // `generation_jobs.acquisition_session_id` (a free job still exists)
+        // OR the `acquisition_free_concept_claims` primary key, raised by
+        // the BEFORE INSERT trigger inside this very statement (a claim
+        // exists, whether or not its job still does).
+        //
+        // Both mean the same thing to the caller — this session has already
+        // taken its one free attempt — so they are deliberately not
+        // distinguished here. The claim is the one that keeps enforcing
+        // after the job has been deleted, which is why it exists.
+        //
+        // Nothing was spent: the insert was refused before any job existed
+        // for a worker to claim.
+        if (input.acquisitionSessionId) {
+          throw new FreeConceptAlreadyConsumedError();
+        }
       }
       throw error;
     }
 
     return mapGenerationJob(data as DbGenerationJob);
+  }
+
+  async getFreeConceptClaim(
+    acquisitionSessionId: string,
+  ): Promise<AcquisitionFreeConceptClaim | null> {
+    const { data, error } = await this.client
+      .from("acquisition_free_concept_claims")
+      .select("*")
+      .eq("acquisition_session_id", acquisitionSessionId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return null;
+    const row = data as DbAcquisitionFreeConceptClaim;
+    return {
+      acquisitionSessionId: row.acquisition_session_id,
+      generationJobId: row.generation_job_id,
+      claimedAt: row.claimed_at,
+    };
+  }
+
+  async getFreeConceptGenerationJob(
+    acquisitionSessionId: string,
+  ): Promise<GenerationJob | null> {
+    // At most one row can match — the partial unique index guarantees it —
+    // so `maybeSingle` is a correctness assertion as much as a query shape.
+    const { data, error } = await this.client
+      .from("generation_jobs")
+      .select("*")
+      .eq("acquisition_session_id", acquisitionSessionId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapGenerationJob(data as DbGenerationJob) : null;
   }
 
   async getGenerationJobByIdempotencyKey(
@@ -1166,6 +1298,185 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (error) throw error;
 
     return ((data as DbGenerationJob[]) ?? []).map(mapGenerationJob);
+  }
+
+  // --- Sprint A4: acquisition sessions ---------------------------------
+
+  async createAcquisitionSession(
+    sessionToken: string,
+  ): Promise<AcquisitionSession> {
+    const { data, error } = await this.client
+      .from("acquisition_sessions")
+      .insert({ session_token: sessionToken, entitlement: "prospect" })
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapAcquisitionSession(data as DbAcquisitionSession);
+  }
+
+  async getAcquisitionSessionByToken(
+    sessionToken: string,
+  ): Promise<AcquisitionSession | null> {
+    const { data, error } = await this.client
+      .from("acquisition_sessions")
+      .select("*")
+      .eq("session_token", sessionToken)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapAcquisitionSession(data as DbAcquisitionSession) : null;
+  }
+
+  async getAcquisitionSession(
+    sessionId: string,
+  ): Promise<AcquisitionSession | null> {
+    const { data, error } = await this.client
+      .from("acquisition_sessions")
+      .select("*")
+      .eq("id", sessionId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapAcquisitionSession(data as DbAcquisitionSession) : null;
+  }
+
+  async allocateFreeConcept(
+    sessionId: string,
+    projectId: string,
+  ): Promise<FreeConceptAllocation> {
+    // Single atomic conditional UPDATE — the same optimistic-claim shape as
+    // `claimNextQueuedJob` and `beginPaidImageIntentDispatch`, and for the
+    // same reason: this decides whether money may be spent, so it must not
+    // have a read-then-write gap two requests could both pass through.
+    //
+    // Both NULL conditions matter. `free_concept_project_id is null` is the
+    // allocation race; `free_concept_generation_job_id is null` refuses to
+    // re-allocate an entitlement a durable job has already consumed, even
+    // if some future code path cleared the project id.
+    const timestamp = new Date().toISOString();
+    const { data: claimed, error: claimError } = await this.client
+      .from("acquisition_sessions")
+      .update({
+        free_concept_project_id: projectId,
+        free_concept_allocated_at: timestamp,
+        updated_at: timestamp,
+      })
+      .eq("id", sessionId)
+      .is("free_concept_project_id", null)
+      // Sprint A4 Correction 1: `free_concept_consumed_at` is the authority
+      // for "was it spent"; the job id beside it is an immutable historical
+      // reference that no longer carries a foreign key. Both are required to
+      // be unset so neither alone can be cleared into a fresh allocation.
+      .is("free_concept_consumed_at", null)
+      .is("free_concept_generation_job_id", null)
+      .select("*")
+      .maybeSingle();
+    if (claimError) throw claimError;
+    if (claimed) {
+      return {
+        outcome: "allocated",
+        session: mapAcquisitionSession(claimed as DbAcquisitionSession),
+      };
+    }
+
+    // The conditional update touched no row. Re-read to learn WHY, rather
+    // than inferring it — "already mine" and "already someone else's" are
+    // different answers and only the row can distinguish them.
+    const session = await this.getAcquisitionSession(sessionId);
+    if (!session) throw new Error("Acquisition session not found");
+    if (session.freeConceptConsumedAt || session.freeConceptGenerationJobId) {
+      return { outcome: "exhausted", session };
+    }
+    if (session.freeConceptProjectId === projectId) {
+      // Sprint A4 Correction 1: the allocation is still ours, but the
+      // consumption marker is not the only evidence a job was created. A
+      // crash between the job insert and the marker write leaves the marker
+      // false and a real, executable, spend-bounded job behind — so the
+      // durable evidence is consulted before reporting this resumable.
+      //
+      // Reporting `resumed` here would not actually produce a second paid
+      // attempt (the insert would be refused), but it would tell the
+      // customer their free concept is still available when it is not, and
+      // every state derived from this call would inherit that lie.
+      //
+      // Sprint A4 Correction 2: the CLAIM is checked first — it is what the
+      // insert is really validated against, and unlike the job it survives
+      // that job being deleted.
+      if (await this.getFreeConceptClaim(sessionId)) {
+        return { outcome: "exhausted", session };
+      }
+      const spent = await this.getFreeConceptGenerationJob(sessionId);
+      if (spent) return { outcome: "exhausted", session };
+      return { outcome: "resumed", session };
+    }
+    return { outcome: "exhausted", session };
+  }
+
+  async recordFreeConceptConsumed(
+    sessionId: string,
+    generationJobId: string,
+  ): Promise<AcquisitionSession | null> {
+    const timestamp = new Date().toISOString();
+    const { data, error } = await this.client
+      .from("acquisition_sessions")
+      .update({
+        free_concept_generation_job_id: generationJobId,
+        free_concept_consumed_at: timestamp,
+        updated_at: timestamp,
+      })
+      .eq("id", sessionId)
+      .is("free_concept_generation_job_id", null)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    // No row updated means consumption was already recorded. Return the
+    // session as it genuinely stands — the caller needs the WINNING job id,
+    // not a failure.
+    if (!data) return this.getAcquisitionSession(sessionId);
+    return mapAcquisitionSession(data as DbAcquisitionSession);
+  }
+
+  async captureAcquisitionEmail(
+    sessionId: string,
+    input: CaptureAcquisitionEmailInput,
+  ): Promise<AcquisitionSession | null> {
+    const existing = await this.getAcquisitionSession(sessionId);
+    if (!existing) return null;
+
+    const timestamp = new Date().toISOString();
+    const { data, error } = await this.client
+      .from("acquisition_sessions")
+      .update({
+        email: input.email,
+        // First capture only. A correction is not a new capture, and moving
+        // this timestamp would rewrite when the prospect entered the funnel.
+        email_captured_at: existing.emailCapturedAt ?? timestamp,
+        updated_at: timestamp,
+      })
+      .eq("id", sessionId)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapAcquisitionSession(data as DbAcquisitionSession) : null;
+  }
+
+  async grantInternalEntitlement(
+    sessionId: string,
+  ): Promise<AcquisitionSession | null> {
+    const existing = await this.getAcquisitionSession(sessionId);
+    if (!existing) return null;
+
+    const timestamp = new Date().toISOString();
+    const { data, error } = await this.client
+      .from("acquisition_sessions")
+      .update({
+        entitlement: "internal",
+        internal_granted_at: existing.internalGrantedAt ?? timestamp,
+        updated_at: timestamp,
+      })
+      .eq("id", sessionId)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapAcquisitionSession(data as DbAcquisitionSession) : null;
   }
 
   // --- Phase 2C0.5: durable paid image intents -------------------------

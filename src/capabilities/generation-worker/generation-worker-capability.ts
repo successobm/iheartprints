@@ -38,7 +38,7 @@ import type {
 import { MAX_GENERATION_ATTEMPTS } from "@/capabilities/shared/generation-retry-policy";
 import {
   buildPaidImageIntentKey,
-  paidIntentBudgetForJob,
+  paidIntentBudgetForGenerationJob,
   REPLACEMENT_PAID_INTENT_EPOCH,
 } from "@/capabilities/shared/paid-image-intent";
 import {
@@ -647,6 +647,28 @@ export function createGenerationWorkerCapability(
     // palette verdict. Phase 2C replaces INITIAL concepts only.
     if (input.job.targetArtworkVersionId) return;
 
+    // Sprint A4 Correction 1: the acquisition free concept is never
+    // replaced, and — just as importantly — never WITHHELD for want of a
+    // replacement.
+    //
+    // Returning here rather than letting the budget refuse the reservation
+    // is the whole point. The refusal path marks the failing candidate
+    // `withheld`, which is right for a batch of three (two good directions
+    // still reach the customer) and catastrophic for a batch of one: the
+    // customer's single free concept would be suppressed, they would see
+    // nothing at all, and their entitlement would already be spent. A
+    // quality defect would have been converted into delivering nothing.
+    //
+    // So the free concept is delivered as generated. The deterministic
+    // palette verdict is still computed and still recorded on the artwork
+    // version — nothing is hidden from us, only from the replacement
+    // purchase. That is the honest reading of the promise: ONE concept, not
+    // one concept with unlimited quality retries bought on our side.
+    //
+    // Ordinary paid jobs are completely unaffected — same budget, same
+    // replacement allowance, same withholding.
+    if (input.job.acquisitionSessionId) return;
+
     // Phase 2C.3A: inferred hard palette FAIL is advisory. Only an EXPLICIT
     // ink restriction + deterministic violation may purchase a replacement.
     const explicitInkRestriction = deriveExplicitInkRestriction(input.brief);
@@ -660,7 +682,7 @@ export function createGenerationWorkerCapability(
     );
     if (failing.length === 0) return;
 
-    const budget = paidIntentBudgetForJob(input.job.conceptCount);
+    const budget = paidIntentBudgetForGenerationJob(input.job);
     const generateDirection = provider.generateDirection;
 
     // An adapter with no per-direction entry point produced the batch as one
@@ -757,6 +779,10 @@ export function createGenerationWorkerCapability(
               repo,
               job: input.job,
               providerKey: provider.providerKey,
+              // Sprint A4 Correction 3: local readiness, checked before the
+              // durable dispatch claim so a misconfigured provider never
+              // consumes an attempt it will not use.
+              preflight: () => provider.assertReadyToDispatch?.(),
               dispatch: async () => {
                 const result = await generateDirection.call(
                   provider,
@@ -1457,6 +1483,10 @@ export function createGenerationWorkerCapability(
               repo,
               job,
               providerKey: provider.providerKey,
+              // Sprint A4 Correction 3: local readiness, checked before the
+              // durable dispatch claim so a misconfigured provider never
+              // consumes an attempt it will not use.
+              preflight: () => provider.assertReadyToDispatch?.(),
               dispatch: async () => {
                 // Only a per-direction CONCEPT unit may use the
                 // per-direction entry point. A targeted revision keeps
@@ -1567,7 +1597,7 @@ export function createGenerationWorkerCapability(
         paidIntentsUsed: (
           await repo.listPaidImageIntentsForJob(designId, job.id)
         ).length,
-        paidIntentBudget: paidIntentBudgetForJob(job.conceptCount),
+        paidIntentBudget: paidIntentBudgetForGenerationJob(job),
       });
 
       if (delivered.length === 0) {

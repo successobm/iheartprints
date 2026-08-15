@@ -10,8 +10,8 @@ import type {
 import type { GeneratedConceptDraft } from "@/capabilities/shared/contracts";
 import {
   buildPaidImageIntentKey,
-  MAX_PAID_DISPATCHES_PER_INTENT,
-  paidIntentBudgetForJob,
+  maxPhysicalDispatchesForGenerationJob,
+  paidIntentBudgetForGenerationJob,
   type PaidImageIntentIdentity,
   type PaidImageIntentKind,
   type PaidImageIntentScopeKey,
@@ -115,6 +115,20 @@ export interface ExecutePaidImageUnitDeps {
   job: GenerationJob;
   providerKey: string;
   /**
+   * Sprint A4 Correction 3: LOCAL readiness check, run immediately before
+   * the dispatch claim and never after it.
+   *
+   * Must not contact anything. Throwing here means no claim is taken, no
+   * dispatch is counted, and the failure stays retryable — which is the
+   * whole point: a misconfigured deployment must not spend a customer's one
+   * free attempt.
+   *
+   * Optional so existing call sites and fakes are unaffected; absence means
+   * "ready", which is true of every adapter with no configuration to get
+   * wrong.
+   */
+  preflight?: () => Promise<void> | void;
+  /**
    * Makes the paid provider dispatch. Called at most once per invocation,
    * and ONLY after `beginPaidImageIntentDispatch` has durably authorized it.
    */
@@ -159,7 +173,13 @@ export async function executePaidImageUnit(
 ): Promise<{ concepts: PersistedPaidConcept[]; paidCallMade: boolean }> {
   const { repo, job, providerKey } = deps;
   const projectId = job.projectId;
-  const budget = paidIntentBudgetForJob(job.conceptCount);
+  const budget = paidIntentBudgetForGenerationJob(job);
+  // Sprint A4 Correction 2: resolved ONCE, from durable job authority, and
+  // used at every point below that would otherwise reach for the module
+  // constant. The acquisition free concept gets exactly ONE physical
+  // provider submission; every ordinary job keeps its existing
+  // ambiguity/retry policy completely unchanged.
+  const maxDispatches = maxPhysicalDispatchesForGenerationJob(job);
 
   const identity: PaidImageIntentIdentity = {
     projectId,
@@ -201,7 +221,7 @@ export async function executePaidImageUnit(
     throw new PaidImageIntentBlockedError(
       "intent_failed",
       intentKey,
-      `This paid image intent already exhausted its dispatch budget (${MAX_PAID_DISPATCHES_PER_INTENT}) without producing durable artwork.`,
+      `This paid image intent already exhausted its dispatch budget (${maxDispatches}) without producing durable artwork.`,
     );
   }
 
@@ -233,12 +253,47 @@ export async function executePaidImageUnit(
     }
   }
 
+  // --- 3.5. Preflight (Sprint A4 Correction 3) -------------------------
+  //
+  // THE PAID BOUNDARY IS HERE, and the claim below is what crosses it.
+  //
+  // The durable dispatch counter must mean "we have crossed the point where
+  // an external paid request may actually be sent" — NOT "we entered the
+  // code path that might eventually try". Before this step existed, an
+  // adapter that fails on local configuration
+  // (`UnavailableConceptGenerationProvider` is precisely that) threw from
+  // inside `dispatch`, which runs AFTER the claim. A definite local failure
+  // therefore produced dispatches = 1 with zero external submissions, and
+  // for the acquisition free concept that was the customer's only attempt,
+  // spent on our misconfiguration.
+  //
+  // Placed AFTER reuse and adoption on purpose: recovering an image the
+  // platform has already bought must not be blocked by a provider whose
+  // configuration has since broken. Those paths contact nothing.
+  //
+  // Placed IMMEDIATELY before the claim on purpose: every statement between
+  // preflight and the external request is a window in which the claim can
+  // be taken for a call that never happens. There is deliberately nothing
+  // between them but the claim itself.
+  //
+  // This does NOT weaken concurrency safety. Two workers may both preflight
+  // successfully; only one can win `beginPaidImageIntentDispatch`, and the
+  // loser never reaches the provider. The claim remains the sole
+  // concurrency authority.
+  //
+  // It also claims no certainty about billing. Preflight says only that
+  // this process is configured to attempt a request. Once the claim is
+  // taken, every subsequent failure — DNS, reset, timeout, 4xx, 5xx — is
+  // treated as possibly billed, because none of them can be proven
+  // otherwise.
+  if (deps.preflight) await deps.preflight();
+
   // --- 4. Authorize ---------------------------------------------------
   const claimToken = randomUUID();
   const claimed = await repo.beginPaidImageIntentDispatch(
     intent.id,
     claimToken,
-    MAX_PAID_DISPATCHES_PER_INTENT,
+    maxDispatches,
   );
   if (!claimed) {
     // Refused. Either a concurrent worker just succeeded it (reuse), or
@@ -257,7 +312,7 @@ export async function executePaidImageUnit(
     throw new PaidImageIntentBlockedError(
       "dispatches_exhausted",
       intentKey,
-      `This paid image intent has already been dispatched ${MAX_PAID_DISPATCHES_PER_INTENT} time(s) without producing durable artwork; refusing to pay again.`,
+      `This paid image intent has already been dispatched ${maxDispatches} time(s) without producing durable artwork; refusing to pay again.`,
     );
   }
 
@@ -286,7 +341,7 @@ export async function executePaidImageUnit(
     // to retry keeps this intent retry-eligible — parent-COMPLETION hygiene
     // is a separate decision made by the worker (see
     // `terminalizeStrandedPaidIntents`), never guessed at here.
-    const terminal = claimed.dispatches >= MAX_PAID_DISPATCHES_PER_INTENT;
+    const terminal = claimed.dispatches >= maxDispatches;
     const lastError = describePaidImageFailure(failureClass, error);
     try {
       await repo.recordPaidImageIntentFailure(intent.id, claimToken, {

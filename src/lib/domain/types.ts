@@ -143,6 +143,104 @@ export interface PrintProject {
    * currently pending.
    */
   finalDirectionConfirmed: boolean;
+  /**
+   * Sprint A4: the acquisition session that created this project — the
+   * server-side authority every paid-value gate resolves from.
+   *
+   * Deliberately resolved from the PROJECT rather than from the request.
+   * A gate that trusted a cookie could be bypassed by clearing it; a gate
+   * that reads the project's own durable binding cannot, which is what
+   * makes a direct API call no more powerful than the UI (Goal 17).
+   *
+   * `null` means the project was created before acquisition sessions
+   * existed — a legacy project, grandfathered so pre-A4 work keeps
+   * functioning. It never means "unentitled". After A4 every project
+   * created through the API is bound at insert, so no new `null` can
+   * appear through a customer path.
+   */
+  acquisitionSessionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Sprint A4: the acquisition entitlement tier a session holds.
+ *
+ *   "prospect" — an ordinary anonymous visitor. One free concept, then
+ *                email to continue, then (Sprint A5) payment.
+ *   "internal" — explicitly granted server-side against a configured
+ *                secret, for real Print'em All production work and
+ *                acceptance testing. Never inferred from an email address,
+ *                a query string, a browser flag, or `NODE_ENV`.
+ *
+ * There is deliberately no `"paid"` tier. Payment entitlement is Sprint A5
+ * work, and introducing a value nothing can legitimately write would be a
+ * capability that only looks implemented.
+ */
+export type AcquisitionEntitlement = "prospect" | "internal";
+
+/**
+ * Sprint A4: an opaque, server-issued anonymous session.
+ *
+ * NOT authentication, NOT an account, NOT a customer identity model. Its
+ * entire job is spend control — "has this browser session already had its
+ * one free concept?" — plus the email captured to continue the design
+ * session. It holds no password, no verified identity, and no marketing
+ * consent, and its existence must never be described to a customer as an
+ * account having been created.
+ *
+ * ALLOCATION vs CONSUMPTION is the distinction the whole entitlement rests
+ * on, and the two fields below are not redundant:
+ *
+ *   freeConceptProjectId — the free concept has been ALLOCATED to this
+ *     project. Claimed atomically before any generation job exists, so two
+ *     racing requests cannot both be allocated. Allocation alone costs the
+ *     customer nothing: a prospect whose enqueue failed before a durable
+ *     job existed still has their free concept, and re-requesting on the
+ *     same project simply resumes the same allocation.
+ *
+ *   freeConceptGenerationJobId — the free concept has been CONSUMED by this
+ *     job. Written only after the `GenerationJob` row is durable, which is
+ *     the moment the platform has actually committed to a recoverable,
+ *     idempotent, spend-bounded generation attempt. Once set, no second
+ *     free generation is ever authorized for this session.
+ */
+/**
+ * Sprint A4 Correction 2: the durable tombstone recording that an
+ * acquisition session has taken its ONE free concept attempt.
+ *
+ * The session id is the PRIMARY KEY of the backing table, so the row itself
+ * IS the invariant — one claim per session, for the lifetime of the session
+ * rather than the lifetime of a generation job.
+ *
+ * `generationJobId` is deliberately historical evidence rather than a live
+ * relationship: it carries no foreign key, so it keeps its value (and the
+ * claim keeps enforcing) after the job it names has been deleted. A dangling
+ * id here is the correct record of what happened, not corruption.
+ */
+export interface AcquisitionFreeConceptClaim {
+  acquisitionSessionId: string;
+  /** The job that took the claim. May no longer resolve. */
+  generationJobId: string | null;
+  claimedAt: string;
+}
+
+export interface AcquisitionSession {
+  id: string;
+  /**
+   * The opaque bearer value carried in an httpOnly cookie. Never logged,
+   * never returned in a customer-facing snapshot, never placed in a URL.
+   */
+  sessionToken: string;
+  entitlement: AcquisitionEntitlement;
+  freeConceptProjectId: string | null;
+  freeConceptAllocatedAt: string | null;
+  freeConceptGenerationJobId: string | null;
+  freeConceptConsumedAt: string | null;
+  /** Normalized (trimmed, lowercased). Captured to continue, never consent. */
+  email: string | null;
+  emailCapturedAt: string | null;
+  internalGrantedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -671,6 +769,35 @@ export interface GenerationJob {
    * and for jobs created before this column existed.
    */
   revisionInstruction?: string | null;
+  /**
+   * Sprint A4 Correction 1: the acquisition session whose ONE free concept
+   * this job spends. `null` for every ordinary job — internal, legacy, paid,
+   * and every job that existed before this column.
+   *
+   * It is deliberately three things at once, and each one has to be durable
+   * on the JOB rather than derived from somewhere else:
+   *
+   *   AUTHORITY. A partial unique index on this column makes "at most one
+   *     free-concept job per acquisition session" a database invariant. That
+   *     is what makes a second free job impossible even if the session's own
+   *     consumption marker was never written — the failure mode a separate
+   *     durable write cannot defend against.
+   *
+   *   ECONOMICS. `paidIntentBudgetForGenerationJob` caps a job with this set
+   *     at exactly ONE paid image dispatch, and Phase 2C replacement is not
+   *     offered for it. `conceptCount === 1` alone was never sufficient: the
+   *     replacement allowance is added on top of the concept count, so a
+   *     "one free concept" job carried a budget of three paid images.
+   *
+   *   RECONCILIATION. "Has this session spent its free concept?" is
+   *     answerable from here when `AcquisitionSession.freeConceptConsumedAt`
+   *     is missing because a crash landed between the two writes.
+   *
+   * The worker reads it from the job it claimed. It must never be inferred
+   * from request context, a cookie, or UI state — none of which a background
+   * worker has, and none of which is authority in the first place.
+   */
+  acquisitionSessionId?: string | null;
   attempts: number;
   /** Sanitized, non-secret description of the most recent failure, if any. */
   lastError: string | null;

@@ -1,4 +1,6 @@
 import type {
+  AcquisitionFreeConceptClaim,
+  AcquisitionSession,
   ArtworkPreparation,
   ArtworkPreparationStatus,
   ArtworkVersion,
@@ -87,6 +89,34 @@ export interface CreateGenerationJobInput {
   targetArtworkVersionId?: string | null;
   /** True Source-Image Targeted Revision — see `GenerationJob.revisionInstruction`. */
   revisionInstruction?: string | null;
+  /**
+   * Sprint A4 Correction 1: set ONLY when this job spends an acquisition
+   * session's one free concept. Enforced unique per session by the database,
+   * so the insert itself is the authority — see
+   * `FreeConceptAlreadyConsumedError`.
+   */
+  acquisitionSessionId?: string | null;
+}
+
+/**
+ * Sprint A4 Correction 1: the database refused a second free-concept
+ * generation job for an acquisition session that already has one.
+ *
+ * This is a NORMAL outcome, not an infrastructure fault: it is what a
+ * customer clicking twice, a duplicated request, a second project in the
+ * same session, or a retry after a lost consumption write all look like from
+ * the database's point of view. It is thrown rather than returned because
+ * `createGenerationJob` has exactly one honest answer for every other case
+ * (the job), and a nullable return would be indistinguishable from failure.
+ *
+ * Callers convert it into a customer-safe refusal. Nothing was spent: the
+ * insert is refused before any job exists for a worker to claim.
+ */
+export class FreeConceptAlreadyConsumedError extends Error {
+  constructor() {
+    super("This acquisition session has already used its free concept.");
+    this.name = "FreeConceptAlreadyConsumedError";
+  }
 }
 
 export type UpdateGenerationJobInput = Partial<
@@ -297,8 +327,43 @@ export class UniqueConstraintViolationError extends Error {
   }
 }
 
+/**
+ * Sprint A4: the three genuinely different outcomes of trying to allocate a
+ * session's one free concept to a project, modelled explicitly because the
+ * caller must behave differently for each and a nullable row would conflate
+ * two of them (the same reasoning as `PaidImageIntentReservation`).
+ *
+ *   "allocated" — this session had no allocation and now has one for this
+ *                 project. Generation may proceed as the free concept.
+ *   "resumed"   — this session's allocation was ALREADY this project. A
+ *                 reload, a second tab, a duplicate request, or a retry
+ *                 after a failed enqueue all land here. Generation may
+ *                 proceed as the same free concept; nothing new is spent.
+ *   "exhausted" — the free concept is allocated elsewhere, or already
+ *                 consumed by a durable job. No free generation.
+ */
+export type FreeConceptAllocation =
+  | { outcome: "allocated"; session: AcquisitionSession }
+  | { outcome: "resumed"; session: AcquisitionSession }
+  | { outcome: "exhausted"; session: AcquisitionSession };
+
+/** Sprint A4: normalized email plus the moment it was captured. */
+export interface CaptureAcquisitionEmailInput {
+  /** Already trimmed/lowercased by `AcquisitionCapability` — repositories never normalize. */
+  email: string;
+}
+
 export interface ProjectRepository {
-  createProject(): Promise<ProjectSnapshot>;
+  /**
+   * Sprint A4: `acquisitionSessionId` binds the new project to the session
+   * that created it — the durable authority every paid-value gate resolves
+   * from. Optional, defaulting to `null`, for exactly one reason: internal
+   * callers and capability-level tests that create a project directly have
+   * no acquisition session and must not be forced to fabricate one. A
+   * `null` binding is the LEGACY reading (grandfathered), and the customer
+   * API path always supplies a real id.
+   */
+  createProject(acquisitionSessionId?: string | null): Promise<ProjectSnapshot>;
   getProject(projectId: string): Promise<ProjectSnapshot | null>;
   updateProject(
     projectId: string,
@@ -393,10 +458,64 @@ export interface ProjectRepository {
    * ConceptGenerationCapability's idempotency and retry strategy. Never
    * exposed through `ProjectSnapshot` — internal tracing only.
    */
+  /**
+   * Sprint A4 Correction 1: when `input.acquisitionSessionId` is set, THIS
+   * INSERT IS THE ENTITLEMENT AUTHORITY.
+   *
+   * Implementations must make both uniqueness rules real, and must
+   * distinguish them by re-reading rather than by parsing an error string:
+   *
+   *   (project_id, idempotency_key)   the same logical job already exists →
+   *                                   return the WINNER'S row. A double
+   *                                   click, a duplicated request, or a
+   *                                   retry is resuming one job, not
+   *                                   requesting a second.
+   *   (acquisition_session_id)        this session already has a free-concept
+   *                                   job, and it is a DIFFERENT one →
+   *                                   throw `FreeConceptAlreadyConsumedError`.
+   *
+   * The second rule is what makes a second free concept impossible even when
+   * `recordFreeConceptConsumed` never ran — the crash window that no amount
+   * of application ordering can close on its own.
+   */
   createGenerationJob(
     projectId: string,
     input: CreateGenerationJobInput,
   ): Promise<GenerationJob>;
+  /**
+   * Sprint A4 Correction 1: the free-concept job this session spent, if any
+   * — the RECONCILIATION source for consumption.
+   *
+   * `AcquisitionSession.freeConceptConsumedAt` is written immediately after
+   * the job insert, but the two are separate writes and a crash can land
+   * between them. This answers the same question from the row the database
+   * itself guarantees is unique, so a session whose marker is missing still
+   * reads as consumed instead of handing out a second free concept.
+   */
+  getFreeConceptGenerationJob(
+    acquisitionSessionId: string,
+  ): Promise<GenerationJob | null>;
+  /**
+   * Sprint A4 Correction 2: the durable, session-owned claim on the ONE free
+   * concept attempt — the LIFETIME entitlement authority.
+   *
+   * This exists because the Correction 1 authority (a partial unique index
+   * on `generation_jobs.acquisition_session_id`) only constrains rows that
+   * exist: deleting the free job freed the slot for another. The claim is
+   * owned by the session, holds no foreign key to the job, and therefore
+   * keeps enforcing after the job it names has been deleted.
+   *
+   * Taken ATOMICALLY as part of the `generation_jobs` insert (a BEFORE
+   * INSERT trigger in Postgres; the same single locked operation in the
+   * local store), so there is no window in which a job exists without a
+   * claim or a claim exists without a job.
+   *
+   * This is what `AcquisitionCapability` reconciles from — never the
+   * `free_concept_consumed_at` marker alone, and never the job alone.
+   */
+  getFreeConceptClaim(
+    acquisitionSessionId: string,
+  ): Promise<AcquisitionFreeConceptClaim | null>;
   getGenerationJobByIdempotencyKey(
     projectId: string,
     idempotencyKey: string,
@@ -428,6 +547,70 @@ export interface ProjectRepository {
    * recovered.
    */
   recoverAbandonedJobs(staleAfterMs: number): Promise<GenerationJob[]>;
+
+  // --- Sprint A4: acquisition sessions ---------------------------------
+
+  /**
+   * Creates a new anonymous acquisition session holding the supplied opaque
+   * token. The token is generated by the capability (never by the
+   * repository) so token entropy policy lives in one auditable place.
+   */
+  createAcquisitionSession(sessionToken: string): Promise<AcquisitionSession>;
+  getAcquisitionSessionByToken(
+    sessionToken: string,
+  ): Promise<AcquisitionSession | null>;
+  getAcquisitionSession(sessionId: string): Promise<AcquisitionSession | null>;
+  /**
+   * Atomically allocates this session's one free concept to `projectId`.
+   *
+   * Implementations MUST make the allocation a single conditional write
+   * (`... where free_concept_project_id is null`), never a read followed by
+   * an unconditional write: two concurrent first-generation requests — a
+   * double click, two tabs, a duplicated HTTP request — must resolve to one
+   * `"allocated"` and one `"resumed"`, never two allocations.
+   *
+   * A session whose free concept is already CONSUMED (a durable generation
+   * job exists) is always `"exhausted"`, even for the same project. That is
+   * what stops a second free generation on the project the free concept was
+   * spent on.
+   */
+  allocateFreeConcept(
+    sessionId: string,
+    projectId: string,
+  ): Promise<FreeConceptAllocation>;
+  /**
+   * Records the durable generation job that CONSUMED the free concept —
+   * the irreversible half of the entitlement.
+   *
+   * Conditional on `free_concept_generation_job_id is null`, so a late or
+   * duplicated call can never re-point consumption at a different job.
+   * Returns the session as it stands afterwards; a caller that lost the
+   * race sees the winning job id, which is exactly the fact it needs.
+   */
+  recordFreeConceptConsumed(
+    sessionId: string,
+    generationJobId: string,
+  ): Promise<AcquisitionSession | null>;
+  /**
+   * Persists the captured email. Last write wins so a customer who mistyped
+   * their address can correct it; `emailCapturedAt` is stamped on the FIRST
+   * capture and never moved, because "when did this prospect give us an
+   * address" is not re-answered by a correction.
+   *
+   * Never touches `entitlement` — capturing an email is not a grant.
+   */
+  captureAcquisitionEmail(
+    sessionId: string,
+    input: CaptureAcquisitionEmailInput,
+  ): Promise<AcquisitionSession | null>;
+  /**
+   * Grants the internal entitlement, with an audit timestamp. Only ever
+   * called after a server-side secret comparison succeeds; the repository
+   * itself performs no authorization.
+   */
+  grantInternalEntitlement(
+    sessionId: string,
+  ): Promise<AcquisitionSession | null>;
 
   // --- Phase 2C0.5: durable paid image intents -------------------------
 
