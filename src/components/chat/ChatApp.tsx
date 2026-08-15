@@ -25,6 +25,7 @@ import {
   planSessionBootstrap,
 } from "./chat-session";
 import { Composer } from "./Composer";
+import { handoffToCreateNewInterview } from "./create-new-handoff";
 import { ConceptCards } from "./ConceptCards";
 import { ConceptStatusBanner } from "./ConceptStatusBanner";
 import { DesignerDecisionCard } from "./DesignerDecisionCard";
@@ -113,6 +114,7 @@ export function ChatApp() {
   });
   const previousConceptStatusRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   /** Latest prepared revision — used to drop stale signed-URL responses. */
   const preparedRevisionRef = useRef<string | null>(null);
 
@@ -802,6 +804,13 @@ export function ChatApp() {
     await bootstrap();
   }
 
+  function continueWithCreateNewInterview() {
+    handoffToCreateNewInterview({
+      selectCreateNew: () => setWorkflowChoice("create_new"),
+      getComposer: () => composerRef.current,
+    });
+  }
+
   const preparation = snapshot?.artworkPreparation ?? null;
   const preparationId = preparation?.preparationId ?? null;
   const hasPreparedArtwork = preparation?.hasPreparedArtwork ?? false;
@@ -1182,7 +1191,7 @@ export function ChatApp() {
             {uploadedArtworkStep === "choose_workflow" ? (
               <WorkflowChoiceCard
                 busy={sending}
-                onCreateNew={() => setWorkflowChoice("create_new")}
+                onCreateNew={continueWithCreateNewInterview}
                 onUploadExisting={() => setWorkflowChoice("upload_existing")}
               />
             ) : null}
@@ -1378,6 +1387,7 @@ export function ChatApp() {
 
       {!affordances.hideComposer && !uploadedArtworkActive ? (
         <Composer
+          textareaRef={composerRef}
           disabled={composerDisabled}
           placeholder={placeholder}
           onSend={sendMessage}

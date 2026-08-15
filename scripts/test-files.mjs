@@ -16,6 +16,7 @@
  */
 export const TEST_FILES = [
   "src/components/chat/chat-session.test.ts",
+  "src/components/chat/create-new-handoff.test.ts",
   "src/components/chat/ChatApp.ssr.test.tsx",
   "src/components/chat/chat-affordances.test.ts",
   "src/components/chat/ConceptCards.test.tsx",
