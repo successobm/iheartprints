@@ -2,6 +2,10 @@ import { randomBytes } from "crypto";
 
 import { hasDeliveredGeneratedConcept } from "@/capabilities/shared/concept-delivery";
 import type { ProjectRepository } from "@/lib/db/repository";
+import {
+  APPAREL_RASTER_PRODUCTION_PROFILE,
+  productionUnlockAuthorizes,
+} from "@/lib/domain/types";
 import type { AcquisitionSession } from "@/lib/domain/types";
 
 import {
@@ -22,11 +26,16 @@ import { validateEmail } from "./acquisition-email";
  *   - the one-free-concept entitlement (authorize, allocate, consume)
  *   - the email-to-continue gate
  *   - the internal entitlement grant
+ *   - Sprint A5.2: reading the durable production unlock at the
+ *     finalization gate
  *   - the customer-safe description of all of the above
  *
  * WHAT IT DELIBERATELY DOES NOT OWN
  *
- *   - payment, pricing, checkout, subscriptions (Sprint A5)
+ *   - payment, pricing, checkout, providers, webhooks (Sprint A5.3+). This
+ *     capability READS an already-granted `ProductionUnlock` through the
+ *     repository; it never creates one, never knows what it cost, and never
+ *     learns that a payment provider exists.
  *   - authentication, accounts, passwords, verified identity
  *   - marketing consent, CRM, email delivery
  *   - fraud detection, device fingerprinting, IP-based identity
@@ -214,9 +223,31 @@ export interface AcquisitionCapability {
   ): Promise<void>;
 
   /**
-   * THE FINALIZATION GATE. Print-ready preparation can dispatch paid
-   * production reconstruction (Topaz), so until payment entitlement exists
-   * it is available to internal and legacy-unbound projects only.
+   * THE FINALIZATION GATE — and, since Sprint A5.2, THE COMMERCIAL GATE.
+   *
+   * Print-ready preparation can dispatch paid production reconstruction
+   * (Topaz), so this sits exactly where the durable record that authorizes
+   * that spend (`FinalArtworkJob`) would be created. Refusing here removes
+   * the spend structurally: no job, no worker claim, no paid call.
+   *
+   * Sprint A5.2: an ordinary prospect is now allowed through when their
+   * PROJECT holds an active `ProductionUnlock` for the apparel-raster
+   * production profile.
+   *
+   * THE SIGNATURE IS PART OF THE DESIGN. It takes a project id and nothing
+   * else, and must keep doing so. Adding an `approvalId`, an
+   * `artworkVersionId`, or a `requestedProductionOutput` parameter would
+   * re-import into the money path exactly the identifiers that are
+   * superseded, replaced, or mutated during ordinary design work — which is
+   * how a customer's first post-purchase revision would revoke their own
+   * purchase. The project is the entitlement key.
+   *
+   * It is also NOT the technical gate. A project may be commercially
+   * unlocked and still refused finalization for a stale concept, a pending
+   * revision, an unconfirmed direction, or a requested production output V1
+   * does not produce — every one of which `FinalArtworkCapability` checks
+   * after this one returns. Commercial permission never manufactures
+   * technical capability.
    */
   authorizeFinalization(projectId: string): Promise<FinalizationAuthorization>;
 
@@ -457,6 +488,92 @@ export function createAcquisitionCapability(
   }
 
   /**
+   * Sprint A5.2 — THE COMMERCIAL ENTITLEMENT READ.
+   *
+   * "Does this PROJECT hold a live production unlock for the one production
+   * profile V1 produces?"
+   *
+   * FOUR THINGS ARE CHECKED, and none of them is redundant:
+   *
+   *   1. An unlock row exists for (project, apparel_raster) with status
+   *      `"active"`. The repository filters on status in the query, so a
+   *      revoked unlock cannot reach here at all.
+   *
+   *   2. `productionUnlockAuthorizes` re-verifies status, profile, and
+   *      project against the values this build understands. The domain
+   *      narrows both columns fail-closed on read
+   *      (`readStoredProductionProfile` /
+   *      `readStoredProductionUnlockStatus`), so a row written by a newer
+   *      deploy — a production profile this build does not implement, a
+   *      lifecycle state it cannot interpret — arrives as an unrecognized
+   *      sentinel and fails every positive test here. NULL is never
+   *      "active", and an unknown profile is never coerced to
+   *      apparel_raster. This is deliberate defense in depth: a gate that
+   *      trusts its caller's query filter stops working the day a second
+   *      call site appears.
+   *
+   *   3. THE SESSION CROSS-CHECK. The unlock records which acquisition
+   *      session held the project when it was granted; the project records
+   *      which session owns it now. If those disagree, something has
+   *      happened that this build has no model for — and the safe direction
+   *      on a spend boundary is always the one that does not authorize
+   *      money. Note the session is resolved from the PROJECT, never from
+   *      a cookie, a header, or a request body; the unlock's own session id
+   *      can therefore never widen access on its own.
+   *
+   *   4. A read failure refuses. Same rule as `freeConceptSpent`: a database
+   *      that cannot be read is not a database that has said yes.
+   *
+   * Never mutates anything. A refusal costs the customer nothing, and an
+   * authorization writes no marker — the unlock row is the authority, and
+   * consulting it is not an event.
+   */
+  async function hasActiveProductionUnlock(
+    projectId: string,
+    session: AcquisitionSession,
+  ): Promise<boolean> {
+    let unlock;
+    try {
+      unlock = await repo.getActiveProductionUnlock(
+        projectId,
+        APPAREL_RASTER_PRODUCTION_PROFILE,
+      );
+    } catch {
+      return false;
+    }
+    if (!unlock) return false;
+
+    if (
+      !productionUnlockAuthorizes(unlock, {
+        projectId,
+        productionProfile: APPAREL_RASTER_PRODUCTION_PROFILE,
+      })
+    ) {
+      return false;
+    }
+
+    // (3) — logged, because a mismatch is never routine. It means a project
+    // changed hands, a row was written by something other than the grant
+    // path, or the two bindings drifted; all three are worth finding, and
+    // none of them may quietly authorize production spend. The session ids
+    // are internal identifiers, never customer-facing, and no email or
+    // session TOKEN is involved.
+    if (unlock.acquisitionSessionId !== session.id) {
+      console.error(
+        "Production unlock session does not match the project's acquisition session; refusing finalization",
+        {
+          projectId,
+          projectAcquisitionSessionId: session.id,
+          unlockAcquisitionSessionId: unlock.acquisitionSessionId,
+        },
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
    * The refusals for a session whose free concept is gone are genuinely
    * different product states, and the customer is told the true one.
    *
@@ -588,13 +705,26 @@ export function createAcquisitionCapability(
       if (authority.kind === "unavailable") {
         return { allowed: false, customerMessage: ACQUISITION_UNAVAILABLE_MESSAGE };
       }
+      // A legacy project (no acquisition session at all) and an internally
+      // granted one are both outside the acquisition funnel entirely. They
+      // need no `ProductionUnlock` and must never have a synthetic one
+      // created for them — a fabricated commercial record would assert a
+      // purchase that never happened and would be indistinguishable
+      // afterwards from a real one.
       if (authority.kind === "legacy") return { allowed: true };
       if (isUnrestricted(authority.session)) return { allowed: true };
-      // No paid entitlement exists in A4, so for every prospect this is a
-      // refusal. Deliberately not conditioned on whether the free concept
-      // was used: print-ready preparation can dispatch paid production
-      // reconstruction, and it is not part of what the free concept
-      // demonstrates.
+
+      // Sprint A5.2 — THE COMMERCIAL GATE, for an ordinary prospect.
+      //
+      // Deliberately still not conditioned on the free concept: preparing
+      // print-ready artwork can dispatch paid production reconstruction, and
+      // that was never part of what the free concept demonstrates. What has
+      // changed is that "prospect" is no longer synonymous with "refused" —
+      // a prospect whose PROJECT has been unlocked may finalize it.
+      if (await hasActiveProductionUnlock(projectId, authority.session)) {
+        return { allowed: true };
+      }
+
       return { allowed: false, customerMessage: PAID_FINALIZATION_LOCKED_MESSAGE };
     },
 

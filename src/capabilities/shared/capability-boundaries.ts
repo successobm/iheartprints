@@ -1553,4 +1553,130 @@
  *     works), not `continue_locked`.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "A4c3" as const;
+/**
+ * SPRINT A5.1 + A5.2 — the PRODUCTION UNLOCK (commercial entitlement).
+ *
+ * `ProductionUnlock` (`production_unlocks`) is the durable answer to one
+ * question: *may this design project be prepared for production under this
+ * production profile?* See ARCHITECTURE.md §23c.
+ *
+ * NO NEW CAPABILITY. `AcquisitionCapability` gained no method, no
+ * constructor argument, and no dependency — it still depends only on
+ * `ProjectRepository`, and it READS an already-granted unlock through it.
+ * A5.3+'s payment provider belongs behind its own provider port in its own
+ * capability; FORBIDDEN: putting a provider adapter inside the acquisition
+ * boundary, or making the acquisition boundary depend on a payment
+ * capability. The entitlement read is a repository read, by design.
+ *
+ * THE KEY IS THE PROJECT, and this is not a preference.
+ *
+ *   FORBIDDEN: binding commercial entitlement to `FinalDirectionApproval`,
+ *     `ArtworkVersion`, `FinalArtworkJob`, `AssetRecord`, a PNG, a filename,
+ *     a provider, or `requestedProductionOutput`.
+ *
+ *     The approval case is the instructive one, because it is the intuitive
+ *     answer. An approval is DESIGNED to be cheap to supersede, and this file
+ *     already documents four sites that supersede it — including
+ *     `ConversationCapability.triggerAutomaticRevision`, which fires the
+ *     moment a revision request is understood. An approval-bound entitlement
+ *     would be revoked by the customer's FIRST SENTENCE after paying. The
+ *     others fail similarly: artwork is replaced by every targeted revision,
+ *     a `FinalArtworkJob` is created AFTER the gate that authorizes it
+ *     (circular), an asset is the OUTPUT of the paid work rather than the
+ *     permission for it, and `requestedProductionOutput` is deliberately
+ *     mutable so a customer may change their mind.
+ *
+ *     `PrintProject.id` is the only identifier in this domain that survives
+ *     revision, approval supersession, regeneration, and a change of
+ *     requested output — and it is already what `resolveAuthority` reads, so
+ *     the commercial gate and the spend gate agree by construction.
+ *
+ *   FORBIDDEN: keying on the acquisition SESSION. One purchase must not make
+ *     every project that browser ever creates paid.
+ *
+ *   FORBIDDEN: adding `approvalId` / `artworkVersionId` /
+ *     `requestedProductionOutput` parameters to
+ *     `authorizeFinalization(projectId)`. The signature is the guarantee: a
+ *     parameter is how a superseded identifier gets back into the money path.
+ *
+ *   Provenance columns are deliberately absent. If one is ever added it must
+ *     be IGNORED by the gate — a nullable approval id beside an entitlement
+ *     is a standing invitation for a future reader to bind to it.
+ *
+ * ONE RECORD, BOTH WORKFLOWS. `requestFinalArtwork` (Create New) and
+ * `requestPreparedUploadFinalArtwork` (Upload Existing Artwork) already
+ * consumed the same `authorizeFinalization(projectId)` call, so both are
+ * unlocked by one project-level record and neither changed. FORBIDDEN: a
+ * workflow-specific unlock, an "upload entitlement", or a second gate.
+ *
+ * A5.1/A5.2 UNLOCK FINALIZATION ONLY.
+ *
+ *   FORBIDDEN: wiring `ProductionUnlock` into `authorizeConceptGeneration`.
+ *     Every spend budget in this codebase is scoped to a single
+ *     `GenerationJob` (`paid_image_intents`,
+ *     `paidIntentBudgetForGenerationJob`,
+ *     `maxPhysicalDispatchesForGenerationJob`, `MAX_GENERATION_ATTEMPTS`),
+ *     and NOTHING counts jobs per project or per session. Every new Explore
+ *     batch and every brief re-approval mints a job with a fresh full budget.
+ *     The blanket refusal of prospects is currently the only thing bounding
+ *     that, so unlocking generation before a per-project ceiling exists
+ *     converts a bounded giveaway into an unbounded paid-image surface. The
+ *     ceiling's home is the unlock row itself, decremented conditionally
+ *     (`... where remaining > 0`) so the DATABASE is the limit — same rule as
+ *     `beginPaidImageIntentDispatch`.
+ *
+ * COMMERCIAL PERMISSION IS NOT TECHNICAL CAPABILITY. An unlocked project is
+ * still refused, or still produces no deliverable, for a pending revision, an
+ * unconfirmed final direction, a stale concept, or a `requestedProductionOutput`
+ * V1 does not produce. FORBIDDEN: merging `ProductionUnlock` with
+ * `requestedProductionOutput`, or letting an unlock satisfy any gate that
+ * exists to state what the pipeline can honestly deliver.
+ *
+ * THE UNLOCK SITS ABOVE EXISTING IDEMPOTENCY, never inside it.
+ * `createJobToleratingRace`, the `(approval, requestedProductionOutput)` and
+ * `(preparation, width, output)` unique keys, and the Topaz
+ * `(providerKey, providerRequestId, providerStatus)` triple are all
+ * unchanged. FORBIDDEN: relaxing any of them because an unlock is present.
+ *
+ * FAIL CLOSED, IN FOUR PLACES, none of them redundant:
+ *   the query filters `status = 'active'`, so a revoked unlock cannot reach a
+ *     gate that forgot to check;
+ *   `productionUnlockAuthorizes` re-verifies status, profile, and project
+ *     against values THIS BUILD understands — `readStoredProductionProfile`
+ *     and `readStoredProductionUnlockStatus` narrow persisted columns to an
+ *     unrecognized sentinel rather than coercing them. FORBIDDEN: reading
+ *     NULL or an unknown status as `"active"`, and equally forbidden:
+ *     coercing an unknown profile to `apparel_raster`;
+ *   the unlock's recorded acquisition session is cross-checked against the
+ *     PROJECT's durable binding, and a mismatch refuses. FORBIDDEN: accepting
+ *     a session id from a cookie, a header, or a request body;
+ *   a repository read failure refuses — a database that cannot be read is not
+ *     a database that has said yes.
+ *
+ * THE PROFILE IS A PRODUCTION OUTCOME, NEVER A FILE FORMAT.
+ * `ProductionProfile` is the strict GRANTABLE subset of `ProductionCategory`
+ * — that union also carries refusal and dormant-role values
+ * (`apparel_vector`, `out_of_scope_product`, `signage`, `logo_vector`,
+ * `unknown`), none of which anyone can be sold. Enforced twice and
+ * independently: a `CHECK` constraint in the database, and fail-closed
+ * narrowing in the application. FORBIDDEN: inventing a parallel
+ * "productionTarget" vocabulary, and equally forbidden: widening the CHECK to
+ * "make a test pass" — a string in a column must never be what authorizes a
+ * production path.
+ *
+ * REVOCATION IS NOT DELETION. `revoked` stops FUTURE finalization; the row
+ * survives as the audit trail a refund depends on, and prior
+ * `FinalArtworkJob`s, production assets, and validations are never touched —
+ * that work genuinely happened. A re-grant is a NEW row with its own
+ * `grantedAt`, never a resurrection. FORBIDDEN: deleting an unlock, moving
+ * `revokedAt` on an already-revoked row, or a status value that describes a
+ * PAYMENT rather than a permission (`pending`, `paid`, `failed`) — those
+ * belong to a transaction record A5.3+ owns.
+ *
+ * LEGACY AND INTERNAL NEED NO UNLOCK. Both are outside the acquisition funnel
+ * entirely. FORBIDDEN: creating a synthetic unlock for them — a fabricated
+ * commercial record asserts a purchase that never happened and is
+ * indistinguishable afterwards from a real one.
+ */
+
+export const CAPABILITY_BOUNDARY_VERSION = "A5.2" as const;

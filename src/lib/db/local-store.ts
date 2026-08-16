@@ -9,6 +9,8 @@ import {
 import {
   emptyInterviewState,
   productionIntentMatches,
+  readStoredProductionProfile,
+  readStoredProductionUnlockStatus,
 } from "@/lib/domain/types";
 import type {
   AcquisitionFreeConceptClaim,
@@ -27,6 +29,8 @@ import type {
   PaidImageIntent,
   PrintProject,
   ProductionAssetValidation,
+  ProductionProfile,
+  ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
   TShirtDesignBrief,
@@ -43,8 +47,10 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  CreateProductionUnlockInput,
   FreeConceptAllocation,
   PaidImageIntentReservation,
+  ProductionUnlockGrant,
   ProjectRepository,
   RecordPaidImageIntentFailureInput,
   ReservePaidImageIntentInput,
@@ -73,6 +79,8 @@ interface LocalDatabase {
   acquisitionSessions: AcquisitionSession[];
   /** Sprint A4 Correction 2 — the lifetime free-attempt tombstone. */
   acquisitionFreeConceptClaims: AcquisitionFreeConceptClaim[];
+  /** Sprint A5.1 — the commercial entitlement. */
+  productionUnlocks: ProductionUnlock[];
   assets: AssetRecord[];
   /** Sprint 2M Phase 2B. */
   finalDirectionApprovals: FinalDirectionApproval[];
@@ -102,6 +110,7 @@ function emptyDb(): LocalDatabase {
     paidImageIntents: [],
     acquisitionSessions: [],
     acquisitionFreeConceptClaims: [],
+    productionUnlocks: [],
     assets: [],
     finalDirectionApprovals: [],
     finalArtworkJobs: [],
@@ -194,6 +203,27 @@ async function readDb(): Promise<LocalDatabase> {
       // free-attempt claim existed. No claims means no session has spent a
       // free concept, which is exactly right for pre-A4 data.
       acquisitionFreeConceptClaims: parsed.acquisitionFreeConceptClaims ?? [],
+      // Sprint A5.1: absent in every store written before production unlocks
+      // existed — no unlocks means nothing is commercially entitled, which is
+      // exactly right for pre-A5 data.
+      //
+      // Both narrowings FAIL CLOSED and are the local store's equivalent of
+      // the Postgres CHECK constraints. An on-disk row carrying a profile or
+      // status this build has never heard of — a newer deploy's data, a
+      // hand-edited file, a partially-written record — resolves to an
+      // unrecognized sentinel rather than being coerced to the one value this
+      // build implements. NULL is never `"active"`.
+      productionUnlocks: (parsed.productionUnlocks ?? []).map((unlock) => ({
+        ...unlock,
+        productionProfile: readStoredProductionProfile(
+          unlock.productionProfile as string | null | undefined,
+        ),
+        status: readStoredProductionUnlockStatus(
+          unlock.status as string | null | undefined,
+        ),
+        revokedAt: unlock.revokedAt ?? null,
+        revokedReason: unlock.revokedReason ?? null,
+      })),
       // Sprint 2M Phase 2B/2C: default the new reserved fields for on-disk
       // data written before they existed, so resume never crashes.
       assets: (parsed.assets ?? []).map((asset) => ({
@@ -1038,6 +1068,99 @@ export class LocalProjectRepository implements ProjectRepository {
     session.updatedAt = timestamp;
     await writeDb(db);
     return session;
+  }
+
+  // --- Sprint A5.1: production unlocks (commercial entitlement) --------
+
+  async getActiveProductionUnlock(
+    projectId: string,
+    productionProfile: ProductionProfile,
+  ): Promise<ProductionUnlock | null> {
+    const db = await readDb();
+    // Mirrors the Supabase query's `.eq("status", "active")` exactly. The
+    // status compared here has already been narrowed fail-closed by
+    // `readDb`, so a row carrying an uninterpretable value can never match
+    // — the same outcome the Postgres CHECK constraint produces by refusing
+    // to store one in the first place.
+    return (
+      db.productionUnlocks.find(
+        (unlock) =>
+          unlock.projectId === projectId &&
+          unlock.productionProfile === productionProfile &&
+          unlock.status === "active",
+      ) ?? null
+    );
+  }
+
+  async createProductionUnlock(
+    projectId: string,
+    input: CreateProductionUnlockInput,
+  ): Promise<ProductionUnlockGrant> {
+    const db = await readDb();
+
+    // The local store's equivalent of the partial unique index
+    // `production_unlocks_active_per_project_profile_idx`. Every method on
+    // this class runs under the process-wide `withLock` mutex, so this
+    // check-then-insert is atomic relative to every other call — which is
+    // what makes "two concurrent grants resolve to one active row" a real
+    // guarantee here rather than a hope, matching what Postgres gives the
+    // Supabase implementation for free.
+    const existing = db.productionUnlocks.find(
+      (unlock) =>
+        unlock.projectId === projectId &&
+        unlock.productionProfile === input.productionProfile &&
+        unlock.status === "active",
+    );
+    if (existing) return { outcome: "existing", unlock: existing };
+
+    const timestamp = nowIso();
+    const unlock: ProductionUnlock = {
+      id: randomUUID(),
+      projectId,
+      acquisitionSessionId: input.acquisitionSessionId,
+      productionProfile: input.productionProfile,
+      // Always "active". A record inserted already-revoked would carry a
+      // `grantedAt` nobody ever granted.
+      status: "active",
+      grantedAt: timestamp,
+      revokedAt: null,
+      revokedReason: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.productionUnlocks.push(unlock);
+    await writeDb(db);
+    return { outcome: "granted", unlock };
+  }
+
+  async revokeProductionUnlock(
+    projectId: string,
+    productionProfile: ProductionProfile,
+    reason: string | null,
+  ): Promise<ProductionUnlock | null> {
+    const db = await readDb();
+    const unlock = db.productionUnlocks.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.productionProfile === productionProfile &&
+        item.status === "active",
+    );
+    // Nothing active to revoke. Deliberately not an error: revoking twice,
+    // or revoking something that was never granted, both leave the world in
+    // the state the caller wanted.
+    if (!unlock) return null;
+
+    const timestamp = nowIso();
+    // The row is mutated in place and NEVER removed — it is the audit trail
+    // a refund depends on. Nothing about `final_artwork_jobs`, assets, or
+    // production validations is touched: artwork that was produced genuinely
+    // was produced, and revocation only stops FUTURE finalization.
+    unlock.status = "revoked";
+    unlock.revokedAt = timestamp;
+    unlock.revokedReason = reason;
+    unlock.updatedAt = timestamp;
+    await writeDb(db);
+    return unlock;
   }
 
   // --- Phase 2C0.5: durable paid image intents -------------------------

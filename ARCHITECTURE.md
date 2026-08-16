@@ -6694,7 +6694,7 @@ first controlled acquisition funnel:
 
 ```
 anonymous visitor → design conversation → ONE free concept
-                  → email required to continue → paid access (Sprint A5)
+                  → email required to continue → production unlock (§23c)
 ```
 
 It is **spend control**, not identity. It is explicitly **not**
@@ -6703,9 +6703,14 @@ marketing consent, and not an anti-fraud platform. It holds no password, no
 verified identity, and no consent record, and no surface in the product may
 describe it as an account having been created.
 
-**Sprint A5 is not implemented.** There is no payment, checkout,
-subscription, pricing, or paid entitlement tier in this codebase. Every
-paid-value action beyond the one free concept is simply refused.
+**There is still no payment provider, checkout, subscription, or pricing in
+this codebase.** Sprint A5.1/A5.2 added the commercial entitlement
+(`ProductionUnlock`, §23c) and wired it into the finalization gate; A5.3+
+owns the provider that would let a customer obtain one. Every image-
+generation action beyond the one free concept remains refused for an ordinary
+prospect regardless of any unlock, and `acquisition_sessions.entitlement`
+deliberately still has no `paid` value — the unlock lives on the project, not
+on the session.
 
 ### The domain model
 
@@ -7173,6 +7178,231 @@ separate, dormant architecture). See
 
 ---
 
+## 23c. Production Unlock — the commercial entitlement (Sprint A5.1 / A5.2)
+
+### What this is
+
+`ProductionUnlock` (`public.production_unlocks`) is the durable commercial
+authority:
+
+> **This design project may be prepared for production under one production
+> profile.**
+
+The funnel §23b left open now ends somewhere:
+
+```
+anonymous visitor → design conversation → ONE free concept
+                  → email required to continue
+                  → PRODUCTION UNLOCK → finalization → validated Production PNG
+```
+
+**It is not a payment record.** It carries no amount, no currency, no
+provider id, and no transaction state. A5.1/A5.2 introduce no payment
+provider, no checkout, no webhook, and no customer payment UI — an unlock can
+currently only be created through a direct repository call (fixtures, tests,
+internal tooling). Payment is A5.3+ and belongs in its own transaction and
+event records. This separation is deliberate: an unlock says a project may be
+produced and says nothing about how that permission was obtained, which is
+what lets an operator grant one for support reasons without inventing a
+fabricated charge.
+
+### The key is the PROJECT
+
+This is the load-bearing decision of the sprint, and the intuitive answer is
+the wrong one.
+
+Binding the entitlement to the `FinalDirectionApproval` the customer was
+looking at when they paid reads as correct — that record *is* production
+intent. But an approval is **designed to be cheap to supersede**, and is
+superseded from four separate code paths:
+
+| Site | Trigger |
+|---|---|
+| `FinalArtworkCapability.requestFinalArtwork` | a different artwork is approved |
+| `ConversationCapability.triggerAutomaticRevision` (×2) | **a revision request is understood** |
+| `GenerationWorkerCapability` (regeneration completion) | a new concept batch exists |
+
+The second fires the moment a customer *says* they want a change. An
+approval-bound entitlement would therefore be revoked by the customer's first
+sentence after paying. Every other candidate fails for a related reason:
+
+| Candidate | Why not |
+|---|---|
+| `ArtworkVersion` | replaced by every targeted revision |
+| `FinalArtworkJob` | created *after* the gate that would authorize it — circular |
+| `AssetRecord` / the PNG | an **output** of the paid work, not the permission |
+| `requestedProductionOutput` | deliberately mutable; changing your mind must not void a purchase |
+| the acquisition session | would make every project that browser ever creates paid |
+
+`print_projects.id` is the only identifier here that survives revision,
+approval supersession, regeneration, and a change of requested output. It is
+also already the authority every acquisition gate resolves from
+(`resolveAuthority`), so the commercial gate and the spend gate agree by
+construction rather than by convention.
+
+**Approval/artwork/job/asset ids are NOT entitlement keys.** No provenance
+columns exist in this slice either: a nullable `unlocked_for_approval_id`
+sitting beside an entitlement would be a standing invitation for a future
+gate to read it, which is precisely the binding this design exists to
+prevent. If provenance is added later it must be ignored by the gate.
+
+### The production profile
+
+`ProductionProfile` is the strict **grantable subset** of
+`ProductionCategory` (§ Print Validation) — today exactly one value,
+`apparel_raster`. It is a production **outcome**, never a file format:
+"raster garment decoration", not "PNG". That V1's pipeline currently delivers
+that outcome as a validated Production PNG is a fact about the pipeline, not
+about what was purchased — which is what lets a later embroidery or vector
+production profile reuse this commercial model unchanged.
+
+`ProductionCategory` also carries values describing refusals and dormant
+roles (`apparel_vector`, `out_of_scope_product`, `signage`, `logo_vector`,
+`unknown`). None is a thing anyone can be sold, so the grantable subset is
+enforced twice, independently:
+
+- a `CHECK (production_profile in ('apparel_raster'))` constraint, so the
+  database cannot authorize a future production path merely because a string
+  reached the column; and
+- `readStoredProductionProfile`, which narrows a persisted value **fail
+  closed** to an unrecognized sentinel rather than coercing it.
+
+`production-unlock-entitlement.test.ts` additionally asserts the subset
+relation at compile time, so the two vocabularies cannot drift.
+
+### Authorization enters through `authorizeFinalization(projectId)`
+
+`AcquisitionCapability` gained no new method and no new parameter. The single
+existing finalization fence now reads:
+
+```
+legacy   (acquisitionSessionId IS NULL) → allow   (grandfathered, no unlock needed)
+internal (entitlement = 'internal')     → allow   (no unlock needed)
+unavailable                             → refuse  (fail closed)
+prospect + active apparel_raster unlock → ALLOW   ← Sprint A5.2
+prospect without one                    → refuse
+```
+
+**The signature is part of the design.** Adding an `approvalId`, an
+`artworkVersionId`, or a `requestedProductionOutput` parameter would
+re-import into the money path exactly the identifiers that are superseded,
+replaced, or mutated during ordinary design work.
+
+Both finalization workflows already consumed this one call, so both are
+unlocked by one project-level record and neither needed a change:
+
+- `requestFinalArtwork` (Create New Artwork)
+- `requestPreparedUploadFinalArtwork` (Upload Existing Artwork)
+
+There is deliberately no "upload unlock" and no "create-new unlock".
+
+Four things are checked before an unlock is treated as permission
+(`hasActiveProductionUnlock`), and none is redundant: the repository filters
+on `status = 'active'`; `productionUnlockAuthorizes` re-verifies status,
+profile, and project against values *this build* understands; the unlock's
+recorded acquisition session is cross-checked against the project's own
+durable binding and a **mismatch fails closed**; and a repository read
+failure refuses. A session id is never accepted from a cookie, a header, or a
+request body.
+
+### What an unlock does NOT do
+
+- **It does not unlock generation.** `authorizeConceptGeneration` is
+  untouched: regeneration, exploration, generative revision, and additional
+  concept generation all remain refused for a prospect. A5.1/A5.2 unlock
+  **finalization only**. This is deliberate — every spend budget in the
+  codebase (`paid_image_intents`, `paidIntentBudgetForGenerationJob`,
+  `maxPhysicalDispatchesForGenerationJob`, `MAX_GENERATION_ATTEMPTS`) is
+  scoped to a single `GenerationJob`, and nothing counts jobs per project or
+  per session. Unlocking generation without first adding that ceiling would
+  create an unbounded-spend surface.
+- **It does not manufacture technical capability.** A project may be
+  commercially unlocked and still refused, or still produce no deliverable,
+  because of a pending revision, an unconfirmed final direction, a stale
+  concept, or a `requestedProductionOutput` V1 does not produce. Those gates
+  are unchanged and run *after* the commercial one.
+- **It does not change customer-facing state.** No `payment_required` /
+  `payment_processing` / `production_unlocked` customer state exists yet, and
+  `CustomerAcquisitionState` is unchanged. A5.1/A5.2 are backend-only.
+- **It does not sit below existing idempotency.** The unlock is checked
+  *above* `createJobToleratingRace`, the `(approval, requestedProductionOutput)`
+  and `(preparation, width, output)` unique keys, and the Topaz
+  `(providerKey, providerRequestId, providerStatus)` triple — all unchanged.
+  A double or concurrent finalization request on an unlocked project still
+  produces exactly one `FinalArtworkJob`.
+
+### Lifecycle and revocation
+
+`status` is `active | revoked` — deliberately no payment-lifecycle values
+(`pending`, `paid`, `failed`), which describe a transaction rather than a
+permission.
+
+- **An active unlock survives revision and approval supersession.** That is
+  the whole point of the key.
+- **Revocation stops future finalization only.** The row is never deleted;
+  prior `final_artwork_jobs`, production assets, and
+  `production_asset_validations` are never touched. Artwork that was produced
+  genuinely was produced. This is future refund-compatible behavior without
+  implementing refunds.
+- **A re-grant after revocation is a NEW row** with its own `granted_at`, not
+  a resurrection — the partial unique index constrains only active rows, so
+  the audit trail accumulates.
+- **NULL and unknown are never active.** `readStoredProductionUnlockStatus`
+  fails closed, so a status written by a newer deploy cannot be read as
+  permission by an older one.
+
+### Uniqueness, races, and persistence
+
+```sql
+create unique index production_unlocks_active_per_project_profile_idx
+  on public.production_unlocks (project_id, production_profile)
+  where status = 'active';
+```
+
+**At most one active unlock per project and profile, enforced by
+PostgreSQL** — the same "the constraint is the guarantee" rule §23b
+establishes for the free concept. Concurrent grants resolve to one `granted`
+and N `existing`; the loser re-reads the winner rather than raising, because
+the desired end state (this project is unlocked) holds either way and a
+raised error would tempt a caller into a retry that creates a second
+entitlement. The local store reproduces this through its process-wide lock;
+both stores make the same decisions.
+
+Scoped to `(project, profile)` rather than `(project)` so a future embroidery
+or vector profile is a genuinely different purchase — never blocked by, and
+never silently satisfied by, an apparel-raster unlock.
+
+Both foreign keys are `ON DELETE RESTRICT`, matching every acquisition
+foreign key: losing a row must never change what somebody is entitled to.
+
+### Security posture
+
+Identical to every other application table (§ Current Data Access Model):
+RLS enabled, **zero policies**, `anon`/`authenticated` privileges revoked in
+the same migration that creates the table, service-mediated writes only.
+`service_role` is untouched. No ownership column is invented — there is still
+no customer identity model.
+
+`scripts/verify-production-unlock-postgres.sql` proves all of this against a
+real PostgreSQL instance with the full migration chain applied: table shape,
+RLS on, zero policies, no browser-role grants, `service_role` still able to
+write, the active-uniqueness refusal, revoked-then-re-granted behavior,
+project A not implying project B, every non-grantable profile and every
+invented status rejected by CHECK, revocation-consistency, and
+`ON DELETE RESTRICT` on both foreign keys.
+
+### Dependency direction
+
+Unchanged. `AcquisitionCapability` still depends only on
+`ProjectRepository`. It **reads** an already-granted `ProductionUnlock`
+through the repository; it never creates one, never learns what it cost, and
+never learns that a payment provider exists. When A5.3+ introduces one, the
+provider adapter belongs behind its own provider port in its own capability —
+never inside `AcquisitionCapability`, and never as a capability the
+acquisition boundary depends on.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:
@@ -7184,11 +7414,27 @@ Verified against the implementation:
   process; it is not started by customer HTTP requests
 - No live Supabase integration tests in CI
 - Filesystem/worker rate limiting is in-memory/single-instance
-- **There is no payment entitlement (Sprint A5 is not implemented).** After
-  the one free concept, every further concept generation, exploration,
-  generative revision, and print-ready finalization is refused for an
-  ordinary prospect. Only an internally granted session (§23b) can perform
-  them
+- **There is no payment provider (Sprint A5.3+ is not implemented).** The
+  commercial entitlement exists — an active `ProductionUnlock` on a project
+  permits finalization for an ordinary prospect (§23c) — but there is no
+  Stripe or other provider, no checkout, no webhook, no pricing, and no
+  customer payment UI. An unlock can currently be created only through a
+  direct repository call (fixtures, tests, internal tooling), so in practice
+  no customer can obtain one yet
+- **A production unlock does not unlock generation.** After the one free
+  concept, every further concept generation, exploration, and generative
+  revision is still refused for an ordinary prospect, unlocked or not
+  (§23c). Only an internally granted session (§23b) can perform them. This
+  is deliberate: every spend budget in the codebase is scoped to a single
+  `GenerationJob`, and nothing counts jobs per project or per session, so
+  unlocking generation before adding that ceiling would create an unbounded
+  paid-image surface
+- **No customer-facing payment state exists.** `CustomerAcquisitionState` is
+  unchanged by A5.1/A5.2; a prospect whose project holds an active unlock is
+  still described by the same states as one who does not. The gate is
+  server-authoritative either way, so nothing is bypassable — but the UI
+  cannot yet distinguish "unlocked" from "locked" and will need to before
+  payment ships
 - **The acquisition entitlement makes no cross-device abuse claim.** It
   survives reload, navigation, reopening a project URL, repeated clicks,
   stale tabs, API retries, and starting a second project in the same

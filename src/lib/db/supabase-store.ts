@@ -4,6 +4,8 @@ import {
 } from "@/lib/domain/conversation";
 import {
   emptyInterviewState,
+  readStoredProductionProfile,
+  readStoredProductionUnlockStatus,
   readStoredRequestedProductionOutput,
 } from "@/lib/domain/types";
 import type {
@@ -35,6 +37,8 @@ import type {
   PrintProject,
   ProductionAssetRole,
   ProductionAssetValidation,
+  ProductionProfile,
+  ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
   TShirtDesignBrief,
@@ -51,8 +55,10 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  CreateProductionUnlockInput,
   FreeConceptAllocation,
   PaidImageIntentReservation,
+  ProductionUnlockGrant,
   ProjectRepository,
   RecordPaidImageIntentFailureInput,
   ReservePaidImageIntentInput,
@@ -107,6 +113,26 @@ type DbAcquisitionSession = {
   email: string | null;
   email_captured_at: string | null;
   internal_granted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * Sprint A5.1. `production_profile` and `status` are deliberately typed as
+ * raw `string`, not as the narrow domain unions: the row is whatever is
+ * actually in the database, including a value a newer deploy wrote, and
+ * pretending otherwise at the type level would let `mapProductionUnlock` skip
+ * the fail-closed narrowing that is the whole point.
+ */
+type DbProductionUnlock = {
+  id: string;
+  project_id: string;
+  acquisition_session_id: string;
+  production_profile: string | null;
+  status: string | null;
+  granted_at: string;
+  revoked_at: string | null;
+  revoked_reason: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -456,6 +482,32 @@ function mapAcquisitionSession(row: DbAcquisitionSession): AcquisitionSession {
     email: row.email,
     emailCapturedAt: row.email_captured_at,
     internalGrantedAt: row.internal_granted_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Sprint A5.1: narrows both authority-bearing columns FAIL-CLOSED.
+ *
+ * The database already refuses an out-of-vocabulary value via CHECK
+ * constraints, so in a healthy deployment these narrowings are no-ops. They
+ * exist for the case the constraints cannot cover: a NEWER deploy widening
+ * the CHECK and writing a profile or status this build has never heard of.
+ * Coercing such a value to `"apparel_raster"` / `"active"` would let an old
+ * running instance authorize a production path it does not implement, or
+ * treat a lifecycle state it cannot interpret as permission.
+ */
+function mapProductionUnlock(row: DbProductionUnlock): ProductionUnlock {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    acquisitionSessionId: row.acquisition_session_id,
+    productionProfile: readStoredProductionProfile(row.production_profile),
+    status: readStoredProductionUnlockStatus(row.status),
+    grantedAt: row.granted_at,
+    revokedAt: row.revoked_at,
+    revokedReason: row.revoked_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1477,6 +1529,100 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .maybeSingle();
     if (error) throw error;
     return data ? mapAcquisitionSession(data as DbAcquisitionSession) : null;
+  }
+
+  // --- Sprint A5.1: production unlocks (commercial entitlement) --------
+
+  async getActiveProductionUnlock(
+    projectId: string,
+    productionProfile: ProductionProfile,
+  ): Promise<ProductionUnlock | null> {
+    // `.eq("status", "active")` is part of the guarantee, not an
+    // optimization: a revoked unlock must be unable to reach a gate at all,
+    // rather than relying on every caller to remember to check. The partial
+    // unique index makes this a single-row lookup.
+    const { data, error } = await this.client
+      .from("production_unlocks")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("production_profile", productionProfile)
+      .eq("status", "active")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapProductionUnlock(data as DbProductionUnlock) : null;
+  }
+
+  async createProductionUnlock(
+    projectId: string,
+    input: CreateProductionUnlockInput,
+  ): Promise<ProductionUnlockGrant> {
+    const { data, error } = await this.client
+      .from("production_unlocks")
+      .insert({
+        project_id: projectId,
+        acquisition_session_id: input.acquisitionSessionId,
+        production_profile: input.productionProfile,
+        status: "active",
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      // THE UNIQUENESS IS THE GUARANTEE. A concurrent grant — a duplicate
+      // request, two operator clicks, and in A5.3+ two webhook deliveries —
+      // loses here, and the correct response is to report the WINNER rather
+      // than to fail: the desired end state (this project is unlocked) holds
+      // either way, and raising would tempt a caller into retrying, which is
+      // how a second entitlement gets created.
+      //
+      // Re-read rather than assume: only the row can say who won, and the
+      // caller needs the real id.
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        const raced = await this.getActiveProductionUnlock(
+          projectId,
+          input.productionProfile,
+        );
+        if (raced) return { outcome: "existing", unlock: raced };
+      }
+      throw error;
+    }
+
+    return { outcome: "granted", unlock: mapProductionUnlock(data as DbProductionUnlock) };
+  }
+
+  async revokeProductionUnlock(
+    projectId: string,
+    productionProfile: ProductionProfile,
+    reason: string | null,
+  ): Promise<ProductionUnlock | null> {
+    const timestamp = new Date().toISOString();
+    // A single conditional UPDATE, the same optimistic shape every other
+    // authority transition in this store uses. `.eq("status", "active")` is
+    // what makes a duplicate revocation a no-op instead of moving
+    // `revoked_at` on an already-revoked row and rewriting when it happened.
+    //
+    // The row is never deleted, and nothing else is touched: final artwork
+    // jobs, production assets, and their validations all stay exactly as they
+    // are, because that work genuinely happened. Revocation stops FUTURE
+    // finalization only.
+    const { data, error } = await this.client
+      .from("production_unlocks")
+      .update({
+        status: "revoked",
+        revoked_at: timestamp,
+        revoked_reason: reason,
+        updated_at: timestamp,
+      })
+      .eq("project_id", projectId)
+      .eq("production_profile", productionProfile)
+      .eq("status", "active")
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    // No row updated means there was nothing active to revoke. Not an error:
+    // revoking twice, or revoking something never granted, both leave the
+    // world in the state the caller asked for.
+    return data ? mapProductionUnlock(data as DbProductionUnlock) : null;
   }
 
   // --- Phase 2C0.5: durable paid image intents -------------------------

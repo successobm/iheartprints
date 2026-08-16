@@ -276,4 +276,13 @@ export const TEST_FILES = [
   // TRANSCRIPT CONTENT, not just `acquisition.state` — asserting state alone
   // is what let the second-project defect through Correction C's suite.
   "src/capabilities/acquisition/acquisition-session-delivery.test.ts",
+  // Sprint A5.1 + A5.2: the PRODUCTION UNLOCK — the commercial entitlement,
+  // keyed on the PROJECT rather than on any approval/artwork/job/asset.
+  // Proves the gate itself (both finalization workflows unlocking from one
+  // record), the things that must NOT unlock it (another project in the same
+  // session, a mismatched session binding, an unknown profile or status), the
+  // things it must NOT unlock (concept generation, an unsupported production
+  // output), and that approval supersession — which fires on the customer's
+  // first post-purchase revision — leaves the purchase intact.
+  "src/capabilities/acquisition/production-unlock-entitlement.test.ts",
 ];

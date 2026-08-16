@@ -245,6 +245,231 @@ export interface AcquisitionSession {
   updatedAt: string;
 }
 
+// ---------------------------------------------------------------------------
+// Sprint A5.1 — the Production Unlock (commercial entitlement)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sprint A5.1: WHICH PRODUCTION PATH a commercial unlock authorizes.
+ *
+ * WHY THIS IS ITS OWN NARROW UNION AND NOT `ProductionCategory`
+ *
+ * `ProductionCategory` (`capabilities/print-validation/contracts.ts`) is the
+ * right VOCABULARY — `"apparel_raster"` there means exactly what it means
+ * here, and inventing a parallel "productionTarget" concept would be the
+ * duplicate-authority mistake this architecture keeps refusing. But that
+ * union is a CLASSIFICATION of what is being asked for, so it also carries
+ * values that describe refusals and dormant roles:
+ *
+ *   apparel_vector        an honest "we do not produce that"
+ *   out_of_scope_product  outside the product entirely
+ *   signage / logo_vector reserved, dormant, produced by nothing today
+ *   unknown               could not be classified
+ *
+ * None of those is a thing a customer can be sold, and a grantable-profile
+ * type that contains them is one typo away from persisting an unlock for a
+ * production path that does not exist. So this is the strict GRANTABLE
+ * subset — every value here is a production outcome iHeartPrints actually
+ * produces, and `production-unlock-profile.test.ts` asserts at compile time
+ * that it stays a subset of `ProductionCategory` (a type-level check rather
+ * than an import, so the domain layer keeps depending on nothing).
+ *
+ * The database carries the same restriction independently, as a CHECK
+ * constraint. A string existing in a column must never be what authorizes a
+ * production path.
+ *
+ * This is a production OUTCOME, never a file format. `"apparel_raster"` is
+ * "raster garment decoration", not "PNG" — the deliverable that profile
+ * currently produces is a validated Production PNG, and that is a fact about
+ * V1's pipeline, not about what was purchased.
+ */
+export const GRANTABLE_PRODUCTION_PROFILES = ["apparel_raster"] as const;
+
+export type ProductionProfile = (typeof GRANTABLE_PRODUCTION_PROFILES)[number];
+
+/** The one production profile V1 sells. Named so call sites read as intent. */
+export const APPAREL_RASTER_PRODUCTION_PROFILE = "apparel_raster" as const;
+
+/**
+ * Sprint A5.1: a persisted production profile this build cannot interpret —
+ * a newer deploy (or a corrupt row) wrote a value that is not in
+ * `GRANTABLE_PRODUCTION_PROFILES`.
+ *
+ * Deliberately a distinct sentinel rather than a coercion to
+ * `"apparel_raster"`, exactly mirroring `UnrecognizedProductionOutput`: an
+ * app that cannot read which production path was purchased must refuse to
+ * authorize one, not assume the answer is the one it happens to implement.
+ */
+export const UNRECOGNIZED_PRODUCTION_PROFILE = "unrecognized_profile" as const;
+
+export type UnrecognizedProductionProfile =
+  typeof UNRECOGNIZED_PRODUCTION_PROFILE;
+
+/** What a persisted profile column may narrow to. */
+export type StoredProductionProfile =
+  | ProductionProfile
+  | UnrecognizedProductionProfile;
+
+/**
+ * Sprint A5.1: the lifecycle of one production unlock.
+ *
+ *   "active"  — this project may be prepared for production under this
+ *               profile. The only value any gate treats as permission.
+ *   "revoked" — the grant was withdrawn (refund, chargeback, operator
+ *               action). The row is NEVER deleted and prior FinalArtworkJobs
+ *               and produced assets are never touched: revocation stops
+ *               FUTURE finalization, it does not rewrite history.
+ *
+ * Deliberately NO payment-lifecycle values (`pending`, `paid`, `failed`).
+ * Those belong to a payment TRANSACTION record, which A5.3+ introduces; a
+ * status enum that mixed "did the money arrive" with "may this project be
+ * produced" would make the entitlement question unanswerable without also
+ * knowing a provider's vocabulary. This slice deliberately has no provider.
+ */
+export const PRODUCTION_UNLOCK_STATUSES = ["active", "revoked"] as const;
+
+export type ProductionUnlockStatus =
+  (typeof PRODUCTION_UNLOCK_STATUSES)[number];
+
+/**
+ * Sprint A5.1: a persisted status this build cannot interpret. Same
+ * reasoning as `UNRECOGNIZED_PRODUCTION_PROFILE`, in the direction that
+ * matters most: **NULL and unknown are never "active"**.
+ */
+export const UNRECOGNIZED_PRODUCTION_UNLOCK_STATUS =
+  "unrecognized_status" as const;
+
+export type StoredProductionUnlockStatus =
+  | ProductionUnlockStatus
+  | typeof UNRECOGNIZED_PRODUCTION_UNLOCK_STATUS;
+
+/**
+ * Sprint A5.1 — THE COMMERCIAL ENTITLEMENT.
+ *
+ * "This design project may be prepared for production under one production
+ * profile."
+ *
+ * THE KEY IS THE PROJECT. Deliberately, and this is the load-bearing design
+ * decision of the whole sprint. The obvious alternative — binding the
+ * purchase to the `FinalDirectionApproval` the customer was looking at when
+ * they paid — is wrong because that record is designed to be cheap to
+ * supersede, and is superseded from four separate code paths, one of which
+ * fires the moment a customer *says* they want a change
+ * (`ConversationCapability.triggerAutomaticRevision`). An entitlement bound
+ * there would be revoked by the customer's first post-purchase sentence.
+ *
+ * Every other candidate fails for a related reason:
+ *
+ *   ArtworkVersion            replaced by every targeted revision
+ *   FinalArtworkJob           created AFTER the gate that would authorize it
+ *   AssetRecord / the PNG     an OUTPUT of the paid work, not the permission
+ *   requestedProductionOutput deliberately mutable — the customer may change
+ *                             their mind, and doing so must not void a
+ *                             purchase
+ *
+ * The project is the only identifier in this domain that survives revision,
+ * approval supersession, regeneration, and a change of requested output. It
+ * is also already the authority every acquisition gate resolves from
+ * (`AcquisitionCapability.resolveAuthority`), so the commercial gate and the
+ * spend gate agree by construction rather than by convention.
+ *
+ * WHAT THIS RECORD IS NOT
+ *
+ *   Not a payment. No amount, no currency, no provider id, no transaction
+ *   state — those belong to payment records this slice deliberately does not
+ *   create. An unlock says a project may be produced; it says nothing about
+ *   how that permission was obtained, which is what lets an operator grant
+ *   one for support reasons without inventing a fake charge.
+ *
+ *   Not a technical capability. A project may hold an active unlock and
+ *   still be refused finalization because it asks for an artifact V1 does
+ *   not produce (`requestedProductionOutput`), because its concepts are
+ *   stale, or because a revision is pending. Commercial permission never
+ *   manufactures technical capability.
+ *
+ *   Not a generation allowance. A5.1/A5.2 unlocks FINALIZATION ONLY.
+ *   `authorizeConceptGeneration` is untouched.
+ *
+ *   Not identity. `acquisitionSessionId` records WHO bought it, resolved
+ *   server-side from the project's own durable binding — never from a
+ *   cookie, a header, or a request body.
+ */
+export interface ProductionUnlock {
+  id: string;
+  /** The durable entitlement key. */
+  projectId: string;
+  /**
+   * The acquisition session that held this project when the unlock was
+   * granted. Attribution and a fail-closed cross-check — never an
+   * independent authority, and never accepted from a caller.
+   */
+  acquisitionSessionId: string;
+  /** Narrowed fail-closed on read; an uninterpretable value never authorizes. */
+  productionProfile: StoredProductionProfile;
+  /** Narrowed fail-closed on read; only the literal `"active"` is permission. */
+  status: StoredProductionUnlockStatus;
+  grantedAt: string;
+  revokedAt: string | null;
+  /** Operational note. Never customer-facing, never a provider message. */
+  revokedReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Narrows a raw persisted profile column to the grantable vocabulary,
+ * FAILING CLOSED.
+ *
+ *   recognized grantable value → that value
+ *   anything else, including
+ *   null/empty                 → the unrecognized sentinel, which no gate
+ *                                treats as authorization
+ *
+ * Never returns `null` for a present-but-unreadable value: "absent" and
+ * "unreadable" would then be the same thing to a caller, and only one of
+ * them means a row exists that somebody may have paid for.
+ */
+export function readStoredProductionProfile(
+  raw: string | null | undefined,
+): StoredProductionProfile {
+  if (raw == null || raw === "") return UNRECOGNIZED_PRODUCTION_PROFILE;
+  if ((GRANTABLE_PRODUCTION_PROFILES as readonly string[]).includes(raw)) {
+    return raw as ProductionProfile;
+  }
+  return UNRECOGNIZED_PRODUCTION_PROFILE;
+}
+
+/** The same narrowing for the status column. NULL is never `"active"`. */
+export function readStoredProductionUnlockStatus(
+  raw: string | null | undefined,
+): StoredProductionUnlockStatus {
+  if (raw == null || raw === "") return UNRECOGNIZED_PRODUCTION_UNLOCK_STATUS;
+  if ((PRODUCTION_UNLOCK_STATUSES as readonly string[]).includes(raw)) {
+    return raw as ProductionUnlockStatus;
+  }
+  return UNRECOGNIZED_PRODUCTION_UNLOCK_STATUS;
+}
+
+/**
+ * THE ONE PLACE an unlock becomes permission.
+ *
+ * Every condition is positive and explicit — there is no "not revoked"
+ * anywhere, because a future status this build has never heard of must not
+ * pass a negative test. The profile is re-checked here as well as in the
+ * query, because a gate that trusts its caller's filter is a gate that stops
+ * working the day someone adds a second call site.
+ */
+export function productionUnlockAuthorizes(
+  unlock: ProductionUnlock | null | undefined,
+  input: { projectId: string; productionProfile: ProductionProfile },
+): boolean {
+  if (!unlock) return false;
+  if (unlock.status !== "active") return false;
+  if (unlock.productionProfile !== input.productionProfile) return false;
+  if (unlock.projectId !== input.projectId) return false;
+  return true;
+}
+
 /**
  * Sprint A2 (corrected): WHAT PRODUCTION ARTIFACT THE CUSTOMER ASKED
  * IHEARTPRINTS TO PRODUCE — structured, authoritative, and deliberately not

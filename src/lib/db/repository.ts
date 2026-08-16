@@ -22,6 +22,8 @@ import type {
   PaidImageIntentStatus,
   PrintProject,
   ProductionAssetValidation,
+  ProductionProfile,
+  ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
   StoredRequestedProductionOutput,
@@ -347,6 +349,44 @@ export type FreeConceptAllocation =
   | { outcome: "resumed"; session: AcquisitionSession }
   | { outcome: "exhausted"; session: AcquisitionSession };
 
+/**
+ * Sprint A5.1: what a caller must supply to grant a production unlock.
+ *
+ * There is no `status` field: a grant is always `"active"`, because a record
+ * that could be inserted already-revoked would be a fiction with a
+ * `granted_at` nobody ever granted. Revocation is its own operation on an
+ * existing row.
+ */
+export interface CreateProductionUnlockInput {
+  /**
+   * Resolved by the caller from the PROJECT's own durable binding
+   * (`PrintProject.acquisitionSessionId`) — never from a cookie, a header, or
+   * a request body. The repository does not verify this; the gate
+   * (`AcquisitionCapability.authorizeFinalization`) cross-checks it against
+   * the project's binding and fails closed on a mismatch.
+   */
+  acquisitionSessionId: string;
+  productionProfile: ProductionProfile;
+}
+
+/**
+ * Sprint A5.1: the two genuinely different outcomes of a grant, distinguished
+ * for the same reason `FreeConceptAllocation` and `PaidImageIntentReservation`
+ * are — a nullable row would conflate them.
+ *
+ *   "granted"  — this call created the active unlock.
+ *   "existing" — an active unlock for this (project, profile) already
+ *                existed. A duplicate request, a double click, or the loser
+ *                of a genuine race. Returns the WINNING row, which is the
+ *                fact the caller needs; the project is unlocked either way.
+ *
+ * Note there is no "failed" outcome. A grant that loses the uniqueness race
+ * has not failed at anything — the desired end state holds.
+ */
+export type ProductionUnlockGrant =
+  | { outcome: "granted"; unlock: ProductionUnlock }
+  | { outcome: "existing"; unlock: ProductionUnlock };
+
 /** Sprint A4: normalized email plus the moment it was captured. */
 export interface CaptureAcquisitionEmailInput {
   /** Already trimmed/lowercased by `AcquisitionCapability` — repositories never normalize. */
@@ -611,6 +651,74 @@ export interface ProjectRepository {
   grantInternalEntitlement(
     sessionId: string,
   ): Promise<AcquisitionSession | null>;
+
+  // --- Sprint A5.1: production unlocks (commercial entitlement) --------
+
+  /**
+   * The project's live commercial entitlement for one production profile,
+   * or `null`.
+   *
+   * Implementations MUST filter on `status = 'active'` in the query rather
+   * than returning the newest row for the caller to inspect: a revoked
+   * unlock reaching a gate that forgot to check is the one failure mode this
+   * method exists to make impossible. `AcquisitionCapability` re-verifies
+   * anyway (`productionUnlockAuthorizes`) — the two checks are deliberate
+   * defense in depth, not redundancy, because the local and Supabase stores
+   * narrow persisted values independently.
+   *
+   * A row whose persisted profile or status this build cannot interpret must
+   * never be returned as active. Both stores narrow through
+   * `readStoredProductionProfile` / `readStoredProductionUnlockStatus`, which
+   * fail closed to an unrecognized sentinel rather than coercing to the one
+   * value this build happens to implement.
+   */
+  getActiveProductionUnlock(
+    projectId: string,
+    productionProfile: ProductionProfile,
+  ): Promise<ProductionUnlock | null>;
+
+  /**
+   * Grants a production unlock for a project, idempotently.
+   *
+   * THE UNIQUENESS IS THE GUARANTEE, not a read-before-write. Two concurrent
+   * grants — a duplicate request, two operator clicks, and (in A5.3+) two
+   * webhook deliveries — must resolve to exactly ONE active row. The Postgres
+   * implementation gets this from the partial unique index
+   * `production_unlocks_active_per_project_profile_idx` and re-reads the
+   * winner on `unique_violation`; the local store gets it from its own
+   * process-wide lock around the same check-then-insert. Neither may ever
+   * produce two active unlocks for one (project, profile).
+   *
+   * The loser of a race is reported as `"existing"` rather than thrown: it is
+   * an ordinary, expected outcome, and the caller's correct behavior is
+   * identical either way — the project is unlocked.
+   *
+   * `acquisitionSessionId` is supplied by the caller, which must resolve it
+   * from the PROJECT's own durable binding and never from a cookie, header,
+   * or request body. The repository performs no authorization of its own.
+   */
+  createProductionUnlock(
+    projectId: string,
+    input: CreateProductionUnlockInput,
+  ): Promise<ProductionUnlockGrant>;
+
+  /**
+   * Withdraws the active unlock for a project and profile (refund,
+   * chargeback, operator action). Returns the revoked row, or `null` when
+   * there was nothing active to revoke.
+   *
+   * NEVER deletes the row, and never touches `final_artwork_jobs`, assets, or
+   * production validations. Revocation stops FUTURE finalization; artwork
+   * already produced remains exactly as it was, because it genuinely was
+   * produced. A later re-grant inserts a NEW row rather than reviving this
+   * one — the partial unique index only constrains active rows, so the audit
+   * trail accumulates instead of being overwritten.
+   */
+  revokeProductionUnlock(
+    projectId: string,
+    productionProfile: ProductionProfile,
+    reason: string | null,
+  ): Promise<ProductionUnlock | null>;
 
   // --- Phase 2C0.5: durable paid image intents -------------------------
 
