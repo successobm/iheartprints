@@ -13,6 +13,8 @@
  * hedging-cue heuristics, so this never grows a per-scenario keyword list.
  */
 
+import { clauseBodySource } from "@/lib/domain/clause-boundaries";
+
 const TENTATIVE_CUE_PATTERN =
   /\b(maybe|perhaps|possibly|i'?m not sure|not sure|do you think|might|not certain|i wonder|wondering|what if|i guess|kind of|sort of|not 100%|unsure)\b/i;
 
@@ -25,7 +27,13 @@ const TENTATIVE_CUE_PATTERN =
  * here: without an accompanying declarative clause, the customer is asking
  * for an opinion or confirmation, not issuing a standing instruction.
  */
-const WHOLE_MESSAGE_QUESTION_PATTERN = /^[^.!]*\?\s*$/;
+// The `.` exclusion is decimal-safe (`lib/domain/clause-boundaries.ts`):
+// before that, "Should the lift be 2.5 inches?" failed this test purely
+// because of the decimal point, and a hedged question was treated as a
+// standing instruction — which enqueues a paid regeneration.
+const WHOLE_MESSAGE_QUESTION_PATTERN = new RegExp(
+  `^${clauseBodySource(".!")}*\\?\\s*$`,
+);
 
 export function isExplicitRevisionIntent(message: string): boolean {
   const trimmed = message.trim();

@@ -1,3 +1,7 @@
+import {
+  clauseBodySource,
+  splitOnClauseBoundaries,
+} from "@/lib/domain/clause-boundaries";
 import { designContentTokens, stemToken } from "@/lib/domain/design-content-contract";
 
 /**
@@ -60,8 +64,10 @@ const GARMENT_COLOR_CLAUSE_PATTERN =
  * customer gives when asked ("left chest") — which would otherwise look like
  * a composition statement purely because it contains the word "left".
  */
-const PRINT_PLACEMENT_CLAUSE_PATTERN =
-  /\b(?:print|printed|printing|placement)\b[^.]{0,40}\b(?:full front|full back|left chest|chest|sleeve|front|back)\b/i;
+const PRINT_PLACEMENT_CLAUSE_PATTERN = new RegExp(
+  `\\b(?:print|printed|printing|placement)\\b${clauseBodySource(".")}{0,40}\\b(?:full front|full back|left chest|chest|sleeve|front|back)\\b`,
+  "i",
+);
 const PLACEMENT_ONLY_CLAUSE_PATTERN =
   /^(?:on\s+)?(?:the\s+)?(?:full\s+front|full\s+back|left\s+chest|right\s+chest|chest|sleeve|front|back)$/i;
 
@@ -75,8 +81,10 @@ const WORDING_CLAUSE_PATTERN =
   /\b(?:wording|the text|text is|it says|says|say|spelled?|spelling|lettering reads?|reads)\b/i;
 
 /** A clause expressing a palette preference for the rendering, not content. */
-const PALETTE_PREFERENCE_CLAUSE_PATTERN =
-  /\b(?:use|keep|stick to|palette)\b[^.]{0,30}\bcolou?rs?\b/i;
+const PALETTE_PREFERENCE_CLAUSE_PATTERN = new RegExp(
+  `\\b(?:use|keep|stick to|palette)\\b${clauseBodySource(".")}{0,30}\\bcolou?rs?\\b`,
+  "i",
+);
 
 /** A leading conversational/imperative wrapper that carries no design content. */
 const LEADING_WRAPPER_PATTERN =
@@ -136,7 +144,7 @@ export function preserveDesignDetail(
  */
 function designCriticalClauses(message: string): string[] {
   const clauses: string[] = [];
-  for (const sentence of message.split(/[.!?;]+/)) {
+  for (const sentence of splitOnClauseBoundaries(message, ".!?;")) {
     const trimmed = sentence.trim();
     if (!trimmed) continue;
     const commaParts = trimmed.split(",").map((part) => part.trim()).filter(Boolean);

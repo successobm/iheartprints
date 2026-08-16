@@ -82,6 +82,7 @@
  * one are blocked precisely so the product never has to answer them.
  */
 
+import { clauseBoundarySource } from "@/lib/domain/clause-boundaries";
 import type { IpSafetyFinding, IpSafetyReason } from "./contracts";
 
 /* ------------------------------------------------------------------ */
@@ -293,10 +294,21 @@ const BUSINESS_NAME_CONTINUATION =
  */
 function toClauses(text: string): string[] {
   return text
-    .split(/[.!?;\n]+|\bhowever\b|\bthough\b|\bexcept\b/i)
+    .split(IP_SAFETY_CLAUSE_BOUNDARY_PATTERN)
     .map((clause) => clause.trim())
     .filter(Boolean);
 }
+
+/**
+ * The `.` half is decimal-safe (`lib/domain/clause-boundaries.ts`): a number
+ * in the request ("a 2.5 inch shield") must not split one clause into two, or
+ * an operator and the referent it scopes over could land on opposite sides of
+ * a boundary that isn't really there.
+ */
+const IP_SAFETY_CLAUSE_BOUNDARY_PATTERN = new RegExp(
+  `(?:${clauseBoundarySource(".!?;\n")})+|\\bhowever\\b|\\bthough\\b|\\bexcept\\b`,
+  "i",
+);
 
 /** Short, bounded internal evidence — never persisted, never surfaced. */
 function evidenceOf(clause: string): string {

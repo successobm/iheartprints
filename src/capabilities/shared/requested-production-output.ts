@@ -38,6 +38,7 @@
  *     "embroidery digitizing is our business"        → predicate, not request
  */
 
+import { clauseBoundarySource } from "@/lib/domain/clause-boundaries";
 import type { RequestedProductionOutput } from "@/lib/domain/types";
 
 // ---------------------------------------------------------------------------
@@ -189,10 +190,21 @@ const PNG_AFFIRMATION_PATTERNS = [
 const FILENAME_PATTERN =
   /\b[\w][\w.-]*\.(?:png|jpe?g|gif|webp|svg|eps|ai|pdf|psd|tiff?|dst|pes|exp|zip)\b/gi;
 
+/**
+ * Sentence/contrast boundaries. The `.` half is decimal-safe
+ * (`lib/domain/clause-boundaries.ts`) so a size the customer states
+ * ("a 12.75\" wide PNG") stays in one clause rather than splitting mid-number
+ * and separating the request from its own disqualifier check.
+ */
+const PRODUCTION_CLAUSE_BOUNDARY_PATTERN = new RegExp(
+  `(?:${clauseBoundarySource(".!?;\n")})+|\\bbut\\b|\\bhowever\\b|\\bthough\\b`,
+  "i",
+);
+
 /** Clause-level so a disqualifier in one sentence cannot mask a request in another — and vice versa. */
 function toClauses(text: string): string[] {
   return text
-    .split(/[.!?;\n]+|\bbut\b|\bhowever\b|\bthough\b/i)
+    .split(PRODUCTION_CLAUSE_BOUNDARY_PATTERN)
     .map((clause) => clause.trim())
     .filter(Boolean);
 }

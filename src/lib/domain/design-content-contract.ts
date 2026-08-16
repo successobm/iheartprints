@@ -33,6 +33,8 @@
  * file, and none may be added.
  */
 
+import { clauseBoundarySource } from "./clause-boundaries";
+
 /**
  * Words that state WHERE something sits, or how it relates to something
  * else. A single one of these in a design description means the customer has
@@ -86,8 +88,16 @@ const PLACE_CUE_PATTERN =
 const ELEMENT_BOUNDARY_PATTERN =
   /,|\band\b|\bplus\b|\balong with\b|\bas well as\b|\bwith\b|\bfeaturing\b|\bincluding\b|\bnext to\b|\bbeside\b|\bbehind\b|\bin front of\b|\babove\b|\bbelow\b|\bunder\b|\bover\b|\bsurrounded by\b/i;
 
-/** Clause boundaries for pulling out the customer's own composition statements. */
-const COMPOSITION_CLAUSE_BOUNDARY_PATTERN = /[.;!?]+|,|\bwith\b/i;
+/**
+ * Clause boundaries for pulling out the customer's own composition statements.
+ * The `.` half comes from `clause-boundaries.ts` so a measurement inside a
+ * composition statement ("lighthouse 2.5 inches from the left") stays one
+ * statement instead of being cut in half at the decimal point.
+ */
+const COMPOSITION_CLAUSE_BOUNDARY_PATTERN = new RegExp(
+  `(?:${clauseBoundarySource(".;!?")})+|,|\\bwith\\b`,
+  "i",
+);
 
 /**
  * Words that carry no design content of their own — conversational filler,

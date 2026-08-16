@@ -1,4 +1,5 @@
 import { COLOR_WORD_PATTERN } from "@/capabilities/shared/color-families";
+import { splitOnClauseBoundaries } from "@/lib/domain/clause-boundaries";
 import { designContentTokens, stemToken } from "@/lib/domain/design-content-contract";
 
 /**
@@ -200,7 +201,7 @@ export function mergeDesignDescription(
  */
 function splitStatements(text: string): string[] {
   const statements: string[] = [];
-  for (const sentence of (text ?? "").split(/[.!?;]+/)) {
+  for (const sentence of splitOnClauseBoundaries(text, ".!?;")) {
     const trimmed = sentence.trim();
     if (!trimmed) continue;
     const commaParts = trimmed.split(",").map((part) => part.trim()).filter(Boolean);

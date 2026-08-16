@@ -5426,6 +5426,90 @@ unchanged, and the create_new path gains no new behavior.
 
 ---
 
+## 13j. Clause Boundaries in Customer Text
+
+**Invariant: numeric decimal points are lexical content, not sentence
+boundaries.**
+
+`src/lib/domain/clause-boundaries.ts` is the single definition of where one
+clause or sentence ends and the next begins in customer free text. Every
+module that splits customer text into clauses, or bounds a capture at a
+clause boundary, resolves its punctuation rule from that file rather than
+writing its own character class.
+
+### The defect this exists to prevent
+
+Live acceptance, A4 funnel. The customer wrote
+
+> black 2010 jeep wrangler unlimited with full racks and an inspired overland
+> roof top tent, large wheels with a 2.5" lift at the beach with the sun
+> setting
+
+and the Design Brief stored
+
+> black 2010 jeep wrangler unlimited with full racks and an inspired overland
+> roof top tent, large wheels with a 2
+
+`extractGraphics` bounds its capture at a sentence boundary — the right rule,
+and the thing that keeps an unrelated leading clause out of the design
+description (§13f) — but its boundary set was the raw class `[.!?]`, so the
+period inside `2.5` counted as punctuation. The lift, the beach and the
+sunset were gone before any concept was generated, with nothing in the
+conversation to show it had happened. Customer content is authoritative
+(Principle 15); silently dropping half of it is the most direct possible
+violation of that.
+
+### The rule
+
+A period is content when, and only when, it sits between two digits.
+Deliberately **lexical**: it asks nothing about measurement nouns, units,
+version keywords, or product names, so `2.5" lift`, `1.5 inch border`,
+`0.25" stroke`, `12.75" wide graphic`, `Version 2.5`, `Model 3.5`,
+`a 1.25 ratio`, `911.2` and `MK2.5` are all preserved by one rule instead of
+a growing list of special cases — while `Model 3.5. No text.` still splits
+into two sentences, because that second period is followed by a space, not a
+digit.
+
+Both halves of the check are load-bearing. "Not preceded by a digit" alone
+would refuse the sentence-ending period of `3.5.`; "not followed by a digit"
+alone would refuse a sentence that begins with a number.
+
+The module exposes three things: `clauseBoundarySource(marks)` (one boundary
+drawn from a punctuation set), `clauseBodySource(excluded)` (the
+negated-class counterpart, for captures that bound themselves), and
+`splitOnClauseBoundaries(text, marks)`.
+
+### Consumers
+
+All of these previously duplicated the same punctuation class and shared the
+same defect:
+
+- `intent-extraction/extraction.ts` — graphics, colors, product, audience,
+  required wording and entity-name captures, removal corrections, the
+  cross-field pending-section guard, and the multi-sentence heuristic
+- `intent-extraction/preserve-design-detail.ts` — the design-detail backstop's
+  clause units (§13f)
+- `intent-extraction/design-description-merge.ts` — statement splitting for
+  the multi-turn merge (§13g)
+- `lib/domain/design-content-contract.ts` — composition-statement boundaries
+- `prompt-translation/creative-reference-extraction.ts` — inspiration-phrase
+  captures
+- `shared/requested-production-output.ts` and `ip-safety/ip-safety-detection.ts`
+  — clause scoping, so an operator and its referent cannot land on opposite
+  sides of a boundary that is not really there
+- `shared/revision-intent.ts` — whole-message question detection, where the
+  defect read a hedged question ("Should the lift be 2.5 inches?") as a
+  standing instruction and would have enqueued a paid regeneration
+
+**Known limit.** One shape stays genuinely ambiguous: a sentence ending in a
+digit, joined with no space to a sentence starting with a digit — `I want
+3.2 of them are enough` meaning "I want 3." then "2 of them are enough". That
+reads as the number `3.2`. Accepted deliberately: it requires a missing
+space, whereas the behavior it replaces lost real customer content in the far
+more common well-formed case.
+
+---
+
 ## 14. Background Worker Architecture
 
 Two independent job queues, two independent workers — deliberately never

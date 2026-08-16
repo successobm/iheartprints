@@ -1,3 +1,8 @@
+import {
+  clauseBodySource,
+  clauseBoundarySource,
+  splitOnClauseBoundaries,
+} from "@/lib/domain/clause-boundaries";
 import { appendNote } from "@/lib/domain/conversation";
 import { EXPLICIT_NO_WORDING_VALUE } from "@/lib/domain/required-wording";
 import type { PrintPlacement, TShirtDesignBrief } from "@/lib/domain/types";
@@ -59,6 +64,31 @@ export interface ExtractionContext {
    */
   isPostSelectionRevision?: boolean;
 }
+
+/* ------------------------------------------------------------------ */
+/* Clause boundaries                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Post-A4 decimal correction. Every capture below that used to bound itself
+ * with a raw negated class (`[^.!?]+`, `[^.,;!?\n]+?`, ...) now goes through
+ * `clauseBodySource`, and every `split` goes through `splitOnClauseBoundaries`
+ * — one shared rule, so a period inside `2.5` is content and a period between
+ * two sentences is still a boundary. See `lib/domain/clause-boundaries.ts` for
+ * the invariant and the live defect that motivated it.
+ */
+
+/** Stops at a real clause boundary — the decimal-safe `[^.,;!?\n]`. */
+const CLAUSE_BODY = clauseBodySource(".,;!?\\n");
+
+/** As `CLAUSE_BODY`, but an em dash also closes the run. */
+const CLAUSE_BODY_TO_DASH = clauseBodySource(".,;!?\\n—");
+
+/** Stops at a real sentence boundary — the decimal-safe `[^.!?]`. */
+const SENTENCE_BODY = clauseBodySource(".!?");
+
+/** Stops at a real sentence boundary or a closing double quote. */
+const QUOTED_SENTENCE_BODY = clauseBodySource('".!?\\n');
 
 /* ------------------------------------------------------------------ */
 /* Vocabularies                                                        */
@@ -339,6 +369,11 @@ const DEFERRAL_PATTERNS = [
 const CORRECTION_CUE_PATTERN =
   /\b(actually|instead|change (?:it|that|the \w+)? ?to|forgot|forget|no longer|scratch that|don'?t print|do not print|shouldn'?t appear|should not appear|remove|only use|just use|use the words?|i meant|not the whole (?:sentence|thing|phrase))\b/i;
 
+const REQUIRED_WORDING_CUE_PATTERN = new RegExp(
+  `\\b(?:say|should say|it should say|the text is|wording should be|should read|print the words?|change (?:the )?(?:wording|text) to|use the words?|only use|just use|i meant)\\s*[:\\-]?\\s*"?(${QUOTED_SENTENCE_BODY}+)"?`,
+  "i",
+);
+
 const EXPLICIT_NO_WORDING_PATTERN =
   /^(?:none|no|nope|no text|no wording|n\/a|na|nothing)$/i;
 const NO_WORDING_PHRASE_PATTERN =
@@ -378,14 +413,17 @@ const GENERIC_DESCRIPTOR = `${GENERIC_DESCRIPTOR_WORD}(?:\\s+${GENERIC_DESCRIPTO
 // before the bare "name X" variant so "team name is My 3 Sons" never
 // captures the leading "is" as part of the name.
 const ENTITY_NAME_PATTERNS: RegExp[] = [
-  new RegExp(`\\b${GENERIC_DESCRIPTOR}(?:'s)?\\s+name\\s+is\\s+([^.,;!?\\n]+)`, "i"),
-  new RegExp(`\\b${GENERIC_DESCRIPTOR}\\s+(?:is\\s+)?(?:called|named)\\s+([^.,;!?\\n]+)`, "i"),
-  new RegExp(`\\b${GENERIC_DESCRIPTOR}\\s+name\\s*[:\\-]?\\s+([^.,;!?\\n]+)`, "i"),
+  new RegExp(`\\b${GENERIC_DESCRIPTOR}(?:'s)?\\s+name\\s+is\\s+(${CLAUSE_BODY}+)`, "i"),
+  new RegExp(
+    `\\b${GENERIC_DESCRIPTOR}\\s+(?:is\\s+)?(?:called|named)\\s+(${CLAUSE_BODY}+)`,
+    "i",
+  ),
+  new RegExp(`\\b${GENERIC_DESCRIPTOR}\\s+name\\s*[:\\-]?\\s+(${CLAUSE_BODY}+)`, "i"),
   // Sprint 2G Live Acceptance Corrective Pass: "the name of the <descriptor>
   // is X" — the descriptor follows "name of", entity follows the second
   // "is". Generic, same as the patterns above.
   new RegExp(
-    `\\bname\\s+of\\s+(?:the|our|my)\\s+${GENERIC_DESCRIPTOR}\\s+is\\s+([^.,;!?\\n]+)`,
+    `\\bname\\s+of\\s+(?:the|our|my)\\s+${GENERIC_DESCRIPTOR}\\s+is\\s+(${CLAUSE_BODY}+)`,
     "i",
   ),
   // Deliberately noun-gated (unlike every other pattern here): with no
@@ -397,8 +435,11 @@ const ENTITY_NAME_PATTERNS: RegExp[] = [
   // correctly because what follows must be one of the specific
   // `ENTITY_NOUNS`, so the engine backtracks to whatever descriptor count
   // actually lines up.
-  new RegExp(`\\b(?:our|the)\\s+(?:\\w+\\s+){0,2}(?:${ENTITY_NOUNS})\\s+is\\s+([^.,;!?\\n]+)`, "i"),
-  /\bcall\s+it\s+([^.,;!?\n]+)/i,
+  new RegExp(
+    `\\b(?:our|the)\\s+(?:\\w+\\s+){0,2}(?:${ENTITY_NOUNS})\\s+is\\s+(${CLAUSE_BODY}+)`,
+    "i",
+  ),
+  new RegExp(`\\bcall\\s+it\\s+(${CLAUSE_BODY}+)`, "i"),
 ];
 
 /**
@@ -449,7 +490,7 @@ const ENTITY_NAME_CONNECTOR =
   "(?:is|,?\\s*which\\s+is|,?\\s*that'?s|—\\s*that'?s|--\\s*that'?s)\\s+";
 
 const REVERSED_ENTITY_NAME_PATTERN = new RegExp(
-  `(?:^|[.!?;]\\s*)([^.,;!?\\n—]+?)\\s*${ENTITY_NAME_CONNECTOR}(?:the|our|my)\\s+${GENERIC_DESCRIPTOR}\\s+(?:name|title)\\b`,
+  `(?:^|${clauseBoundarySource(".!?;")}\\s*)(${CLAUSE_BODY_TO_DASH}+?)\\s*${ENTITY_NAME_CONNECTOR}(?:the|our|my)\\s+${GENERIC_DESCRIPTOR}\\s+(?:name|title)\\b`,
   "i",
 );
 
@@ -460,7 +501,7 @@ const REVERSED_ENTITY_NAME_PATTERN = new RegExp(
  * `REVERSED_ENTITY_NAME_PATTERN`.
  */
 const REVERSED_NAME_OF_PATTERN = new RegExp(
-  `(?:^|[.!?;]\\s*)([^.,;!?\\n—]+?)\\s*${ENTITY_NAME_CONNECTOR}(?:the\\s+)?name\\s+of\\s+(?:the|our|my)\\s+${GENERIC_DESCRIPTOR}\\b`,
+  `(?:^|${clauseBoundarySource(".!?;")}\\s*)(${CLAUSE_BODY_TO_DASH}+?)\\s*${ENTITY_NAME_CONNECTOR}(?:the\\s+)?name\\s+of\\s+(?:the|our|my)\\s+${GENERIC_DESCRIPTOR}\\b`,
   "i",
 );
 
@@ -520,10 +561,14 @@ function reduceEntityNameSentence(phrase: string): string {
 /* through to additionalNotes.                                          */
 /* ------------------------------------------------------------------ */
 
-const REMOVAL_TARGET_AFTER_CUE =
-  /\b(?:don'?t print|do not print|please remove|remove|exclude|leave out|take out)\s+(?:the\s+)?(?:phrase\s+|words?\s+)?"?([^".!?\n]+?)"?(?=[,.;!?]|$)/i;
-const REMOVAL_TARGET_BEFORE_CUE =
-  /"?([^".!?\n]+?)"?\s+(?:shouldn'?t|should\s+not)\s+appear\b/i;
+const REMOVAL_TARGET_AFTER_CUE = new RegExp(
+  `\\b(?:don'?t print|do not print|please remove|remove|exclude|leave out|take out)\\s+(?:the\\s+)?(?:phrase\\s+|words?\\s+)?"?(${QUOTED_SENTENCE_BODY}+?)"?(?=${clauseBoundarySource(",.;!?")}|$)`,
+  "i",
+);
+const REMOVAL_TARGET_BEFORE_CUE = new RegExp(
+  `"?(${QUOTED_SENTENCE_BODY}+?)"?\\s+(?:shouldn'?t|should\\s+not)\\s+appear\\b`,
+  "i",
+);
 const REMOVAL_CUE_BEFORE_QUOTE_PATTERN =
   /\b(?:don'?t print|do not print|please remove|remove|exclude|leave out|take out)\s*$/i;
 
@@ -795,8 +840,7 @@ function isDedicatedToADifferentPendingSection(
   if (!pending || pending === ownSection) return false;
   if (CORRECTION_CUE_PATTERN.test(positiveText)) return false;
   if (alreadyResolved) return true;
-  const clauses = positiveText
-    .split(/[.!?,;]/)
+  const clauses = splitOnClauseBoundaries(positiveText, ".!?,;")
     .map((c) => c.trim())
     .filter(Boolean);
   return clauses.length <= 1;
@@ -847,9 +891,7 @@ function extractRequiredWording(
     return (quoted[1] ?? quoted[2] ?? "").trim();
   }
 
-  const cued = positiveText.match(
-    /\b(?:say|should say|it should say|the text is|wording should be|should read|print the words?|change (?:the )?(?:wording|text) to|use the words?|only use|just use|i meant)\s*[:\-]?\s*"?([^".!?\n]+)"?/i,
-  );
+  const cued = positiveText.match(REQUIRED_WORDING_CUE_PATTERN);
   if (cued?.[1]?.trim()) {
     const bounded = boundEntityCapture(cued[1]);
     if (bounded) return reduceEntityNameSentence(bounded);
@@ -962,8 +1004,7 @@ function extractColors(
   positiveText: string,
   pendingSection: BriefSectionKey | null,
 ): { productColor: string | null; artworkColors: string[] } {
-  const clauses = positiveText
-    .split(/[,.;]/)
+  const clauses = splitOnClauseBoundaries(positiveText, ",.;")
     .map((c) => c.trim())
     .filter(Boolean);
 
@@ -1115,8 +1156,10 @@ function extractStyle(positiveText: string): string | null {
  * the garment-color clause that precedes it. Not domain-specific — the
  * cue set is generic phrasing, not a car/vehicle keyword list.
  */
-const GRAPHICS_CUE_PATTERN =
-  /\b(?:with|featuring|showing|depicting|the design is|design is|it shows|it should show|(?:design|artwork|graphic|image|picture|photo|drawing|illustration)s?\s+of)\s+(?:a |an |some |my |our )?([^.!?]+)/i;
+const GRAPHICS_CUE_PATTERN = new RegExp(
+  `\\b(?:with|featuring|showing|depicting|the design is|design is|it shows|it should show|(?:design|artwork|graphic|image|picture|photo|drawing|illustration)s?\\s+of)\\s+(?:a |an |some |my |our )?(${SENTENCE_BODY}+)`,
+  "i",
+);
 
 /**
  * A trailing "on a navy shirt" names the garment, not the artwork — the
@@ -1158,7 +1201,7 @@ const LEADING_IMPERATIVE = /^(?:please\s+)?(?:print|put|place|use|make|do|send|o
  * customer's "black" would vanish from the brief entirely.
  */
 function subjectBeforeGarmentPhrase(positiveText: string): string | null {
-  const clause = positiveText.split(/[.!?]/)[0]?.trim() ?? "";
+  const clause = splitOnClauseBoundaries(positiveText, ".!?")[0]?.trim() ?? "";
   if (!TRAILING_GARMENT_PHRASE.test(clause)) return null;
   if (LEADING_IMPERATIVE.test(clause)) return null;
 
@@ -1180,7 +1223,7 @@ function extractGraphics(positiveText: string): string | null {
   const captured =
     start < 0
       ? boundEntityCapture(match[1])
-      : positiveText.slice(start).split(/[.!?]/)[0]?.trim() ?? "";
+      : splitOnClauseBoundaries(positiveText.slice(start), ".!?")[0]?.trim() ?? "";
 
   return captured.replace(TRAILING_GARMENT_PHRASE, "").trim() || null;
 }
@@ -1230,8 +1273,7 @@ function extractProduct(positiveText: string): string | null {
   // Splitting on commas too (not just sentence punctuation) keeps a
   // trailing clause like ", name is My 3 Sons" out of the product clause
   // even when it shares a sentence with the product word.
-  const clauses = positiveText
-    .split(/[.!?,;]/)
+  const clauses = splitOnClauseBoundaries(positiveText, ".!?,;")
     .map((c) => c.trim())
     .filter(Boolean);
 
@@ -1267,6 +1309,21 @@ function extractProduct(positiveText: string): string | null {
   // structure. Falls back to the full clause only when the phrase pattern
   // genuinely finds no product word inside it (defensive; PRODUCT_PATTERN
   // already matched somewhere in the text).
+  //
+  // NO LENGTH GATE HERE, deliberately. The post-A4 decimal correction briefly
+  // added one — a single clause ending in a product word was also required to
+  // be short — because decimal-safe splitting stopped "a 2.5 inch logo on
+  // black t-shirts" from being cut in two at the decimal point, which was the
+  // only reason that sentence used to be tightened. The audit proved no word
+  // threshold can work: "a 2.5 inch logo on black t-shirts" and "unisex heavy
+  // blend full zip hooded sweatshirt" are both seven words and need opposite
+  // treatment, and any threshold low enough to catch the first silently
+  // reduces real garment specifications ("youth small navy performance polo
+  // shirt" → "Polo") that `checkProductQuality` accepts as perfectly good
+  // product names. Overly-long / explanatory product values stay
+  // `checkProductQuality`'s responsibility (`shared/brief-field-quality.ts`),
+  // which is the one authority for that judgment and must not be duplicated
+  // here.
   if (clauses.length <= 1 && PRODUCT_WORD_AT_END_PATTERN.test(clause)) return clause;
   const phrase = clause.match(PRODUCT_PHRASE_PATTERN);
   return phrase?.[1]?.trim() ?? clause;
@@ -1309,13 +1366,16 @@ function extractExclusions(positiveText: string): string | null {
 /* Audience / purpose — conservative, cue-word gated                   */
 /* ------------------------------------------------------------------ */
 
+const AUDIENCE_PURPOSE_PATTERN = new RegExp(
+  `\\bfor\\s+(?:our|my|the)\\s+([a-z0-9]${clauseBodySource(".,;!?")}*)`,
+  "i",
+);
+
 function extractAudiencePurpose(positiveText: string): {
   audience: string | null;
   purpose: string | null;
 } {
-  const match = positiveText.match(
-    /\bfor\s+(?:our|my|the)\s+([a-z0-9][^.,;!?]*)/i,
-  );
+  const match = positiveText.match(AUDIENCE_PURPOSE_PATTERN);
   const rawPhrase = match?.[1]?.trim();
   if (!rawPhrase) return { audience: null, purpose: null };
 
@@ -1357,7 +1417,9 @@ const SECTION_FIELD_KEY: Partial<Record<BriefSectionKey, keyof BriefFieldPatch>>
  * never absorb explanatory sentences" / "Audience extraction must never
  * absorb design descriptions").
  */
-const MULTI_SENTENCE_PATTERN = /[.!?]\s*\S/;
+const MULTI_SENTENCE_PATTERN = new RegExp(
+  `${clauseBoundarySource(".!?")}\\s*\\S`,
+);
 
 function looksLikeExplanatorySentence(text: string, maxWords = 10): boolean {
   return MULTI_SENTENCE_PATTERN.test(text) || wordCount(text) > maxWords;

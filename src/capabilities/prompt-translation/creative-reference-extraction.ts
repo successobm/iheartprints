@@ -26,26 +26,45 @@
  * as ordinary content, never the reverse.
  */
 
+import { clauseBodySource } from "@/lib/domain/clause-boundaries";
+
 interface ReferenceCue {
   pattern: RegExp;
+}
+
+/**
+ * The reference phrase itself — everything up to the next real clause
+ * boundary. Decimal-safe (`lib/domain/clause-boundaries.ts`), so a reference
+ * carrying a number ("inspired by Mad Max 2.5", "in the style of Version 2.0
+ * arcade art") is captured whole rather than cut at the decimal point.
+ */
+const REFERENCE_BODY = `${clauseBodySource(",.;!?")}+`;
+
+function referenceCue(cue: string): ReferenceCue {
+  return { pattern: new RegExp(`${cue}(${REFERENCE_BODY})`, "gi") };
 }
 
 // Order matters only in that a longer/more specific cue should be tried
 // before a shorter one it could be a substring of — none currently overlap,
 // but keeping this ordered and documented makes future additions safe.
 const REFERENCE_CUES: ReferenceCue[] = [
-  { pattern: /\bspin[- ]?offs?\s+(?:of|from)\s+([^,.;!?]+)/gi },
-  { pattern: /\binspired by\s+([^,.;!?]+)/gi },
-  { pattern: /\breminiscent of\s+([^,.;!?]+)/gi },
-  { pattern: /\bin the style of\s+([^,.;!?]+)/gi },
-  { pattern: /\bstyled after\s+([^,.;!?]+)/gi },
-  { pattern: /\ba nod to\s+([^,.;!?]+)/gi },
-  { pattern: /\ban? homage to\s+([^,.;!?]+)/gi },
-  { pattern: /\bthrowback to\s+([^,.;!?]+)/gi },
+  referenceCue("\\bspin[- ]?offs?\\s+(?:of|from)\\s+"),
+  referenceCue("\\binspired by\\s+"),
+  referenceCue("\\breminiscent of\\s+"),
+  referenceCue("\\bin the style of\\s+"),
+  referenceCue("\\bstyled after\\s+"),
+  referenceCue("\\ba nod to\\s+"),
+  referenceCue("\\ban? homage to\\s+"),
+  referenceCue("\\bthrowback to\\s+"),
   // Requires an explicit era/style qualifier right after "like a/an" so an
   // ordinary request ("I'd like a black shirt") is never mistaken for a
   // reference cue — only a framing like "like an old travel poster" is.
-  { pattern: /\blike an? ((?:old|classic|vintage|retro|\d{2,4}s?)\s+[^,.;!?]+)/gi },
+  {
+    pattern: new RegExp(
+      `\\blike an? ((?:old|classic|vintage|retro|\\d{2,4}s?)\\s+${REFERENCE_BODY})`,
+      "gi",
+    ),
+  },
 ];
 
 export interface CreativeReferenceExtraction {

@@ -45,6 +45,13 @@ export const TEST_FILES = [
   // came from is replayed end to end in
   // `conversation/subject-color-regression.test.ts` below.
   "src/capabilities/intent-extraction/subject-color-vs-palette.test.ts",
+  // Post-A4 correction: a numeric decimal point is lexical content, not a
+  // sentence boundary (`lib/domain/clause-boundaries.ts`). Covers the live
+  // truncated Jeep message, measurements and non-measurement decimals, the
+  // real periods that must still split, and the other consumers of the same
+  // rule — product, required wording, the design-detail backstop, the
+  // multi-turn merge, revision intent, and the generation prompt.
+  "src/capabilities/intent-extraction/decimal-safe-clause-parsing.test.ts",
   "src/capabilities/shared/brief-field-quality.test.ts",
   "src/capabilities/shared/field-normalization.test.ts",
   "src/components/chat/concept-image-fetch-controller.test.ts",
