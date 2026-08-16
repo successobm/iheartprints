@@ -61,16 +61,21 @@ describe("deriveUploadedArtworkStep", () => {
   it("leaves the Create New Artwork flow completely untouched", () => {
     // The existing interview must render exactly as before: no uploaded-
     // artwork surface at all, at any point.
-    for (const atProjectStart of [true, false]) {
-      assert.equal(
-        deriveUploadedArtworkStep({
-          preparation: null,
-          choice: "create_new",
-          atProjectStart,
-        }),
-        null,
-      );
-    }
+    //
+    // Correction A: expressed as `atProjectStart: false` rather than a
+    // `choice: "create_new"` enum value, which no longer exists. Choosing
+    // Create New is durable SERVER state now (the `create_new` marker on
+    // the assistant turn `beginCreateNewWorkflow` writes), and
+    // `isAtProjectStart` reads it — so by the time this function is asked,
+    // the choice has already closed the project-start window.
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: null,
+        choice: "undecided",
+        atProjectStart: false,
+      }),
+      null,
+    );
   });
 
   it("walks upload → details → analysis → compare → approved", () => {
@@ -136,7 +141,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation({ printPlacement: "sleeve" }),
-        choice: "create_new",
+        choice: "undecided",
         atProjectStart: false,
       }),
       "review_analysis",

@@ -526,6 +526,25 @@ export async function handleUserMessage(
   return apiSnapshot;
 }
 
+/**
+ * Correction A: the "Create New Artwork" workflow choice.
+ *
+ * Deliberately NOT routed through `handleUserMessage`. A workflow choice is
+ * control state, and expressing it as a synthetic customer sentence put
+ * words in the customer's mouth in the transcript and then carried them
+ * into the Design Brief and the generation prompt.
+ *
+ * No local worker kick: choosing a workflow enqueues nothing and can never
+ * make generation eligible.
+ */
+export async function beginCreateNewWorkflow(
+  projectId: string,
+): Promise<ApiProjectSnapshot> {
+  return withConceptStatus(
+    await getCapabilityGraph().conversation.beginCreateNewWorkflow(projectId),
+  );
+}
+
 export async function selectConcept(
   projectId: string,
   artworkVersionId: string,

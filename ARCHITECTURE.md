@@ -5686,6 +5686,12 @@ Other notes:
   why existing tables cannot represent it honestly, why this is the smallest
   additive change). Notably there is **no** workflow-kind column: the
   preparation row's existence is the workflow identity
+- Correction A: the Create New side likewise adds **no** column and **no**
+  migration. `ConversationCapability.beginCreateNewWorkflow` stamps
+  `metadata.workflow = "create_new"` (`lib/domain/conversation.ts`) on the
+  assistant turn it writes, and `isAtProjectStart` reads it back — the same
+  way the `concepts_ready` anchor already carries a conversation-shaped fact
+  the UI branches on. See "Create New is a workflow transition" in §19
 - Derived values recomputed rather than stored as authority: concept
   status batches, brief evaluation, intelligence assessment, revision
   impact, summary views, customer-facing `finalization` status, uploaded-
@@ -5705,7 +5711,8 @@ delegation to composed capabilities.
 | `GET /api/projects/[projectId]` | Load snapshot |
 | `POST /api/projects/[projectId]/email` | Sprint A4: capture the email required to continue the design session. Not sign-up, not verification, not marketing consent; grants no entitlement. Idempotent (§23b) |
 | `POST /api/internal/acquisition-access` | Sprint A4: grants the current session the internal entitlement against `IHEARTPRINTS_INTERNAL_ACCESS_KEY` (`x-iheartprints-internal-key`, constant-time). Unset by default with no dev fallback; uniform 401 on every refusal (§23b) |
-| `POST /api/projects/[projectId]/messages` | Handle user message |
+| `POST /api/projects/[projectId]/messages` | Handle user message — the customer's OWN words, and nothing else |
+| `POST /api/projects/[projectId]/workflow` | Correction A: the workflow choice, as control state. Closed action vocabulary (`create_new` only); idempotent; writes no user message and touches no brief field |
 | `POST /api/projects/[projectId]/brief/decision` | Approve / edit on Design Summary (Sprint 2L Phase 1B: "continue" removed — see §10b) |
 | `POST /api/projects/[projectId]/concepts/regenerate` | Explicit updated-concept enqueue |
 | `GET /api/projects/[projectId]/concepts/[artworkVersionId]/image` | Mint short-lived concept image URL (Sprint 2K Phase 1) |
@@ -5722,6 +5729,51 @@ delegation to composed capabilities.
 | `GET /api/assets/[...objectKey]` | Serve filesystem signed assets |
 | `POST /api/worker/generation` | Independent concept-generation worker batch (secret-protected) |
 | `POST /api/worker/final-artwork` | Sprint 2M Phase 2C: independent final-artwork worker batch (secret-protected) |
+
+### Create New is a workflow transition, not a message (Correction A)
+
+**A workflow choice is control state. The customer's message channel
+carries the customer's own words and nothing else.**
+
+Clicking "Create New Artwork" briefly posted a synthetic sentence — "I'd
+like you to design new artwork for me." — to `/messages`. It fixed an inert
+button and broke three things at once: the transcript showed a customer
+bubble nobody typed; `/messages` runs Intent Extraction, so the sentence
+landed in the Design Brief's **Additional notes**; and from there it was
+headed into the generation prompt as creative input.
+
+`POST /api/projects/:id/workflow` →
+`ConversationCapability.beginCreateNewWorkflow` instead:
+
+- adds **no** user message and touches **no** brief field
+- lets the interview engine speak for itself — the same
+  `briefEvaluation` → `designIntelligence` → `interviewIntelligence`
+  → `applyActToInterviewState` tail every other turn ends with, run against
+  the unchanged brief, so the wording is the engine's rather than copy
+  duplicated in `ChatApp`
+- creates no `GenerationJob` and consumes no free-concept entitlement:
+  choosing a workflow is not a paid-value action, and the A4 fence stays
+  exactly where it was, at enqueue
+- is idempotent for everything a browser can produce (double click, retry
+  after a lost response, reload), guarded read-then-write plus a re-check
+  immediately before the append — the pattern
+  `announceGenerationRefusal` already uses
+
+Durability without schema work: the assistant turn it writes carries
+`metadata.workflow = "create_new"`, and `isAtProjectStart` reads it back so
+the workflow card is not re-offered on reload. This matters *because* the
+synthetic message is gone — a Create New project has no customer turn at all
+until the product question is answered, so "no customer turn yet" alone
+would re-offer the card forever. Still not a client enum: if the transition
+failed, no marker exists and the choice is correctly offered again.
+
+`WorkflowChoice` is now upload-only. The `"create_new"` value was removed:
+that branch is server state, and a client enum for it would be a second,
+weaker answer to a question the server already answers.
+
+**Only the BUTTON is control.** A customer who types "create new" is making
+an ordinary conversational turn and is handled as one — no phrase filtering
+exists or should be added.
 
 ### Customer snapshot sanitization (Sprint 2K Phase 1)
 

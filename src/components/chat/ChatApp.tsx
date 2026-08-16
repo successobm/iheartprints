@@ -26,7 +26,6 @@ import {
   planSessionBootstrap,
 } from "./chat-session";
 import { Composer } from "./Composer";
-import { CREATE_NEW_ARTWORK_INTENT } from "./create-new-intent";
 import { ConceptCards } from "./ConceptCards";
 import { ConceptStatusBanner } from "./ConceptStatusBanner";
 import { DesignerDecisionCard } from "./DesignerDecisionCard";
@@ -279,6 +278,42 @@ export function ChatApp() {
       setSnapshot(data as ApiSnapshot);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send message");
+      await refresh();
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /**
+   * Correction A: "Create New Artwork" is a workflow CHOICE, so it posts to
+   * the workflow endpoint rather than pretending the customer typed a
+   * sentence. There is deliberately no optimistic message: the customer
+   * said nothing, and the only thing to render is what the server decides
+   * the interview says next.
+   */
+  async function chooseCreateNewWorkflow() {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/workflow`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "create_new" }),
+        },
+      );
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to start your design");
+      }
+
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start your design");
       await refresh();
     } finally {
       setSending(false);
@@ -1193,7 +1228,7 @@ export function ChatApp() {
             {uploadedArtworkStep === "choose_workflow" ? (
               <WorkflowChoiceCard
                 busy={sending}
-                onCreateNew={() => void sendMessage(CREATE_NEW_ARTWORK_INTENT)}
+                onCreateNew={() => void chooseCreateNewWorkflow()}
                 onUploadExisting={() => setWorkflowChoice("upload_existing")}
               />
             ) : null}

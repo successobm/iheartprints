@@ -17,6 +17,37 @@ import type { ConversationPhase, TShirtDesignBrief } from "./types";
  */
 export const OPENING_PROMPT = "What are we printing today?";
 
+/**
+ * Correction A: the durable record that a customer chose "Create New
+ * Artwork" at the workflow card.
+ *
+ * Stamped on the assistant message that `beginCreateNewWorkflow` writes,
+ * and read back by `isAtProjectStart` so the card does not reappear on
+ * reload. Message metadata rather than a new column for the same reason the
+ * `concepts_ready` anchor lives there: it is a conversation-shaped fact
+ * about a specific turn, the existing JSONB already carries facts the UI
+ * branches on, and inventing a `workflow` column would create a second
+ * place workflow identity is recorded — the Existing Artwork side already
+ * derives its identity durably from the preparation record instead of an
+ * enum (`components/chat/uploaded-artwork-flow.ts`).
+ *
+ * Deliberately NOT read as "this project is a create_new project": absence
+ * proves nothing (every project that predates this correction, and every
+ * customer who simply started typing, has no marker). It answers only
+ * "was the button pressed", which is the one question the card and the
+ * idempotency check actually ask.
+ */
+export const CREATE_NEW_WORKFLOW = "create_new";
+
+/** Whether the Create New workflow choice has been durably recorded. */
+export function createNewWorkflowChosen(input: {
+  messages: readonly { metadata: Record<string, unknown> }[];
+}): boolean {
+  return input.messages.some(
+    (message) => message.metadata?.workflow === CREATE_NEW_WORKFLOW,
+  );
+}
+
 /** Phases still driven by the fixed ladder in this module, never the adaptive engine. */
 const LEGACY_PHASES: ConversationPhase[] = [
   "ask_product",

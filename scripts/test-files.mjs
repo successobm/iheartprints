@@ -17,6 +17,11 @@
 export const TEST_FILES = [
   "src/components/chat/chat-session.test.ts",
   "src/components/chat/create-new-choice.test.tsx",
+  // Correction A: the Create New workflow transition — an authoritative
+  // server action, never a synthetic customer message. The server half
+  // (no user turn, idempotency, reload durability, clean brief and
+  // generation prompt) runs against the real conversation-service path.
+  "src/capabilities/conversation/create-new-workflow.test.ts",
   "src/components/chat/ChatApp.ssr.test.tsx",
   "src/components/chat/chat-affordances.test.ts",
   "src/components/chat/ConceptCards.test.tsx",

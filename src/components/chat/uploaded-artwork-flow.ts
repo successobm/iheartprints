@@ -17,9 +17,21 @@
  */
 
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
+import { createNewWorkflowChosen } from "@/lib/domain/conversation";
 
-/** Transient, client-only. Never persisted — see this module's doc comment. */
-export type WorkflowChoice = "undecided" | "create_new" | "upload_existing";
+/**
+ * Transient, client-only, and now UPLOAD-ONLY. Correction A removed the
+ * `"create_new"` value: that branch is server state, recorded durably by
+ * `beginCreateNewWorkflow` and read back through `isAtProjectStart`, so a
+ * client enum value for it would be a second — and weaker — answer to a
+ * question the server already answers.
+ *
+ * `"upload_existing"` stays transient on purpose: it matters only in the
+ * window before a file exists, where nothing durable exists to remember,
+ * and forgetting it on reload correctly returns the customer to the choice
+ * rather than trapping them in a workflow they never committed to.
+ */
+export type WorkflowChoice = "undecided" | "upload_existing";
 
 export type UploadedArtworkStep =
   /** Offer both workflows. The only step that is ever shown before a choice. */
@@ -51,25 +63,41 @@ export interface UploadedArtworkFlowInput {
  * Whether the project is still at its very start — the window in which the
  * workflow choice is offered at all.
  *
- * A single customer reply closes that window, which is what makes the
- * Create New button self-dismissing: submitting the intent
- * (`create-new-intent.ts`) puts a user message in the transcript, so this
- * turns false and the card stops rendering because the CONVERSATION moved,
- * not because the client hid it. If that submission fails and the snapshot
- * is restored, this is true again and the choice is correctly re-offered.
+ * Two things close that window, and BOTH are durable server state:
+ *
+ *   a customer reply       they started the interview by typing, so the
+ *                          choice is moot.
+ *   the Create New marker  Correction A. They pressed the button, and
+ *                          `ConversationCapability.beginCreateNewWorkflow`
+ *                          recorded it on the assistant turn it wrote
+ *                          (`CREATE_NEW_WORKFLOW`).
+ *
+ * The marker is what makes the choice survive a reload. Before Correction A
+ * the button posted a synthetic customer sentence, so the customer-reply
+ * rule alone was enough to dismiss the card — at the cost of a fake chat
+ * bubble that also reached the Design Brief. With the sentence gone, a
+ * Create New project has NO customer turn until the product question is
+ * answered, and reading only that rule would re-offer the card on every
+ * reload as though the click had never happened.
+ *
+ * Still never a client enum: if the transition failed, no marker was
+ * written, and the choice is correctly offered again.
  *
  * Lives here rather than inline in `ChatApp` so the rule the card depends on
  * is something tests can assert directly, in a repo whose test tooling has
  * no DOM to click with.
  */
 export function isAtProjectStart(input: {
-  messages: readonly { role: string }[];
+  messages: readonly { role: string; metadata?: Record<string, unknown> }[];
   artworkVersionCount: number;
 }): boolean {
-  return (
-    input.messages.every((message) => message.role !== "user") &&
-    input.artworkVersionCount === 0
-  );
+  if (input.artworkVersionCount > 0) return false;
+  if (input.messages.some((message) => message.role === "user")) return false;
+  return !createNewWorkflowChosen({
+    messages: input.messages.map((message) => ({
+      metadata: message.metadata ?? {},
+    })),
+  });
 }
 
 /**

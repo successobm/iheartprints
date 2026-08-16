@@ -1,8 +1,11 @@
 import type { ProjectRepository } from "@/lib/db/repository";
 import { toDesignBriefSnapshotContent } from "@/lib/domain/brief-snapshot";
 import {
+  CREATE_NEW_WORKFLOW,
+  createNewWorkflowChosen,
   isLegacyScriptedPhase,
   nextPhaseAfterUserReply,
+  OPENING_PROMPT,
   promptForPhase,
 } from "@/lib/domain/conversation";
 import type {
@@ -202,6 +205,26 @@ export interface ConversationCapability {
     designId: string,
     content: string,
   ): Promise<ProjectSnapshot>;
+  /**
+   * Correction A: the customer chose "Create New Artwork" from the workflow
+   * card. A CONTROL action, not a conversational turn.
+   *
+   * It exists because the previous fix expressed the click as a synthetic
+   * customer message ("I'd like you to design new artwork for me."), which
+   * put words in the customer's mouth in the transcript AND fed them
+   * through Intent Extraction, where they landed in the Design Brief's
+   * Additional Notes and from there into the generation prompt. A workflow
+   * choice is control state; it is never creative content.
+   *
+   * Adds no user message and touches no brief field. It only lets the
+   * interview engine speak for itself — the same act selection every other
+   * turn ends with — and records durably that the choice was made.
+   *
+   * Idempotent: a double click, a retried POST, or a reload after a lost
+   * response returns the current snapshot unchanged rather than asking
+   * again. See `createNewWorkflowChosen`.
+   */
+  beginCreateNewWorkflow(designId: string): Promise<ProjectSnapshot>;
   selectConcept(
     designId: string,
     artworkVersionId: string,
@@ -1386,6 +1409,96 @@ export function createConversationCapability(
 
     get(designId) {
       return repo.getProject(designId);
+    },
+
+    async beginCreateNewWorkflow(designId) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+
+      // Idempotent, and deliberately generous about what counts as
+      // "already moved": a second click, a retried POST after a lost
+      // response, or a customer who typed their answer before pressing the
+      // button all mean the same thing — the interview is under way and
+      // must not be interrupted by another question.
+      if (
+        createNewWorkflowChosen(current) ||
+        current.messages.some((message) => message.role === "user") ||
+        current.artworkVersions.length > 0
+      ) {
+        return current;
+      }
+
+      // The brief is NOT touched. Everything below reads it, so the
+      // engine's own next act is whatever it would be for a project that
+      // has answered nothing — which is exactly the truth about a customer
+      // who has so far only chosen a workflow.
+      const workingBrief = await designBrief.getWorkingBrief(designId);
+      const evaluation = briefEvaluation.evaluate(workingBrief);
+      const assessment = designIntelligence.assess(
+        workingBrief,
+        evaluation,
+        revisionIntelligence.analyze(workingBrief, workingBrief),
+      );
+      const state = current.conversation.interviewState;
+      const act = interviewIntelligence.selectNextAct({
+        evaluation,
+        assessment,
+        context: {
+          pendingSection: narrowSection(state.pendingSection),
+          askCounts: state.askCounts,
+          dismissedAdvisories: state.dismissedAdvisories,
+        },
+      });
+
+      // `await_customer` means the engine has nothing to add — the opening
+      // question `createProject` already asked is still the live one. The
+      // marker message below is still written, because the CHOICE is real
+      // and must survive a reload even when the question does not change.
+      const summary = designSummary.createSummary(workingBrief, evaluation);
+      const content =
+        act.type === "await_customer"
+          ? OPENING_PROMPT
+          : naturalizeQuestion(act, summary);
+
+      // Re-checked immediately before the write, the same way
+      // `ConceptGenerationCapability.announceGenerationRefusal` guards its
+      // own append. The read-then-write guard above cannot see a request
+      // that started at the same moment; this closes all but the window
+      // between these two lines. A fully atomic guarantee would need a
+      // uniqueness constraint, i.e. a new column — see the limitation note
+      // in ARCHITECTURE.md rather than inventing one for a case the UI
+      // already prevents by disabling both buttons while a request is in
+      // flight.
+      const beforeWrite = await repo.getProject(designId);
+      if (!beforeWrite) throw new Error("Project not found");
+      if (createNewWorkflowChosen(beforeWrite)) return beforeWrite;
+
+      await repo.updateConversationPhase(designId, "interviewing");
+      await repo.updateConversationInterviewState(
+        designId,
+        applyActToInterviewState(state, act),
+      );
+      await repo.addMessage(designId, {
+        role: "assistant",
+        content,
+        // `workflow: "create_new"` is the durable record of the choice, and
+        // the reason this needs no new column: message metadata is already
+        // where this codebase keeps conversation-shaped facts the UI
+        // branches on (the `concepts_ready` anchor works the same way).
+        // Without it the workflow card would reappear on reload, because
+        // "no customer turn yet" is true of a Create New project right up
+        // until the customer answers the product question.
+        metadata: {
+          phase: "interviewing",
+          act: act.type,
+          section: actSection(act),
+          workflow: CREATE_NEW_WORKFLOW,
+        },
+      });
+
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new Error("Project not found");
+      return snapshot;
     },
 
     async handleUserMessage(designId, content) {
