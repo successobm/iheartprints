@@ -4,6 +4,9 @@ import {
 } from "@/lib/domain/conversation";
 import {
   emptyInterviewState,
+  OUTSTANDING_PAYMENT_TRANSACTION_STATUSES,
+  readStoredPaymentProvider,
+  readStoredPaymentTransactionStatus,
   readStoredProductionProfile,
   readStoredProductionUnlockStatus,
   readStoredRequestedProductionOutput,
@@ -34,6 +37,7 @@ import type {
   InterviewStateData,
   PaidImageIntent,
   PaidImageIntentStatus,
+  PaymentTransaction,
   PrintProject,
   ProductionAssetRole,
   ProductionAssetValidation,
@@ -55,9 +59,12 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  BindProviderCheckoutSessionInput,
   CreateProductionUnlockInput,
   FreeConceptAllocation,
+  OpenPaymentTransactionInput,
   PaidImageIntentReservation,
+  PaymentTransactionOpening,
   ProductionUnlockGrant,
   ProjectRepository,
   RecordPaidImageIntentFailureInput,
@@ -133,6 +140,29 @@ type DbProductionUnlock = {
   granted_at: string;
   revoked_at: string | null;
   revoked_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * Sprint A5.3. `production_profile`, `provider`, and `status` are raw
+ * `string` for the same reason `DbProductionUnlock`'s are: the row is
+ * whatever is actually in the database, and typing them narrowly would let
+ * the mapper skip the fail-closed narrowing that is the point.
+ */
+type DbPaymentTransaction = {
+  id: string;
+  project_id: string;
+  acquisition_session_id: string;
+  production_profile: string | null;
+  provider: string | null;
+  provider_checkout_session_id: string | null;
+  provider_checkout_url: string | null;
+  provider_payment_intent_id: string | null;
+  /** Postgres `integer` — arrives as a number; normalized defensively in the mapper. */
+  amount_minor: number | string;
+  currency: string;
+  status: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -508,6 +538,32 @@ function mapProductionUnlock(row: DbProductionUnlock): ProductionUnlock {
     grantedAt: row.granted_at,
     revokedAt: row.revoked_at,
     revokedReason: row.revoked_reason,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Sprint A5.3: narrows all three vocabulary columns FAIL-CLOSED, for the
+ * same reason `mapProductionUnlock` does — the CHECK constraints already
+ * refuse an out-of-vocabulary value, so these exist for the case they cannot
+ * cover: a NEWER deploy widening a CHECK and writing a value this build has
+ * never heard of. Nothing may read such a value as `"paid"`, and nothing may
+ * read it as an outstanding attempt either.
+ */
+function mapPaymentTransaction(row: DbPaymentTransaction): PaymentTransaction {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    acquisitionSessionId: row.acquisition_session_id,
+    productionProfile: readStoredProductionProfile(row.production_profile),
+    provider: readStoredPaymentProvider(row.provider),
+    providerCheckoutSessionId: row.provider_checkout_session_id,
+    providerCheckoutUrl: row.provider_checkout_url,
+    providerPaymentIntentId: row.provider_payment_intent_id,
+    amountMinor: Number(row.amount_minor),
+    currency: row.currency,
+    status: readStoredPaymentTransactionStatus(row.status),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1623,6 +1679,140 @@ export class SupabaseProjectRepository implements ProjectRepository {
     // revoking twice, or revoking something never granted, both leave the
     // world in the state the caller asked for.
     return data ? mapProductionUnlock(data as DbProductionUnlock) : null;
+  }
+
+  // --- Sprint A5.3: payment transactions (checkout attempts) -----------
+
+  async getOutstandingPaymentTransaction(
+    projectId: string,
+    productionProfile: ProductionProfile,
+  ): Promise<PaymentTransaction | null> {
+    // The status filter is part of the guarantee. Terminal rows must not
+    // surface: a `failed` attempt would strand a customer entitled to try
+    // again, and a `paid` one would put a completed purchase back in front of
+    // them. The partial unique index makes this a single-row lookup.
+    const { data, error } = await this.client
+      .from("payment_transactions")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("production_profile", productionProfile)
+      .in("status", [...OUTSTANDING_PAYMENT_TRANSACTION_STATUSES])
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaymentTransaction(data as DbPaymentTransaction) : null;
+  }
+
+  async getPaymentTransaction(id: string): Promise<PaymentTransaction | null> {
+    const { data, error } = await this.client
+      .from("payment_transactions")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaymentTransaction(data as DbPaymentTransaction) : null;
+  }
+
+  async openPaymentTransaction(
+    projectId: string,
+    input: OpenPaymentTransactionInput,
+  ): Promise<PaymentTransactionOpening> {
+    const { data, error } = await this.client
+      .from("payment_transactions")
+      .insert({
+        project_id: projectId,
+        acquisition_session_id: input.acquisitionSessionId,
+        production_profile: input.productionProfile,
+        provider: input.provider,
+        amount_minor: input.amountMinor,
+        currency: input.currency,
+        // Nothing exists at the provider yet, and the row says exactly that.
+        status: "pending_provider",
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      // THE UNIQUENESS IS THE GUARANTEE. A concurrent opening — two tabs, a
+      // double click, a duplicated request — loses here, and the correct
+      // response is to report the WINNER rather than to raise: two customers'
+      // worth of payment pages for one purchase is exactly what the index
+      // exists to prevent, and an error would tempt a retry that creates one.
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        const raced = await this.getOutstandingPaymentTransaction(
+          projectId,
+          input.productionProfile,
+        );
+        if (raced) return { outcome: "existing", transaction: raced };
+      }
+      throw error;
+    }
+
+    return {
+      outcome: "opened",
+      transaction: mapPaymentTransaction(data as DbPaymentTransaction),
+    };
+  }
+
+  async bindProviderCheckoutSession(
+    id: string,
+    input: BindProviderCheckoutSessionInput,
+  ): Promise<PaymentTransaction | null> {
+    const timestamp = new Date().toISOString();
+    // Conditional on the row still being pre-provider: a late or duplicated
+    // bind must never re-point a transaction at a different session, and must
+    // never resurrect a terminal one.
+    const { data, error } = await this.client
+      .from("payment_transactions")
+      .update({
+        provider_checkout_session_id: input.providerCheckoutSessionId,
+        provider_checkout_url: input.providerCheckoutUrl,
+        provider_payment_intent_id: input.providerPaymentIntentId ?? null,
+        status: "created",
+        updated_at: timestamp,
+      })
+      .eq("id", id)
+      .eq("status", "pending_provider")
+      .select("*")
+      .maybeSingle();
+
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "payment_transactions_provider_checkout_session_id_key",
+        );
+      }
+      throw error;
+    }
+
+    // No row updated means the transaction was no longer pre-provider — a
+    // concurrent bind won, or it is terminal. Return it as it genuinely
+    // stands; the caller needs the winning session, not a failure.
+    if (!data) return this.getPaymentTransaction(id);
+    return mapPaymentTransaction(data as DbPaymentTransaction);
+  }
+
+  async failPendingPaymentTransaction(
+    id: string,
+    reason: string | null,
+  ): Promise<PaymentTransaction | null> {
+    const timestamp = new Date().toISOString();
+    // Only a pre-provider attempt may be failed. A `created` row describes a
+    // real provider session and a terminal row is already history; rewriting
+    // either would destroy the record rather than close it.
+    const { data, error } = await this.client
+      .from("payment_transactions")
+      .update({ status: "failed", updated_at: timestamp })
+      .eq("id", id)
+      .eq("status", "pending_provider")
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    // Deliberately not persisted — there is no column for it, and adding one
+    // to carry a provider's error text is how provider dialect leaks into the
+    // durable domain. The caller logs it server-side instead.
+    void reason;
+    if (!data) return this.getPaymentTransaction(id);
+    return mapPaymentTransaction(data as DbPaymentTransaction);
   }
 
   // --- Phase 2C0.5: durable paid image intents -------------------------

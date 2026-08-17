@@ -20,6 +20,8 @@ import type {
   MessageRole,
   PaidImageIntent,
   PaidImageIntentStatus,
+  PaymentProviderKey,
+  PaymentTransaction,
   PrintProject,
   ProductionAssetValidation,
   ProductionProfile,
@@ -387,6 +389,51 @@ export type ProductionUnlockGrant =
   | { outcome: "granted"; unlock: ProductionUnlock }
   | { outcome: "existing"; unlock: ProductionUnlock };
 
+/**
+ * Sprint A5.3: what a caller must supply to open a checkout attempt.
+ *
+ * Every field is SERVER-RESOLVED — the acquisition session from the
+ * project's own durable binding, the profile/amount/currency from
+ * server-side configuration. Nothing here may originate in a request body,
+ * and the shape carries no field a browser could meaningfully supply.
+ */
+export interface OpenPaymentTransactionInput {
+  acquisitionSessionId: string;
+  productionProfile: ProductionProfile;
+  provider: PaymentProviderKey;
+  /** Positive integer, minor units. Frozen at creation. */
+  amountMinor: number;
+  /** Lowercase ISO 4217. Frozen at creation. */
+  currency: string;
+}
+
+/**
+ * Sprint A5.3: the two outcomes of opening an attempt, distinguished for the
+ * same reason `ProductionUnlockGrant`'s are.
+ *
+ *   "opened"   — this call created the outstanding attempt.
+ *   "existing" — an outstanding attempt already existed. A second tab, a
+ *                double click, a duplicated request, or the loser of a
+ *                genuine race. Returns the WINNER, which may be
+ *                `pending_provider` (resume it) or `created` (reuse it).
+ */
+export type PaymentTransactionOpening =
+  | { outcome: "opened"; transaction: PaymentTransaction }
+  | { outcome: "existing"; transaction: PaymentTransaction };
+
+/**
+ * Sprint A5.3: proof that a provider checkout session genuinely exists.
+ *
+ * `providerPaymentIntentId` is optional because most providers do not create
+ * one until the customer actually pays — its absence at bind time is normal,
+ * not a partial write.
+ */
+export interface BindProviderCheckoutSessionInput {
+  providerCheckoutSessionId: string;
+  providerCheckoutUrl: string;
+  providerPaymentIntentId?: string | null;
+}
+
 /** Sprint A4: normalized email plus the moment it was captured. */
 export interface CaptureAcquisitionEmailInput {
   /** Already trimmed/lowercased by `AcquisitionCapability` — repositories never normalize. */
@@ -719,6 +766,85 @@ export interface ProjectRepository {
     productionProfile: ProductionProfile,
     reason: string | null,
   ): Promise<ProductionUnlock | null>;
+
+  // --- Sprint A5.3: payment transactions (checkout attempts) -----------
+
+  /**
+   * The project's current OUTSTANDING checkout attempt for one production
+   * profile (`pending_provider` or `created`), or `null`.
+   *
+   * Implementations MUST filter on the outstanding statuses in the query.
+   * The terminal ones must not surface here: returning a `failed` attempt
+   * would strand a customer who is entitled to try again, and returning a
+   * `paid` one would put a completed purchase back in front of them.
+   */
+  getOutstandingPaymentTransaction(
+    projectId: string,
+    productionProfile: ProductionProfile,
+  ): Promise<PaymentTransaction | null>;
+
+  getPaymentTransaction(id: string): Promise<PaymentTransaction | null>;
+
+  /**
+   * Opens a checkout attempt in the PRE-PROVIDER state
+   * (`status: "pending_provider"`) — a durable row with no provider session
+   * behind it yet.
+   *
+   * THE ROW MUST EXIST FIRST. Its id is what the caller hands the provider
+   * as an idempotency key and as the metadata handle a later verified
+   * webhook reconciles through; there is nothing else stable to use, and
+   * generating an id without persisting it would leave a crash with no way
+   * back to the session it created.
+   *
+   * THE UNIQUENESS IS THE GUARANTEE. At most one outstanding attempt per
+   * (project, profile), enforced by the partial unique index
+   * `payment_transactions_outstanding_per_project_profile_idx`. A caller
+   * that loses the race is reported `"existing"` with the WINNER, never
+   * thrown at — two tabs must converge on one payment page, and an error
+   * here would tempt a retry that creates a second one.
+   *
+   * `amountMinor`, `currency`, and `productionProfile` are frozen from the
+   * caller's server-resolved offer and never re-read from configuration
+   * afterwards. `acquisitionSessionId` must be resolved from the PROJECT's
+   * own durable binding — the repository performs no authorization.
+   */
+  openPaymentTransaction(
+    projectId: string,
+    input: OpenPaymentTransactionInput,
+  ): Promise<PaymentTransactionOpening>;
+
+  /**
+   * Binds a genuinely-created provider checkout session to a
+   * `pending_provider` attempt, moving it to `"created"`.
+   *
+   * Conditional on the row still being `pending_provider`, so a late or
+   * duplicated bind can never re-point a transaction at a different session
+   * or resurrect a terminal one. Returns the transaction as it genuinely
+   * stands; a caller that lost the race sees the winning session, which is
+   * exactly the fact it needs.
+   *
+   * The database independently refuses a `created` row that is missing its
+   * session id or URL (`payment_transactions_created_is_bound`), so a
+   * partial bind cannot produce a checkout with nowhere to send anyone.
+   */
+  bindProviderCheckoutSession(
+    id: string,
+    input: BindProviderCheckoutSessionInput,
+  ): Promise<PaymentTransaction | null>;
+
+  /**
+   * Marks an attempt `"failed"`, freeing the outstanding slot.
+   *
+   * ONLY ever called for a failure that PROVABLY never created a provider
+   * session. An ambiguous provider failure must leave the row
+   * `pending_provider` instead: a session may really exist, and freeing the
+   * slot would let a second checkout start alongside it. Conditional on the
+   * row still being `pending_provider`.
+   */
+  failPendingPaymentTransaction(
+    id: string,
+    reason: string | null,
+  ): Promise<PaymentTransaction | null>;
 
   // --- Phase 2C0.5: durable paid image intents -------------------------
 

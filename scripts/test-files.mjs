@@ -285,4 +285,15 @@ export const TEST_FILES = [
   // output), and that approval supersession — which fires on the customer's
   // first post-purchase revision — leaves the purchase intact.
   "src/capabilities/acquisition/production-unlock-entitlement.test.ts",
+  // Sprint A5.3: checkout creation. Payment config (no silent fallback — a
+  // wrong price is a billing incident, not a degraded experience), the Stripe
+  // adapter against an injected fetch (never a live call), and the checkout
+  // capability itself. The load-bearing assertion in the capability suite is
+  // a NEGATIVE one, repeated after every successful checkout: creating a
+  // payment attempt creates zero production unlocks, leaves finalization
+  // refused, and moves the generation gate in neither direction.
+  "src/lib/config/payment-config.test.ts",
+  "src/capabilities/payment/stripe-checkout-provider.test.ts",
+  "src/capabilities/payment/production-unlock-checkout.test.ts",
+  "src/app/api/projects/[projectId]/production-unlock/checkout/route.test.ts",
 ];

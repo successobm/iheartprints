@@ -7403,6 +7403,202 @@ acquisition boundary depends on.
 
 ---
 
+## 23d. Checkout and Payment Attempts (Sprint A5.3)
+
+### Two records, and the line between them
+
+```
+PaymentTransaction   ONE CHECKOUT / PAYMENT ATTEMPT.
+                     "Somebody was sent to a payment page for this project,
+                      and here is what happened next."
+
+ProductionUnlock     THE ENTITLEMENT (§23c).
+                     "This project may be prepared for production."
+```
+
+**A transaction never becomes an entitlement.** No status on it — not even the
+`'paid'` this sprint does not write — is read as permission by any gate. There
+is no foreign key between the tables, no trigger, and no shared column;
+`scripts/verify-payment-transactions-postgres.sql` asserts all three against a
+real database, alongside the blunt version: after checkout, the
+`production_unlocks` count is zero.
+
+That separation is what makes the browser structurally incapable of granting
+anything. A5.4's verified webhook will *create an unlock row*, not
+*reinterpret a transaction status*.
+
+### `pending_provider` — the state this table exists for
+
+A durable row must exist **before** the provider is called: its id is the
+provider idempotency key and the metadata handle a later verified webhook
+reconciles through, and there is nothing else stable to use. At that instant
+no checkout session exists anywhere.
+
+Calling that `'created'` would be a lie a crash then makes permanent — a row
+claiming a checkout that was never created, holding the one outstanding slot
+forever, indistinguishable afterwards from a real one. So the pre-provider
+state is named honestly:
+
+| Status | Meaning |
+|---|---|
+| `pending_provider` | durable intent; nothing at the provider yet, or the attempt ended ambiguously. **Resumable.** |
+| `created` | a provider checkout session genuinely exists. **Not payment**; authorizes nothing. |
+| `failed` | provably never created a provider session; frees the outstanding slot. |
+| `paid` / `expired` / `refunded` | A5.4+ vocabulary. Written by nothing in A5.3. |
+
+Two CHECK constraints keep the first two states genuinely distinct rather than
+a flag somebody could forget to move: a `created` row must carry both a
+session id and a URL, and a `pending_provider` row must carry neither.
+
+### Stripe and PostgreSQL are not atomic, and this design does not pretend
+
+Every outcome converges instead:
+
+| What happens | Durable result |
+|---|---|
+| provider call succeeds | bound to `created` |
+| fails **provably before dispatch** (401, 4xx, DNS) | `failed`; slot freed; a clean retry is possible |
+| fails **ambiguously** (5xx, socket hang-up, unreadable 200) | stays `pending_provider` |
+| crash after the provider answers, before we persist | stays `pending_provider` |
+
+In both of the last two rows the next attempt **replays the same idempotency
+key**, so the provider returns the *same* session rather than creating a
+second one. Freeing the slot on an ambiguous failure is exactly how a customer
+ends up looking at two payment pages for one purchase, so it is never done.
+
+The dispatch classification reuses `ProviderError.dispatch` and
+`isPossiblyBilledProviderError` — the same axis the paid-image and
+final-artwork paths already use, never a second reading of the same question.
+
+### At most one outstanding attempt per project and profile
+
+```sql
+create unique index payment_transactions_outstanding_per_project_profile_idx
+  on public.payment_transactions (project_id, production_profile)
+  where status in ('pending_provider', 'created');
+```
+
+Enforced by PostgreSQL, not by application code reading before it writes — the
+same rule as `acquisition_free_concept_claims` and `production_unlocks`. Two
+tabs, a double click, or a duplicated request converge on one payment page;
+the loser of the race is handed the winner rather than an error, because an
+error would tempt a retry that creates a second session. Terminal rows do not
+occupy the slot, so history accumulates and a genuinely new attempt is always
+possible.
+
+`provider_checkout_session_id` and `provider_payment_intent_id` are UNIQUE, so
+one provider session can never resolve to two attempts — a property A5.4's
+webhook depends on.
+
+### The server owns every commercial value
+
+`PaymentCapability.createCheckout(projectId)` takes a project id and **nothing
+else**. Who is buying, which production profile, how much, in what currency,
+with which provider, to which email — all resolved from the project's own
+durable state and from server configuration. There is no parameter a browser
+could influence, which makes client-side price manipulation *structurally
+impossible* rather than merely validated against.
+
+The route enforces the same thing at the transport layer: the body schema is a
+`.strict()` empty object, so `amountMinor`, `currency`, `providerPriceId`,
+`productionProfile`, another `projectId`, an `approvalId`, or a session id is a
+**400 — rejected, not silently stripped**. Stripping would charge the right
+price anyway but leave the boundary invisible; loud rejection makes it
+testable.
+
+Price lives in exactly one place, `production-unlock-offer-config.ts`, and
+**fails closed with no development fallback** — a default price would be a
+published price that every unconfigured deployment quietly started charging.
+The amount is validated as a raw digit string, not merely as a number: an
+operator writing `49.00` meaning forty-nine dollars would otherwise have
+configured forty-nine **cents**, and `Number.isInteger(Number("49.00"))` is
+`true`.
+
+Amount, currency, and profile are **frozen onto the row** at open time and
+re-read from it on resume — never from configuration. A price change must not
+retroactively rewrite what somebody was quoted, and a changed request body
+would also break the idempotency replay.
+
+### Redirects are navigation, never authority
+
+Success and cancel URLs are built from `IHEARTPRINTS_PUBLIC_BASE_URL` — server
+configuration, never a request's `Host`/`Origin` header, which an attacker
+controls and which would make the redirect an open redirect with a payment
+page in front of it.
+
+Neither URL carries a payment claim. The parameter is `checkout=complete`,
+meaning *"you came back from checkout"* — which is true — rather than
+`paid=true`, which this side of the system cannot know. No `{CHECKOUT_SESSION_ID}`
+interpolation. No UI reads it in this slice.
+
+### What qualifies as something to buy
+
+Both workflows reach checkout from their **own existing durable authority**;
+no new approval concept was invented, and in particular a
+`FinalDirectionApproval` is *not* required — that record is created **by**
+finalization, which is the thing being purchased, so requiring it would make
+checkout unreachable for everyone.
+
+| Workflow | Requirement |
+|---|---|
+| Create New | a generated concept has been **delivered** (`hasDeliveredGeneratedConcept` — the same shared rule the concept grid and the email gate use) **and** one is selected |
+| Existing Artwork | an `ArtworkPreparation` the customer has **approved** — exactly what `requestPreparedUploadFinalArtwork` already requires |
+
+`finalDirectionConfirmed` is deliberately **not** required. It means "no more
+changes, produce this", it is the *finalization* gate, and it resets on
+re-selection — demanding it before payment would ask a customer to promise
+they are done revising in order to buy, and would import a resettable flag
+into the commerce path.
+
+Checkout is also refused for: a missing project, unresolvable acquisition
+authority, an **internal** session (already finalizes freely — charging would
+take money for nothing), a **legacy** project (no buyer to record, and already
+grandfathered), no captured email, an existing active unlock, a pending
+revision, an unsupported `requestedProductionOutput`, and any unavailable
+configuration. **Every one returns the same sentence** — distinguishable
+refusals would let a caller enumerate which projects exist and which are
+already paid for.
+
+### Provider isolation
+
+`PaymentProvider` is a three-string contract. `StripeCheckoutProvider` is the
+only implementation, is reachable **only** through `resolvePaymentProvider`
+(deliberately not exported from the capability barrel), and owns 100% of the
+Stripe dialect: endpoint, form encoding, parameter names, the
+`Idempotency-Key` header, status-code meanings, response field names.
+
+**No SDK.** Both existing paid-provider adapters (`OpenAIConceptGenerationProvider`,
+`TopazTransparencyUpscaleProvider`) use raw `fetch` with an injectable
+`fetchImpl`, and this one matches them — zero new dependencies, testable with
+a plain fake, and the exact request this process makes is readable in one
+file.
+
+The email reaches Stripe's own `customer_email` field and is **never**
+duplicated into metadata, never returned to a browser, and never round-tripped
+through a client. Metadata carries exactly one value: the opaque internal
+transaction id. Duplicating authority values into metadata invites a future
+reader to trust it — and metadata is caller-supplied data that happens to have
+made a round trip through a provider.
+
+### Dependency direction
+
+```
+PaymentCapability → ProjectRepository, PaymentProvider, offer config
+```
+
+and nothing else. It resolves the project's acquisition session from the
+repository directly, exactly as `AcquisitionCapability` does.
+`AcquisitionCapability` does **not** depend on it, does not know it exists, and
+was not modified by this sprint.
+
+### What A5.3 does not do
+
+No webhook route, no webhook verification, no `payment_events` table (A5.4's
+authority), no entitlement activation, no customer payment UI, no generation
+unlock, no revision allowance, no refunds, and no signed recovery links.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:
@@ -7414,13 +7610,37 @@ Verified against the implementation:
   process; it is not started by customer HTTP requests
 - No live Supabase integration tests in CI
 - Filesystem/worker rate limiting is in-memory/single-instance
-- **There is no payment provider (Sprint A5.3+ is not implemented).** The
-  commercial entitlement exists — an active `ProductionUnlock` on a project
-  permits finalization for an ordinary prospect (§23c) — but there is no
-  Stripe or other provider, no checkout, no webhook, no pricing, and no
-  customer payment UI. An unlock can currently be created only through a
-  direct repository call (fixtures, tests, internal tooling), so in practice
-  no customer can obtain one yet
+- **No payment can complete (Sprint A5.4 is not implemented).** Checkout
+  creation exists (§23d) — a configured deployment can send a customer to a
+  real payment page — but nothing consumes the result. There is no webhook
+  route, no webhook verification, no `payment_events` table, and no code path
+  that moves a `PaymentTransaction` to `paid` or creates a `ProductionUnlock`
+  from one. A customer who paid today would be charged and would receive
+  nothing until an operator granted the unlock by hand. **Checkout must not
+  be enabled in production until A5.4 lands.**
+- **Payment is disabled by default and in every environment.**
+  `PAYMENT_PROVIDER` defaults to `none`, and `PRODUCTION_UNLOCK_AMOUNT_MINOR`
+  / `PRODUCTION_UNLOCK_CURRENCY` / `IHEARTPRINTS_PUBLIC_BASE_URL` have no
+  defaults and no development fallback — an unconfigured deployment refuses
+  checkout cleanly rather than inventing a price
+- **A production unlock can still only be created by a direct repository
+  call** (fixtures, tests, internal tooling), because A5.3 deliberately does
+  not create one
+- **A configured Stripe Price object is not reconciled against the recorded
+  amount.** When `PRODUCTION_UNLOCK_PROVIDER_PRICE_ID` is set, Stripe's Price
+  decides what the customer is charged while `amount_minor`/`currency` remain
+  what the durable transaction records; nothing can compare them without a
+  network call. Leaving the variable unset (the default) keeps one source of
+  truth and avoids the question entirely
+- **The checkout route inherits the bearer-project-id weakness.** Like every
+  other project route, it authorizes on knowledge of the project's UUID. A
+  stranger holding one could cause a checkout session to be created for
+  somebody else's project and could pay for it — but cannot redirect the
+  resulting entitlement (the unlock lands on the project, and the buyer's
+  email is read from the project's own session, not the caller's). So the
+  exposure is "an attacker can spend their own money on a stranger's
+  project", not "an attacker can obtain a stranger's design". Route-level
+  project ownership remains a launch blocker for A5.7 / security hardening
 - **A production unlock does not unlock generation.** After the one free
   concept, every further concept generation, exploration, and generative
   revision is still refused for an ordinary prospect, unlocked or not

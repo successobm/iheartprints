@@ -1679,4 +1679,118 @@
  * indistinguishable afterwards from a real one.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "A5.2" as const;
+/**
+ * SPRINT A5.3 — PaymentCapability (`capabilities/payment/`).
+ *
+ * The checkout boundary: creating and resuming ONE payment attempt for a
+ * project's production unlock. See ARCHITECTURE.md §23d.
+ *
+ * DEPENDS ON
+ *   ProjectRepository, PaymentProvider (its own port), the offer config.
+ *
+ * DEPENDED ON BY
+ *   the checkout route, and nothing else.
+ *
+ * FORBIDDEN: `AcquisitionCapability` depending on this capability. The spend
+ *   boundary stays a leaf on the repository and must not learn that commerce
+ *   exists. This capability resolves the project's acquisition session from
+ *   the repository itself, exactly as `AcquisitionCapability` does — which is
+ *   why no dependency is needed in either direction.
+ *
+ * A PAYMENT ATTEMPT IS NOT AN ENTITLEMENT.
+ *
+ *   FORBIDDEN: creating, activating, or touching a `ProductionUnlock` from
+ *     any checkout path. FORBIDDEN: any gate reading a `PaymentTransaction`
+ *     status as permission — including the `"paid"` A5.4 will write. There is
+ *     no foreign key between the two tables, no trigger, and no shared
+ *     column, and the Postgres proof asserts all three.
+ *
+ *   FORBIDDEN: treating a browser redirect as authority. Success/cancel URLs
+ *     carry `checkout=complete` ("you came back"), never `paid=true`, never
+ *     an interpolated provider session id. A5.4's VERIFIED WEBHOOK is the
+ *     only thing that may ever grant an unlock.
+ *
+ * `pending_provider` IS A REAL STATE, NOT A PLACEHOLDER.
+ *
+ *   The durable row must exist BEFORE the provider call — its id is the
+ *   idempotency key and the webhook's reconciliation handle. FORBIDDEN:
+ *   writing `"created"` at that moment. A crash would make the lie permanent:
+ *   a row claiming a session that never existed, holding the one outstanding
+ *   slot forever, indistinguishable afterwards from a real one.
+ *
+ *   FORBIDDEN: freeing the outstanding slot on an AMBIGUOUS provider failure.
+ *     A session may really exist; starting a second attempt beside it is how
+ *     a customer ends up with two payment pages for one purchase. Only a
+ *     provably-not-dispatched failure may mark an attempt `"failed"`, and the
+ *     dispatch axis is `ProviderError.dispatch` — the same one the paid-image
+ *     and final-artwork paths already use, never a second reading of it.
+ *
+ *   FORBIDDEN: omitting the provider idempotency key, or deriving it from
+ *     anything but the durable transaction id. It is what makes the
+ *     Stripe-and-Postgres-are-not-atomic window survivable: the retry gets
+ *     the SAME session instead of buying a second one.
+ *
+ * THE SERVER OWNS EVERY COMMERCIAL VALUE.
+ *
+ *   `createCheckout(projectId)` takes a project id and nothing else.
+ *   FORBIDDEN: accepting an amount, currency, price id, production profile,
+ *   project id, acquisition session id, approval id, artwork version id, or
+ *   email from a request body — at any layer. The route's body schema is a
+ *   `.strict()` empty object, so such a field is REJECTED rather than
+ *   stripped: stripping charges the right price but leaves the boundary
+ *   invisible, and an invisible boundary is an untested one.
+ *
+ *   FORBIDDEN: a second price. `production-unlock-offer-config.ts` is the
+ *   only place an amount exists, it fails closed with NO development
+ *   fallback, and it validates the RAW STRING — `Number.isInteger(Number("49.00"))`
+ *   is true, so an operator meaning forty-nine dollars would otherwise have
+ *   configured forty-nine cents.
+ *
+ *   Amount, currency, and profile are FROZEN onto the row at open time and
+ *   re-read from it on resume. FORBIDDEN: re-reading config mid-attempt — it
+ *   would re-price a customer mid-tab and would change the request body under
+ *   a replayed idempotency key.
+ *
+ *   FORBIDDEN: building redirect URLs from a request's `Host`/`Origin`
+ *   header. Server configuration only; an attacker-controlled header there is
+ *   an open redirect with a payment page in front of it.
+ *
+ * PROVIDER ISOLATION, same rule as every other provider boundary.
+ *
+ *   FORBIDDEN: a Stripe type, session object, event shape, or raw error
+ *   reaching anything above `PaymentProvider`. The adapter is exported only
+ *   through `resolvePaymentProvider`, never from the capability barrel.
+ *
+ *   FORBIDDEN: duplicating authority values into provider metadata. It
+ *   carries exactly one opaque internal transaction id — a HANDLE the
+ *   webhook uses to find the durable row, after which every fact comes from
+ *   that row. Metadata is caller-supplied data that made a round trip; it is
+ *   not evidence.
+ *
+ *   FORBIDDEN: putting the customer's email in metadata (Stripe has
+ *   `customer_email`), returning it to a browser, or round-tripping it
+ *   through a client.
+ *
+ * COMMERCIAL PERMISSION IS STILL NOT TECHNICAL CAPABILITY, and checkout is
+ *   refused rather than sold when the product could not deliver: an
+ *   unsupported `requestedProductionOutput`, a pending revision, or nothing
+ *   designed yet. FORBIDDEN: taking money first and refusing afterwards.
+ *
+ * BOTH WORKFLOWS REACH CHECKOUT FROM THEIR OWN EXISTING AUTHORITY —
+ *   a delivered-and-selected concept, or an approved `ArtworkPreparation`.
+ *   FORBIDDEN: requiring a `FinalDirectionApproval` (it is created BY the
+ *   thing being purchased, so requiring it makes checkout unreachable), and
+ *   forbidden: requiring `finalDirectionConfirmed`, which is the finalization
+ *   gate, resets on re-selection, and would import a resettable flag into the
+ *   commerce path.
+ *
+ * ONE REFUSAL SENTENCE for every internal reason. FORBIDDEN: distinguishable
+ *   refusals or status codes — they let a caller enumerate which projects
+ *   exist, which are already paid for, and which are internal. The real
+ *   reason is logged server-side.
+ *
+ * A5.3 UNLOCKS NOTHING. Generation authorization is untouched, finalization
+ *   authorization is untouched, and `AcquisitionCapability` was not modified.
+ */
+
+export const CAPABILITY_BOUNDARY_VERSION = "A5.3" as const;

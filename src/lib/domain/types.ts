@@ -470,6 +470,213 @@ export function productionUnlockAuthorizes(
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Sprint A5.3 — the Payment Transaction (one checkout / payment attempt)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sprint A5.3: which payment provider a transaction belongs to.
+ *
+ * A vocabulary rather than a free string for the same reason
+ * `ProductionProfile` is one: a value in a column must never be what selects
+ * a code path. Exactly one provider exists today.
+ */
+export const KNOWN_PAYMENT_PROVIDERS = ["stripe"] as const;
+
+export type PaymentProviderKey = (typeof KNOWN_PAYMENT_PROVIDERS)[number];
+
+export const UNRECOGNIZED_PAYMENT_PROVIDER = "unrecognized_provider" as const;
+
+export type StoredPaymentProviderKey =
+  | PaymentProviderKey
+  | typeof UNRECOGNIZED_PAYMENT_PROVIDER;
+
+/**
+ * Sprint A5.3 — the lifecycle of ONE checkout / payment attempt.
+ *
+ * `"pending_provider"` IS THE POINT OF THIS ENUM, and it is not a
+ * placeholder. A durable row has to exist BEFORE the provider is called,
+ * because the provider needs our internal transaction id as its idempotency
+ * key and as the metadata handle a later verified webhook reconciles
+ * through. But at that instant no checkout session exists anywhere, and
+ * calling that state `"created"` would be a lie that a crash then makes
+ * permanent — a row claiming a checkout that was never created, occupying
+ * the outstanding-attempt slot forever.
+ *
+ *   "pending_provider" — we intend to check out. Nothing exists at the
+ *                        provider yet, or the attempt to create it ended
+ *                        ambiguously. RESUMABLE: retrying replays the same
+ *                        idempotency key, so the provider returns the same
+ *                        session rather than a second one.
+ *   "created"          — a provider checkout session genuinely exists and is
+ *                        bound to this row. The customer may be sent to it.
+ *                        NOT payment: `created` authorizes nothing.
+ *   "failed"           — the attempt ended in a way that provably never
+ *                        created a provider session. Frees the outstanding
+ *                        slot so a fresh attempt may be made.
+ *   "paid"             — Sprint A5.4 only, and only from a VERIFIED webhook.
+ *   "expired"          — Sprint A5.4+: the provider session lapsed unused.
+ *   "refunded"         — Sprint A5.4+.
+ *
+ * Sprint A5.3 writes only `pending_provider`, `created`, and `failed`. The
+ * later three exist in the vocabulary now so the schema does not have to
+ * change to record them, NOT because anything writes them yet.
+ *
+ * NONE OF THESE IS ENTITLEMENT AUTHORITY. Even `"paid"` will not be: it
+ * records that money arrived. Whether a project may be prepared for
+ * production is answered by `ProductionUnlock` and nothing else.
+ */
+export const PAYMENT_TRANSACTION_STATUSES = [
+  "pending_provider",
+  "created",
+  "paid",
+  "failed",
+  "expired",
+  "refunded",
+] as const;
+
+export type PaymentTransactionStatus =
+  (typeof PAYMENT_TRANSACTION_STATUSES)[number];
+
+export const UNRECOGNIZED_PAYMENT_TRANSACTION_STATUS =
+  "unrecognized_status" as const;
+
+export type StoredPaymentTransactionStatus =
+  | PaymentTransactionStatus
+  | typeof UNRECOGNIZED_PAYMENT_TRANSACTION_STATUS;
+
+/**
+ * The statuses that occupy the one outstanding-attempt slot for a
+ * (project, profile). Mirrors the migration's partial unique index
+ * predicate exactly; the two must not drift.
+ *
+ * `pending_provider` is included deliberately. An attempt whose provider
+ * call ended ambiguously may correspond to a real, live checkout session we
+ * simply failed to record — letting a second attempt start alongside it is
+ * how a customer ends up looking at two payment pages for one purchase.
+ */
+export const OUTSTANDING_PAYMENT_TRANSACTION_STATUSES: readonly PaymentTransactionStatus[] =
+  ["pending_provider", "created"];
+
+/**
+ * Sprint A5.3 — ONE CHECKOUT / PAYMENT ATTEMPT.
+ *
+ * WHAT THIS IS NOT: the entitlement. `ProductionUnlock` is, and remains,
+ * the only thing that authorizes production preparation. A transaction
+ * records that somebody was sent to a payment page and what happened next;
+ * it never, at any status, grants anything. That separation is what makes
+ * "the browser came back from Stripe" structurally incapable of unlocking a
+ * project.
+ *
+ * `providerCheckoutSessionId` / `providerPaymentIntentId` are RECONCILIATION
+ * HANDLES, never authority. They exist so a verified webhook (A5.4) can find
+ * the row it is talking about. Possession of one proves nothing — anyone can
+ * read a Stripe id out of a redirect URL.
+ *
+ * `amountMinor` / `currency` / `productionProfile` are frozen from
+ * server-resolved configuration at creation and never re-read from config
+ * afterwards. A price change must not retroactively rewrite what somebody
+ * was charged.
+ */
+export interface PaymentTransaction {
+  id: string;
+  /** The project this attempt would unlock. Always the entitlement key. */
+  projectId: string;
+  /** Resolved from the PROJECT's durable binding, never from a request. */
+  acquisitionSessionId: string;
+  /** Narrowed fail-closed on read. */
+  productionProfile: StoredProductionProfile;
+  /** Narrowed fail-closed on read. */
+  provider: StoredPaymentProviderKey;
+  /** `null` until a provider checkout session genuinely exists. */
+  providerCheckoutSessionId: string | null;
+  /**
+   * Where to send the customer. Stored rather than re-derived so a repeat
+   * request reuses the SAME live session instead of creating a second one.
+   * Provider-issued and short-lived; never a secret.
+   */
+  providerCheckoutUrl: string | null;
+  /** `null` until the provider reports one (often only at completion). */
+  providerPaymentIntentId: string | null;
+  /** Frozen at creation from server config. Positive integer, minor units. */
+  amountMinor: number;
+  /** Frozen at creation. Lowercase ISO 4217. */
+  currency: string;
+  /** Narrowed fail-closed on read; nothing treats an unknown status as paid. */
+  status: StoredPaymentTransactionStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Narrows a persisted provider column, FAILING CLOSED. */
+export function readStoredPaymentProvider(
+  raw: string | null | undefined,
+): StoredPaymentProviderKey {
+  if (raw == null || raw === "") return UNRECOGNIZED_PAYMENT_PROVIDER;
+  if ((KNOWN_PAYMENT_PROVIDERS as readonly string[]).includes(raw)) {
+    return raw as PaymentProviderKey;
+  }
+  return UNRECOGNIZED_PAYMENT_PROVIDER;
+}
+
+/**
+ * Narrows a persisted transaction status, FAILING CLOSED.
+ *
+ * The direction that matters: a status this build cannot interpret is never
+ * `"paid"`, and — just as importantly — is never silently treated as
+ * outstanding either, so a corrupt row cannot permanently block a customer
+ * from checking out.
+ */
+export function readStoredPaymentTransactionStatus(
+  raw: string | null | undefined,
+): StoredPaymentTransactionStatus {
+  if (raw == null || raw === "") {
+    return UNRECOGNIZED_PAYMENT_TRANSACTION_STATUS;
+  }
+  if ((PAYMENT_TRANSACTION_STATUSES as readonly string[]).includes(raw)) {
+    return raw as PaymentTransactionStatus;
+  }
+  return UNRECOGNIZED_PAYMENT_TRANSACTION_STATUS;
+}
+
+/**
+ * Whether a transaction currently occupies the outstanding-attempt slot.
+ * Positive and explicit — never "not finished", which a future status this
+ * build has never heard of would silently pass.
+ */
+export function isOutstandingPaymentTransaction(
+  transaction: PaymentTransaction | null | undefined,
+): boolean {
+  if (!transaction) return false;
+  return (OUTSTANDING_PAYMENT_TRANSACTION_STATUSES as readonly string[]).includes(
+    transaction.status,
+  );
+}
+
+/**
+ * Whether this transaction can be handed to a customer as-is: a genuinely
+ * created provider session with somewhere to send them.
+ *
+ * Deliberately requires BOTH the id and the URL. A `created` row missing
+ * either is not a usable checkout, and pretending otherwise would send a
+ * customer to `undefined`.
+ */
+export function isUsableCheckout(
+  transaction: PaymentTransaction | null | undefined,
+): transaction is PaymentTransaction & {
+  providerCheckoutSessionId: string;
+  providerCheckoutUrl: string;
+} {
+  if (!transaction) return false;
+  return (
+    transaction.status === "created" &&
+    typeof transaction.providerCheckoutSessionId === "string" &&
+    transaction.providerCheckoutSessionId.length > 0 &&
+    typeof transaction.providerCheckoutUrl === "string" &&
+    transaction.providerCheckoutUrl.length > 0
+  );
+}
+
 /**
  * Sprint A2 (corrected): WHAT PRODUCTION ARTIFACT THE CUSTOMER ASKED
  * IHEARTPRINTS TO PRODUCE — structured, authoritative, and deliberately not

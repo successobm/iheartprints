@@ -33,6 +33,10 @@ import { createIntentExtractionCapability } from "@/capabilities/intent-extracti
 import { createInterviewIntelligenceCapability } from "@/capabilities/interview-intelligence";
 import { createIpSafetyCapability } from "@/capabilities/ip-safety";
 import { createOwnershipCapability } from "@/capabilities/ownership";
+import {
+  createPaymentCapability,
+  resolvePaymentProvider,
+} from "@/capabilities/payment";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import { createPrintVaultCapability } from "@/capabilities/print-vault";
 import { createProductIntelligenceCapability } from "@/capabilities/product-intelligence";
@@ -97,6 +101,16 @@ export interface CapabilityGraph {
    * spend control over an anonymous session, not an identity model.
    */
   acquisition: ReturnType<typeof createAcquisitionCapability>;
+  /**
+   * Sprint A5.3: the checkout boundary. Creates payment ATTEMPTS; never
+   * creates, activates, or reads a `ProductionUnlock`, and never authorizes
+   * finalization or generation.
+   *
+   * Deliberately NOT a dependency of `acquisition` — the entitlement gate
+   * reads the durable unlock through the repository and does not know a
+   * payment provider exists (ARCHITECTURE.md §23d).
+   */
+  payment: ReturnType<typeof createPaymentCapability>;
   ownership: ReturnType<typeof createOwnershipCapability>;
   /**
    * Existing Artwork → Print Ready Phase 1: the Upload Existing Artwork
@@ -202,6 +216,22 @@ export function createCapabilityGraph(
   );
   const finalArtworkScheduler = createFinalArtworkSchedulerCapability(finalArtworkWorker);
 
+  // Sprint A5.3: the checkout boundary. Resolves to `provider: null` in every
+  // environment that has not explicitly configured `PAYMENT_PROVIDER=stripe`
+  // with a credential and a public base URL — which is all of them today, and
+  // is a clean refusal rather than a failure.
+  //
+  // Deliberately NOT passed `acquisition`. The payment capability resolves the
+  // project's acquisition session from the repository itself, exactly as
+  // `AcquisitionCapability` does, so the spend boundary stays a leaf and never
+  // gains a dependency on commerce.
+  const resolvedPayment = resolvePaymentProvider();
+  const payment = createPaymentCapability(
+    repo,
+    resolvedPayment.provider,
+    resolvedPayment.publicBaseUrl,
+  );
+
   const conversation = createConversationCapability({
     repo,
     intentExtraction,
@@ -243,6 +273,7 @@ export function createCapabilityGraph(
     assets,
     ipSafety,
     acquisition,
+    payment,
     ownership: createOwnershipCapability(),
     // Existing Artwork → Print Ready Phase 1: repository + assets + the one
     // brief-mutation boundary. No provider is resolved here, and none exists

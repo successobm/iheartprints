@@ -8,7 +8,10 @@ import {
 } from "@/lib/domain/conversation";
 import {
   emptyInterviewState,
+  isOutstandingPaymentTransaction,
   productionIntentMatches,
+  readStoredPaymentProvider,
+  readStoredPaymentTransactionStatus,
   readStoredProductionProfile,
   readStoredProductionUnlockStatus,
 } from "@/lib/domain/types";
@@ -27,6 +30,7 @@ import type {
   GenerationJob,
   InterviewStateData,
   PaidImageIntent,
+  PaymentTransaction,
   PrintProject,
   ProductionAssetValidation,
   ProductionProfile,
@@ -47,9 +51,12 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  BindProviderCheckoutSessionInput,
   CreateProductionUnlockInput,
   FreeConceptAllocation,
+  OpenPaymentTransactionInput,
   PaidImageIntentReservation,
+  PaymentTransactionOpening,
   ProductionUnlockGrant,
   ProjectRepository,
   RecordPaidImageIntentFailureInput,
@@ -81,6 +88,8 @@ interface LocalDatabase {
   acquisitionFreeConceptClaims: AcquisitionFreeConceptClaim[];
   /** Sprint A5.1 — the commercial entitlement. */
   productionUnlocks: ProductionUnlock[];
+  /** Sprint A5.3 — checkout/payment attempts. Never the entitlement. */
+  paymentTransactions: PaymentTransaction[];
   assets: AssetRecord[];
   /** Sprint 2M Phase 2B. */
   finalDirectionApprovals: FinalDirectionApproval[];
@@ -111,6 +120,7 @@ function emptyDb(): LocalDatabase {
     acquisitionSessions: [],
     acquisitionFreeConceptClaims: [],
     productionUnlocks: [],
+    paymentTransactions: [],
     assets: [],
     finalDirectionApprovals: [],
     finalArtworkJobs: [],
@@ -224,6 +234,30 @@ async function readDb(): Promise<LocalDatabase> {
         revokedAt: unlock.revokedAt ?? null,
         revokedReason: unlock.revokedReason ?? null,
       })),
+      // Sprint A5.3: absent in every store written before payment
+      // transactions existed. Both narrowings FAIL CLOSED — an on-disk row
+      // carrying a provider or status this build has never heard of (a newer
+      // deploy's data, a hand-edited file) resolves to an unrecognized
+      // sentinel. Nothing reads an unknown status as `paid`, and nothing
+      // reads it as outstanding either, so a corrupt row can neither
+      // authorize a purchase nor permanently block one.
+      paymentTransactions: (parsed.paymentTransactions ?? []).map(
+        (transaction) => ({
+          ...transaction,
+          provider: readStoredPaymentProvider(
+            transaction.provider as string | null | undefined,
+          ),
+          status: readStoredPaymentTransactionStatus(
+            transaction.status as string | null | undefined,
+          ),
+          productionProfile: readStoredProductionProfile(
+            transaction.productionProfile as string | null | undefined,
+          ),
+          providerCheckoutSessionId: transaction.providerCheckoutSessionId ?? null,
+          providerCheckoutUrl: transaction.providerCheckoutUrl ?? null,
+          providerPaymentIntentId: transaction.providerPaymentIntentId ?? null,
+        }),
+      ),
       // Sprint 2M Phase 2B/2C: default the new reserved fields for on-disk
       // data written before they existed, so resume never crashes.
       assets: (parsed.assets ?? []).map((asset) => ({
@@ -1161,6 +1195,134 @@ export class LocalProjectRepository implements ProjectRepository {
     unlock.updatedAt = timestamp;
     await writeDb(db);
     return unlock;
+  }
+
+  // --- Sprint A5.3: payment transactions (checkout attempts) -----------
+
+  async getOutstandingPaymentTransaction(
+    projectId: string,
+    productionProfile: ProductionProfile,
+  ): Promise<PaymentTransaction | null> {
+    const db = await readDb();
+    // Mirrors the Supabase query's status filter exactly. Terminal rows are
+    // deliberately invisible here: a `failed` attempt must not strand a
+    // customer entitled to try again, and a `paid` one must not be put back
+    // in front of them.
+    return (
+      db.paymentTransactions.find(
+        (transaction) =>
+          transaction.projectId === projectId &&
+          transaction.productionProfile === productionProfile &&
+          isOutstandingPaymentTransaction(transaction),
+      ) ?? null
+    );
+  }
+
+  async getPaymentTransaction(id: string): Promise<PaymentTransaction | null> {
+    const db = await readDb();
+    return db.paymentTransactions.find((item) => item.id === id) ?? null;
+  }
+
+  async openPaymentTransaction(
+    projectId: string,
+    input: OpenPaymentTransactionInput,
+  ): Promise<PaymentTransactionOpening> {
+    const db = await readDb();
+
+    // The local store's equivalent of the partial unique index
+    // `payment_transactions_outstanding_per_project_profile_idx`. Every
+    // method here runs behind the process-wide `withLock` mutex, so this
+    // check-then-insert is atomic relative to every other call — which is
+    // what makes "two tabs converge on one payment page" a guarantee rather
+    // than a hope, matching what Postgres gives the Supabase store for free.
+    const existing = db.paymentTransactions.find(
+      (transaction) =>
+        transaction.projectId === projectId &&
+        transaction.productionProfile === input.productionProfile &&
+        isOutstandingPaymentTransaction(transaction),
+    );
+    if (existing) return { outcome: "existing", transaction: existing };
+
+    const timestamp = nowIso();
+    const transaction: PaymentTransaction = {
+      id: randomUUID(),
+      projectId,
+      acquisitionSessionId: input.acquisitionSessionId,
+      productionProfile: input.productionProfile,
+      provider: input.provider,
+      // Nothing exists at the provider yet, and the state is named for that
+      // rather than pretending a checkout was created.
+      providerCheckoutSessionId: null,
+      providerCheckoutUrl: null,
+      providerPaymentIntentId: null,
+      amountMinor: input.amountMinor,
+      currency: input.currency,
+      status: "pending_provider",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.paymentTransactions.push(transaction);
+    await writeDb(db);
+    return { outcome: "opened", transaction };
+  }
+
+  async bindProviderCheckoutSession(
+    id: string,
+    input: BindProviderCheckoutSessionInput,
+  ): Promise<PaymentTransaction | null> {
+    const db = await readDb();
+    const transaction = db.paymentTransactions.find((item) => item.id === id);
+    if (!transaction) return null;
+    // Conditional, mirroring the Supabase `.eq("status", "pending_provider")`:
+    // a late or duplicated bind must never re-point a transaction at a
+    // different session or resurrect a terminal one. The caller receives the
+    // row as it genuinely stands, which is the fact it needs.
+    if (transaction.status !== "pending_provider") return transaction;
+
+    // Mirrors the Supabase UNIQUE constraints: one provider session belongs
+    // to exactly one attempt, so a webhook can never resolve to two rows.
+    const sessionTaken = db.paymentTransactions.some(
+      (item) =>
+        item.id !== id &&
+        item.providerCheckoutSessionId === input.providerCheckoutSessionId,
+    );
+    if (sessionTaken) {
+      throw new UniqueConstraintViolationError(
+        "payment_transactions_provider_checkout_session_id_key",
+      );
+    }
+
+    const timestamp = nowIso();
+    transaction.providerCheckoutSessionId = input.providerCheckoutSessionId;
+    transaction.providerCheckoutUrl = input.providerCheckoutUrl;
+    transaction.providerPaymentIntentId = input.providerPaymentIntentId ?? null;
+    transaction.status = "created";
+    transaction.updatedAt = timestamp;
+    await writeDb(db);
+    return transaction;
+  }
+
+  async failPendingPaymentTransaction(
+    id: string,
+    reason: string | null,
+  ): Promise<PaymentTransaction | null> {
+    const db = await readDb();
+    const transaction = db.paymentTransactions.find((item) => item.id === id);
+    if (!transaction) return null;
+    // Only a pre-provider attempt may be failed. A `created` row describes a
+    // real provider session and a terminal row is already history; rewriting
+    // either would destroy the record rather than close it.
+    if (transaction.status !== "pending_provider") return transaction;
+
+    const timestamp = nowIso();
+    transaction.status = "failed";
+    transaction.updatedAt = timestamp;
+    await writeDb(db);
+    // `reason` is deliberately not persisted: there is no column for it, and
+    // adding one to carry a provider's error text is how provider dialect
+    // leaks into the durable domain. The caller logs it server-side.
+    void reason;
+    return transaction;
   }
 
   // --- Phase 2C0.5: durable paid image intents -------------------------
