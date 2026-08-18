@@ -7593,9 +7593,181 @@ was not modified by this sprint.
 
 ### What A5.3 does not do
 
-No webhook route, no webhook verification, no `payment_events` table (A5.4's
-authority), no entitlement activation, no customer payment UI, no generation
-unlock, no revision allowance, no refunds, and no signed recovery links.
+No webhook route, no webhook verification, no `payment_events` table, no
+entitlement activation, and no customer payment UI. A5.4 (§23e) adds the first
+four; customer payment UI remains unbuilt.
+
+---
+
+## 23e. Verified Webhook and Atomic Activation (Sprint A5.4)
+
+### The one authority chain
+
+```
+PaymentTransaction 'created'                        (§23d)
+        ↓
+Stripe-Signature verified against the RAW body      stripe-webhook-signature.ts
+        ↓
+PaymentEvent recorded  (provider_event_id UNIQUE)   ─┐
+        ↓                                            │ ONE PostgreSQL
+PaymentTransaction → 'paid'                          │ transaction:
+        ↓                                            │ apply_payment_event()
+ProductionUnlock → 'active'                         ─┘
+        ↓
+AcquisitionCapability.authorizeFinalization(projectId) allows   (§23c)
+```
+
+**The browser redirect appears nowhere in it.** `?checkout=complete` is a
+query parameter on a page; it reaches no code that writes to a payment or
+entitlement table, and the webhook route deliberately has no project id, no
+cookie, and no query parameter for it to arrive through. The regression test
+lands on the real success URL, re-reads every customer surface, and asserts the
+project is still locked — then delivers the webhook and asserts it is not.
+
+### Atomicity is a database transaction, not an ordering
+
+"Mark the transaction paid" and "create the unlock" are two statements against
+two tables. Over the Supabase REST API they are two round trips that cannot
+share a transaction, and a crash between them leaves exactly the two states
+this product must never be in:
+
+| Partial state | Consequence |
+|---|---|
+| paid, no unlock | the customer was charged and can produce nothing |
+| unlock, not paid | production reconstruction was given away |
+
+No ordering fixes that — the same lesson Sprint A4 Correction 1 learned about
+the free-concept window. So the whole transition is one function,
+`apply_payment_event`, and PostgreSQL's transaction is the guarantee.
+
+`scripts/verify-payment-events-postgres.sql` proves it against a live database
+rather than by inspection: a successful call is made inside a savepoint and
+then rolled back, and **all three** writes must vanish together. If the
+function committed anything independently, residue would survive.
+
+### What the function may and may not be told
+
+**May not:** `project_id`, `acquisition_session_id`, `production_profile`. They
+are read from the transaction row inside the function. A webhook able to supply
+them could unlock a different customer's project.
+
+**May:** the event's identity and digest, which transaction it *claims* to be
+about, and the provider's reported session / intent / amount / currency — every
+one of which is only ever **compared** against stored state, never used to
+establish it.
+
+Reconciliation refuses, and mutates nothing, on any of: unknown transaction,
+checkout-session mismatch, amount mismatch (no tolerance, no rounding, no
+conversion), currency mismatch, a payment intent already bound to another
+transaction, or a transaction in a state that may not be activated.
+
+### Completion is not payment
+
+`event.type === "checkout.session.completed"` is **not** evidence that money
+arrived. Only `payment_status === "paid"` is. `"unpaid"` is the delayed-
+settlement case a later `checkout.session.async_payment_succeeded` resolves,
+and `"no_payment_required"` describes a fully-discounted session this product
+never issues — treating either as paid would give away production
+reconstruction.
+
+### Supported events
+
+| Event | Action |
+|---|---|
+| `checkout.session.completed` | activate — **only if** `payment_status` is `paid` |
+| `checkout.session.async_payment_succeeded` | activate — the money for delayed payment methods |
+| `checkout.session.expired` | expire the attempt, freeing the outstanding slot |
+| everything else | recorded as `ignored`, acknowledged, acted on in no way |
+
+**Out-of-order transitions are defined and tested.** A paid transaction is
+never downgraded by a later `expired`. An expiry on an unpaid attempt frees the
+slot, and a completion arriving afterwards still pays — the money is real; our
+bookkeeping was merely early.
+
+### Idempotency, twice over
+
+`payment_events.provider_event_id` is UNIQUE and the insert is taken **first**,
+inside the same transaction as the payment application. A concurrent
+redelivery blocks on the index and then finds the conflict; it never reads,
+sees nothing, and grants a second time. Duplicates return `duplicate` and are
+answered 200 — a provider that never receives a 2xx retries forever.
+
+Behind that sits an independent second fence: two *distinct* event ids for the
+same payment (Stripe emits more than one per checkout) both reconcile, and the
+partial unique index on `production_unlocks` makes the second reuse the
+existing entitlement rather than duplicate it.
+
+`payment_transactions.provider_payment_intent_id` is UNIQUE, so one provider
+payment intent can never pay off two iHeartPrints transactions.
+
+### Signature verification
+
+Hand-written (`stripe-webhook-signature.ts`), not the Stripe SDK — the same
+decision A5.3 made for the checkout adapter, and for the same reasons. The
+algorithm is small and fully specified (HMAC-SHA256 over
+`"{timestamp}.{rawBody}"`, constant-time compare against each `v1=` value,
+timestamp tolerance), with no cryptographic subtlety; the four ways it actually
+goes wrong are all externally testable and all covered; and `stripe` would be a
+large dependency in the highest-trust path of a nine-package repository.
+
+Properties enforced and tested: the **raw bytes** are verified (a merely
+re-serialized body is refused, which is the failure a parse-then-verify
+implementation would have), the timestamp is inside the MAC (restamping a
+captured body does not revive it), tolerance is symmetric, several `v1` values
+are all tried so secret rotation does not break delivery, `v0` is ignored
+rather than used as a fallback, and comparison is constant-time on
+shape-checked input.
+
+Nothing is parsed before verification succeeds. The route reads the body
+exactly once as text and never calls `JSON.parse`.
+
+### Payment events store a digest, never the payload
+
+A provider event body carries the customer's email and billing address, card
+brand and last four, provider customer/account ids, and amounts. None of it is
+needed after reconciliation, and storing it would create a durable copy of
+payment PII that outlives the purchase and appears in every backup.
+`payload_digest` is a SHA-256 of the exact verified bytes: enough to prove
+afterwards which body was processed, useless for reconstructing it. A test
+asserts the customer's email does not appear anywhere in the stored record.
+
+### RPC security
+
+`apply_payment_event` is **SECURITY INVOKER** — the default, and deliberately
+not `DEFINER`. `service_role` already holds BYPASSRLS and full privileges on
+all three tables, so `DEFINER` would buy nothing and would create a standing
+privilege-escalation path through code that moves money. `search_path` is
+pinned, every table is schema-qualified, there is no dynamic SQL, and `p_action`
+is a closed enum validated on entry.
+
+PostgreSQL grants EXECUTE on new functions to PUBLIC by default — through
+PostgREST that would make the payment-activation authority callable by `anon`.
+The migration revokes it explicitly, and the proof asserts the revoke took
+effect (a negative control confirms the assertion fails when the grant is
+restored).
+
+### Refund automation is NOT implemented
+
+Deliberately deferred. `charge.refunded` and dispute events are recorded as
+`ignored` and change nothing; a refund must be actioned by an operator through
+`revokeProductionUnlock`. The schema is future-safe — `payment_transactions`
+already accepts `refunded`, `production_unlocks` already supports revocation,
+and both are separately tested — but nothing drives them from an event, and a
+half-implemented refund is worse than an honest manual one. A test pins this so
+it is a fact the suite enforces rather than a claim in a document.
+
+### Configuration coupling
+
+`STRIPE_WEBHOOK_SECRET` is **required** whenever `PAYMENT_PROVIDER=stripe`.
+This removes A5.3's documented hazard from the configuration space entirely:
+you cannot turn on charging without also being able to hear that a charge
+succeeded.
+
+### Generation remains locked
+
+Unchanged. A paid `ProductionUnlock` authorizes finalization only;
+`authorizeConceptGeneration` is untouched, and exploration, regeneration, and
+generative revision all remain refused for a prospect after payment.
 
 ---
 
@@ -7610,22 +7782,23 @@ Verified against the implementation:
   process; it is not started by customer HTTP requests
 - No live Supabase integration tests in CI
 - Filesystem/worker rate limiting is in-memory/single-instance
-- **No payment can complete (Sprint A5.4 is not implemented).** Checkout
-  creation exists (§23d) — a configured deployment can send a customer to a
-  real payment page — but nothing consumes the result. There is no webhook
-  route, no webhook verification, no `payment_events` table, and no code path
-  that moves a `PaymentTransaction` to `paid` or creates a `ProductionUnlock`
-  from one. A customer who paid today would be charged and would receive
-  nothing until an operator granted the unlock by hand. **Checkout must not
-  be enabled in production until A5.4 lands.**
 - **Payment is disabled by default and in every environment.**
-  `PAYMENT_PROVIDER` defaults to `none`, and `PRODUCTION_UNLOCK_AMOUNT_MINOR`
-  / `PRODUCTION_UNLOCK_CURRENCY` / `IHEARTPRINTS_PUBLIC_BASE_URL` have no
-  defaults and no development fallback — an unconfigured deployment refuses
-  checkout cleanly rather than inventing a price
-- **A production unlock can still only be created by a direct repository
-  call** (fixtures, tests, internal tooling), because A5.3 deliberately does
-  not create one
+  `PAYMENT_PROVIDER` defaults to `none`, and `STRIPE_SECRET_KEY` /
+  `STRIPE_WEBHOOK_SECRET` / `PRODUCTION_UNLOCK_AMOUNT_MINOR` /
+  `PRODUCTION_UNLOCK_CURRENCY` / `IHEARTPRINTS_PUBLIC_BASE_URL` have no
+  defaults and no development fallback. An unconfigured deployment refuses
+  checkout cleanly rather than inventing a price, and the webhook secret is
+  required whenever checkout is enabled (§23e) — so the A5.3 hazard of
+  charging customers nothing could confirm is no longer configurable
+- **There is no customer payment UI.** The checkout route exists and the
+  webhook works end to end, but nothing in the interface offers a customer a
+  way to pay, shows a price, or reflects a `payment_required` /
+  `payment_processing` / `production_unlocked` state.
+  `CustomerAcquisitionState` is unchanged. A5.5 owns that
+- **Refund automation is not implemented (§23e).** Refund and dispute events
+  are recorded as `ignored` and change nothing. A refund must be actioned by
+  an operator through `revokeProductionUnlock`; the schema and the revocation
+  path are future-safe and tested, but no event drives them
 - **A configured Stripe Price object is not reconciled against the recorded
   amount.** When `PRODUCTION_UNLOCK_PROVIDER_PRICE_ID` is set, Stripe's Price
   decides what the customer is charged while `amount_minor`/`currency` remain
@@ -7640,7 +7813,10 @@ Verified against the implementation:
   email is read from the project's own session, not the caller's). So the
   exposure is "an attacker can spend their own money on a stranger's
   project", not "an attacker can obtain a stranger's design". Route-level
-  project ownership remains a launch blocker for A5.7 / security hardening
+  project ownership remains a launch blocker for A5.7 / security hardening.
+  The webhook route (§23e) is deliberately NOT affected: it takes no project
+  id, no cookie, and no query parameter, and derives everything from the
+  durable transaction row inside the database
 - **A production unlock does not unlock generation.** After the one free
   concept, every further concept generation, exploration, and generative
   revision is still refused for an ordinary prospect, unlocked or not

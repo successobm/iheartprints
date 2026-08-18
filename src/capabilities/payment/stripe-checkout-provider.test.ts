@@ -25,6 +25,13 @@ import type { ProductionUnlockCheckoutRequest } from "./provider";
  */
 
 const FAKE_SECRET = "sk_test_0123456789abcdefghij";
+/**
+ * Sprint A5.4 made the signing secret a required constructor field. This
+ * suite never exercises webhook verification (that lives in
+ * stripe-webhook-signature.test.ts and production-unlock-webhook.test.ts),
+ * so this value exists only to construct the adapter.
+ */
+const FAKE_WEBHOOK_SECRET = "whsec_test_0123456789abcdefghij";
 
 function request(
   overrides: Partial<ProductionUnlockCheckoutRequest> = {},
@@ -76,7 +83,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
     const { fetchImpl, calls } = capturingFetch(() =>
       jsonResponse({ id: "cs_test_1", url: "https://checkout.stripe.test/c/1" }),
     );
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     const result = await provider.createProductionUnlockCheckout(request());
 
@@ -99,7 +110,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
     const { fetchImpl, calls } = capturingFetch(() =>
       jsonResponse({ id: "cs_test_1", url: "https://checkout.stripe.test/c/1" }),
     );
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     await provider.createProductionUnlockCheckout(request());
 
@@ -121,7 +136,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
     const { fetchImpl, calls } = capturingFetch(() =>
       jsonResponse({ id: "cs_test_1", url: "https://checkout.stripe.test/c/1" }),
     );
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     await provider.createProductionUnlockCheckout(request());
 
@@ -142,7 +161,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
     const { fetchImpl, calls } = capturingFetch(() =>
       jsonResponse({ id: "cs_test_1", url: "https://checkout.stripe.test/c/1" }),
     );
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     await provider.createProductionUnlockCheckout(request());
 
@@ -160,7 +183,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
     const { fetchImpl, calls } = capturingFetch(() =>
       jsonResponse({ id: "cs_test_1", url: "https://checkout.stripe.test/c/1" }),
     );
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     await provider.createProductionUnlockCheckout(
       request({ providerPriceId: "price_abc" }),
@@ -181,6 +208,7 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
     );
     const provider = new StripeCheckoutProvider({
       secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
       fetchImpl: expanded.fetchImpl,
     });
     const result = await provider.createProductionUnlockCheckout(request());
@@ -195,6 +223,7 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
     );
     const provider2 = new StripeCheckoutProvider({
       secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
       fetchImpl: asString.fetchImpl,
     });
     assert.equal(
@@ -214,7 +243,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
       const { fetchImpl } = capturingFetch(() =>
         jsonResponse({ error: { message: `bad key ${FAKE_SECRET}` } }, status),
       );
-      const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+      const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
       await assert.rejects(
         () => provider.createProductionUnlockCheckout(request()),
@@ -235,7 +268,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
     const { fetchImpl } = capturingFetch(() =>
       jsonResponse({ error: { message: "No such price" } }, 400),
     );
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     await assert.rejects(
       () => provider.createProductionUnlockCheckout(request()),
@@ -250,7 +287,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
 
   it("I: 5xx is AMBIGUOUS — a session may exist, so the attempt must stay resumable", async () => {
     const { fetchImpl, calls } = capturingFetch(() => jsonResponse({}, 503));
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     await assert.rejects(
       () => provider.createProductionUnlockCheckout(request()),
@@ -274,7 +315,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
   it("J: a 2xx whose body is unusable is ambiguous, not a clean failure", async () => {
     for (const body of [{ id: "cs_1" }, { url: "https://x.test" }, {}]) {
       const { fetchImpl } = capturingFetch(() => jsonResponse(body));
-      const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+      const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
       await assert.rejects(
         () => provider.createProductionUnlockCheckout(request()),
@@ -298,7 +343,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
       error.code = "ENOTFOUND";
       throw error;
     }) as unknown as typeof fetch;
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     await assert.rejects(
       () => provider.createProductionUnlockCheckout(request()),
@@ -319,7 +368,11 @@ describe("Sprint A5.3 — Stripe checkout adapter", () => {
       attempts += 1;
       throw new Error("socket hang up");
     }) as unknown as typeof fetch;
-    const provider = new StripeCheckoutProvider({ secretKey: FAKE_SECRET, fetchImpl });
+    const provider = new StripeCheckoutProvider({
+      secretKey: FAKE_SECRET,
+      webhookSecret: FAKE_WEBHOOK_SECRET,
+      fetchImpl,
+    });
 
     await assert.rejects(() => provider.createProductionUnlockCheckout(request()));
     assert.equal(

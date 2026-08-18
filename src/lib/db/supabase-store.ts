@@ -5,6 +5,7 @@ import {
 import {
   emptyInterviewState,
   OUTSTANDING_PAYMENT_TRANSACTION_STATUSES,
+  readStoredPaymentEventOutcome,
   readStoredPaymentProvider,
   readStoredPaymentTransactionStatus,
   readStoredProductionProfile,
@@ -37,6 +38,9 @@ import type {
   InterviewStateData,
   PaidImageIntent,
   PaidImageIntentStatus,
+  PaymentEvent,
+  PaymentEventApplication,
+  PaymentProviderKey,
   PaymentTransaction,
   PrintProject,
   ProductionAssetRole,
@@ -59,6 +63,7 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  ApplyPaymentEventInput,
   BindProviderCheckoutSessionInput,
   CreateProductionUnlockInput,
   FreeConceptAllocation,
@@ -163,6 +168,20 @@ type DbPaymentTransaction = {
   amount_minor: number | string;
   currency: string;
   status: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Sprint A5.4. Vocabulary columns typed as raw `string` so the mapper cannot skip narrowing. */
+type DbPaymentEvent = {
+  id: string;
+  provider: string | null;
+  provider_event_id: string;
+  event_type: string;
+  payload_digest: string;
+  received_at: string;
+  outcome: string | null;
+  processed_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -551,6 +570,22 @@ function mapProductionUnlock(row: DbProductionUnlock): ProductionUnlock {
  * never heard of. Nothing may read such a value as `"paid"`, and nothing may
  * read it as an outstanding attempt either.
  */
+/** Sprint A5.4: narrows provider and outcome FAIL-CLOSED, same reason as every other mapper here. */
+function mapPaymentEvent(row: DbPaymentEvent): PaymentEvent {
+  return {
+    id: row.id,
+    provider: readStoredPaymentProvider(row.provider),
+    providerEventId: row.provider_event_id,
+    eventType: row.event_type,
+    payloadDigest: row.payload_digest,
+    receivedAt: row.received_at,
+    outcome: readStoredPaymentEventOutcome(row.outcome),
+    processedAt: row.processed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function mapPaymentTransaction(row: DbPaymentTransaction): PaymentTransaction {
   return {
     id: row.id,
@@ -1789,6 +1824,76 @@ export class SupabaseProjectRepository implements ProjectRepository {
     // stands; the caller needs the winning session, not a failure.
     if (!data) return this.getPaymentTransaction(id);
     return mapPaymentTransaction(data as DbPaymentTransaction);
+  }
+
+  // --- Sprint A5.4: verified payment events + atomic activation --------
+
+  async getPaymentEventByProviderId(
+    provider: PaymentProviderKey,
+    providerEventId: string,
+  ): Promise<PaymentEvent | null> {
+    const { data, error } = await this.client
+      .from("payment_events")
+      .select("*")
+      .eq("provider", provider)
+      .eq("provider_event_id", providerEventId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapPaymentEvent(data as DbPaymentEvent) : null;
+  }
+
+  /**
+   * THE ATOMIC PAYMENT-TO-ENTITLEMENT TRANSITION — a single database
+   * function call, and deliberately not a sequence of REST writes.
+   *
+   * The PostgREST API cannot span two tables in one transaction, so
+   * "mark the transaction paid" and "activate the unlock" as separate calls
+   * would leave a crash window producing exactly the two states this product
+   * must never be in: charged-with-no-entitlement, or entitled-without-payment.
+   * `apply_payment_event` puts the whole decision inside one PostgreSQL
+   * transaction, where the database's own atomicity is the guarantee.
+   *
+   * Note which parameters are ABSENT: project, acquisition session, and
+   * production profile. The function reads them from the transaction row, so
+   * a webhook cannot name a different customer's project.
+   *
+   * An RPC-level error is a genuine infrastructure fault and is thrown. Every
+   * BUSINESS outcome — unmatched, mismatched, ignored, duplicate — comes back
+   * as a return value, so a webhook that will never become valid is answered
+   * rather than retried forever.
+   */
+  async applyPaymentEvent(
+    input: ApplyPaymentEventInput,
+  ): Promise<PaymentEventApplication> {
+    const { data, error } = await this.client.rpc("apply_payment_event", {
+      p_provider: input.provider,
+      p_provider_event_id: input.providerEventId,
+      p_event_type: input.eventType,
+      p_payload_digest: input.payloadDigest,
+      p_action: input.action,
+      p_payment_transaction_id: input.paymentTransactionId,
+      p_provider_checkout_session_id: input.providerCheckoutSessionId,
+      p_provider_payment_intent_id: input.providerPaymentIntentId,
+      p_amount_minor: input.amountMinor,
+      p_currency: input.currency,
+    });
+    if (error) throw error;
+
+    // Narrowed fail-closed: a return value this build cannot interpret is
+    // never read as a successful activation. The function's vocabulary and
+    // this list must agree, and if they ever diverge the safe answer is
+    // "something happened that we did not understand", not "processed".
+    const outcome = typeof data === "string" ? data : "";
+    if (
+      outcome === "processed" ||
+      outcome === "ignored" ||
+      outcome === "unmatched" ||
+      outcome === "rejected_mismatch" ||
+      outcome === "duplicate"
+    ) {
+      return outcome;
+    }
+    throw new Error("apply_payment_event returned an unrecognized outcome");
   }
 
   async failPendingPaymentTransaction(

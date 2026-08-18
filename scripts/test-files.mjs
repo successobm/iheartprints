@@ -296,4 +296,15 @@ export const TEST_FILES = [
   "src/capabilities/payment/stripe-checkout-provider.test.ts",
   "src/capabilities/payment/production-unlock-checkout.test.ts",
   "src/app/api/projects/[projectId]/production-unlock/checkout/route.test.ts",
+  // Sprint A5.4: the verified webhook — the ONLY path from money to
+  // entitlement. The signature matrix is the security boundary of the whole
+  // sprint (constant-time compare, timestamp tolerance, multi-v1 rotation,
+  // raw-bytes-not-re-serialized). The end-to-end suite drives RAW HTTP bodies
+  // with real signatures through the real adapter into the real atomic
+  // reconciliation, and its load-bearing assertions are the refusals: an
+  // unpaid completion, a mismatched amount, a reused payment intent, and a
+  // browser redirect all grant nothing.
+  "src/capabilities/payment/stripe-webhook-signature.test.ts",
+  "src/capabilities/payment/production-unlock-webhook.test.ts",
+  "src/app/api/payments/webhook/route.test.ts",
 ];

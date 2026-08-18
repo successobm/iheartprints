@@ -1793,4 +1793,4 @@
  *   authorization is untouched, and `AcquisitionCapability` was not modified.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "A5.3" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "A5.4" as const;

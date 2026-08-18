@@ -6,6 +6,7 @@ import {
   PAYMENT_PROVIDER_ENV,
   PUBLIC_BASE_URL_ENV,
   STRIPE_SECRET_KEY_ENV,
+  STRIPE_WEBHOOK_SECRET_ENV,
 } from "./payment-provider-config";
 import {
   getProductionUnlockOfferConfig,
@@ -27,14 +28,16 @@ import {
 const TOUCHED_ENV = [
   PAYMENT_PROVIDER_ENV,
   STRIPE_SECRET_KEY_ENV,
+  STRIPE_WEBHOOK_SECRET_ENV,
   PUBLIC_BASE_URL_ENV,
   PRODUCTION_UNLOCK_AMOUNT_MINOR_ENV,
   PRODUCTION_UNLOCK_CURRENCY_ENV,
   PRODUCTION_UNLOCK_PROVIDER_PRICE_ID_ENV,
 ] as const;
 
-/** A syntactically valid TEST key. Never a real credential, never live. */
+/** Syntactically valid TEST values. Never real credentials, never live. */
 const VALID_TEST_SECRET = "sk_test_0123456789abcdefghij";
+const VALID_WEBHOOK_SECRET = "whsec_test_0123456789abcdefghij";
 
 function setEnv(values: Partial<Record<(typeof TOUCHED_ENV)[number], string>>) {
   for (const key of TOUCHED_ENV) delete process.env[key];
@@ -172,6 +175,7 @@ describe("Sprint A5.3 — payment provider configuration", () => {
       setEnv({
         [PAYMENT_PROVIDER_ENV]: requested,
         [STRIPE_SECRET_KEY_ENV]: VALID_TEST_SECRET,
+        [STRIPE_WEBHOOK_SECRET_ENV]: VALID_WEBHOOK_SECRET,
         [PUBLIC_BASE_URL_ENV]: "https://example.test",
       });
       const config = getPaymentProviderConfig();
@@ -211,6 +215,7 @@ describe("Sprint A5.3 — payment provider configuration", () => {
       setEnv({
         [PAYMENT_PROVIDER_ENV]: "stripe",
         [STRIPE_SECRET_KEY_ENV]: secret,
+        [STRIPE_WEBHOOK_SECRET_ENV]: VALID_WEBHOOK_SECRET,
         [PUBLIC_BASE_URL_ENV]: "https://example.test",
       });
       const config = getPaymentProviderConfig();
@@ -226,6 +231,7 @@ describe("Sprint A5.3 — payment provider configuration", () => {
     setEnv({
       [PAYMENT_PROVIDER_ENV]: "stripe",
       [STRIPE_SECRET_KEY_ENV]: "pk_test_SUPERSECRETVALUE12345",
+      [STRIPE_WEBHOOK_SECRET_ENV]: VALID_WEBHOOK_SECRET,
       [PUBLIC_BASE_URL_ENV]: "https://example.test",
     });
     const config = getPaymentProviderConfig();
@@ -239,6 +245,7 @@ describe("Sprint A5.3 — payment provider configuration", () => {
     setEnv({
       [PAYMENT_PROVIDER_ENV]: "stripe",
       [STRIPE_SECRET_KEY_ENV]: VALID_TEST_SECRET,
+      [STRIPE_WEBHOOK_SECRET_ENV]: VALID_WEBHOOK_SECRET,
     });
     assert.equal(
       getPaymentProviderConfig().mode === "unavailable" &&
@@ -252,6 +259,7 @@ describe("Sprint A5.3 — payment provider configuration", () => {
       setEnv({
         [PAYMENT_PROVIDER_ENV]: "stripe",
         [STRIPE_SECRET_KEY_ENV]: VALID_TEST_SECRET,
+        [STRIPE_WEBHOOK_SECRET_ENV]: VALID_WEBHOOK_SECRET,
         [PUBLIC_BASE_URL_ENV]: base,
       });
       assert.equal(
@@ -266,6 +274,7 @@ describe("Sprint A5.3 — payment provider configuration", () => {
     setEnv({
       [PAYMENT_PROVIDER_ENV]: "stripe",
       [STRIPE_SECRET_KEY_ENV]: VALID_TEST_SECRET,
+      [STRIPE_WEBHOOK_SECRET_ENV]: VALID_WEBHOOK_SECRET,
       [PUBLIC_BASE_URL_ENV]: "https://iheartprints.example/",
     });
     const config = getPaymentProviderConfig();
@@ -274,5 +283,69 @@ describe("Sprint A5.3 — payment provider configuration", () => {
     assert.equal(config.provider, "stripe");
     assert.equal(config.publicBaseUrl, "https://iheartprints.example");
     assert.equal(config.secretKey, VALID_TEST_SECRET);
+    assert.equal(config.webhookSecret, VALID_WEBHOOK_SECRET);
+  });
+
+  /* ================================================================== */
+  /* Sprint A5.4 — the webhook secret                                    */
+  /* ================================================================== */
+
+  it("A5.4: refuses to enable checkout at all without a webhook secret", () => {
+    // THE COUPLING IS THE POINT. A5.3 shipped a documented hazard: a
+    // deployment could take payments while nothing consumed the result, so
+    // customers would be charged and receive nothing. Requiring the signing
+    // secret as a precondition of `mode: "stripe"` removes that state from the
+    // configuration space — you cannot turn on charging without also being
+    // able to hear that the charge succeeded.
+    setEnv({
+      [PAYMENT_PROVIDER_ENV]: "stripe",
+      [STRIPE_SECRET_KEY_ENV]: VALID_TEST_SECRET,
+      [PUBLIC_BASE_URL_ENV]: "https://example.test",
+    });
+    const config = getPaymentProviderConfig();
+    assert.equal(config.mode, "unavailable");
+    assert.equal(
+      config.mode === "unavailable" && config.safeErrorCode,
+      "PAYMENT_WEBHOOK_SECRET_NOT_CONFIGURED",
+    );
+  });
+
+  it("A5.4: refuses a malformed webhook secret, including the API key in the wrong slot", () => {
+    for (const secret of [
+      VALID_TEST_SECRET,            // the API key pasted into the webhook slot
+      "pk_test_0123456789abcdefghij",
+      "whsec_short",
+      "0123456789abcdefghijklmno",
+    ]) {
+      setEnv({
+        [PAYMENT_PROVIDER_ENV]: "stripe",
+        [STRIPE_SECRET_KEY_ENV]: VALID_TEST_SECRET,
+        [STRIPE_WEBHOOK_SECRET_ENV]: secret,
+        [PUBLIC_BASE_URL_ENV]: "https://example.test",
+      });
+      const config = getPaymentProviderConfig();
+      assert.equal(
+        config.mode === "unavailable" && config.safeErrorCode,
+        "PAYMENT_WEBHOOK_SECRET_INVALID",
+        `webhook secret shaped "${secret.slice(0, 8)}…" must be refused`,
+      );
+    }
+  });
+
+  it("A5.4: never echoes the webhook secret in its internal reason", () => {
+    setEnv({
+      [PAYMENT_PROVIDER_ENV]: "stripe",
+      [STRIPE_SECRET_KEY_ENV]: VALID_TEST_SECRET,
+      // Deliberately TOO SHORT to be valid, so the config actually rejects it
+      // — an earlier version of this test used a well-formed value, which
+      // resolved successfully and asserted nothing about leakage at all.
+      [STRIPE_WEBHOOK_SECRET_ENV]: "whsec_LEAKME",
+      [PUBLIC_BASE_URL_ENV]: "https://example.test",
+    });
+    const config = getPaymentProviderConfig();
+    assert.equal(config.mode, "unavailable");
+    if (config.mode !== "unavailable") return;
+    assert.equal(config.internalReason.includes("LEAKME"), false);
+    assert.equal(config.internalReason.includes("whsec_"), false);
   });
 });

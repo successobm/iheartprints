@@ -20,6 +20,8 @@ import type {
   MessageRole,
   PaidImageIntent,
   PaidImageIntentStatus,
+  PaymentEvent,
+  PaymentEventApplication,
   PaymentProviderKey,
   PaymentTransaction,
   PrintProject,
@@ -434,6 +436,36 @@ export interface BindProviderCheckoutSessionInput {
   providerPaymentIntentId?: string | null;
 }
 
+/**
+ * Sprint A5.4: everything the atomic authority is allowed to know.
+ *
+ * Note what is absent and why: no project id, no acquisition session id, no
+ * production profile. They are derived from the transaction row inside the
+ * operation. Every provider-reported value below exists to be COMPARED, never
+ * to establish a fact.
+ */
+export interface ApplyPaymentEventInput {
+  provider: PaymentProviderKey;
+  /** The provider's event id. UNIQUE — the idempotency fence. */
+  providerEventId: string;
+  /** Verbatim provider event type, for forensics only. */
+  eventType: string;
+  /** SHA-256 (hex) of the verified raw bytes. Never the payload itself. */
+  payloadDigest: string;
+  /** Closed vocabulary decided by the provider adapter. */
+  action: "activate" | "expire" | "ignore";
+  /** A LOOKUP HANDLE for the durable row. `null` for an ignored event. */
+  paymentTransactionId: string | null;
+  /** Cross-checked against the stored session id; a mismatch refuses. */
+  providerCheckoutSessionId: string | null;
+  /** Bound only on success. The column's UNIQUE constraint is a second fence. */
+  providerPaymentIntentId: string | null;
+  /** Compared exactly. No conversion, no rounding, no tolerance. */
+  amountMinor: number | null;
+  /** Compared exactly. */
+  currency: string | null;
+}
+
 /** Sprint A4: normalized email plus the moment it was captured. */
 export interface CaptureAcquisitionEmailInput {
   /** Already trimmed/lowercased by `AcquisitionCapability` — repositories never normalize. */
@@ -845,6 +877,49 @@ export interface ProjectRepository {
     id: string,
     reason: string | null,
   ): Promise<PaymentTransaction | null>;
+
+  // --- Sprint A5.4: verified payment events + atomic activation --------
+
+  /**
+   * THE ATOMIC PAYMENT-TO-ENTITLEMENT TRANSITION, and the only thing in this
+   * repository that may ever create a `ProductionUnlock` from a payment.
+   *
+   * ONE INDIVISIBLE OPERATION. Recording the verified event, reconciling it
+   * against the durable transaction, marking that transaction paid, and
+   * activating the unlock either ALL happen or NONE do. Implementations must
+   * not expose this as several calls a caller sequences, because the two
+   * states it exists to prevent are exactly the partial ones:
+   *
+   *   paid, no unlock    the customer was charged and can produce nothing.
+   *   unlock, not paid   production reconstruction was given away.
+   *
+   * The Supabase implementation calls the `apply_payment_event` database
+   * function — a real PostgreSQL transaction, because the REST API cannot span
+   * two tables otherwise. The local store performs the same sequence under its
+   * process-wide lock. Both make identical decisions.
+   *
+   * WHAT IT MAY NOT BE TOLD: `projectId`, `acquisitionSessionId`, or
+   * `productionProfile`. Those are read from the transaction row named by
+   * `paymentTransactionId`. A webhook able to supply them could unlock a
+   * different customer's project, so the parameter simply does not exist.
+   *
+   * Every other provider-reported value is COMPARED against stored state,
+   * never used to establish it. Amount and currency must match EXACTLY.
+   *
+   * Returns `"duplicate"` when this provider event was already recorded — the
+   * uniqueness on `provider_event_id` participates in the transaction, so a
+   * concurrent redelivery blocks and then finds the conflict rather than
+   * reading, seeing nothing, and granting a second time.
+   */
+  applyPaymentEvent(
+    input: ApplyPaymentEventInput,
+  ): Promise<PaymentEventApplication>;
+
+  /** Read-only, for tests and operational forensics. Never a gate input. */
+  getPaymentEventByProviderId(
+    provider: PaymentProviderKey,
+    providerEventId: string,
+  ): Promise<PaymentEvent | null>;
 
   // --- Phase 2C0.5: durable paid image intents -------------------------
 

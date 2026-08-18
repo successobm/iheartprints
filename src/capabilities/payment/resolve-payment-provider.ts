@@ -47,7 +47,10 @@ export function resolvePaymentProvider(
   }
 
   return {
-    provider: new StripeCheckoutProvider({ secretKey: config.secretKey }),
+    provider: new StripeCheckoutProvider({
+      secretKey: config.secretKey,
+      webhookSecret: config.webhookSecret,
+    }),
     publicBaseUrl: config.publicBaseUrl,
     config,
   };

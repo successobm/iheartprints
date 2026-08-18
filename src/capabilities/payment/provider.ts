@@ -18,15 +18,18 @@
  *            three strings, and `ProviderError` (reused from the concept/
  *            final-artwork providers) is the only failure vocabulary.
  *
- * DELIBERATELY NO WEBHOOK CONTRACT. Verifying and interpreting provider
- * events is A5.4's authority; adding a `verifyWebhook` method here now would
- * be an interface nothing implements against a security boundary nothing
- * enforces yet. The only forward-compatibility this slice owes A5.4 is that
- * the provider is handed our internal transaction id (below) so a verified
- * event can be traced back to a durable row.
+ * Sprint A5.4 added `verifyWebhook`. Both halves of it — the signing scheme
+ * and the event shape — are provider dialect, so both belong to the adapter;
+ * a caller receives a `NormalizedPaymentEvent` and never learns which payment
+ * company sent it. The forward-compatibility A5.3 owed A5.4 was exactly one
+ * thing, and it held: the provider is handed our internal transaction id
+ * (below), so a verified event can be traced back to a durable row without
+ * any provider value ever becoming authority.
  */
 
 import type { ProductionProfile } from "@/lib/domain/types";
+
+import type { NormalizedPaymentEvent } from "./webhook-contract";
 
 /**
  * A fully server-resolved purchase description. Every field's provenance is
@@ -113,4 +116,40 @@ export interface PaymentProvider {
   createProductionUnlockCheckout(
     request: ProductionUnlockCheckoutRequest,
   ): Promise<ProductionUnlockCheckoutResult>;
+  /**
+   * Sprint A5.4: verifies a webhook's signature against the RAW body and
+   * normalizes the result.
+   *
+   * Both halves belong to the adapter because both are provider dialect: the
+   * signing scheme and the event shape. The caller receives a provider-neutral
+   * decision and never learns which payment company sent it.
+   *
+   * MUST verify before parsing. MUST NOT throw for an invalid signature — an
+   * unverified request is an ordinary, expected event on a public endpoint,
+   * not an exception.
+   */
+  verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult;
+}
+
+/**
+ * Sprint A5.4: a verified provider notification, or the reason it was not.
+ *
+ * `verified: false` carries NO detail beyond an internal reason the caller
+ * logs — the route answers a bare 400. An attacker probing this endpoint must
+ * not learn which part of their forgery failed.
+ */
+export type VerifyWebhookResult =
+  | { verified: true; event: NormalizedPaymentEvent; payloadDigest: string }
+  | { verified: false; internalReason: string };
+
+export interface VerifyWebhookInput {
+  /**
+   * The EXACT raw body bytes. Never parsed-then-re-serialized JSON: the MAC
+   * covers bytes, not meaning.
+   */
+  rawBody: string;
+  /** The provider's signature header, verbatim. */
+  signatureHeader: string | null;
+  /** Injected so signature-tolerance behaviour is testable without a fake clock. */
+  nowSeconds?: number;
 }

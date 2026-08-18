@@ -12,10 +12,15 @@
  * the server and not by anything a browser sent.
  */
 
+import { createHash } from "node:crypto";
+
 import type {
+  NormalizedPaymentEvent,
   PaymentProvider,
   ProductionUnlockCheckoutRequest,
   ProductionUnlockCheckoutResult,
+  VerifyWebhookInput,
+  VerifyWebhookResult,
 } from "@/capabilities/payment";
 
 /**
@@ -79,6 +84,50 @@ export class FakePaymentProvider implements PaymentProvider {
   /** Distinct checkout sessions this fake ever issued. */
   get issuedSessionIds(): string[] {
     return [...new Set([...this.byIdempotencyKey.values()].map((r) => r.providerCheckoutSessionId))];
+  }
+
+  /**
+   * Scripted webhook verification, for tests about what the CAPABILITY does
+   * with a verified event.
+   *
+   * Deliberately not a second signature implementation. The real one
+   * (`stripe-webhook-signature.ts`) is exercised end-to-end through the real
+   * adapter and the real route by `stripe-webhook-signature.test.ts` and
+   * `route.test.ts`; a fake that re-implemented HMAC could drift from it and
+   * make a broken verifier look tested.
+   *
+   * Default: refuse everything. A test that wants a verified event must say
+   * so, so no test can accidentally pass because the fake was lenient.
+   */
+  private webhookBehavior:
+    | { kind: "reject" }
+    | { kind: "verify"; event: NormalizedPaymentEvent } = { kind: "reject" };
+
+  /** Every webhook input this provider was handed, in order. */
+  readonly webhookInputs: VerifyWebhookInput[] = [];
+
+  verifiesWebhookAs(event: NormalizedPaymentEvent): this {
+    this.webhookBehavior = { kind: "verify", event };
+    return this;
+  }
+
+  rejectsWebhooks(): this {
+    this.webhookBehavior = { kind: "reject" };
+    return this;
+  }
+
+  verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult {
+    this.webhookInputs.push(input);
+    if (this.webhookBehavior.kind === "reject") {
+      return { verified: false, internalReason: "fake_rejected" };
+    }
+    return {
+      verified: true,
+      event: this.webhookBehavior.event,
+      // Digest of the real raw body, so a test can assert the stored digest
+      // genuinely describes the bytes that arrived.
+      payloadDigest: createHash("sha256").update(input.rawBody, "utf8").digest("hex"),
+    };
   }
 
   async createProductionUnlockCheckout(

@@ -62,6 +62,7 @@ import {
   KNOWN_PAYMENT_PROVIDERS,
   normalizeProductionIntent,
   productionUnlockAuthorizes,
+  type PaymentEventApplication,
   type PaymentProviderKey,
   type PaymentTransaction,
   type ProductionProfile,
@@ -110,6 +111,37 @@ export type CreateCheckoutResult =
     }
   | { ok: false; customerMessage: string };
 
+/**
+ * Sprint A5.4: what the webhook route should answer.
+ *
+ * Two outcomes only, because a payment provider treats the response as a
+ * retry instruction and nothing else:
+ *
+ *   "acknowledged" — 200. The event was verified and decided. That decision
+ *                    may have been "processed", but equally "ignored",
+ *                    "unmatched", or "rejected_mismatch": all four are FINAL,
+ *                    and re-delivering them would never produce a different
+ *                    answer. Acknowledging is how a permanent refusal avoids
+ *                    becoming an infinite retry loop.
+ *   "rejected"     — 400. The request was not verifiably from the provider,
+ *                    so nothing about it was interpreted at all.
+ *
+ * Deliberately NOT a mirror of `PaymentEventOutcome`. The provider does not
+ * need to know what we decided, and telling it would leak whether a given
+ * transaction id exists.
+ */
+export type HandleWebhookResult =
+  | { status: "acknowledged"; outcome: PaymentEventApplication }
+  | { status: "rejected" };
+
+export interface HandleWebhookInput {
+  /** The EXACT raw body bytes, read once by the route. */
+  rawBody: string;
+  signatureHeader: string | null;
+  /** Injected only by tests, to exercise signature tolerance. */
+  nowSeconds?: number;
+}
+
 export interface PaymentCapability {
   /**
    * THE CHECKOUT GATE.
@@ -121,6 +153,20 @@ export interface PaymentCapability {
    * entitled".
    */
   createCheckout(projectId: string): Promise<CreateCheckoutResult>;
+  /**
+   * Sprint A5.4 — THE ONLY PATH FROM MONEY TO ENTITLEMENT.
+   *
+   * Verifies the provider's signature against the RAW bytes, normalizes the
+   * event behind the provider boundary, and hands the result to the single
+   * atomic database authority. Nothing here decides anything about a project;
+   * it establishes that the provider really said this, and then lets the
+   * durable transaction row supply every fact.
+   *
+   * This method is unreachable from a browser redirect. `?checkout=complete`
+   * is a query parameter on a page; it reaches no code that writes to a
+   * payment or entitlement table.
+   */
+  handleWebhook(input: HandleWebhookInput): Promise<HandleWebhookResult>;
 }
 
 /**
@@ -452,6 +498,97 @@ export function createPaymentCapability(
         { projectId, paymentTransactionId: transaction.id },
       );
       return { ok: true, checkoutUrl: created.checkoutUrl, reused };
+    },
+
+    async handleWebhook(input) {
+      // A deployment with no provider configured has no signing secret and
+      // therefore no way to verify anything. Rejected rather than
+      // acknowledged: acknowledging would tell a caller that an unverifiable
+      // request was accepted.
+      if (!provider) {
+        console.warn("Payment webhook received while no provider is configured");
+        return { status: "rejected" };
+      }
+
+      // (1) VERIFY FIRST. Nothing below this line has looked at the body.
+      const verification = provider.verifyWebhook({
+        rawBody: input.rawBody,
+        signatureHeader: input.signatureHeader,
+        nowSeconds: input.nowSeconds,
+      });
+
+      if (!verification.verified) {
+        // Logged with the internal reason, answered with nothing. An attacker
+        // probing this endpoint must not learn which part of their forgery
+        // failed, and a legitimate misconfiguration is diagnosable from the
+        // server's own logs.
+        console.warn("Payment webhook signature rejected", {
+          internalReason: verification.internalReason,
+        });
+        return { status: "rejected" };
+      }
+
+      const event = verification.event;
+
+      // (2) Guard the provider vocabulary at the boundary. The adapter is
+      // ours, so this is unreachable today; it exists because the day a second
+      // provider is added, this is the line that stops one provider's event
+      // being recorded under another's name.
+      if (
+        !(KNOWN_PAYMENT_PROVIDERS as readonly string[]).includes(
+          provider.providerKey,
+        )
+      ) {
+        console.error("Payment webhook from an unrecognized provider adapter");
+        return { status: "rejected" };
+      }
+
+      // (3) ONE atomic call. Recording the event, reconciling it, marking the
+      // transaction paid, and activating the unlock happen together or not at
+      // all — see `ProjectRepository.applyPaymentEvent`.
+      //
+      // Everything below is a LOOKUP HANDLE or a value to be COMPARED. There
+      // is deliberately no project id, acquisition session id, or production
+      // profile in this call: the transaction row owns them, and a webhook
+      // able to supply them could unlock a different customer's project.
+      let outcome: PaymentEventApplication;
+      try {
+        outcome = await repo.applyPaymentEvent({
+          provider: provider.providerKey as PaymentProviderKey,
+          providerEventId: event.providerEventId,
+          eventType: event.eventType,
+          payloadDigest: verification.payloadDigest,
+          action: event.action,
+          paymentTransactionId: event.paymentTransactionId,
+          providerCheckoutSessionId: event.providerCheckoutSessionId,
+          providerPaymentIntentId: event.providerPaymentIntentId,
+          amountMinor: event.amountMinor,
+          currency: event.currency,
+        });
+      } catch (error) {
+        // A genuine infrastructure fault, not a business refusal. Rethrown so
+        // the route answers 5xx and the provider RETRIES — which is correct
+        // here and only here: the event was real and may still be applicable
+        // once the database is reachable again.
+        console.error("Payment webhook reconciliation failed", {
+          providerEventId: event.providerEventId,
+          eventType: event.eventType,
+        });
+        throw error;
+      }
+
+      // Logged at info with no customer content: an event id, a provider event
+      // type, and what we did. No email, no amount, no project, no payload.
+      console.info("Payment webhook processed", {
+        providerEventId: event.providerEventId,
+        eventType: event.eventType,
+        outcome,
+      });
+
+      // Every decided outcome is acknowledged, including the refusals. They
+      // are FINAL — redelivery would reach the same conclusion — and answering
+      // anything else would make a permanent refusal an infinite retry loop.
+      return { status: "acknowledged", outcome };
     },
   };
 }

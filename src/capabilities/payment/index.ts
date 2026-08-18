@@ -13,6 +13,8 @@ export {
   type PaymentCapability,
   type CreateCheckoutResult,
   type CheckoutRefusalReason,
+  type HandleWebhookInput,
+  type HandleWebhookResult,
 } from "./payment-capability";
 export { CHECKOUT_UNAVAILABLE_MESSAGE } from "./payment-copy";
 export {
@@ -30,4 +32,11 @@ export type {
   PaymentProvider,
   ProductionUnlockCheckoutRequest,
   ProductionUnlockCheckoutResult,
+  VerifyWebhookInput,
+  VerifyWebhookResult,
 } from "./provider";
+export type {
+  NormalizedPaymentEvent,
+  WebhookAction,
+} from "./webhook-contract";
+export { STRIPE_SIGNATURE_HEADER } from "./stripe-webhook-signature";

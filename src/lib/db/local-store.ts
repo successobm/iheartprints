@@ -10,6 +10,7 @@ import {
   emptyInterviewState,
   isOutstandingPaymentTransaction,
   productionIntentMatches,
+  readStoredPaymentEventOutcome,
   readStoredPaymentProvider,
   readStoredPaymentTransactionStatus,
   readStoredProductionProfile,
@@ -30,6 +31,10 @@ import type {
   GenerationJob,
   InterviewStateData,
   PaidImageIntent,
+  PaymentEvent,
+  PaymentEventApplication,
+  PaymentEventOutcome,
+  PaymentProviderKey,
   PaymentTransaction,
   PrintProject,
   ProductionAssetValidation,
@@ -51,6 +56,7 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  ApplyPaymentEventInput,
   BindProviderCheckoutSessionInput,
   CreateProductionUnlockInput,
   FreeConceptAllocation,
@@ -90,6 +96,8 @@ interface LocalDatabase {
   productionUnlocks: ProductionUnlock[];
   /** Sprint A5.3 — checkout/payment attempts. Never the entitlement. */
   paymentTransactions: PaymentTransaction[];
+  /** Sprint A5.4 — verified provider notifications. Digest only, never payloads. */
+  paymentEvents: PaymentEvent[];
   assets: AssetRecord[];
   /** Sprint 2M Phase 2B. */
   finalDirectionApprovals: FinalDirectionApproval[];
@@ -121,6 +129,7 @@ function emptyDb(): LocalDatabase {
     acquisitionFreeConceptClaims: [],
     productionUnlocks: [],
     paymentTransactions: [],
+    paymentEvents: [],
     assets: [],
     finalDirectionApprovals: [],
     finalArtworkJobs: [],
@@ -258,6 +267,20 @@ async function readDb(): Promise<LocalDatabase> {
           providerPaymentIntentId: transaction.providerPaymentIntentId ?? null,
         }),
       ),
+      // Sprint A5.4: absent in every store written before payment events
+      // existed. The outcome narrows FAIL CLOSED — an on-disk row carrying a
+      // value this build has never heard of never reads as `processed`, so a
+      // hand-edited or newer-deploy row cannot claim a payment succeeded.
+      paymentEvents: (parsed.paymentEvents ?? []).map((event) => ({
+        ...event,
+        provider: readStoredPaymentProvider(
+          event.provider as string | null | undefined,
+        ),
+        outcome: readStoredPaymentEventOutcome(
+          event.outcome as string | null | undefined,
+        ),
+        processedAt: event.processedAt ?? null,
+      })),
       // Sprint 2M Phase 2B/2C: default the new reserved fields for on-disk
       // data written before they existed, so resume never crashes.
       assets: (parsed.assets ?? []).map((asset) => ({
@@ -1300,6 +1323,173 @@ export class LocalProjectRepository implements ProjectRepository {
     transaction.updatedAt = timestamp;
     await writeDb(db);
     return transaction;
+  }
+
+  // --- Sprint A5.4: verified payment events + atomic activation --------
+
+  async getPaymentEventByProviderId(
+    provider: PaymentProviderKey,
+    providerEventId: string,
+  ): Promise<PaymentEvent | null> {
+    const db = await readDb();
+    return (
+      db.paymentEvents.find(
+        (event) =>
+          event.provider === provider &&
+          event.providerEventId === providerEventId,
+      ) ?? null
+    );
+  }
+
+  /**
+   * THE ATOMIC PAYMENT-TO-ENTITLEMENT TRANSITION.
+   *
+   * This is a line-by-line mirror of the `apply_payment_event` PostgreSQL
+   * function (`20260817180000_payment_events.sql`), and the two must not
+   * drift — every decision below exists there in the same order and with the
+   * same outcome. Atomicity comes from the process-wide `withLock` mutex every
+   * method on this class runs behind; the Supabase implementation gets it from
+   * a real database transaction.
+   *
+   * The ordering is the design: the event insert (the idempotency fence) is
+   * taken FIRST, so a duplicate delivery can never read-then-act.
+   */
+  async applyPaymentEvent(
+    input: ApplyPaymentEventInput,
+  ): Promise<PaymentEventApplication> {
+    const db = await readDb();
+
+    // (1) The idempotency fence.
+    const alreadySeen = db.paymentEvents.some(
+      (event) => event.providerEventId === input.providerEventId,
+    );
+    if (alreadySeen) return "duplicate";
+
+    const timestamp = nowIso();
+    const event: PaymentEvent = {
+      id: randomUUID(),
+      provider: input.provider,
+      providerEventId: input.providerEventId,
+      eventType: input.eventType,
+      payloadDigest: input.payloadDigest,
+      receivedAt: timestamp,
+      outcome: "ignored",
+      processedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.paymentEvents.push(event);
+
+    const settle = async (
+      outcome: PaymentEventOutcome,
+    ): Promise<PaymentEventApplication> => {
+      event.outcome = outcome;
+      event.processedAt = nowIso();
+      event.updatedAt = event.processedAt;
+      await writeDb(db);
+      return outcome;
+    };
+
+    if (input.action === "ignore") return settle("ignored");
+
+    // (2) Resolve the transaction. Provider metadata never bootstraps one.
+    const transaction = input.paymentTransactionId
+      ? db.paymentTransactions.find(
+          (item) => item.id === input.paymentTransactionId,
+        )
+      : undefined;
+    if (!transaction) return settle("unmatched");
+
+    // (3) The checkout session must match. Trusting the metadata handle while
+    // ignoring the session id would let one mislabelled value pay off a
+    // different transaction.
+    if (
+      transaction.providerCheckoutSessionId !== input.providerCheckoutSessionId
+    ) {
+      return settle("rejected_mismatch");
+    }
+
+    if (input.action === "expire") {
+      // A PAID transaction is never downgraded by a lapse notification. Money
+      // that arrived does not un-arrive because a session object expired.
+      if (
+        transaction.status === "pending_provider" ||
+        transaction.status === "created"
+      ) {
+        transaction.status = "expired";
+        transaction.updatedAt = nowIso();
+        return settle("processed");
+      }
+      return settle("ignored");
+    }
+
+    // (4) The money path. Amount and currency must match EXACTLY.
+    if (
+      transaction.amountMinor !== input.amountMinor ||
+      transaction.currency !== input.currency
+    ) {
+      return settle("rejected_mismatch");
+    }
+
+    // Stated positively so a status this build has never heard of can never
+    // pass. `expired` is included because an out-of-order lapse does not make
+    // real money unreal; `paid` because a second distinct event for the same
+    // payment must converge rather than fail.
+    if (
+      transaction.status !== "created" &&
+      transaction.status !== "expired" &&
+      transaction.status !== "paid"
+    ) {
+      return settle("rejected_mismatch");
+    }
+
+    // Mirrors the UNIQUE constraint on `provider_payment_intent_id`: one
+    // provider payment intent can never pay off two transactions.
+    if (input.providerPaymentIntentId) {
+      const boundElsewhere = db.paymentTransactions.some(
+        (item) =>
+          item.id !== transaction.id &&
+          item.providerPaymentIntentId === input.providerPaymentIntentId,
+      );
+      if (boundElsewhere) return settle("rejected_mismatch");
+      if (
+        transaction.providerPaymentIntentId &&
+        transaction.providerPaymentIntentId !== input.providerPaymentIntentId
+      ) {
+        return settle("rejected_mismatch");
+      }
+      transaction.providerPaymentIntentId = input.providerPaymentIntentId;
+    }
+
+    transaction.status = "paid";
+    transaction.updatedAt = nowIso();
+
+    // THE ENTITLEMENT, derived entirely from the transaction row — the webhook
+    // never supplied a project, a session, or a profile. Reused rather than
+    // duplicated, mirroring the partial unique index.
+    const activeUnlock = db.productionUnlocks.find(
+      (unlock) =>
+        unlock.projectId === transaction.projectId &&
+        unlock.productionProfile === transaction.productionProfile &&
+        unlock.status === "active",
+    );
+    if (!activeUnlock) {
+      const grantedAt = nowIso();
+      db.productionUnlocks.push({
+        id: randomUUID(),
+        projectId: transaction.projectId,
+        acquisitionSessionId: transaction.acquisitionSessionId,
+        productionProfile: transaction.productionProfile,
+        status: "active",
+        grantedAt,
+        revokedAt: null,
+        revokedReason: null,
+        createdAt: grantedAt,
+        updatedAt: grantedAt,
+      });
+    }
+
+    return settle("processed");
   }
 
   async failPendingPaymentTransaction(

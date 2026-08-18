@@ -29,6 +29,7 @@ import type { PaymentProviderKey } from "@/lib/domain/types";
 export const PAYMENT_PROVIDER_ENV = "PAYMENT_PROVIDER";
 export const STRIPE_SECRET_KEY_ENV = "STRIPE_SECRET_KEY";
 export const PUBLIC_BASE_URL_ENV = "IHEARTPRINTS_PUBLIC_BASE_URL";
+export const STRIPE_WEBHOOK_SECRET_ENV = "STRIPE_WEBHOOK_SECRET";
 
 /**
  * A shape floor, not a strength policy — the same role
@@ -47,10 +48,23 @@ export const PUBLIC_BASE_URL_ENV = "IHEARTPRINTS_PUBLIC_BASE_URL";
 const STRIPE_SECRET_KEY_PREFIXES = ["sk_test_", "sk_live_", "rk_test_", "rk_live_"];
 const MIN_STRIPE_SECRET_KEY_LENGTH = 20;
 
+/**
+ * Sprint A5.4: the webhook signing secret. Stripe issues these as `whsec_…`.
+ *
+ * Shape-checked for the same reason the API key is: the overwhelmingly likely
+ * mistake is pasting the API key here (or this here), and catching it at
+ * config time is far better than discovering it as a flood of rejected
+ * webhooks after a customer has already paid.
+ */
+const STRIPE_WEBHOOK_SECRET_PREFIX = "whsec_";
+const MIN_STRIPE_WEBHOOK_SECRET_LENGTH = 20;
+
 export type PaymentProviderUnavailableCode =
   | "PAYMENT_PROVIDER_DISABLED"
   | "PAYMENT_PROVIDER_NOT_CONFIGURED"
   | "PAYMENT_PROVIDER_CREDENTIAL_INVALID"
+  | "PAYMENT_WEBHOOK_SECRET_NOT_CONFIGURED"
+  | "PAYMENT_WEBHOOK_SECRET_INVALID"
   | "PAYMENT_PUBLIC_BASE_URL_NOT_CONFIGURED"
   | "PAYMENT_PUBLIC_BASE_URL_INVALID";
 
@@ -60,6 +74,20 @@ export type PaymentProviderConfig =
       provider: PaymentProviderKey;
       /** Never logged, never returned, never placed in a URL or metadata. */
       secretKey: string;
+      /**
+       * Sprint A5.4: the webhook signing secret.
+       *
+       * REQUIRED WHENEVER CHECKOUT IS ENABLED, which is a deliberate coupling
+       * rather than an oversight. A5.3 shipped with a documented hazard: a
+       * deployment could take payments while nothing consumed the result, so
+       * customers would be charged and receive nothing. Making this secret a
+       * precondition of `mode: "stripe"` removes that state from the
+       * configuration space entirely — you cannot turn on charging without
+       * also being able to hear that the charge succeeded.
+       *
+       * Never logged, never returned, never placed in a URL or metadata.
+       */
+      webhookSecret: string;
       /**
        * Origin the customer is returned to after checkout. Server-resolved
        * rather than taken from the request's `Host`/`Origin` header, which an
@@ -115,6 +143,26 @@ export function getPaymentProviderConfig(): PaymentProviderConfig {
     };
   }
 
+  const webhookSecret = process.env[STRIPE_WEBHOOK_SECRET_ENV]?.trim() || "";
+  if (!webhookSecret) {
+    return {
+      mode: "unavailable",
+      safeErrorCode: "PAYMENT_WEBHOOK_SECRET_NOT_CONFIGURED",
+      internalReason: `${PAYMENT_PROVIDER_ENV}=stripe but ${STRIPE_WEBHOOK_SECRET_ENV} is not set; enabling checkout without it would charge customers whose payment nothing could confirm.`,
+    };
+  }
+  if (
+    webhookSecret.length < MIN_STRIPE_WEBHOOK_SECRET_LENGTH ||
+    !webhookSecret.startsWith(STRIPE_WEBHOOK_SECRET_PREFIX)
+  ) {
+    return {
+      mode: "unavailable",
+      safeErrorCode: "PAYMENT_WEBHOOK_SECRET_INVALID",
+      // Names the variable, never the value.
+      internalReason: `${STRIPE_WEBHOOK_SECRET_ENV} does not look like a Stripe webhook signing secret.`,
+    };
+  }
+
   const rawBaseUrl = process.env[PUBLIC_BASE_URL_ENV]?.trim() || "";
   if (!rawBaseUrl) {
     return {
@@ -133,7 +181,13 @@ export function getPaymentProviderConfig(): PaymentProviderConfig {
     };
   }
 
-  return { mode: "stripe", provider: "stripe", secretKey, publicBaseUrl };
+  return {
+    mode: "stripe",
+    provider: "stripe",
+    secretKey,
+    webhookSecret,
+    publicBaseUrl,
+  };
 }
 
 /**

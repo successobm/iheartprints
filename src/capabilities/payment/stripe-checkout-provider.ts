@@ -23,6 +23,8 @@
  *   - log, echo, or place the secret key anywhere but the Authorization header
  */
 
+import { createHash } from "crypto";
+
 import {
   ProviderError,
   classifyFetchRejectionDispatch,
@@ -34,7 +36,11 @@ import type {
   PaymentProvider,
   ProductionUnlockCheckoutRequest,
   ProductionUnlockCheckoutResult,
+  VerifyWebhookInput,
+  VerifyWebhookResult,
 } from "./provider";
+import { normalizeStripeEvent } from "./stripe-event-normalizer";
+import { verifyStripeWebhookSignature } from "./stripe-webhook-signature";
 
 const STRIPE_CHECKOUT_SESSIONS_ENDPOINT =
   "https://api.stripe.com/v1/checkout/sessions";
@@ -70,19 +76,80 @@ const MAX_CHECKOUT_ATTEMPTS = 3;
 
 export interface StripeCheckoutProviderConfig {
   secretKey: string;
+  /**
+   * Sprint A5.4: the webhook signing secret. Separate from `secretKey` — a
+   * different credential with a different rotation schedule, and one that
+   * grants nothing at Stripe (it only proves a payload came from them).
+   */
+  webhookSecret: string;
   /** Injectable for tests — defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
+  /** Injectable for tests — defaults to the real clock, seconds since epoch. */
+  nowSeconds?: () => number;
 }
 
 export class StripeCheckoutProvider implements PaymentProvider {
   readonly providerKey = "stripe";
 
   private readonly secretKey: string;
+  private readonly webhookSecret: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly nowSeconds: () => number;
 
   constructor(config: StripeCheckoutProviderConfig) {
     this.secretKey = config.secretKey;
+    this.webhookSecret = config.webhookSecret;
     this.fetchImpl = config.fetchImpl ?? fetch;
+    this.nowSeconds = config.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
+  }
+
+  /**
+   * Sprint A5.4: verify, THEN parse. The ordering is the security property.
+   *
+   * Nothing about the body is interpreted — not its JSON, not its event type,
+   * not the transaction it names — until the signature has been checked
+   * against the exact bytes received. A verifier that parsed first would be
+   * executing attacker-supplied structure before establishing that an attacker
+   * did not supply it.
+   *
+   * Returns rather than throws for an unverified request: unsigned and
+   * badly-signed traffic is ordinary background noise on a public endpoint,
+   * and turning it into exceptions would put attacker-controlled frequency in
+   * charge of this process's error paths.
+   */
+  verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult {
+    const verification = verifyStripeWebhookSignature({
+      rawBody: input.rawBody,
+      signatureHeader: input.signatureHeader,
+      secret: this.webhookSecret,
+      nowSeconds: input.nowSeconds ?? this.nowSeconds(),
+    });
+
+    if (!verification.verified) {
+      // The reason is internal and log-only. The caller answers a bare 400 —
+      // telling a prober which part of their forgery failed would help them
+      // fix it.
+      return { verified: false, internalReason: verification.reason };
+    }
+
+    const normalized = normalizeStripeEvent(verification.payload);
+    if (!normalized.ok) {
+      // Correctly signed, but not a usable event envelope — no id to key
+      // idempotency on, or no type to decide from. Genuinely from Stripe and
+      // genuinely unusable, so it is refused rather than recorded as
+      // `ignored` under an identity it does not have.
+      return { verified: false, internalReason: "unusable_event_envelope" };
+    }
+
+    return {
+      verified: true,
+      event: normalized.event,
+      // A digest of the VERIFIED bytes — never the bytes themselves. See
+      // `PaymentEvent.payloadDigest`: a Stripe event body carries the
+      // customer's email, billing address, and card metadata, none of which
+      // this product needs after reconciliation.
+      payloadDigest: createHash("sha256").update(verification.payload, "utf8").digest("hex"),
+    };
   }
 
   async createProductionUnlockCheckout(

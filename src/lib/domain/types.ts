@@ -677,6 +677,120 @@ export function isUsableCheckout(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Sprint A5.4 — the Payment Event (one verified provider notification)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sprint A5.4: what the platform DID about one verified provider event.
+ *
+ * Deliberately a small, stable, product-owned vocabulary — NOT the provider's
+ * event type, which is stored separately in `eventType`. Putting
+ * `checkout.session.completed` in an outcome field would make the schema
+ * track a provider's taxonomy forever and would answer the wrong question:
+ * "what did they tell us" is not "what did we do about it".
+ *
+ *   "processed"         — the event was acted on. A payment was applied and a
+ *                         `ProductionUnlock` is active, or a stale attempt was
+ *                         expired. The ONLY outcome that ever accompanies a
+ *                         commercial state change.
+ *   "ignored"           — a validly-signed event this build does not act on:
+ *                         an unsupported event type, or a state transition
+ *                         that must not happen (an `expired` arriving for a
+ *                         transaction that is already paid).
+ *   "unmatched"         — no `PaymentTransaction` could be resolved. Provider
+ *                         metadata NEVER bootstraps a purchase, so an event
+ *                         naming a transaction we have no record of is
+ *                         recorded and dropped.
+ *   "rejected_mismatch" — a transaction was found and reconciliation FAILED:
+ *                         wrong checkout session, wrong amount, wrong
+ *                         currency, an unpaid payment status, a payment
+ *                         intent already bound elsewhere, or a transaction in
+ *                         a state that may not be activated. Nothing is
+ *                         mutated. This is the outcome that must never be
+ *                         confused with success.
+ */
+export const PAYMENT_EVENT_OUTCOMES = [
+  "processed",
+  "ignored",
+  "unmatched",
+  "rejected_mismatch",
+] as const;
+
+export type PaymentEventOutcome = (typeof PAYMENT_EVENT_OUTCOMES)[number];
+
+export const UNRECOGNIZED_PAYMENT_EVENT_OUTCOME =
+  "unrecognized_outcome" as const;
+
+export type StoredPaymentEventOutcome =
+  | PaymentEventOutcome
+  | typeof UNRECOGNIZED_PAYMENT_EVENT_OUTCOME;
+
+/**
+ * Sprint A5.4 — the durable record that ONE verified provider event was
+ * received, and what was done about it.
+ *
+ * THE UNIQUENESS ON `providerEventId` IS THE IDEMPOTENCY AUTHORITY. A payment
+ * provider retries a webhook until it gets a 2xx, and network partitions mean
+ * a retry can arrive while the first delivery is still being processed. The
+ * insert of this row is taken FIRST, inside the same database transaction as
+ * the payment application, so a concurrent duplicate blocks on the unique
+ * index and then finds the conflict — it does not "check first and then act",
+ * which is the pattern that lets two deliveries both pass a read.
+ *
+ * WHAT IS NOT STORED: the raw webhook payload. A provider's event body
+ * carries a customer's email, billing address, card brand and last four,
+ * provider customer and account identifiers, and amounts — none of which this
+ * product needs after reconciliation, and all of which would become a durable
+ * copy of payment PII sitting in the application database forever.
+ * `payloadDigest` is a SHA-256 of the exact verified bytes: enough to prove
+ * afterwards that a specific body was the one processed, and useless for
+ * reconstructing what was in it.
+ */
+export interface PaymentEvent {
+  id: string;
+  /** Narrowed fail-closed on read. */
+  provider: StoredPaymentProviderKey;
+  /** The provider's own event id. UNIQUE — this is the idempotency fence. */
+  providerEventId: string;
+  /**
+   * The provider's event type verbatim (e.g. `checkout.session.completed`).
+   * Recorded for operational forensics only; no gate branches on it after
+   * the fact.
+   */
+  eventType: string;
+  /** SHA-256 (hex) of the exact raw bytes whose signature was verified. */
+  payloadDigest: string;
+  receivedAt: string;
+  /** Set when the platform finished deciding. Narrowed fail-closed. */
+  outcome: StoredPaymentEventOutcome;
+  processedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Narrows a persisted outcome, FAILING CLOSED — an unknown value is never `processed`. */
+export function readStoredPaymentEventOutcome(
+  raw: string | null | undefined,
+): StoredPaymentEventOutcome {
+  if (raw == null || raw === "") return UNRECOGNIZED_PAYMENT_EVENT_OUTCOME;
+  if ((PAYMENT_EVENT_OUTCOMES as readonly string[]).includes(raw)) {
+    return raw as PaymentEventOutcome;
+  }
+  return UNRECOGNIZED_PAYMENT_EVENT_OUTCOME;
+}
+
+/**
+ * Sprint A5.4: what the reconciliation authority decided. Returned by the
+ * atomic operation and by nothing else.
+ *
+ * `"duplicate"` is deliberately NOT a stored outcome — a duplicate delivery
+ * creates no row at all; it collides with the one that already exists. It is
+ * a return value meaning "this event was already decided, and the answer
+ * stands".
+ */
+export type PaymentEventApplication = PaymentEventOutcome | "duplicate";
+
 /**
  * Sprint A2 (corrected): WHAT PRODUCTION ARTIFACT THE CUSTOMER ASKED
  * IHEARTPRINTS TO PRODUCE — structured, authoritative, and deliberately not
