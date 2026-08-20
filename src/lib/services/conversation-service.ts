@@ -4,6 +4,7 @@ import type {
   EmailCaptureResult,
 } from "@/capabilities/acquisition";
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
+import type { CustomerPaymentView } from "@/capabilities/payment";
 import { getCapabilityGraph } from "@/capabilities/composition";
 import type { DesignBriefDecisionAction } from "@/capabilities/conversation";
 import {
@@ -271,6 +272,17 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * to never put it in a response (Goal 19).
    */
   acquisition: CustomerAcquisitionView;
+  /**
+   * Sprint A5.5: where this project stands commercially, already phrased for
+   * the customer.
+   *
+   * Carries a server-FORMATTED display amount and nothing else monetary — no
+   * raw minor units, no currency code, no provider price id, no checkout
+   * session id, no payment intent id, no internal transaction id, and no
+   * configuration detail. The UI needs to know whether to offer a purchase
+   * and what to say it costs; every other fact stays server-side.
+   */
+  payment: CustomerPaymentView;
 };
 
 async function withConceptStatus(
@@ -294,6 +306,7 @@ async function withConceptStatus(
     printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
     artworkPreparation,
     acquisition: await resolveAcquisitionView(snapshot),
+    payment: await resolvePaymentView(snapshot.project.id),
   };
 }
 
@@ -331,6 +344,31 @@ async function withConceptStatus(
  * `generating` stays an input because it genuinely is a property of THIS
  * project ("is this one busy right now"), not of the session.
  */
+/**
+ * Sprint A5.5. Same advisory-not-a-gate rule as `resolveAcquisitionView`: a
+ * commercial view must never take down a snapshot the customer is waiting on.
+ *
+ * Degrades to `"unavailable"`, NOT to `"payment_required"` and never to
+ * `"production_unlocked"`. The direction matters in both ways at once:
+ * `payment_required` would render a checkout button whose POST is about to
+ * fail for the same reason this read did, and `production_unlocked` would
+ * claim an entitlement from an error. `unavailable` is the only honest thing
+ * to show when the server cannot establish what this project may do.
+ *
+ * Every real commercial decision is made independently by
+ * `PaymentCapability.createCheckout` and, for the entitlement itself, by
+ * `AcquisitionCapability.authorizeFinalization` — both of which fail closed.
+ * This function only decides what to draw.
+ */
+async function resolvePaymentView(
+  projectId: string,
+): Promise<CustomerPaymentView> {
+  try {
+    return await getCapabilityGraph().payment.describeForCustomer(projectId);
+  } catch {
+    return { state: "unavailable", offer: null, checkoutPending: false };
+  }
+}
 async function resolveAcquisitionView(
   snapshot: ProjectSnapshot,
 ): Promise<CustomerAcquisitionView> {

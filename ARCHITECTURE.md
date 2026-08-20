@@ -7771,6 +7771,128 @@ generative revision all remain refused for a prospect after payment.
 
 ---
 
+## 23f. Customer Production Unlock UI (Sprint A5.5)
+
+### The customer journey
+
+```
+free concept delivered
+      ↓
+email_required            → EmailContinuationGate        (A4, unchanged)
+      ↓  email captured
+design chosen             → concept selection, or an approved ArtworkPreparation
+      ↓
+payment_required          → ProductionUnlockCard: offer + price + "Unlock This Design"
+      ↓  POST /production-unlock/checkout  →  provider checkout page
+payment_processing        → "Confirming your payment…"   (bounded polling)
+      ↓  VERIFIED WEBHOOK  →  ProductionUnlock.active     (§23e)
+production_unlocked       → "Your design is unlocked for production."
+      ↓  the customer presses it
+existing finalization action → validated Production PNG → download
+```
+
+**Selection is free; production is not.** A customer who has given an email
+may view, select, and discuss their concept — they are being asked to buy
+*that design*, so being unable to choose it first would be incoherent. What
+they may not do is generate anything new or finalize.
+
+### One commercial authority
+
+`PaymentCapability.describeForCustomer(projectId)` derives a single
+`CustomerPaymentView`, exposed as `ProjectSnapshot.payment`. It reuses the
+**same** `resolveEligibility` rule `createCheckout` uses, so the UI cannot
+offer a button the server would refuse or hide one it would honour — that
+agreement is structural, not maintained.
+
+`resolveProductionUnlockSurface` is the one function that turns the view into
+something to render. No component derives payment state of its own. Sprint A4
+Corrections C and C2 were both "one rule, two slightly different consumers";
+commercial state is the worst place to repeat that, because the two answers
+would be *you owe us money* and *you don't*.
+
+| Server state | Meaning |
+|---|---|
+| `not_applicable` | nothing commercial to show — no email, internal/legacy project, nothing designed, pending revision, unsupported output |
+| `payment_required` | eligible and unpaid |
+| `production_unlocked` | an **active `ProductionUnlock`** exists — the only value that means paid |
+| `unavailable` | eligible, but this deployment cannot sell right now |
+
+### The redirect still proves nothing
+
+`?checkout=complete` is read once on the first client render, then **stripped
+from the address bar** so a reload or Back/Forward cannot keep re-asserting
+it. It may influence exactly one thing: whether an unpaid-but-attempted
+project shows the offer or the confirmation spinner. Both grant nothing.
+
+`resolveProductionUnlockSurface` is written so the hint **cannot** reach
+`production_unlocked`, and a test enumerates all sixteen combinations of
+server state × hint × outstanding-attempt to prove it. Showing the spinner
+requires **both** the hint and a durable outstanding attempt: the hint alone
+would confirm a payment nobody made, and an attempt alone would leave an
+abandoned checkout spinning forever.
+
+### Bounded confirmation polling
+
+`createPaymentConfirmationPoll` re-reads authoritative server state, stops the
+moment the project is genuinely unlocked, and **stops** after a bounded number
+of attempts (~1 minute). The first check is immediate, so a webhook that
+landed before the browser returned never costs the customer a spinner.
+
+On timeout the copy asks them to reload shortly and **never to pay again** — a
+transaction may be `created` or already `paid` at that moment, and inviting a
+second attempt is how somebody gets charged twice for one unlock.
+
+### Commercial state is a card, never a transcript message
+
+A5.5 adds **no assistant message about payment** — no "pay now", no "payment
+processing", no "payment complete". An end-to-end test asserts no assistant
+message in either workflow contains payment vocabulary at all.
+
+The `continue_locked` acquisition note is **suppressed while a commercial
+surface is showing**. Its sentence is still true of *generation* (which A5.5
+does not unlock), but stacking it above a card asking for money is precisely
+the duplicated-message friction this sprint exists to avoid.
+
+### The UI cannot lie
+
+The card has no branch that prints "paid", "payment successful", or
+"unlocked" for anything but the `production_unlocked` surface, and a test
+sweeps every surface asserting it. When this deployment cannot sell, the card
+renders a neutral note and **no button** — never one whose POST is certain to
+fail — and never mentions a provider, a variable, or a setting.
+
+### Payment never starts production work
+
+The unlocked surface is a confirmation line and stops there. The action that
+follows is the **existing** finalization control (`requestFinalArtwork` /
+`requestPreparedUploadFinalArtwork`), which the customer still chooses to
+press. No payment-specific finalization route exists.
+
+### What crosses the boundary
+
+`CustomerPaymentView` carries a state, an optional offer
+(title/description/**server-formatted** display amount), and a
+`checkoutPending` flag. Deliberately absent: the captured email, the raw minor
+amount, the currency code, a provider price id, checkout session id, payment
+intent id, internal transaction id, and every configuration detail. The
+display amount is formatted server-side via `Intl.NumberFormat` — which
+supplies the currency's own exponent, so a zero-decimal currency is not
+misplaced by a factor of a hundred — because a client that received minor
+units would have to format them, and a second formatter is a second source of
+truth about price.
+
+The checkout URL is returned **only** by the checkout POST response and is
+never persisted into the snapshot.
+
+### Unchanged by A5.5
+
+Checkout body strictness, server-side price/profile/email, webhook-only
+activation, the atomic PostgreSQL reconciliation, project-level entitlement,
+RLS, and generation economics. No client-written payment state exists.
+Signed cross-device recovery remains A5.7.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:
@@ -7790,11 +7912,14 @@ Verified against the implementation:
   checkout cleanly rather than inventing a price, and the webhook secret is
   required whenever checkout is enabled (§23e) — so the A5.3 hazard of
   charging customers nothing could confirm is no longer configurable
-- **There is no customer payment UI.** The checkout route exists and the
-  webhook works end to end, but nothing in the interface offers a customer a
-  way to pay, shows a price, or reflects a `payment_required` /
-  `payment_processing` / `production_unlocked` state.
-  `CustomerAcquisitionState` is unchanged. A5.5 owns that
+- **The customer payment UI exists (§23f), but no price is configured.**
+  `PRODUCTION_UNLOCK_AMOUNT_MINOR` / `PRODUCTION_UNLOCK_CURRENCY` have no
+  defaults, so every deployment currently renders the neutral "temporarily
+  unavailable" surface rather than an offer. Choosing the price is a business
+  decision, not a code change
+- **`CustomerAcquisitionState` is unchanged.** A5.5 added its payment states
+  as a SEPARATE `ProjectSnapshot.payment` view rather than widening the
+  acquisition vocabulary, so the A4 funnel states mean exactly what they did
 - **Refund automation is not implemented (§23e).** Refund and dispute events
   are recorded as `ignored` and change nothing. A refund must be actioned by
   an operator through `revokeProductionUnlock`; the schema and the revocation

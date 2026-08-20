@@ -16,7 +16,26 @@ export {
   type HandleWebhookInput,
   type HandleWebhookResult,
 } from "./payment-capability";
-export { CHECKOUT_UNAVAILABLE_MESSAGE } from "./payment-copy";
+export {
+  CHECKOUT_UNAVAILABLE_MESSAGE,
+  CHECKOUT_START_FAILED_MESSAGE,
+  PAYMENT_CONFIRMATION_TIMEOUT_MESSAGE,
+  PAYMENT_CONFIRMING_MESSAGE,
+  PRODUCTION_UNLOCK_ACTION_LABEL,
+  PRODUCTION_UNLOCK_OFFER_DESCRIPTION,
+  PRODUCTION_UNLOCK_OFFER_TITLE,
+  PRODUCTION_UNLOCK_UNAVAILABLE_MESSAGE,
+  PRODUCTION_UNLOCKED_MESSAGE,
+} from "./payment-copy";
+export {
+  resolveProductionUnlockSurface,
+  type CustomerOfferView,
+  type CustomerPaymentState,
+  type CustomerPaymentView,
+  type ProductionUnlockSurface,
+  type ProductionUnlockSurfaceInput,
+} from "./customer-payment-view";
+export { formatOfferAmount } from "./format-offer-amount";
 export {
   buildCheckoutReturnUrls,
   CHECKOUT_RETURN_PARAM,

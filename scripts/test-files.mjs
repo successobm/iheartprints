@@ -307,4 +307,14 @@ export const TEST_FILES = [
   "src/capabilities/payment/stripe-webhook-signature.test.ts",
   "src/capabilities/payment/production-unlock-webhook.test.ts",
   "src/app/api/payments/webhook/route.test.ts",
+  // Sprint A5.5: the customer-facing production unlock. The load-bearing
+  // assertion is an exhaustive sweep proving the redirect hint can never
+  // produce "unlocked" — only the server's entitlement can. Plus the bounded
+  // confirmation poller (it must STOP), the card's negative copy checks, and
+  // the whole journey end to end for both workflows with no transcript
+  // commercial copy anywhere.
+  "src/capabilities/payment/customer-payment-view.test.ts",
+  "src/components/chat/payment-confirmation-poll.test.ts",
+  "src/components/chat/ProductionUnlockCard.test.tsx",
+  "src/capabilities/payment/production-unlock-customer-flow.test.ts",
 ];

@@ -69,7 +69,13 @@ import {
 } from "@/lib/domain/types";
 
 import { buildCheckoutReturnUrls } from "./checkout-return-urls";
-import { CHECKOUT_UNAVAILABLE_MESSAGE } from "./payment-copy";
+import type { CustomerPaymentView } from "./customer-payment-view";
+import { formatOfferAmount } from "./format-offer-amount";
+import {
+  CHECKOUT_UNAVAILABLE_MESSAGE,
+  PRODUCTION_UNLOCK_OFFER_DESCRIPTION,
+  PRODUCTION_UNLOCK_OFFER_TITLE,
+} from "./payment-copy";
 import type { PaymentProvider } from "./provider";
 
 /**
@@ -167,6 +173,20 @@ export interface PaymentCapability {
    * payment or entitlement table.
    */
   handleWebhook(input: HandleWebhookInput): Promise<HandleWebhookResult>;
+  /**
+   * Sprint A5.5 — THE ONE CUSTOMER-FACING COMMERCIAL VIEW.
+   *
+   * Derived from the SAME eligibility rule `createCheckout` uses, so the UI
+   * can never offer a button the server would refuse, nor hide one it would
+   * honour. That agreement is structural rather than maintained: both call
+   * `resolveEligibility`.
+   *
+   * Never returns the captured email, a provider price id, a checkout session
+   * id, a payment intent id, an internal transaction id, or any configuration
+   * detail. The only monetary value that crosses is a server-formatted
+   * display string.
+   */
+  describeForCustomer(projectId: string): Promise<CustomerPaymentView>;
 }
 
 /**
@@ -243,133 +263,170 @@ export function createPaymentCapability(
     };
   }
 
+  /**
+   * Sprint A5.5 — THE ONE ELIGIBILITY RULE, extracted so that "may this
+   * customer buy?" has exactly one answer.
+   *
+   * `createCheckout` and `describeForCustomer` are the two things that ask
+   * it, and they MUST agree: a UI that offers a button the server refuses,
+   * or hides one the server would honour, is the C/C2 defect wearing a
+   * commercial hat. Before this extraction the checks lived inline in
+   * `createCheckout`, and the customer view would have had to restate them.
+   *
+   * Ordering is preserved exactly as A5.3 wrote it, including that the
+   * deployment's ability to take money is checked LAST — a misconfigured
+   * deployment must never litter the table with attempts it cannot use, and
+   * the customer view distinguishes "nothing to sell you" from "we cannot
+   * sell right now" on the same boundary.
+   */
+  async function resolveEligibility(projectId: string): Promise<
+    | { eligible: false; reason: CheckoutRefusalReason }
+    | {
+        eligible: true;
+        snapshot: NonNullable<Awaited<ReturnType<ProjectRepository["getProject"]>>>;
+        acquisitionSessionId: string;
+        email: string;
+        productionProfile: ProductionProfile;
+        providerKey: PaymentProviderKey;
+        offer: Extract<ProductionUnlockOfferConfig, { mode: "configured" }>;
+        publicBaseUrl: string;
+        provider: PaymentProvider;
+      }
+  > {
+    // 1. Is there a buyer, and may they buy?
+    const snapshot = await repo.getProject(projectId);
+    if (!snapshot) return { eligible: false, reason: "project_not_found" };
+
+    const acquisitionSessionId = snapshot.project.acquisitionSessionId;
+    if (!acquisitionSessionId) {
+      // A LEGACY project (created before acquisition sessions existed) has no
+      // buyer to record, and `payment_transactions.acquisition_session_id` is
+      // NOT NULL precisely so one cannot be fabricated.
+      //
+      // It is also the right product answer, not merely the convenient one: a
+      // legacy project is already grandfathered through the finalization gate
+      // (§23b), so it has nothing to purchase. Selling an unlock to somebody
+      // who is already unlocked would take money for nothing.
+      return { eligible: false, reason: "legacy_project" };
+    }
+
+    let session;
+    try {
+      session = await repo.getAcquisitionSession(acquisitionSessionId);
+    } catch {
+      return { eligible: false, reason: "authority_unavailable" };
+    }
+    // Same fail-closed rule as `AcquisitionCapability.resolveAuthority`: a
+    // project bound to a session that cannot be loaded is never treated as
+    // legacy, and never given the benefit of the doubt.
+    if (!session) return { eligible: false, reason: "authority_unavailable" };
+
+    if (session.entitlement === "internal") {
+      // Nothing to sell. An internal session already finalizes freely, so a
+      // checkout here would charge for access that is already granted.
+      return { eligible: false, reason: "internal_project" };
+    }
+
+    if (!session.email) {
+      // The funnel is: free concept → email → unlock. Taking money from
+      // somebody we have no way to send a receipt or a recovery link to would
+      // be selling a product we cannot deliver support for. The address is
+      // already captured server-side by A4; this only checks that it happened.
+      return { eligible: false, reason: "email_required" };
+    }
+
+    // 2. Is there anything left to sell?
+    const productionProfile = APPAREL_RASTER_PRODUCTION_PROFILE;
+
+    let existingUnlock;
+    try {
+      existingUnlock = await repo.getActiveProductionUnlock(
+        projectId,
+        productionProfile,
+      );
+    } catch {
+      return { eligible: false, reason: "authority_unavailable" };
+    }
+    if (productionUnlockAuthorizes(existingUnlock, { projectId, productionProfile })) {
+      // Already bought. Refusing here is the cheap, obvious guard; the durable
+      // one is the partial unique index on `production_unlocks`, which makes a
+      // second active unlock impossible regardless.
+      return { eligible: false, reason: "already_unlocked" };
+    }
+
+    // 3. Is "unlock this design for production" a TRUTHFUL offer?
+    if (snapshot.project.revisionPending) {
+      // The customer has said the current artwork is not what they want.
+      // Selling them production preparation at that moment would be selling
+      // preparation of a design they have already rejected.
+      return { eligible: false, reason: "revision_pending" };
+    }
+
+    const requestedOutput = normalizeProductionIntent(
+      snapshot.brief.requestedProductionOutput,
+    );
+    if (isUnsupportedRequestedProductionOutput(requestedOutput)) {
+      // They have asked for an artifact V1 does not produce. Commercial
+      // permission never manufactures technical capability (§23c) — and taking
+      // money first and refusing to deliver afterwards is the worst possible
+      // ordering of those two facts.
+      return { eligible: false, reason: "unsupported_production_output" };
+    }
+
+    if (!(await hasSomethingToPurchase(repo, projectId, snapshot))) {
+      return { eligible: false, reason: "nothing_to_purchase" };
+    }
+
+    // 4. Can this deployment actually take money?
+    if (!provider) return { eligible: false, reason: "provider_unavailable" };
+    if (!publicBaseUrl) return { eligible: false, reason: "provider_unavailable" };
+    if (!(KNOWN_PAYMENT_PROVIDERS as readonly string[]).includes(provider.providerKey)) {
+      return { eligible: false, reason: "provider_unavailable" };
+    }
+
+    const offer = readOffer();
+    if (offer.mode !== "configured") {
+      console.info("Production unlock offer unavailable", {
+        projectId,
+        safeErrorCode: offer.safeErrorCode,
+        internalReason: offer.internalReason,
+      });
+      return { eligible: false, reason: "offer_unavailable" };
+    }
+    if (offer.productionProfile !== productionProfile) {
+      // The configured offer is for a profile this checkout is not selling.
+      // Unreachable today (both are the single V1 constant) and checked
+      // anyway, because the day a second profile exists this is the line that
+      // stops one being sold under the other's price.
+      return { eligible: false, reason: "offer_unavailable" };
+    }
+
+    return {
+      eligible: true,
+      snapshot,
+      acquisitionSessionId,
+      email: session.email,
+      productionProfile,
+      providerKey: provider.providerKey as PaymentProviderKey,
+      offer,
+      publicBaseUrl,
+      provider,
+    };
+  }
+
   return {
     async createCheckout(projectId) {
-      // ---------------------------------------------------------------
-      // 1. Is there a buyer, and may they buy?
-      // ---------------------------------------------------------------
-
-      const snapshot = await repo.getProject(projectId);
-      if (!snapshot) return refuse(projectId, "project_not_found");
-
-      const acquisitionSessionId = snapshot.project.acquisitionSessionId;
-      if (!acquisitionSessionId) {
-        // A LEGACY project (created before acquisition sessions existed) has
-        // no buyer to record, and `payment_transactions.acquisition_session_id`
-        // is NOT NULL precisely so one cannot be fabricated.
-        //
-        // It is also the right product answer, not merely the convenient one:
-        // a legacy project is already grandfathered through the finalization
-        // gate (§23b), so it has nothing to purchase. Selling an unlock to
-        // somebody who is already unlocked would take money for nothing.
-        return refuse(projectId, "legacy_project");
+      const eligibility = await resolveEligibility(projectId);
+      if (!eligibility.eligible) {
+        return refuse(projectId, eligibility.reason);
       }
-
-      let session;
-      try {
-        session = await repo.getAcquisitionSession(acquisitionSessionId);
-      } catch {
-        return refuse(projectId, "authority_unavailable");
-      }
-      // Same fail-closed rule as `AcquisitionCapability.resolveAuthority`: a
-      // project bound to a session that cannot be loaded is never treated as
-      // legacy, and never given the benefit of the doubt.
-      if (!session) return refuse(projectId, "authority_unavailable");
-
-      if (session.entitlement === "internal") {
-        // Nothing to sell. An internal session already finalizes freely, so a
-        // checkout here would charge for access that is already granted.
-        return refuse(projectId, "internal_project");
-      }
-
-      if (!session.email) {
-        // The funnel is: free concept → email → unlock. Taking money from
-        // somebody we have no way to send a receipt or a recovery link to
-        // would be selling a product we cannot deliver support for. The
-        // address is already captured server-side by A4; this only checks
-        // that it happened.
-        return refuse(projectId, "email_required");
-      }
-
-      // ---------------------------------------------------------------
-      // 2. Is there anything left to sell?
-      // ---------------------------------------------------------------
-
-      const productionProfile = APPAREL_RASTER_PRODUCTION_PROFILE;
-
-      let existingUnlock;
-      try {
-        existingUnlock = await repo.getActiveProductionUnlock(
-          projectId,
-          productionProfile,
-        );
-      } catch {
-        return refuse(projectId, "authority_unavailable");
-      }
-      if (
-        productionUnlockAuthorizes(existingUnlock, { projectId, productionProfile })
-      ) {
-        // Already bought. Refusing here is the cheap, obvious guard; the
-        // durable one is the partial unique index on `production_unlocks`,
-        // which makes a second active unlock impossible regardless.
-        return refuse(projectId, "already_unlocked");
-      }
-
-      // ---------------------------------------------------------------
-      // 3. Is "unlock this design for production" a TRUTHFUL offer?
-      // ---------------------------------------------------------------
-
-      if (snapshot.project.revisionPending) {
-        // The customer has said the current artwork is not what they want.
-        // Selling them production preparation at that moment would be selling
-        // preparation of a design they have already rejected.
-        return refuse(projectId, "revision_pending");
-      }
-
-      const requestedOutput = normalizeProductionIntent(
-        snapshot.brief.requestedProductionOutput,
-      );
-      if (isUnsupportedRequestedProductionOutput(requestedOutput)) {
-        // They have asked for an artifact V1 does not produce. Commercial
-        // permission never manufactures technical capability (§23c) — and
-        // taking money first and refusing to deliver afterwards is the worst
-        // possible ordering of those two facts.
-        return refuse(projectId, "unsupported_production_output");
-      }
-
-      if (!(await hasSomethingToPurchase(repo, projectId, snapshot))) {
-        return refuse(projectId, "nothing_to_purchase");
-      }
-
-      // ---------------------------------------------------------------
-      // 4. Can this deployment actually take money?
-      //    Checked BEFORE any durable row exists, so a misconfigured
-      //    deployment never litters the table with attempts it cannot use.
-      // ---------------------------------------------------------------
-
-      if (!provider) return refuse(projectId, "provider_unavailable");
-      if (!publicBaseUrl) return refuse(projectId, "provider_unavailable");
-      if (!(KNOWN_PAYMENT_PROVIDERS as readonly string[]).includes(provider.providerKey)) {
-        return refuse(projectId, "provider_unavailable");
-      }
-      const providerKey = provider.providerKey as PaymentProviderKey;
-
-      const offer = readOffer();
-      if (offer.mode !== "configured") {
-        console.info("Production unlock offer unavailable", {
-          projectId,
-          safeErrorCode: offer.safeErrorCode,
-          internalReason: offer.internalReason,
-        });
-        return refuse(projectId, "offer_unavailable");
-      }
-      if (offer.productionProfile !== productionProfile) {
-        // The configured offer is for a profile this checkout is not selling.
-        // Unreachable today (both are the single V1 constant) and checked
-        // anyway, because the day a second profile exists this is the line
-        // that stops one being sold under the other's price.
-        return refuse(projectId, "offer_unavailable");
-      }
+      const {
+        acquisitionSessionId,
+        email,
+        productionProfile,
+        providerKey,
+        offer,
+      } = eligibility;
 
       // ---------------------------------------------------------------
       // 5. Open or resume exactly ONE outstanding attempt.
@@ -454,11 +511,14 @@ export function createPaymentCapability(
       //                             provider returns the SAME session
       // ---------------------------------------------------------------
 
-      const returnUrls = buildCheckoutReturnUrls(publicBaseUrl, projectId);
+      const returnUrls = buildCheckoutReturnUrls(
+        eligibility.publicBaseUrl,
+        projectId,
+      );
 
       let created;
       try {
-        created = await provider.createProductionUnlockCheckout({
+        created = await eligibility.provider.createProductionUnlockCheckout({
           paymentTransactionId: transaction.id,
           projectId,
           productionProfile: frozen.productionProfile,
@@ -468,7 +528,7 @@ export function createPaymentCapability(
           // Server-side, from the session the PROJECT is bound to. Never
           // returned to a browser, so there is no round trip in which a
           // client could substitute one.
-          customerEmail: session.email,
+          customerEmail: email,
           successUrl: returnUrls.successUrl,
           cancelUrl: returnUrls.cancelUrl,
         });
@@ -589,6 +649,80 @@ export function createPaymentCapability(
       // are FINAL — redelivery would reach the same conclusion — and answering
       // anything else would make a permanent refusal an infinite retry loop.
       return { status: "acknowledged", outcome };
+    },
+
+    async describeForCustomer(projectId) {
+      const productionProfile = APPAREL_RASTER_PRODUCTION_PROFILE;
+
+      // THE ENTITLEMENT IS CHECKED FIRST, and it is the only thing that can
+      // produce `production_unlocked`. Deliberately not routed through
+      // `resolveEligibility`, which reports an active unlock as a REFUSAL
+      // ("already_unlocked") because its question is "may they buy?". Asking
+      // the entitlement directly here keeps the paid state sourced from the
+      // entitlement record rather than inferred from a refusal reason.
+      let unlock;
+      try {
+        unlock = await repo.getActiveProductionUnlock(projectId, productionProfile);
+      } catch {
+        return { state: "unavailable", offer: null, checkoutPending: false };
+      }
+      if (productionUnlockAuthorizes(unlock, { projectId, productionProfile })) {
+        return { state: "production_unlocked", offer: null, checkoutPending: false };
+      }
+
+      const eligibility = await resolveEligibility(projectId);
+
+      if (!eligibility.eligible) {
+        // The two genuinely different kinds of "no offer", distinguished
+        // because the customer sees different things:
+        //
+        //   nothing to sell     → no payment surface at all. Not an error, not
+        //                         a promise, just not the moment.
+        //   cannot sell now     → a neutral unavailable note. Never a checkout
+        //                         button that is certain to fail.
+        //
+        // `already_unlocked` cannot appear here — the entitlement check above
+        // has already returned for that case.
+        const cannotSellRightNow =
+          eligibility.reason === "authority_unavailable" ||
+          eligibility.reason === "offer_unavailable" ||
+          eligibility.reason === "provider_unavailable";
+
+        return {
+          state: cannotSellRightNow ? "unavailable" : "not_applicable",
+          offer: null,
+          checkoutPending: false,
+        };
+      }
+
+      // An outstanding attempt means a payment page was opened. It is NOT
+      // evidence anybody paid — see `CustomerPaymentView.checkoutPending`.
+      let checkoutPending = false;
+      try {
+        const outstanding = await repo.getOutstandingPaymentTransaction(
+          projectId,
+          productionProfile,
+        );
+        checkoutPending = isOutstandingPaymentTransaction(outstanding);
+      } catch {
+        // Unreadable is not "pending". The consequence of guessing wrong here
+        // is a confirmation spinner shown to somebody who never paid, so the
+        // safe direction is the one that keeps offering the purchase.
+        checkoutPending = false;
+      }
+
+      return {
+        state: "payment_required",
+        offer: {
+          title: PRODUCTION_UNLOCK_OFFER_TITLE,
+          description: PRODUCTION_UNLOCK_OFFER_DESCRIPTION,
+          displayAmount: formatOfferAmount(
+            eligibility.offer.amountMinor,
+            eligibility.offer.currency,
+          ),
+        },
+        checkoutPending,
+      };
     },
   };
 }

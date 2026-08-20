@@ -35,13 +35,21 @@ import { DesignSummaryCard, type FieldTransition } from "./DesignSummaryCard";
 import { EmailContinuationGate } from "./EmailContinuationGate";
 import { MessageBubble } from "./MessageBubble";
 import { FinalArtworkDeliveryCard } from "./FinalArtworkDeliveryCard";
+import { createPaymentConfirmationPoll } from "./payment-confirmation-poll";
 import { PrepareForPrintAction } from "./PrepareForPrintAction";
+import { ProductionUnlockCard } from "./ProductionUnlockCard";
 import { RecommendationCard } from "./RecommendationCard";
 import {
   createStatusPollController,
   DEFAULT_STATUS_POLL_INTERVAL_MS,
 } from "./status-poll-controller";
 import { useIsClient } from "./use-is-client";
+import {
+  CHECKOUT_RETURN_COMPLETE,
+  CHECKOUT_RETURN_PARAM,
+  CHECKOUT_START_FAILED_MESSAGE,
+  resolveProductionUnlockSurface,
+} from "@/capabilities/payment";
 
 type ApiSnapshot = ApiProjectSnapshot & {
   persistenceMode?: "supabase" | "local";
@@ -206,6 +214,53 @@ export function ChatApp() {
     setDeliveryEditingReopened(false);
   }
 
+  // --- Sprint A5.5: the production unlock surface -----------------------
+  //
+  // Three pieces of LOCAL state, and none of them is payment state. The
+  // server owns whether this project is unlocked; these only record what
+  // this browser is doing about it.
+  const [confirmationTimedOut, setConfirmationTimedOut] = useState(false);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+
+  /**
+   * The checkout return hint, captured ONCE on the first client render.
+   *
+   * A ref rather than state, and read during render rather than set from an
+   * effect. Setting state from an effect body here would trigger a cascading
+   * re-render for a value that never changes after the first paint, and the
+   * hint has to be captured BEFORE the URL is stripped — so a ref is both the
+   * cheaper and the more accurate tool.
+   *
+   * SSR-safe: the ref stays `null` on the server, so the first paint has no
+   * hint and the surface renders from server state alone.
+   */
+  const checkoutReturnRef = useRef<boolean | null>(null);
+  if (isClient && checkoutReturnRef.current === null) {
+    checkoutReturnRef.current =
+      new URL(window.location.href).searchParams.get(CHECKOUT_RETURN_PARAM) ===
+      CHECKOUT_RETURN_COMPLETE;
+  }
+  const returnedFromCheckout = checkoutReturnRef.current === true;
+
+  /**
+   * Strips the hint from the address bar once it has been captured.
+   *
+   * A genuine external-system update, which is what an effect is for. It
+   * matters because the parameter is a ONE-SHOT navigation hint: left in
+   * place, a reload or a Back/Forward would keep re-asserting "we just came
+   * back from checkout", and somebody who abandoned payment could sit on a
+   * confirmation spinner indefinitely.
+   *
+   * `history.replaceState` rather than a router navigation — this must not
+   * add a history entry or re-run the page.
+   */
+  useEffect(() => {
+    if (!isClient) return;
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has(CHECKOUT_RETURN_PARAM)) return;
+    url.searchParams.delete(CHECKOUT_RETURN_PARAM);
+    window.history.replaceState(null, "", url.toString());
+  }, [isClient]);
   async function bootstrap() {
     setLoading(true);
     setError(null);
@@ -237,6 +292,52 @@ export function ChatApp() {
     }
   }
 
+  /**
+   * Sprint A5.5: start (or resume) a checkout and hand the browser over.
+   *
+   * The POST carries NO BODY. Amount, currency, production profile, buyer,
+   * and email are all resolved server-side (§23d), and the route rejects any
+   * property at all — so there is nothing for this function to send even if
+   * it wanted to.
+   *
+   * A double click cannot start two checkouts: the button is disabled while
+   * `sending` is true, and beneath that A5.3's outstanding-attempt index
+   * makes two concurrent requests converge on ONE payment page.
+   */
+  async function startProductionUnlockCheckout() {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setCheckoutError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/production-unlock/checkout`,
+        { method: "POST" },
+      );
+      const data = (await response.json()) as {
+        checkoutUrl?: string;
+        error?: string;
+      };
+
+      if (!response.ok || !data.checkoutUrl) {
+        // The server's message is already customer-safe and uniform across
+        // every internal reason; the local fallback covers a transport
+        // failure that produced no body. Neither says "payment failed" —
+        // nothing was charged, because nothing was started.
+        setCheckoutError(data.error || CHECKOUT_START_FAILED_MESSAGE);
+        return;
+      }
+
+      // Leaving the app. `assign` rather than `replace` so the browser Back
+      // button returns here, which is what a customer who changes their mind
+      // on the payment page will reach for.
+      window.location.assign(data.checkoutUrl);
+    } catch {
+      setCheckoutError(CHECKOUT_START_FAILED_MESSAGE);
+    } finally {
+      setSending(false);
+    }
+  }
   async function sendMessage(content: string) {
     if (!snapshot || sending) return;
     setSending(true);
@@ -1074,6 +1175,48 @@ export function ChatApp() {
   const showUseThisDesignAction =
     affordances.showUseThisDesign && !uploadedArtworkActive;
 
+  // Sprint A5.5: THE ONE PLACE a payment view becomes something to render.
+  // Resolved by the shared pure rule, never re-derived here — and note that
+  // `returnedFromCheckout` cannot reach `production_unlocked` through it.
+  const unlockSurface = snapshot
+    ? resolveProductionUnlockSurface({
+        payment: snapshot.payment,
+        returnedFromCheckout,
+      })
+    : "none";
+
+  /**
+   * Bounded confirmation polling.
+   *
+   * Runs ONLY while the surface is `payment_processing`, which requires both
+   * a durable outstanding attempt and the one-shot return hint — so an
+   * abandoned checkout never polls, and a customer who never opened checkout
+   * never polls.
+   *
+   * The first check fires immediately, because a webhook that landed before
+   * the browser returned is the common case and there is no reason to show a
+   * spinner for an interval before discovering the project is already
+   * unlocked.
+   */
+  useEffect(() => {
+    if (!isClient || unlockSurface !== "payment_processing") return;
+    const projectId = snapshot?.project.id;
+    if (!projectId) return;
+
+    return createPaymentConfirmationPoll({
+      refreshAndCheckUnlocked: async () => {
+        const response = await fetch(`/api/projects/${projectId}`);
+        if (!response.ok) return false;
+        const fresh = (await response.json()) as ApiSnapshot;
+        setSnapshot(fresh);
+        // AUTHORITATIVE. The entitlement is the only thing that stops the
+        // poll — never the transaction status, and never the fact that we
+        // came back from a payment page.
+        return fresh.payment.state === "production_unlocked";
+      },
+      onTimeout: () => setConfirmationTimedOut(true),
+    }).start();
+  }, [isClient, unlockSurface, snapshot?.project.id]);
   // Sprint A4: the email continuation gate. Purely a mirror of a
   // server-derived state — the client never decides that a gate applies,
   // and the server refuses the same actions whether or not this renders.
@@ -1081,9 +1224,19 @@ export function ChatApp() {
   // Sprint A4 Correction 1: `unavailable` is shown with the same quiet note
   // as `continue_locked`, deliberately. Both mean "not right now"; neither is
   // the customer's fault; neither says anything about why.
+  //
+  // Sprint A5.5: SUPPRESSED whenever a commercial surface is showing. The
+  // `continue_locked` sentence ("...aren't available on your session yet —
+  // we'll let you know...") is still true of GENERATION, which A5.5 does not
+  // unlock, but stacking it above a card asking for money is exactly the
+  // duplicated-commercial-message friction this sprint exists to avoid: two
+  // surfaces telling the customer different stories about the same moment.
+  // The card is the commercial authority; the note stays for the states
+  // where there is no card (nothing purchasable, or unresolvable authority).
   const acquisitionNotice =
-    snapshot?.acquisition.state === "continue_locked" ||
-    snapshot?.acquisition.state === "unavailable"
+    unlockSurface === "none" &&
+    (snapshot?.acquisition.state === "continue_locked" ||
+      snapshot?.acquisition.state === "unavailable")
       ? snapshot.acquisition.message
       : null;
 
@@ -1317,6 +1470,21 @@ export function ChatApp() {
               </p>
             ) : null}
 
+            {/* Sprint A5.5: the commercial surface. Rendered AFTER the email
+                gate and BEFORE the finalization action, which is the order
+                the customer actually moves through: give an address, choose
+                a design, unlock it, then prepare it. Payment state lives
+                here and nowhere in the transcript. */}
+            {snapshot ? (
+              <ProductionUnlockCard
+                surface={unlockSurface}
+                offer={snapshot.payment.offer}
+                busy={sending}
+                confirmationTimedOut={confirmationTimedOut}
+                errorMessage={checkoutError}
+                onUnlock={() => void startProductionUnlockCheckout()}
+              />
+            ) : null}
             {showUseThisDesignAction ? (
               <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-black/8 bg-white p-4 shadow-sm">
                 <p className="text-sm text-ink">
