@@ -264,6 +264,57 @@ export function createPaymentCapability(
   }
 
   /**
+   * Is this project outside the commercial funnel entirely — nothing to sell,
+   * no surface to draw, regardless of what the deployment can or cannot
+   * charge for?
+   *
+   * The same two tiers `AcquisitionCapability.authorizeFinalization` lets
+   * through unconditionally, resolved the same way and from the same place:
+   *
+   *   legacy    `acquisitionSessionId IS NULL` — predates the funnel,
+   *             grandfathered, already unlocked. §23b.
+   *   internal  a deliberate, audited grant. Already finalizes freely, so a
+   *             checkout would charge for access it already holds.
+   *
+   * Resolved from `ProjectRepository` directly rather than by depending on
+   * `AcquisitionCapability` — the boundary this capability is required to
+   * keep (see `capability-boundaries.ts`: the spend boundary must not learn
+   * that commerce exists, and neither direction needs a dependency because
+   * both read the session from the repository).
+   *
+   * FAILS TO `false` — "stay on the ordinary path" — never to `true`. Every
+   * unreadable case is left to `resolveEligibility`, which already fails
+   * closed on exactly these reads (`authority_unavailable`). This function is
+   * only ever allowed to REMOVE a commercial surface from somebody who
+   * provably has nothing to buy; it must never be the thing that grants one,
+   * and it must never manufacture an entitlement from a failed read.
+   */
+  async function isOutsideCommercialFunnel(projectId: string): Promise<boolean> {
+    let snapshot;
+    try {
+      snapshot = await repo.getProject(projectId);
+    } catch {
+      return false;
+    }
+    if (!snapshot) return false;
+
+    const acquisitionSessionId = snapshot.project.acquisitionSessionId;
+    if (!acquisitionSessionId) return true;
+
+    let session;
+    try {
+      session = await repo.getAcquisitionSession(acquisitionSessionId);
+    } catch {
+      return false;
+    }
+    // A session that cannot be loaded is never given the benefit of the
+    // doubt, exactly as `resolveAuthority` refuses to treat it as legacy.
+    if (!session) return false;
+
+    return session.entitlement === "internal";
+  }
+
+  /**
    * Sprint A5.5 — THE ONE ELIGIBILITY RULE, extracted so that "may this
    * customer buy?" has exactly one answer.
    *
@@ -653,6 +704,28 @@ export function createPaymentCapability(
 
     async describeForCustomer(projectId) {
       const productionProfile = APPAREL_RASTER_PRODUCTION_PROFILE;
+
+      // OUTSIDE-THE-FUNNEL IS ANSWERED BEFORE ANY COMMERCIAL RECORD IS READ.
+      //
+      // An internal or legacy project has nothing to buy — `authorizeFinalization`
+      // already lets both finalize unconditionally — so the honest customer view
+      // is "no commercial surface at all". Asking that question FIRST is the
+      // ordering that matters, not merely a shortcut:
+      //
+      // `resolveEligibility` already ranked `internal_project` above every
+      // provider/price check, so internal was correctly immune to an unset
+      // Stripe key. What it was NOT immune to was the two READS that ran
+      // before it — `getActiveProductionUnlock` here, whose catch returns
+      // `"unavailable"`. A deployment whose commercial tables do not exist yet
+      // (A5.1/A5.6 migrations unapplied) therefore reported
+      // "Production unlock is temporarily unavailable" to an operator whose
+      // entitlement the server never got as far as consulting. Internal
+      // authority must not depend on the commercial subsystem being present,
+      // reachable, or configured — that is the whole point of it being a
+      // separate tier.
+      if (await isOutsideCommercialFunnel(projectId)) {
+        return { state: "not_applicable", offer: null, checkoutPending: false };
+      }
 
       // THE ENTITLEMENT IS CHECKED FIRST, and it is the only thing that can
       // produce `production_unlocked`. Deliberately not routed through

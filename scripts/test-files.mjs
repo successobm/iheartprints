@@ -317,4 +317,11 @@ export const TEST_FILES = [
   "src/components/chat/payment-confirmation-poll.test.ts",
   "src/components/chat/ProductionUnlockCard.test.tsx",
   "src/capabilities/payment/production-unlock-customer-flow.test.ts",
+  // Internal entitlement vs the commercial surface. An internal operator was
+  // shown "temporarily unavailable" because the customer payment view read a
+  // commercial record BEFORE it asked who was asking — so this suite pins the
+  // ordering against both shapes of commercial absence (unconfigured provider
+  // /price, and the reads themselves throwing) while proving the prospect
+  // funnel, legacy grandfathering, and the offer itself are unchanged.
+  "src/capabilities/payment/internal-entitlement-payment-view.test.ts",
 ];
