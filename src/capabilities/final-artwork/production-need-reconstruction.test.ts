@@ -37,10 +37,19 @@ import type { FinalArtworkProviderInput } from "./provider";
  *   verdict            reconstruction_sufficiency FAIL at contentScale 1.3846
  *   cost               one Topaz credit, spent on a plate production rejected
  *
+ * WHAT THE SECOND LIVE ORDER THEN PROVED (job
+ * `36df2fa0-92c3-4ff6-ad35-9ac9a1fc96f1`). Asking for the full production need
+ * in one pass — 3353x3675, 5.742x — did NOT work, and the reason was not our
+ * arithmetic. Topaz accepted the request, ran ~219s, reported `Completed`, and
+ * returned 2336x2560: exactly 4.000x, silently clamped, and billed. So the
+ * original premise of this file ("ask for enough pixels in ONE pass") is only
+ * reachable up to 4x. Above that, no request can succeed, and the only correct
+ * behaviour is to refuse BEFORE dispatch instead of paying to be clamped.
+ *
  * The fix is NOT to loosen the validator. `reconstruction_sufficiency` was
- * right, and every assertion below leaves it exactly as strict as it was —
- * the D case passes it on the merits, by asking the provider for enough
- * pixels in ONE pass instead of a constant that knew nothing about the plate.
+ * right both times, and every assertion below leaves it exactly as strict as
+ * it was. A need at or under 4x passes it on the merits; a need above 4x costs
+ * zero credits and produces no plate at all.
  *
  * ZERO REAL PROVIDER CALLS. Every reconstruction here is a local `pngjs`
  * nearest-neighbour blow-up standing in for Topaz at the exact dimensions the
@@ -117,7 +126,7 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
   /* GOAL 5 — the real file, end to end                                  */
   /* ================================================================== */
 
-  it("D: the live 562x486 file requests ~5.6x in ONE pass and reaches a certifiable plate", () => {
+  it("D: the live 562x486 file at 10.5in needs 5.6x, exceeds Topaz's 4x, and costs ZERO", () => {
     const sourceBytes = artworkPng(
       LIVE_CANVAS.width,
       LIVE_CANVAS.height,
@@ -136,7 +145,38 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
     assert.equal(enhancement.requiresReconstruction, true);
     assert.equal(enhancement.requiredWidthPx, 3150, "10.5in x 300 PPI");
 
-    // --- the request itself: derived, not constant
+    // --- and yet no request may be built: 3150/562 = 5.60x is beyond what the
+    // provider can deliver, so this is known impossible before a credit moves.
+    const outcome = resolveReconstructionRequest(source, sizing);
+    assert.equal(
+      outcome.status,
+      "insufficient_reconstruction",
+      "a 5.6x need must never become a 4x request that gets billed and clamped",
+    );
+    if (outcome.status !== "insufficient_reconstruction") return;
+    assert.match(
+      outcome.reason,
+      /4x maximum this reconstruction provider can actually deliver/i,
+      "the reason must name the real constraint, not a generic size complaint",
+    );
+  });
+
+  it("D2: the same live file at a width its 4x reconstruction genuinely covers is certifiable", () => {
+    // 7in x 300 = 2100px plate. 2100 / 562 = 3.74x — inside the provider's
+    // reach, so this is a real, honest print_ready outcome for the live
+    // artwork rather than a smaller-is-easier fiction.
+    const sourceBytes = artworkPng(
+      LIVE_CANVAS.width,
+      LIVE_CANVAS.height,
+      LIVE_VISIBLE.width,
+      LIVE_VISIBLE.height,
+    );
+    const source = decode(sourceBytes);
+    const sizing: PlacementSizingPolicy = {
+      ...PRINT_PLACEMENT_SIZING_POLICY.full_back,
+      targetWidthIn: 7,
+    };
+
     const outcome = resolveReconstructionRequest(source, sizing);
     assert.equal(outcome.status, "resolved");
     if (outcome.status !== "resolved") return;
@@ -144,16 +184,13 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
 
     const impliedFactor = request.projectedVisibleWidthPx / LIVE_VISIBLE.width;
     assert.ok(
-      impliedFactor > 5.6 && impliedFactor < 6.0,
-      `expected ~5.6x-5.7x (5.60x need + 2% headroom), got ${impliedFactor.toFixed(3)}x`,
+      impliedFactor <= 4,
+      `must stay within the provider ceiling; got ${impliedFactor.toFixed(3)}x`,
     );
+    assert.equal(request.clampedByProviderMaxScale, false, "3.8x needs no clamp");
+    assert.equal(request.targetWidthPx, 2100);
     assert.ok(
-      impliedFactor > 4,
-      "the removed fixed 4x is exactly what produced the live failure",
-    );
-    assert.equal(request.targetWidthPx, 3150);
-    assert.ok(
-      request.projectedVisibleWidthPx >= 3150,
+      request.projectedVisibleWidthPx >= 2100,
       "the reconstruction must carry at least the plate it will be resampled to",
     );
     assert.equal(request.clampedByMaxDimension, false);
@@ -169,12 +206,12 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
     if (normalized.status !== "normalized") return;
     const meta = normalized.result.metadata;
 
-    assert.equal(meta.outputWidthPx, 3150);
+    assert.equal(meta.outputWidthPx, 2100);
     assert.ok(
       meta.contentScale <= 1.005,
       `contentScale must clear reconstruction_sufficiency; got ${meta.contentScale.toFixed(4)} (the live failure was 1.3846)`,
     );
-    assert.ok(meta.trimmedWidthPx >= 3150);
+    assert.ok(meta.trimmedWidthPx >= 2100);
 
     // --- authoritative validation, uploaded-preserve profile, unchanged rules
     const encoded = encodeProductionPng(normalized.result);
@@ -187,7 +224,7 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
         artworkVersionId: "prepared-artwork-version",
         printPlacement: "full_back",
         productSummary: "tshirts",
-        intendedPrintWidthIn: 10.5,
+        intendedPrintWidthIn: 7,
         requestedProductionOutput: null,
         asset: {
           contentType: "image/png",
@@ -375,6 +412,169 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
   });
 
   /* ================================================================== */
+  /* LIVE ACCEPTANCE — Topaz's proven 4x ceiling                         */
+  /* ================================================================== */
+
+  it("C2: a need of exactly 4x asks for exactly 4x, and is not clamped away", () => {
+    // 800px visible needing a 3200px plate: 4.000x on the nose.
+    const source = decode(artworkPng(1000, 1000, 800, 800));
+    const sizing: PlacementSizingPolicy = {
+      ...PRINT_PLACEMENT_SIZING_POLICY.full_back,
+      targetWidthIn: 3200 / 300,
+      maxHeightIn: 14,
+    };
+    const outcome = resolveReconstructionRequest(source, sizing);
+    assert.equal(outcome.status, "resolved");
+    if (outcome.status !== "resolved") return;
+
+    assert.equal(outcome.request.scale, 4, "the ceiling is reachable, not merely approachable");
+    assert.equal(outcome.request.widthPx, 4000, "1000 canvas x 4");
+    assert.equal(outcome.request.heightPx, 4000);
+    assert.ok(
+      outcome.request.projectedVisibleWidthPx >= outcome.request.targetWidthPx,
+      "exactly 4x still covers the plate it was sized for",
+    );
+  });
+
+  it("C3: no resolvable request may EVER exceed 4x source on either axis", () => {
+    // A sweep across shapes and plate sizes, including many that need far more
+    // than 4x. The invariant is unconditional: whatever comes back resolved is
+    // within the provider's proven reach.
+    const shapes = [
+      { canvas: [584, 640], visible: [562, 486] },
+      { canvas: [300, 900], visible: [280, 850] },
+      { canvas: [900, 300], visible: [850, 280] },
+      { canvas: [120, 120], visible: [100, 100] },
+      { canvas: [2000, 1000], visible: [1900, 950] },
+    ] as const;
+    const widths = [3, 4, 7, 10.5, 14];
+
+    for (const shape of shapes) {
+      const source = decode(
+        artworkPng(shape.canvas[0], shape.canvas[1], shape.visible[0], shape.visible[1]),
+      );
+      for (const targetWidthIn of widths) {
+        const sizing: PlacementSizingPolicy = {
+          ...PRINT_PLACEMENT_SIZING_POLICY.full_back,
+          targetWidthIn,
+          maxHeightIn: 14,
+        };
+        const outcome = resolveReconstructionRequest(source, sizing);
+        if (outcome.status !== "resolved") continue;
+        const { widthPx, heightPx } = outcome.request;
+        assert.ok(
+          widthPx <= shape.canvas[0] * 4 + 1 && heightPx <= shape.canvas[1] * 4 + 1,
+          `${shape.canvas} @ ${targetWidthIn}in resolved to ${widthPx}x${heightPx}, above 4x source`,
+        );
+      }
+    }
+  });
+
+  it("E2: a >4x need never dispatches, never records a request id, never costs a credit", async () => {
+    // The exact live shape: 584x640 visible 562x486 at 10.5in.
+    const sourceBytes = artworkPng(
+      LIVE_CANVAS.width,
+      LIVE_CANVAS.height,
+      LIVE_VISIBLE.width,
+      LIVE_VISIBLE.height,
+    );
+    const sizing = PRINT_PLACEMENT_SIZING_POLICY.full_back;
+
+    let fetched = 0;
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl: (async () => {
+        fetched += 1;
+        throw new Error("no provider call may happen for a >4x need");
+      }) as typeof fetch,
+      sleepImpl: async () => {},
+    });
+
+    let submitted = 0;
+    await assert.rejects(
+      () =>
+        provider.produce({
+          sourceBytes,
+          sourceContentType: "image/png",
+          sizing,
+          existingProviderRequest: null,
+          onProviderRequestSubmitted: async () => {
+            submitted += 1;
+          },
+        }),
+      /cannot be reconstructed to the .* this production size requires/i,
+    );
+    assert.equal(fetched, 0, "zero provider dispatches — this is the billing defect closed");
+    assert.equal(submitted, 0, "no paid request identity was ever recorded");
+  });
+
+  it("D3: a provider that silently clamps to 4x can no longer surprise us — we never ask above it", () => {
+    // The live defect reproduced as arithmetic: what the OLD unbounded resolver
+    // would have asked for, versus what Topaz actually returns regardless.
+    const source = decode(
+      artworkPng(LIVE_CANVAS.width, LIVE_CANVAS.height, LIVE_VISIBLE.width, LIVE_VISIBLE.height),
+    );
+    const sizing = PRINT_PLACEMENT_SIZING_POLICY.full_back;
+
+    // What Topaz WILL return for this source, whatever we ask: exactly 4x.
+    const providerWouldReturn = {
+      width: LIVE_CANVAS.width * 4,
+      height: LIVE_CANVAS.height * 4,
+    };
+    assert.deepEqual(
+      providerWouldReturn,
+      { width: 2336, height: 2560 },
+      "the live observed response, pinned",
+    );
+
+    // Because we now refuse rather than ask, the dimension guard in produce()
+    // never has to fire for a request of our own making. A mismatch after this
+    // change means the PROVIDER changed, not that we over-asked.
+    const outcome = resolveReconstructionRequest(source, sizing);
+    assert.equal(outcome.status, "insufficient_reconstruction");
+  });
+
+  it("F2: reconstruction reach and final plate dimensions are never conflated", () => {
+    // A plate ALWAYS has the pixel count its physical size demands — that is
+    // what normalization does, and it can never fail. The separate, honest
+    // question is whether those pixels carry detail. These two numbers must
+    // stay distinguishable, or `reconstruction_sufficiency` means nothing.
+    const source = decode(
+      artworkPng(LIVE_CANVAS.width, LIVE_CANVAS.height, LIVE_VISIBLE.width, LIVE_VISIBLE.height),
+    );
+    const sizing = PRINT_PLACEMENT_SIZING_POLICY.full_back; // 10.5in -> 3150px
+
+    // Force the maximum the provider can actually deliver, bypassing the
+    // resolver's refusal, to measure what such a plate would really be worth.
+    const maxReconstruction = fakeReconstruction(
+      source,
+      LIVE_CANVAS.width * 4,
+      LIVE_CANVAS.height * 4,
+    );
+    const normalized = normalizeProductionRaster(maxReconstruction, sizing);
+    assert.equal(normalized.status, "normalized");
+    if (normalized.status !== "normalized") return;
+    const meta = normalized.result.metadata;
+
+    // The plate reaches full size...
+    assert.equal(meta.outputWidthPx, 3150, "the canvas always reaches the required pixel count");
+    // ...and is nonetheless NOT sufficient, by more than the validator's 0.5%.
+    assert.ok(
+      meta.contentScale > 1.005,
+      `a 4x plate forced to 10.5in must not read as sufficient; contentScale ${meta.contentScale.toFixed(4)}`,
+    );
+    assert.ok(
+      meta.contentScale > 1.35 && meta.contentScale < 1.42,
+      `expected ~1.39x of manufactured enlargement, got ${meta.contentScale.toFixed(4)}`,
+    );
+    // Which is exactly why the resolver refuses to buy it in the first place.
+    assert.equal(
+      resolveReconstructionRequest(source, sizing).status,
+      "insufficient_reconstruction",
+    );
+  });
+
+  /* ================================================================== */
   /* GOAL 2 / GOAL 7 — single pass, and the prepared source              */
   /* ================================================================== */
 
@@ -386,7 +586,12 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
       LIVE_VISIBLE.height,
     );
     const source = decode(sourceBytes);
-    const sizing = PRINT_PLACEMENT_SIZING_POLICY.full_back;
+    // 7in, so the first pass is a request the provider can actually deliver —
+    // the point here is single-pass sourcing, not the ceiling.
+    const sizing: PlacementSizingPolicy = {
+      ...PRINT_PLACEMENT_SIZING_POLICY.full_back,
+      targetWidthIn: 7,
+    };
 
     const first = resolveReconstructionRequest(source, sizing);
     assert.equal(first.status, "resolved");

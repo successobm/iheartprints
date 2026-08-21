@@ -83,6 +83,33 @@ const RECONSTRUCTION_HEADROOM = 1.02;
 const MIN_RECONSTRUCTION_DIM_PX = 256;
 const MAX_RECONSTRUCTION_DIM_PX = 8192;
 
+/**
+ * Print'em All Phase 0 (live acceptance) — Topaz Transparency Upscale's REAL
+ * effective ceiling, established by a controlled live order rather than by
+ * documentation.
+ *
+ * WHAT THE LIVE RUN PROVED. FinalArtworkJob
+ * `36df2fa0-92c3-4ff6-ad35-9ac9a1fc96f1` submitted a 584x640 source asking for
+ * 3353x3675 (5.742x — exactly what a 10.5in @ 300 PPI plate required). Topaz
+ * accepted the request with a 2xx, ran for ~219s, reported `Completed`, and
+ * returned a valid PNG of **2336x2560** — precisely 4.000x on both axes. The
+ * requested `output_width`/`output_height` were neither honoured nor rejected.
+ *
+ * THE DANGEROUS PART IS THE SILENCE. Topaz does not fail a >4x request; it
+ * clamps to 4x and BILLS for it. So the only place this can be caught without
+ * spending money is here, before dispatch — the returned-dimension guard in
+ * `produce()` catches it correctly but always one credit too late.
+ *
+ * This is therefore a hard ceiling on the SCALE FACTOR, not on pixel count:
+ * 3353x3675 is far below `MAX_RECONSTRUCTION_DIM_PX`, which is exactly why
+ * that existing guard did not save the live order. Both ceilings are kept —
+ * they bound different things, and either can bind first.
+ *
+ * A need above this ceiling is not "ask anyway and see": it resolves to
+ * `insufficient_reconstruction` and never leaves this process.
+ */
+const PROVIDER_MAX_RECONSTRUCTION_SCALE = 4;
+
 const DEFAULT_SUBMIT_TIMEOUT_MS = 30_000;
 /** Phase 2D observed 69.5s–128.0s for Transparency Upscale; generous margin above the worst case. */
 const DEFAULT_POLL_TIMEOUT_MS = 6 * 60 * 1000;
@@ -120,6 +147,14 @@ export interface ReconstructionRequest {
   projectedVisibleHeightPx: number;
   /** True when `MAX_RECONSTRUCTION_DIM_PX` pulled the scale below what production asked for. */
   clampedByMaxDimension: boolean;
+  /**
+   * True when `PROVIDER_MAX_RECONSTRUCTION_SCALE` — Topaz's proven 4x
+   * effective ceiling — pulled the scale below what production asked for.
+   * Distinct from `clampedByMaxDimension`: that one bounds absolute pixels,
+   * this one bounds the magnification factor, and the live failure hit only
+   * this one.
+   */
+  clampedByProviderMaxScale: boolean;
 }
 
 export type ResolveReconstructionOutcome =
@@ -149,7 +184,15 @@ export type ResolveReconstructionOutcome =
  *     target        = resolveWidthConstrainedSizing(sizing, trimmed source)
  *     scale         = max(target.widthPx  / alphaBBox.width,
  *                         target.heightPx / alphaBBox.height) x HEADROOM
+ *     scale         = min(scale, PROVIDER_MAX_RECONSTRUCTION_SCALE)  // 4x, proven live
  *     request       = round(sourceCanvas x scale)          // both axes, one scale
+ *
+ * THE CEILING IS NOT A SECOND-BEST REQUEST. When the need exceeds 4x, this
+ * function does not quietly ask for 4x and hope: it checks whether the clamped
+ * projection still covers the plate, and returns `insufficient_reconstruction`
+ * when it does not. Asking for 4x anyway would produce a plate that
+ * `reconstruction_sufficiency` refuses — the live failure, minus the honesty
+ * of having refused it for free.
  *
  * THE DENOMINATOR IS THE ALPHA BOUNDING BOX, and that is the load-bearing
  * detail. Dividing by the trimmed size instead would silently under-request:
@@ -207,6 +250,7 @@ export function resolveReconstructionRequest(
   // requested scale makes that ceiling far easier to reach, so the clamp has
   // to become proportional in the same change that raises the scale.
   let clampedByMaxDimension = false;
+  let clampedByProviderMaxScale = false;
   const floorFactor = Math.max(
     MIN_RECONSTRUCTION_DIM_PX / (source.width * scale),
     MIN_RECONSTRUCTION_DIM_PX / (source.height * scale),
@@ -224,15 +268,33 @@ export function resolveReconstructionRequest(
     scale /= ceilingFactor;
   }
 
+  // Print'em All Phase 0 (live acceptance): the provider's own proven 4x
+  // ceiling. Applied AFTER the absolute-pixel ceiling and after the floor,
+  // because it outranks both — a request above it is not merely large, it is
+  // one the provider will silently refuse to honour while still billing for
+  // it (see `PROVIDER_MAX_RECONSTRUCTION_SCALE`). One uniform factor, so both
+  // axes land at or under 4x source by construction.
+  if (scale > PROVIDER_MAX_RECONSTRUCTION_SCALE) {
+    clampedByProviderMaxScale = true;
+    scale = PROVIDER_MAX_RECONSTRUCTION_SCALE;
+  }
+
   const widthPx = Math.max(1, Math.round(source.width * scale));
   const heightPx = Math.max(1, Math.round(source.height * scale));
   const projectedVisibleWidthPx = bbox.width * scale;
   const projectedVisibleHeightPx = bbox.height * scale;
 
-  // Only reachable via the ceiling: without it, `scale >= required` holds by
+  // Only reachable via a ceiling: without one, `scale >= required` holds by
   // construction and the projection always covers the target.
+  //
+  // This is the ONLY thing standing between a >4x need and a wasted credit.
+  // Reaching a ceiling is not itself a failure — a clamped request whose
+  // projection still covers the plate is fine — but a clamped request that
+  // falls short is a request whose output production would reject, and it is
+  // refused here rather than billed and then refused by
+  // `reconstruction_sufficiency`.
   if (
-    clampedByMaxDimension &&
+    (clampedByMaxDimension || clampedByProviderMaxScale) &&
     (projectedVisibleWidthPx < target.widthPx ||
       projectedVisibleHeightPx < target.heightPx)
   ) {
@@ -241,7 +303,8 @@ export function resolveReconstructionRequest(
       reason:
         `This artwork cannot be reconstructed to the ${target.widthPx}x${target.heightPx}px this production size requires: ` +
         `its visible artwork is ${bbox.width}x${bbox.height}px, and the largest proportional reconstruction available ` +
-        `(${widthPx}x${heightPx}px) would carry only ${Math.round(projectedVisibleWidthPx)}x${Math.round(projectedVisibleHeightPx)}px of it.`,
+        `(${widthPx}x${heightPx}px${clampedByProviderMaxScale ? `, the ${PROVIDER_MAX_RECONSTRUCTION_SCALE}x maximum this reconstruction provider can actually deliver` : ""}) ` +
+        `would carry only ${Math.round(projectedVisibleWidthPx)}x${Math.round(projectedVisibleHeightPx)}px of it.`,
     };
   }
 
@@ -256,6 +319,7 @@ export function resolveReconstructionRequest(
       projectedVisibleWidthPx,
       projectedVisibleHeightPx,
       clampedByMaxDimension,
+      clampedByProviderMaxScale,
     },
   };
 }
@@ -326,6 +390,19 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
     if (resumable) {
       processId = resumable.providerRequestId;
     } else {
+      // Print'em All Phase 0 (live acceptance): the last gate before money is
+      // spent. `resolveReconstructionRequest` already bounds the scale, so
+      // this can only fire if that function is later changed in a way that
+      // reintroduces the live billing defect — which is precisely why it
+      // guards the dispatch boundary rather than trusting a caller. Charging
+      // for a request the provider will silently clamp is the one failure
+      // mode this adapter must never repeat.
+      assertWithinProviderScaleCeiling(
+        source.width,
+        source.height,
+        targetReconstructedWidth,
+        targetReconstructedHeight,
+      );
       processId = await this.submit(
         input.sourceBytes,
         targetReconstructedWidth,
@@ -582,6 +659,34 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
     }
     return buffer;
   }
+}
+
+/**
+ * Refuses, without dispatching, any request that exceeds the provider's proven
+ * `PROVIDER_MAX_RECONSTRUCTION_SCALE` on either axis.
+ *
+ * `invalid_request` + `not_dispatched` deliberately: nothing left this
+ * process, nothing was billed, and `isRetryableProviderError` excludes it so
+ * no transport retry can turn one refusal into repeated paid attempts.
+ */
+function assertWithinProviderScaleCeiling(
+  sourceWidth: number,
+  sourceHeight: number,
+  requestedWidth: number,
+  requestedHeight: number,
+): void {
+  const maxWidth = sourceWidth * PROVIDER_MAX_RECONSTRUCTION_SCALE;
+  const maxHeight = sourceHeight * PROVIDER_MAX_RECONSTRUCTION_SCALE;
+  // Rounding to whole pixels can land a hair above an exact 4x multiple; the
+  // tolerance admits that and nothing wider.
+  if (requestedWidth <= maxWidth + 1 && requestedHeight <= maxHeight + 1) return;
+  throw new ProviderError(
+    "invalid_request",
+    `A ${requestedWidth}x${requestedHeight} reconstruction of a ${sourceWidth}x${sourceHeight} source exceeds the ` +
+      `${PROVIDER_MAX_RECONSTRUCTION_SCALE}x maximum this reconstruction provider can deliver — it would be silently ` +
+      `reduced to ${Math.round(maxWidth)}x${Math.round(maxHeight)} and billed anyway.`,
+    "not_dispatched",
+  );
 }
 
 function classifySubmitResponse(status: number): void {

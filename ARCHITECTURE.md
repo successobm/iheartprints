@@ -5341,6 +5341,67 @@ There is **no retry ladder**. If a reconstruction still lands short of the
 target, the plate is produced honestly and authoritative validation fails it
 via `reconstruction_sufficiency` — never an escalating loop of paid calls.
 
+### The provider reconstruction ceiling (Print'em All Phase 0, live acceptance)
+
+`TopazTransparencyUpscaleProvider` bounds every request to
+`PROVIDER_MAX_RECONSTRUCTION_SCALE = 4` — a **scale-factor** ceiling, distinct
+from the existing absolute-pixel `MAX_RECONSTRUCTION_DIM_PX = 8192`. Both are
+kept; either can bind first, and the live failure hit only the former.
+
+This constant is live-measured, not documented-from-a-datasheet. Controlled
+acceptance job `36df2fa0-92c3-4ff6-ad35-9ac9a1fc96f1` submitted a 584×640
+prepared source asking for 3353×3675 (5.742×, exactly what a 10.5in @ 300 PPI
+plate requires). Topaz returned `2xx`, ran ~219s, reported `Completed`, and
+delivered **2336×2560 — precisely 4.000× on both axes**. It neither honoured
+nor rejected the requested dimensions: it **silently clamped and billed**.
+
+The consequence for architecture is specific. A provider that fails loudly can
+be caught after dispatch; one that fails silently can only be caught before it.
+So the ceiling lives in `resolveReconstructionRequest` (pure, testable, no
+network), and a need above it does **not** become a smaller request — it
+returns `insufficient_reconstruction`, which the adapter raises as
+`ProviderError("invalid_request", …, "not_dispatched")`: nothing leaves the
+process, nothing is billed, and `isRetryableProviderError` excludes it so no
+transport retry can convert one refusal into repeated paid attempts. A
+defence-in-depth assertion at the dispatch boundary re-checks the invariant, so
+a future edit to the resolver cannot silently reopen the billing defect.
+
+The returned-dimension guard in `produce()` remains, but its meaning has
+changed: it can no longer fire for a request of our own making, so a mismatch
+now indicates **the provider changed**, not that we over-asked.
+
+**This ceiling does not relax any acceptance rule.** A source needing more than
+4× to reach its selected physical size still cannot produce a certifiable plate
+— `reconstruction_sufficiency` would refuse the interpolated result, and that
+verdict is unchanged. What changed is only *when* the refusal happens and what
+it costs: before dispatch, for zero credits, instead of after, for one. The
+customer-facing remedy is a smaller physical print size — the honest maximum is
+`trimmed reconstruction width ÷ 300`, which for the live fixture is ≈7.5in
+against the 10.5in requested (effective 216 PPI if forced to 10.5in).
+
+Accepting a plate below effective 300 PPI would be a **product decision no
+current authority clearly grants**, and it is deliberately not implemented
+here. The governing texts are not perfectly aligned and the gap is recorded
+rather than resolved by code:
+
+- Constitution §16.2 lists the deliverable as "reconstructed **or upscaled**
+  when source pixels are insufficient", and names pixel geometry
+  (`production pixels ÷ intended physical inches`) as "the authority for the
+  300 PPI target". Read literally, an interpolated 3150px plate satisfies
+  §16.4's `print_ready` clause.
+- The implementation and "Resolution provenance — the honesty mechanism
+  (Goal 5/9, 'Upscaling Truthfulness')" above are **stricter**:
+  `reconstruction_sufficiency` blocks any plate enlarged beyond the raster it
+  was built from (tolerance 0.5%), and `effective_resolution` /
+  `minimum_raster_dimensions` judge against native dimensions rather than the
+  enlarged file's pixel count.
+
+The stricter reading governs today because it is what the code enforces and
+what this document has described since Sprint 2M Phase 1. Changing it — to
+permit deterministic enlargement after a maxed-out reconstruction, at a stated
+effective-PPI floor — is a Constitution amendment, not an implementation
+detail, and must not be introduced by loosening a validator.
+
 ### Uploaded-preserve validation profile
 
 `PrintValidationInput.validationProfile` selects which checks *apply*. It is
