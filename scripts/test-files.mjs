@@ -157,6 +157,13 @@ export const TEST_FILES = [
   "src/lib/config/final-artwork-provider-config.test.ts",
   "src/capabilities/final-artwork/resolve-final-artwork-provider.test.ts",
   "src/capabilities/final-artwork/topaz-transparency-upscale-provider.test.ts",
+  // Print'em All Phase 0: the reconstruction request is derived from the
+  // production plate, not from a constant. Pins the live 562x486 -> 10.5in
+  // failure (which asked for 4x, needed 5.60x, and was correctly refused by
+  // reconstruction_sufficiency after the credit was spent), plus the other
+  // scale bands, the proportional maximum, the fail-before-dispatch case, and
+  // the guarantee that the transparent prepared artwork stays the source.
+  "src/capabilities/final-artwork/production-need-reconstruction.test.ts",
   "src/capabilities/final-artwork-worker/source-eligibility.test.ts",
   "src/capabilities/final-artwork-worker/production-verification.test.ts",
   "src/lib/config/automated-test-safety.test.ts",

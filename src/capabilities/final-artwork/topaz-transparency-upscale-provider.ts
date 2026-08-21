@@ -35,10 +35,15 @@ import { PNG } from "pngjs";
 import { withRetry } from "@/capabilities/shared/retry";
 import { ProviderError, isRetryableProviderError } from "@/capabilities/providers/provider-error";
 
+import { resolveWidthConstrainedSizing } from "@/capabilities/shared/print-placement-dimensions";
+
+import { trimToAlphaBounds, type AlphaTrimOptions } from "./alpha-trim";
 import {
   encodeProductionPng,
   normalizeProductionRaster,
+  type ProductionSizingRequest,
 } from "./production-normalization";
+import type { RgbaImage } from "./raster-transform";
 import type {
   FinalArtworkProvider,
   FinalArtworkProviderInput,
@@ -50,13 +55,30 @@ const TOPAZ_MODEL = "Transparency Upscale";
 const TRANSFORMATION_METHOD = "topaz_transparency_upscale_v1";
 
 /**
- * The tested Phase 2D configuration — a proportional 4x reconstruction
- * (1024x1024 → 4096x4096 for the bake-off's square sources). Applied to
- * both axes independently so a non-square source is upscaled
- * proportionally rather than forced into a square frame (never stretches,
- * never crops — Goal 5).
+ * Print'em All Phase 0: how much MORE than the bare production requirement to
+ * ask the provider for.
+ *
+ * Not a fudge factor — it pays for one specific, measured effect. The scale is
+ * derived from the SOURCE's alpha bounding box, but the box that actually
+ * matters is the one measured on the RECONSTRUCTED raster, and the two are
+ * never exactly proportional: reconstruction softens edges, so re-applying the
+ * alpha threshold afterwards moves the bounds by a pixel or two in either
+ * direction. The live Print'em All file drifted +0.13% (562px x 4 predicted
+ * 2248, measured 2251) — harmless in that direction, fatal in the other, since
+ * landing even one pixel short puts `reconstruction_sufficiency` back into
+ * failure and the credit is already spent.
+ *
+ * `alpha-trim`'s safety margin usually absorbs this, but not always: artwork
+ * whose bounds already touch all four source edges gets `appliedMarginPx: 0`
+ * (`alreadyTightToSourceEdges`), leaving exactly zero headroom. This constant
+ * is what covers that case.
+ *
+ * 2% against a 0.5% `CONTENT_SCALE_TOLERANCE` is the smallest margin that
+ * still clears the drift with room to spare. It is deliberately NOT large:
+ * over-requesting costs provider time and produces pixels production then
+ * throws away.
  */
-const RECONSTRUCTION_SCALE = 4;
+const RECONSTRUCTION_HEADROOM = 1.02;
 /** Defensive bounds around the reconstruction request — never a real limit observed from Topaz, just a sane guard against a corrupt/huge source producing a runaway request. */
 const MIN_RECONSTRUCTION_DIM_PX = 256;
 const MAX_RECONSTRUCTION_DIM_PX = 8192;
@@ -80,6 +102,162 @@ export interface TopazTransparencyUpscaleProviderConfig {
 
 interface TopazStatusPayload {
   status?: unknown;
+}
+
+/** What one reconstruction submission should ask the provider for. */
+export interface ReconstructionRequest {
+  /** Provider `output_width` — the whole source canvas at `scale`. */
+  widthPx: number;
+  /** Provider `output_height`. */
+  heightPx: number;
+  /** The ONE uniform factor applied to both axes. Never per-axis. */
+  scale: number;
+  /** The production plate this request exists to satisfy, in pixels. */
+  targetWidthPx: number;
+  targetHeightPx: number;
+  /** Visible (alpha-bound) artwork the reconstruction is expected to carry. */
+  projectedVisibleWidthPx: number;
+  projectedVisibleHeightPx: number;
+  /** True when `MAX_RECONSTRUCTION_DIM_PX` pulled the scale below what production asked for. */
+  clampedByMaxDimension: boolean;
+}
+
+export type ResolveReconstructionOutcome =
+  | { status: "resolved"; request: ReconstructionRequest }
+  /** Nothing to reconstruct. Truthful verdict, never a crash — mirrors `trimToAlphaBounds`. */
+  | { status: "no_visible_artwork"; reason: string }
+  /**
+   * The proportional maximum cannot carry this source to the production
+   * target. Known BEFORE dispatch, so the credit is never spent on a request
+   * whose output we already know production would reject.
+   */
+  | { status: "insufficient_reconstruction"; reason: string };
+
+/**
+ * Print'em All Phase 0 — THE RECONSTRUCTION SIZE DECISION, extracted as a pure
+ * function so it is testable without a network, a provider, or a credit.
+ *
+ * WHAT REPLACED WHAT. The adapter used to ask for `sourceCanvas x 4`, a
+ * constant inherited from the Phase 2D bake-off (whose square 1024px sources
+ * happened to need exactly 4x). That number knew nothing about the production
+ * requirement, so it was right only by coincidence. The live Print'em All file
+ * needed 5.60x, received 4x, and produced a plate that
+ * `reconstruction_sufficiency` correctly refused — after the credit was spent.
+ *
+ * THE FORMULA:
+ *
+ *     target        = resolveWidthConstrainedSizing(sizing, trimmed source)
+ *     scale         = max(target.widthPx  / alphaBBox.width,
+ *                         target.heightPx / alphaBBox.height) x HEADROOM
+ *     request       = round(sourceCanvas x scale)          // both axes, one scale
+ *
+ * THE DENOMINATOR IS THE ALPHA BOUNDING BOX, and that is the load-bearing
+ * detail. Dividing by the trimmed size instead would silently under-request:
+ * the trimmed size already contains the source's own safety margin, but that
+ * margin is re-applied at a FIXED 12px after reconstruction rather than being
+ * scaled with it. On the live file, dividing by trimmed (586px) yields 5.375x
+ * → 3045px of trimmed reconstruction against a 3150px plate — short, and short
+ * in exactly the way this change exists to eliminate. Dividing by the bbox
+ * (562px) yields 5.605x → 3174px. Padding is not resolution, here as
+ * everywhere else in this pipeline.
+ *
+ * `max(width, height)` because either axis can bind: a plate constrained by
+ * `maxHeightIn` needs its HEIGHT satisfied, and honouring width alone would
+ * under-reconstruct it.
+ *
+ * Never returns a scale below 1 — asking a paid reconstruction provider to
+ * make an image SMALLER is a local resample wearing a bill.
+ *
+ * Pure: no I/O, no provider, no clock.
+ */
+export function resolveReconstructionRequest(
+  source: RgbaImage,
+  sizing: ProductionSizingRequest,
+  options: AlphaTrimOptions = {},
+): ResolveReconstructionOutcome {
+  const trim = trimToAlphaBounds(source, options);
+  if (trim.status === "no_visible_artwork") {
+    return { status: "no_visible_artwork", reason: trim.reason };
+  }
+
+  // The SAME resolver normalization will run after reconstruction. Aspect
+  // ratio survives a proportional upscale, so resolving it from the source's
+  // own trimmed geometry predicts the post-reconstruction answer — including
+  // whether `maxHeightIn` binds.
+  const target = resolveWidthConstrainedSizing(
+    sizing,
+    trim.metadata.trimmedWidthPx,
+    trim.metadata.trimmedHeightPx,
+  );
+
+  const bbox = trim.metadata.alphaBBox;
+  const required = Math.max(
+    target.widthPx / bbox.width,
+    target.heightPx / bbox.height,
+  );
+  let scale = Math.max(1, required * RECONSTRUCTION_HEADROOM);
+
+  // --- Proportional bounds. ONE factor, applied to both axes, always.
+  //
+  // The pre-Phase-0 code clamped each axis independently, which silently
+  // DISTORTED any non-square request that reached the ceiling on one axis
+  // only: a 3000x1500 source asking for 12000x6000 became 8192x6000, turning a
+  // 2.00 aspect ratio into 1.37. `preserved_source_geometry` would have caught
+  // it and failed the plate — after the credit was spent. Raising the
+  // requested scale makes that ceiling far easier to reach, so the clamp has
+  // to become proportional in the same change that raises the scale.
+  let clampedByMaxDimension = false;
+  const floorFactor = Math.max(
+    MIN_RECONSTRUCTION_DIM_PX / (source.width * scale),
+    MIN_RECONSTRUCTION_DIM_PX / (source.height * scale),
+  );
+  if (floorFactor > 1) scale *= floorFactor;
+
+  const ceilingFactor = Math.max(
+    (source.width * scale) / MAX_RECONSTRUCTION_DIM_PX,
+    (source.height * scale) / MAX_RECONSTRUCTION_DIM_PX,
+  );
+  if (ceilingFactor > 1) {
+    // The ceiling outranks the floor: a source whose aspect ratio cannot fit
+    // between them at all must not be silently stretched to satisfy both.
+    clampedByMaxDimension = true;
+    scale /= ceilingFactor;
+  }
+
+  const widthPx = Math.max(1, Math.round(source.width * scale));
+  const heightPx = Math.max(1, Math.round(source.height * scale));
+  const projectedVisibleWidthPx = bbox.width * scale;
+  const projectedVisibleHeightPx = bbox.height * scale;
+
+  // Only reachable via the ceiling: without it, `scale >= required` holds by
+  // construction and the projection always covers the target.
+  if (
+    clampedByMaxDimension &&
+    (projectedVisibleWidthPx < target.widthPx ||
+      projectedVisibleHeightPx < target.heightPx)
+  ) {
+    return {
+      status: "insufficient_reconstruction",
+      reason:
+        `This artwork cannot be reconstructed to the ${target.widthPx}x${target.heightPx}px this production size requires: ` +
+        `its visible artwork is ${bbox.width}x${bbox.height}px, and the largest proportional reconstruction available ` +
+        `(${widthPx}x${heightPx}px) would carry only ${Math.round(projectedVisibleWidthPx)}x${Math.round(projectedVisibleHeightPx)}px of it.`,
+    };
+  }
+
+  return {
+    status: "resolved",
+    request: {
+      widthPx,
+      heightPx,
+      scale,
+      targetWidthPx: target.widthPx,
+      targetHeightPx: target.heightPx,
+      projectedVisibleWidthPx,
+      projectedVisibleHeightPx,
+      clampedByMaxDimension,
+    },
+  };
 }
 
 export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
@@ -120,16 +298,22 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       );
     }
 
-    const targetReconstructedWidth = clamp(
-      Math.round(source.width * RECONSTRUCTION_SCALE),
-      MIN_RECONSTRUCTION_DIM_PX,
-      MAX_RECONSTRUCTION_DIM_PX,
+    // Print'em All Phase 0: sized from what production actually requires, not
+    // from a constant. Resolved BEFORE the resume/submit branch below so an
+    // impossible request costs nothing — see `resolveReconstructionRequest`.
+    const resolved = resolveReconstructionRequest(
+      { width: source.width, height: source.height, data: source.data },
+      input.sizing,
     );
-    const targetReconstructedHeight = clamp(
-      Math.round(source.height * RECONSTRUCTION_SCALE),
-      MIN_RECONSTRUCTION_DIM_PX,
-      MAX_RECONSTRUCTION_DIM_PX,
-    );
+    if (resolved.status !== "resolved") {
+      // `invalid_request` + `not_dispatched`: the platform asked for something
+      // this provider cannot honestly deliver, and nothing left this process.
+      // Never retried (`isRetryableProviderError` excludes it) because a retry
+      // of an impossible request is still impossible, and never billed.
+      throw new ProviderError("invalid_request", resolved.reason, "not_dispatched");
+    }
+    const targetReconstructedWidth = resolved.request.widthPx;
+    const targetReconstructedHeight = resolved.request.heightPx;
 
     // --- Goal 3: resume, never resubmit, when a matching in-flight/completed
     // paid request already exists for this exact job.
@@ -464,10 +648,6 @@ function readProcessId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const value = (payload as { process_id?: unknown }).process_id;
   return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
 }
 
 function defaultSleep(ms: number): Promise<void> {

@@ -4,8 +4,12 @@ import { PNG } from "pngjs";
 
 import { PRINT_PLACEMENT_SIZING_POLICY } from "@/capabilities/shared/print-placement-dimensions";
 
-import { TopazTransparencyUpscaleProvider } from "./topaz-transparency-upscale-provider";
+import {
+  resolveReconstructionRequest,
+  TopazTransparencyUpscaleProvider,
+} from "./topaz-transparency-upscale-provider";
 import type { FinalArtworkProviderInput } from "./provider";
+import type { ProductionSizingRequest } from "./production-normalization";
 
 /** A real PNG: opaque colored square centered on a fully transparent canvas. */
 function buildFixturePng(size: number): Buffer {
@@ -30,9 +34,13 @@ function buildFixturePng(size: number): Buffer {
  * not the production sizing math (covered directly in
  * `production-normalization.test.ts`, and end to end by the worker-level K/L
  * test in `final-artwork-worker-capability.test.ts`). The resulting plate is
- * still distinct from both the 1024px source and the 4096px reconstruction,
- * which is all Goal 4/5's "three distinct measurements" needs here, and it
- * keeps this file's `pngjs` resample cost low.
+ * still distinct from both the 1024px source and the reconstruction size the
+ * resolver derives, which is all Goal 4/5's "three distinct measurements"
+ * needs here, and it keeps this file's `pngjs` resample cost low.
+ *
+ * Print'em All Phase 0: that reconstruction size is now DERIVED (see
+ * `expectedRequest`), so this fixture also demonstrates the down-side of the
+ * change — sleeve needs ~1.12x, and the old constant would have bought 4x.
  */
 function baseInput(overrides: Partial<FinalArtworkProviderInput> = {}): FinalArtworkProviderInput {
   return {
@@ -47,6 +55,28 @@ function baseInput(overrides: Partial<FinalArtworkProviderInput> = {}): FinalArt
 
 function noSleep(): Promise<void> {
   return Promise.resolve();
+}
+
+/**
+ * Print'em All Phase 0: the reconstruction size is no longer a constant, so
+ * these tests no longer hard-code one. They ask the SAME resolver the adapter
+ * uses what this fixture and this placement require, which is what keeps the
+ * fake provider's response consistent with the real request — and stops a
+ * magic number from re-entering the suite through the back door.
+ */
+function expectedRequest(
+  sourceSize = 1024,
+  sizing: ProductionSizingRequest = PRINT_PLACEMENT_SIZING_POLICY.sleeve,
+) {
+  const png = PNG.sync.read(buildFixturePng(sourceSize));
+  const outcome = resolveReconstructionRequest(
+    { width: png.width, height: png.height, data: png.data },
+    sizing,
+  );
+  if (outcome.status !== "resolved") {
+    throw new Error(`fixture is not reconstructible: ${outcome.status}`);
+  }
+  return outcome.request;
 }
 
 interface FakeFetchOptions {
@@ -88,7 +118,7 @@ function buildFakeFetch(options: FakeFetchOptions = {}) {
       return jsonResponse(status, body);
     }
     if (url === "https://cdn.example.com/output.png") {
-      const bytes = options.downloadBytes ?? buildFixturePng(4096);
+      const bytes = options.downloadBytes ?? buildFixturePng(expectedRequest().widthPx);
       return new Response(new Uint8Array(bytes), {
         status: 200,
         headers: { "content-type": options.downloadContentType ?? "image/png" },
@@ -125,15 +155,23 @@ describe("TopazTransparencyUpscaleProvider (Sprint 2M Phase 2E)", () => {
     assert.equal(output.resolutionProvenance, "reconstructed");
     assert.equal(output.nativeWidthPx, 1024);
     assert.equal(output.nativeHeightPx, 1024);
-    assert.equal(output.reconstructedWidthPx, 4096);
-    assert.equal(output.reconstructedHeightPx, 4096);
+    // Phase 0: sized from the production requirement, not a constant. For this
+    // square 1024px fixture at sleeve (a 900px plate) that resolves to ~1.12x
+    // — direct proof the adapter no longer over-requests a fixed 4x when
+    // production needs far less than that.
+    assert.equal(output.reconstructedWidthPx, expectedRequest().widthPx);
+    assert.equal(output.reconstructedHeightPx, expectedRequest().heightPx);
+    assert.ok(
+      expectedRequest().widthPx < 4096,
+      "the removed fixed 4x would have requested 4096px for a 900px plate",
+    );
     // L: the normalized production plate is a THIRD, distinct measurement —
     // never collapsed into source or reconstructed dimensions.
     assert.equal(output.widthPx, 900, "3in sleeve at 300 PPI");
     assert.equal(output.heightPx, 900);
     // Print-Ready Normalization Phase 1: the plate is normalized from the
     // RECONSTRUCTED raster, and reports its own measured geometry.
-    assert.equal(output.normalization.sourceWidthPx, 4096);
+    assert.equal(output.normalization.sourceWidthPx, expectedRequest().widthPx);
     assert.equal(output.normalization.intendedWidthIn, 3);
     assert.equal(output.normalization.targetPpi, 300);
     assert.ok(output.normalization.artworkOccupancy > 0.9);
