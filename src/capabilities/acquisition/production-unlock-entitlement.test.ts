@@ -32,6 +32,7 @@ import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-interview";
 
 import { createAcquisitionCapability } from "./acquisition-capability";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * Sprint A5.1 + A5.2 — the PRODUCTION UNLOCK, proved at the gate.
@@ -279,7 +280,10 @@ describe("Sprint A5.1/A5.2 — the production unlock at the finalization gate", 
 
     const { projectId } = await runAdaptiveInterviewToSummary(
       harness.conversation,
-      {},
+      // Print'em All Phase 1: the print location is answered during the
+      // interview, so the project has a placement to recommend and confirm a
+      // production size against.
+      { printLocation: "Full front" },
       resolvedSessionId,
     );
     await harness.conversation.submitDesignBriefDecision(projectId, "approve");
@@ -293,6 +297,11 @@ describe("Sprint A5.1/A5.2 — the production unlock at the finalization gate", 
       projectId,
       artworkVersionId,
     );
+    // Print'em All Phase 1: the commercial gate and the PRODUCTION SIZE
+    // gate are independent dimensions. These scenarios are about the first
+    // one, so the second is satisfied here — an unlock buys the right to
+    // finalize, never the right to skip confirming how large the print is.
+    await confirmProductionSizeForTests(harness.repo, projectId);
 
     return { sessionId: resolvedSessionId, projectId, artworkVersionId };
   }
@@ -318,6 +327,10 @@ describe("Sprint A5.1/A5.2 — the production unlock at the finalization gate", 
       shirtColor: "Black",
       printPlacement: "left_chest",
     });
+    // Print'em All Phase 1: a resolvable width is no longer enough — the
+    // upload finalization path requires an explicit CONFIRMED size, which
+    // is a production-safety gate and not a commercial one.
+    await confirmProductionSizeForTests(harness.repo, projectId);
 
     const original = await harness.repo.createAsset(projectId, {
       kind: "customer_upload",
@@ -555,6 +568,103 @@ describe("Sprint A5.1/A5.2 — the production unlock at the finalization gate", 
     );
   });
 
+  it("Q: internal entitlement bypasses the COMMERCIAL gate and never the production-size gate", async () => {
+    const harness = await buildHarness();
+    const session = await harness.repo.createAcquisitionSession(newToken());
+    await harness.repo.grantInternalEntitlement(session.id);
+
+    const { projectId } = await prospectWithApprovedUpload(harness, session.id);
+
+    // Commercially unrestricted: the acquisition gate is open, and no unlock
+    // row is needed.
+    assert.equal(
+      (await harness.acquisition.authorizeFinalization(projectId)).allowed,
+      true,
+    );
+
+    // Production-unsafe is a different matter entirely. Withdraw the
+    // confirmation this harness performs and the internal session is refused
+    // exactly like any other — internal means commercially unrestricted, not
+    // exempt from knowing how large the print is.
+    await harness.repo.updateBrief(projectId, {
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
+    });
+
+    await assert.rejects(
+      () => harness.finalArtwork.requestPreparedUploadFinalArtwork(projectId),
+      /Confirm the print size before preparation/,
+    );
+
+    // And no job exists to be picked up later, so nothing can ever be spent
+    // against the unconfirmed size — the refusal is not merely a message.
+    const preparation = await harness.repo.getArtworkPreparation(projectId);
+    assert.deepEqual(
+      await harness.repo.listFinalArtworkJobsForPreparation(
+        projectId,
+        preparation!.id,
+      ),
+      [],
+    );
+  });
+
+  it("N/Goal 10: the internal operator can choose a garment, take the recommendation, override it, and proceed", async () => {
+    const harness = await buildHarness();
+    const session = await harness.repo.createAcquisitionSession(newToken());
+    await harness.repo.grantInternalEntitlement(session.id);
+    const { projectId } = await prospectWithApprovedUpload(harness, session.id);
+
+    // This harness builds a LEFT CHEST upload, which is the placement whose
+    // recommendation must NOT move with the garment class.
+    await harness.conversation.setGarmentSizeClass(projectId, "adult_plus");
+
+    const { describePrintReadySize } = await import(
+      "@/capabilities/shared/print-ready-size"
+    );
+    const viewFor = async () => {
+      const snapshot = await harness.repo.getProject(projectId);
+      return describePrintReadySize({
+        printPlacement: snapshot!.brief.printPlacement,
+        intendedPrintWidthIn: snapshot!.brief.intendedPrintWidthIn,
+        garmentSizeClass: snapshot!.brief.garmentSizeClass,
+        productionSizeConfirmedAt: snapshot!.brief.productionSizeConfirmedAt,
+        productionSizeConfirmedWidthIn:
+          snapshot!.brief.productionSizeConfirmedWidthIn,
+        productionSizeConfirmedMaxHeightIn:
+          snapshot!.brief.productionSizeConfirmedMaxHeightIn,
+        artworkWidthPx: 900,
+        artworkHeightPx: 900,
+      })!;
+    };
+
+    // F/Goal 9: a 2XL left chest is still a 4in left chest, not a 12in one.
+    const recommended = await viewFor();
+    assert.equal(recommended.recommendation!.boxWidthIn, 4);
+    // Setting the class confirmed nothing.
+    assert.equal(recommended.confirmed, false);
+
+    // Take the recommendation...
+    await harness.conversation.confirmRecommendedProductionSize(projectId);
+    assert.equal((await viewFor()).confirmed, true);
+
+    // ...then override it with an explicit width inside the left-chest band,
+    // which re-confirms at the new figure rather than reverting to 4in.
+    await harness.conversation.setProductionPrintWidth(projectId, 4.5);
+    const overridden = await viewFor();
+    assert.equal(overridden.confirmed, true);
+    assert.equal(overridden.widthIn, 4.5);
+    assert.equal(overridden.recommendation!.boxWidthIn, 4);
+    assert.equal(overridden.recommendation!.isConfirmed, false);
+
+    // And production proceeds, with no commercial gate anywhere in the way.
+    const request = await harness.finalArtwork.requestPreparedUploadFinalArtwork(
+      projectId,
+    );
+    assert.equal(request.job.status, "queued");
+    assert.equal(request.job.productionWidthIn, 4.5);
+  });
+
   it("F: a legacy project (no acquisition session at all) finalizes without any production unlock row", async () => {
     const harness = await buildHarness();
     // `createProject()` with no session id is exactly a pre-A4 project.
@@ -782,6 +892,11 @@ describe("Sprint A5.1/A5.2 — the production unlock at the finalization gate", 
       projectId,
       artworkVersionId,
     );
+    // Print'em All Phase 1: the commercial gate and the PRODUCTION SIZE
+    // gate are independent dimensions. These scenarios are about the first
+    // one, so the second is satisfied here — an unlock buys the right to
+    // finalize, never the right to skip confirming how large the print is.
+    await confirmProductionSizeForTests(harness.repo, projectId);
     const second = await harness.finalArtwork.requestFinalArtwork(
       projectId,
       artworkVersionId,

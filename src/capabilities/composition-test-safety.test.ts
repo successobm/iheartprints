@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * Release-blocker regression (post Sprint 2M Phase 2E): `npm run verify`
@@ -243,6 +244,11 @@ describe("Release-blocker regression: automated tests never reach a real paid pr
           // Live Acceptance Corrective Pass (Section 2): selection alone
           // is never final approval — confirm explicitly first.
           await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+          // Print'em All Phase 1: production work now requires an explicit human
+          // confirmation of the physical print size. These scenarios are about what
+          // happens once finalization is authorized, so they perform that
+          // confirmation here — the same act a customer performs on the size card.
+          await confirmProductionSizeForTests(repo, projectId);
 
           await graph.finalArtwork.requestFinalArtwork(projectId, artwork!.id);
           await graph.finalArtworkWorker.processNextJob();

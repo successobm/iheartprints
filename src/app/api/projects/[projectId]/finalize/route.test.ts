@@ -67,10 +67,13 @@ describe("POST /api/projects/[projectId]/finalize (Sprint 2M Phase 2B)", () => {
       confirmSelectedDirection,
     } = await import("@/lib/services/conversation-service");
 
-    const { projectId } = await runAdaptiveInterviewToSummary({
-      start: startConversation,
-      handleUserMessage,
-    });
+    const { projectId } = await runAdaptiveInterviewToSummary(
+      { start: startConversation, handleUserMessage },
+      // Print'em All Phase 1: the print location is answered during the
+      // interview, so the project has a placement to recommend and confirm a
+      // production size against before finalization is requested.
+      { printLocation: "Full front" },
+    );
     await submitDesignBriefDecision(projectId, "approve");
     await getCapabilityGraph().generationWorker.processNextJob();
 
@@ -81,6 +84,9 @@ describe("POST /api/projects/[projectId]/finalize (Sprint 2M Phase 2B)", () => {
     // Live Acceptance Corrective Pass (Section 2): selection alone is
     // never final approval — confirm explicitly first.
     await confirmSelectedDirection(projectId, concept!.id);
+    // Confirming the DESIGN and confirming the PHYSICAL SIZE are separate
+    // decisions, and production requires both.
+    await conversationService.confirmRecommendedProductionSize(projectId);
 
     const response = await postFinalize(projectId, { artworkVersionId: concept!.id });
     assert.equal(response.status, 200);
@@ -98,10 +104,13 @@ describe("POST /api/projects/[projectId]/finalize (Sprint 2M Phase 2B)", () => {
       "@/lib/services/conversation-service"
     );
 
-    const { projectId } = await runAdaptiveInterviewToSummary({
-      start: startConversation,
-      handleUserMessage,
-    });
+    const { projectId } = await runAdaptiveInterviewToSummary(
+      { start: startConversation, handleUserMessage },
+      // Print'em All Phase 1: the print location is answered during the
+      // interview, so the project has a placement to recommend and confirm a
+      // production size against before finalization is requested.
+      { printLocation: "Full front" },
+    );
     await submitDesignBriefDecision(projectId, "approve");
     await getCapabilityGraph().generationWorker.processNextJob();
 

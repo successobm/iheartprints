@@ -43,10 +43,15 @@ describe("conversation-service — final direction approval (Sprint 2M Phase 2B)
       confirmSelectedDirection,
     } = conversationService;
 
-    const { projectId } = await runAdaptiveInterviewToSummary({
-      start: startConversation,
-      handleUserMessage,
-    });
+    const { projectId } = await runAdaptiveInterviewToSummary(
+      { start: startConversation, handleUserMessage },
+      // Print'em All Phase 1: the print location is answered during the
+      // interview. There is no honest production-size recommendation without
+      // it, and stating it after the brief is approved would (correctly) mark
+      // the concepts stale — placement is concept-relevant, physical size is
+      // deliberately not.
+      { printLocation: "Full front" },
+    );
     await submitDesignBriefDecision(projectId, "approve");
     await getCapabilityGraph().generationWorker.processNextJob();
 
@@ -56,6 +61,9 @@ describe("conversation-service — final direction approval (Sprint 2M Phase 2B)
     // Live Acceptance Corrective Pass (Section 2): selection alone is
     // never final approval — confirm by default here.
     await confirmSelectedDirection(projectId, concept!.id);
+    // Print'em All Phase 1: confirming the DESIGN and confirming the PHYSICAL
+    // SIZE are separate decisions, and production requires both.
+    await conversationService.confirmRecommendedProductionSize(projectId);
 
     return { projectId, artworkVersionId: concept!.id, conversationService };
   }

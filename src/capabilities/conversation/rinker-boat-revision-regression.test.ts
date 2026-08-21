@@ -61,6 +61,10 @@ describe("Regression — Rinker boat revision lifecycle (Sprint 2M Phase 2G, Goa
         productColor: "White",
         // The live failing message, verbatim.
         requiredWording: "GLORIOUS is the boat name",
+        // Print'em All Phase 1: the print location is answered during the
+        // interview, so the project has a placement to recommend and confirm
+        // a production size against before any finalization is requested.
+        printLocation: "Full front",
       },
     );
     void afterSummary;
@@ -181,6 +185,9 @@ describe("Regression — Rinker boat revision lifecycle (Sprint 2M Phase 2G, Goa
     // Live Acceptance Corrective Pass (Section 2): selection alone is
     // never final approval — the customer must explicitly confirm.
     await conversation.confirmSelectedDirection(projectId, revisedConcept.id);
+    // Print'em All Phase 1: the DESIGN is confirmed above; the PHYSICAL SIZE
+    // is a separate decision, and production requires both.
+    await conversation.confirmRecommendedProductionSize(projectId);
     const result = await finalArtwork.requestFinalArtwork(projectId, revisedConcept.id);
 
     // P: final approval targets the revised ArtworkVersion, never the original.
@@ -217,6 +224,9 @@ describe("Regression — Rinker boat revision lifecycle (Sprint 2M Phase 2G, Goa
     )!;
     await conversation.selectConcept(projectId, revisedConcept.id);
     await conversation.confirmSelectedDirection(projectId, revisedConcept.id);
+    // Print'em All Phase 1: the DESIGN is confirmed above; the PHYSICAL SIZE
+    // is a separate decision, and production requires both.
+    await conversation.confirmRecommendedProductionSize(projectId);
 
     const prepared = await finalArtwork.requestFinalArtwork(projectId, revisedConcept.id);
     assert.equal(prepared.approval.status, "active");

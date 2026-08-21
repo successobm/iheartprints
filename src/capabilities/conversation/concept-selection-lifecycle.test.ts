@@ -42,9 +42,15 @@ describe("Concept selection lifecycle", () => {
   type Graph = Awaited<ReturnType<typeof freshGraph>>;
 
   /** Interview → approve → three concepts. */
-  async function runToConcepts(graph: Graph) {
+  async function runToConcepts(
+    graph: Graph,
+    answerOverrides: Partial<Record<string, string>> = {},
+  ) {
     const { conversation, generationWorker } = graph;
-    const { projectId } = await runAdaptiveInterviewToSummary(conversation);
+    const { projectId } = await runAdaptiveInterviewToSummary(
+      conversation,
+      answerOverrides,
+    );
     await conversation.submitDesignBriefDecision(projectId, "approve");
     await generationWorker.processNextJob();
 
@@ -57,8 +63,11 @@ describe("Concept selection lifecycle", () => {
     };
   }
 
-  async function runToSelectedConcept(graph: Graph) {
-    const { projectId, originals } = await runToConcepts(graph);
+  async function runToSelectedConcept(
+    graph: Graph,
+    answerOverrides: Partial<Record<string, string>> = {},
+  ) {
+    const { projectId, originals } = await runToConcepts(graph, answerOverrides);
     await graph.conversation.selectConcept(projectId, originals[0]!);
     return { projectId, originals };
   }
@@ -140,8 +149,18 @@ describe("Concept selection lifecycle", () => {
 
   it("6b: an active final-direction approval is explicitly superseded, never left orphaned", async () => {
     const graph = await freshGraph();
-    const { projectId, originals } = await runToSelectedConcept(graph);
+    // Print'em All Phase 1: the print location is answered DURING the
+    // interview rather than patched in afterwards. There is no honest size
+    // recommendation without a placement, and setting one after the brief is
+    // approved would (correctly) mark the concepts stale — placement is
+    // concept-relevant, unlike physical size.
+    const { projectId, originals } = await runToSelectedConcept(graph, {
+      printLocation: "Full front",
+    });
     await graph.conversation.confirmSelectedDirection(projectId, originals[0]!);
+    // Confirming the DESIGN and confirming the PRINT SIZE are separate
+    // decisions, and production requires both.
+    await graph.conversation.confirmRecommendedProductionSize(projectId);
     await graph.finalArtwork.requestFinalArtwork(projectId, originals[0]!);
 
     // A queued FinalArtworkJob exists, so unselect must refuse rather than

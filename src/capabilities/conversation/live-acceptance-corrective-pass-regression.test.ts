@@ -42,6 +42,10 @@ describe("Live Acceptance Corrective Pass — final direction confirmation, sing
       product: "T-shirt",
       productColor: "Navy",
       requiredWording: "Camp Wildwood 2026",
+      // Print'em All Phase 1: the print location is answered during the
+      // interview, so the project has a placement to recommend and confirm a
+      // production size against before any finalization is requested.
+      printLocation: "Full front",
     });
     await conversation.submitDesignBriefDecision(projectId, "approve");
     await generationWorker.processNextJob();
@@ -52,6 +56,10 @@ describe("Live Acceptance Corrective Pass — final direction confirmation, sing
     const [firstConcept] = generated.artworkVersions;
     assert.ok(firstConcept);
     const afterSelect = await conversation.selectConcept(projectId, firstConcept.id);
+    // Confirming the DESIGN and confirming the PRINT SIZE are separate
+    // decisions; production requires both, and these scenarios are about the
+    // first one.
+    await conversation.confirmRecommendedProductionSize(projectId);
     return { projectId, originalConceptId: firstConcept.id, afterSelect };
   }
 

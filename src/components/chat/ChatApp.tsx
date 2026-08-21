@@ -8,7 +8,7 @@ import type {
   DesignSummaryView,
   RecommendationAction,
 } from "@/capabilities/shared/contracts";
-import type { PrintPlacement } from "@/lib/domain/types";
+import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
 import type { ApiProjectSnapshot } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { deriveChatAffordances } from "./chat-affordances";
@@ -560,6 +560,83 @@ export function ChatApp() {
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to explore new concepts",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /**
+   * Print'em All Phase 1: which garment the print is going on.
+   *
+   * Moves the RECOMMENDATION and nothing else. It writes the durable
+   * garmentSizeClass, recomputes the suggested box — and deliberately does
+   * NOT confirm a size, create a job, or reach a provider. It also withdraws
+   * any existing confirmation server-side, because consent was given to a
+   * size on a kind of garment and the second half just changed.
+   */
+  async function chooseGarmentSize(garmentSizeClass: GarmentSizeClass) {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/print-size/confirm`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // No `useRecommended`: choosing a garment is not choosing a size.
+          body: JSON.stringify({ garmentSizeClass }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to set the garment size");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to set the garment size",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /**
+   * Print'em All Phase 1: "Use recommended size" — records the customer's
+   * explicit confirmation of the recommended production box.
+   *
+   * A separate endpoint from `choosePrintWidth`, deliberately. That one says
+   * "make it this wide"; this one says "yes, the area you recommended is
+   * right", which is a different statement and — because a box bounds both
+   * axes — a different production result for anything that is not square.
+   * Confirming is also the fact the server later authorizes paid work
+   * against, so it gets its own route rather than riding on a width write.
+   */
+  async function confirmRecommendedPrintSize() {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/print-size/confirm`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ useRecommended: true }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to confirm the print size");
+      }
+      setSnapshot(data as ApiSnapshot);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to confirm the print size",
       );
     } finally {
       setSending(false);
@@ -1415,6 +1492,10 @@ export function ChatApp() {
                 cleanupPreviewHighlight={cleanupPreview?.highlight ?? null}
                 printReadySize={snapshot?.printReadySize ?? null}
                 onChoosePrintWidth={(widthIn) => void choosePrintWidth(widthIn)}
+                onUseRecommendedSize={() => void confirmRecommendedPrintSize()}
+                onChooseGarmentSize={(garmentSizeClass) =>
+                  void chooseGarmentSize(garmentSizeClass)
+                }
                 finalizationStatus={snapshot?.finalization.status ?? "not_requested"}
                 onPrepareForPrint={() => void prepareUploadedArtworkForPrint()}
               />
@@ -1544,6 +1625,10 @@ export function ChatApp() {
                 onPrepare={() => void approveFinalDirection()}
                 printReadySize={snapshot.printReadySize}
                 onChoosePrintWidth={(widthIn) => void choosePrintWidth(widthIn)}
+                onUseRecommendedSize={() => void confirmRecommendedPrintSize()}
+                onChooseGarmentSize={(garmentSizeClass) =>
+                  void chooseGarmentSize(garmentSizeClass)
+                }
               />
             ) : null}
 

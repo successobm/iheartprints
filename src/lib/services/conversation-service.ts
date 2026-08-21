@@ -25,6 +25,7 @@ import {
 import type {
   FinalArtworkJob,
   FinalArtworkJobStatus,
+  GarmentSizeClass,
   ProjectSnapshot,
   ProjectStatus,
   StoredRequestedProductionOutput,
@@ -437,6 +438,7 @@ async function resolvePrintReadySize(
       intendedPrintWidthIn: snapshot.brief.intendedPrintWidthIn,
       artworkWidthPx: preparation.visibleArtworkWidthPx,
       artworkHeightPx: preparation.visibleArtworkHeightPx,
+      ...productionSizeAuthorityOf(snapshot),
     });
   }
 
@@ -473,6 +475,7 @@ async function resolvePrintReadySize(
     intendedPrintWidthIn: snapshot.brief.intendedPrintWidthIn,
     artworkWidthPx,
     artworkHeightPx,
+    ...productionSizeAuthorityOf(snapshot),
   });
 }
 
@@ -697,6 +700,54 @@ export async function setProductionPrintWidth(
       requestedWidthIn,
     ),
   );
+}
+
+/**
+ * Print'em All Phase 1: "Use recommended size" — confirms the recommended
+ * production box for this project's placement and garment size class.
+ */
+export async function confirmRecommendedProductionSize(
+  projectId: string,
+): Promise<ApiProjectSnapshot> {
+  return withConceptStatus(
+    await getCapabilityGraph().conversation.confirmRecommendedProductionSize(
+      projectId,
+    ),
+  );
+}
+
+/**
+ * Print'em All Phase 1: records the garment sizing context the print box is
+ * recommended for. Withdraws any existing size confirmation — see
+ * `DesignBriefCapability.setGarmentSizeClass`.
+ */
+export async function setGarmentSizeClass(
+  projectId: string,
+  garmentSizeClass: GarmentSizeClass | null,
+): Promise<ApiProjectSnapshot> {
+  return withConceptStatus(
+    await getCapabilityGraph().conversation.setGarmentSizeClass(
+      projectId,
+      garmentSizeClass,
+    ),
+  );
+}
+
+/**
+ * Print'em All Phase 1: the production-size authority fields, in one place.
+ *
+ * Spread into every `describePrintReadySize` call rather than listed at each
+ * one, so a new call site cannot quietly omit the confirmation and render a
+ * size that looks approved because it looks like a number.
+ */
+function productionSizeAuthorityOf(snapshot: ProjectSnapshot) {
+  return {
+    garmentSizeClass: snapshot.brief.garmentSizeClass,
+    productionSizeConfirmedAt: snapshot.brief.productionSizeConfirmedAt,
+    productionSizeConfirmedWidthIn: snapshot.brief.productionSizeConfirmedWidthIn,
+    productionSizeConfirmedMaxHeightIn:
+      snapshot.brief.productionSizeConfirmedMaxHeightIn,
+  };
 }
 
 /** Sprint 2G Part 3: explicit action behind the persistent "Generate Updated Concepts" control. */

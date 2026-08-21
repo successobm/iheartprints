@@ -18,7 +18,7 @@ import {
   PRINT_READY_WAITING_MESSAGE,
 } from "@/capabilities/shared/waiting-copy";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
-import type { PrintPlacement } from "@/lib/domain/types";
+import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
 import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { ArtworkComparison } from "./ArtworkComparison";
@@ -77,6 +77,10 @@ export interface UploadedArtworkPanelProps {
    */
   printReadySize?: PrintReadySizeView | null;
   onChoosePrintWidth?: (widthIn: number) => void;
+  /** Print'em All Phase 1: "Use recommended size" — the one-click confirmation. */
+  onUseRecommendedSize?: () => void;
+  /** Print'em All Phase 1: the garment sizing context the recommendation is derived for. */
+  onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   /** Customer-safe finalization state. Never a job id, provider name, or internal status. */
   finalizationStatus?: CustomerFinalizationStatus;
   /** The explicit "Prepare Print-Ready Artwork" action. Idempotent server-side, so a double click is safe. */
@@ -170,6 +174,8 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           preparedImageUrl={props.preparedImageUrl}
           printReadySize={props.printReadySize ?? null}
           onChoosePrintWidth={props.onChoosePrintWidth}
+          onUseRecommendedSize={props.onUseRecommendedSize}
+          onChooseGarmentSize={props.onChooseGarmentSize}
           finalizationStatus={props.finalizationStatus ?? "not_requested"}
           onPrepareForPrint={props.onPrepareForPrint}
         />
@@ -531,6 +537,8 @@ function ApprovedStep({
   preparedImageUrl,
   printReadySize,
   onChoosePrintWidth,
+  onUseRecommendedSize,
+  onChooseGarmentSize,
   finalizationStatus,
   onPrepareForPrint,
 }: {
@@ -540,6 +548,10 @@ function ApprovedStep({
   preparedImageUrl: string | null;
   printReadySize: PrintReadySizeView | null;
   onChoosePrintWidth?: (widthIn: number) => void;
+  /** Print'em All Phase 1: "Use recommended size" — the one-click confirmation. */
+  onUseRecommendedSize?: () => void;
+  /** Print'em All Phase 1: the garment sizing context the recommendation is derived for. */
+  onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   finalizationStatus: CustomerFinalizationStatus;
   onPrepareForPrint?: () => void;
 }) {
@@ -564,6 +576,8 @@ function ApprovedStep({
         busy={busy}
         printReadySize={printReadySize}
         onChoosePrintWidth={onChoosePrintWidth}
+        onUseRecommendedSize={onUseRecommendedSize}
+        onChooseGarmentSize={onChooseGarmentSize}
         finalizationStatus={finalizationStatus}
         onPrepareForPrint={onPrepareForPrint}
       />
@@ -586,6 +600,8 @@ function PrintReadyStep({
   busy,
   printReadySize,
   onChoosePrintWidth,
+  onUseRecommendedSize,
+  onChooseGarmentSize,
   finalizationStatus,
   onPrepareForPrint,
 }: {
@@ -593,6 +609,10 @@ function PrintReadyStep({
   busy: boolean;
   printReadySize: PrintReadySizeView | null;
   onChoosePrintWidth?: (widthIn: number) => void;
+  /** Print'em All Phase 1: "Use recommended size" — the one-click confirmation. */
+  onUseRecommendedSize?: () => void;
+  /** Print'em All Phase 1: the garment sizing context the recommendation is derived for. */
+  onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   finalizationStatus: CustomerFinalizationStatus;
   onPrepareForPrint?: () => void;
 }) {
@@ -633,6 +653,15 @@ function PrintReadyStep({
 
   const copy = describePrintReadyPreparation(enhancementNeeded);
 
+  // Print'em All Phase 1 (Goal 6 / Goal 16): the upload path's copy of the
+  // same gate. Internal Print'em All access bypasses the COMMERCIAL gates —
+  // acquisition, email, payment — and deliberately not this one: internal
+  // means commercially unrestricted, never production-unsafe, and an
+  // unconfirmed size is a production-safety question.
+  const sizeConfirmationPending = printReadySize
+    ? !printReadySize.confirmed
+    : false;
+
   return (
     <div className="mt-4 space-y-3 border-t border-black/8 pt-4">
       {/* Size comes FIRST, as it does in the create_new flow: it is the last
@@ -642,6 +671,8 @@ function PrintReadyStep({
           size={printReadySize}
           busy={busy}
           onChooseWidth={onChoosePrintWidth}
+          onUseRecommendedSize={onUseRecommendedSize}
+        onChooseGarmentSize={onChooseGarmentSize}
         />
       ) : null}
 
@@ -666,7 +697,7 @@ function PrintReadyStep({
           ) : null}
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || sizeConfirmationPending}
             onClick={onPrepareForPrint}
             className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
           >

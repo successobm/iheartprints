@@ -1,5 +1,6 @@
 "use client";
 
+import type { GarmentSizeClass } from "@/lib/domain/types";
 import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size";
 import {
   PRINT_READY_RETRY_ACTION_LABEL,
@@ -23,6 +24,10 @@ interface PrepareForPrintActionProps {
    */
   printReadySize?: PrintReadySizeView | null;
   onChoosePrintWidth?: (widthIn: number) => void;
+  /** Print'em All Phase 1: "Use recommended size" — the one-click confirmation. */
+  onUseRecommendedSize?: () => void;
+  /** Print'em All Phase 1: the garment sizing context the recommendation is derived for. */
+  onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
 }
 
 /**
@@ -45,6 +50,8 @@ export function PrepareForPrintAction({
   onPrepare,
   printReadySize = null,
   onChoosePrintWidth,
+  onUseRecommendedSize,
+  onChooseGarmentSize,
 }: PrepareForPrintActionProps) {
   if (finalizationStatus === "preparing") {
     return (
@@ -95,6 +102,20 @@ export function PrepareForPrintAction({
 
   if (!canRequest) return null;
 
+  // Print'em All Phase 1 (Goal 6): preparation is unavailable until a human
+  // has confirmed the physical print size.
+  //
+  // The server refuses this independently — `requireConfirmedProductionSize`
+  // throws before a job is created — so this changes no guarantee. What it
+  // changes is honesty: offering a button we know will be refused reads as a
+  // broken product, and the card directly above already says what to do about
+  // it. Defaults to "not pending" when no size view is available at all, so
+  // every caller that has not been wired up behaves exactly as before and the
+  // server stays the only real gate.
+  const sizeConfirmationPending = printReadySize
+    ? !printReadySize.confirmed
+    : false;
+
   return (
     <div className="mt-3 space-y-3 rounded-2xl border border-black/8 bg-white p-4 shadow-sm">
       {/* Size comes FIRST: it is the last decision still open, and it stops
@@ -104,6 +125,8 @@ export function PrepareForPrintAction({
           size={printReadySize}
           busy={busy}
           onChooseWidth={onChoosePrintWidth}
+          onUseRecommendedSize={onUseRecommendedSize}
+          onChooseGarmentSize={onChooseGarmentSize}
         />
       ) : null}
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -113,7 +136,7 @@ export function PrepareForPrintAction({
         </p>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || sizeConfirmationPending}
           onClick={onPrepare}
           className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
         >

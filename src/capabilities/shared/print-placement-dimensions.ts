@@ -61,18 +61,41 @@ export interface PlacementSizingPolicy {
   /** Allowed deviation, in inches, when validating a produced plate's physical width against `targetWidthIn`. Never exact float equality. */
   widthToleranceIn: number;
   /**
-   * Live Acceptance Cleanup (Issue 5): the printable width band for this
-   * placement. `defaultWidthIn` is what a customer who expresses no
-   * preference gets; `minWidthIn`/`maxWidthIn` bound what they may choose.
+   * Print'em All Phase 1 — CONCEPT C, THE TECHNICAL / PRODUCT LIMIT.
    *
-   * Bounds are a garment-printability fact (a 20-inch print does not fit an
-   * adult tee, and a 1-inch full-front print is not a full-front print), so
-   * they live here with the rest of the placement policy rather than in a
-   * UI component or a route validator.
+   * `minWidthIn`/`maxWidthIn` (with `maxHeightIn` above) bound what may be
+   * produced on this placement AT ALL. They are a garment-printability fact
+   * — a 20-inch print does not fit an adult tee, and a 1-inch full-front
+   * print is not a full-front print — so they live here with the rest of the
+   * placement policy rather than in a UI component or a route validator.
+   *
+   * A LIMIT IS NOT A RECOMMENDATION. The band is deliberately much wider
+   * than any recommended box (4-14in for front/back against a 10.5in
+   * standard adult recommendation) precisely so that a deliberate oversize
+   * choice — 12in, 13in, a 4XL back print — is HONORED rather than silently
+   * pulled back to "standard". Recommendations live in
+   * `garment-production-sizing.ts` and are never read from here.
    */
-  defaultWidthIn: number;
   minWidthIn: number;
   maxWidthIn: number;
+  /**
+   * The width a caller receives when nobody has expressed a size.
+   *
+   * Print'em All Phase 1: kept for the pre-confirmation display path and for
+   * every existing caller's behavior, but it is explicitly NOT authority and
+   * NOT a recommendation:
+   *
+   *   - It cannot be spent against. `confirmed-production-size.ts` is the
+   *     only thing a paid provider call may be authorized from, and a
+   *     default has by definition never been confirmed by anyone.
+   *   - It is not garment-aware. The real recommendation comes from
+   *     `recommendProductionBox({ placement, garmentSizeClass })`, which
+   *     knows that 10.5in is a standard ADULT figure and not universal truth.
+   *
+   * It survives as the neutral starting point a size-confirmation surface
+   * opens on, nothing more.
+   */
+  defaultWidthIn: number;
 }
 
 /**
@@ -80,6 +103,13 @@ export interface PlacementSizingPolicy {
  * the Print-Ready Normalization Phase 1 default — a real, printable standard
  * adult front/back print width, replacing the previous fixed 12x14" canvas
  * whose height was never derived from the artwork at all.
+ *
+ * Print'em All Phase 1: the 10.5in figures here are the STANDARD ADULT case
+ * and are mirrored, deliberately, by `PRODUCTION_BOX_RECOMMENDATIONS`'s
+ * `adult_standard` row — which is the garment-aware authority every
+ * recommendation surface reads. Nothing in this table knows about youth,
+ * ladies, or plus-size garments, and nothing should learn: this table's job
+ * is the TECHNICAL LIMIT and the sizing STRATEGY, not the suggestion.
  */
 export const PRINT_PLACEMENT_SIZING_POLICY: Record<
   PrintPlacement,
@@ -196,10 +226,7 @@ export function resolveProductionWidth(
     policy.maxWidthIn,
     Math.max(policy.minWidthIn, requestedWidthIn),
   );
-  // Quarter-inch resolution: finer than a print shop can meaningfully hold,
-  // and it keeps the customer-facing figure readable ("10.5 inches", not
-  // "10.4999999 inches").
-  const widthIn = Math.round(clampedWidth * 4) / 4;
+  const widthIn = roundToQuarterInch(clampedWidth);
 
   return {
     widthIn,
@@ -217,6 +244,46 @@ export function resolveProductionWidth(
  * deliverable, whose height comes from the artwork's own aspect ratio (see
  * `resolveWidthConstrainedSizing`).
  */
+/**
+ * Print'em All Phase 1 — CONCEPT C, read on its own.
+ *
+ * The independent guardrail: what this placement can physically produce,
+ * with no reference to what we would suggest or what anyone confirmed. A
+ * confirmation is validated against THIS, never against a recommendation, so
+ * an explicit oversize choice is refused only when it is genuinely
+ * unprintable.
+ */
+export interface PlacementTechnicalLimit {
+  minWidthIn: number;
+  maxWidthIn: number;
+  maxHeightIn: number;
+}
+
+export function technicalLimitForPlacement(
+  placement: PrintPlacement | null,
+): PlacementTechnicalLimit | null {
+  if (!placement) return null;
+  const policy = PRINT_PLACEMENT_SIZING_POLICY[placement];
+  return {
+    minWidthIn: policy.minWidthIn,
+    maxWidthIn: policy.maxWidthIn,
+    maxHeightIn: policy.maxHeightIn,
+  };
+}
+
+/**
+ * Rounds a physical width to the quarter inch — finer than a print shop can
+ * meaningfully hold, and it keeps the operator-facing figure readable
+ * ("10.5 inches", not "10.4999999 inches").
+ *
+ * Extracted so `resolveProductionWidth` and the confirmation path round
+ * IDENTICALLY: a confirmed width that rounded differently from the width the
+ * pipeline resolves would read as a size change and fence its own job out.
+ */
+export function roundToQuarterInch(widthIn: number): number {
+  return Math.round(widthIn * 4) / 4;
+}
+
 export function targetDimensionsForPlacement(
   placement: PrintPlacement | null,
   requestedWidthIn: number | null = null,

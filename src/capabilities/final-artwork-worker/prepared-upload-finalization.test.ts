@@ -30,6 +30,7 @@ import type { PrintPlacement } from "@/lib/domain/types";
 import type { ProjectRepository } from "@/lib/db/repository";
 
 import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capability";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * Existing Artwork → Print Ready Phase 2 acceptance coverage for the upload
@@ -303,6 +304,15 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
      * only: no provider, no paid call.
      */
     customerMessage?: string;
+    /**
+     * Print'em All Phase 1: skip the size confirmation, leaving the project
+     * in the state every historical project is in — a numeric width, and
+     * nobody who ever approved it. The scenarios that prove no paid provider
+     * is reachable without confirmation set this.
+     */
+    confirmProductionSize?: false;
+    /** Confirm an explicit width instead of the recommended box. */
+    confirmedWidthIn?: number;
   }
 
   /**
@@ -421,6 +431,19 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       approvedAt: new Date().toISOString(),
     });
     await repo.setProjectStatus(projectId, "approved");
+    // Print'em All Phase 1: approving the PREPARED ARTWORK and confirming the
+    // PRINT SIZE are two different decisions, and only the second one
+    // authorizes paid production work. These scenarios all begin after both,
+    // so the size confirmation happens here — unless a scenario is
+    // specifically about what happens without one.
+    if (options.confirmProductionSize !== false) {
+      await confirmProductionSizeForTests(repo, projectId, {
+        // A scenario that states a width is stating the size its customer
+        // chose, so that is what gets confirmed. Without one, the confirmation
+        // is of the recommended box — the "Use recommended size" path.
+        widthIn: options.confirmedWidthIn ?? options.intendedPrintWidthIn ?? undefined,
+      });
+    }
 
     return {
       projectId,
@@ -516,6 +539,10 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const { assets, finalArtwork } = buildPipeline(repo);
     const { projectId } = await setupApprovedPreparation(repo, assets, {
       printPlacement: null,
+      // There is no placement, so there is no size to confirm — the
+      // confirmation gate and the placement gate answer different questions
+      // and this scenario is about the second one.
+      confirmProductionSize: false,
     });
 
     await assert.rejects(
@@ -1089,6 +1116,159 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     );
   });
 
+  /* ---------------------------------------------------------------------
+   * Print'em All Phase 1 — production size confirmation as spend authority.
+   * ------------------------------------------------------------------- */
+
+  it("J: a numeric default with no confirmation reaches ZERO providers and creates ZERO jobs", async () => {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+
+    // The exact state of every historical project, and the exact state the
+    // live Topaz credit was spent from: a resolvable width, and nobody who
+    // ever approved it.
+    const setup = await setupApprovedPreparation(repo, assets, {
+      intendedPrintWidthIn: 4,
+      confirmProductionSize: false,
+    });
+
+    await assert.rejects(
+      () => finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId),
+      /Confirm the print size before preparation/,
+    );
+
+    // The refusal is structural, not cosmetic: there is no job, so there is
+    // nothing for a worker to pick up later and nothing that can ever be
+    // spent against a size no human chose.
+    assert.deepEqual(
+      await repo.listFinalArtworkJobsForPreparation(
+        setup.projectId,
+        setup.preparationId,
+      ),
+      [],
+    );
+    const { processedJobId } = await worker.processNextJob();
+    assert.equal(processedJobId, null);
+    assert.equal(provider.submitCount, 0);
+    assert.equal(local.calls, 0);
+  });
+
+  it("J2: confirming afterwards unblocks the SAME project, with no second confirmation needed", async () => {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      confirmProductionSize: false,
+    });
+
+    await assert.rejects(
+      () => finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId),
+      /Confirm the print size before preparation/,
+    );
+
+    await confirmProductionSizeForTests(repo, setup.projectId);
+
+    const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    assert.equal(job.status, "queued");
+    // The left-chest recommendation this harness confirms.
+    assert.equal(job.productionWidthIn, 4);
+    await worker.processNextJob();
+    assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
+  });
+
+  it("N: a size change AFTER provider submission never re-aims the submitted job", async () => {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider);
+    const setup = await setupApprovedPreparation(repo, assets);
+
+    const first = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    await worker.processNextJob();
+    const submitted = await repo.getFinalArtworkJob(first.job.id);
+    assert.equal(submitted?.status, "completed");
+    assert.equal(provider.submitCount, 1);
+    const firstRequestId = submitted?.providerRequestId;
+    assert.ok(firstRequestId, "the paid submission recorded its request id");
+
+    // The operator now confirms a different physical size.
+    await confirmProductionSizeForTests(repo, setup.projectId, { widthIn: 5 });
+
+    // The submitted job is IMMUTABLE evidence of what was produced and paid
+    // for at 4in. Nothing about it moves.
+    const afterChange = await repo.getFinalArtworkJob(first.job.id);
+    assert.equal(afterChange?.productionWidthIn, 4);
+    assert.equal(afterChange?.providerRequestId, firstRequestId);
+    assert.equal(afterChange?.status, "completed");
+
+    // And its output is no longer offered as this project's deliverable —
+    // a 4in plate is simply not the 5in one somebody asked for.
+    assert.equal(
+      await finalArtwork.getCurrentProductionAssetId(setup.projectId),
+      null,
+    );
+
+    // The new size gets its OWN job, with its own idempotency scope, so the
+    // old provider request can never be resumed as authority for it.
+    const second = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    assert.notEqual(second.job.id, first.job.id);
+    assert.equal(second.job.productionWidthIn, 5);
+    assert.equal(second.job.providerRequestId, null);
+    assert.equal(second.alreadyRequested, false);
+
+    await worker.processNextJob();
+    assert.equal(provider.submitCount, 2, "the new size is genuinely produced");
+    const secondAsset = await productionAssetFor(
+      repo,
+      setup.projectId,
+      second.job.id,
+    );
+    const firstAsset = await productionAssetFor(repo, setup.projectId, first.job.id);
+    assert.notEqual(secondAsset?.id, firstAsset?.id);
+    // Neither plate was rewritten into the other.
+    assert.equal(firstAsset?.widthPx, 1200);
+    assert.equal(secondAsset?.widthPx, 1500);
+  });
+
+  it("S: an already-completed print_ready plate stays deliverable, and is never retroactively invalidated", async () => {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider);
+    const setup = await setupApprovedPreparation(repo, assets);
+
+    const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    await worker.processNextJob();
+    const asset = await productionAssetFor(repo, setup.projectId, job.id);
+    assert.ok(asset);
+    assert.equal(
+      await finalArtwork.getCurrentProductionAssetId(setup.projectId),
+      asset.id,
+    );
+
+    // Goal 21: the confirmation requirement governs NEW paid work. A file
+    // that already exists, was already validated, and was already paid for
+    // remains the customer's file — taking it away to enforce a gate it
+    // predates would be the cure doing more harm than the disease.
+    assert.equal(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "print_ready",
+    );
+    assert.equal(
+      await finalArtwork.getCurrentProductionAssetId(setup.projectId),
+      asset.id,
+    );
+    assert.equal(provider.submitCount, 1, "nothing was re-produced");
+  });
+
   it("W: changing the size after a completed plate demands a NEW production run", async () => {
     const repo = await freshRepo();
     const { assets, finalArtwork, worker } = buildPipeline(repo);
@@ -1099,8 +1279,11 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const firstAsset = await productionAssetFor(repo, setup.projectId, first.job.id);
     assert.equal(firstAsset?.widthPx, 1200, "4in left chest at 300 PPI");
 
-    // The customer chooses a bigger print.
-    await repo.updateBrief(setup.projectId, { intendedPrintWidthIn: 5 });
+    // The customer chooses a bigger print — and CONFIRMS it. Print'em All
+    // Phase 1: writing `intendedPrintWidthIn` alone deliberately no longer
+    // moves production authority, because a working intent is not a decision.
+    // Confirmation is what makes the 4in plate stale.
+    await confirmProductionSizeForTests(repo, setup.projectId, { widthIn: 5 });
 
     // The 4in plate is never handed over as though it were the 5in one.
     assert.equal(
@@ -1130,7 +1313,7 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     );
   });
 
-  it("a job completing for a size the customer has since abandoned never claims print_ready", async () => {
+  it("a queued job for a size the customer has since abandoned is superseded before it runs", async () => {
     const repo = await freshRepo();
     const { assets, finalArtwork, worker } = buildPipeline(repo);
     const setup = await setupApprovedPreparation(repo, assets);
@@ -1138,11 +1321,20 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
     );
-    // The size changes while the job sits queued.
-    await repo.updateBrief(setup.projectId, { intendedPrintWidthIn: 5 });
+    // The confirmed size changes while the job sits queued.
+    await confirmProductionSizeForTests(repo, setup.projectId, { widthIn: 5 });
     await worker.processNextJob();
 
-    assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
+    // Print'em All Phase 1 (Goal 12): the job is now SUPERSEDED rather than
+    // run to completion and then withheld. The old behavior was safe about
+    // the claim it made — it never announced print_ready — but it still did
+    // all the work, which on the upload path means it would have bought a
+    // reconstruction for a size nobody wanted. The stale-width fence sits
+    // before dispatch, so nothing is produced and nothing is spent.
+    const settled = await repo.getFinalArtworkJob(job.id);
+    assert.equal(settled?.status, "cancelled");
+    assert.match(settled?.lastError ?? "", /No provider work was performed/);
+
     const snapshot = await repo.getProject(setup.projectId);
     assert.notEqual(
       snapshot!.project.status,
@@ -1276,12 +1468,17 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
       requestedProductionOutput: "production_png",
+      productionWidthIn: 10.5,
     });
 
     assert.equal(job.sourceKind, "generated_concept");
     assert.equal(job.finalDirectionApprovalId, approval.id);
     assert.equal(job.artworkPreparationId, null);
-    assert.equal(job.productionWidthIn, null);
+    // Print'em All Phase 1: a create_new job now carries the confirmed width
+    // it was enqueued for, exactly as a prepared_upload job always has. That
+    // binding is what makes a queued job for a superseded size detectably
+    // stale; `null` here is reserved for jobs enqueued before it existed.
+    assert.equal(job.productionWidthIn, 10.5);
     assert.deepEqual(
       await repo.listFinalArtworkJobsForPreparation(projectId, approval.id),
       [],

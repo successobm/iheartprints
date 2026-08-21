@@ -21,10 +21,13 @@ async function reachConfirmedSelectedConcept() {
     confirmSelectedDirection,
   } = conversationService;
 
-  const { projectId } = await runAdaptiveInterviewToSummary({
-    start: startConversation,
-    handleUserMessage,
-  });
+  const { projectId } = await runAdaptiveInterviewToSummary(
+    { start: startConversation, handleUserMessage },
+    // Print'em All Phase 1: the print location is answered during the
+    // interview, so the project has a placement to recommend and confirm a
+    // production size against before finalization is requested.
+    { printLocation: "Full front" },
+  );
   await submitDesignBriefDecision(projectId, "approve");
   await getCapabilityGraph().generationWorker.processNextJob();
 
@@ -32,6 +35,9 @@ async function reachConfirmedSelectedConcept() {
   const [concept] = generated!.artworkVersions;
   await selectConcept(projectId, concept!.id);
   await confirmSelectedDirection(projectId, concept!.id);
+  // Confirming the DESIGN and confirming the PHYSICAL SIZE are separate
+  // decisions, and production requires both.
+  await conversationService.confirmRecommendedProductionSize(projectId);
 
   return {
     projectId,
@@ -71,6 +77,11 @@ async function reachApprovedPreparedUpload() {
   });
   await preparationService.prepareUploadedArtwork(projectId);
   await preparationService.approvePreparedArtwork(projectId);
+  // Print'em All Phase 1: approving the PREPARED ARTWORK is not approving the
+  // PRINT SIZE. Production is unavailable until a human confirms the physical
+  // size, so this scenario — about what the local trigger does once a job
+  // exists — performs that confirmation through the real customer path.
+  await conversationService.confirmRecommendedProductionSize(projectId);
 
   return { projectId, preparationService };
 }

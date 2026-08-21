@@ -6,6 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { PNG } from "pngjs";
 
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * Sprint 2M Phase 2C, Goal 14/19V: the secure production-asset read
@@ -109,6 +110,11 @@ describe("GET /api/projects/[projectId]/production-artwork/image (Sprint 2M Phas
     // Live Acceptance Corrective Pass (Section 2): selection alone is
     // never final approval — confirm by default here.
     await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    // Print'em All Phase 1: production work now requires an explicit human
+    // confirmation of the physical print size. These scenarios are about what
+    // happens once finalization is authorized, so they perform that
+    // confirmation here — the same act a customer performs on the size card.
+    await confirmProductionSizeForTests(repo, projectId);
 
     return { projectId, artworkId: artwork!.id, graph };
   }

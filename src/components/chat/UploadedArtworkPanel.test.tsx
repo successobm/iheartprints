@@ -52,7 +52,9 @@ function preparation(
  * for an approved upload. Every figure here arrives pre-computed — the panel
  * never derives inches of its own.
  */
-function printReadySize(): PrintReadySizeView {
+function printReadySize(
+  overrides: Partial<PrintReadySizeView> = {},
+): PrintReadySizeView {
   return {
     widthIn: 10.5,
     heightIn: 10.34,
@@ -67,6 +69,32 @@ function printReadySize(): PrintReadySizeView {
       { widthIn: 12, label: '12"', isStandard: false, isSelected: false },
     ],
     note: "This is a standard adult full back print size.",
+    recommendation: {
+      recommendedFor: "Adult standard · Full Back",
+      boxWidthIn: 10.5,
+      boxHeightIn: 10.5,
+      artworkWidthIn: 10.5,
+      artworkHeightIn: 10.34,
+      assumedGarmentSizeClass: true,
+      isConfirmed: true,
+    },
+    // Print'em All Phase 1: this fixture describes a CONFIRMED project,
+    // because that is the state every pre-existing assertion in this file was
+    // written against — an approved upload whose Prepare action is offered.
+    // The unconfirmed case is a new, explicit test rather than a silent
+    // change of meaning for the existing ones.
+    confirmed: true,
+    confirmedAt: "2026-08-21T00:00:00.000Z",
+    blockingMessage: null,
+    garmentSizeOptions: [
+      { value: "youth", label: "Youth", isSelected: false },
+      { value: "womens_small", label: "Women's / Smaller Garment", isSelected: false },
+      { value: "adult_standard", label: "Standard Adult", isSelected: true },
+      { value: "adult_plus", label: "2XL–4XL / Larger Garment", isSelected: false },
+      { value: "custom", label: "Custom Size", isSelected: false },
+    ],
+    requiresExplicitWidth: false,
+    ...overrides,
   };
 }
 
@@ -363,7 +391,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     assert.match(text, /10\.5" × 10\.34"/);
     assert.match(text, /300 DPI/);
     assert.match(text, /Full Back/);
-    assert.match(text, /Change Size/);
+    assert.match(text, /Adjust size/);
     const html = render("approved", approvedState);
     // Enhancement is stated as a fact about a later step, with the
     // preservation promise attached.
@@ -430,7 +458,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     assert.match(html, /about 3–4 minutes/);
     assert.doesNotMatch(html, /Prepare Print-Ready Artwork/);
     // Size is not changeable once production has started.
-    assert.doesNotMatch(html, /Change Size/);
+    assert.doesNotMatch(html, /Adjust size/);
   });
 
   it("states an honest needs-attention message, and offers a retry, on failure", () => {
@@ -482,13 +510,13 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     assert.doesNotMatch(html, /Prepare Print-Ready Artwork/);
     assert.doesNotMatch(html, /Ready for print preparation/);
     // But the only route an upload customer has to a different size stays.
-    assert.match(html, /Change Size/);
+    assert.match(html, /Adjust size/);
   });
 
   it("says nothing about size when there is nothing honest to say", () => {
     const html = render("approved", approvedState, {}, { printReadySize: null });
 
-    assert.doesNotMatch(html, /Change Size/);
+    assert.doesNotMatch(html, /Adjust size/);
     assert.doesNotMatch(html, /300 DPI/);
     assert.match(html, /Prepare Print-Ready Artwork/);
   });

@@ -1440,12 +1440,13 @@ to the customer-safe `needs_review` state — the internal reason lives only
 on `FinalArtworkJob.lastError`, which no customer surface reads.
 
 Target physical print dimensions come from `shared/print-placement-dimensions.ts`,
-keyed by `PrintPlacement` and overridden by the customer's own chosen
-production width when they set one (`TShirtDesignBrief.intendedPrintWidthIn`,
-threaded in as `deriveProductionRequirements({ intendedPrintWidthIn })`).
-The placement table supplies the default and the printable band. Current
-defaults are adult-apparel widths (`full_front`/`full_back`: 10.5in
-default, 14in max height; `left_chest`: 4in; `sleeve`: 3in). Target
+keyed by `PrintPlacement` and overridden by the confirmed production size
+when the project has one (see §13f — Garment-Aware Production Size Authority,
+which is the normative account). The placement table supplies the technical
+limit and the pre-confirmation default; it is **not** the recommendation and
+**not** production authority. Current adult-apparel figures are
+`full_front`/`full_back`: 10.5in, 14in max height, 4–14in band;
+`left_chest`: 4in, 2–5in band; `sleeve`: 3in, 1.5–4in band. Target
 resolution is **300 PPI** for apparel raster production. Pixel geometry
 is authoritative; PNG density metadata is not.
 
@@ -1597,6 +1598,9 @@ scenario driven end-to-end through the real worker pipeline, confirming
   brief, not the frozen snapshot, for the same reason.
 
   Bounds, defaults, and clamping live in `shared/print-placement-dimensions.ts`
+  (the technical limit; recommendations live in
+  `shared/garment-production-sizing.ts` and the confirmed production
+  authority in `shared/confirmed-production-size.ts` — see §13f)
   (`defaultWidthIn` / `minWidthIn` / `maxWidthIn` per placement, resolved by
   `resolveProductionWidth`), so there is exactly one definition of what a
   placement can physically print. `sizingPolicyForPlacement(placement,
@@ -1800,8 +1804,16 @@ GenerationSchedulerCapability
 Shared pure modules (not capabilities):
   interview-coverage-policy, product-rule-packs, concept-relevance,
   question-phrasing, brief-diff, generation-retry-policy,
-  print-placement-dimensions
+  print-placement-dimensions, garment-production-sizing,
+  confirmed-production-size
 ```
+
+`garment-production-sizing` (the recommendation) and
+`confirmed-production-size` (the authority) are separate modules on purpose:
+nothing that only needs a suggestion should be able to reach the value a paid
+provider call is authorized from. Both depend on `print-placement-dimensions`
+(the technical limit) and on `lib/domain`; neither depends on a capability,
+a repository, or a clock. See §13f.
 
 ### Prohibited reverse dependencies
 
@@ -4157,6 +4169,174 @@ The per-placement figures in §13c's table are now the printable
 **envelope** — the largest area artwork may occupy. Provisional
 (concept-stage) Print Validation still measures against the envelope, since
 a generated concept has not been normalized for production at all.
+
+### 13f. Garment-Aware Production Size Authority (Print'em All Phase 1)
+
+**Three concepts, deliberately separated.** They were previously one number
+(`targetWidthIn`/`defaultWidthIn` = 10.5in), and every consumer read that
+number as universal truth. It is not: 10.5in is the standard ADULT
+recommendation, and youth, ladies, and 2XL+ garments are all real production
+work it does not serve.
+
+| Concept | Owner | What it means | May authorize spend? |
+|---|---|---|---|
+| **A. Recommended production box** | `shared/garment-production-sizing.ts` | A suggestion, from garment size class + placement | **No** |
+| **B. Confirmed production size** | `shared/confirmed-production-size.ts` | What a human explicitly approved | **Yes — and only this** |
+| **C. Technical / product limit** | `shared/print-placement-dimensions.ts` (`PlacementTechnicalLimit`) | What the placement can physically produce | No — it bounds B |
+
+**A recommendation is not authority.** `ProductionBoxRecommendation.requiresExplicitConfirmation`
+is always `true`. A recommendation, however good, never reaches a provider.
+
+**Confirmed physical dimensions are production authority.** The authority is
+`TShirtDesignBrief.productionSizeConfirmedAt` + `productionSizeConfirmedWidthIn`
+(+ `productionSizeConfirmedMaxHeightIn` for a confirmed BOX), written only by
+`DesignBriefCapability.confirmProductionSize`. It is self-describing: the
+confirmation names the exact width it approved, so no other writer of
+`intendedPrintWidthIn` can inherit somebody else's consent.
+
+**Why a width column could not carry consent.** A live Print'em All job spent
+a Topaz reconstruction credit while `intended_print_width_in` was NULL: the
+pipeline read the width, found none, fell back to the placement default, and
+produced a plate at a size no person had chosen or seen. Once a default fills
+in, "10.5 because the customer said so" and "10.5 because nobody said
+anything" are the same value, so every gate built on "do we have a width?"
+passes in exactly the case it exists to catch.
+
+**Provider spend requires confirmed size.** `FinalArtworkCapability`'s
+`requireConfirmedProductionSize` fences BOTH workflows at the request
+boundary — an unconfirmed project creates no `FinalArtworkJob` at all, so
+there is nothing for a worker to claim and nothing that can be spent. The
+customer-facing message is "Confirm the print size before preparation."
+
+**The recommendation table** (`PRODUCTION_BOX_RECOMMENDATIONS`), in inches:
+
+| Garment size class | full_front | full_back | left_chest | sleeve |
+|---|---|---|---|---|
+| `youth` | 8.5 × 8.5 | 8.5 × 8.5 | 4 × 4 | 3 × 3 |
+| `womens_small` | 9 × 9 | 9 × 9 | 4 × 4 | 3 × 3 |
+| `adult_standard` | **10.5 × 10.5** | **10.5 × 10.5** | 4 × 4 | 3 × 3 |
+| `adult_plus` | 12 × 12 | 12 × 12 | 4 × 4 | 3 × 3 |
+| `custom` | — | — | — | — |
+
+The front/back figures are **initial Print'em All operator production
+recommendations**, supplied as product authority and expected to **evolve from
+real production evidence**; revising them is a data change to that one table.
+The 10.5in / 4in / 3in values are not new — they are the existing Print-Ready
+Normalization Phase 1 figures, moved rather than re-derived, and a test asserts
+`adult_standard` still agrees with `PRINT_PLACEMENT_SIZING_POLICY`.
+
+**Left chest and sleeve do not scale with the garment class.** They are sized
+by the PRINT, not the shirt: a left-chest logo is a left-chest logo at 4in on a
+youth tee and on a 4XL, and scaling it would put a 12in "left chest" print on a
+2XL — which is a full front, not a left chest.
+
+**`custom` carries no recommendation, permanently**, at any placement. It means
+the operator is sizing to something this vocabulary does not describe, so any
+box would be a guess at a garment we were explicitly told we do not know — and
+a shipped guess is indistinguishable from a real production decision the moment
+somebody confirms it. That path requires an explicitly entered width.
+
+**Garment size class is apparel-product terminology only.**
+`GarmentSizeClass` (`youth | womens_small | adult_standard | adult_plus |
+custom`) describes the GARMENT, never a person: not a gender inference, not a
+body measurement, not a customer attribute. It is not a SKU catalogue, an
+apparel inventory, or a manufacturer sizing database — it exists solely to
+seed a recommendation. `null` means never stated, which is ASSUMED to be
+`adult_standard` for the SUGGESTION only, reported as
+`assumedGarmentSizeClass` — and the picker highlights nothing in that state,
+because an assumption must not read as a decision.
+
+It is chosen explicitly, in `PrintReadySizeCard`'s "Printing on" picker, using
+plain labels (`Youth`, `Women's / Smaller Garment`, `Standard Adult`,
+`2XL–4XL / Larger Garment`, `Custom Size`) that never expose the enum. One
+label vocabulary (`GARMENT_SIZE_CLASS_LABELS`) serves both the picker and the
+"Recommended for:" line, so the two cannot disagree on screen.
+
+Selecting a class writes the durable `garmentSizeClass` and moves the
+recommendation. It confirms no size, creates no `FinalArtworkJob`, and reaches
+no provider.
+
+**Changing the class WITHDRAWS any existing confirmation**
+(`DesignBriefCapability.setGarmentSizeClass`, one write so the two cannot land
+apart). Consent was given to a physical size *on a kind of garment*, and the
+second half just changed: keeping it would ride a 10.5in adult print onto a
+youth tee unapproved, and adopting the new class's recommendation instead would
+infer consent from a suggestion. `intendedPrintWidthIn` is deliberately left in
+place, so the one required re-confirmation click lands on a sensible number.
+
+**Oversize must be explicit, and a recommendation is never a maximum.** The
+technical band (4–14in on a full front) is deliberately much wider than any
+recommendation, so an operator on a 12in `adult_plus` recommendation who wants
+13in gets 13in, and one on a 9in `womens_small` recommendation who wants 8.5in
+gets 8.5in. A request outside the
+band is REFUSED by `normalizeConfirmableWidth`, never clamped — a clamp would
+record consent for a size the operator did not choose. (The chat path still
+clamps `intendedPrintWidthIn` into the band as before, but deliberately does
+NOT confirm a clamped value.)
+
+**Aspect ratio is always preserved.** A recommendation is a BOX, and artwork
+is contained within it proportionally: 10.5 × 10.5 prints a square at
+10.5 × 10.5, a 3:2 landscape at 10.5 × 7.0, and a 2:3 portrait at 7.0 × 10.5.
+Never stretched, never cropped to fill, never forced to 10.5in wide. There is
+no second geometry engine — `sizingPolicyForProductionBox` points
+`resolveWidthConstrainedSizing`'s `targetWidthIn`/`maxHeightIn` at the box,
+and that function already contains proportionally. A confirmed WIDTH alone
+carries no box height: height follows the artwork's aspect ratio, bounded only
+by the technical limit. No surface anywhere offers independent X/Y scaling.
+
+**Job identity includes production width, for BOTH workflows.**
+`final_artwork_jobs.production_width_in` is snapshotted at enqueue and
+immutable. `jobIntentIsCurrent` — the pre-dispatch fence — now compares the
+confirmed size as well as the requested output, so a job queued for 10.5in is
+superseded (never run, never billed) once 12in is confirmed, and vice versa.
+An unconfirmed project matches nothing, so a job can never outlive the consent
+that authorized it. A size change after provider submission leaves the
+submitted job as immutable evidence and creates a distinct job for the new
+size; the old provider request is never resumed as authority for it.
+
+**Internal commerce bypass does not bypass production confirmation.** An
+internal entitlement opens the acquisition, email, and payment gates. It does
+not open this one: internal means commercially unrestricted, never
+production-unsafe.
+
+**Historical projects are not retroactively invalidated.** No backfill: every
+pre-existing project is honestly unconfirmed and must confirm before NEW paid
+work. Already-completed `print_ready` plates remain deliverable —
+`resolveCurrentMatchingProductionJob` falls back to the previously-resolved
+width when no confirmation exists, and `findDeliverableJob` still delivers a
+legacy job that carries no bound width.
+
+**The Topaz 4× ceiling is unchanged**, as is the 300 PPI requirement and
+`reconstruction_sufficiency`. Confirmation decides WHAT size is produced; the
+ceiling independently decides whether that size is reachable at all.
+
+**Halftone fallback is the next phase.** See §13g.
+
+### 13g. Halftone fallback — the Phase 2 insertion point (not built)
+
+Nothing in this repository implements halftoning, and Phase 1 deliberately
+added no seam for it: a hook with no implementation behind it is a fake
+success state waiting to happen.
+
+The clean insertion point, when Phase 2 arrives, is
+`final-artwork/enhancement-decision.ts`. It is already the ONE place that
+decides how production reaches its target resolution, it is already pure
+arithmetic on (visible source width, confirmed target width × target PPI),
+and it already names its outcome as a `EnhancementMethod` union
+(`"skipped" | "reconstructed"`). The future branch is a third member of that
+union, decided in the same function and from the same two numbers:
+
+    confirmed physical size
+      → standard raster adequacy analysis   (decideEnhancement, today)
+      → "skipped"        when the artwork already carries the target
+      → "reconstructed"  when the need is within Topaz's proven 4x ceiling
+      → "halftone_candidate"  when it is not            [PHASE 2 — not built]
+
+The refusal that stands there today —
+`topaz-transparency-upscale-provider.ts`'s pre-dispatch check, which resolves
+a >4× need to "no request at all" with zero provider calls — is what a
+`halftone_candidate` outcome would eventually replace rather than bypass. It
+must keep failing closed until something real can succeed in its place.
 
 ### pixel dimensions ≠ physical dimensions ≠ density metadata
 

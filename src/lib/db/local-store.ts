@@ -439,6 +439,14 @@ export class LocalProjectRepository implements ProjectRepository {
       // no longer defaulted to "full_front" at creation.
       printPlacement: null,
       intendedPrintWidthIn: null,
+      // Print'em All Phase 1: no garment sizing context stated, and — the
+      // load-bearing one — no production size confirmed by anybody. A brand
+      // new project cannot authorize paid provider work until a human
+      // confirms a physical size.
+      garmentSizeClass: null,
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
       // Sprint A2: unspecified — the customer has not asked for a particular
       // production artifact, which is the supported Production PNG path.
       requestedProductionOutput: null,
@@ -1779,7 +1787,18 @@ export class LocalProjectRepository implements ProjectRepository {
           productionIntentMatches(
             item.requestedProductionOutput,
             input.requestedProductionOutput,
-          ),
+          ) &&
+          // Print'em All Phase 1: production width joins create_new job
+          // identity, mirroring this migration's
+          // `coalesce(production_width_in, -1)`. A 12in plate is not a 10.5in
+          // plate, so a newly confirmed size gets its OWN job rather than
+          // re-targeting one that may already be with a paid provider.
+          // Legacy rows (width NULL) collapse to the same `-1` bucket the
+          // coalesced index puts them in, so they keep deduplicating against
+          // each other exactly as before.
+          Math.abs(
+            (item.productionWidthIn ?? -1) - (input.productionWidthIn ?? -1),
+          ) < 1e-6,
       );
       if (duplicate) {
         throw new UniqueConstraintViolationError(
@@ -1821,8 +1840,10 @@ export class LocalProjectRepository implements ProjectRepository {
           : null,
       artworkPreparationId:
         input.sourceKind === "prepared_upload" ? input.artworkPreparationId : null,
-      productionWidthIn:
-        input.sourceKind === "prepared_upload" ? input.productionWidthIn : null,
+      // Print'em All Phase 1: written for BOTH workflows now — a create_new
+      // job is bound to the confirmed size it was enqueued for, exactly as a
+      // prepared_upload job already was.
+      productionWidthIn: input.productionWidthIn,
       requestedProductionOutput: input.requestedProductionOutput,
       artworkVersionId: input.artworkVersionId,
       status: "queued",

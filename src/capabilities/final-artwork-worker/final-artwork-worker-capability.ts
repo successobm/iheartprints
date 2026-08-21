@@ -61,9 +61,10 @@ import type {
 } from "@/capabilities/print-validation/contracts";
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
 import {
-  resolveProductionWidth,
-  type PlacementSizingPolicy,
-} from "@/capabilities/shared/print-placement-dimensions";
+  confirmedSizeMatchesJobWidth,
+  resolveProductionSizeConfirmation,
+} from "@/capabilities/shared/confirmed-production-size";
+import { type PlacementSizingPolicy } from "@/capabilities/shared/print-placement-dimensions";
 import type { FinalArtworkProvider, FinalArtworkProviderResumeContext } from "@/capabilities/final-artwork/provider";
 import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwork/production-normalization";
 import { computeAlphaBounds, DEFAULT_ALPHA_THRESHOLD } from "@/capabilities/final-artwork/alpha-trim";
@@ -235,13 +236,52 @@ export function createFinalArtworkWorkerCapability(
    * starts costing money or making a claim to the customer.
    *
    * Returns `true` when the job is still answering the current question.
+   *
+   * ---------------------------------------------------------------------
+   * Print'em All Phase 1 (Goal 12): PHYSICAL SIZE IS PART OF THE QUESTION.
+   *
+   * This fence previously compared requested OUTPUT only. That left the
+   * larger of the two ways a job goes stale wide open: a job enqueued for a
+   * 10.5in plate would sail straight through it after the operator confirmed
+   * 12in, dispatch to a paid provider, and produce a perfectly good file at a
+   * size nobody wanted. The reverse (12in queued, 10.5in confirmed) was just
+   * as unguarded.
+   *
+   * Two conditions now have to hold, and both are checked against the
+   * project's CONFIRMED authority rather than its working intent:
+   *
+   *   1. the project still has a confirmed production size at all — a
+   *      withdrawn confirmation makes every queued job stale, so a job can
+   *      never outlive the consent that authorized it; and
+   *   2. that confirmed size is the size this job was bound to at enqueue.
+   *
+   * An unconfirmed project therefore matches NOTHING, which is the correct
+   * fail-closed direction for a fence whose entire job is to stand in front
+   * of a paid provider call.
    */
   async function jobIntentIsCurrent(job: FinalArtworkJob): Promise<boolean> {
     const snapshot = await repo.getProject(job.projectId);
     if (!snapshot) return false;
-    return productionIntentMatches(
-      job.requestedProductionOutput,
-      snapshot.brief.requestedProductionOutput,
+    if (
+      !productionIntentMatches(
+        job.requestedProductionOutput,
+        snapshot.brief.requestedProductionOutput,
+      )
+    ) {
+      return false;
+    }
+
+    // A legacy job carries no bound width (it predates width binding), so
+    // there is no size to disagree about and this check abstains rather than
+    // failing it. Such a job cannot be dispatched to a provider by this build
+    // anyway — every enqueue path now binds a confirmed width — so abstaining
+    // affects only the status-transition call site, where it is what keeps an
+    // already-completed historical plate resolvable (Goal 21).
+    if (job.productionWidthIn === null) return true;
+
+    return confirmedSizeMatchesJobWidth(
+      resolveProductionSizeConfirmation(snapshot.brief),
+      job.productionWidthIn,
     );
   }
 
@@ -264,7 +304,7 @@ export function createFinalArtworkWorkerCapability(
     await repo.updateFinalArtworkJob(job.id, {
       status: "cancelled",
       lastError:
-        "Superseded: the project's requested production output changed after this job was enqueued. No provider work was performed for the superseded intent.",
+        "Superseded: the project's confirmed production size or requested production output changed after this job was enqueued. No provider work was performed for the superseded intent.",
       completedAt: new Date().toISOString(),
     });
   }
@@ -328,15 +368,12 @@ export function createFinalArtworkWorkerCapability(
       return false;
     }
 
-    const snapshot = await repo.getProject(job.projectId);
-    if (!snapshot) return false;
-
-    const resolved = resolveProductionWidth(
-      snapshot.brief.printPlacement,
-      snapshot.brief.intendedPrintWidthIn,
-    );
-    if (!resolved) return false;
-    return Math.abs(resolved.widthIn - job.productionWidthIn) < 1e-6;
+    // Print'em All Phase 1: the width comparison moved into
+    // `jobIntentIsCurrent`, which every caller of this function has already
+    // passed, and now reads the CONFIRMED authority rather than the working
+    // brief's resolved default. Keeping a second, differently-sourced copy
+    // here is how the two would eventually disagree.
+    return true;
   }
 
   async function resolveExistingProductionAsset(
@@ -671,19 +708,28 @@ export function createFinalArtworkWorkerCapability(
     // `shared/print-placement-dimensions.ts` (full_front/full_back,
     // left_chest, sleeve) via `deriveProductionRequirements` — no new
     // universal assumption invented here.
-    // Live Acceptance Cleanup (Issue 5): the customer's chosen production
-    // WIDTH is authoritative production intent and is read from the working
-    // brief (`intendedPrintWidthIn`), not from the frozen brief snapshot.
-    // Physical size is a production specification, not creative content — it
-    // is deliberately absent from `DesignBriefSnapshotContent`, so choosing
-    // 12 inches never supersedes an approved brief version, never restyles
-    // artwork, and never marks a concept stale. `null` (never chosen) falls
-    // back to the placement default, exactly as before this pass.
+    //
+    // Print'em All Phase 1: the production WIDTH is the job's OWN bound
+    // width, snapshotted at enqueue from the project's confirmed authority —
+    // no longer the live working brief.
+    //
+    // Both halves of that matter. Reading the LIVE brief let a queued job
+    // silently re-aim itself when the size changed underneath it, which is
+    // the create_new twin of the bug the upload path was already immune to.
+    // Reading a CONFIRMED value rather than a resolved one is what keeps a
+    // placement default from ever reaching a provider: the fence above has
+    // already established that a confirmation exists and that it names this
+    // job's width, so from here the job acts only on what a human approved.
+    //
+    // Physical size remains a production specification, not creative content
+    // — deliberately absent from `DesignBriefSnapshotContent`, so choosing 12
+    // inches never supersedes an approved brief version, never restyles
+    // artwork, and never marks a concept stale.
     //
     // Nothing about the size comes from the request that enqueued this job,
     // so a stale or forged finalize call cannot smuggle a different one in;
     // and nothing infers it from the pixels a generator happened to produce.
-    const intendedPrintWidthIn = snapshot.brief.intendedPrintWidthIn;
+    const intendedPrintWidthIn = job.productionWidthIn;
     // Sprint A2 Correction 2: the JOB'S OWN bound intent, snapshotted at
     // enqueue — not the live working brief, which can move underneath a
     // running job. The fence above has already established that the two

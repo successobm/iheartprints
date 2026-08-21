@@ -29,6 +29,7 @@ import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-inter
 import { StripeCheckoutProvider } from "./stripe-checkout-provider";
 import { buildStripeSignatureHeader } from "./stripe-webhook-signature";
 import { CHECKOUT_RETURN_COMPLETE, CHECKOUT_RETURN_PARAM } from "./checkout-return-urls";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * Sprint A5.4 — THE VERIFIED WEBHOOK, END TO END.
@@ -300,7 +301,10 @@ describe("Sprint A5.4 — verified webhook activates the production unlock", () 
     const sessionId = (await harness.repo.createAcquisitionSession(newToken())).id;
     const { projectId } = await runAdaptiveInterviewToSummary(
       harness.conversation,
-      {},
+      // Print'em All Phase 1: the print location is answered during the
+      // interview, so the project has a placement to recommend and confirm a
+      // production size against.
+      { printLocation: "Full front" },
       sessionId,
     );
     await harness.conversation.submitDesignBriefDecision(projectId, "approve");
@@ -333,6 +337,10 @@ describe("Sprint A5.4 — verified webhook activates the production unlock", () 
       shirtColor: "Black",
       printPlacement: "left_chest",
     });
+    // Print'em All Phase 1: a resolvable width is no longer enough — the
+    // upload finalization path requires an explicit CONFIRMED size, which
+    // is a production-safety gate and not a commercial one.
+    await confirmProductionSizeForTests(harness.repo, projectId);
 
     const asset = (kind: "customer_upload" | "png", name: string) =>
       harness.repo.createAsset(projectId, {
@@ -1042,6 +1050,11 @@ describe("Sprint A5.4 — verified webhook activates the production unlock", () 
     const { projectId, artworkVersionId, transaction } =
       await createNewWithCheckout(harness);
     await harness.conversation.confirmSelectedDirection(projectId, artworkVersionId);
+    // Print'em All Phase 1: the commercial gate and the PRODUCTION SIZE
+    // gate are independent dimensions. These scenarios are about the first
+    // one, so the second is satisfied here — an unlock buys the right to
+    // finalize, never the right to skip confirming how large the print is.
+    await confirmProductionSizeForTests(harness.repo, projectId);
 
     await deliver(
       harness,

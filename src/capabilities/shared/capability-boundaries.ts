@@ -1791,6 +1791,92 @@
  *
  * A5.3 UNLOCKS NOTHING. Generation authorization is untouched, finalization
  *   authorization is untouched, and `AcquisitionCapability` was not modified.
+ *
+ * ---------------------------------------------------------------------------
+ * PRINT'EM ALL PHASE 1 — GARMENT-AWARE PRODUCTION SIZE AUTHORITY
+ * ---------------------------------------------------------------------------
+ *
+ * THREE CONCEPTS, THREE MODULES, ONE DIRECTION OF DEPENDENCY.
+ *   `shared/garment-production-sizing.ts`   the RECOMMENDATION (a suggestion)
+ *   `shared/confirmed-production-size.ts`   the AUTHORITY (what a human approved)
+ *   `shared/print-placement-dimensions.ts`  the TECHNICAL LIMIT (what fits)
+ *
+ *   All three are pure: no repository, no capability, no provider, no clock.
+ *   Recommendation and confirmation both depend on the technical limit;
+ *   nothing depends on the recommendation in order to spend money.
+ *
+ *   FORBIDDEN: a fourth copy of any inch figure. UI components, routes, and
+ *   workers read derived values only — the rule that already keeps `10.5`
+ *   out of the finalization worker.
+ *
+ * A RECOMMENDATION IS NEVER SPEND AUTHORITY.
+ *   `ProductionBoxRecommendation.requiresExplicitConfirmation` is typed as
+ *   the literal `true`, so nothing can derive `false` from anything.
+ *
+ *   FORBIDDEN: authorizing a paid provider call from a recommendation, from
+ *   `defaultWidthIn`, or from `intendedPrintWidthIn`. A number cannot carry
+ *   consent — once a default fills in, "10.5 because they said so" and "10.5
+ *   because nobody said anything" are the same value. Only
+ *   `productionSizeConfirmedAt` + `productionSizeConfirmedWidthIn` may
+ *   authorize spend, and only `DesignBriefCapability.confirmProductionSize`
+ *   may write them.
+ *
+ * THE RECOMMENDATION TABLE IS OPERATOR PRODUCT AUTHORITY, AND EVOLVES.
+ *   `PRODUCTION_BOX_RECOMMENDATIONS` holds the operator's initial Print'em
+ *   All figures (8.5 / 9 / 10.5 / 12in front-back boxes) and is expected to
+ *   change as real production evidence accumulates. Revising it is a data
+ *   change to that one table.
+ *
+ *   FORBIDDEN: adding a figure this product has not actually decided. A
+ *   shipped guess becomes indistinguishable from a real production decision
+ *   the moment an operator confirms it — which is why `custom` stays `null`
+ *   permanently and asks for a width instead.
+ *
+ *   FORBIDDEN: scaling left chest or sleeve with the garment class. Those are
+ *   sized by the PRINT, not the shirt; a 12in "left chest" is a full front.
+ *
+ * CHANGING THE GARMENT CLASS WITHDRAWS THE CONFIRMATION.
+ *   Consent was given to a physical size ON A KIND OF GARMENT, and the class
+ *   is the second half of that sentence.
+ *
+ *   FORBIDDEN: carrying an old confirmation across a class change, and
+ *   equally forbidden: auto-confirming the new class's recommendation, which
+ *   would infer consent from a suggestion.
+ *
+ * GARMENT SIZE CLASS IS PRODUCT TERMINOLOGY, NEVER A PERSON.
+ *   FORBIDDEN: inferring gender or body size from it, growing it into a SKU
+ *   catalogue / apparel inventory / manufacturer sizing database, or selling
+ *   garments. iHeartPrints sells artwork.
+ *
+ * CONTAIN, NEVER DISTORT — AND NEVER A SECOND GEOMETRY ENGINE.
+ *   `sizingPolicyForProductionBox` points `resolveWidthConstrainedSizing` at
+ *   a box; that function already contains proportionally.
+ *
+ *   FORBIDDEN: stretching, cropping to fill, letterboxing, forcing a portrait
+ *   to the box width, any independent X/Y scale in an operator surface, or a
+ *   second implementation of containment arithmetic.
+ *
+ * RECOMMENDATION != MAXIMUM.
+ *   FORBIDDEN: clamping an explicit oversize request back to the
+ *   recommendation. The technical band bounds it; a request outside the band
+ *   is REFUSED, not clamped, because a clamp would record consent for a size
+ *   nobody chose.
+ *
+ * PRODUCTION WIDTH IS PART OF JOB IDENTITY, FOR BOTH WORKFLOWS.
+ *   FORBIDDEN: re-aiming a queued job at a newly confirmed size, reusing a
+ *   submitted provider request as authority for a different size, or mutating
+ *   a submitted job. A new confirmed size gets a new job; the old one stays
+ *   immutable evidence.
+ *
+ * COMMERCIAL ENTITLEMENT AND PRODUCTION SAFETY ARE INDEPENDENT DIMENSIONS.
+ *   FORBIDDEN: an internal entitlement, a production unlock, or a legacy
+ *   project skipping size confirmation. Internal means commercially
+ *   unrestricted, never production-unsafe.
+ *
+ * NO RETROACTIVE CONSENT, AND NO RETROACTIVE INVALIDATION.
+ *   FORBIDDEN: backfilling `production_size_confirmed_at`, and equally
+ *   forbidden: withholding an already-produced, already-validated
+ *   `print_ready` plate from the customer who already has it.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "A5.5" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "PEA1" as const;

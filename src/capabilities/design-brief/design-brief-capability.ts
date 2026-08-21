@@ -6,6 +6,7 @@ import { toDesignBriefSnapshotContent } from "@/lib/domain/brief-snapshot";
 import type {
   DesignBriefSnapshotContent,
   DesignBriefVersion,
+  GarmentSizeClass,
   PrintPlacement,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
@@ -46,6 +47,76 @@ export interface DesignBriefCapability {
   setIntendedPrintWidth(
     designId: string,
     widthIn: number | null,
+  ): Promise<TShirtDesignBrief>;
+  /**
+   * Print'em All Phase 1 — RECORDS EXPLICIT HUMAN CONFIRMATION of the
+   * physical production size, and is the only thing in the system that may.
+   *
+   * The single most important property of this method is that no other write
+   * path can produce its effect. `setIntendedPrintWidth` records what someone
+   * WANTS; this records what someone APPROVED, together with the exact size
+   * they approved it for. That separation is the whole fix: a live Topaz
+   * credit was spent against a width that was never anything more than a
+   * default, and no inspection of a width column afterwards could have
+   * distinguished that from a real decision.
+   *
+   * The confirmation is written as one unit — timestamp, width, and box
+   * height together — so a half-written confirmation cannot exist. It also
+   * writes `intendedPrintWidthIn`, keeping the working intent and the
+   * confirmed authority in agreement rather than leaving two numbers to drift.
+   *
+   * Like `setIntendedPrintWidth`, it approves no brief version, marks no
+   * concept stale, triggers no revision, and reaches no image provider.
+   *
+   * The caller is responsible for having normalized the width against the
+   * placement's technical limit (`normalizeConfirmableWidth`); this boundary
+   * persists an already-decided figure.
+   */
+  confirmProductionSize(
+    designId: string,
+    input: {
+      /** The exact physical print width being confirmed, in inches. */
+      widthIn: number;
+      /** Containing-box height bound, or `null` when a width alone was confirmed. */
+      boxMaxHeightIn: number | null;
+      /** ISO timestamp of the confirmation. Supplied by the caller so this boundary stays clock-free. */
+      confirmedAt: string;
+    },
+  ): Promise<TShirtDesignBrief>;
+  /**
+   * Print'em All Phase 1: WITHDRAWS a production-size confirmation, returning
+   * the project to "no human has approved a size".
+   *
+   * Needed because a confirmation is about a specific physical size in a
+   * specific context, and the context can move out from under it — most
+   * obviously when the garment size class changes, which changes what the
+   * recommended box is and therefore what the operator was agreeing to.
+   * Silently keeping the old confirmation would let a 10.5in adult print ride
+   * a garment-class change onto a youth tee without anyone re-approving it.
+   *
+   * Clears all three confirmation fields together, and deliberately leaves
+   * `intendedPrintWidthIn` alone: the number is still a fine starting point
+   * for the next confirmation, it just no longer carries anyone's consent.
+   */
+  withdrawProductionSizeConfirmation(
+    designId: string,
+  ): Promise<TShirtDesignBrief>;
+  /**
+   * Print'em All Phase 1: records the GARMENT SIZING CONTEXT a production box
+   * should be recommended for.
+   *
+   * Withdraws any existing size confirmation as a side effect, for the reason
+   * given on `withdrawProductionSizeConfirmation`. That coupling lives here,
+   * at the boundary that owns both fields, rather than in each caller — a
+   * caller that forgot it would produce exactly the silent cross-garment
+   * carry-over this exists to prevent.
+   *
+   * Apparel-product sizing terminology only. Never an inference about a
+   * person, and never a garment catalogue.
+   */
+  setGarmentSizeClass(
+    designId: string,
+    garmentSizeClass: GarmentSizeClass | null,
   ): Promise<TShirtDesignBrief>;
   /**
    * Existing Artwork → Print Ready Phase 1: records the PRODUCTION CONTEXT an
@@ -108,6 +179,39 @@ export function createDesignBriefCapability(
 
     async setIntendedPrintWidth(designId, widthIn) {
       return repo.updateBrief(designId, { intendedPrintWidthIn: widthIn });
+    },
+
+    async confirmProductionSize(designId, input) {
+      return repo.updateBrief(designId, {
+        // Written together, always. `resolveProductionSizeConfirmation` fails
+        // closed on a partial record, but the cheaper guarantee is simply
+        // never to write one.
+        intendedPrintWidthIn: input.widthIn,
+        productionSizeConfirmedWidthIn: input.widthIn,
+        productionSizeConfirmedMaxHeightIn: input.boxMaxHeightIn,
+        productionSizeConfirmedAt: input.confirmedAt,
+      });
+    },
+
+    async withdrawProductionSizeConfirmation(designId) {
+      return repo.updateBrief(designId, {
+        productionSizeConfirmedAt: null,
+        productionSizeConfirmedWidthIn: null,
+        productionSizeConfirmedMaxHeightIn: null,
+      });
+    },
+
+    async setGarmentSizeClass(designId, garmentSizeClass) {
+      // One write, so the class change and the withdrawal cannot land apart —
+      // a crash between two writes would leave a 10.5in adult confirmation
+      // attached to a youth garment, which is the exact state this coupling
+      // exists to make unreachable.
+      return repo.updateBrief(designId, {
+        garmentSizeClass,
+        productionSizeConfirmedAt: null,
+        productionSizeConfirmedWidthIn: null,
+        productionSizeConfirmedMaxHeightIn: null,
+      });
     },
 
     async setUploadedArtworkContext(designId, input) {

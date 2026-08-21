@@ -34,10 +34,13 @@ describe("GET /api/projects/[projectId]/finalization/status", () => {
       confirmSelectedDirection,
     } = await import("@/lib/services/conversation-service");
 
-    const { projectId } = await runAdaptiveInterviewToSummary({
-      start: startConversation,
-      handleUserMessage,
-    });
+    const { projectId } = await runAdaptiveInterviewToSummary(
+      { start: startConversation, handleUserMessage },
+      // Print'em All Phase 1: the print location is answered during the
+      // interview, so the project has a placement to recommend and confirm a
+      // production size against before finalization is requested.
+      { printLocation: "Full front" },
+    );
     await submitDesignBriefDecision(projectId, "approve");
     await getCapabilityGraph().generationWorker.processNextJob();
 
@@ -48,6 +51,9 @@ describe("GET /api/projects/[projectId]/finalization/status", () => {
     // Live Acceptance Corrective Pass (Section 2): selection alone is
     // never final approval — confirm by default here.
     await confirmSelectedDirection(projectId, concept!.id);
+    // Confirming the DESIGN and confirming the PHYSICAL SIZE are separate
+    // decisions, and production requires both.
+    await conversationService.confirmRecommendedProductionSize(projectId);
 
     return { projectId, artworkVersionId: concept!.id };
   }

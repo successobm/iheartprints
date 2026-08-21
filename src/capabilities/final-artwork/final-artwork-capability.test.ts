@@ -14,6 +14,7 @@ import { PlaceholderConceptProvider } from "@/capabilities/providers";
 import { createConceptGenerationCapability } from "@/capabilities/concept-generation";
 
 import { createFinalArtworkCapability } from "./final-artwork-capability";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 describe("FinalArtworkCapability.requestFinalArtwork (Sprint 2M Phase 2B)", () => {
   let tempDir = "";
@@ -77,6 +78,11 @@ describe("FinalArtworkCapability.requestFinalArtwork (Sprint 2M Phase 2B)", () =
     // once the customer HAS confirmed, so confirm by default here; the
     // dedicated "not yet confirmed" test explicitly un-confirms instead.
     await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    // Print'em All Phase 1: production work now requires an explicit human
+    // confirmation of the physical print size. These scenarios are about what
+    // happens once finalization is authorized, so they perform that
+    // confirmation here — the same act a customer performs on the size card.
+    await confirmProductionSizeForTests(repo, projectId);
 
     return { projectId, versionId: version.id, artworkId: firstConcept!.id, worker, conceptGeneration };
   }
@@ -214,6 +220,11 @@ describe("FinalArtworkCapability.requestFinalArtwork (Sprint 2M Phase 2B)", () =
     assert.ok(newBatch.length > 0);
     await repo.selectArtworkVersion(projectId, newBatch[0]!.id);
     await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    // Print'em All Phase 1: production work now requires an explicit human
+    // confirmation of the physical print size. These scenarios are about what
+    // happens once finalization is authorized, so they perform that
+    // confirmation here — the same act a customer performs on the size card.
+    await confirmProductionSizeForTests(repo, projectId);
     const secondApproval = await finalArtwork.requestFinalArtwork(projectId, newBatch[0]!.id);
     assert.notEqual(secondApproval.approval.id, firstApproval.approval.id);
     assert.equal(secondApproval.approval.status, "active");
@@ -264,6 +275,11 @@ describe("FinalArtworkCapability.requestFinalArtwork (Sprint 2M Phase 2B)", () =
 
     // Explicit confirmation unblocks it.
     await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    // Print'em All Phase 1: production work now requires an explicit human
+    // confirmation of the physical print size. These scenarios are about what
+    // happens once finalization is authorized, so they perform that
+    // confirmation here — the same act a customer performs on the size card.
+    await confirmProductionSizeForTests(repo, projectId);
     const result = await finalArtwork.requestFinalArtwork(projectId, artworkId);
     assert.equal(result.approval.status, "active");
   });

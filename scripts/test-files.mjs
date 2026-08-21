@@ -190,6 +190,7 @@ export const TEST_FILES = [
   "src/capabilities/shared/brief-diff.test.ts",
   "src/capabilities/shared/waiting-copy.test.ts",
   "src/capabilities/shared/production-print-size.test.ts",
+  "src/capabilities/shared/garment-production-sizing.test.ts",
   "src/capabilities/conversation/concept-selection-lifecycle.test.ts",
   "src/capabilities/conversation/production-size-lifecycle.test.ts",
   "src/components/chat/PrintReadySizeCard.test.tsx",

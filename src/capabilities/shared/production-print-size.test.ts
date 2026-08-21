@@ -27,6 +27,10 @@ describe("Production print size — defaults and derivation", () => {
     const size = describePrintReadySize({
       printPlacement: "full_front",
       intendedPrintWidthIn: null,
+      garmentSizeClass: null,
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
       artworkWidthPx: 1024,
       artworkHeightPx: 1024,
     });
@@ -41,6 +45,10 @@ describe("Production print size — defaults and derivation", () => {
     const size = describePrintReadySize({
       printPlacement: "full_back",
       intendedPrintWidthIn: null,
+      garmentSizeClass: null,
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
       artworkWidthPx: 1024,
       artworkHeightPx: 1024,
     });
@@ -52,6 +60,10 @@ describe("Production print size — defaults and derivation", () => {
     const square = describePrintReadySize({
       printPlacement: "full_front",
       intendedPrintWidthIn: null,
+      garmentSizeClass: null,
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
       artworkWidthPx: 1000,
       artworkHeightPx: 1000,
     });
@@ -61,6 +73,10 @@ describe("Production print size — defaults and derivation", () => {
     const tall = describePrintReadySize({
       printPlacement: "full_front",
       intendedPrintWidthIn: null,
+      garmentSizeClass: null,
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
       artworkWidthPx: 1000,
       artworkHeightPx: 1070,
     });
@@ -70,6 +86,10 @@ describe("Production print size — defaults and derivation", () => {
     const unknown = describePrintReadySize({
       printPlacement: "full_front",
       intendedPrintWidthIn: null,
+      garmentSizeClass: null,
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
       artworkWidthPx: null,
       artworkHeightPx: null,
     });
@@ -85,6 +105,10 @@ describe("Production print size — defaults and derivation", () => {
     const size = describePrintReadySize({
       printPlacement: "full_front",
       intendedPrintWidthIn: 12,
+      garmentSizeClass: null,
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
       artworkWidthPx: 1000,
       artworkHeightPx: 1000,
     });

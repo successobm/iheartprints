@@ -38,6 +38,8 @@ import { ALL_SECTIONS_IN_POLICY_ORDER } from "@/capabilities/shared/interview-co
 import { diffEstablishedBriefSections } from "@/capabilities/shared/brief-diff";
 import { resolveProductionWidth } from "@/capabilities/shared/print-placement-dimensions";
 import { describePrintReadySize } from "@/capabilities/shared/print-ready-size";
+import { confirmableSizeFromBox } from "@/capabilities/shared/confirmed-production-size";
+import { recommendProductionBox } from "@/capabilities/shared/garment-production-sizing";
 import {
   detectProductionSizeIntent,
   RELATIVE_SIZE_STEP_IN,
@@ -57,6 +59,7 @@ import { productNameForQuestion } from "@/capabilities/shared/print-product-voca
 import { splitRequestedChanges } from "@/capabilities/shared/revision-delta";
 import { isExplicitRevisionIntent } from "@/capabilities/shared/revision-intent";
 import { traceConversationUnderstanding } from "@/lib/debug/conversation-understanding-trace";
+import type { GarmentSizeClass } from "@/lib/domain/types";
 import type {
   BriefSectionKey,
   DesignSummaryView,
@@ -273,6 +276,34 @@ export interface ConversationCapability {
   setProductionPrintWidth(
     designId: string,
     requestedWidthIn: number | null,
+  ): Promise<ProjectSnapshot>;
+  /**
+   * Print'em All Phase 1: "Use recommended size" — confirms the RECOMMENDED
+   * production box for this project's placement and garment size class.
+   *
+   * Distinct from `setProductionPrintWidth` because a box is not a width. A
+   * 10.5x10.5 recommendation contains a 2:3 portrait to 7.0x10.5; confirming
+   * it as "10.5 inches wide" would print that portrait at 10.5x15.75, which
+   * is both a different design decision and, on most garments, off the shirt.
+   *
+   * Refuses when this (garment class, placement) has no authoritative
+   * recommendation — youth, ladies, plus, and custom garments have none yet,
+   * and the honest response is to ask for a size rather than to suggest one
+   * we do not have.
+   */
+  confirmRecommendedProductionSize(designId: string): Promise<ProjectSnapshot>;
+  /**
+   * Print'em All Phase 1: records which garment sizing context the print box
+   * should be RECOMMENDED for.
+   *
+   * Withdraws any existing size confirmation, because a confirmation is
+   * consent to a specific size on a specific kind of garment and the second
+   * half just changed. Apparel-product sizing terminology only — never an
+   * inference about a person.
+   */
+  setGarmentSizeClass(
+    designId: string,
+    garmentSizeClass: GarmentSizeClass | null,
   ): Promise<ProjectSnapshot>;
   /**
    * Sprint 2M Phase 2B: the customer's explicit "this is my final direction
@@ -867,10 +898,41 @@ export function createConversationCapability(
       );
     }
 
-    await designBrief.setIntendedPrintWidth(
-      designId,
-      requestedWidthIn === null ? null : resolved.widthIn,
-    );
+    // Print'em All Phase 1 (Goal 6 / Goal 7): an explicitly stated width is
+    // an explicit human decision about physical size, so it CONFIRMS —
+    // "make the print 12 inches wide" and the Adjust Size control are both
+    // somebody saying a number out loud.
+    //
+    // Two cases deliberately do NOT confirm:
+    //
+    //   * `null` — a return to the placement default. A default is the
+    //     absence of a decision, so it withdraws any confirmation rather
+    //     than re-recording one. This is the single most important line in
+    //     the method: without it, "reset to standard" would leave consent
+    //     attached to a number nobody chose, which is the original bug.
+    //
+    //   * A CLAMPED request — they asked for 20in on a garment that tops out
+    //     at 14in. They stated 20 and 20 is not available, so nobody has yet
+    //     approved 14. The acknowledgement below tells them what actually
+    //     fits and the confirm control is one click away; manufacturing
+    //     consent for a size they never named would be exactly the failure
+    //     this whole pass exists to close.
+    if (requestedWidthIn === null) {
+      await designBrief.setIntendedPrintWidth(designId, null);
+      await designBrief.withdrawProductionSizeConfirmation(designId);
+    } else if (resolved.clamped) {
+      await designBrief.setIntendedPrintWidth(designId, resolved.widthIn);
+      await designBrief.withdrawProductionSizeConfirmation(designId);
+    } else {
+      await designBrief.confirmProductionSize(designId, {
+        widthIn: resolved.widthIn,
+        // A stated WIDTH carries no box height: height simply follows the
+        // artwork's own aspect ratio, bounded by the placement's technical
+        // limit. Only a recommended BOX bounds both axes.
+        boxMaxHeightIn: null,
+        confirmedAt: new Date().toISOString(),
+      });
+    }
 
     const updated = await designBrief.getWorkingBrief(designId);
     const size = describePrintReadySize({
@@ -895,6 +957,68 @@ export function createConversationCapability(
     const snapshot = await repo.getProject(designId);
     if (!snapshot) throw new Error("Project not found");
     return snapshot;
+  }
+
+  /**
+   * Print'em All Phase 1: "Use recommended size".
+   *
+   * Shares every guard with `applyProductionPrintWidth` by delegating to it —
+   * the "can't resize mid-finalization" rule, the print_ready re-open rule,
+   * and the chat acknowledgement are all size-change rules, not
+   * width-specific ones, and duplicating them here is how they would drift.
+   * The only thing this function adds is the BOX: it re-records the
+   * confirmation with the recommendation's height bound, which a width alone
+   * cannot express.
+   */
+  async function applyRecommendedProductionSize(
+    designId: string,
+    current: ProjectSnapshot,
+  ): Promise<ProjectSnapshot> {
+    const recommendation = recommendProductionBox({
+      placement: current.brief.printPlacement,
+      garmentSizeClass: current.brief.garmentSizeClass,
+    });
+    if (!recommendation) {
+      throw new Error(
+        "I need to know where this prints before I can recommend a print size",
+      );
+    }
+
+    const confirmable = confirmableSizeFromBox(
+      current.brief.printPlacement,
+      recommendation.box,
+    );
+    if (!confirmable) {
+      // Youth, ladies, plus, and custom garments have no authoritative
+      // recommendation yet. Asking for the size is the honest answer;
+      // inventing a box that merely sounds reasonable would ship a made-up
+      // production figure under the word "recommended".
+      throw new Error(
+        "I don't have a recommended print size for this garment yet — tell me how wide the print should be and I'll use that.",
+      );
+    }
+
+    const snapshot = await applyProductionPrintWidth(
+      designId,
+      current,
+      confirmable.widthIn,
+    );
+
+    // `applyProductionPrintWidth` confirmed a width with no height bound;
+    // re-record the same confirmation WITH the recommendation's box height so
+    // a portrait design is contained within the recommended area rather than
+    // run past it. Same width, so nothing about the confirmation's identity
+    // (or any job keyed on it) changes.
+    await designBrief.confirmProductionSize(designId, {
+      widthIn: confirmable.widthIn,
+      boxMaxHeightIn: confirmable.boxMaxHeightIn,
+      confirmedAt:
+        snapshot.brief.productionSizeConfirmedAt ?? new Date().toISOString(),
+    });
+
+    const updated = await repo.getProject(designId);
+    if (!updated) throw new Error("Project not found");
+    return updated;
   }
 
   /** Restores the brief to its state before the most recently accepted revision, if any. */
@@ -1707,6 +1831,33 @@ export function createConversationCapability(
       const current = await repo.getProject(designId);
       if (!current) throw new Error("Project not found");
       return applyProductionPrintWidth(designId, current, requestedWidthIn);
+    },
+
+    async confirmRecommendedProductionSize(designId) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+      return applyRecommendedProductionSize(designId, current);
+    },
+
+    async setGarmentSizeClass(designId, garmentSizeClass) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+
+      // Guarded exactly like a size change, and for the same reason: the
+      // garment class decides the recommended box, so changing it while a
+      // plate is being made would leave every figure on screen describing
+      // something other than what is in the oven.
+      if (current.project.status === "finalizing") {
+        throw new Error(
+          "Your print-ready artwork is being prepared right now — I can't change the garment size until that finishes",
+        );
+      }
+
+      await designBrief.setGarmentSizeClass(designId, garmentSizeClass);
+
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new Error("Project not found");
+      return snapshot;
     },
 
     async approveFinalDirection(designId, artworkVersionId) {

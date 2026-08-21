@@ -28,6 +28,7 @@ import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-inter
 import { resolveProductionUnlockSurface } from "./customer-payment-view";
 import { StripeCheckoutProvider } from "./stripe-checkout-provider";
 import { buildStripeSignatureHeader } from "./stripe-webhook-signature";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * Sprint A5.5 — THE CUSTOMER JOURNEY, end to end.
@@ -306,7 +307,10 @@ describe("Sprint A5.5 — the customer production-unlock journey", () => {
     // 1. One free concept.
     const { projectId } = await runAdaptiveInterviewToSummary(
       harness.conversation,
-      {},
+      // Print'em All Phase 1: the print location is answered during the
+      // interview, so the project has a placement to recommend and confirm a
+      // production size against.
+      { printLocation: "Full front" },
       sessionId,
     );
     await harness.conversation.submitDesignBriefDecision(projectId, "approve");
@@ -392,6 +396,11 @@ describe("Sprint A5.5 — the customer production-unlock journey", () => {
       true,
     );
     await harness.conversation.confirmSelectedDirection(projectId, artworkVersionId);
+    // Print'em All Phase 1: the commercial gate and the PRODUCTION SIZE
+    // gate are independent dimensions. These scenarios are about the first
+    // one, so the second is satisfied here — an unlock buys the right to
+    // finalize, never the right to skip confirming how large the print is.
+    await confirmProductionSizeForTests(harness.repo, projectId);
     const finalized = await harness.finalArtwork.requestFinalArtwork(
       projectId,
       artworkVersionId,
@@ -422,6 +431,10 @@ describe("Sprint A5.5 — the customer production-unlock journey", () => {
       shirtColor: "Black",
       printPlacement: "left_chest",
     });
+    // Print'em All Phase 1: a resolvable width is no longer enough — the
+    // upload finalization path requires an explicit CONFIRMED size, which
+    // is a production-safety gate and not a commercial one.
+    await confirmProductionSizeForTests(harness.repo, projectId);
 
     const asset = (kind: "customer_upload" | "png", name: string) =>
       harness.repo.createAsset(projectId, {

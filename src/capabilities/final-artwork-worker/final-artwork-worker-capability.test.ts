@@ -36,6 +36,7 @@ import { createPrintValidationCapability } from "@/capabilities/print-validation
 import type { ConceptEvaluation, PrintPlacement } from "@/lib/domain/types";
 
 import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capability";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * Sprint 2M Phase 2E: a fake RECONSTRUCTION provider (never a real Topaz
@@ -444,6 +445,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     // (all about what the worker does once finalization is authorized)
     // continue to exercise `requestFinalArtwork` the same way as before.
     await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    // Print'em All Phase 1: production work now requires an explicit human
+    // confirmation of the physical print size. These scenarios are about what
+    // happens once finalization is authorized, so they perform that
+    // confirmation here — the same act a customer performs on the size card.
+    await confirmProductionSizeForTests(repo, projectId);
 
     return { projectId, versionId: version.id, artworkId: artwork!.id, primaryAssetId };
   }
@@ -500,6 +506,7 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       finalDirectionApprovalId: "00000000-0000-0000-0000-000000000000",
       artworkVersionId: artworkId,
       requestedProductionOutput: "production_png",
+      productionWidthIn: 10.5,
     });
 
     await worker.processNextJob();
@@ -597,6 +604,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     // (all about what the worker does once finalization is authorized)
     // continue to exercise `requestFinalArtwork` the same way as before.
     await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    // Print'em All Phase 1: production work now requires an explicit human
+    // confirmation of the physical print size. These scenarios are about what
+    // happens once finalization is authorized, so they perform that
+    // confirmation here — the same act a customer performs on the size card.
+    await confirmProductionSizeForTests(repo, projectId);
 
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artwork!.id);
     await worker.processNextJob();
@@ -644,6 +656,79 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
    * stale or forged request cannot override it, and nothing is ever inferred
    * from the pixels the generator happened to produce.
    */
+  /* ---------------------------------------------------------------------
+   * Print'em All Phase 1 — the create_new path uses the SAME production size
+   * authority as the upload path, and is fenced the same way.
+   * ------------------------------------------------------------------- */
+
+  it("P1/J: a create_new project with no confirmed size creates no job and reaches no provider", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    // Deliberately NOT confirmed — `setupProjectWithConcept` confirms by
+    // default, so this scenario opts out to reproduce the unconfirmed state.
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "full_back",
+    });
+    await repo.updateBrief(projectId, {
+      productionSizeConfirmedAt: null,
+      productionSizeConfirmedWidthIn: null,
+      productionSizeConfirmedMaxHeightIn: null,
+    });
+
+    await assert.rejects(
+      () => finalArtwork.requestFinalArtwork(projectId, artworkId),
+      /Confirm the print size before preparation/,
+    );
+
+    const { processedJobId } = await worker.processNextJob();
+    assert.equal(processedJobId, null, "no job exists to be claimed");
+    const plate = (await repo.listAssets(projectId)).find(
+      (asset) => asset.productionRole === "production_png",
+    );
+    assert.equal(plate, undefined);
+  });
+
+  it("M: a create_new job queued for one confirmed size is superseded when a different one is confirmed", async () => {
+    const repo = await freshRepo();
+    const { assets, finalArtwork, worker } = buildPipeline(repo);
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets, {
+      printPlacement: "full_front",
+    });
+
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.equal(job.productionWidthIn, 10.5, "bound to the confirmed size at enqueue");
+
+    // The operator confirms a bigger print while the job sits queued.
+    await confirmProductionSizeForTests(repo, projectId, { widthIn: 12 });
+
+    await worker.processNextJob();
+
+    // Goal 12: the old job must not dispatch. It is superseded before any
+    // provider — local or paid — is contacted, and produces nothing.
+    const settled = await repo.getFinalArtworkJob(job.id);
+    assert.equal(settled?.status, "cancelled");
+    assert.match(settled?.lastError ?? "", /No provider work was performed/);
+    assert.equal(
+      (await repo.listAssets(projectId)).some(
+        (asset) => asset.finalArtworkJobId === job.id,
+      ),
+      false,
+    );
+
+    // And the reverse direction is stale too: a job for 12in does not become
+    // current again just because the number moved back down.
+    const bigger = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    assert.notEqual(bigger.job.id, job.id, "a different size is a different job");
+    assert.equal(bigger.job.productionWidthIn, 12);
+
+    await confirmProductionSizeForTests(repo, projectId, { widthIn: 10.5 });
+    await worker.processNextJob();
+    assert.equal(
+      (await repo.getFinalArtworkJob(bigger.job.id))?.status,
+      "cancelled",
+    );
+  });
+
   it("18/20: a chosen 12in width produces a 3600px-wide plate at 300 DPI", async () => {
     const repo = await freshRepo();
     const { assets, finalArtwork, worker } = buildPipeline(repo);
@@ -651,7 +736,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "full_front",
     });
 
-    await repo.updateBrief(projectId, { intendedPrintWidthIn: 12 });
+    // Print'em All Phase 1 (Goal 11): a deliberate 12in oversize is CONFIRMED
+    // and honored — never quietly pulled back to the 10.5in standard adult
+    // recommendation. The recommendation and the technical limit (4-14in on a
+    // full front) are separate things, and only the second one bounds this.
+    await confirmProductionSizeForTests(repo, projectId, { widthIn: 12 });
 
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
@@ -1876,6 +1965,11 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     // (all about what the worker does once finalization is authorized)
     // continue to exercise `requestFinalArtwork` the same way as before.
     await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    // Print'em All Phase 1: production work now requires an explicit human
+    // confirmation of the physical print size. These scenarios are about what
+    // happens once finalization is authorized, so they perform that
+    // confirmation here — the same act a customer performs on the size card.
+    await confirmProductionSizeForTests(repo, projectId);
 
     return { projectId, artworkId: artwork!.id };
   }

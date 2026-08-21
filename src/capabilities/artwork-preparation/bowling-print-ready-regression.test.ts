@@ -32,6 +32,7 @@ import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 import { bowlingStyleArtwork, toPngBytes } from "./artwork-fixtures";
 import { createArtworkPreparationCapability } from "./artwork-preparation-capability";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * THE PHASE 2 ACCEPTANCE REGRESSION — the live bowling case, end to end, with
@@ -222,8 +223,24 @@ describe("Bowling acceptance regression — approved prepared artwork → print-
     const preparedHash = createHash("sha256").update(preparedBytes).digest("hex");
 
     // --- Phase 2 -----------------------------------------------------------
+    // Print'em All Phase 1 (Goal 6): approving the PREPARED ARTWORK is not
+    // approving the PRINT SIZE. Production is unavailable until a human
+    // confirms the physical size — the exact gate whose absence let a live
+    // Topaz credit be spent against a width nobody had chosen.
+    await assert.rejects(
+      () => finalArtwork.requestPreparedUploadFinalArtwork(projectId),
+      /Confirm the print size before preparation/,
+      "no production work is enqueued before the size is confirmed",
+    );
+
+    await confirmProductionSizeForTests(repo, projectId);
+
     const request = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-    assert.equal(request.productionWidthIn, 10.5, "the Full Back placement default");
+    assert.equal(
+      request.productionWidthIn,
+      10.5,
+      "the confirmed standard adult Full Back recommendation",
+    );
     assert.equal(request.job.sourceKind, "prepared_upload");
     assert.equal(request.job.artworkPreparationId, preparationRow.id);
     assert.equal(

@@ -156,6 +156,17 @@ function snapshotAsBrief(version: DesignBriefVersion): TShirtDesignBrief {
     // depend on either: which artifact a customer asked us to produce cannot
     // change what the artwork looks like.
     requestedProductionOutput: null,
+    // Print'em All Phase 1: `null` for the same reason again. Garment size
+    // class and production-size confirmation are production specifications,
+    // not creative content, so the approved creative snapshot does not carry
+    // them and generation must not see them. Reconstructing a brief here that
+    // claimed a confirmation would be the worst possible place to fabricate
+    // one — this object exists purely to describe what the artwork should
+    // look like, and it has no business authorizing spend.
+    garmentSizeClass: null,
+    productionSizeConfirmedAt: null,
+    productionSizeConfirmedWidthIn: null,
+    productionSizeConfirmedMaxHeightIn: null,
     preferredColors: content.preferredColors,
     designStyle: content.designStyle,
     additionalInstructions: content.additionalInstructions,

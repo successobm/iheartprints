@@ -39,6 +39,7 @@ import type {
   FinalArtworkJob,
   FinalDirectionApproval,
   StoredRequestedProductionOutput,
+  TShirtDesignBrief,
 } from "@/lib/domain/types";
 import {
   createAcquisitionCapability,
@@ -46,6 +47,11 @@ import {
 } from "@/capabilities/acquisition";
 import { diffBriefSections } from "@/capabilities/shared/brief-diff";
 import { isConceptRelevantChange } from "@/capabilities/shared/concept-relevance";
+import {
+  PRODUCTION_SIZE_CONFIRMATION_REQUIRED_MESSAGE,
+  resolveProductionSizeConfirmation,
+  type ConfirmedProductionSize,
+} from "@/capabilities/shared/confirmed-production-size";
 import { resolveProductionWidth } from "@/capabilities/shared/print-placement-dimensions";
 
 export interface RequestFinalArtworkResult {
@@ -329,11 +335,18 @@ export function createFinalArtworkCapability(
         snapshot.brief.requestedProductionOutput,
       );
 
+      // Print'em All Phase 1 (Goal 6) — THE PRODUCTION SIZE FENCE.
+      // Read from the same persisted authority the upload path reads, for the
+      // same reason: a recommendation is not spend authority, a default is not
+      // spend authority, and only an explicit human confirmation is.
+      const confirmedSize = requireConfirmedProductionSize(snapshot.brief);
+
       const job = await createJobToleratingRace(
         repo,
         projectId,
         approval,
         requestedProductionOutput,
+        confirmedSize.widthIn,
       );
 
       // Sprint 2M Phase 2G (Goal 8): only claimable work justifies
@@ -409,19 +422,19 @@ export function createFinalArtworkCapability(
         throw new Error("Your prepared artwork could not be found for this project");
       }
 
-      // Production size is read from the project's own persisted intent, never
-      // from the request — a forged or stale finalize call cannot smuggle a
-      // different physical size in (Goal 18).
-      const resolvedWidth = resolveProductionWidth(
-        snapshot.brief.printPlacement,
-        snapshot.brief.intendedPrintWidthIn,
-      );
-      if (!resolvedWidth) {
-        throw new Error(
-          "I need to know where this prints before I can prepare your print-ready artwork",
-        );
-      }
-      const productionWidthIn = resolvedWidth.widthIn;
+      // Production size is read from the project's own persisted authority,
+      // never from the request — a forged or stale finalize call cannot
+      // smuggle a different physical size in (Goal 18).
+      //
+      // Print'em All Phase 1 (Goal 6): that authority is now the CONFIRMED
+      // size, not `resolveProductionWidth`'s placement default. This is the exact
+      // line the live Topaz credit was spent through: the old call read
+      // `intendedPrintWidthIn = null`, fell back to the 10.5in placement
+      // default, and enqueued a paid job for a physical size no human had
+      // ever chosen or seen.
+      const productionWidthIn = requireConfirmedProductionSize(
+        snapshot.brief,
+      ).widthIn;
 
       // Sprint A2 Correction 2 (Goal 3 / Goal 11): server-side current
       // authority, never anything the caller carried — see the create_new
@@ -586,10 +599,35 @@ async function resolveCurrentMatchingProductionJob(
   projectId: string,
   currentIntent: StoredRequestedProductionOutput,
 ): Promise<FinalArtworkJob | null> {
+  const snapshot = await repo.getProject(projectId);
+  if (!snapshot) return null;
+
+  // Print'em All Phase 1: the width a DELIVERY is matched against.
+  //
+  // Deliberately NOT `requireConfirmedProductionSize`. This function answers
+  // "which finished file is the current one?", never "may we spend money?",
+  // and the two need opposite failure modes. Refusing to resolve a delivery
+  // for want of a confirmation would take an already-produced, already-paid-
+  // for plate away from every project that predates confirmation — exactly
+  // the retroactive invalidation of production files Goal 21 forbids.
+  //
+  // So: the confirmed size when there is one, the previously-resolved width
+  // otherwise, which is byte-for-byte the behavior every historical project
+  // already had.
+  const confirmation = resolveProductionSizeConfirmation(snapshot.brief);
+  const currentWidthIn = confirmation.confirmed
+    ? confirmation.size.widthIn
+    : (resolveProductionWidth(
+        snapshot.brief.printPlacement,
+        snapshot.brief.intendedPrintWidthIn,
+      )?.widthIn ?? null);
+  if (currentWidthIn === null) return null;
+
   const activeApproval = await repo.getActiveFinalDirectionApproval(projectId);
   if (activeApproval) {
-    return findJobForIntent(
+    return findDeliverableJob(
       await repo.listFinalArtworkJobsForApproval(projectId, activeApproval.id),
+      currentWidthIn,
       currentIntent,
     );
   }
@@ -597,21 +635,50 @@ async function resolveCurrentMatchingProductionJob(
   const preparation = await repo.getArtworkPreparation(projectId);
   if (!preparation || preparation.status !== "approved") return null;
 
-  const snapshot = await repo.getProject(projectId);
-  if (!snapshot) return null;
-
-  // The width match is as load-bearing as the intent match: a plate produced
-  // at 10.5in is the wrong deliverable for someone who has since chosen 12in.
-  const resolvedWidth = resolveProductionWidth(
-    snapshot.brief.printPlacement,
-    snapshot.brief.intendedPrintWidthIn,
-  );
-  if (!resolvedWidth) return null;
-
-  return findJobForWidth(
+  return findDeliverableJob(
     await repo.listFinalArtworkJobsForPreparation(projectId, preparation.id),
-    resolvedWidth.widthIn,
+    currentWidthIn,
     currentIntent,
+  );
+}
+
+/**
+ * Print'em All Phase 1: which job's output may be presented as this project's
+ * current deliverable.
+ *
+ * A job bound to the current width wins outright — the width match is as
+ * load-bearing as the intent match, because a plate produced at 10.5in is the
+ * wrong deliverable for someone who has since confirmed 12in.
+ *
+ * A job with NO bound width is a legacy create_new job, enqueued before
+ * production width joined job identity. Its plate is real, was validated, and
+ * is very possibly the only file the customer has; `null` there means "we did
+ * not record what size this was made for", which is not the same as "it is
+ * the wrong size". It stays deliverable, and is superseded the moment a job
+ * bound to a real width exists for the same intent — which is why the exact
+ * match is tried first rather than merged into one predicate.
+ */
+function findDeliverableJob(
+  jobs: FinalArtworkJob[],
+  currentWidthIn: number,
+  requestedProductionOutput: StoredRequestedProductionOutput,
+): FinalArtworkJob | null {
+  const boundToCurrentWidth = findJobForWidth(
+    jobs,
+    currentWidthIn,
+    requestedProductionOutput,
+  );
+  if (boundToCurrentWidth) return boundToCurrentWidth;
+
+  return (
+    jobs.find(
+      (job) =>
+        job.productionWidthIn === null &&
+        productionIntentMatches(
+          job.requestedProductionOutput,
+          requestedProductionOutput,
+        ),
+    ) ?? null
   );
 }
 
@@ -647,6 +714,8 @@ function findJobForWidth(
   productionWidthIn: number,
   requestedProductionOutput: StoredRequestedProductionOutput,
 ): FinalArtworkJob | null {
+  // Print'em All Phase 1: serves BOTH workflows now. A create_new job is
+  // bound to its confirmed width exactly as a prepared_upload job always was.
   return (
     jobs.find(
       (job) =>
@@ -657,23 +726,6 @@ function findJobForWidth(
         // specifications, and both distinguish a deliverable. A 12in PNG is
         // not an 11in PNG, and neither of them is a set of separations.
         productionIntentMatches(job.requestedProductionOutput, requestedProductionOutput),
-    ) ?? null
-  );
-}
-
-/**
- * Sprint A2 Correction 2: the create_new equivalent of `findJobForWidth` —
- * which of an approval's jobs, if any, was created to satisfy the intent
- * being requested now. `null` means "no job here answers this request", and
- * the caller creates one.
- */
-function findJobForIntent(
-  jobs: FinalArtworkJob[],
-  requestedProductionOutput: StoredRequestedProductionOutput,
-): FinalArtworkJob | null {
-  return (
-    jobs.find((job) =>
-      productionIntentMatches(job.requestedProductionOutput, requestedProductionOutput),
     ) ?? null
   );
 }
@@ -804,14 +856,20 @@ async function createJobToleratingRace(
   projectId: string,
   approval: FinalDirectionApproval,
   requestedProductionOutput: StoredRequestedProductionOutput,
+  productionWidthIn: number,
 ): Promise<FinalArtworkJob> {
   // Sprint A2 Correction 2 (Goal 4): reuse is now keyed on the bound intent
   // as well as the approval. A job created to produce a PNG does not satisfy
   // a request for separations, and vice versa — previously the completed job
   // was returned for either, which is what let a retraction to PNG be
   // answered with "already done" by an unsupported job that produced nothing.
-  const existing = findJobForIntent(
+  // Print'em All Phase 1 (Goal 13): reuse is keyed on the confirmed WIDTH as
+  // well as the bound intent. A job created for a 10.5in plate does not
+  // satisfy a request for a 12in one — returning it would hand back a
+  // finished (and possibly already paid for) file whose stated size is wrong.
+  const existing = findJobForWidth(
     await repo.listFinalArtworkJobsForApproval(projectId, approval.id),
+    productionWidthIn,
     requestedProductionOutput,
   );
   if (existing) {
@@ -841,15 +899,51 @@ async function createJobToleratingRace(
       finalDirectionApprovalId: approval.id,
       artworkVersionId: approval.artworkVersionId,
       requestedProductionOutput,
+      productionWidthIn,
     });
   } catch (error) {
     if (error instanceof UniqueConstraintViolationError) {
-      const raced = findJobForIntent(
+      const raced = findJobForWidth(
         await repo.listFinalArtworkJobsForApproval(projectId, approval.id),
+        productionWidthIn,
         requestedProductionOutput,
       );
       if (raced) return raced;
     }
     throw error;
   }
+}
+
+/**
+ * Print'em All Phase 1 (Goal 6) — the ONE place either workflow turns a
+ * project into permission to enqueue production work.
+ *
+ * Throws rather than returning `null`, deliberately. Both call sites sit
+ * immediately before a job is created, and a job is the thing that later
+ * spends a Topaz credit; a nullable return invites a
+ * `?? placementDefaultWidth` somewhere downstream, which is exactly how the
+ * live credit was spent in the first place.
+ *
+ * The message is the plain operator/customer-facing one, because this is not
+ * an error condition: nothing went wrong, a decision simply has not been made
+ * yet, and the remedy is one click on a surface they are already looking at.
+ */
+function requireConfirmedProductionSize(
+  brief: Pick<
+    TShirtDesignBrief,
+    | "printPlacement"
+    | "productionSizeConfirmedAt"
+    | "productionSizeConfirmedWidthIn"
+    | "productionSizeConfirmedMaxHeightIn"
+  >,
+): ConfirmedProductionSize {
+  const confirmation = resolveProductionSizeConfirmation(brief);
+  if (!confirmation.confirmed) {
+    throw new Error(
+      confirmation.reason === "placement_unknown"
+        ? "I need to know where this prints before I can prepare your print-ready artwork"
+        : PRODUCTION_SIZE_CONFIRMATION_REQUIRED_MESSAGE,
+    );
+  }
+  return confirmation.size;
 }

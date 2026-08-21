@@ -6,6 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { PNG } from "pngjs";
 
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
 /**
  * Customer download boundary for print-ready production artwork.
@@ -108,6 +109,11 @@ describe("GET /api/projects/[projectId]/production-artwork/download", () => {
     ]);
     await repo.selectArtworkVersion(projectId, artwork!.id);
     await repo.updateProject(projectId, { finalDirectionConfirmed: true });
+    // Print'em All Phase 1: production work now requires an explicit human
+    // confirmation of the physical print size. These scenarios are about what
+    // happens once finalization is authorized, so they perform that
+    // confirmation here — the same act a customer performs on the size card.
+    await confirmProductionSizeForTests(repo, projectId);
 
     return { projectId, artworkId: artwork!.id, graph, repo };
   }

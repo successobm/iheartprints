@@ -9,6 +9,7 @@ import {
   readStoredPaymentProvider,
   readStoredPaymentTransactionStatus,
   readStoredProductionProfile,
+  readGarmentSizeClass,
   readStoredProductionUnlockStatus,
   readStoredRequestedProductionOutput,
 } from "@/lib/domain/types";
@@ -197,6 +198,11 @@ type DbBrief = {
   shirt_color: string | null;
   print_placement: TShirtDesignBrief["printPlacement"];
   intended_print_width_in: number | null;
+  /** Print'em All Phase 1. Untyped `string | null` at the row boundary — narrowed by `readGarmentSizeClass`, which reads anything unrecognized as "never stated". */
+  garment_size_class: string | null;
+  production_size_confirmed_at: string | null;
+  production_size_confirmed_width_in: number | null;
+  production_size_confirmed_max_height_in: number | null;
   /** Sprint A2. Untyped `string | null` at the row boundary — narrowed by `readStoredRequestedProductionOutput`, which fails closed on anything unrecognized. */
   requested_production_output: string | null;
   preferred_colors: string[] | null;
@@ -423,6 +429,17 @@ function mapBrief(row: DbBrief): TShirtDesignBrief {
     shirtColor: row.shirt_color,
     printPlacement: row.print_placement,
     intendedPrintWidthIn: row.intended_print_width_in,
+    // Print'em All Phase 1: an unrecognized class reads as "never stated",
+    // which downgrades to "assume standard adult for the SUGGESTION and ask
+    // a human to confirm". Unlike `requestedProductionOutput` there is no
+    // fail-closed sentinel to reach for, and none is needed: a garment class
+    // authorizes nothing, and the confirmation gate below is what actually
+    // stands between this row and a paid provider call.
+    garmentSizeClass: readGarmentSizeClass(row.garment_size_class),
+    productionSizeConfirmedAt: row.production_size_confirmed_at,
+    productionSizeConfirmedWidthIn: row.production_size_confirmed_width_in,
+    productionSizeConfirmedMaxHeightIn:
+      row.production_size_confirmed_max_height_in,
     // Sprint A2 Correction 2 (Goal 12): FAIL CLOSED. An unrecognized value
     // becomes the sentinel, never `null` — an older build that cannot read
     // what the customer asked for must refuse to produce, not assume PNG.
@@ -965,6 +982,22 @@ export class SupabaseProjectRepository implements ProjectRepository {
       payload.print_placement = patch.printPlacement;
     if (patch.intendedPrintWidthIn !== undefined)
       payload.intended_print_width_in = patch.intendedPrintWidthIn;
+    if (patch.garmentSizeClass !== undefined)
+      payload.garment_size_class = patch.garmentSizeClass;
+    // Print'em All Phase 1: the three confirmation columns are always written
+    // TOGETHER by `DesignBriefCapability.confirmProductionSize` (and cleared
+    // together when a confirmation is withdrawn), so a half-written
+    // confirmation — a timestamp with no width — never reaches the database.
+    // `resolveProductionSizeConfirmation` fails closed on one anyway; this is
+    // the belt to that suspenders.
+    if (patch.productionSizeConfirmedAt !== undefined)
+      payload.production_size_confirmed_at = patch.productionSizeConfirmedAt;
+    if (patch.productionSizeConfirmedWidthIn !== undefined)
+      payload.production_size_confirmed_width_in =
+        patch.productionSizeConfirmedWidthIn;
+    if (patch.productionSizeConfirmedMaxHeightIn !== undefined)
+      payload.production_size_confirmed_max_height_in =
+        patch.productionSizeConfirmedMaxHeightIn;
     if (patch.requestedProductionOutput !== undefined)
       payload.requested_production_output = patch.requestedProductionOutput;
     if (patch.preferredColors !== undefined)
@@ -2243,6 +2276,10 @@ export class SupabaseProjectRepository implements ProjectRepository {
               // normalized, so the column's NULL is reserved for genuinely
               // legacy rows and never means "this build forgot".
               requested_production_output: input.requestedProductionOutput,
+              // Print'em All Phase 1: written for create_new too, for exactly
+              // the same reason — NULL here now means "enqueued before width
+              // binding existed", never "this build forgot".
+              production_width_in: input.productionWidthIn,
               status: "queued",
             }
           : {

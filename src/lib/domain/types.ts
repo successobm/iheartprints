@@ -107,6 +107,68 @@ export type PrintPlacement =
   | "left_chest"
   | "sleeve";
 
+/**
+ * Print'em All Phase 1: the GARMENT SIZING CONTEXT a production box is
+ * recommended for.
+ *
+ * This is apparel-product sizing terminology and nothing else. It describes
+ * the GARMENT — the physical thing being decorated — never a person. It is
+ * not a gender inference, not a body measurement, and not a customer
+ * attribute; a single order routinely spans several of these classes.
+ *
+ * Deliberately five coarse classes and NOT a SKU catalogue, an apparel
+ * inventory, or a manufacturer sizing database. The only question this type
+ * exists to answer is "roughly how large a print box should we RECOMMEND?",
+ * and five classes answer it. Anything finer would be a product expansion
+ * the Constitution does not authorize.
+ *
+ * `"custom"` is not a garment at all — it is the explicit escape hatch for
+ * an operator sizing to something this vocabulary does not name, and it
+ * deliberately carries NO recommendation. `null` on the brief means the
+ * class was never stated.
+ */
+export type GarmentSizeClass =
+  | "youth"
+  | "womens_small"
+  | "adult_standard"
+  | "adult_plus"
+  | "custom";
+
+export const GARMENT_SIZE_CLASSES: readonly GarmentSizeClass[] = [
+  "youth",
+  "womens_small",
+  "adult_standard",
+  "adult_plus",
+  "custom",
+];
+
+/**
+ * Narrows a raw persisted column to the garment vocabulary.
+ *
+ * Unlike `readStoredRequestedProductionOutput`, an unrecognized value reads
+ * back as `null` (= never stated) rather than a fail-closed sentinel, and
+ * that asymmetry is deliberate. A requested production OUTPUT decides what we
+ * are allowed to produce, so an unreadable one must refuse. A garment size
+ * class only seeds a SUGGESTION and authorizes nothing; the thing standing
+ * between this row and a paid provider call is
+ * `productionSizeConfirmedAt`, which an unreadable garment class cannot
+ * affect. Reading it as "never stated" therefore loses no safety and keeps an
+ * older build usable against a newer row.
+ *
+ * Lives in the domain, not in `capabilities/shared`, so `lib/db` can narrow
+ * its own rows without depending on a capability (ARCHITECTURE dependency
+ * direction). `shared/garment-production-sizing.ts` re-exports it so the
+ * capability layer still has one import surface for sizing.
+ */
+export function readGarmentSizeClass(
+  value: string | null | undefined,
+): GarmentSizeClass | null {
+  if (!value) return null;
+  return (GARMENT_SIZE_CLASSES as readonly string[]).includes(value)
+    ? (value as GarmentSizeClass)
+    : null;
+}
+
 export interface PrintProject {
   id: string;
   name: string;
@@ -948,7 +1010,65 @@ export interface TShirtDesignBrief {
    * since that default was previously indistinguishable from a real answer.
    */
   printPlacement: PrintPlacement | null;
+  /**
+   * The WORKING production width intent, in inches. `null` means the
+   * customer/operator has never expressed one.
+   *
+   * Print'em All Phase 1: this field is NOT production spend authority and
+   * never was — a numeric value here can equally be a real choice or the
+   * residue of one, and it cannot distinguish the two. The authority is
+   * `productionSizeConfirmedAt` + `productionSizeConfirmedWidthIn` below.
+   * See `shared/confirmed-production-size.ts`.
+   */
   intendedPrintWidthIn: number | null;
+  /**
+   * Print'em All Phase 1: which garment sizing context the RECOMMENDED
+   * production box should be derived for. `null` = never stated, which is
+   * treated as an ASSUMED standard adult garment for recommendation purposes
+   * only — and an assumption is never authority, which is exactly why
+   * confirmation is a separate persisted fact.
+   *
+   * Lives on the MUTABLE working brief alongside `intendedPrintWidthIn` and
+   * `requestedProductionOutput`, for the same reason: it is a production
+   * specification, not creative content. Choosing a youth garment must not
+   * restyle artwork, supersede an approved brief version, or mark concepts
+   * stale, and it must be retractable.
+   */
+  garmentSizeClass: GarmentSizeClass | null;
+  /**
+   * Print'em All Phase 1 — THE PRODUCTION SPEND AUTHORITY.
+   *
+   * When the physical production size was EXPLICITLY confirmed by a human,
+   * as an ISO timestamp. `null` means it never was, and no paid provider
+   * work may be authorized for this project's current size.
+   *
+   * A persisted FACT rather than an inference. The live Print'em All job
+   * that spent a Topaz credit with `intended_print_width_in = null` is the
+   * reason: "a width exists" and "a human confirmed this width" are
+   * different statements, and only the second one is spend authority.
+   *
+   * Never backfilled. A historical project whose width came from a default
+   * is honestly unconfirmed, and must be confirmed before NEW paid work.
+   */
+  productionSizeConfirmedAt: string | null;
+  /**
+   * The exact physical print WIDTH, in inches, that
+   * `productionSizeConfirmedAt` authorizes. Self-describing on purpose: the
+   * confirmation names the size it approved, so no other writer of
+   * `intendedPrintWidthIn` can ever inherit somebody else's confirmation.
+   */
+  productionSizeConfirmedWidthIn: number | null;
+  /**
+   * The confirmed CONTAINING BOX's height bound, in inches, or `null` when
+   * the operator confirmed a width alone and height simply follows the
+   * artwork's aspect ratio (bounded only by the placement's technical
+   * limit).
+   *
+   * Set when a recommended BOX is confirmed — a 10.5x10.5 recommendation
+   * contains a 2:3 portrait to 7.0x10.5, which a width alone cannot express.
+   * Never an independent Y scale: both axes always move together.
+   */
+  productionSizeConfirmedMaxHeightIn: number | null;
   /**
    * Sprint A2 (corrected): the structured, authoritative answer to "what
    * production artifact are we being asked to produce?". `null` =

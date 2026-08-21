@@ -258,6 +258,17 @@ export type CreateFinalArtworkJobInput =
       sourceKind: "generated_concept";
       finalDirectionApprovalId: string;
       artworkVersionId: string;
+      /**
+       * Print'em All Phase 1: the CONFIRMED physical print width, in inches,
+       * this job is enqueued for — now part of create_new job identity too,
+       * exactly as it already was for prepared_upload.
+       *
+       * Previously absent, so a create_new job read the live working brief at
+       * run time and silently re-aimed itself when the size changed
+       * underneath it. Binding it here is what makes a queued job for a
+       * superseded size detectably stale.
+       */
+      productionWidthIn: number;
     } & FinalArtworkJobProductionIntent)
   | ({
       sourceKind: "prepared_upload";
