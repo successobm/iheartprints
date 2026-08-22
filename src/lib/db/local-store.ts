@@ -7,6 +7,8 @@ import {
   projectNameFromBrief,
 } from "@/lib/domain/conversation";
 import {
+  DEFAULT_PRODUCTION_TREATMENT,
+  STANDARD_RASTER_TREATMENT_KEY,
   emptyInterviewState,
   isOutstandingPaymentTransaction,
   productionIntentMatches,
@@ -447,6 +449,13 @@ export class LocalProjectRepository implements ProjectRepository {
       productionSizeConfirmedAt: null,
       productionSizeConfirmedWidthIn: null,
       productionSizeConfirmedMaxHeightIn: null,
+      // Print'em All Phase 2: no treatment chosen, which IS standard raster —
+      // the representation whose validation nothing was relaxed for. Never a
+      // halftone by default, and never a halftone because something else
+      // failed.
+      productionTreatment: DEFAULT_PRODUCTION_TREATMENT,
+      halftoneSettings: null,
+      productionTreatmentSelectedAt: null,
       // Sprint A2: unspecified — the customer has not asked for a particular
       // production artifact, which is the supported Production PNG path.
       requestedProductionOutput: null,
@@ -1798,7 +1807,15 @@ export class LocalProjectRepository implements ProjectRepository {
           // each other exactly as before.
           Math.abs(
             (item.productionWidthIn ?? -1) - (input.productionWidthIn ?? -1),
-          ) < 1e-6,
+          ) < 1e-6 &&
+          // Print'em All Phase 2: production treatment joins job identity,
+          // mirroring the migration's
+          // `coalesce(production_treatment_key, 'standard_raster')`. Legacy
+          // rows collapse to the same bucket a newly written standard-raster
+          // job lands in, which is correct: they are the same production
+          // intent.
+          (item.productionTreatmentKey ?? STANDARD_RASTER_TREATMENT_KEY) ===
+            input.productionTreatmentKey,
       );
       if (duplicate) {
         throw new UniqueConstraintViolationError(
@@ -1820,7 +1837,11 @@ export class LocalProjectRepository implements ProjectRepository {
           productionIntentMatches(
             item.requestedProductionOutput,
             input.requestedProductionOutput,
-          ),
+          ) &&
+          // Print'em All Phase 2: see the create_new branch above — same key,
+          // same coalesced legacy bucket.
+          (item.productionTreatmentKey ?? STANDARD_RASTER_TREATMENT_KEY) ===
+            input.productionTreatmentKey,
       );
       if (duplicate) {
         throw new UniqueConstraintViolationError(
@@ -1844,6 +1865,9 @@ export class LocalProjectRepository implements ProjectRepository {
       // job is bound to the confirmed size it was enqueued for, exactly as a
       // prepared_upload job already was.
       productionWidthIn: input.productionWidthIn,
+      // Print'em All Phase 2: frozen at enqueue and never re-read, exactly
+      // like the width above.
+      productionTreatmentKey: input.productionTreatmentKey,
       requestedProductionOutput: input.requestedProductionOutput,
       artworkVersionId: input.artworkVersionId,
       status: "queued",

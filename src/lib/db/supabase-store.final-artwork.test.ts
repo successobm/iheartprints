@@ -422,6 +422,7 @@ describe("SupabaseProjectRepository — final direction approval + final artwork
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
       requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
       productionWidthIn: 10.5,
     });
     assert.equal(job.status, "queued");
@@ -433,6 +434,7 @@ describe("SupabaseProjectRepository — final direction approval + final artwork
           finalDirectionApprovalId: approval.id,
           artworkVersionId: "artwork-1",
           requestedProductionOutput: "production_png",
+          productionTreatmentKey: "standard_raster",
           productionWidthIn: 10.5,
         }),
       UniqueConstraintViolationError,
@@ -454,6 +456,7 @@ describe("SupabaseProjectRepository — final artwork worker (Sprint 2M Phase 2C
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
       requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
       productionWidthIn: 10.5,
     });
   }

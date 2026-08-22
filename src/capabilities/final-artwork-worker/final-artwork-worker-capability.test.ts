@@ -506,6 +506,7 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       finalDirectionApprovalId: "00000000-0000-0000-0000-000000000000",
       artworkVersionId: artworkId,
       requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
       productionWidthIn: 10.5,
     });
 
@@ -673,6 +674,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       productionSizeConfirmedAt: null,
       productionSizeConfirmedWidthIn: null,
       productionSizeConfirmedMaxHeightIn: null,
+      productionTreatment: "standard_raster",
+      halftoneSettings: null,
+      productionTreatmentSelectedAt: null,
     });
 
     await assert.rejects(

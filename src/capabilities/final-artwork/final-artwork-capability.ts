@@ -53,6 +53,10 @@ import {
   type ConfirmedProductionSize,
 } from "@/capabilities/shared/confirmed-production-size";
 import { resolveProductionWidth } from "@/capabilities/shared/print-placement-dimensions";
+import {
+  STANDARD_RASTER_TREATMENT_KEY,
+  currentProductionTreatmentKey,
+} from "@/capabilities/shared/production-treatment";
 
 export interface RequestFinalArtworkResult {
   approval: FinalDirectionApproval;
@@ -439,6 +443,16 @@ export function createFinalArtworkCapability(
       // Sprint A2 Correction 2 (Goal 3 / Goal 11): server-side current
       // authority, never anything the caller carried — see the create_new
       // path's identical reasoning.
+      // Print'em All Phase 2: the treatment this job is FOR, resolved from
+      // the project's own durable authority and frozen onto the job — never
+      // read from the request, and never re-read while the job runs. An
+      // operator who moves a screen control after enqueueing gets a new job
+      // for the new settings; the queued one is superseded rather than
+      // silently re-aimed at a plate nobody authorized.
+      const productionTreatmentKey = currentProductionTreatmentKey(
+        snapshot.brief,
+      );
+
       const { job, alreadyRequested } = await resolvePreparedUploadJob(
         repo,
         projectId,
@@ -446,6 +460,7 @@ export function createFinalArtworkCapability(
         artwork.id,
         productionWidthIn,
         normalizeProductionIntent(snapshot.brief.requestedProductionOutput),
+        productionTreatmentKey,
       );
 
       // Same rule as the create_new path (Sprint 2M Phase 2G Goal 8): only
@@ -623,12 +638,23 @@ async function resolveCurrentMatchingProductionJob(
       )?.widthIn ?? null);
   if (currentWidthIn === null) return null;
 
+  // Print'em All Phase 2: the treatment a DELIVERY is matched against.
+  //
+  // Deliberately the resolved CURRENT treatment, with the same fail-toward-
+  // standard-raster reading `resolveProductionTreatment` applies everywhere
+  // else. A project whose halftone settings became unreadable is a project
+  // whose current representation is standard raster, and the plate it should
+  // be handed is the standard-raster one — not nothing, and not a screened
+  // file whose settings can no longer be explained.
+  const currentTreatmentKey = currentProductionTreatmentKey(snapshot.brief);
+
   const activeApproval = await repo.getActiveFinalDirectionApproval(projectId);
   if (activeApproval) {
     return findDeliverableJob(
       await repo.listFinalArtworkJobsForApproval(projectId, activeApproval.id),
       currentWidthIn,
       currentIntent,
+      currentTreatmentKey,
     );
   }
 
@@ -639,6 +665,7 @@ async function resolveCurrentMatchingProductionJob(
     await repo.listFinalArtworkJobsForPreparation(projectId, preparation.id),
     currentWidthIn,
     currentIntent,
+    currentTreatmentKey,
   );
 }
 
@@ -657,16 +684,26 @@ async function resolveCurrentMatchingProductionJob(
  * the wrong size". It stays deliverable, and is superseded the moment a job
  * bound to a real width exists for the same intent — which is why the exact
  * match is tried first rather than merged into one predicate.
+ *
+ * Print'em All Phase 2 extends the exact match to the production TREATMENT,
+ * and deliberately does NOT extend the legacy fallback to it. A legacy row's
+ * `null` treatment key genuinely means standard raster (there was no other
+ * option when it was written), so it is already correctly matched by
+ * `findJobForWidth`'s coalesce whenever the project's current treatment is
+ * standard raster — and a project that has since moved to a halftone must not
+ * be handed a continuous-tone plate as its current deliverable.
  */
 function findDeliverableJob(
   jobs: FinalArtworkJob[],
   currentWidthIn: number,
   requestedProductionOutput: StoredRequestedProductionOutput,
+  productionTreatmentKey: string,
 ): FinalArtworkJob | null {
   const boundToCurrentWidth = findJobForWidth(
     jobs,
     currentWidthIn,
     requestedProductionOutput,
+    productionTreatmentKey,
   );
   if (boundToCurrentWidth) return boundToCurrentWidth;
 
@@ -674,6 +711,8 @@ function findDeliverableJob(
     jobs.find(
       (job) =>
         job.productionWidthIn === null &&
+        (job.productionTreatmentKey ?? STANDARD_RASTER_TREATMENT_KEY) ===
+          productionTreatmentKey &&
         productionIntentMatches(
           job.requestedProductionOutput,
           requestedProductionOutput,
@@ -713,6 +752,7 @@ function findJobForWidth(
   jobs: FinalArtworkJob[],
   productionWidthIn: number,
   requestedProductionOutput: StoredRequestedProductionOutput,
+  productionTreatmentKey: string,
 ): FinalArtworkJob | null {
   // Print'em All Phase 1: serves BOTH workflows now. A create_new job is
   // bound to its confirmed width exactly as a prepared_upload job always was.
@@ -725,7 +765,14 @@ function findJobForWidth(
         // Sprint A2 Correction 2: size and requested output are independent
         // specifications, and both distinguish a deliverable. A 12in PNG is
         // not an 11in PNG, and neither of them is a set of separations.
-        productionIntentMatches(job.requestedProductionOutput, requestedProductionOutput),
+        productionIntentMatches(job.requestedProductionOutput, requestedProductionOutput) &&
+        // Print'em All Phase 2: production TREATMENT is a third independent
+        // specification, and it distinguishes a deliverable exactly as the
+        // other two do. A 35 LPI screen is not a 45 LPI screen, and neither of
+        // them is a continuous-tone plate. Legacy rows collapse to the
+        // standard-raster key, matching the migration's coalesce.
+        (job.productionTreatmentKey ?? STANDARD_RASTER_TREATMENT_KEY) ===
+          productionTreatmentKey,
     ) ?? null
   );
 }
@@ -752,6 +799,7 @@ async function resolvePreparedUploadJob(
   artworkVersionId: string,
   productionWidthIn: number,
   requestedProductionOutput: StoredRequestedProductionOutput,
+  productionTreatmentKey: string,
 ): Promise<{ job: FinalArtworkJob; alreadyRequested: boolean }> {
   const existingJobs = await repo.listFinalArtworkJobsForPreparation(
     projectId,
@@ -761,6 +809,7 @@ async function resolvePreparedUploadJob(
     existingJobs,
     productionWidthIn,
     requestedProductionOutput,
+    productionTreatmentKey,
   );
   if (existing) {
     if (existing.status === "failed") {
@@ -791,6 +840,7 @@ async function resolvePreparedUploadJob(
       artworkVersionId,
       productionWidthIn,
       requestedProductionOutput,
+      productionTreatmentKey,
     });
     return { job, alreadyRequested: false };
   } catch (error) {
@@ -802,6 +852,7 @@ async function resolvePreparedUploadJob(
         await repo.listFinalArtworkJobsForPreparation(projectId, artworkPreparationId),
         productionWidthIn,
         requestedProductionOutput,
+        productionTreatmentKey,
       );
       if (raced) return { job: raced, alreadyRequested: true };
     }
@@ -871,6 +922,9 @@ async function createJobToleratingRace(
     await repo.listFinalArtworkJobsForApproval(projectId, approval.id),
     productionWidthIn,
     requestedProductionOutput,
+    // See the insert below: the Create New workflow is standard raster,
+    // always, so reuse is keyed on the same constant it writes.
+    STANDARD_RASTER_TREATMENT_KEY,
   );
   if (existing) {
     if (existing.status === "failed") {
@@ -900,6 +954,19 @@ async function createJobToleratingRace(
       artworkVersionId: approval.artworkVersionId,
       requestedProductionOutput,
       productionWidthIn,
+      // Print'em All Phase 2: the Create New workflow is STANDARD RASTER,
+      // always, and this is not a placeholder for a later wiring.
+      //
+      // The halftone treatment's input contract is an APPROVED, background-
+      // prepared transparent source (Goals 5, 15, 26) — an immutable asset a
+      // human looked at and approved, which the Create New path does not
+      // produce. Writing the project's treatment key here instead would let an
+      // operator select a screen on a generated-concept project and get a job
+      // recorded as halftone that the worker then produces as continuous tone:
+      // a plate whose own record disagrees with what it is. The treatment
+      // endpoint refuses that selection at the source (eligibility's
+      // `no_prepared_source`); this is the same refusal, made structural.
+      productionTreatmentKey: STANDARD_RASTER_TREATMENT_KEY,
     });
   } catch (error) {
     if (error instanceof UniqueConstraintViolationError) {
@@ -907,6 +974,7 @@ async function createJobToleratingRace(
         await repo.listFinalArtworkJobsForApproval(projectId, approval.id),
         productionWidthIn,
         requestedProductionOutput,
+        STANDARD_RASTER_TREATMENT_KEY,
       );
       if (raced) return raced;
     }

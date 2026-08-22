@@ -19,7 +19,10 @@ import type {
   StoredRequestedProductionOutput,
 } from "@/lib/domain/types";
 
+import type { ProductionTreatment } from "@/capabilities/shared/production-treatment";
+
 import type {
+  HalftoneProductionEvidence,
   PrintValidationAssetSummary,
   PrintValidationInput,
   ProductionNormalizationSummary,
@@ -227,6 +230,19 @@ export interface AssembleUploadedPreserveProductionPrintValidationInputParams {
   asset: ProductionAssetSummaryInput;
   normalization: ProductionNormalizationSummary;
   uploadedPreserve: UploadedPreserveEvidence;
+  /**
+   * Print'em All Phase 2: which production representation this plate is.
+   * Omitted means `standard_raster`, so every existing caller and every
+   * plate produced before treatments existed keeps exactly the checks it had.
+   */
+  productionTreatment?: ProductionTreatment;
+  /**
+   * Print'em All Phase 2: the halftone screen's recorded geometry, when one
+   * was applied. Passed straight through UNMODIFIED — this assembler must
+   * never derive, default, or repair it, because its whole value to validation
+   * is that it is the transform's own account of what it did.
+   */
+  halftone?: HalftoneProductionEvidence | null;
 }
 
 /**
@@ -277,5 +293,7 @@ export function assembleUploadedPreserveProductionPrintValidationInput(
       nativeHeightPx: params.asset.nativeHeightPx,
     },
     productionNormalization: params.normalization,
+    productionTreatment: params.productionTreatment,
+    halftone: params.halftone ?? null,
   };
 }

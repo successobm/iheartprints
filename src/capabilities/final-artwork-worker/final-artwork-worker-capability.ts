@@ -52,6 +52,7 @@ import {
   deriveProductionRequirements,
 } from "@/capabilities/print-validation";
 import type {
+  HalftoneProductionEvidence,
   PrintValidationInput,
   PrintValidationReport,
   ProductionNormalizationSummary,
@@ -70,6 +71,13 @@ import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwo
 import { computeAlphaBounds, DEFAULT_ALPHA_THRESHOLD } from "@/capabilities/final-artwork/alpha-trim";
 import { decideEnhancement } from "@/capabilities/final-artwork/enhancement-decision";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
+import { HalftoneDtfProvider } from "@/capabilities/final-artwork/halftone-dtf-provider";
+import type { HalftoneScreenMetadata } from "@/capabilities/final-artwork/halftone-screen";
+import {
+  currentProductionTreatmentKey,
+  resolveProductionTreatment,
+  treatmentKeyMatchesJob,
+} from "@/capabilities/shared/production-treatment";
 import {
   createConceptEvaluationCapability,
   resolveConceptEvaluationProvider,
@@ -120,6 +128,15 @@ interface ProductionProvenanceMeta {
    * credited with geometry nobody measured.
    */
   normalization: ProductionNormalizationSummary | null;
+  /**
+   * Print'em All Phase 2: the halftone screen's own measured geometry, when
+   * one was applied. `null` for every continuous-tone plate — and for a
+   * halftone plate persisted by an older build, which is then honestly
+   * re-validated without screen evidence (and correctly refused by
+   * `halftone_treatment`) rather than being credited with a screen nobody
+   * recorded.
+   */
+  halftone: HalftoneProductionEvidence | null;
 }
 
 /**
@@ -279,6 +296,21 @@ export function createFinalArtworkWorkerCapability(
     // already-completed historical plate resolvable (Goal 21).
     if (job.productionWidthIn === null) return true;
 
+    // Print'em All Phase 2: the production TREATMENT is the third bound
+    // intent, and it changes far more often than the other two — an operator
+    // adjusting LPI or angle while a job is queued is ordinary work, not an
+    // edge case. Without this the queued job would run and produce a plate
+    // under settings nobody currently wants, and (because the plate is
+    // otherwise perfectly valid) announce it as print-ready.
+    if (
+      !treatmentKeyMatchesJob(
+        currentProductionTreatmentKey(snapshot.brief),
+        job.productionTreatmentKey,
+      )
+    ) {
+      return false;
+    }
+
     return confirmedSizeMatchesJobWidth(
       resolveProductionSizeConfirmation(snapshot.brief),
       job.productionWidthIn,
@@ -304,7 +336,7 @@ export function createFinalArtworkWorkerCapability(
     await repo.updateFinalArtworkJob(job.id, {
       status: "cancelled",
       lastError:
-        "Superseded: the project's confirmed production size or requested production output changed after this job was enqueued. No provider work was performed for the superseded intent.",
+        "Superseded: the project's confirmed production size, requested production output, or production treatment changed after this job was enqueued. No provider work was performed for the superseded intent.",
       completedAt: new Date().toISOString(),
     });
   }
@@ -398,7 +430,8 @@ export function createFinalArtworkWorkerCapability(
     const provenance =
       meta.resolutionProvenance === "native" ||
       meta.resolutionProvenance === "interpolated_upscale" ||
-      meta.resolutionProvenance === "reconstructed"
+      meta.resolutionProvenance === "reconstructed" ||
+      meta.resolutionProvenance === "halftone_generated"
         ? (meta.resolutionProvenance as ResolutionProvenance)
         : "unknown";
     return {
@@ -413,6 +446,7 @@ export function createFinalArtworkWorkerCapability(
       providerRequestId:
         typeof meta.providerRequestId === "string" ? meta.providerRequestId : null,
       normalization,
+      halftone: readHalftoneEvidence(meta.halftone),
     };
   }
 
@@ -574,6 +608,12 @@ export function createFinalArtworkWorkerCapability(
           // or retried attempt re-validates the same deliverable against
           // the same evidence instead of re-deriving it.
           normalization: output.normalization as unknown as Record<string, unknown>,
+          // Print'em All Phase 2: the screen travels WITH the plate for the
+          // same reason the normalization geometry does — a recovered or
+          // retried attempt must re-validate the same deliverable against the
+          // same recorded evidence, and a physical print six months from now
+          // must be explainable from the asset alone.
+          halftone: (output.halftone ?? null) as unknown as Record<string, unknown> | null,
           ...params.extraAssetMetadata,
         },
       });
@@ -605,6 +645,7 @@ export function createFinalArtworkWorkerCapability(
         preservesApprovedContent: output.preservesApprovedContent,
         providerRequestId: output.providerRequestId,
         normalization: toNormalizationSummary(output.normalization, sizing),
+        halftone: toHalftoneEvidence(output.halftone ?? null),
       },
       providerLatencyMs,
     };
@@ -1039,19 +1080,49 @@ export function createFinalArtworkWorkerCapability(
     const measured = await measurePreparedSource(job, sourceAsset.id);
     if (!measured) return;
 
+    // --- Print'em All Phase 2 (Goal 25): THE TREATMENT DECISION, and its
+    // position in this function is the economically important part.
+    //
+    // It is made HERE — before `decideEnhancement` chooses a provider and
+    // therefore before any paid dispatch can occur. The artwork this treatment
+    // exists to serve is precisely the artwork the reconstruction provider's
+    // 4x ceiling refuses, so calling Topaz first and screening afterwards
+    // would spend a credit manufacturing continuous-tone detail the screen
+    // then discards. On this path the paid provider is not reached at all.
+    //
+    // The treatment comes from the JOB's frozen key, never the live brief: the
+    // stale-intent fence above already proved the two agree, and reading the
+    // brief again here would let settings that changed mid-flight reach a
+    // plate the job was not authorized for.
+    const treatment = resolveProductionTreatment(snapshot.brief);
+    const halftone = treatment.treatment === "halftone_dtf" ? treatment.halftone : null;
+
+    // Recorded either way, because the two questions are independent and only
+    // one of them is about spend. `decideEnhancement` answers "would this
+    // artwork have needed a paid reconstruction?" — worth knowing, and worth
+    // logging, even on a path that will not buy one.
     const enhancement = decideEnhancement({
       sourceVisibleWidthPx: measured.alphaBBoxWidthPx,
       targetWidthIn: sizing.targetWidthIn,
       targetPpi: sizing.targetPpi,
     });
 
-    // The one place the paid provider is chosen — or not. Artwork that already
-    // carries the target's worth of real pixels never reaches it (Goal 15: one
-    // paid request per idempotency key, and none at all when the pixels are
-    // already there).
-    const activeProvider = enhancement.requiresReconstruction
-      ? provider
-      : localNormalizationProvider;
+    // The one place the paid provider is chosen — or not.
+    //
+    // A halftone job never reaches it, whatever `decideEnhancement` concluded
+    // (Goal 25). Otherwise, artwork that already carries the target's worth of
+    // real pixels never reaches it either (Goal 15: one paid request per
+    // idempotency key, and none at all when the pixels are already there).
+    //
+    // The halftone provider is constructed PER JOB from that job's own
+    // settings rather than injected once, so a plate's screen can never come
+    // from ambient process state — two concurrent jobs with different settings
+    // are two providers, not one shared one being reconfigured.
+    const activeProvider: FinalArtworkProvider = halftone
+      ? new HalftoneDtfProvider(halftone)
+      : enhancement.requiresReconstruction
+        ? provider
+        : localNormalizationProvider;
 
     const uploadedPreserveMeta: UploadedPreserveMeta = {
       preparedArtworkVersionId: artwork.id,
@@ -1060,8 +1131,14 @@ export function createFinalArtworkWorkerCapability(
       sourceBytesSha256: measured.sha256,
       sourceAlphaBBoxWidthPx: measured.alphaBBoxWidthPx,
       sourceAlphaBBoxHeightPx: measured.alphaBBoxHeightPx,
-      enhancement: enhancement.method,
-      enhancementReason: enhancement.reason,
+      // Its own value, never folded into `"skipped"`. A screened plate did
+      // not skip reconstruction because it did not need it — it took a
+      // different representation entirely, and a record that cannot tell those
+      // apart cannot explain why no credit was spent.
+      enhancement: halftone ? "halftone_screened" : enhancement.method,
+      enhancementReason: halftone
+        ? `DTF halftone treatment: dot geometry generated at final production size, so no reconstruction was required. (Continuous-tone assessment, for reference: ${enhancement.reason})`
+        : enhancement.reason,
     };
 
     const produced = await produceProductionAsset({
@@ -1127,6 +1204,13 @@ export function createFinalArtworkWorkerCapability(
         productionAsset,
         uploadedPreserveMeta,
       ),
+      // Print'em All Phase 2: which representation this plate is, and the
+      // screen's own account of itself. Both come from the PERSISTED plate
+      // (via `provenance`), not from the settings this run happened to hold,
+      // so a recovered attempt validates the deliverable that actually exists
+      // rather than the one it was about to make.
+      productionTreatment: treatment.treatment,
+      halftone: provenance.halftone,
     });
 
     await finishValidatedJob({
@@ -1315,7 +1399,11 @@ function readUploadedPreserveEvidence(
       return fallback;
     }
   }
-  if (meta.enhancement !== "skipped" && meta.enhancement !== "reconstructed") {
+  if (
+    meta.enhancement !== "skipped" &&
+    meta.enhancement !== "reconstructed" &&
+    meta.enhancement !== "halftone_screened"
+  ) {
     return fallback;
   }
 
@@ -1404,6 +1492,93 @@ function toNormalizationSummary(
  * plate must match its target width is a production-policy decision, not a
  * property of the file.
  */
+/**
+ * Print'em All Phase 2: the provider's screen metadata, as the provider-
+ * neutral evidence Print Validation consumes.
+ *
+ * A projection rather than a pass-through, mirroring `toNormalizationSummary`.
+ * The engine's metadata carries working figures validation has no business
+ * seeing (cell area, mean requested coverage); the evidence carries exactly
+ * the facts a check recomputes from.
+ */
+function toHalftoneEvidence(
+  metadata: HalftoneScreenMetadata | null,
+): HalftoneProductionEvidence | null {
+  if (!metadata) return null;
+  return {
+    algorithmVersion: metadata.algorithmVersion,
+    lpi: metadata.lpi,
+    angleDeg: metadata.angleDeg,
+    dotShape: metadata.dotShape,
+    midtone: metadata.midtone,
+    chokePx: metadata.chokePx,
+    garmentHex: metadata.garmentHex,
+    targetPpi: metadata.targetPpi,
+    cellPx: metadata.cellPx,
+    achievedLpi: metadata.achievedLpi,
+    minDotRadiusPx: metadata.minDotRadiusPx,
+    screenWidthPx: metadata.screenWidthPx,
+    screenHeightPx: metadata.screenHeightPx,
+    visiblePixelCount: metadata.visiblePixelCount,
+    inkedPixelFraction: metadata.inkedPixelFraction,
+  };
+}
+
+/**
+ * Reads screen evidence back off a persisted plate.
+ *
+ * Returns `null` on anything incomplete rather than filling gaps, exactly
+ * like `readNormalizationSummary`. A plate whose recorded screen is partial
+ * cannot be verified, and `halftone_treatment` refusing it is the correct
+ * outcome — far better than a check passing against numbers this function
+ * invented.
+ */
+function readHalftoneEvidence(value: unknown): HalftoneProductionEvidence | null {
+  if (!value || typeof value !== "object") return null;
+  const meta = value as Record<string, unknown>;
+
+  const numbers = [
+    "lpi",
+    "angleDeg",
+    "midtone",
+    "chokePx",
+    "targetPpi",
+    "cellPx",
+    "achievedLpi",
+    "minDotRadiusPx",
+    "screenWidthPx",
+    "screenHeightPx",
+    "visiblePixelCount",
+    "inkedPixelFraction",
+  ] as const;
+  for (const key of numbers) {
+    if (typeof meta[key] !== "number" || !Number.isFinite(meta[key] as number)) {
+      return null;
+    }
+  }
+  if (typeof meta.algorithmVersion !== "string" || !meta.algorithmVersion) return null;
+  if (typeof meta.dotShape !== "string" || !meta.dotShape) return null;
+  if (typeof meta.garmentHex !== "string" || !meta.garmentHex) return null;
+
+  return {
+    algorithmVersion: meta.algorithmVersion,
+    lpi: meta.lpi as number,
+    angleDeg: meta.angleDeg as number,
+    dotShape: meta.dotShape,
+    midtone: meta.midtone as number,
+    chokePx: meta.chokePx as number,
+    garmentHex: meta.garmentHex,
+    targetPpi: meta.targetPpi as number,
+    cellPx: meta.cellPx as number,
+    achievedLpi: meta.achievedLpi as number,
+    minDotRadiusPx: meta.minDotRadiusPx as number,
+    screenWidthPx: meta.screenWidthPx as number,
+    screenHeightPx: meta.screenHeightPx as number,
+    visiblePixelCount: meta.visiblePixelCount as number,
+    inkedPixelFraction: meta.inkedPixelFraction as number,
+  };
+}
+
 function readNormalizationSummary(
   value: unknown,
   sizing: PlacementSizingPolicy,

@@ -1879,4 +1879,90 @@
  *   `print_ready` plate from the customer who already has it.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "PEA1" as const;
+/**
+ * ---------------------------------------------------------------------------
+ * PRINT'EM ALL PHASE 2 — PRODUCTION TREATMENTS (DTF HALFTONE)
+ * ---------------------------------------------------------------------------
+ *
+ * A SECOND PRODUCTION REPRESENTATION, NOT A SECOND PIPELINE.
+ *
+ * V1 now produces apparel raster artwork by one of two methods. They are not a
+ * quality dial and not a fallback chain — they make different claims and are
+ * proven by different checks:
+ *
+ *   standard_raster  genuine/reconstructed CONTINUOUS TONE at 300 PPI,
+ *                    reconstruction bounded by the provider's proven 4x
+ *                    ceiling, judged by `reconstruction_sufficiency`.
+ *   halftone_dtf     a DOT LATTICE generated AT the final production
+ *                    dimensions. No provider, no paid call. Judged by
+ *                    `halftone_final_size_generation`,
+ *                    `halftone_screen_geometry`, and
+ *                    `halftone_tonal_sufficiency`.
+ *
+ * WHERE THE SEAM IS, AND WHERE IT IS NOT.
+ *
+ * Phase 1 reserved `final-artwork/enhancement-decision.ts` and proposed a
+ * third `EnhancementMethod` member. THAT DESIGN WAS REJECTED AND MUST NOT BE
+ * REVIVED. `decideEnhancement` is pure arithmetic on (visible source width,
+ * target width x PPI); a treatment is not derivable from those numbers because
+ * it is not a fact about the artwork, it is A DECISION A HUMAN MADE. Putting
+ * the branch there constructs exactly the chain this phase exists to make
+ * impossible:
+ *
+ *     standard raster was refused  ->  therefore halftone
+ *
+ * The seam is one line higher, at PROVIDER SELECTION in
+ * `final-artwork-worker`'s `runPreparedUploadJob`, and it sits BEFORE any
+ * provider dispatch (Goal 25 — the artwork this treatment serves is exactly
+ * the artwork the 4x ceiling refuses, so reaching for Topaz first would buy
+ * detail the screen then discards). `decideEnhancement` is unchanged, still
+ * runs, and its verdict is still recorded.
+ *
+ * DEPENDENCY DIRECTION.
+ *   lib/domain/types.ts            persisted vocabulary + fail-closed readers
+ *                                  (`lib/db` reads these and never depends on
+ *                                  `capabilities`)
+ *     <- shared/production-treatment.ts   policy: defaults, bounds,
+ *                                  normalization, canonical key, eligibility
+ *       <- final-artwork/halftone-screen.ts        the engine
+ *       <- print-validation/                       the checks
+ *
+ * `print-validation` MUST NOT import the engine. Both sides read
+ * `MIN_PRINTABLE_DOT_RADIUS_PX` from `shared`, because a validator that
+ * imported the thing it validates would be depending on its own subject.
+ *
+ * AUTHORITY, AND WHAT MAY BE BUILT ON IT.
+ *
+ * The durable decision is `production_treatment` + `halftone_settings` +
+ * `production_treatment_selected_at`, written ONLY by
+ * `DesignBriefCapability.selectProductionTreatment`. It is exactly the shape
+ * of Phase 1's size confirmation and for the same reason: a value that could
+ * be arrived at by default cannot be distinguished, afterwards, from one a
+ * human chose.
+ *
+ * `resolveProductionTreatment` FAILS TO STANDARD RASTER on any incomplete
+ * record. Nothing anywhere may make the reverse move.
+ *
+ * FORBIDDEN, permanently:
+ *   - deriving a treatment from a validation outcome, a failed
+ *     reconstruction, an artwork measurement, or any other inference;
+ *   - automatic treatment selection for public customers (Phase 2 is internal
+ *     operator selection only, and any future automatic recommendation needs
+ *     real print tests behind it);
+ *   - relaxing `reconstruction_sufficiency`, the 4x ceiling, or any standard
+ *     raster rule to accommodate the halftone path;
+ *   - emitting `reconstruction_sufficiency` as a PASS for a halftone plate
+ *     (it is inapplicable, and is not emitted at all);
+ *   - collapsing `"halftone_generated"` provenance into `"reconstructed"`,
+ *     or describing a halftone plate as reconstructed source detail;
+ *   - baking a garment colour into an exported deliverable;
+ *   - re-running background removal as part of halftoning, or treating the
+ *     immutable prepared source as anything but immutable;
+ *   - gating the treatment on a browser-side condition. The gate is
+ *     `AcquisitionCapability.isInternalProject`, on the WRITE.
+ *
+ * TREATMENT IS PART OF JOB IDENTITY, alongside production width and requested
+ * output. A settings change supersedes a queued job; it never re-aims one.
+ */
+
+export const CAPABILITY_BOUNDARY_VERSION = "PEA2" as const;

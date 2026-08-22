@@ -24,6 +24,7 @@ import type {
 } from "@/lib/domain/types";
 import type { ProductionMethod } from "@/capabilities/shared/contracts";
 import type { PlacementSizingPolicy } from "@/capabilities/shared/print-placement-dimensions";
+import type { ProductionTreatment } from "@/capabilities/shared/production-treatment";
 
 // ---------------------------------------------------------------------------
 // Production Requirements (Goal 2 / Goal 3 / Goal 8)
@@ -306,6 +307,42 @@ export const PRINT_VALIDATION_CHECK_CODES = [
    * has the required pixel count without the detail to match it.
    */
   "reconstruction_sufficiency",
+  // --- Print'em All Phase 2: DTF halftone treatment ------------------------
+  // Emitted ONLY for a plate whose durable production treatment is
+  // `halftone_dtf`, and replacing `reconstruction_sufficiency` rather than
+  // joining it. That swap is the whole design: a halftone plate is a
+  // different production representation, so asking it a continuous-tone
+  // question ("were these pixels enlarged past their source detail?") would
+  // fail every correct halftone ever made, and answering that question
+  // leniently to let them through would corrupt the standard path's meaning.
+  // Different representation, different — and in places stricter — proof.
+  /**
+   * The treatment's settings and engine identity were actually recorded, so
+   * this plate can be reproduced and explained. Blocking: a screened plate
+   * whose screen nobody wrote down is not one to certify.
+   */
+  "halftone_treatment",
+  /**
+   * The dot lattice was generated ACROSS THE DELIVERED PLATE'S OWN pixel
+   * dimensions. Blocking, and the check the whole representation rests on —
+   * a screen generated small and enlarged afterwards prints at a line
+   * frequency the file no longer states correctly.
+   */
+  "halftone_final_size_generation",
+  /**
+   * The screen's physical geometry is right: cell pitch really is
+   * `targetPpi / LPI`, the achieved frequency matches the requested one
+   * within raster rounding, the LPI is inside the supported band, and the
+   * smallest dot the screen can emit is above the minimum printable size.
+   */
+  "halftone_screen_geometry",
+  /**
+   * The prepared source carries at least the TONAL information the chosen
+   * screen frequency consumes. A halftone's honest requirement, and a far
+   * lower bar than continuous tone's — but a real one, and the reason this
+   * treatment is not a way to print anything at any size.
+   */
+  "halftone_tonal_sufficiency",
 ] as const;
 
 export type PrintValidationCheckCode =
@@ -347,6 +384,13 @@ export interface PrintValidationReport {
   designBriefVersionId: string | null;
   /** Which applicability profile produced these checks — see `PrintValidationProfile`. */
   profile: PrintValidationProfile;
+  /**
+   * Print'em All Phase 2: which production representation was judged. Always
+   * present, so a stored report is self-describing about the fact that most
+   * changes which checks ran — never leaving "reconstruction sufficiency was
+   * inapplicable" and "reconstruction sufficiency was skipped" ambiguous.
+   */
+  productionTreatment: ProductionTreatment;
   status: PrintValidationStatus;
   requirements: ProductionRequirements;
   checks: PrintValidationCheck[];
@@ -395,11 +439,27 @@ export interface PrintValidationReport {
  *     when `resolutionProvenance === "reconstructed"`.
  *   - `"unknown"` — provenance was not determined. Treated exactly like
  *     `"interpolated_upscale"` for validation purposes (never assumed safe).
+ *   - `"halftone_generated"` (Print'em All Phase 2) — the pixels are a
+ *     halftone DOT LATTICE that the local screen engine drew across the final
+ *     production canvas. Checks trust `widthPx`/`heightPx` directly, because
+ *     the geometry is exact at the target density BY CONSTRUCTION: it was
+ *     generated at that density rather than resampled to it.
+ *
+ *     It is deliberately its own value and must never be collapsed into
+ *     `"reconstructed"`. `"reconstructed"` asserts that provider-manufactured
+ *     CONTINUOUS-TONE DETAIL fills those pixels; a halftone plate asserts
+ *     nothing of the kind and carries none. Reading one as the other would
+ *     turn "300 PPI final-size dot geometry" into a claim of "300 PPI
+ *     reconstructed source detail" — the exact overstatement Phase 2 exists
+ *     to keep out of the record. What the source IS asked for here is tonal
+ *     information at the screen's own frequency, and that is judged by
+ *     `halftone_tonal_sufficiency`, never by pixel count.
  */
 export type ResolutionProvenance =
   | "native"
   | "interpolated_upscale"
   | "reconstructed"
+  | "halftone_generated"
   | "unknown";
 
 /**
@@ -551,7 +611,53 @@ export interface UploadedPreserveEvidence {
   sourceAlphaBBoxWidthPx: number;
   sourceAlphaBBoxHeightPx: number;
   /** Which enhancement path produced the plate. Internal only — the provider's name never appears here. */
-  enhancement: "skipped" | "reconstructed";
+  enhancement: "skipped" | "reconstructed" | "halftone_screened";
+}
+
+/**
+ * Print'em All Phase 2: the halftone screen's own recorded geometry, as
+ * authoritative Print Validation consumes it.
+ *
+ * Structurally a mirror of `ProductionNormalizationSummary`, and for the same
+ * reason: these are CLAIMS the transform made about itself, and validation
+ * recomputes from them rather than accepting them. `cellPx` is checked
+ * against `targetPpi / lpi`, `achievedLpi` against `targetPpi / cellPx`, and
+ * `screenWidthPx`/`screenHeightPx` against the delivered asset's own
+ * dimensions — three independent facts that cannot all be wrong in the same
+ * direction by accident.
+ *
+ * HONESTY BOUNDARY. None of this says the print will look good, that the LPI
+ * suits any particular printer/film/powder/RIP combination, or that the
+ * artwork's subject matter survived screening legibly. It says the plate is
+ * the screen it claims to be, at the physical size it claims, generated where
+ * it claims. Everything past that is a press test.
+ */
+export interface HalftoneProductionEvidence {
+  /** Engine identity the settings were interpreted by. */
+  algorithmVersion: string;
+  lpi: number;
+  angleDeg: number;
+  dotShape: string;
+  /** Gamma/midtone transfer control actually applied. */
+  midtone: number;
+  /** Edge choke actually applied, in output pixels. */
+  chokePx: number;
+  /** The garment colour the screen was tonally referenced against. Never composited into the deliverable. */
+  garmentHex: string;
+  targetPpi: number;
+  /** Output pixels per halftone cell. Must equal `targetPpi / lpi`. */
+  cellPx: number;
+  /** Recomputed line frequency. Must equal `lpi` within raster rounding. */
+  achievedLpi: number;
+  /** Radius, in output pixels, of the smallest dot this screen can emit. */
+  minDotRadiusPx: number;
+  /** THE FINAL-SIZE PROOF: the pixel dimensions the lattice was drawn across. */
+  screenWidthPx: number;
+  screenHeightPx: number;
+  /** Visible source pixels the screen was applied to. */
+  visiblePixelCount: number;
+  /** Fraction of those that came out carrying ink — the screen's measured result. */
+  inkedPixelFraction: number;
 }
 
 /**
@@ -576,6 +682,27 @@ export interface PrintValidationInput {
    * whose lineage nobody recorded is not one to certify); ignored otherwise.
    */
   uploadedPreserve?: UploadedPreserveEvidence | null;
+  /**
+   * Print'em All Phase 2: WHICH PRODUCTION REPRESENTATION this plate is.
+   * Absent/`undefined` means `"standard_raster"`, so every existing caller —
+   * and every plate produced before treatments existed — keeps byte-for-byte
+   * the behavior it had.
+   *
+   * Deliberately a separate axis from `validationProfile`. The profile says
+   * whose specification the artwork answers to (a brief we were given, or the
+   * customer's own pixels); the treatment says which physical representation
+   * was made. They vary independently, and folding one into the other would
+   * mean adding a profile every time either changes.
+   */
+  productionTreatment?: ProductionTreatment;
+  /**
+   * Print'em All Phase 2: the screen's recorded geometry. REQUIRED when
+   * `productionTreatment` is `"halftone_dtf"` (its absence is itself a
+   * blocking `halftone_treatment` failure — same rule as uploaded-preserve
+   * lineage: a plate whose screen nobody recorded is not one to certify);
+   * ignored otherwise.
+   */
+  halftone?: HalftoneProductionEvidence | null;
   /** The approved Design Brief version this concept claims to have been generated against. `null` for uploaded artwork, which no brief version authorizes. */
   designBriefVersionId: string | null;
   /** The design's current/latest approved Design Brief version id, for provenance comparison (Goal 6, Goal 14 Scenario H). */

@@ -458,6 +458,7 @@ describe("conversation-service — finalization status polling", () => {
       artworkVersionId: artwork!.id,
       productionWidthIn: 10.5,
       requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
     });
     await new Promise((resolve) => setTimeout(resolve, 5));
     const running = await repo.createFinalArtworkJob(projectId, {
@@ -466,6 +467,7 @@ describe("conversation-service — finalization status polling", () => {
       artworkVersionId: artwork!.id,
       productionWidthIn: 12,
       requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
     });
     await repo.updateFinalArtworkJob(failed.id, { status: "failed", lastError: "old" });
     await repo.updateFinalArtworkJob(running.id, { status: "running" });
@@ -514,6 +516,7 @@ describe("conversation-service — finalization status polling", () => {
       artworkVersionId: artwork!.id,
       productionWidthIn: 10.5,
       requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
     });
     await repo.updateFinalArtworkJob(job.id, {
       status: "failed",

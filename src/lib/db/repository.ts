@@ -253,6 +253,19 @@ type FinalArtworkJobProductionIntent = {
   requestedProductionOutput: StoredRequestedProductionOutput;
 };
 
+/**
+ * Print'em All Phase 2: the canonical production-treatment identity a job is
+ * enqueued for, snapshotted from the project's durable treatment authority.
+ *
+ * Part of job identity for both workflows, exactly like `productionWidthIn`
+ * and `requestedProductionOutput`: different settings are different plates
+ * and must be different jobs, so an operator adjusting a screen cannot
+ * silently re-aim work that is already queued or already done.
+ */
+export interface FinalArtworkJobTreatmentIntent {
+  productionTreatmentKey: string;
+}
+
 export type CreateFinalArtworkJobInput =
   | ({
       sourceKind: "generated_concept";
@@ -269,14 +282,16 @@ export type CreateFinalArtworkJobInput =
        * superseded size detectably stale.
        */
       productionWidthIn: number;
-    } & FinalArtworkJobProductionIntent)
+    } & FinalArtworkJobProductionIntent &
+      FinalArtworkJobTreatmentIntent)
   | ({
       sourceKind: "prepared_upload";
       artworkPreparationId: string;
       artworkVersionId: string;
       /** The production print width, in inches, this job is enqueued for — part of its idempotency key. */
       productionWidthIn: number;
-    } & FinalArtworkJobProductionIntent);
+    } & FinalArtworkJobProductionIntent &
+      FinalArtworkJobTreatmentIntent);
 
 /**
  * Sprint 2M Phase 2C: mirrors `UpdateGenerationJobInput`. Sprint 2M Phase 2E

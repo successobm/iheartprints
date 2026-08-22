@@ -11,6 +11,7 @@ import type {
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 import type { BriefPatchProposal } from "@/capabilities/shared/contracts";
+import type { ProductionTreatmentSelection } from "@/capabilities/shared/production-treatment";
 
 /**
  * Authoritative Design Brief capability.
@@ -119,6 +120,61 @@ export interface DesignBriefCapability {
     garmentSizeClass: GarmentSizeClass | null,
   ): Promise<TShirtDesignBrief>;
   /**
+   * Print'em All Phase 2 — RECORDS AN EXPLICIT OPERATOR CHOICE of production
+   * treatment, and is the only thing in the system that may.
+   *
+   * The property that matters is the same one `confirmProductionSize` has,
+   * against a sharper failure mode. Standard raster honestly REFUSES artwork
+   * it cannot reconstruct within the provider's proven ceiling; DTF halftone
+   * can produce that same artwork at that same physical size, because it
+   * generates dot geometry at final size rather than reconstructing detail.
+   * So the chain that must never be constructible anywhere in this system is
+   * "standard raster was refused, therefore halftone" — a machine deciding on
+   * its own to change how a customer's artwork is printed.
+   *
+   * Nothing here can be reached from a validation outcome. A treatment is
+   * written because a human chose it, and the timestamp is what keeps that
+   * distinguishable forever afterwards.
+   *
+   * All three fields are written as ONE unit — treatment, settings, and the
+   * timestamp that says a human chose it — so a half-written treatment cannot
+   * exist. `resolveProductionTreatment` fails to standard raster on a partial
+   * record anyway; the cheaper guarantee is never to write one.
+   *
+   * AUTHORIZATION IS NOT HERE. Phase 2 restricts this choice to internal
+   * Print'em All operators, and that gate lives at the route boundary where
+   * the session's entitlement is actually known (mirroring
+   * `grantInternalEntitlement`: "authorization happens in the route, never
+   * here"). Callers are responsible for having normalized the settings via
+   * `normalizeHalftoneSettings` and for having checked eligibility; this
+   * boundary persists an already-authorized decision.
+   *
+   * Like the size confirmation, it approves no brief version, marks no concept
+   * stale, triggers no revision, and reaches no image provider.
+   */
+  selectProductionTreatment(
+    designId: string,
+    input: {
+      selection: ProductionTreatmentSelection;
+      /** ISO timestamp of the operator's choice. Supplied by the caller so this boundary stays clock-free. */
+      selectedAt: string;
+    },
+  ): Promise<TShirtDesignBrief>;
+  /**
+   * Print'em All Phase 2: returns the project to standard raster.
+   *
+   * Retraction has to be as easy as selection. An operator who screens a
+   * proof, looks at it, and decides the continuous-tone plate was better must
+   * be able to say so — and the treatment being a mutable working-brief field
+   * rather than an approved snapshot is precisely what makes that one call
+   * instead of a new approval cycle.
+   *
+   * Clears all three fields together. The already-produced halftone plate is
+   * NOT deleted: it remains immutable evidence of what those settings made,
+   * and coming back to them reuses it rather than regenerating it.
+   */
+  clearProductionTreatment(designId: string): Promise<TShirtDesignBrief>;
+  /**
    * Existing Artwork → Print Ready Phase 1: records the PRODUCTION CONTEXT an
    * uploaded-artwork customer states — what we're printing on, its colour,
    * and where the print goes.
@@ -190,6 +246,34 @@ export function createDesignBriefCapability(
         productionSizeConfirmedWidthIn: input.widthIn,
         productionSizeConfirmedMaxHeightIn: input.boxMaxHeightIn,
         productionSizeConfirmedAt: input.confirmedAt,
+      });
+    },
+
+    async selectProductionTreatment(designId, input) {
+      return repo.updateBrief(
+        designId,
+        input.selection.treatment === "halftone_dtf"
+          ? {
+              productionTreatment: "halftone_dtf",
+              halftoneSettings: input.selection.halftone,
+              productionTreatmentSelectedAt: input.selectedAt,
+            }
+          : {
+              productionTreatment: "standard_raster",
+              // Cleared, never left behind. Settings that outlive the
+              // treatment they belong to are settings a future reader can
+              // mistake for the current screen.
+              halftoneSettings: null,
+              productionTreatmentSelectedAt: input.selectedAt,
+            },
+      );
+    },
+
+    async clearProductionTreatment(designId) {
+      return repo.updateBrief(designId, {
+        productionTreatment: "standard_raster",
+        halftoneSettings: null,
+        productionTreatmentSelectedAt: null,
       });
     },
 

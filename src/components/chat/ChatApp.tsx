@@ -60,6 +60,12 @@ export function ChatApp() {
   const [snapshot, setSnapshot] = useState<ApiSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  /**
+   * Print'em All Phase 2: bumped whenever the treatment changes, so the
+   * preview <img> elements re-fetch instead of showing a plate made with the
+   * previous settings.
+   */
+  const [treatmentPreviewNonce, setTreatmentPreviewNonce] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [conceptBannerDismissed, setConceptBannerDismissed] = useState(false);
   /**
@@ -615,6 +621,67 @@ export function ChatApp() {
    * Confirming is also the fact the server later authorizes paid work
    * against, so it gets its own route rather than riding on a width write.
    */
+  /**
+   * Print'em All Phase 2: the internal operator's production-treatment
+   * choice.
+   *
+   * Persists immediately rather than accumulating in component state, which
+   * is the point rather than a shortcut (Goal 16): the treatment IS the
+   * production authority, so the thing the operator is looking at and the
+   * thing the pipeline will produce have to be the same record. Retraction
+   * is one click, so committing early costs nothing.
+   */
+  async function selectProductionTreatment(body: {
+    treatment: "standard_raster" | "halftone_dtf";
+    halftone?: Record<string, number | string>;
+  }) {
+    if (!snapshot || sending) return;
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/projects/${snapshot.project.id}/production-treatment`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to set the production treatment");
+      }
+      setSnapshot(data as ApiSnapshot);
+      // Busts the preview <img> cache without a cache-control dance: the
+      // previews are derived from settings that just changed, and a stale one
+      // would have an operator judging a plate they are no longer making.
+      setTreatmentPreviewNonce((value) => value + 1);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to set the production treatment",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /**
+   * Preview URLs for the operator panel. Present only when the SERVER
+   * included the treatment view — the same condition that governs whether the
+   * panel renders at all, so a client cannot conjure a preview URL for a
+   * project it has no entitlement on (the route re-checks anyway).
+   */
+  const treatmentPreviewUrls = snapshot?.productionTreatment
+    ? {
+        prepared: `/api/projects/${snapshot.project.id}/production-treatment/preview?mode=prepared&v=${treatmentPreviewNonce}`,
+        halftone: `/api/projects/${snapshot.project.id}/production-treatment/preview?mode=halftone&v=${treatmentPreviewNonce}`,
+        garment: `/api/projects/${snapshot.project.id}/production-treatment/preview?mode=garment&v=${treatmentPreviewNonce}`,
+      }
+    : {};
+
   async function confirmRecommendedPrintSize() {
     if (!snapshot || sending) return;
     setSending(true);
@@ -1498,6 +1565,17 @@ export function ChatApp() {
                 }
                 finalizationStatus={snapshot?.finalization.status ?? "not_requested"}
                 onPrepareForPrint={() => void prepareUploadedArtworkForPrint()}
+                productionTreatment={snapshot?.productionTreatment}
+                treatmentPreviewUrls={treatmentPreviewUrls}
+                onSelectStandardRaster={() =>
+                  void selectProductionTreatment({ treatment: "standard_raster" })
+                }
+                onSelectHalftoneTreatment={(halftone) =>
+                  void selectProductionTreatment({
+                    treatment: "halftone_dtf",
+                    halftone,
+                  })
+                }
               />
             ) : null}
 

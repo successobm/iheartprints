@@ -30,6 +30,14 @@ import type {
   ProductionRequirements,
   UploadedPreserveEvidence,
 } from "./contracts";
+import type { HalftoneProductionEvidence } from "./contracts";
+import {
+  DEFAULT_PRODUCTION_TREATMENT,
+  MAX_HALFTONE_LPI,
+  MIN_HALFTONE_LPI,
+  MIN_PRINTABLE_DOT_RADIUS_PX,
+  type ProductionTreatment,
+} from "@/capabilities/shared/production-treatment";
 
 /**
  * Print-Ready Normalization Phase 1 tolerances. Explicit, named, and always
@@ -72,6 +80,38 @@ const SOURCE_GEOMETRY_TOLERANCE = 0.02;
  * percent.
  */
 const CONTENT_SCALE_TOLERANCE = 0.005;
+/**
+ * Print'em All Phase 2. Allowed relative deviation between a halftone
+ * screen's REQUESTED line frequency and the frequency its recorded cell pitch
+ * actually produces.
+ *
+ * Tight, because there is nothing here for a tolerance to absorb: cell pitch
+ * is `targetPpi / lpi` in continuous coordinates and is deliberately never
+ * rounded to whole pixels, so the only deviation possible is float
+ * representation. A wider band would let a genuine LPI error — the classic
+ * one being an engine that rounds 8.571px to 9px and silently prints 33.3 LPI
+ * while the file says 35 — pass as rounding.
+ */
+const HALFTONE_LPI_TOLERANCE = 0.001;
+/**
+ * Print'em All Phase 2. The minimum ratio of source TONAL resolution to
+ * screen frequency below which a halftone is not backed by real tone.
+ *
+ * 1.0 is the information floor, not a style preference: at exactly 1.0 each
+ * halftone cell is backed by one source sample, and below it cells start
+ * sharing samples, so the screen is inventing tonal structure the file does
+ * not contain. That is the same lie `reconstruction_sufficiency` refuses on
+ * the continuous-tone path, measured in the unit this representation actually
+ * consumes.
+ */
+const MIN_HALFTONE_TONAL_RATIO = 1;
+/**
+ * Below this ratio the screen is backed by real tone but has little margin —
+ * fine detail lands within a cell or two of the sampling limit and will soften
+ * visibly. A warning, never a block: it is a quality observation for the
+ * operator looking at the proof, not a claim that the plate is wrong.
+ */
+const COMFORTABLE_HALFTONE_TONAL_RATIO = 1.5;
 
 export interface PrintValidationCapability {
   /** Deterministic — the same input always produces the same report. Never mutates `input`. */
@@ -100,6 +140,15 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     input.validationProfile ?? "generated_concept";
   const uploadedPreserve = profile === "uploaded_preserve";
 
+  // Print'em All Phase 2. A SECOND, INDEPENDENT AXIS from the profile above:
+  // the profile says whose specification the artwork answers to, the
+  // treatment says which physical representation was made. Absent means
+  // standard raster, so every plate produced before treatments existed is
+  // judged by exactly the rules it was produced under.
+  const productionTreatment: ProductionTreatment =
+    input.productionTreatment ?? DEFAULT_PRODUCTION_TREATMENT;
+  const halftoneTreatment = productionTreatment === "halftone_dtf";
+
   const checks: PrintValidationCheck[] = [];
   const requiredTransformations = new Set<FinalizationTransformation>();
 
@@ -127,7 +176,7 @@ function validate(input: PrintValidationInput): PrintValidationReport {
         "Product is outside the iHeartPrints product scope (apparel artwork); no production artifact is produced for it.",
     });
     requiredTransformations.add("require_human_review");
-    return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
   }
   checks.push({
     check: "product_scope",
@@ -150,7 +199,7 @@ function validate(input: PrintValidationInput): PrintValidationReport {
       reason: `Customer explicitly requested ${requirements.requestedUnsupportedOutput}; iHeartPrints currently produces the raster Production PNG only, which must not be presented as satisfying that request.`,
     });
     requiredTransformations.add("require_human_review");
-    return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
   }
   checks.push({
     check: "production_output_supported",
@@ -169,7 +218,7 @@ function validate(input: PrintValidationInput): PrintValidationReport {
         ? "No production asset exists for this uploaded artwork."
         : "No generated asset exists for this concept.",
     });
-    return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
   }
   checks.push({
     check: "asset_exists",
@@ -192,7 +241,7 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     const provenance = checkBriefProvenance(input);
     checks.push(provenance);
     if (provenance.status === "fail") {
-      return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+      return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
     }
   } else {
     const lineage = checkSourceLineage(input);
@@ -202,7 +251,7 @@ function validate(input: PrintValidationInput): PrintValidationReport {
       // any further arithmetic certifying — the same "there is nothing here
       // to finalize" class as a missing asset.
       requiredTransformations.add("require_human_review");
-      return buildReport(input, requirements, checks, requiredTransformations, profile, "blocked");
+      return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
     }
   }
 
@@ -310,10 +359,62 @@ function validate(input: PrintValidationInput): PrintValidationReport {
         requiredTransformations.add("require_human_review");
       }
 
-      const sufficiencyCheck = checkReconstructionSufficiency(normalization);
-      checks.push(sufficiencyCheck);
-      if (sufficiencyCheck.status !== "pass") {
-        requiredTransformations.add("upscale_raster_artwork");
+      // Print'em All Phase 2 — THE SWAP, and the one place the two
+      // production representations genuinely diverge in what they must prove.
+      //
+      // `reconstruction_sufficiency` asks a CONTINUOUS-TONE question: were
+      // these pixels stretched past the detail of the raster they were built
+      // from? For a halftone plate that question is not lenient or strict, it
+      // is malformed — the plate's pixels are a dot lattice drawn at final
+      // size, not a resample of source detail, so the check would fail every
+      // correct halftone ever produced. Relaxing it to let them through would
+      // be far worse: it would quietly weaken what that check means for every
+      // continuous-tone plate as well.
+      //
+      // So a halftone plate answers a DIFFERENT set of questions instead, and
+      // it is not a smaller one. It must prove its screen was recorded, was
+      // generated across the delivered plate's own dimensions, carries the
+      // physical cell geometry its stated LPI requires, and was backed by
+      // enough source TONE to be worth screening at that frequency.
+      if (halftoneTreatment) {
+        const treatmentCheck = checkHalftoneTreatment(input.halftone ?? null);
+        checks.push(treatmentCheck);
+        if (treatmentCheck.status !== "pass") {
+          requiredTransformations.add("require_human_review");
+        }
+
+        if (input.halftone) {
+          const finalSizeCheck = checkHalftoneFinalSizeGeneration(
+            input.halftone,
+            normalization,
+            asset,
+          );
+          checks.push(finalSizeCheck);
+          if (finalSizeCheck.status !== "pass") {
+            requiredTransformations.add("require_human_review");
+          }
+
+          const screenGeometryCheck = checkHalftoneScreenGeometry(input.halftone);
+          checks.push(screenGeometryCheck);
+          if (screenGeometryCheck.status !== "pass") {
+            requiredTransformations.add("require_human_review");
+          }
+
+          const toneCheck = checkHalftoneTonalSufficiency(
+            input.halftone,
+            normalization,
+          );
+          checks.push(toneCheck);
+          if (toneCheck.status === "fail") {
+            requiredTransformations.add("require_human_review");
+          }
+        }
+      } else {
+        const sufficiencyCheck = checkReconstructionSufficiency(normalization);
+        checks.push(sufficiencyCheck);
+        if (sufficiencyCheck.status !== "pass") {
+          requiredTransformations.add("upscale_raster_artwork");
+        }
       }
     }
   }
@@ -372,7 +473,7 @@ function validate(input: PrintValidationInput): PrintValidationReport {
   });
 
   const status = aggregateStatus(checks);
-  return buildReport(input, requirements, checks, requiredTransformations, profile, status);
+  return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, status);
 }
 
 function describeValidationProfile(
@@ -497,7 +598,18 @@ function honestDimensionsFor(
   // detail (e.g. Topaz Transparency Upscale), never fabricated local
   // interpolation — trusted exactly like "native", never penalized down to
   // the tiny pre-reconstruction source dimensions.
-  if (asset.resolutionProvenance === "native" || asset.resolutionProvenance === "reconstructed") {
+  if (
+    asset.resolutionProvenance === "native" ||
+    asset.resolutionProvenance === "reconstructed" ||
+    // Print'em All Phase 2: a halftone plate's pixels are trusted for the same
+    // reason a native asset's are, arrived at differently. Nothing was
+    // enlarged to reach this pixel count — the dot lattice was DRAWN at it, so
+    // the geometry is exact at the target density by construction. Whether
+    // that lattice was worth drawing at this frequency is a separate question
+    // with its own check (`halftone_tonal_sufficiency`); pixel count is not
+    // where it gets asked.
+    asset.resolutionProvenance === "halftone_generated"
+  ) {
     return { widthPx: asset.widthPx, heightPx: asset.heightPx, interpolated: false };
   }
   return {
@@ -534,6 +646,20 @@ function checkResolutionProvenance(
       severity: "info",
       reason:
         "Asset dimensions include genuine provider-side reconstruction (not fabricated local interpolation) — resolution sufficiency was judged against the reconstructed pixel dimensions directly.",
+    };
+  }
+  if (asset.resolutionProvenance === "halftone_generated") {
+    return {
+      check: "resolution_provenance",
+      status: "pass",
+      severity: "info",
+      // Worded with deliberate care. This says the DOT GEOMETRY is correct at
+      // the production density because it was generated there. It does not say
+      // — and must never be paraphrased into saying — that the source detail
+      // was reconstructed to 300 PPI. See `halftone_tonal_sufficiency` for
+      // what the source was actually asked for.
+      reason:
+        "Asset dimensions are final-size halftone production geometry: the dot lattice was generated at the production density rather than resampled to it, so pixel dimensions were judged directly. This is not a claim of reconstructed source detail.",
     };
   }
   return {
@@ -951,6 +1077,297 @@ function checkReconstructionSufficiency(
 }
 
 // ---------------------------------------------------------------------------
+// Print'em All Phase 2 — DTF halftone treatment checks
+// ---------------------------------------------------------------------------
+
+/**
+ * Was the screen recorded at all?
+ *
+ * Missing evidence FAILS rather than passes, exactly as `source_lineage`
+ * does and for the same reason. A screened plate whose settings nobody wrote
+ * down cannot be reproduced, cannot be explained to a printer, and cannot be
+ * compared against the next one — "we did not record it" is not a reason to
+ * certify a production file.
+ */
+function checkHalftoneTreatment(
+  evidence: HalftoneProductionEvidence | null,
+): PrintValidationCheck {
+  if (!evidence) {
+    return {
+      check: "halftone_treatment",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "This plate is recorded as DTF halftone production but carries no halftone screen evidence, so the screen that produced it cannot be reproduced or verified.",
+    };
+  }
+  if (!evidence.algorithmVersion) {
+    return {
+      check: "halftone_treatment",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "This halftone plate records no screen engine version, so there is no way to know which implementation produced it.",
+    };
+  }
+  return {
+    check: "halftone_treatment",
+    status: "pass",
+    severity: "blocking",
+    reason:
+      `Halftone treatment recorded and reproducible: ${evidence.lpi} LPI, ${evidence.angleDeg}deg, ${evidence.dotShape} dot, ` +
+      `midtone ${evidence.midtone}, choke ${evidence.chokePx}px, garment ${evidence.garmentHex}, engine ${evidence.algorithmVersion}.`,
+  };
+}
+
+/**
+ * THE CHECK THE WHOLE REPRESENTATION RESTS ON (Goals 6, 17, 18).
+ *
+ * A halftone plate's honesty is entirely a claim about WHERE the lattice was
+ * drawn. Generated across the final canvas, a 35 LPI screen prints at 35 LPI
+ * and its pixels are genuinely correct at 300 PPI. Generated small and
+ * enlarged afterwards, the identical file prints at 35 divided by the scale
+ * factor while still stating 35 — the dots get bigger, the tonal sampling
+ * does not improve, and the plate has become a resolution claim it cannot
+ * support. That is the failure this treatment could most plausibly be misused
+ * to hide, so it is checked against three independently recorded facts:
+ *
+ *   the screen's own recorded generation dimensions,
+ *   the delivered asset's actual pixel dimensions,
+ *   the physical specification the transform recorded for those pixels
+ *     (`intendedWidthIn x targetPpi`).
+ *
+ * The first two must agree EXACTLY — they are integer pixel counts written by
+ * two different stages, so any disagreement means something between them
+ * resized the plate, and there is nothing there to round. The third is
+ * compared within a pixel, because it is a physical measurement in inches
+ * being turned back into pixels.
+ */
+function checkHalftoneFinalSizeGeneration(
+  evidence: HalftoneProductionEvidence,
+  normalization: ProductionNormalizationSummary,
+  asset: NonNullable<PrintValidationInput["primaryAsset"]>,
+): PrintValidationCheck {
+  if (asset.widthPx === null || asset.heightPx === null) {
+    return {
+      check: "halftone_final_size_generation",
+      status: "unknown",
+      severity: "blocking",
+      reason:
+        "Cannot confirm the halftone screen was generated at final size — the delivered plate's own pixel dimensions are not recorded.",
+    };
+  }
+
+  if (
+    evidence.screenWidthPx !== asset.widthPx ||
+    evidence.screenHeightPx !== asset.heightPx
+  ) {
+    return {
+      check: "halftone_final_size_generation",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `Halftone screen was generated across ${evidence.screenWidthPx}x${evidence.screenHeightPx}px but the delivered plate is ` +
+        `${asset.widthPx}x${asset.heightPx}px — the dot lattice was resized after generation, so the plate does not print at the line frequency it states.`,
+    };
+  }
+
+  // The physical cross-check. The plate's own recorded print size, converted
+  // back to pixels at the recorded density, has to land on the same canvas the
+  // lattice was drawn across — otherwise the screen and the physical
+  // specification are describing two different plates.
+  const specWidthPx = normalization.intendedWidthIn * normalization.targetPpi;
+  const specHeightPx = normalization.intendedHeightIn * normalization.targetPpi;
+  if (
+    Math.abs(specWidthPx - evidence.screenWidthPx) > 1 ||
+    Math.abs(specHeightPx - evidence.screenHeightPx) > 1
+  ) {
+    return {
+      check: "halftone_final_size_generation",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `Halftone screen was generated across ${evidence.screenWidthPx}x${evidence.screenHeightPx}px, but this plate's recorded physical specification ` +
+        `(${normalization.intendedWidthIn.toFixed(3)}in x ${normalization.intendedHeightIn.toFixed(3)}in at ${normalization.targetPpi} PPI) calls for ` +
+        `${Math.round(specWidthPx)}x${Math.round(specHeightPx)}px — the screen and the physical specification describe different plates.`,
+    };
+  }
+
+  return {
+    check: "halftone_final_size_generation",
+    status: "pass",
+    severity: "blocking",
+    reason:
+      `Halftone screen was generated directly at the final production size (${evidence.screenWidthPx}x${evidence.screenHeightPx}px), matching both the ` +
+      `delivered plate and its ${normalization.intendedWidthIn.toFixed(2)}in x ${normalization.intendedHeightIn.toFixed(2)}in specification at ${normalization.targetPpi} PPI; ` +
+      "nothing was enlarged after generation.",
+  };
+}
+
+/**
+ * Is the screen's PHYSICAL geometry what its stated line frequency requires
+ * (Goals 7, 18)?
+ *
+ * LPI is a physical dot frequency, so it is verifiable arithmetic rather than
+ * a label: at a given output density there is exactly one cell pitch that
+ * produces it. Recomputing that pitch here — instead of trusting the
+ * engine's own `achievedLpi` — is what catches the classic implementation
+ * bug where a cell size gets rounded to whole pixels and the plate silently
+ * prints a different frequency than the one on its record.
+ */
+function checkHalftoneScreenGeometry(
+  evidence: HalftoneProductionEvidence,
+): PrintValidationCheck {
+  if (
+    !Number.isFinite(evidence.cellPx) ||
+    evidence.cellPx <= 0 ||
+    !Number.isFinite(evidence.targetPpi) ||
+    evidence.targetPpi <= 0 ||
+    !Number.isFinite(evidence.lpi) ||
+    evidence.lpi <= 0
+  ) {
+    return {
+      check: "halftone_screen_geometry",
+      status: "unknown",
+      severity: "blocking",
+      reason:
+        "Cannot verify halftone screen geometry — the recorded cell pitch, output density, or line frequency is incomplete.",
+    };
+  }
+
+  if (evidence.lpi < MIN_HALFTONE_LPI || evidence.lpi > MAX_HALFTONE_LPI) {
+    return {
+      check: "halftone_screen_geometry",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `Halftone screen was produced at ${evidence.lpi} LPI, outside the ${MIN_HALFTONE_LPI}-${MAX_HALFTONE_LPI} LPI band this build supports and has tested geometry for.`,
+    };
+  }
+
+  const expectedCellPx = evidence.targetPpi / evidence.lpi;
+  const recomputedLpi = evidence.targetPpi / evidence.cellPx;
+  const cellDeviation = Math.abs(evidence.cellPx - expectedCellPx) / expectedCellPx;
+  const lpiDeviation = Math.abs(recomputedLpi - evidence.lpi) / evidence.lpi;
+
+  if (cellDeviation > HALFTONE_LPI_TOLERANCE || lpiDeviation > HALFTONE_LPI_TOLERANCE) {
+    return {
+      check: "halftone_screen_geometry",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `Halftone cell pitch is ${evidence.cellPx.toFixed(4)}px where ${evidence.lpi} LPI at ${evidence.targetPpi} PPI requires ${expectedCellPx.toFixed(4)}px ` +
+        `(the recorded lattice actually prints ${recomputedLpi.toFixed(2)} LPI) — the plate does not carry the line frequency it states.`,
+    };
+  }
+
+  if (evidence.minDotRadiusPx < MIN_PRINTABLE_DOT_RADIUS_PX) {
+    return {
+      check: "halftone_screen_geometry",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `This screen's smallest dot is ${evidence.minDotRadiusPx.toFixed(2)}px in radius, below the ${MIN_PRINTABLE_DOT_RADIUS_PX}px a DTF process reproduces reliably — ` +
+        "its lightest tones would drop out or print as haze rather than as dots.",
+    };
+  }
+
+  return {
+    check: "halftone_screen_geometry",
+    status: "pass",
+    severity: "blocking",
+    reason:
+      `Halftone geometry is physically correct: ${evidence.cellPx.toFixed(3)}px cells at ${evidence.targetPpi} PPI produce ${recomputedLpi.toFixed(2)} LPI against ${evidence.lpi} requested, ` +
+      `with a smallest dot radius of ${evidence.minDotRadiusPx.toFixed(2)}px.`,
+  };
+}
+
+/**
+ * THE HALFTONE'S OWN SUFFICIENCY QUESTION — the counterpart of
+ * `reconstruction_sufficiency`, asked in the unit this representation
+ * actually consumes (Goal 18).
+ *
+ * A screen at L lines per inch samples the artwork L times per inch and can
+ * represent nothing finer. So the honest bar is not "does the source carry
+ * 300 PPI of detail?" — no halftone needs that, which is the whole reason
+ * this treatment exists — but "does the source carry at least L PPI of TONE?".
+ *
+ * The source's tonal density falls out of geometry the normalization summary
+ * already records, so nothing new has to be measured or trusted:
+ *
+ *     source tonal PPI = trimmedWidthPx / intendedWidthIn
+ *
+ * i.e. the pixels the plate was actually built from, spread across the
+ * physical inches it prints at. For the live Print'em All fixture that is
+ * 578px across 10.5in = 55 PPI, against a 35 LPI screen — a ratio of 1.57,
+ * genuinely backed. The SAME file measured against continuous tone's 300 PPI
+ * bar is short by 5.6x, and both statements are true at once because they are
+ * measuring different representations.
+ *
+ * Below 1.0 the screen would be inventing tonal structure the file does not
+ * contain, which is the same dishonesty the continuous-tone path refuses.
+ * Between 1.0 and 1.5 it is real but tight, and the operator is told so
+ * rather than blocked — a proof they can look at beats a threshold nobody
+ * chose from a press test.
+ */
+function checkHalftoneTonalSufficiency(
+  evidence: HalftoneProductionEvidence,
+  normalization: ProductionNormalizationSummary,
+): PrintValidationCheck {
+  if (
+    !Number.isFinite(normalization.trimmedWidthPx) ||
+    normalization.trimmedWidthPx <= 0 ||
+    !Number.isFinite(normalization.intendedWidthIn) ||
+    normalization.intendedWidthIn <= 0 ||
+    !Number.isFinite(evidence.lpi) ||
+    evidence.lpi <= 0
+  ) {
+    return {
+      check: "halftone_tonal_sufficiency",
+      status: "unknown",
+      severity: "blocking",
+      reason:
+        "Cannot determine whether this screen is backed by real source tone — the plate's recorded production geometry is incomplete.",
+    };
+  }
+
+  const sourceTonalPpi = normalization.trimmedWidthPx / normalization.intendedWidthIn;
+  const ratio = sourceTonalPpi / evidence.lpi;
+
+  if (ratio < MIN_HALFTONE_TONAL_RATIO) {
+    return {
+      check: "halftone_tonal_sufficiency",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `This artwork carries ${sourceTonalPpi.toFixed(1)} PPI of tonal information across its ${normalization.intendedWidthIn.toFixed(2)}in print width, ` +
+        `below the ${evidence.lpi} PPI a ${evidence.lpi} LPI screen consumes — halftone cells would share source samples, so the screen would be ` +
+        "inventing tonal structure the file does not contain. A lower line frequency or a smaller physical size would be honest; this is not.",
+    };
+  }
+
+  if (ratio < COMFORTABLE_HALFTONE_TONAL_RATIO) {
+    return {
+      check: "halftone_tonal_sufficiency",
+      status: "warning",
+      severity: "warning",
+      reason:
+        `This artwork carries ${sourceTonalPpi.toFixed(1)} PPI of tonal information against a ${evidence.lpi} LPI screen (${ratio.toFixed(2)}x) — ` +
+        "backed by real source tone, but with little margin, so fine detail will soften noticeably. Halftoning represents tone; it does not restore detail the source never had.",
+    };
+  }
+
+  return {
+    check: "halftone_tonal_sufficiency",
+    status: "pass",
+    severity: "warning",
+    reason:
+      `This artwork carries ${sourceTonalPpi.toFixed(1)} PPI of tonal information against a ${evidence.lpi} LPI screen (${ratio.toFixed(2)}x) — ` +
+      "every halftone cell is backed by real source tone.",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Print-Ready Normalization Phase 1 — production-plate checks
 // ---------------------------------------------------------------------------
 
@@ -1132,6 +1549,7 @@ function buildReport(
   checks: PrintValidationCheck[],
   requiredTransformations: Set<FinalizationTransformation>,
   profile: PrintValidationProfile,
+  productionTreatment: ProductionTreatment,
   status: PrintValidationStatus,
 ): PrintValidationReport {
   // A "blocking"-severity check only ever carries status "pass" / "fail" /
@@ -1150,6 +1568,7 @@ function buildReport(
     artworkVersionId: input.artworkVersionId,
     designBriefVersionId: input.designBriefVersionId,
     profile,
+    productionTreatment,
     status,
     requirements,
     checks,

@@ -16,6 +16,8 @@
  * deliverable is never per-provider geometry.
  */
 
+import type { HalftoneScreenMetadata } from "./halftone-screen";
+
 import type {
   ProductionNormalizationMetadata,
   ProductionSizingRequest,
@@ -97,7 +99,16 @@ export interface FinalArtworkProviderOutput {
    */
   reconstructedWidthPx: number | null;
   reconstructedHeightPx: number | null;
-  resolutionProvenance: "native" | "interpolated_upscale" | "reconstructed";
+  resolutionProvenance:
+    | "native"
+    | "interpolated_upscale"
+    | "reconstructed"
+    /**
+     * Print'em All Phase 2: the plate's pixels are a halftone dot lattice
+     * GENERATED at the final production dimensions. Distinct from all three
+     * others — see `ResolutionProvenance` in print-validation/contracts.ts.
+     */
+    | "halftone_generated";
   /** Short, internal-only identifier for what produced these bytes — e.g. `"local_raster_contain_resample_v1"`. Never customer-facing. */
   transformationMethod: string;
   /**
@@ -135,6 +146,17 @@ export interface FinalArtworkProviderOutput {
    * rather than trusting any claim in it.
    */
   normalization: ProductionNormalizationMetadata;
+  /**
+   * Print'em All Phase 2: the halftone screen's own measurements, when this
+   * provider applied one. `null`/absent for every continuous-tone provider —
+   * there is no screen to describe, and inventing an empty one would make
+   * "no halftone" and "a halftone nobody recorded" indistinguishable.
+   *
+   * Persisted on the production asset and handed to authoritative Print
+   * Validation, which RECOMPUTES the screen's physical geometry from it in
+   * exactly the same "verify, never trust" way it treats `normalization`.
+   */
+  halftone?: HalftoneScreenMetadata | null;
 }
 
 export interface FinalArtworkProvider {

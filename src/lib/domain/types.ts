@@ -134,6 +134,231 @@ export type GarmentSizeClass =
   | "adult_plus"
   | "custom";
 
+/**
+ * Print'em All Phase 2: which apparel-raster production REPRESENTATION a
+ * project's plate is made as. See
+ * `capabilities/shared/production-treatment.ts` for the full rationale and
+ * every policy built on this value.
+ *
+ * Defined here rather than there because `lib/db` persists and reads it, and
+ * `lib/db` never depends on `capabilities`. This file owns the persisted
+ * VOCABULARY; the capability owns what may be done with it.
+ */
+export type ProductionTreatment = "standard_raster" | "halftone_dtf";
+
+export const PRODUCTION_TREATMENTS: readonly ProductionTreatment[] = [
+  "standard_raster",
+  "halftone_dtf",
+];
+
+/**
+ * The treatment a project has when nobody has chosen one — always standard
+ * raster, which is also what every project predating this vocabulary
+ * genuinely is.
+ */
+export const DEFAULT_PRODUCTION_TREATMENT: ProductionTreatment = "standard_raster";
+
+export function isProductionTreatment(value: unknown): value is ProductionTreatment {
+  return (
+    typeof value === "string" &&
+    (PRODUCTION_TREATMENTS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Narrows a raw persisted treatment column.
+ *
+ * An unrecognized value — written by a newer deploy, or corrupt — reads back
+ * as the DEFAULT rather than being honoured. This build physically cannot
+ * produce a treatment it does not implement, so the only alternatives to
+ * defaulting are guessing (producing a plate nobody specified) or crashing
+ * (taking a project offline because a column has a newer word in it). It also
+ * fails toward the SAFE representation: standard raster is the one whose
+ * validation nothing was relaxed for.
+ */
+export function readProductionTreatment(value: unknown): ProductionTreatment {
+  return isProductionTreatment(value) ? value : DEFAULT_PRODUCTION_TREATMENT;
+}
+
+/**
+ * Print'em All Phase 2: the canonical treatment key every standard-raster job
+ * carries — and, deliberately, the SAME string the migration's
+ * `coalesce(production_treatment_key, 'standard_raster')` substitutes for a
+ * legacy NULL.
+ *
+ * They must be identical. A legacy job and a newly written standard-raster job
+ * describe the same production intent, so they have to land in the same
+ * uniqueness bucket; giving the legacy sentinel its own value would stop every
+ * historical job deduplicating against every other and reintroduce the
+ * duplicate paid reconstruction these keys exist to prevent.
+ */
+export const STANDARD_RASTER_TREATMENT_KEY = "standard_raster";
+
+/** Print'em All Phase 2: halftone dot shapes this build implements. */
+export type HalftoneDotShape = "round" | "ellipse";
+
+export const HALFTONE_DOT_SHAPES: readonly HalftoneDotShape[] = ["round", "ellipse"];
+
+/** Print'em All Phase 2: halftone screen angles this build implements, in degrees. */
+export type HalftoneScreenAngle = 22.5 | 45;
+
+export const HALFTONE_SCREEN_ANGLES: readonly HalftoneScreenAngle[] = [22.5, 45];
+
+/**
+ * The bounded LPI band this build supports. See `DEFAULT_HALFTONE_LPI` in
+ * `capabilities/shared/production-treatment.ts` for why this is a band an
+ * operator moves inside rather than a single number the product asserts.
+ */
+export const MIN_HALFTONE_LPI = 25;
+export const MAX_HALFTONE_LPI = 55;
+/** Midtone/gamma transfer bounds. `1` is the identity transfer. */
+export const MIN_HALFTONE_MIDTONE = 0.5;
+export const MAX_HALFTONE_MIDTONE = 2;
+/** Edge choke bounds, in output pixels. Small and explicit — never a matte editor. */
+export const MIN_HALFTONE_CHOKE_PX = 0;
+export const MAX_HALFTONE_CHOKE_PX = 2;
+
+/**
+ * A resolved garment colour: the label a human stated, and the exact RGB the
+ * treatment used it as.
+ *
+ * BOTH are persisted because they answer different questions. The label is
+ * what the operator chose; the RGB is what the engine actually did. A future
+ * change to the colour table must be DETECTABLE rather than silently
+ * rewriting what past plates were made against.
+ */
+export interface GarmentColor {
+  /** Exactly as stated on the brief — never normalized away. */
+  label: string;
+  /** Uppercase `#RRGGBB`. */
+  hex: string;
+  rgb: { r: number; g: number; b: number };
+}
+
+/**
+ * Print'em All Phase 2: everything needed to recreate one halftone plate
+ * exactly.
+ *
+ * Persisted as durable authority, never held only in React state: an operator
+ * who reloads the page must not have to remember what they chose, and a plate
+ * whose settings nobody wrote down is a plate nobody can reproduce or explain
+ * to a printer.
+ */
+export interface HalftoneSettings {
+  lpi: number;
+  angleDeg: HalftoneScreenAngle;
+  dotShape: HalftoneDotShape;
+  /** Gamma/midtone transfer control. `1` is linear; `>1` puts more ink in the midtones. */
+  midtone: number;
+  /** Edge cleanup erosion, in output pixels. `0` is off. */
+  chokePx: number;
+  /** The garment colour the screen was tonally referenced against. Never composited into the deliverable. */
+  garment: GarmentColor;
+  /** Which engine version interpreted these settings. */
+  algorithmVersion: string;
+}
+
+/**
+ * Narrows a raw persisted `halftone_settings` JSONB document.
+ *
+ * FAILS CLOSED, unlike `readGarmentSizeClass`, and the asymmetry is the same
+ * one that distinguishes a suggestion from a specification. A garment class
+ * only seeds a recommendation, so an unreadable one may safely become "never
+ * stated". These settings ARE the plate — every value here changed output
+ * pixels — so a partial or malformed document means the treatment cannot be
+ * reproduced, and the honest reading of that is `null` (no usable settings),
+ * never a document with defaults quietly filled into the gaps. A caller that
+ * gets `null` while the treatment says halftone has a project whose
+ * treatment is incomplete, which is exactly what it should see.
+ */
+export function readHalftoneSettings(value: unknown): HalftoneSettings | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+
+  const lpi = raw.lpi;
+  if (
+    typeof lpi !== "number" ||
+    !Number.isInteger(lpi) ||
+    lpi < MIN_HALFTONE_LPI ||
+    lpi > MAX_HALFTONE_LPI
+  ) {
+    return null;
+  }
+
+  const angleDeg = raw.angleDeg;
+  if (
+    typeof angleDeg !== "number" ||
+    !(HALFTONE_SCREEN_ANGLES as readonly number[]).includes(angleDeg)
+  ) {
+    return null;
+  }
+
+  const dotShape = raw.dotShape;
+  if (
+    typeof dotShape !== "string" ||
+    !(HALFTONE_DOT_SHAPES as readonly string[]).includes(dotShape)
+  ) {
+    return null;
+  }
+
+  const midtone = raw.midtone;
+  if (
+    typeof midtone !== "number" ||
+    !Number.isFinite(midtone) ||
+    midtone < MIN_HALFTONE_MIDTONE ||
+    midtone > MAX_HALFTONE_MIDTONE
+  ) {
+    return null;
+  }
+
+  const chokePx = raw.chokePx;
+  if (
+    typeof chokePx !== "number" ||
+    !Number.isInteger(chokePx) ||
+    chokePx < MIN_HALFTONE_CHOKE_PX ||
+    chokePx > MAX_HALFTONE_CHOKE_PX
+  ) {
+    return null;
+  }
+
+  const algorithmVersion = raw.algorithmVersion;
+  if (typeof algorithmVersion !== "string" || !algorithmVersion) return null;
+
+  const garment = readGarmentColor(raw.garment);
+  if (!garment) return null;
+
+  return {
+    lpi,
+    angleDeg: angleDeg as HalftoneScreenAngle,
+    dotShape: dotShape as HalftoneDotShape,
+    midtone,
+    chokePx,
+    garment,
+    algorithmVersion,
+  };
+}
+
+function readGarmentColor(value: unknown): GarmentColor | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const label = raw.label;
+  const hex = raw.hex;
+  if (typeof label !== "string" || !label) return null;
+  if (typeof hex !== "string" || !/^#[0-9A-F]{6}$/.test(hex)) return null;
+  const rgb = raw.rgb;
+  if (!rgb || typeof rgb !== "object") return null;
+  const { r, g, b } = rgb as Record<string, unknown>;
+  const channels = [r, g, b];
+  if (
+    channels.some(
+      (c) => typeof c !== "number" || !Number.isInteger(c) || c < 0 || c > 255,
+    )
+  ) {
+    return null;
+  }
+  return { label, hex, rgb: { r: r as number, g: g as number, b: b as number } };
+}
+
 export const GARMENT_SIZE_CLASSES: readonly GarmentSizeClass[] = [
   "youth",
   "womens_small",
@@ -1093,6 +1318,47 @@ export interface TShirtDesignBrief {
    * sync, and no fabricated `DesignBriefVersion`).
    */
   requestedProductionOutput: StoredRequestedProductionOutput | null;
+  /**
+   * Print'em All Phase 2 — THE PRODUCTION TREATMENT AUTHORITY.
+   *
+   * Which apparel-raster REPRESENTATION this project's plate is made as.
+   * `"standard_raster"` unless a human explicitly selected otherwise; see
+   * `shared/production-treatment.ts`.
+   *
+   * Recorded as a decision rather than derived, and the reason is specific:
+   * DTF halftone can produce a plate at a physical size standard raster
+   * honestly refuses (the live fixture needs 5.6x against a proven 4x
+   * provider ceiling), so "standard raster was refused, therefore halftone"
+   * is a chain a machine must never be able to complete on its own. It would
+   * be the system talking itself into changing a customer's artwork.
+   *
+   * Lives on the MUTABLE working brief alongside `intendedPrintWidthIn`,
+   * `garmentSizeClass`, and `requestedProductionOutput`, for the same
+   * reason: a production specification, not creative content, and it must be
+   * retractable without a new approval cycle.
+   */
+  productionTreatment: ProductionTreatment;
+  /**
+   * Print'em All Phase 2: the exact halftone screen settings the operator
+   * selected — LPI, angle, dot shape, midtone, choke, the resolved garment
+   * colour, and the engine version that interpreted them. `null` whenever
+   * `productionTreatment` is not `"halftone_dtf"`.
+   *
+   * Persisted, never held in React state (Goal 16): an operator who reloads
+   * must not have to remember what they chose, and a plate whose settings
+   * nobody wrote down is a plate nobody can reproduce or explain to a printer.
+   */
+  halftoneSettings: HalftoneSettings | null;
+  /**
+   * Print'em All Phase 2: when a human EXPLICITLY selected the current
+   * production treatment, as an ISO timestamp. `null` = never selected =
+   * the default.
+   *
+   * The same audit fact `productionSizeConfirmedAt` is, for the same reason:
+   * it is what keeps "halftone because an operator chose it" distinguishable,
+   * forever afterwards, from "halftone because something defaulted".
+   */
+  productionTreatmentSelectedAt: string | null;
   preferredColors: string[];
   designStyle: string | null;
   additionalInstructions: string | null;
@@ -1937,6 +2203,26 @@ export interface FinalArtworkJob {
    * that path changes.
    */
   productionWidthIn: number | null;
+  /**
+   * Print'em All Phase 2: the canonical production-treatment identity THIS
+   * JOB WAS CREATED TO SATISFY — snapshotted at enqueue and immutable, exactly
+   * like `productionWidthIn` and `requestedProductionOutput`.
+   *
+   * Reading the project's live treatment at run time instead would let a
+   * queued job silently re-aim itself every time an operator moved a slider:
+   * change LPI while a job waits and the plate that comes out is not the plate
+   * that was authorized. It is also part of JOB IDENTITY (see the migration's
+   * unique indexes), so different settings are different jobs with their own
+   * evidence rather than one row fighting over two meanings — which is what
+   * makes returning to previous settings reuse that plate instead of redoing
+   * it.
+   *
+   * `null` = a legacy job enqueued before this column existed. Those all
+   * predate any way to select anything else, so they mean standard raster —
+   * normalized by `treatmentKeyMatchesJob`, never by reading `null` as
+   * "unspecified" a second time.
+   */
+  productionTreatmentKey: string | null;
   /**
    * Sprint A2 Correction 2 (Goal 1): the production output THIS JOB WAS
    * CREATED TO SATISFY, snapshotted from the project's current intent at

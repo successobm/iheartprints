@@ -6,6 +6,7 @@
  * Regeneration jobs → RevisionTimeline → RegenerationPlan → intent with plan.
  */
 
+import { DEFAULT_PRODUCTION_TREATMENT } from "@/lib/domain/types";
 import type {
   ArtworkVersion,
   ConceptEvaluationStatus,
@@ -167,6 +168,14 @@ function snapshotAsBrief(version: DesignBriefVersion): TShirtDesignBrief {
     productionSizeConfirmedAt: null,
     productionSizeConfirmedWidthIn: null,
     productionSizeConfirmedMaxHeightIn: null,
+    // Print'em All Phase 2: the same reasoning a third time. Which production
+    // REPRESENTATION a plate is made as cannot change what the artwork should
+    // look like, so generation never sees it — and reconstructing a brief here
+    // that claimed a chosen treatment would fabricate a human decision in the
+    // one object that exists purely to describe creative content.
+    productionTreatment: DEFAULT_PRODUCTION_TREATMENT,
+    halftoneSettings: null,
+    productionTreatmentSelectedAt: null,
     preferredColors: content.preferredColors,
     designStyle: content.designStyle,
     additionalInstructions: content.additionalInstructions,

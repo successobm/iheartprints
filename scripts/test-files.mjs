@@ -188,6 +188,12 @@ export const TEST_FILES = [
   "src/capabilities/conversation/revision-acknowledgement-delta.test.ts",
   "src/capabilities/conversation/post-revision-chat-state.test.ts",
   "src/capabilities/shared/brief-diff.test.ts",
+  // Print'em All Phase 2 — the DTF halftone production treatment.
+  "src/capabilities/shared/production-treatment.test.ts",
+  "src/capabilities/final-artwork/halftone-screen.test.ts",
+  "src/capabilities/final-artwork-worker/halftone-production.test.ts",
+  "src/capabilities/conversation/production-treatment-authorization.test.ts",
+  "src/components/chat/production-treatment-dead-end.test.tsx",
   "src/capabilities/shared/waiting-copy.test.ts",
   "src/capabilities/shared/production-print-size.test.ts",
   "src/capabilities/shared/garment-production-sizing.test.ts",

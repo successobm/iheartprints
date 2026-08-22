@@ -4312,31 +4312,246 @@ ceiling independently decides whether that size is reachable at all.
 
 **Halftone fallback is the next phase.** See §13g.
 
-### 13g. Halftone fallback — the Phase 2 insertion point (not built)
+### 13g. Production treatments: standard raster and DTF halftone (Print'em All Phase 2)
 
-Nothing in this repository implements halftoning, and Phase 1 deliberately
-added no seam for it: a hook with no implementation behind it is a fake
-success state waiting to happen.
+**Two production REPRESENTATIONS, one pipeline.** V1 produces apparel raster
+artwork by one of two methods. They are not a quality dial and not a fallback
+chain — they answer different questions and are proven by different checks.
 
-The clean insertion point, when Phase 2 arrives, is
-`final-artwork/enhancement-decision.ts`. It is already the ONE place that
-decides how production reaches its target resolution, it is already pure
-arithmetic on (visible source width, confirmed target width × target PPI),
-and it already names its outcome as a `EnhancementMethod` union
-(`"skipped" | "reconstructed"`). The future branch is a third member of that
-union, decided in the same function and from the same two numbers:
+| | **STANDARD RASTER** | **DTF HALFTONE** |
+|---|---|---|
+| What the pixels are | Genuine or provider-reconstructed continuous tone | A dot lattice generated at final production size |
+| Density target | 300 PPI | 300 PPI |
+| Reconstruction | Topaz Transparency Upscale, bounded at its proven **4× ceiling** | **None. No provider, no paid call, ever** |
+| Source contract | Prepared transparent PNG | Prepared transparent PNG (identical) |
+| What the source must carry | ≥ 300 PPI of real detail after reconstruction | ≥ LPI of real **tonal** information |
+| Sufficiency check | `reconstruction_sufficiency` | `halftone_tonal_sufficiency` |
+| Availability | Every project. The default. | **Internal operator selection only** |
 
-    confirmed physical size
-      → standard raster adequacy analysis   (decideEnhancement, today)
-      → "skipped"        when the artwork already carries the target
-      → "reconstructed"  when the need is within Topaz's proven 4x ceiling
-      → "halftone_candidate"  when it is not            [PHASE 2 — not built]
+**Why the halftone is not a loophole.** The two representations are not the
+same claim measured leniently and strictly. A continuous-tone plate asserts
+that 3150 pixels across 10.5 inches each carry real detail; the live
+Print'em All file (562px of visible artwork) needs 5.6× to make that true,
+the provider ceiling is 4×, and standard raster refuses it — correctly, and
+for free, before dispatch. A halftone plate asserts something different and
+narrower: that a dot lattice was **drawn at** 300 PPI, and that the artwork
+carried enough tone to be worth screening at the chosen line frequency. The
+live file carries ~55 PPI of tone against a 35 LPI screen, so that second
+claim is true where the first was false. Both statements are simultaneously
+correct because they measure different things.
 
-The refusal that stands there today —
-`topaz-transparency-upscale-provider.ts`'s pre-dispatch check, which resolves
-a >4× need to "no request at all" with zero provider calls — is what a
-`halftone_candidate` outcome would eventually replace rather than bypass. It
-must keep failing closed until something real can succeed in its place.
+#### The insertion point — and why Phase 1's prediction was wrong
+
+Phase 1 reserved `final-artwork/enhancement-decision.ts` as the seam and
+proposed a third `EnhancementMethod` member, `"halftone_candidate"`, decided
+inside `decideEnhancement` from the same two numbers. **That design was not
+built, and must not be.**
+
+`decideEnhancement` is pure arithmetic on (visible source width, target
+width × target PPI). A production treatment is not derivable from those
+numbers, because it is not a fact about the artwork — it is a **decision a
+human made**. Adding the branch there would have constructed exactly the one
+chain this phase exists to make impossible:
+
+    standard raster was refused  →  therefore halftone
+
+which is the system talking itself into changing a customer's artwork. It
+would also have been unrecoverable in the record: "halftone because an
+operator chose it" and "halftone because reconstruction fell short" would be
+the same stored state forever afterwards.
+
+The real seam is one line higher, in
+`final-artwork-worker/final-artwork-worker-capability.ts`'s
+`runPreparedUploadJob`, at **provider selection**:
+
+    approved prepared transparent PNG
+      → stale-intent fence (size, requested output, TREATMENT)
+      → resolveProductionTreatment(brief)          ← durable human decision
+      → decideEnhancement(...)                     ← unchanged, still recorded
+      → activeProvider =
+            halftone   ? new HalftoneDtfProvider(settings)   // local, free
+          : needsRecon  ? provider                            // Topaz, paid
+          :               localNormalizationProvider          // local, free
+      → produceProductionAsset → validation → print_ready
+
+`decideEnhancement` is untouched. It still runs on the halftone path and its
+verdict is still recorded — "would this have needed a paid reconstruction?"
+stays a useful thing to know — it simply no longer selects the provider when
+a treatment has been chosen. **No second finalization pipeline was created**:
+asset persistence, idempotency, paid-request resumption, authoritative Print
+Validation, project status, and delivery are the same code for both
+representations.
+
+#### Treatment authority (`shared/production-treatment.ts`)
+
+The same three-way split Phase 1 established for size:
+
+| Concept | Owner | May authorize production? |
+|---|---|---|
+| **Vocabulary + persisted shape** | `lib/domain/types.ts` (`ProductionTreatment`, `HalftoneSettings`, `GarmentColor`, `readHalftoneSettings`) | No |
+| **Policy** | `capabilities/shared/production-treatment.ts` (defaults, bounds, normalization, eligibility, canonical key) | No |
+| **The decision** | `tshirt_design_briefs.production_treatment` + `halftone_settings` + `production_treatment_selected_at`, written only by `DesignBriefCapability.selectProductionTreatment` | **Yes** |
+
+The vocabulary lives in `lib/domain/types.ts` rather than with the policy
+because `lib/db` persists and reads it and `lib/db` never depends on
+`capabilities`.
+
+`resolveProductionTreatment` **fails to standard raster** in every incomplete
+case — a treatment with no settings, unreadable settings, or no record of a
+human having chosen it. Never the reverse: nothing anywhere can turn a
+standard-raster project into a halftone one.
+
+**Treatment joins job identity.** `final_artwork_jobs.production_treatment_key`
+carries a canonical, human-readable descriptor
+(`halftone_dtf/<engine>/lpi=35/ang=45/dot=round/tone=1.00/choke=0/garment=#000000`)
+snapshotted at enqueue, alongside `production_width_in` and
+`requested_production_output`. Consequences, all of which mirror Phase 1's
+width binding exactly:
+
+- a queued job for superseded settings is **superseded, never re-aimed** —
+  moving a slider mid-flight cannot change what a running job produces;
+- new settings get their **own** job with their own evidence;
+- returning to previous settings **reuses that plate** rather than redoing it;
+- legacy rows (`NULL`) collapse to the `'standard_raster'` sentinel — the same
+  string a standard-raster job writes, because they are the same production
+  intent.
+
+#### The engine (`final-artwork/halftone-screen.ts`)
+
+Deterministic, local, amplitude-modulated. Pure RGBA math — no codec, no I/O,
+no network.
+
+- **LPI is a physical frequency, derived, never a slider.** `cellPx =
+  targetPpi / lpi`, kept as a float and placed in continuous coordinates. At
+  300 PPI: 35 LPI = 8.571px, 40 = 7.5px, 50 = 6px. Rounding the cell to whole
+  pixels — the classic implementation bug — would silently print 33.3 or 37.5
+  LPI while the file still claimed 35, and `halftone_screen_geometry`
+  recomputes the frequency specifically to catch that.
+- **Supported band: 25–55 LPI. Initial operator default: 35 LPI.** A band,
+  not a number: external DTF evidence genuinely varies (~15–55 in the most
+  cited tool; 25–50 or 35–50 in other guidance), so the product ships a
+  conservative range an operator moves inside and records which value made
+  each plate. 35 is chosen from *this pipeline's* arithmetic: ~73 output
+  pixels per cell (enough for smooth gradation, vs ~30 at 55 LPI), a 35 PPI
+  tonal ask the live fixture's 55 PPI clears with margin, and the largest dots
+  in the band for the first physical tests — which have not happened yet.
+- **Angles: 22.5° and 45°, default 45°.** The screen geometry is genuinely
+  rotated; a control with no measurable effect would be worse than no control.
+  45° because a diagonal lattice is least conspicuous for a single-colour
+  screen and most garment artwork carries strong horizontal/vertical
+  structure; 22.5° for artwork whose own structure is diagonal.
+- **Dots: round and ellipse.** Coverage → radius is built by **measuring** a
+  sampled unit cell and ranking the spot metric, not by per-shape algebra, so
+  area coverage is exact for any monotone spot function and a third shape is a
+  one-line addition.
+- **Tone → coverage, stated once and testable:**
+
+      separation = |luma(pixel) − luma(garment)| / max(Lg, 1 − Lg)
+      coverage   = FLOOR + (1 − FLOOR) · separation ^ (1 / midtone)
+
+  Measuring against the GARMENT is what makes one rule serve every colour: on
+  black it reduces to luma (highlights print, shadows open to fabric), on
+  white it inverts, on mid grey both ends reach full coverage.
+- **`HALFTONE_MIN_COVERAGE = 0.15` — the garment-blend floor, and the most
+  important number in the engine.** Taken literally, garment-relative tone
+  deletes black artwork on a black shirt: precisely the failure the
+  black-background preparation work surfaced. The floor means every
+  meaningfully opaque pixel keeps a real, printable dot no matter how close
+  its colour is to the garment. **This treatment is a BLEND, not a knockout.**
+  Deliberate garment-colour knockout (dropping matched regions entirely) is a
+  separate operation Phase 2 does not implement.
+- **Colour is never touched (full-colour output).** Every output pixel keeps
+  its source RGB byte-for-byte; the screen writes **alpha only**. Shadows,
+  gradients, and highlights are reproduced through varying dot coverage. This
+  is garment-integration halftoning, not monochrome newspaper screening.
+- **Edge cleanup**: a separable alpha erosion of 0–2 output pixels, **default
+  0**, plus a sub-printable-alpha cutoff at the same threshold `alpha-trim`
+  already uses. Together these are the white-haze / grey-fringe control. It is
+  not a white-underbase editor and no default silently removes an edge pixel.
+
+**Background removal and garment knockout are separate concepts** (and stay
+separate). The prepared transparent asset produced by background isolation is
+**immutable**, and the halftone treatment operates on it. Halftoning never
+re-runs opaque-background removal, and the real workflow is
+`opaque upload → background isolation → approved transparent prepared asset →
+halftone treatment` — never `opaque upload → halftone a black background`.
+
+#### Halftone-specific validation
+
+A halftone plate is **not** run through continuous-tone
+`reconstruction_sufficiency`. That check is not emitted at all — never emitted
+as a pass, which would assert continuous-tone sufficiency the plate does not
+have. Four checks are emitted in its place:
+
+| Check | Severity | Blocks when |
+|---|---|---|
+| `halftone_treatment` | blocking | No screen evidence or engine version recorded — the plate cannot be reproduced or explained |
+| `halftone_final_size_generation` | blocking | The lattice's recorded generation dimensions disagree with the delivered plate, or with the plate's own physical specification (`intendedWidthIn × targetPpi`, ±1px). **The check the representation rests on**: a lattice generated small and enlarged prints at LPI ÷ scale while still claiming LPI |
+| `halftone_screen_geometry` | blocking | Cell pitch ≠ `targetPpi / lpi`, recomputed frequency ≠ requested (tolerance 0.001 relative — float residue only), LPI outside the supported band, or the screen's smallest emittable dot below `MIN_PRINTABLE_DOT_RADIUS_PX` (0.75px) |
+| `halftone_tonal_sufficiency` | blocking below 1.0×, **warning** below 1.5× | Source tonal density (`trimmedWidthPx / intendedWidthIn`) is below the screen's own frequency. Below 1.0× cells share source samples and the screen would be inventing tonal structure the file does not contain |
+
+`resolutionProvenance` gains a fourth value, `"halftone_generated"`, and it is
+deliberately **not** collapsed into `"reconstructed"`. `"reconstructed"`
+asserts that provider-manufactured *continuous-tone detail* fills those
+pixels. A halftone plate asserts nothing of the kind. The plate's geometry is
+correct at 300 PPI because it was **generated at 300 PPI**, not because source
+detail was recovered — and it is recorded, worded, and reported that way. It
+is **300 PPI final-size halftone production geometry**, never "300 PPI
+reconstructed source detail".
+
+Everything a print shop would reject a file for still blocks, unchanged:
+decodability, transparency, physical width, effective resolution, minimum
+pixels, aspect preservation, alpha-bound content, dead canvas, recorded
+production geometry, source lineage, and preserved source geometry.
+
+#### Standard raster is unchanged
+
+`targetPpi` 300, `reconstruction_sufficiency`, the Topaz **4× ceiling** and
+its pre-dispatch refusal, and every existing blocker behave exactly as before.
+No rule was relaxed to make the halftone case pass; the acceptance suite
+asserts the >4× refusal against the real resolver in the same file that
+asserts the halftone success, on the same artwork.
+
+#### Internal-only, server-authoritative (Phase 2 scope)
+
+Treatment selection requires the project's acquisition session to carry the
+**internal entitlement** (`AcquisitionCapability.isInternalProject`, failing
+closed — a legacy project is *not* internal, because legacy permissiveness is
+a commercial grandfather, not an authorization). The gate is on the **write**
+(`ConversationCapability.selectProductionTreatment`), so the route, the
+operator panel, and the preview endpoint cannot disagree with it, and a
+browser-side condition is never load-bearing. Non-internal callers receive a
+uniform 404 that does not reveal that a tier exists; the customer snapshot
+omits the `productionTreatment` key entirely rather than sending `null`.
+
+**Public customers are entirely unaffected**: no new control, no new copy, no
+behaviour change. There is no automatic treatment recommendation, for anyone.
+Adding one is a later decision that needs real print tests behind it.
+
+#### Preview is preview
+
+`GET /api/projects/:id/production-treatment/preview?mode=prepared|halftone|garment`
+renders the project's **persisted** settings at the confirmed final production
+size (so the dot density an operator sees is the dot density that prints) and
+accepts no ad-hoc settings — production authority has exactly one home. The
+`garment` mode composites the plate over the garment colour for judgement
+only. **No garment colour is ever baked into an exported deliverable**, which
+stays a transparent, garment-neutral PNG.
+
+#### What this is not
+
+Not a RIP. Not a printer driver. Not screen-print colour separations, not
+embroidery digitization, not sublimation preparation, not vector output.
+Halftoning represents tone and solves garment integration; **it does not
+restore information**. Blurred subjects stay blurred, unreadable text stays
+unreadable, malformed generated detail stays malformed — at a coarser sampling
+than before. Source-quality diagnostics are unchanged and still apply.
+
+**Physical print testing is still required.** Every default here (35 LPI, 45°,
+round, the coverage floor, the minimum dot) is an operator starting point
+justified from this pipeline's own arithmetic — not an industry guarantee, and
+not a claim about any particular printer, ink, film, powder, pretreatment,
+RIP, press setting, or garment.
 
 ### pixel dimensions ≠ physical dimensions ≠ density metadata
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import {
   describeApprovedPreparation,
@@ -47,6 +47,13 @@ const PLACEMENT_OPTIONS = Object.entries(PRINT_PLACEMENT_LABELS) as Array<
   [PrintPlacement, string]
 >;
 
+import type { ProductionTreatmentView } from "@/lib/services/conversation-service";
+
+import {
+  ProductionTreatmentPanel,
+  type TreatmentPreviewMode,
+} from "./ProductionTreatmentPanel";
+
 export interface UploadedArtworkPanelProps {
   step: UploadedArtworkStep;
   preparation: ArtworkPreparationView | null;
@@ -85,6 +92,26 @@ export interface UploadedArtworkPanelProps {
   finalizationStatus?: CustomerFinalizationStatus;
   /** The explicit "Prepare Print-Ready Artwork" action. Idempotent server-side, so a double click is safe. */
   onPrepareForPrint?: () => void;
+  /**
+   * Print'em All Phase 2: the INTERNAL operator's production-treatment
+   * surface, or `undefined` for every other project.
+   *
+   * Undefined rather than a boolean flag, and that is the point: the panel
+   * exists only when the SERVER included it, so there is no client-side
+   * condition here that could be flipped to reveal it. See
+   * `ProductionTreatmentPanel` — visibility is presentation, the gate is on
+   * the write.
+   */
+  productionTreatment?: ProductionTreatmentView;
+  treatmentPreviewUrls?: Partial<Record<TreatmentPreviewMode, string | null>>;
+  onSelectStandardRaster?: () => void;
+  onSelectHalftoneTreatment?: (settings: {
+    lpi: number;
+    angleDeg: number;
+    dotShape: string;
+    midtone: number;
+    chokePx: number;
+  }) => void;
   /**
    * Existing Artwork → Print Ready Phase 1.3: the customer pointed at an
    * area to PREVIEW — not yet remove. Receives SOURCE IMAGE pixels.
@@ -178,6 +205,25 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           onChooseGarmentSize={props.onChooseGarmentSize}
           finalizationStatus={props.finalizationStatus ?? "not_requested"}
           onPrepareForPrint={props.onPrepareForPrint}
+          treatmentControls={
+            // Print'em All Phase 2: rendered INSIDE the approved step rather
+            // than appended after it, so it lands between the size
+            // confirmation it depends on and the production request it
+            // configures. Appended, it sat below "Prepare Print-Ready
+            // Artwork" — reading as an afterthought to an action it is
+            // supposed to precede.
+            props.productionTreatment &&
+            props.onSelectStandardRaster &&
+            props.onSelectHalftoneTreatment ? (
+              <ProductionTreatmentPanel
+                view={props.productionTreatment}
+                busy={busy}
+                previewUrls={props.treatmentPreviewUrls ?? {}}
+                onSelectStandardRaster={props.onSelectStandardRaster}
+                onSelectHalftone={props.onSelectHalftoneTreatment}
+              />
+            ) : null
+          }
         />
       ) : null}
     </section>
@@ -541,6 +587,7 @@ function ApprovedStep({
   onChooseGarmentSize,
   finalizationStatus,
   onPrepareForPrint,
+  treatmentControls,
 }: {
   preparation: ArtworkPreparationView;
   busy: boolean;
@@ -554,6 +601,18 @@ function ApprovedStep({
   onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   finalizationStatus: CustomerFinalizationStatus;
   onPrepareForPrint?: () => void;
+  /**
+   * Print'em All Phase 2: the internal operator's production-treatment
+   * controls, or `null`.
+   *
+   * A SLOT rather than props threaded through two layers, because the panel it
+   * renders is already wired once in `UploadedArtworkPanel` and duplicating
+   * that wiring here would be a second place for the two to drift. What this
+   * slot decides is only WHERE the controls sit — which matters, because a
+   * treatment is chosen after a size is confirmed and before production is
+   * requested, and the ordering on screen should say so.
+   */
+  treatmentControls?: ReactNode;
 }) {
   const copy = describeApprovedPreparation(preparation.customer.enhancementNeeded);
 
@@ -580,6 +639,7 @@ function ApprovedStep({
         onChooseGarmentSize={onChooseGarmentSize}
         finalizationStatus={finalizationStatus}
         onPrepareForPrint={onPrepareForPrint}
+        treatmentControls={treatmentControls}
       />
     </div>
   );
@@ -604,6 +664,7 @@ function PrintReadyStep({
   onChooseGarmentSize,
   finalizationStatus,
   onPrepareForPrint,
+  treatmentControls,
 }: {
   enhancementNeeded: boolean;
   busy: boolean;
@@ -615,7 +676,14 @@ function PrintReadyStep({
   onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   finalizationStatus: CustomerFinalizationStatus;
   onPrepareForPrint?: () => void;
+  treatmentControls?: ReactNode;
 }) {
+  // The ONE state that legitimately replaces the production authorities
+  // rather than sitting alongside them: work is in the oven right now, and
+  // both the size confirmation and the treatment are refused server-side
+  // while it is (`ConversationCapability` throws "being prepared right now"
+  // for either). Showing controls the server would refuse is the disagreement
+  // between page and server this file exists to avoid.
   if (finalizationStatus === "preparing") {
     return (
       <div className="mt-4 flex items-center gap-2 rounded-xl bg-black/[0.03] p-3 text-sm text-muted">
@@ -629,28 +697,26 @@ function PrintReadyStep({
     );
   }
 
-  if (finalizationStatus === "retryable_failure") {
-    return (
-      <div className="mt-4 space-y-3 border-t border-black/8 pt-4">
-        <p className="text-sm text-ink" role="alert">
-          {PRINT_READY_RETRY_MESSAGE}
-        </p>
-        <p className="text-sm text-muted">{PRINT_READY_RETRY_SUPPORTING_MESSAGE}</p>
-        {onPrepareForPrint ? (
-          <button
-            type="button"
-            disabled={busy}
-            aria-busy={busy}
-            onClick={onPrepareForPrint}
-            className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {PRINT_READY_RETRY_ACTION_LABEL}
-          </button>
-        ) : null}
-      </div>
-    );
-  }
-
+  // Print'em All Phase 2 — THE DEAD-END FIX.
+  //
+  // `retryable_failure` used to `return` here, rendering a retry notice and a
+  // button and NOTHING ELSE. That silently deleted the production-size
+  // authority — garment class, recommendation, contained dimensions, and the
+  // confirmation control — from the one state where an operator most needs
+  // them, because a failed attempt is precisely when they want to change
+  // something before trying again.
+  //
+  // Live consequence, on a real Print'em All project: Standard Raster failed,
+  // DTF Halftone correctly refused to be selectable without a confirmed size,
+  // and the only remaining control was "Retry Preparation" — which would have
+  // failed the same way. The operator had no route to the authority the
+  // halftone required. A previous failed attempt must never remove the
+  // controls needed to choose a different valid production treatment.
+  //
+  // So the retry notice is now a BANNER inside the normal layout instead of a
+  // replacement for it. One size card, one treatment panel, one action button,
+  // whose label reflects that an attempt already happened.
+  const retryableFailure = finalizationStatus === "retryable_failure";
   const copy = describePrintReadyPreparation(enhancementNeeded);
 
   // Print'em All Phase 1 (Goal 6 / Goal 16): the upload path's copy of the
@@ -664,6 +730,17 @@ function PrintReadyStep({
 
   return (
     <div className="mt-4 space-y-3 border-t border-black/8 pt-4">
+      {/* What went wrong, ABOVE the controls that can change the outcome —
+          and never instead of them. */}
+      {retryableFailure ? (
+        <div className="space-y-1">
+          <p className="text-sm text-ink" role="alert">
+            {PRINT_READY_RETRY_MESSAGE}
+          </p>
+          <p className="text-sm text-muted">{PRINT_READY_RETRY_SUPPORTING_MESSAGE}</p>
+        </div>
+      ) : null}
+
       {/* Size comes FIRST, as it does in the create_new flow: it is the last
           decision still open, and the button below acts on whatever it says. */}
       {printReadySize && onChoosePrintWidth ? (
@@ -672,9 +749,14 @@ function PrintReadyStep({
           busy={busy}
           onChooseWidth={onChoosePrintWidth}
           onUseRecommendedSize={onUseRecommendedSize}
-        onChooseGarmentSize={onChooseGarmentSize}
+          onChooseGarmentSize={onChooseGarmentSize}
         />
       ) : null}
+
+      {/* Then the treatment, which is a decision ABOUT the confirmed size and
+          is only selectable once there is one. Between the size and the
+          action, so the screen reads in the order the work happens. */}
+      {treatmentControls}
 
       {finalizationStatus === "needs_review" ? (
         <p
@@ -690,18 +772,34 @@ function PrintReadyStep({
           different size), but the primary action does not compete with it. */}
       {finalizationStatus !== "print_ready" && onPrepareForPrint ? (
         <>
-          <p className="text-sm font-semibold text-ink">{copy.headline}</p>
-          <p className="text-sm text-muted">{copy.message}</p>
-          {copy.enhancementMessage ? (
-            <p className="text-sm text-ink">{copy.enhancementMessage}</p>
-          ) : null}
+          {/* The "here is what happens next" copy is skipped after a failure —
+              the banner above already said what happened, and repeating the
+              first-run pitch underneath it reads as though nothing had. */}
+          {retryableFailure ? null : (
+            <>
+              <p className="text-sm font-semibold text-ink">{copy.headline}</p>
+              <p className="text-sm text-muted">{copy.message}</p>
+              {copy.enhancementMessage ? (
+                <p className="text-sm text-ink">{copy.enhancementMessage}</p>
+              ) : null}
+            </>
+          )}
           <button
             type="button"
+            // Print'em All Phase 1's gate, now reaching the retry path too: an
+            // unconfirmed size cannot start production, and the server refuses
+            // it anyway. Disabling is what keeps the button from promising an
+            // action that is about to fail.
             disabled={busy || sizeConfirmationPending}
+            aria-busy={busy}
             onClick={onPrepareForPrint}
             className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {finalizationStatus === "needs_review" ? "Try Again" : copy.actionLabel}
+            {retryableFailure
+              ? PRINT_READY_RETRY_ACTION_LABEL
+              : finalizationStatus === "needs_review"
+                ? "Try Again"
+                : copy.actionLabel}
           </button>
         </>
       ) : null}

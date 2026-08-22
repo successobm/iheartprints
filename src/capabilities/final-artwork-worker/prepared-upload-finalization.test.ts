@@ -566,6 +566,7 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       artworkVersionId: attacker.artworkVersionId!,
       productionWidthIn: 4,
       requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
     });
 
     await worker.processNextJob();
@@ -1468,6 +1469,7 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       finalDirectionApprovalId: approval.id,
       artworkVersionId: "artwork-1",
       requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
       productionWidthIn: 10.5,
     });
 

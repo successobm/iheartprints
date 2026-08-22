@@ -269,6 +269,26 @@ export interface AcquisitionCapability {
 
   /** Grants the internal entitlement. Authorization happens in the route, never here. */
   grantInternalEntitlement(sessionId: string): Promise<AcquisitionSession | null>;
+  /**
+   * Print'em All Phase 2 — IS THIS PROJECT AN INTERNAL OPERATOR'S?
+   *
+   * The server-authoritative answer that advanced production-treatment
+   * controls are gated on (Goal 24). Deliberately a capability method and not
+   * a route-local check, because two different surfaces need the SAME answer:
+   * the route that WRITES a treatment must refuse an unauthorized caller, and
+   * the read that decides whether to render the controls must agree with it.
+   * A browser flag, a query string, or a hidden UI toggle would satisfy the
+   * second and not the first, which is the shape of every "hidden admin
+   * screen" that turns out not to be hidden.
+   *
+   * FAILS CLOSED in every ambiguous case, including a session that cannot be
+   * loaded. A LEGACY project (created before acquisition sessions existed) is
+   * NOT internal: legacy is permissive about the acquisition funnel, which is
+   * a commercial gate, and reusing that permissiveness as an authorization
+   * grant would hand advanced production controls to every historical project
+   * in the database.
+   */
+  isInternalProject(projectId: string): Promise<boolean>;
 
   /**
    * The customer-safe view attached to every project snapshot.
@@ -793,6 +813,16 @@ export function createAcquisitionCapability(
 
     async grantInternalEntitlement(sessionId) {
       return repo.grantInternalEntitlement(sessionId);
+    },
+
+    async isInternalProject(projectId) {
+      const authority = await resolveAuthority(projectId);
+      // Only a real, loadable session carrying the internal grant. Not
+      // "unavailable" (we could not establish authority), and not "legacy" —
+      // see the interface doc for why legacy permissiveness must not become
+      // an authorization.
+      if (authority.kind !== "session") return false;
+      return isUnrestricted(authority.session);
     },
 
     async describeForCustomer(projectId, input) {

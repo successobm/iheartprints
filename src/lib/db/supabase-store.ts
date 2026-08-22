@@ -10,6 +10,8 @@ import {
   readStoredPaymentTransactionStatus,
   readStoredProductionProfile,
   readGarmentSizeClass,
+  readHalftoneSettings,
+  readProductionTreatment,
   readStoredProductionUnlockStatus,
   readStoredRequestedProductionOutput,
 } from "@/lib/domain/types";
@@ -203,6 +205,11 @@ type DbBrief = {
   production_size_confirmed_at: string | null;
   production_size_confirmed_width_in: number | null;
   production_size_confirmed_max_height_in: number | null;
+  /** Print'em All Phase 2. Untyped at the row boundary — narrowed by `readProductionTreatment`, which reads anything unrecognized as standard raster. */
+  production_treatment: string | null;
+  /** Print'em All Phase 2. Raw JSONB — narrowed fail-closed by `readHalftoneSettings`; a partial document is no settings, never defaults filled in. */
+  halftone_settings: unknown;
+  production_treatment_selected_at: string | null;
   /** Sprint A2. Untyped `string | null` at the row boundary — narrowed by `readStoredRequestedProductionOutput`, which fails closed on anything unrecognized. */
   requested_production_output: string | null;
   preferred_colors: string[] | null;
@@ -348,6 +355,8 @@ type DbFinalArtworkJob = {
   production_width_in: number | string | null;
   /** Sprint A2 Correction 2: raw column; narrowed fail-closed in `mapFinalArtworkJob`. */
   requested_production_output: string | null;
+  /** Print'em All Phase 2: frozen treatment identity. NULL = legacy job predating treatment binding. */
+  production_treatment_key: string | null;
   artwork_version_id: string;
   status: FinalArtworkJobStatus;
   attempts: number;
@@ -440,6 +449,17 @@ function mapBrief(row: DbBrief): TShirtDesignBrief {
     productionSizeConfirmedWidthIn: row.production_size_confirmed_width_in,
     productionSizeConfirmedMaxHeightIn:
       row.production_size_confirmed_max_height_in,
+    // Print'em All Phase 2: an unrecognized treatment reads as standard
+    // raster — the representation whose validation nothing was relaxed for.
+    // Failing toward the SAFE representation is the point: a build that
+    // cannot interpret a treatment must not produce a plate under rules it
+    // does not have.
+    productionTreatment: readProductionTreatment(row.production_treatment),
+    // Fail-closed, unlike the treatment above, and the asymmetry is
+    // deliberate: these values ARE the plate, so a partial document means
+    // "not reproducible", never "reproducible with defaults in the gaps".
+    halftoneSettings: readHalftoneSettings(row.halftone_settings),
+    productionTreatmentSelectedAt: row.production_treatment_selected_at,
     // Sprint A2 Correction 2 (Goal 12): FAIL CLOSED. An unrecognized value
     // becomes the sentinel, never `null` — an older build that cannot read
     // what the customer asked for must refuse to produce, not assume PNG.
@@ -696,6 +716,11 @@ function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
     requestedProductionOutput: readStoredRequestedProductionOutput(
       row.requested_production_output,
     ),
+    // Print'em All Phase 2: read raw, never narrowed. This is an opaque
+    // IDENTITY string whose only job is to compare equal or unequal to the
+    // project's current key — normalizing it would be able to make two
+    // genuinely different production intents look like one.
+    productionTreatmentKey: row.production_treatment_key ?? null,
     artworkVersionId: row.artwork_version_id,
     status: row.status,
     attempts: row.attempts,
@@ -998,6 +1023,19 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.productionSizeConfirmedMaxHeightIn !== undefined)
       payload.production_size_confirmed_max_height_in =
         patch.productionSizeConfirmedMaxHeightIn;
+    // Print'em All Phase 2: the three treatment columns are always written
+    // TOGETHER by `DesignBriefCapability.selectProductionTreatment` (and
+    // cleared together when a treatment is retracted), for the same reason the
+    // confirmation columns above are — a treatment recorded without its
+    // settings, or settings without the timestamp that says a human chose
+    // them, is not a treatment.
+    if (patch.productionTreatment !== undefined)
+      payload.production_treatment = patch.productionTreatment;
+    if (patch.halftoneSettings !== undefined)
+      payload.halftone_settings = patch.halftoneSettings;
+    if (patch.productionTreatmentSelectedAt !== undefined)
+      payload.production_treatment_selected_at =
+        patch.productionTreatmentSelectedAt;
     if (patch.requestedProductionOutput !== undefined)
       payload.requested_production_output = patch.requestedProductionOutput;
     if (patch.preferredColors !== undefined)
@@ -2280,6 +2318,11 @@ export class SupabaseProjectRepository implements ProjectRepository {
               // the same reason — NULL here now means "enqueued before width
               // binding existed", never "this build forgot".
               production_width_in: input.productionWidthIn,
+              // Print'em All Phase 2: always written explicitly, for the same
+              // reason as the two above — this column's NULL is reserved for
+              // rows enqueued before treatment binding existed and must never
+              // mean "this build forgot".
+              production_treatment_key: input.productionTreatmentKey,
               status: "queued",
             }
           : {
@@ -2288,6 +2331,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
               production_width_in: input.productionWidthIn,
               artwork_version_id: input.artworkVersionId,
               requested_production_output: input.requestedProductionOutput,
+              production_treatment_key: input.productionTreatmentKey,
               status: "queued",
             },
       )

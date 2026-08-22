@@ -38,7 +38,23 @@ import { ALL_SECTIONS_IN_POLICY_ORDER } from "@/capabilities/shared/interview-co
 import { diffEstablishedBriefSections } from "@/capabilities/shared/brief-diff";
 import { resolveProductionWidth } from "@/capabilities/shared/print-placement-dimensions";
 import { describePrintReadySize } from "@/capabilities/shared/print-ready-size";
-import { confirmableSizeFromBox } from "@/capabilities/shared/confirmed-production-size";
+import {
+  confirmableSizeFromBox,
+  productionSizeIsConfirmed,
+} from "@/capabilities/shared/confirmed-production-size";
+import {
+  MAX_HALFTONE_CHOKE_PX,
+  MAX_HALFTONE_LPI,
+  MAX_HALFTONE_MIDTONE,
+  MIN_HALFTONE_CHOKE_PX,
+  MIN_HALFTONE_LPI,
+  MIN_HALFTONE_MIDTONE,
+  assessHalftoneEligibility,
+  normalizeHalftoneSettings,
+  resolveGarmentColor,
+  type HalftoneIneligibilityReason,
+  type HalftoneSettingsRequest,
+} from "@/capabilities/shared/production-treatment";
 import { recommendProductionBox } from "@/capabilities/shared/garment-production-sizing";
 import {
   detectProductionSizeIntent,
@@ -195,6 +211,50 @@ const CONFIRM_FINAL_PATTERN =
  * of undo (`undoLastChange`) is available for the most recently accepted
  * revision.
  */
+/**
+ * Print'em All Phase 2: what an operator surface sends to change the
+ * production treatment.
+ *
+ * Deliberately a REQUEST rather than settings: the caller names the treatment
+ * and whatever controls they moved, and the capability resolves the rest —
+ * defaults for anything unstated, the garment colour from the project's own
+ * authority (never from the request), and the engine version. A surface that
+ * could supply a garment colour or an algorithm version would be able to
+ * record a plate as having been made against something it was not.
+ */
+export interface ProductionTreatmentRequest {
+  treatment: "standard_raster" | "halftone_dtf";
+  halftone?: HalftoneSettingsRequest;
+}
+
+/**
+ * What a non-internal caller is told when they reach the treatment endpoint.
+ *
+ * Deliberately uninformative about WHY, and phrased as a plain unavailability
+ * rather than a permission error. A public customer has no use for the fact
+ * that an internal production tier exists, and a probe must not be able to map
+ * the deployment's entitlement model from the response — the same reasoning
+ * the internal-access route applies to its uniform 401.
+ */
+export const PRODUCTION_TREATMENT_NOT_AVAILABLE_MESSAGE =
+  "Advanced production treatment isn't available for this project.";
+
+/** Internal-operator copy for the hard eligibility refusals. Never customer-facing. */
+function halftoneIneligibilityMessage(
+  reason: HalftoneIneligibilityReason,
+): string {
+  switch (reason) {
+    case "production_size_unconfirmed":
+      return "Confirm the print size before choosing a production treatment — the halftone screen is generated for a confirmed physical size.";
+    case "no_prepared_source":
+      return "DTF halftone treatment runs on approved, background-prepared artwork, and this project has none yet.";
+    case "garment_color_unresolved":
+      return "Set the garment colour first — it is the screen's tonal reference point, and there is no safe value to assume.";
+    default:
+      return "DTF halftone treatment is not available for this project.";
+  }
+}
+
 export interface ConversationCapability {
   /**
    * Sprint A4: `acquisitionSessionId` binds the new project to the session
@@ -304,6 +364,33 @@ export interface ConversationCapability {
   setGarmentSizeClass(
     designId: string,
     garmentSizeClass: GarmentSizeClass | null,
+  ): Promise<ProjectSnapshot>;
+  /**
+   * Print'em All Phase 2: the operator's explicit choice of PRODUCTION
+   * TREATMENT — which apparel-raster representation this project's plate is
+   * made as.
+   *
+   * INTERNAL ONLY, AND SERVER-AUTHORITATIVE (Goal 24). Refuses unless the
+   * project's acquisition session carries the internal entitlement. That
+   * check lives here, on the write boundary, rather than in the surface that
+   * renders the controls: a browser-side condition can decide what a UI
+   * SHOWS, but only a server-side one can decide what the system DOES, and
+   * this phase's whole exposure question is which of the two is load-bearing.
+   *
+   * Also refuses when the treatment cannot honestly be offered — no confirmed
+   * production size, no approved prepared source, no resolvable garment
+   * colour (`assessHalftoneEligibility`). SOFT ineligibility (artwork with no
+   * real midtone) is deliberately NOT refused: Goal 3 says an operator who
+   * deliberately wants the garment-blend look on a flat logo is making a
+   * legitimate production choice, and eligibility gates the OFFER, not the
+   * decision.
+   *
+   * A production-specification change only. It generates nothing, approves no
+   * brief version, marks no concept stale, and reaches no image provider.
+   */
+  selectProductionTreatment(
+    designId: string,
+    selection: ProductionTreatmentRequest,
   ): Promise<ProjectSnapshot>;
   /**
    * Sprint 2M Phase 2B: the customer's explicit "this is my final direction
@@ -1837,6 +1924,68 @@ export function createConversationCapability(
       const current = await repo.getProject(designId);
       if (!current) throw new Error("Project not found");
       return applyRecommendedProductionSize(designId, current);
+    },
+
+    async selectProductionTreatment(designId, selection) {
+      const current = await repo.getProject(designId);
+      if (!current) throw new Error("Project not found");
+
+      // THE GATE. Server-side, on the write, before anything is validated or
+      // persisted — so a forged request, a stale tab, or a curious customer
+      // hitting the endpoint directly all land in the same place.
+      if (!(await acquisition.isInternalProject(designId))) {
+        throw new Error(PRODUCTION_TREATMENT_NOT_AVAILABLE_MESSAGE);
+      }
+
+      // Guarded exactly like a size change, and for the same reason: the
+      // treatment decides what is in the oven, so changing it mid-bake would
+      // leave every figure on screen describing something else.
+      if (current.project.status === "finalizing") {
+        throw new Error(
+          "Your print-ready artwork is being prepared right now — I can't change the production treatment until that finishes",
+        );
+      }
+
+      if (selection.treatment === "standard_raster") {
+        await designBrief.clearProductionTreatment(designId);
+        const cleared = await repo.getProject(designId);
+        if (!cleared) throw new Error("Project not found");
+        return cleared;
+      }
+
+      const garment = resolveGarmentColor(current.brief.shirtColor);
+      const preparation = await repo.getArtworkPreparation(designId);
+      const eligibility = assessHalftoneEligibility({
+        productionCategory: "apparel_raster",
+        productionSizeConfirmed: productionSizeIsConfirmed(current.brief),
+        preparedSourceAvailable:
+          preparation?.status === "approved" && Boolean(preparation.preparedAssetId),
+        garment,
+        // Not measured here. Tonal content is the SOFT signal, and this
+        // boundary only enforces the hard ones — decoding the prepared raster
+        // to refuse an operator's deliberate choice would be both expensive
+        // and, per Goal 3, wrong.
+        tone: { visiblePixelCount: 1, midtoneFraction: 1 },
+      });
+      if (!eligibility.eligible) {
+        throw new Error(halftoneIneligibilityMessage(eligibility.reason));
+      }
+
+      const settings = normalizeHalftoneSettings(selection.halftone ?? {}, garment!);
+      if (!settings) {
+        throw new Error(
+          `Those screen settings are outside what this build produces: ${MIN_HALFTONE_LPI}-${MAX_HALFTONE_LPI} LPI, 22.5 or 45 degrees, round or ellipse, midtone ${MIN_HALFTONE_MIDTONE}-${MAX_HALFTONE_MIDTONE}, choke ${MIN_HALFTONE_CHOKE_PX}-${MAX_HALFTONE_CHOKE_PX}px.`,
+        );
+      }
+
+      await designBrief.selectProductionTreatment(designId, {
+        selection: { treatment: "halftone_dtf", halftone: settings },
+        selectedAt: new Date().toISOString(),
+      });
+
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new Error("Project not found");
+      return snapshot;
     },
 
     async setGarmentSizeClass(designId, garmentSizeClass) {

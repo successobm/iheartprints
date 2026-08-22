@@ -6,7 +6,30 @@ import type {
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
 import type { CustomerPaymentView } from "@/capabilities/payment";
 import { getCapabilityGraph } from "@/capabilities/composition";
-import type { DesignBriefDecisionAction } from "@/capabilities/conversation";
+import type {
+  DesignBriefDecisionAction,
+  ProductionTreatmentRequest,
+} from "@/capabilities/conversation";
+import { productionSizeIsConfirmed } from "@/capabilities/shared/confirmed-production-size";
+import {
+  DEFAULT_HALFTONE_CHOKE_PX,
+  DEFAULT_HALFTONE_LPI,
+  DEFAULT_HALFTONE_MIDTONE,
+  HALFTONE_DOT_SHAPES,
+  HALFTONE_SCREEN_ANGLES,
+  MAX_HALFTONE_CHOKE_PX,
+  MAX_HALFTONE_LPI,
+  MAX_HALFTONE_MIDTONE,
+  MIN_HALFTONE_CHOKE_PX,
+  MIN_HALFTONE_LPI,
+  MIN_HALFTONE_MIDTONE,
+  assessHalftoneEligibility,
+  recommendedHalftoneSettings,
+  resolveGarmentColor,
+  type GarmentColor,
+  type HalftoneSettings,
+  type ProductionTreatment,
+} from "@/capabilities/shared/production-treatment";
 import {
   toCustomerArtworkVersions,
   toCustomerConceptStatusView,
@@ -284,7 +307,124 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * and what to say it costs; every other fact stays server-side.
    */
   payment: CustomerPaymentView;
+  /**
+   * Print'em All Phase 2: the internal operator's production-treatment
+   * surface.
+   *
+   * OPTIONAL, and absent entirely — not `null` — for every project that is
+   * not an internal operator's. A `null` field would still tell a public
+   * customer's browser that an internal production tier exists; an absent key
+   * tells it nothing. This is presentation only: the server-side gate that
+   * actually decides is
+   * `ConversationCapability.selectProductionTreatment`, so a client that
+   * synthesized this object would gain a rendered panel and no capability.
+   */
+  productionTreatment?: ProductionTreatmentView;
 };
+
+/**
+ * Print'em All Phase 2: everything an operator's treatment panel renders,
+ * resolved server-side.
+ *
+ * The panel computes nothing. Bounds, options, defaults, the resolved garment
+ * colour, and whether the treatment can be offered at all are all decided by
+ * the same domain module production uses, so a control can never offer a
+ * value the pipeline would refuse.
+ */
+export interface ProductionTreatmentView {
+  treatment: ProductionTreatment;
+  /** The persisted settings, or `null` on standard raster. */
+  halftone: HalftoneSettings | null;
+  /** What "Reset to recommended" returns to. `null` when no garment colour resolves. */
+  recommended: HalftoneSettings | null;
+  /** When a human last chose a treatment. `null` = never = the default. */
+  selectedAt: string | null;
+  /** The resolved garment colour, for preview compositing. `null` when unresolvable. */
+  garment: GarmentColor | null;
+  /** Whether the halftone treatment may be OFFERED, and why not when it may not. */
+  offerable: boolean;
+  offerBlockedReason: string | null;
+  /** The bounded control ranges. One definition, served to the UI rather than restated in it. */
+  controls: {
+    lpi: { min: number; max: number; recommended: number };
+    angles: readonly number[];
+    dotShapes: readonly string[];
+    midtone: { min: number; max: number; recommended: number };
+    chokePx: { min: number; max: number; recommended: number };
+  };
+}
+
+/**
+ * Print'em All Phase 2. Resolves the operator surface, or `undefined` when
+ * this project is not an internal operator's.
+ *
+ * Never allowed to take down a snapshot — same advisory-not-a-gate rule the
+ * acquisition and preparation views follow. A failure here hides a panel; it
+ * does not break a page, and it cannot grant anything, because the write side
+ * re-checks the entitlement independently.
+ */
+async function resolveProductionTreatmentView(
+  snapshot: ProjectSnapshot,
+  artworkPreparation: ArtworkPreparationView | null,
+): Promise<ProductionTreatmentView | undefined> {
+  const graph = getCapabilityGraph();
+  try {
+    if (!(await graph.acquisition.isInternalProject(snapshot.project.id))) {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+
+  const garment = resolveGarmentColor(snapshot.brief.shirtColor);
+  // Reuses the preparation view this snapshot already resolved rather than
+  // re-reading it. Two reads could disagree, and "is there an approved
+  // prepared source?" must have one answer per snapshot.
+  const preparedSourceAvailable = Boolean(
+    artworkPreparation?.approved && artworkPreparation.hasPreparedArtwork,
+  );
+
+  const eligibility = assessHalftoneEligibility({
+    productionCategory: "apparel_raster",
+    productionSizeConfirmed: productionSizeIsConfirmed(snapshot.brief),
+    preparedSourceAvailable,
+    garment,
+    // The tonal signal is measured only when the operator asks for a preview —
+    // decoding the prepared raster on every snapshot read would be expensive
+    // and, since tonal content is a SOFT signal an operator may override
+    // anyway, would not change what this panel offers.
+    tone: { visiblePixelCount: 1, midtoneFraction: 1 },
+  });
+
+  return {
+    treatment: snapshot.brief.productionTreatment,
+    halftone: snapshot.brief.halftoneSettings,
+    recommended: garment ? recommendedHalftoneSettings(garment) : null,
+    selectedAt: snapshot.brief.productionTreatmentSelectedAt,
+    garment,
+    offerable: eligibility.eligible,
+    offerBlockedReason: eligibility.eligible ? null : eligibility.rationale,
+    controls: {
+      lpi: {
+        min: MIN_HALFTONE_LPI,
+        max: MAX_HALFTONE_LPI,
+        recommended: DEFAULT_HALFTONE_LPI,
+      },
+      angles: HALFTONE_SCREEN_ANGLES,
+      dotShapes: HALFTONE_DOT_SHAPES,
+      midtone: {
+        min: MIN_HALFTONE_MIDTONE,
+        max: MAX_HALFTONE_MIDTONE,
+        recommended: DEFAULT_HALFTONE_MIDTONE,
+      },
+      chokePx: {
+        min: MIN_HALFTONE_CHOKE_PX,
+        max: MAX_HALFTONE_CHOKE_PX,
+        recommended: DEFAULT_HALFTONE_CHOKE_PX,
+      },
+    },
+  };
+}
 
 async function withConceptStatus(
   snapshot: ProjectSnapshot,
@@ -308,6 +448,10 @@ async function withConceptStatus(
     artworkPreparation,
     acquisition: await resolveAcquisitionView(snapshot),
     payment: await resolvePaymentView(snapshot.project.id),
+    productionTreatment: await resolveProductionTreatmentView(
+      snapshot,
+      artworkPreparation,
+    ),
   };
 }
 
@@ -712,6 +856,24 @@ export async function confirmRecommendedProductionSize(
   return withConceptStatus(
     await getCapabilityGraph().conversation.confirmRecommendedProductionSize(
       projectId,
+    ),
+  );
+}
+
+/**
+ * Print'em All Phase 2: the operator's PRODUCTION TREATMENT choice.
+ *
+ * Internal-operator only; the entitlement check is inside the capability, on
+ * the write, never here and never in the route.
+ */
+export async function selectProductionTreatment(
+  projectId: string,
+  selection: ProductionTreatmentRequest,
+): Promise<ApiProjectSnapshot> {
+  return withConceptStatus(
+    await getCapabilityGraph().conversation.selectProductionTreatment(
+      projectId,
+      selection,
     ),
   );
 }
