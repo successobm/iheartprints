@@ -21,7 +21,20 @@ describe("PreviewBackgroundControl", () => {
 
     assert.match(html, /role="radiogroup"/);
     assert.match(html, new RegExp(PREVIEW_BACKGROUND_COPY.label));
-    assert.match(html, /data-preview-background="white"/);
+    // Tracks whatever the default is rather than pinning a colour here — the
+    // default itself is asserted once, in `preview-background.test.ts`.
+    assert.match(
+      html,
+      new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`),
+    );
+    assert.match(
+      html,
+      new RegExp(
+        `data-preview-background-option="${DEFAULT_PREVIEW_BACKGROUND}"[^>]*aria-checked="true"` +
+          `|aria-checked="true"[^>]*data-preview-background-option="${DEFAULT_PREVIEW_BACKGROUND}"`,
+      ),
+      "the default surface must be the selected one",
+    );
     assert.match(html, /data-preview-background-option="white"/);
     assert.match(html, /data-preview-background-option="gray"/);
     assert.match(html, /data-preview-background-option="black"/);

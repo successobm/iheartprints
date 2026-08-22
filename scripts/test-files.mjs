@@ -121,6 +121,10 @@ export const TEST_FILES = [
   "src/capabilities/worker-scheduler/worker-auth.test.ts",
   "src/capabilities/worker-scheduler/worker-rate-limiter.test.ts",
   "src/capabilities/worker-scheduler/worker-scheduler-capability.test.ts",
+  // The local store resolves its path per call, so a suite that reaches this
+  // module through its STATIC import graph still writes to its own temp
+  // workspace and never to the developer's real .data/sprint1-store.json.
+  "src/lib/db/local-store-isolation.test.ts",
   "src/lib/db/supabase-store.generation-jobs.test.ts",
   "src/app/api/worker/generation/route.test.ts",
   "src/capabilities/conversation-understanding/conversation-understanding-capability.test.ts",
@@ -208,6 +212,14 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/artwork-preparation-capability.test.ts",
   "src/capabilities/artwork-preparation/bowling-upload-regression.test.ts",
   "src/capabilities/artwork-preparation/no-paid-provider.test.ts",
+  // Garment colour is production context, never authority over customer
+  // pixels: preparation must be byte-identical on a white and a black shirt.
+  "src/capabilities/artwork-preparation/garment-color-preparation-isolation.test.ts",
+  // The prepared asset is reviewable, not guaranteed unchanged: same-colour
+  // design content connected to the background goes with it, so the copy
+  // stops promising otherwise and the advisory is derived from evidence
+  // `isolateBackground` already records.
+  "src/capabilities/artwork-preparation/prepared-review-truthfulness.test.ts",
   // Phase 1 follow-up: enclosed background cavities (letter counters, ring
   // interiors) removed, intentional black artwork preserved.
   "src/capabilities/artwork-preparation/background-cavities.test.ts",
@@ -232,6 +244,11 @@ export const TEST_FILES = [
   "src/components/chat/guided-cleanup-zoom.test.ts",
   "src/components/chat/guided-cleanup-interaction.test.ts",
   "src/components/chat/GuidedCleanupWorkspace.test.tsx",
+  // The inspection surface. These existed but were never registered, so the
+  // default could change without a single suite noticing — which is exactly
+  // what needed noticing when it moved from White to Gray.
+  "src/components/chat/preview-background.test.ts",
+  "src/components/chat/PreviewBackgroundControl.test.tsx",
   "src/components/chat/uploaded-artwork-flow.test.ts",
   "src/components/chat/UploadedArtworkPanel.test.tsx",
   "src/app/api/projects/[projectId]/artwork-upload/route.test.ts",

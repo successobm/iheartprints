@@ -8,6 +8,10 @@ import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size"
 import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
 
 import { ArtworkComparison } from "./ArtworkComparison";
+import {
+  DEFAULT_PREVIEW_BACKGROUND,
+  PREVIEW_BACKGROUND_COLORS,
+} from "./preview-background";
 import { UploadedArtworkPanel } from "./UploadedArtworkPanel";
 import { WorkflowChoiceCard } from "./WorkflowChoiceCard";
 import {
@@ -33,6 +37,13 @@ function preparation(
       enhancementNeeded: true,
     },
     hasPreparedArtwork: true,
+    // The neutral variant. Suites that exercise the review advisory override
+    // it; nothing else should depend on its wording.
+    preparedReview: {
+      headline: "Background prepared",
+      guidance: "Review the artwork below before continuing.",
+      sharesBackgroundColor: false,
+    },
     preparedRevision: "rev-fixture-prepared",
     approved: false,
     widthPx: 979,
@@ -312,7 +323,9 @@ describe("UploadedArtworkPanel", () => {
     assert.doesNotMatch(approved, /Approve|Finalize|Download|Enhance now/i);
 
     assert.match(approved, /Background preparation complete/);
-    assert.match(approved, /removed the background and preserved your artwork/);
+    // No categorical preservation promise for the PREPARED asset.
+    assert.match(approved, /removed the background from the artwork you uploaded/);
+    assert.doesNotMatch(approved, /preserved your artwork|design itself is unchanged/);
     assert.match(
       approved,
       /still needs to be enhanced before we can create the final print-ready file/,
@@ -535,8 +548,11 @@ describe("ArtworkComparison", () => {
     assert.match(html, /data-preview-background-option="white"/);
     assert.match(html, /data-preview-background-option="gray"/);
     assert.match(html, /data-preview-background-option="black"/);
-    assert.match(html, /data-comparison-surface="prepared"[^>]*data-preview-background="white"|data-preview-background="white"[^>]*data-comparison-surface="prepared"/);
-    assert.match(html, /#FFFFFF/);
+    assert.match(html, new RegExp(
+      `data-comparison-surface="prepared"[^>]*data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"` +
+        `|data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"[^>]*data-comparison-surface="prepared"`,
+    ));
+    assert.match(html, new RegExp(PREVIEW_BACKGROUND_COLORS[DEFAULT_PREVIEW_BACKGROUND]));
     assert.match(html, /object-contain/);
     assert.doesNotMatch(html, /object-cover/);
   });

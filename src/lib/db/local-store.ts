@@ -111,8 +111,35 @@ interface LocalDatabase {
   artworkPreparations: ArtworkPreparation[];
 }
 
-const DATA_DIR = path.join(process.cwd(), ".data");
-const DATA_FILE = path.join(DATA_DIR, "sprint1-store.json");
+/**
+ * The on-disk store location, resolved PER CALL and never frozen at module
+ * load.
+ *
+ * These were `const DATA_DIR = path.join(process.cwd(), ".data")` evaluated at
+ * import time, and that made the path a function of WHEN this module first
+ * entered the graph rather than of where the process is actually working.
+ *
+ * Automated suites isolate themselves by `mkdtemp` + `process.chdir` inside
+ * `before()`. A suite whose STATIC import graph reaches this module — e.g. via
+ * `@/capabilities/composition` — evaluates it while cwd is still the repo
+ * root, so the constants bound to the developer's real
+ * `.data/sprint1-store.json` before the `chdir` ever ran, and every write the
+ * suite made landed in it. Nothing in the test was wrong; the path was already
+ * decided. `production-treatment-authorization.test.ts` wrote 36 rows into the
+ * real local store this way.
+ *
+ * Resolving per call makes the temp-dir `chdir` authoritative for whoever
+ * chdir'd, regardless of import order. Production behaviour is unchanged:
+ * `next dev` / `next start` never change cwd, so every call returns exactly
+ * what the frozen constant used to hold.
+ */
+function dataDir(): string {
+  return path.join(process.cwd(), ".data");
+}
+
+function dataFile(): string {
+  return path.join(dataDir(), "sprint1-store.json");
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -143,7 +170,7 @@ function emptyDb(): LocalDatabase {
 
 async function readDb(): Promise<LocalDatabase> {
   try {
-    const raw = await fs.readFile(DATA_FILE, "utf8");
+    const raw = await fs.readFile(dataFile(), "utf8");
     const parsed = JSON.parse(raw) as Partial<LocalDatabase>;
     // Normalize Sprint 1/2D local JSON that predates design_brief_versions /
     // artwork designBriefVersionId / Sprint 2F brief fields / interview
@@ -327,8 +354,8 @@ async function readDb(): Promise<LocalDatabase> {
 }
 
 async function writeDb(db: LocalDatabase): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(DATA_FILE, JSON.stringify(db, null, 2), "utf8");
+  await fs.mkdir(dataDir(), { recursive: true });
+  await fs.writeFile(dataFile(), JSON.stringify(db, null, 2), "utf8");
 }
 
 function snapshot(db: LocalDatabase, projectId: string): ProjectSnapshot | null {

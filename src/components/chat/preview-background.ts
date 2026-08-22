@@ -15,8 +15,25 @@ export const PREVIEW_BACKGROUNDS = ["white", "gray", "black"] as const;
 
 export type PreviewBackground = (typeof PREVIEW_BACKGROUNDS)[number];
 
-/** Strongest practical inspection surface for dark residue and holes. */
-export const DEFAULT_PREVIEW_BACKGROUND: PreviewBackground = "white";
+/**
+ * Neutral by default, because the default must not favour either half of the
+ * artwork.
+ *
+ * This was `"white"`, chosen as the strongest surface for spotting dark
+ * residue. It is — but it is also the worst possible surface for artwork that
+ * is largely WHITE. The audited bowling logo is built for a dark garment: its
+ * outer ring, tagline, pin bodies and letter faces are all white, and against
+ * a white inspection surface every one of them disappears while sitting at
+ * full alpha. The prepared file was intact and the preview made it look
+ * destroyed, at exactly the moment the customer has to decide whether to
+ * approve it.
+ *
+ * Mid-gray is the only one of the three that is honest about light AND dark
+ * content at once. White and Black stay one click away as targeted checks —
+ * White for dark residue, Black for light residue — which is what they are
+ * actually good at.
+ */
+export const DEFAULT_PREVIEW_BACKGROUND: PreviewBackground = "gray";
 
 export const PREVIEW_BACKGROUND_COLORS: Record<PreviewBackground, string> = {
   white: "#FFFFFF",
@@ -30,7 +47,8 @@ export const PREVIEW_BACKGROUND_COPY = {
   helper: "Check your artwork on different backgrounds before approving it.",
   approvalGuidance:
     "Make sure all parts of your design are still there and the background looks clean.",
-  approvalTip: "Try White to spot dark background residue.",
+  approvalTip:
+    "Gray shows light and dark artwork at once. Try White to spot dark background residue, Black to spot light residue.",
   options: {
     white: "White",
     gray: "Gray",

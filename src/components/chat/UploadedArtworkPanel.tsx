@@ -476,11 +476,15 @@ function CompareStep({
   return (
     <div>
       <p className="text-sm font-semibold text-ink">
-        Here&apos;s your artwork, prepared
+        {preparation.preparedReview?.headline ?? "Here's your artwork, prepared"}
       </p>
       <p className="mt-1 text-sm text-muted">
-        Compare them side by side. Nothing about your design was changed — only
-        the background around it.
+        {preparation.preparedReview?.guidance ??
+          "Review the artwork below before continuing."}
+      </p>
+      <p className="mt-1 text-sm text-muted">
+        The artwork you uploaded is saved exactly as it was, so nothing here is
+        permanent until you approve it.
       </p>
 
       <div className="mt-3">

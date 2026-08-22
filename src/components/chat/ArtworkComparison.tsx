@@ -81,7 +81,11 @@ export function ArtworkComparison({
         />
         <ComparisonTile
           label="Prepared"
-          caption="Background removed. The design itself is unchanged."
+          // The Original tile's "untouched" claim is true and stays. This one
+          // cannot make the same promise: removal takes background-coloured
+          // pixels that reach the border, and a design element drawn in that
+          // colour and touching the background goes with them.
+          caption="Background removed. Check your design before continuing."
           image={prepared}
           surface="prepared"
           previewBackground={previewBackground}

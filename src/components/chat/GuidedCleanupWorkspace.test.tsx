@@ -159,16 +159,23 @@ describe("GuidedCleanupWorkspace", () => {
   it("Phase 1.7 UX: wheel zoom does not change preparedRevision or QA background", () => {
     const html = render();
     assert.match(html, /data-prepared-revision="rev-test"/);
-    assert.match(html, /data-preview-background="white"/);
+    assert.match(html, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
     assert.match(html, /data-cleanup-tool="region"/);
     assert.match(html, /src="https:\/\/signed\.example\/prepared\.png"/);
   });
 
-  it("A: workspace defaults to White QA background", () => {
+  it("A: workspace opens on the default QA background", () => {
+    // Tracks the shared default rather than restating a colour. The default
+    // itself is asserted once, in `preview-background.test.ts`.
     const html = render();
-    assert.equal(DEFAULT_PREVIEW_BACKGROUND, "white");
-    assert.match(html, /data-preview-background="white"/);
-    assert.match(html, new RegExp(PREVIEW_BACKGROUND_COLORS.white));
+    assert.match(
+      html,
+      new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`),
+    );
+    assert.match(
+      html,
+      new RegExp(PREVIEW_BACKGROUND_COLORS[DEFAULT_PREVIEW_BACKGROUND]),
+    );
     assert.match(html, new RegExp(PREVIEW_BACKGROUND_COPY.label));
   });
 
@@ -180,8 +187,13 @@ describe("GuidedCleanupWorkspace", () => {
     assert.doesNotThrow(() => {
       const html = render();
       assert.match(html, /data-qa-surface="preview-background"/);
-      assert.match(html, /data-preview-background="white"/);
-      assert.match(html, /background-color:#FFFFFF/);
+      assert.match(html, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
+      assert.match(
+        html,
+        new RegExp(
+          `background-color:${PREVIEW_BACKGROUND_COLORS[DEFAULT_PREVIEW_BACKGROUND]}`,
+        ),
+      );
       assert.match(html, /Preview Background/);
       assert.match(html, /data-preview-background-option="white"/);
     });
@@ -251,20 +263,20 @@ describe("GuidedCleanupWorkspace", () => {
     });
     assert.match(pending, /data:image\/png;base64,candidate-token/);
     assert.match(pending, /data-candidate-highlight-frame/);
-    assert.match(pending, /data-preview-background="white"/);
+    assert.match(pending, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
     assert.match(pending, /Remove This Area/);
     // While a preview is pending, Undo yields to Confirm/Cancel (unchanged).
     assert.doesNotMatch(pending, /Undo Last Removal/);
 
     const afterRemovals = render({ removalCount: 2, pendingHighlight: null });
     assert.match(afterRemovals, /Undo Last Removal/);
-    assert.match(afterRemovals, /data-preview-background="white"/);
+    assert.match(afterRemovals, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
   });
 
   it("H: zoom factor and preview background are independently attributed", () => {
     const html = render();
     assert.match(html, /data-zoom-factor="1"/);
-    assert.match(html, /data-preview-background="white"/);
+    assert.match(html, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
     // Fit is the only zoom reset path; QA background sits beside the zoom
     // toolbar and does not own Fit/scroll reset.
     assert.match(html, /aria-label="Fit"/);
@@ -279,7 +291,7 @@ describe("GuidedCleanupWorkspace", () => {
       },
     });
     assert.match(html, />Cancel</);
-    assert.match(html, /data-preview-background="white"/);
+    assert.match(html, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
   });
 
   it("K/L/M: confirm, undo, and Done remain available as before", () => {
@@ -439,6 +451,8 @@ describe("ArtworkPreviewModal — Enlarge stays view-only", () => {
       }),
     );
 
+    // Explicitly asked for White above, so White is what must render — an
+    // operator's chosen inspection surface outranks the default.
     assert.match(html, /data-preview-background="white"/);
     assert.match(html, new RegExp(PREVIEW_BACKGROUND_COLORS.white));
     assert.doesNotMatch(html, /Use Prepared Artwork|Approve/i);

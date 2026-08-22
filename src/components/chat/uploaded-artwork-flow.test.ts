@@ -24,6 +24,7 @@ function preparation(
       enhancementNeeded: false,
     },
     hasPreparedArtwork: false,
+    preparedReview: null,
     preparedRevision: null,
     approved: false,
     widthPx: 979,

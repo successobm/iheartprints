@@ -84,8 +84,10 @@ import {
 import {
   describeArtworkForCustomer,
   describeGuidedCleanupOutcome,
+  describePreparedArtworkReview,
   type ArtworkPreparationCustomerView,
   type GuidedCleanupOutcomeCode,
+  type PreparedArtworkReviewCopy,
 } from "./preparation-copy";
 import { opaquePreparedRevision } from "./prepared-revision";
 import { classifyRepairability } from "./repairability";
@@ -160,6 +162,12 @@ export interface ArtworkPreparationView {
    * turn back into a removal request.
    */
   guidedCleanup: GuidedCleanupStateView;
+  /**
+   * What to tell the customer about the PREPARED asset before they approve
+   * it, derived from evidence `isolateBackground` already recorded. `null`
+   * until a prepared asset exists. Advisory: it never blocks approval.
+   */
+  preparedReview: PreparedArtworkReviewCopy | null;
   /**
    * Phase 1.4: opaque identity of the current prepared derivation. Changes on
    * every confirm/undo (new prepared asset). Unchanged by cleanup_preview.
@@ -342,6 +350,10 @@ export function createArtworkPreparationCapability(
       classification: assessment.classification,
       customer: describeArtworkForCustomer(analysis, assessment),
       hasPreparedArtwork: preparation.preparedAssetId !== null,
+      preparedReview:
+        preparation.preparedAssetId === null
+          ? null
+          : describePreparedArtworkReview(preparation.preparation),
       preparedRevision: opaquePreparedRevision(preparation.preparedAssetId),
       approved: preparation.status === "approved",
       widthPx: analysis.widthPx,

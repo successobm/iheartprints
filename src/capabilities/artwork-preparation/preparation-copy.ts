@@ -75,8 +75,14 @@ export function describeApprovedPreparation(
 ): ApprovedPreparationCopy {
   return {
     headline: "Background preparation complete",
-    summary:
-      "We've removed the background and preserved your artwork.",
+    // NOT "and preserved your artwork". Background isolation removes pixels
+    // that are the background's colour AND connected to the image border; it
+    // has no way to tell such a pixel apart from a design element drawn in
+    // that same colour and touching the background. On the audited bowling
+    // logo the black keylines around the lettering went with the background,
+    // because at the pixel level they ARE the background. A categorical
+    // preservation promise is one this pipeline cannot keep, so it isn't made.
+    summary: "We've removed the background from the artwork you uploaded.",
     nextStepMessage: enhancementNeeded
       ? "This artwork still needs to be enhanced before we can create the final print-ready file."
       : "This prepared artwork is ready for final print preparation.",
@@ -308,4 +314,77 @@ function resolutionMessageFor(
 function formatInches(value: number): string {
   const rounded = Math.round(value * 100) / 100;
   return `${rounded}"`;
+}
+
+/**
+ * Existing Artwork → Print Ready: what the customer is told about a PREPARED
+ * asset, before they approve it.
+ *
+ * ## Why this is not one fixed sentence
+ *
+ * Background isolation removes pixels that match the detected background
+ * colour and are reachable from the image border. When a design is drawn in
+ * that same colour and touches the background — black keylines on a black
+ * plate — those pixels are, at the pixel level, indistinguishable from the
+ * background, and they go with it. That is a real limitation of the removal
+ * semantics, not a bug in them, and the copy has to be honest about it
+ * without frightening a customer whose artwork came out fine.
+ *
+ * ## The evidence, and its exact strength
+ *
+ * `interiorBackgroundColoredPixelsPreserved` counts visible pixels that match
+ * the background colour and SURVIVED, because no border-connected path
+ * reached them. It is already recorded by `isolateBackground` for every
+ * preparation; nothing here re-measures the image, and no removal decision
+ * changes.
+ *
+ * Above zero, that count is proof of ONE thing: the design contains content
+ * painted in the background's own colour. It is NOT proof that anything was
+ * wrongly removed — the pipeline cannot know that. But it is exactly the
+ * precondition for the failure mode, so it is the honest trigger for a
+ * REVIEW PROMPT and nothing stronger. Measured across the fixture set it
+ * separates cleanly: zero for plain light/dark backgrounds, non-zero for the
+ * bowling logo, the finger-hole ball and the intentional drop shadow.
+ *
+ * Advisory only. It never blocks approval, never rejects artwork, and never
+ * claims damage occurred.
+ */
+export interface PreparedArtworkReviewCopy {
+  headline: string;
+  guidance: string;
+  /**
+   * True when the design provably contains content in the background's own
+   * colour, so same-colour connections may have been removed with it.
+   */
+  sharesBackgroundColor: boolean;
+}
+
+/** The subset of the preparation record this decision reads. */
+export interface PreparedArtworkReviewEvidence {
+  interiorBackgroundColoredPixelsPreserved?: unknown;
+}
+
+export function describePreparedArtworkReview(
+  record: PreparedArtworkReviewEvidence | null | undefined,
+): PreparedArtworkReviewCopy {
+  const preserved = record?.interiorBackgroundColoredPixelsPreserved;
+  const sharesBackgroundColor =
+    typeof preserved === "number" && Number.isFinite(preserved) && preserved > 0;
+
+  if (!sharesBackgroundColor) {
+    return {
+      headline: "Background prepared",
+      guidance: "Review the artwork below before continuing.",
+      sharesBackgroundColor: false,
+    };
+  }
+
+  return {
+    headline: "Background prepared — review recommended",
+    // Says what the count actually proves ("uses the same colour as"), not
+    // what it would be convenient to imply ("we removed part of your design").
+    guidance:
+      "Some of your design uses the same colour as the background. Check the prepared artwork on Gray, White, and Black before continuing.",
+    sharesBackgroundColor: true,
+  };
 }
