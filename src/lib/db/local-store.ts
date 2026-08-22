@@ -10,6 +10,7 @@ import {
   DEFAULT_PRODUCTION_TREATMENT,
   STANDARD_RASTER_TREATMENT_KEY,
   emptyInterviewState,
+  isActiveFinalArtworkJobStatus,
   isOutstandingPaymentTransaction,
   productionIntentMatches,
   readStoredPaymentEventOutcome,
@@ -1898,6 +1899,14 @@ export class LocalProjectRepository implements ProjectRepository {
           item.projectId === projectId &&
           item.finalDirectionApprovalId === finalDirectionApprovalId,
       ) ?? null
+    );
+  }
+
+  async listActiveFinalArtworkJobs(projectId: string): Promise<FinalArtworkJob[]> {
+    const db = await readDb();
+    return db.finalArtworkJobs.filter(
+      (item) =>
+        item.projectId === projectId && isActiveFinalArtworkJobStatus(item.status),
     );
   }
 

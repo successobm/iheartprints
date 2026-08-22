@@ -205,6 +205,9 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           onChooseGarmentSize={props.onChooseGarmentSize}
           finalizationStatus={props.finalizationStatus ?? "not_requested"}
           onPrepareForPrint={props.onPrepareForPrint}
+          preparesDifferentTreatment={
+            props.productionTreatment?.treatment === "halftone_dtf"
+          }
           treatmentControls={
             // Print'em All Phase 2: rendered INSIDE the approved step rather
             // than appended after it, so it lands between the size
@@ -588,6 +591,7 @@ function ApprovedStep({
   finalizationStatus,
   onPrepareForPrint,
   treatmentControls,
+  preparesDifferentTreatment,
 }: {
   preparation: ArtworkPreparationView;
   busy: boolean;
@@ -601,6 +605,7 @@ function ApprovedStep({
   onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   finalizationStatus: CustomerFinalizationStatus;
   onPrepareForPrint?: () => void;
+  preparesDifferentTreatment?: boolean;
   /**
    * Print'em All Phase 2: the internal operator's production-treatment
    * controls, or `null`.
@@ -640,6 +645,7 @@ function ApprovedStep({
         finalizationStatus={finalizationStatus}
         onPrepareForPrint={onPrepareForPrint}
         treatmentControls={treatmentControls}
+        preparesDifferentTreatment={preparesDifferentTreatment}
       />
     </div>
   );
@@ -665,6 +671,7 @@ function PrintReadyStep({
   finalizationStatus,
   onPrepareForPrint,
   treatmentControls,
+  preparesDifferentTreatment,
 }: {
   enhancementNeeded: boolean;
   busy: boolean;
@@ -677,6 +684,12 @@ function PrintReadyStep({
   finalizationStatus: CustomerFinalizationStatus;
   onPrepareForPrint?: () => void;
   treatmentControls?: ReactNode;
+  /**
+   * Print'em All Phase 2: true when the production treatment now differs from
+   * the continuous-tone attempt that failed, so the action about to run is a
+   * genuinely different piece of work rather than a repeat of the failed one.
+   */
+  preparesDifferentTreatment?: boolean;
 }) {
   // The ONE state that legitimately replaces the production authorities
   // rather than sitting alongside them: work is in the oven right now, and
@@ -795,11 +808,19 @@ function PrintReadyStep({
             onClick={onPrepareForPrint}
             className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {retryableFailure
-              ? PRINT_READY_RETRY_ACTION_LABEL
-              : finalizationStatus === "needs_review"
-                ? "Try Again"
-                : copy.actionLabel}
+            {/* Print'em All Phase 2 (Goal 11): after a failed Standard Raster
+                attempt, choosing DTF Halftone makes the next action a
+                different piece of work — it prepares a screened plate and
+                never re-sends the failed reconstruction request. Calling that
+                "Retry Preparation" would describe an action that does not
+                happen. */}
+            {retryableFailure && preparesDifferentTreatment
+              ? copy.actionLabel
+              : retryableFailure
+                ? PRINT_READY_RETRY_ACTION_LABEL
+                : finalizationStatus === "needs_review"
+                  ? "Try Again"
+                  : copy.actionLabel}
           </button>
         </>
       ) : null}

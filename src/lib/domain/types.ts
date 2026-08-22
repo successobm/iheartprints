@@ -2157,6 +2157,40 @@ export type FinalArtworkJobStatus =
   | "cancelled";
 
 /**
+ * Print'em All Phase 2 — WHICH JOB STATUSES MEAN "WORK IS ACTUALLY IN FLIGHT".
+ *
+ * The three statuses a worker can still act on: `queued` and `recoverable`
+ * are claimable, `running` is claimed. Everything else is finished —
+ * `completed`, `failed`, and `cancelled` are all terminal, and none of them
+ * is a reason to refuse an operator a change.
+ *
+ * THIS EXISTS BECAUSE `PrintProject.status` CANNOT ANSWER THE QUESTION.
+ * `failJob` deliberately leaves the project at `"finalizing"` (an
+ * infrastructure failure is retryable, so the lifecycle really is still open),
+ * which means a project sits at `"finalizing"` indefinitely after ANY failed
+ * job. Reading that as "a plate is being made right now" produced a live
+ * dead-end: an internal operator whose Standard Raster attempt had failed was
+ * refused every recovery action — garment class, print size, and production
+ * treatment alike — while the very same screen told them the attempt had
+ * finished. Both readings were correct about different fields; only one of
+ * them was the question being asked.
+ *
+ * A lifecycle marker says a story is unfinished. Only a JOB says somebody is
+ * working right now.
+ */
+export const ACTIVE_FINAL_ARTWORK_JOB_STATUSES: readonly FinalArtworkJobStatus[] = [
+  "queued",
+  "running",
+  "recoverable",
+];
+
+export function isActiveFinalArtworkJobStatus(
+  status: FinalArtworkJobStatus,
+): boolean {
+  return ACTIVE_FINAL_ARTWORK_JOB_STATUSES.includes(status);
+}
+
+/**
  * Existing Artwork → Print Ready Phase 2: which customer authority a
  * `FinalArtworkJob` was created under. DERIVED, never a stored column — it is
  * `"prepared_upload"` exactly when `artworkPreparationId` is set, and

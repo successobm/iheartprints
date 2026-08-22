@@ -428,6 +428,84 @@ describe("Internal Existing Artwork must never dead-end on production size", () 
     );
   });
 
+  it("V: after switching to halftone, the action stops calling itself a retry", () => {
+    // The failed attempt was Standard Raster. Preparing a halftone plate is a
+    // different piece of work — it never re-sends the reconstruction request
+    // that failed — so labelling it "Retry Preparation" would describe an
+    // action that does not happen.
+    const stillStandard = visibleText(
+      render({ finalizationStatus: "retryable_failure" }),
+    );
+    assert.match(stillStandard, /Retry Preparation/);
+
+    const nowHalftone = visibleText(
+      render({
+        finalizationStatus: "retryable_failure",
+        size: unconfirmedSize({
+          confirmed: true,
+          confirmedAt: "2026-08-21T00:00:00.000Z",
+          blockingMessage: null,
+        }),
+        treatment: treatmentView({
+          treatment: "halftone_dtf",
+          offerable: true,
+          offerBlockedReason: null,
+          halftone: {
+            lpi: 35,
+            angleDeg: 45,
+            dotShape: "round",
+            midtone: 1,
+            chokePx: 0,
+            garment: { label: "Black", hex: "#000000", rgb: { r: 0, g: 0, b: 0 } },
+            algorithmVersion: "iheartprints_halftone_am_v1",
+          },
+        } as never),
+      }),
+    );
+    assert.doesNotMatch(nowHalftone, /Retry Preparation/);
+    assert.match(nowHalftone, /Prepare Print-Ready Artwork/);
+    // The failure itself is still reported — the banner is informational and
+    // does not disappear just because the plan changed.
+    assert.match(nowHalftone, /Print-ready preparation couldn/);
+  });
+
+  it("L: choosing halftone reveals the screen controls", () => {
+    const text = visibleText(
+      render({
+        finalizationStatus: "retryable_failure",
+        size: unconfirmedSize({
+          confirmed: true,
+          confirmedAt: "2026-08-21T00:00:00.000Z",
+          blockingMessage: null,
+        }),
+        treatment: treatmentView({
+          treatment: "halftone_dtf",
+          offerable: true,
+          offerBlockedReason: null,
+          halftone: {
+            lpi: 35,
+            angleDeg: 45,
+            dotShape: "round",
+            midtone: 1,
+            chokePx: 0,
+            garment: { label: "Black", hex: "#000000", rgb: { r: 0, g: 0, b: 0 } },
+            algorithmVersion: "iheartprints_halftone_am_v1",
+          },
+        } as never),
+      }),
+    );
+    for (const control of [
+      "Line frequency",
+      "Screen angle",
+      "Dot shape",
+      "Tone",
+      "Edge cleanup",
+      "Reset to recommended defaults",
+    ]) {
+      assert.ok(text.includes(control), `${control} must be offered`);
+    }
+  });
+
   it("M: a PUBLIC project renders no treatment controls at all", () => {
     // The server omits the key entirely for a non-internal project, so the
     // panel has nothing to render — and the size authority is unaffected.

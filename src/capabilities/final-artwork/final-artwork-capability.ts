@@ -187,6 +187,25 @@ export interface FinalArtworkCapability {
    * else, and a completed job with no `ready` validation is never returned
    * at all.
    */
+  /**
+   * Print'em All Phase 2 — IS A PLATE BEING MADE RIGHT NOW?
+   *
+   * The only honest source for "production work is in flight", and the
+   * replacement for reading `PrintProject.status === "finalizing"` as though
+   * it meant that.
+   *
+   * `PrintProject.status` is a LIFECYCLE marker: `failJob` deliberately
+   * leaves it at `"finalizing"` after a failure, because the lifecycle really
+   * is still open and the customer's own action re-queues it. A JOB is what
+   * says somebody is working. Conflating the two produced a live dead-end
+   * where an operator whose Standard Raster attempt had failed was refused
+   * every recovery action on the grounds that it was still running.
+   *
+   * Consulted by every guard that must not let an input change mid-bake —
+   * print size, garment class, concept selection, production treatment — so
+   * all four agree, and so a failed attempt can never lock any of them.
+   */
+  isFinalizationInFlight(projectId: string): Promise<boolean>;
   getCurrentProductionAssetId(projectId: string): Promise<string | null>;
   /**
    * Sprint A2 Correction 3: the same resolution, with the job it came from —
@@ -489,6 +508,11 @@ export function createFinalArtworkCapability(
       }
 
       return { preparation, job, productionWidthIn, alreadyRequested };
+    },
+
+    async isFinalizationInFlight(projectId) {
+      const active = await repo.listActiveFinalArtworkJobs(projectId);
+      return active.length > 0;
     },
 
     async getCurrentProductionAssetId(projectId) {

@@ -194,6 +194,7 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork-worker/halftone-production.test.ts",
   "src/capabilities/conversation/production-treatment-authorization.test.ts",
   "src/components/chat/production-treatment-dead-end.test.tsx",
+  "src/capabilities/conversation/operator-recovery-flow.test.ts",
   "src/capabilities/shared/waiting-copy.test.ts",
   "src/capabilities/shared/production-print-size.test.ts",
   "src/capabilities/shared/garment-production-sizing.test.ts",

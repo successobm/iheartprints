@@ -3,6 +3,7 @@ import {
   projectNameFromBrief,
 } from "@/lib/domain/conversation";
 import {
+  ACTIVE_FINAL_ARTWORK_JOB_STATUSES,
   emptyInterviewState,
   OUTSTANDING_PAYMENT_TRANSACTION_STATUSES,
   readStoredPaymentEventOutcome,
@@ -2385,6 +2386,20 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (error) throw error;
     const row = (data as DbFinalArtworkJob[] | null)?.[0];
     return row ? mapFinalArtworkJob(row) : null;
+  }
+
+  async listActiveFinalArtworkJobs(projectId: string): Promise<FinalArtworkJob[]> {
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      // Filtered in the QUERY rather than in JS: this runs on every guarded
+      // mutation, and a project's terminal job history grows without bound
+      // while its active set is almost always empty.
+      .in("status", [...ACTIVE_FINAL_ARTWORK_JOB_STATUSES])
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbFinalArtworkJob[]) ?? []).map(mapFinalArtworkJob);
   }
 
   async listFinalArtworkJobsForApproval(

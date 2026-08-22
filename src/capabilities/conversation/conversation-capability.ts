@@ -941,9 +941,14 @@ export function createConversationCapability(
     }
 
     // Size is decided BEFORE production starts. Once a plate is being made
-    // (or has been made) at a given size, changing the number without
-    // re-preparing would make every displayed figure a lie.
-    if (current.project.status === "finalizing") {
+    // at a given size, changing the number without re-preparing would make
+    // every displayed figure a lie.
+    //
+    // Print'em All Phase 2: "being made" now means an ACTIVE JOB, never
+    // `project.status` — see `isFinalizationInFlight`. A failed attempt left
+    // that status at "finalizing" forever and locked the size control an
+    // operator needed precisely because the attempt had failed.
+    if (await finalArtwork.isFinalizationInFlight(designId)) {
       throw new Error(
         "Your print-ready artwork is being prepared right now — I can't change the print size until that finishes",
       );
@@ -1838,12 +1843,16 @@ export function createConversationCapability(
         );
       }
 
-      // Never silently invalidate production work. `finalizing` has a
-      // claimable/running FinalArtworkJob behind it, and `print_ready` has a
-      // delivered asset the customer is looking at; both are explicit
-      // lifecycle states with their own exits ("Make Another Change"), not
-      // something a selection change may quietly undo.
-      if (current.project.status === "finalizing") {
+      // Never silently invalidate production work. An active job is one
+      // being made right now, and `print_ready` has a delivered asset the
+      // customer is looking at; neither is something a selection change may
+      // quietly undo.
+      //
+      // Print'em All Phase 2: this asked `project.status` for the first half
+      // and got a sticky answer — see `isFinalizationInFlight`. A create_new
+      // project whose finalization had failed could not change its selected
+      // concept either.
+      if (await finalArtwork.isFinalizationInFlight(designId)) {
         throw new Error(
           "Your print-ready artwork is being prepared right now — I can't change the selection until that finishes",
         );
@@ -1898,8 +1907,21 @@ export function createConversationCapability(
           "I'm still updating your concept — once it's ready I can explore new directions",
         );
       }
+      // Print'em All Phase 2 — the last read of the sticky marker as
+      // active-work evidence.
+      //
+      // The two halves of this guard were never the same fact. `print_ready`
+      // is a DELIVERED ASSET the customer is looking at, and it stays a
+      // project-status question. `finalizing` was meant to be "a job is being
+      // worked right now" — but `failJob` deliberately leaves that status in
+      // place after a failure, so a customer whose finalization failed could
+      // never explore new directions again, and was told their artwork "is
+      // already being prepared" when nothing was.
+      //
+      // Same defect, same invariant, and now the same authority as the four
+      // production mutations: only an ACTIVE job counts.
       if (
-        current.project.status === "finalizing" ||
+        (await finalArtwork.isFinalizationInFlight(designId)) ||
         current.project.status === "print_ready"
       ) {
         throw new Error(
@@ -1940,7 +1962,12 @@ export function createConversationCapability(
       // Guarded exactly like a size change, and for the same reason: the
       // treatment decides what is in the oven, so changing it mid-bake would
       // leave every figure on screen describing something else.
-      if (current.project.status === "finalizing") {
+      //
+      // THE LIVE DEAD-END. This is the guard that produced the contradictory
+      // screen — "Print-ready preparation couldn't finish" above, "being
+      // prepared right now" below — because it asked `project.status` rather
+      // than whether any job was actually in flight.
+      if (await finalArtwork.isFinalizationInFlight(designId)) {
         throw new Error(
           "Your print-ready artwork is being prepared right now — I can't change the production treatment until that finishes",
         );
@@ -1996,7 +2023,11 @@ export function createConversationCapability(
       // garment class decides the recommended box, so changing it while a
       // plate is being made would leave every figure on screen describing
       // something other than what is in the oven.
-      if (current.project.status === "finalizing") {
+      //
+      // Print'em All Phase 2: an ACTIVE JOB, never `project.status`. This was
+      // the first refusal a recovering operator hit — the garment chips did
+      // nothing at all.
+      if (await finalArtwork.isFinalizationInFlight(designId)) {
         throw new Error(
           "Your print-ready artwork is being prepared right now — I can't change the garment size until that finishes",
         );

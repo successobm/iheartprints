@@ -138,7 +138,12 @@ describe("Production treatment authorization (Print'em All Phase 2)", () => {
     await repo.setProjectStatus(projectId, "approved");
     await confirmProductionSizeForTests(repo, projectId, { widthIn: 10.5 });
 
-    return { projectId, sessionId: session.id };
+    return {
+      projectId,
+      sessionId: session.id,
+      preparationId: preparation.id,
+      artworkVersionId: artwork!.id,
+    };
   }
 
   it("T: an internal operator may select the halftone treatment, and it persists", async () => {
@@ -286,10 +291,20 @@ describe("Production treatment authorization (Print'em All Phase 2)", () => {
     );
   });
 
-  it("refuses while a plate is being prepared — the treatment decides what is in the oven", async () => {
+  it("refuses while a plate is ACTUALLY being prepared — a live job, not a status", async () => {
+    // The lock is real and still exists. What changed is what it asks:
+    // an ACTIVE JOB, never `PrintProject.status`.
     const repo = await freshRepo();
-    const { projectId } = await setupEligibleProject(repo, { internal: true });
-    await repo.setProjectStatus(projectId, "finalizing");
+    const { projectId, preparationId, artworkVersionId } =
+      await setupEligibleProject(repo, { internal: true });
+    await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "prepared_upload",
+      artworkPreparationId: preparationId,
+      artworkVersionId,
+      productionWidthIn: 10.5,
+      requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
+    });
     const conversation = buildConversation(repo);
 
     await assert.rejects(
@@ -302,6 +317,22 @@ describe("Production treatment authorization (Print'em All Phase 2)", () => {
         return true;
       },
     );
+  });
+
+  it("does NOT refuse merely because project.status is still 'finalizing'", async () => {
+    // The live dead-end, as a unit. `failJob` deliberately leaves the project
+    // at "finalizing" after a failure, so this status alone must never lock a
+    // recovery action — otherwise a failed attempt permanently removes the
+    // controls needed to recover from it.
+    const repo = await freshRepo();
+    const { projectId } = await setupEligibleProject(repo, { internal: true });
+    await repo.setProjectStatus(projectId, "finalizing");
+    const conversation = buildConversation(repo);
+
+    const selected = await conversation.selectProductionTreatment(projectId, {
+      treatment: "halftone_dtf",
+    });
+    assert.equal(selected.brief.productionTreatment, "halftone_dtf");
   });
 
   it("an internal operator can retract back to standard raster in one call", async () => {

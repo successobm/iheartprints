@@ -1102,6 +1102,20 @@ export interface ProjectRepository {
    * Always project-scoped — an approval id from another project can never
    * return rows here.
    */
+  /**
+   * Print'em All Phase 2: every finalization job for this project that a
+   * worker can still act on (`queued` / `running` / `recoverable`).
+   *
+   * Deliberately project-scoped and workflow-agnostic rather than resolved
+   * through an approval or a preparation: the question it answers — "is a
+   * plate being made right now?" — is about the PROJECT, and a job under a
+   * superseded authority that is still running is still running.
+   *
+   * Empty is the common case and means nothing is in flight, whatever
+   * `PrintProject.status` happens to say (see
+   * `ACTIVE_FINAL_ARTWORK_JOB_STATUSES` for why those can disagree).
+   */
+  listActiveFinalArtworkJobs(projectId: string): Promise<FinalArtworkJob[]>;
   listFinalArtworkJobsForApproval(
     projectId: string,
     finalDirectionApprovalId: string,
