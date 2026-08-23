@@ -39,10 +39,11 @@
  * construction.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { AssetCapability } from "@/capabilities/assets";
 import type { DesignBriefCapability } from "@/capabilities/design-brief";
+import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type {
   ArtworkPreparation,
@@ -93,6 +94,24 @@ import {
 import { resolveGarmentColor } from "@/capabilities/shared/production-treatment";
 import { opaquePreparedRevision } from "./prepared-revision";
 import { classifyRepairability } from "./repairability";
+import {
+  buildSeparationMaster,
+  computeRegionMap,
+  runSeparationPostChecks,
+} from "./region-separation";
+import type {
+  SeparationDecisionSet,
+  SeparationReviewView,
+  SubmitRegionDecisionsRequest,
+} from "./region-separation-contracts";
+import {
+  assessSeparationReviewState,
+  buildSeparationReviewView,
+  isDecisionSetComplete,
+  isDecisionSetStale,
+  mergeRegionDecisions,
+  validateSubmitRegionDecisions,
+} from "./separation-review";
 import {
   ArtworkUploadRejectedError,
   sanitizeUploadFilename,
@@ -297,6 +316,41 @@ export interface ArtworkPreparationCapability {
     designId: string,
     role: "original" | "prepared",
   ): Promise<string | null>;
+
+  /**
+   * Intelligent Separation Phase 9: the current consequential-region review
+   * state, recomputed from the immutable original on every call (Goal 3) and
+   * merged with whatever decision set is persisted. Never throws for "no
+   * consequential regions" — that is `review_not_required`, a normal answer.
+   *
+   * NOT internally gated — callers (routes) enforce internal-only access, the
+   * same pattern the production-treatment preview route already uses. This
+   * capability has no concept of "internal" by design (see the module's
+   * Dependencies section); adding one here would be a second place that gate
+   * could be forgotten.
+   */
+  getSeparationReview(designId: string): Promise<SeparationReviewView>;
+  /**
+   * Records an operator's region decisions. Fails closed on any region id,
+   * intent, or hash the CURRENT region map does not recognise (Goal 22) —
+   * never applies a partial write. Recomputes the master and post-checks
+   * immediately so the caller can render a live preview without a second
+   * round trip.
+   */
+  submitRegionDecisions(
+    designId: string,
+    request: SubmitRegionDecisionsRequest,
+  ): Promise<SeparationReviewView>;
+  /**
+   * THE FINAL APPROVAL (Goal 18). Requires every consequential region to
+   * carry an operator decision and the decision set to be current; refuses
+   * otherwise. Builds the master deterministically, uploads it as a NEW
+   * asset, and repoints `preparedAssetId`/`preparedArtworkVersionId` at it —
+   * the exact same fields `approvePreparedArtwork` sets, so
+   * `final-artwork-worker` and every downstream consumer need no changes at
+   * all (Goal: production routing changed? NO).
+   */
+  approveSeparationMaster(designId: string): Promise<SeparationReviewView>;
 }
 
 export function createArtworkPreparationCapability(
@@ -427,6 +481,45 @@ export function createArtworkPreparationCapability(
       );
     }
     return decodePngUpload(downloaded.bytes).image;
+  }
+
+  /**
+   * Intelligent Separation Phase 9: the original's bytes AND decoded image —
+   * the region map's stable identity is pinned against the byte hash, never
+   * the decoded pixels, so it agrees with every prior phase's
+   * `sourceAssetSha256`.
+   */
+  async function loadOriginalImageWithHash(preparation: ArtworkPreparation) {
+    const downloaded = await assets.downloadAssetBytes(preparation.originalAssetId);
+    if (!downloaded) {
+      throw new ArtworkPreparationStateError(
+        "We couldn't find the artwork you uploaded. Please upload it again.",
+      );
+    }
+    return {
+      image: decodePngUpload(downloaded.bytes).image,
+      sha256: createHash("sha256").update(downloaded.bytes).digest("hex"),
+    };
+  }
+
+  /**
+   * Recomputes the current region map from the immutable original and reads
+   * back the persisted decision set, if any. Pure composition of
+   * `computeRegionMap` (region-separation.ts) — never a second source of
+   * region identity.
+   */
+  function computeSeparationState(preparation: ArtworkPreparation, sourceAssetSha256: string, original: RgbaImage) {
+    const analysis = preparation.analysis as unknown as ArtworkAnalysis;
+    const computation = computeRegionMap(
+      original,
+      sourceAssetSha256,
+      analysis.estimatedBackgroundColor,
+      analysis.backgroundTolerance,
+    );
+    const decisionSet = preparation.separation
+      ? (preparation.separation as unknown as SeparationDecisionSet)
+      : null;
+    return { computation, decisionSet };
   }
 
   /**
@@ -1036,6 +1129,24 @@ export function createArtworkPreparationCapability(
         );
       }
 
+      // Intelligent Separation Phase 10: this path approves `preparedAssetId`
+      // as-is — the deterministic background-removal output, with no operator
+      // confirmation of consequential regions. When this artwork's region map
+      // has consequential regions needing a decision, that is exactly the
+      // bowling-logo failure mode (legitimate black artwork touching a black
+      // background, silently dropped) this feature exists to prevent, so this
+      // path must not be reachable. The gate is here, not just in the UI,
+      // because a hidden button is not a security boundary — see
+      // `approveSeparationMaster`, the only approval route once review is
+      // required.
+      const { image: original, sha256 } = await loadOriginalImageWithHash(preparation);
+      const { computation, decisionSet } = computeSeparationState(preparation, sha256, original);
+      if (assessSeparationReviewState(computation.regionMap, decisionSet) !== "review_not_required") {
+        throw new ArtworkPreparationStateError(
+          "This artwork has areas that need your confirmation before it can be used. Please complete the separation review above.",
+        );
+      }
+
       const nextVersionNumber =
         snapshot.artworkVersions.reduce(
           (highest, version) => Math.max(highest, version.versionNumber),
@@ -1094,6 +1205,136 @@ export function createArtworkPreparationCapability(
       await repo.setProjectStatus(designId, "approved");
 
       return toView(updated, brief);
+    },
+
+    async getSeparationReview(designId) {
+      const { preparation } = await loadOwned(designId);
+      const { image: original, sha256 } = await loadOriginalImageWithHash(preparation);
+      const { computation, decisionSet } = computeSeparationState(preparation, sha256, original);
+      const postCheck = decisionSet
+        ? runSeparationPostChecks(
+            original,
+            buildSeparationMaster(original, computation, decisionSet.decisions),
+            computation,
+            decisionSet.decisions,
+          )
+        : null;
+      const isProductionAuthoritative =
+        Boolean(decisionSet?.approvedAt) &&
+        decisionSet?.approvedAssetId !== null &&
+        decisionSet?.approvedAssetId === preparation.preparedAssetId;
+      return buildSeparationReviewView(computation.regionMap, decisionSet, postCheck, isProductionAuthoritative);
+    },
+
+    async submitRegionDecisions(designId, request) {
+      const { preparation } = await loadOwned(designId);
+      const { image: original, sha256 } = await loadOriginalImageWithHash(preparation);
+      const { computation, decisionSet: existing } = computeSeparationState(preparation, sha256, original);
+
+      const validity = validateSubmitRegionDecisions(computation.regionMap, request);
+      if (!validity.ok) {
+        throw new ArtworkPreparationStateError(validity.reason);
+      }
+
+      const merged = mergeRegionDecisions(computation.regionMap, existing, request, new Date().toISOString());
+      await repo.updateArtworkPreparation(preparation.id, {
+        separation: merged as unknown as Record<string, unknown>,
+      });
+
+      const master = buildSeparationMaster(original, computation, merged.decisions);
+      const postCheck = runSeparationPostChecks(original, master, computation, merged.decisions);
+      return buildSeparationReviewView(computation.regionMap, merged, postCheck, false);
+    },
+
+    async approveSeparationMaster(designId) {
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new ArtworkPreparationStateError("Project not found");
+      const { preparation } = await loadOwned(designId);
+      const { image: original, sha256 } = await loadOriginalImageWithHash(preparation);
+      const { computation, decisionSet } = computeSeparationState(preparation, sha256, original);
+
+      if (isDecisionSetStale(computation.regionMap, decisionSet)) {
+        throw new ArtworkPreparationStateError(
+          "This artwork's separation review is out of date. Reload before approving.",
+        );
+      }
+      if (!isDecisionSetComplete(computation.regionMap, decisionSet)) {
+        throw new ArtworkPreparationStateError(
+          "Every highlighted area needs a decision before this preparation can be used.",
+        );
+      }
+
+      const master = buildSeparationMaster(original, computation, decisionSet!.decisions);
+      const postCheck = runSeparationPostChecks(original, master, computation, decisionSet!.decisions);
+      if (!postCheck.passed) {
+        // Unreachable by construction of `buildSeparationMaster` — verified,
+        // never assumed. If it ever fires, refuse rather than silently
+        // producing a plate that fails its own pixel-authority guarantee.
+        throw new ArtworkPreparationStateError(
+          "This preparation could not be safely completed. Please try again or contact support.",
+        );
+      }
+
+      const asset = await assets.uploadCustomerArtwork(designId, {
+        conceptId: `separation-${preparation.id}-${randomUUID()}`,
+        bytes: encodeRgbaToPng(master),
+        contentType: "image/png",
+        widthPx: master.width,
+        heightPx: master.height,
+        hasTransparency: true,
+        kind: "png",
+        metadata: {
+          // Goal 19 lineage: immutable original -> silhouette algorithm ->
+          // region map hash -> operator decisions -> deterministic master.
+          derivedFromAssetId: preparation.originalAssetId,
+          artworkPreparationId: preparation.id,
+          separationLineage: {
+            algorithmVersion: computation.regionMap.algorithmVersion,
+            regionMapHash: computation.regionMap.regionMapHash,
+            silhouetteRadius: computation.regionMap.silhouetteRadius,
+            decisions: decisionSet!.decisions,
+          },
+        },
+      });
+
+      const nextVersionNumber =
+        snapshot.artworkVersions.reduce((highest, v) => Math.max(highest, v.versionNumber), 0) + 1;
+      const [artworkVersion] = await repo.addArtworkVersions(designId, [
+        {
+          versionNumber: nextVersionNumber,
+          kind: "prepared_upload",
+          title: "Your artwork, prepared",
+          summary:
+            "Your uploaded artwork, prepared with operator-confirmed garment-independent separation.",
+          placeholderLabel: "Your artwork",
+          accentColor: "#173F35",
+          designBriefVersionId: null,
+          generationJobId: null,
+          providerKey: null,
+          primaryAssetId: asset.id,
+          thumbnailAssetId: null,
+          sourceArtworkVersionId: null,
+          conceptDirectionKey: null,
+        },
+      ]);
+
+      const approvedAt = new Date().toISOString();
+      const finalDecisionSet = {
+        ...decisionSet!,
+        approvedAt,
+        approvedAssetId: asset.id,
+        postCheckAtApproval: postCheck,
+      };
+      await repo.updateArtworkPreparation(preparation.id, {
+        status: "approved",
+        preparedAssetId: asset.id,
+        preparedArtworkVersionId: artworkVersion!.id,
+        approvedAt,
+        separation: finalDecisionSet as unknown as Record<string, unknown>,
+      });
+      await repo.setProjectStatus(designId, "approved");
+
+      return buildSeparationReviewView(computation.regionMap, finalDecisionSet, postCheck, true);
     },
 
     async resolveImageAssetId(designId, role) {

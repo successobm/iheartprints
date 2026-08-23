@@ -345,6 +345,8 @@ export type UpdateArtworkPreparationInput = Partial<{
   preparation: Record<string, unknown> | null;
   /** Phase 1.2: the customer's ordered guided-cleanup clicks. */
   guidedCleanup: Record<string, unknown> | null;
+  /** Intelligent Separation Phase 9: the operator-confirmed region decision set. */
+  separation: Record<string, unknown> | null;
   approvedAt: string | null;
 }>;
 

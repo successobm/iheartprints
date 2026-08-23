@@ -11,6 +11,7 @@ import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
 import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { approvePreparedArtworkForTests } from "@/test-support/approve-prepared-artwork-for-tests";
 
 import { bowlingStyleArtwork, toPngBytes } from "./artwork-fixtures";
 import { createArtworkPreparationCapability } from "./artwork-preparation-capability";
@@ -101,7 +102,7 @@ describe("Artwork preparation makes zero network calls", () => {
       printPlacement: "full_front",
     });
     await capability.prepareBackground(projectId);
-    const approved = await capability.approvePreparedArtwork(projectId);
+    const approved = await approvePreparedArtworkForTests(capability, projectId);
 
     assert.equal(approved.approved, true);
     assert.deepEqual(networkAttempts, []);
@@ -128,7 +129,7 @@ describe("Artwork preparation makes zero network calls", () => {
       filename: "logo.png",
     });
     await capability.prepareBackground(projectId);
-    await capability.approvePreparedArtwork(projectId);
+    await approvePreparedArtworkForTests(capability, projectId);
 
     // Uploaded artwork is never dressed up as concept generation, and Phase 1
     // never starts production finalization.

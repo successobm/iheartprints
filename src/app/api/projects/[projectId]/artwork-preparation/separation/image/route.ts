@@ -1,0 +1,146 @@
+import { createHash } from "node:crypto";
+
+import { PNG } from "pngjs";
+
+import { getCapabilityGraph } from "@/capabilities/composition";
+import { getProjectRepository } from "@/lib/db";
+import { decodePngUpload } from "@/capabilities/artwork-preparation/image-decode";
+import { analyzeArtwork } from "@/capabilities/artwork-preparation/image-analysis";
+import { computeRegionMap, buildSeparationMaster } from "@/capabilities/artwork-preparation/region-separation";
+import { compositeOverGarment } from "@/capabilities/final-artwork/halftone-screen";
+import { resolveGarmentColor } from "@/capabilities/shared/production-treatment";
+import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
+import type { RegionDecision } from "@/capabilities/artwork-preparation/region-separation-contracts";
+
+type RouteContext = {
+  params: Promise<{ projectId: string }>;
+};
+
+/**
+ * Intelligent Separation Phase 9: renders the images the operator review UI
+ * needs, server-side, from the SAME deterministic functions the capability
+ * uses — never a second implementation of the highlight/composite logic.
+ *
+ * INTERNAL ONLY, ENFORCED SERVER-SIDE (Goal 21/22), same gate and same
+ * uninformative 404 as the rest of this surface.
+ *
+ * `mode`:
+ *   original         the immutable original, unmodified
+ *   region-overlay    the original with ONE region tinted magenta (requires `region`)
+ *   master             the deterministic master built from PERSISTED decisions
+ *                      (or, if none exist yet, none-dropped — i.e. every
+ *                      consequential region shown as ink, so a first-visit
+ *                      preview is never blocked on a decision existing)
+ *   master-preview     the master composited over a requested garment colour
+ *                      (`garment`, a `#RRGGBB` hex) — PREVIEW ONLY, never
+ *                      persisted, never the deliverable (Goal 6).
+ *
+ * Never persisted, never cached anywhere shared — an operator is looking at
+ * their own in-progress, mutable review state.
+ */
+export async function GET(request: Request, context: RouteContext) {
+  try {
+    const { projectId } = await context.params;
+    const graph = getCapabilityGraph();
+
+    if (!(await graph.acquisition.isInternalProject(projectId))) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    const url = new URL(request.url);
+    const mode = url.searchParams.get("mode") ?? "master";
+    if (!["original", "region-overlay", "master", "master-preview"].includes(mode)) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    const repo = getProjectRepository();
+    const preparation = await repo.getArtworkPreparation(projectId);
+    if (!preparation || preparation.projectId !== projectId) {
+      return new Response("Not found", { status: 404 });
+    }
+    const downloaded = await graph.assets.downloadAssetBytes(preparation.originalAssetId);
+    if (!downloaded) return new Response("Not found", { status: 404 });
+
+    const decoded = decodePngUpload(downloaded.bytes);
+    const original = decoded.image;
+
+    if (mode === "original") return pngResponse(encodePng(original));
+
+    const analysis = analyzeArtwork({
+      image: original,
+      format: "image/png",
+      byteSize: downloaded.bytes.length,
+      declaresAlphaChannel: decoded.header.declaresAlphaChannel,
+      printPlacement: null,
+      intendedPrintWidthIn: null,
+    });
+    const sourceAssetSha256 = createHash("sha256").update(downloaded.bytes).digest("hex");
+    const computation = computeRegionMap(
+      original,
+      sourceAssetSha256,
+      analysis.estimatedBackgroundColor,
+      analysis.backgroundTolerance,
+    );
+
+    if (mode === "region-overlay") {
+      const regionId = Number(url.searchParams.get("region"));
+      if (!Number.isFinite(regionId)) {
+        return NextResponseNotFound();
+      }
+      const isKnown = computation.regionMap.consequentialRegions.some((r) => r.regionId === regionId);
+      if (!isKnown) return NextResponseNotFound();
+      return pngResponse(encodePng(overlayRegion(original, computation.label, regionId)));
+    }
+
+    const decisionSet = preparation.separation
+      ? (preparation.separation as unknown as { decisions?: RegionDecision[] })
+      : null;
+    const decisions: RegionDecision[] = decisionSet?.decisions ?? [];
+    const master = buildSeparationMaster(original, computation, decisions);
+
+    if (mode === "master") return pngResponse(encodePng(master));
+
+    // master-preview
+    const garmentParam = url.searchParams.get("garment") ?? "#000000";
+    const garment = resolveGarmentColor(garmentParam) ?? {
+      label: "Preview",
+      hex: "#000000",
+      rgb: { r: 0, g: 0, b: 0 },
+    };
+    return pngResponse(encodePng(compositeOverGarment(master, garment)));
+  } catch (error) {
+    console.error("Failed to render separation review image", error);
+    return new Response("Not found", { status: 404 });
+  }
+}
+
+function overlayRegion(original: RgbaImage, label: Int32Array, regionId: number): RgbaImage {
+  const data = Buffer.from(original.data);
+  for (let i = 0; i < label.length; i += 1) {
+    if (label[i] !== regionId) continue;
+    data[i * 4] = 255;
+    data[i * 4 + 1] = 0;
+    data[i * 4 + 2] = 255;
+    data[i * 4 + 3] = 255;
+  }
+  return { width: original.width, height: original.height, data };
+}
+
+function encodePng(image: RgbaImage): Buffer {
+  const png = new PNG({ width: image.width, height: image.height });
+  image.data.copy(png.data);
+  return PNG.sync.write(png);
+}
+
+function pngResponse(bytes: Buffer): Response {
+  return new Response(new Uint8Array(bytes), {
+    headers: {
+      "Content-Type": "image/png",
+      "Cache-Control": "private, no-store",
+    },
+  });
+}
+
+function NextResponseNotFound(): Response {
+  return new Response("Not found", { status: 404 });
+}

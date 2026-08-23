@@ -397,6 +397,8 @@ type DbArtworkPreparation = {
   preparation: Record<string, unknown> | null;
   /** Phase 1.2. Absent on rows written before the column existed. */
   guided_cleanup?: Record<string, unknown> | null;
+  /** Intelligent Separation Phase 9. Absent on rows written before the column existed. */
+  separation?: Record<string, unknown> | null;
   approved_at: string | null;
   created_at: string;
   updated_at: string;
@@ -777,6 +779,7 @@ function mapArtworkPreparation(row: DbArtworkPreparation): ArtworkPreparation {
     analysis: row.analysis ?? {},
     preparation: row.preparation ?? null,
     guidedCleanup: row.guided_cleanup ?? null,
+    separation: row.separation ?? null,
     approvedAt: row.approved_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -2633,6 +2636,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.guidedCleanup !== undefined) {
       update.guided_cleanup = patch.guidedCleanup;
     }
+    if (patch.separation !== undefined) update.separation = patch.separation;
     if (patch.approvedAt !== undefined) update.approved_at = patch.approvedAt;
 
     const { data, error } = await this.client

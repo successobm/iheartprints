@@ -987,6 +987,23 @@ export function ChatApp() {
   }
 
   /**
+   * Intelligent Separation Phase 10 (Goal 3): `SeparationReviewPanel`
+   * approves through its OWN routes, not `submitPreparationAction` — those
+   * routes return a `SeparationReviewView`, not a full `ApiSnapshot`, so
+   * there is nothing for this component to merge in directly. What
+   * `approveSeparationMaster` changes server-side (`preparedAssetId`,
+   * project status) is exactly what a full snapshot reload already picks
+   * up, so this reuses that existing reload rather than inventing a second,
+   * narrower way to patch local state — the same pattern the generation and
+   * finalization poll loops above already use.
+   */
+  async function refreshSnapshotAfterSeparationApproval() {
+    if (!snapshot) return;
+    const full = await loadProjectSnapshot(snapshot.project.id);
+    if (full) setSnapshot(full);
+  }
+
+  /**
    * Existing Artwork → Print Ready Phase 1.3: the customer clicked an area to
    * PREVIEW. Sends a COORDINATE only. Nothing is removed until they confirm.
    */
@@ -1532,6 +1549,12 @@ export function ChatApp() {
 
             {uploadedArtworkStep && uploadedArtworkStep !== "choose_workflow" ? (
               <UploadedArtworkPanel
+                // `preparation` truthy (required to even reach the "compare"
+                // step this id feeds) implies `snapshot` is truthy too, since
+                // `preparation` is derived from it — but TS can't see that
+                // cross-variable link, so this mirrors the same `snapshot?.`
+                // guard used for every other snapshot-derived prop here.
+                projectId={snapshot?.project.id ?? ""}
                 step={uploadedArtworkStep}
                 preparation={preparation}
                 busy={sending}
@@ -1548,6 +1571,7 @@ export function ChatApp() {
                 onSaveDetails={(input) => void saveUploadedArtworkDetails(input)}
                 onPrepare={() => void prepareUploadedArtwork()}
                 onApprove={() => void approvePreparedArtwork()}
+                onSeparationApproved={() => void refreshSnapshotAfterSeparationApproval()}
                 onReconsider={() => setReconsideringUpload(true)}
                 onCleanupPoint={(point, options) =>
                   void previewGuidedCleanup(point, options)

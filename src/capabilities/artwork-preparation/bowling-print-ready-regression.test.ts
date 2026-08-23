@@ -29,6 +29,7 @@ import { createFinalArtworkWorkerCapability } from "@/capabilities/final-artwork
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import type { PrintValidationReport } from "@/capabilities/print-validation/contracts";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { approvePreparedArtworkForTests } from "@/test-support/approve-prepared-artwork-for-tests";
 
 import { bowlingStyleArtwork, toPngBytes } from "./artwork-fixtures";
 import { createArtworkPreparationCapability } from "./artwork-preparation-capability";
@@ -211,7 +212,7 @@ describe("Bowling acceptance regression — approved prepared artwork → print-
     );
 
     await preparation.prepareBackground(projectId);
-    const approved = await preparation.approvePreparedArtwork(projectId);
+    const approved = await approvePreparedArtworkForTests(preparation, projectId);
     assert.equal(approved.approved, true);
 
     const preparationRow = await repo.getArtworkPreparation(projectId);
@@ -221,6 +222,19 @@ describe("Bowling acceptance regression — approved prepared artwork → print-
       preparationRow.preparedAssetId,
     ))!.bytes;
     const preparedHash = createHash("sha256").update(preparedBytes).digest("hex");
+
+    // Intelligent Separation Phase 10 (Goal 9): this fixture has a
+    // consequential region, so `approvePreparedArtworkForTests` routed
+    // approval through `approveSeparationMaster` rather than the legacy
+    // path. Confirm `preparedAssetId` really is THAT master — carrying
+    // `separationLineage` — not an asset the legacy path could have
+    // produced, before trusting everything downstream to have been built
+    // from it.
+    const preparedAsset = await repo.getAssetById(preparationRow.preparedAssetId);
+    assert.ok(
+      preparedAsset?.metadata.separationLineage,
+      "preparedAssetId must be the approved separation master, carrying its lineage",
+    );
 
     // --- Phase 2 -----------------------------------------------------------
     // Print'em All Phase 1 (Goal 6): approving the PREPARED ARTWORK is not

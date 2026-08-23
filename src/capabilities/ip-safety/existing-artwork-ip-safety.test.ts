@@ -18,6 +18,7 @@ import type {
   ConceptGenerationRequest,
   ConceptGenerationResult,
 } from "@/capabilities/shared/contracts";
+import { approvePreparedArtworkForTests } from "@/test-support/approve-prepared-artwork-for-tests";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 import { IP_SAFETY_REDIRECT_MESSAGE } from "./customer-response";
@@ -137,7 +138,7 @@ describe("Sprint A3 — Existing Artwork: preparation is untouched, redesign is 
       printPlacement: "full_back",
     });
     await harness.preparation.prepareBackground(projectId);
-    const approved = await harness.preparation.approvePreparedArtwork(projectId);
+    const approved = await approvePreparedArtworkForTests(harness.preparation, projectId);
 
     assert.equal(approved.approved, true);
     const row = await harness.repo.getArtworkPreparation(projectId);
@@ -172,7 +173,7 @@ describe("Sprint A3 — Existing Artwork: preparation is untouched, redesign is 
       printPlacement: "full_back",
     });
     await harness.preparation.prepareBackground(projectId);
-    const approved = await harness.preparation.approvePreparedArtwork(projectId);
+    const approved = await approvePreparedArtworkForTests(harness.preparation, projectId);
 
     const customerFacingText = [
       JSON.stringify(approved.customer),
@@ -221,7 +222,7 @@ describe("Sprint A3 — Existing Artwork: preparation is untouched, redesign is 
       printPlacement: "full_back",
     });
     await harness.preparation.prepareBackground(projectId);
-    const approved = await harness.preparation.approvePreparedArtwork(projectId);
+    const approved = await approvePreparedArtworkForTests(harness.preparation, projectId);
 
     assert.equal(approved.approved, true);
     assert.equal(harness.provider.calls.length, 0);

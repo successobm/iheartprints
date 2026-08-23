@@ -13,6 +13,7 @@ import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/ass
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { approvePreparedArtworkForTests } from "@/test-support/approve-prepared-artwork-for-tests";
 
 import {
   BOWLING_DISPLAY_GLYPH_X,
@@ -453,7 +454,7 @@ describe("Bowling cavity acceptance — enclosed background vs intentional black
     assert.equal(clickedBall.candidateToken, null);
     assert.equal(clickedBall.view.guidedCleanup.removalCount, 0);
 
-    const approved = await capability.approvePreparedArtwork(projectId);
+    const approved = await approvePreparedArtworkForTests(capability, projectId);
     assert.equal(approved.approved, true);
     assert.equal(
       approved.guidedCleanup.available,

@@ -155,6 +155,7 @@ function render(
 ) {
   return renderToString(
     createElement(UploadedArtworkPanel, {
+      projectId: "test-project-id",
       step,
       preparation: preparation(overrides),
       busy: phase2.busy ?? false,
@@ -638,6 +639,7 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
   ) {
     return renderToString(
       createElement(UploadedArtworkPanel, {
+      projectId: "test-project-id",
         step: "compare" as UploadedArtworkStep,
         preparation: preparation(overrides),
         busy: false,
@@ -924,6 +926,7 @@ describe("Preparation review intelligence — no auto-routing, no leaked vocabul
   function renderCompareFull(overrides: Partial<ArtworkPreparationView> = {}) {
     return renderToString(
       createElement(UploadedArtworkPanel, {
+      projectId: "test-project-id",
         step: "compare" as UploadedArtworkStep,
         preparation: preparation(overrides),
         busy: false,
@@ -1047,6 +1050,7 @@ describe("Preparation review intelligence — real preparation evidence (Phase 3
   function renderWithView(view: ArtworkPreparationView) {
     return renderToString(
       createElement(UploadedArtworkPanel, {
+      projectId: "test-project-id",
         step: "compare" as UploadedArtworkStep,
         preparation: view,
         busy: false,
