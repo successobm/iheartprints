@@ -15,9 +15,13 @@
  */
 
 import { printPlacementLabel } from "@/lib/domain/print-placement";
+
+import { assessProductionSourceStrategy } from "@/capabilities/shared/production-source-strategy";
+import { channelDistanceBetweenColors } from "./pixel-metrics";
 import type {
   ArtworkAnalysis,
   RepairabilityAssessment,
+  RgbColor,
 } from "./contracts";
 
 /**
@@ -355,36 +359,165 @@ export interface PreparedArtworkReviewCopy {
   /**
    * True when the design provably contains content in the background's own
    * colour, so same-colour connections may have been removed with it.
+   *
+   * Kept as its own field, computed exactly as it always was, for backward
+   * display compatibility — `reviewRequired` below is the field anything new
+   * should read.
    */
   sharesBackgroundColor: boolean;
+  /**
+   * Intelligent Separation Phase 2: whether measured evidence
+   * (`assessProductionSourceStrategy`) supports approving this preparation
+   * without further look, or asks for one. Never "unsafe" — see that
+   * module's doc comment for why only these two values are supportable.
+   *
+   * Falls back to `sharesBackgroundColor` when no source evidence was
+   * supplied (the bare pure-function call with no second argument) — the
+   * same conservative behaviour this function always had.
+   */
+  reviewRequired: boolean;
+  /**
+   * Whether the confirmed garment colour sits within the same tolerance of
+   * the detected background that background membership itself uses
+   * (`GARMENT_BACKGROUND_MATCH_TOLERANCE`). `null` when no garment colour is
+   * confirmed or it could not be parsed — never guessed.
+   *
+   * A colour fact only. It says the garment MAY already supply that colour
+   * on press; it never says a separation is safe, press-proven, or that any
+   * treatment should change.
+   */
+  garmentMayMatchBackground: boolean | null;
 }
 
 /** The subset of the preparation record this decision reads. */
 export interface PreparedArtworkReviewEvidence {
   interiorBackgroundColoredPixelsPreserved?: unknown;
+  /**
+   * Intelligent Separation Phase 2 (`enclosure-evidence.ts`). Absent on any
+   * preparation made before this phase — MUST be read as "not measured",
+   * never coerced to `0`. See `readEnclosureRatio` below.
+   */
+  exteriorRemovalEnclosureRatio?: unknown;
 }
 
+/**
+ * The deterministic analysis fields the source-strategy assessment reads.
+ * Always available on `ArtworkPreparation.analysis` — for every preparation,
+ * old or new — which is what lets a record from before this phase still
+ * drive a real (non-"safe-by-absence") assessment; see Phase 2's Goal 15.
+ */
+export interface PreparedArtworkReviewSourceEvidence {
+  fullyOpaque: boolean;
+  hasTransparency: boolean;
+  disconnectedBackgroundColoredPixels: number;
+  backgroundIsEdgeConnected: boolean;
+  backgroundConfidence: number;
+  estimatedBackgroundColor: RgbColor;
+}
+
+export interface PreparedArtworkReviewContext {
+  sourceEvidence: PreparedArtworkReviewSourceEvidence;
+  /** The customer's confirmed garment colour, resolved to RGB. `null` when unset or unparseable. */
+  garmentRgb: RgbColor | null;
+}
+
+/** Reads the new evidence defensively: absent/malformed is "not measured", never "measured zero". */
+function readEnclosureRatio(
+  record: PreparedArtworkReviewEvidence | null | undefined,
+): number | null {
+  const value = record?.exteriorRemovalEnclosureRatio;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function legacySharesBackgroundColor(
+  record: PreparedArtworkReviewEvidence | null | undefined,
+): boolean {
+  const preserved = record?.interiorBackgroundColoredPixelsPreserved;
+  return typeof preserved === "number" && Number.isFinite(preserved) && preserved > 0;
+}
+
+const NEUTRAL_REVIEW_COPY = {
+  headline: "Background prepared",
+  guidance: "Review the artwork below before continuing.",
+} as const;
+
+/**
+ * `describePreparedArtworkReview` takes a SECOND, OPTIONAL argument
+ * (`context`). Without it — the bare pure-function call this module has
+ * always supported — behaviour is unchanged from before Phase 2:
+ * `sharesBackgroundColor` alone decides the copy, and `reviewRequired`
+ * mirrors it.
+ *
+ * With `context` (what the real preparation capability always supplies,
+ * because `analysis` exists on every preparation regardless of age), the
+ * decision is upgraded to the Phase 1 pure assessor fed with real measured
+ * evidence, and the guidance becomes garment-conditional — see Goal 6.
+ */
 export function describePreparedArtworkReview(
   record: PreparedArtworkReviewEvidence | null | undefined,
+  context?: PreparedArtworkReviewContext,
 ): PreparedArtworkReviewCopy {
-  const preserved = record?.interiorBackgroundColoredPixelsPreserved;
-  const sharesBackgroundColor =
-    typeof preserved === "number" && Number.isFinite(preserved) && preserved > 0;
+  const sharesBackgroundColor = legacySharesBackgroundColor(record);
 
-  if (!sharesBackgroundColor) {
+  if (!context) {
     return {
-      headline: "Background prepared",
-      guidance: "Review the artwork below before continuing.",
-      sharesBackgroundColor: false,
+      ...(sharesBackgroundColor
+        ? {
+            headline: "Background prepared — review recommended",
+            guidance:
+              "Some of your design uses the same colour as the background. Check the prepared artwork on Gray, White, and Black before continuing.",
+          }
+        : NEUTRAL_REVIEW_COPY),
+      sharesBackgroundColor,
+      reviewRequired: sharesBackgroundColor,
+      garmentMayMatchBackground: null,
     };
   }
 
+  const { sourceEvidence, garmentRgb } = context;
+  const garmentToBackgroundChannelDistance =
+    garmentRgb === null
+      ? null
+      : channelDistanceBetweenColors(garmentRgb, sourceEvidence.estimatedBackgroundColor);
+
+  const assessment = assessProductionSourceStrategy({
+    sourceFullyOpaque: sourceEvidence.fullyOpaque,
+    sourceHasTransparency: sourceEvidence.hasTransparency,
+    disconnectedBackgroundColoredPixels: sourceEvidence.disconnectedBackgroundColoredPixels,
+    backgroundIsEdgeConnected: sourceEvidence.backgroundIsEdgeConnected,
+    backgroundConfidence: sourceEvidence.backgroundConfidence,
+    exteriorRemovalEnclosureRatio: readEnclosureRatio(record),
+    garmentToBackgroundChannelDistance,
+  });
+
+  const reviewRequired = assessment.readiness === "review_required";
+  const garmentMayMatchBackground =
+    garmentToBackgroundChannelDistance === null
+      ? null
+      : assessment.reasons.includes("garment_matches_background");
+
+  if (!reviewRequired) {
+    return {
+      ...NEUTRAL_REVIEW_COPY,
+      sharesBackgroundColor,
+      reviewRequired,
+      garmentMayMatchBackground,
+    };
+  }
+
+  // Same headline and the same three preview surfaces named either way — the
+  // distinction Goal 6 asks for is in what the removed colour MEANS on this
+  // garment, never in whether to go look.
+  const headline = "Background prepared — review recommended";
+  const guidance = garmentMayMatchBackground
+    ? "Some of your design uses the same colour as the background. On this garment colour, those areas may already be supplied by the shirt itself — check the prepared artwork on Gray, White, and Black before continuing."
+    : "Some removed background-coloured areas also run through the design. On this garment, those areas may show up as missing fill or detail — check the prepared artwork on Gray, White, and Black before continuing.";
+
   return {
-    headline: "Background prepared — review recommended",
-    // Says what the count actually proves ("uses the same colour as"), not
-    // what it would be convenient to imply ("we removed part of your design").
-    guidance:
-      "Some of your design uses the same colour as the background. Check the prepared artwork on Gray, White, and Black before continuing.",
-    sharesBackgroundColor: true,
+    headline,
+    guidance,
+    sharesBackgroundColor,
+    reviewRequired,
+    garmentMayMatchBackground,
   };
 }

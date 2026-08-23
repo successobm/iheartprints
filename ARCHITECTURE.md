@@ -4553,6 +4553,116 @@ justified from this pipeline's own arithmetic — not an industry guarantee, and
 not a claim about any particular printer, ink, film, powder, pretreatment,
 RIP, press setting, or garment.
 
+### Production source authority (`shared/production-source-strategy.ts`)
+
+A **seam, not a wired path.** Nothing consumes it yet: the final-artwork
+worker still resolves its source from `preparation.preparedAssetId` and still
+explicitly refuses to finalize from the immutable original. This module exists
+so a later separation engine has a contract to satisfy rather than a pipeline
+to rewrite.
+
+**Two orthogonal axes.** `ProductionTreatment` answers *which representation
+are we printing* (continuous tone, or a generated dot lattice).
+`ProductionSourceStrategy` answers *which source did we decide to trust*:
+
+| | |
+|---|---|
+| `prepared_background_removed` | The approved prepared transparent asset. **The only strategy any production path uses today.** |
+| `original_preserving_separation` | A transparent representation derived from the immutable original by treating confirmed-garment-coloured regions as substrate rather than ink. **Experimental** — never automatically selectable, never press-tested |
+| `manual_intervention` | An operator-supplied or operator-corrected separation |
+
+Collapsing the axes would destroy lineage: `halftone_dtf` implies "screened
+from the prepared asset" only by convention, and the moment a second source
+exists that convention becomes an unprovable assumption baked into an enum.
+`ProductionSourceLineage` therefore records `originAssetId` (**always** the
+immutable upload, on every strategy), `sourceAssetId`, and a `derivation`
+naming the engine — so swapping a deterministic knockout for a semantic
+segmenter is visible in provenance rather than hidden behind an unchanged
+strategy name.
+
+**Two verdicts, not three.** `assessProductionSourceStrategy` emits `safe` or
+`review_required` — never `safe | ambiguous | unsafe`. Separating "ambiguous"
+from "unsafe" requires knowing whether removed content *mattered*, and no
+available pixel signal distinguishes a correctly-entered letter counter from a
+destroyed banner fill: both are the same topology. A third value would be
+vocabulary for a judgement nothing can make. Every reason code names something
+measured, and none asserts that artwork was damaged, that a region is a
+recognisable object, or that a separation is press-safe.
+
+**Offering is not recommending.** The assessor never *recommends* an
+experimental strategy; it only adds one to `allowedStrategies` when the
+evidence makes it coherent (garment within the background-membership tolerance
+of the detected background, and an opaque source to separate).
+`mayProduceWithoutReview` is false for every strategy except
+`prepared_background_removed`, so an experimental separation cannot become
+production authority by accident.
+
+**Garment colour is substrate evidence, never a preparation input.** It
+decides what may be *offered*, and can never make an ordinary preparation read
+as riskier or safer than it measured. Background removal remains
+garment-blind.
+
+**Measured limits (bowling fixture `99ee94fc…afa5`, 979×1024).** Garment-aware
+separation reproduces the prepared asset's artwork bounds exactly (919×906 →
+3150×3106 at 10.5in, 3600×3550 at 12in) and screens with zero exterior ink,
+which the opaque original cannot do. But it degenerates the moment the garment
+stops matching the background — on white and navy it classifies nothing as
+exterior substrate, so everything prints and canvas-bounds sizing returns —
+and it **cannot detect its own worst failure**: a white design on a white
+garment loses its body while every ink-preservation metric reports success.
+That failure is a question about intent, not pixels.
+
+#### Phase 2 — wiring the evidence, not the separator
+
+The seam above stayed unwired. What Phase 2 wires is strictly upstream of it:
+**stronger evidence into the existing review advisory**, not a new production
+path.
+
+**A stronger topological signal.** `enclosure-evidence.ts` promotes the
+measurement behind `exteriorRemovalEnclosureRatio` — of the pixels standard
+background removal actually took, what fraction sit at a position the
+SURVIVING artwork surrounds on all four scanline directions. It is computed
+once, inside preparation (`derivePreparedAsset`), between the immutable
+original and the prepared result, and folded into the SAME loosely-typed
+`preparation` JSON every other preparation diagnostic already lives in — no
+migration, because that field is `jsonb`/`Record<string, unknown>` and the new
+key is additive and optional. A record from before this phase simply lacks
+it, and every reader treats that absence as **"not measured," never "measured
+zero."**
+
+**Still only `safe` / `review_required`.** The evidence is stronger; the
+supportable classification is not. `foregroundRing`, `letterCounter`, and
+`multipleCounters` all measure a strictly positive ratio and are CORRECT
+removals — a letter's counter or a ring's open middle produces exactly this
+signal. The number says WHERE removal reached, never whether it mattered, so
+`review_required` never becomes "unsafe" or "damaged" in any copy this module
+produces.
+
+**Garment-conditional review copy, not garment-conditional removal.** The same
+`review_required` preparation now reads differently depending on the
+confirmed garment: if the garment is within
+`GARMENT_BACKGROUND_MATCH_TOLERANCE` of the detected background (the SAME
+tolerance background membership and Phase 1's experimental separation both
+already use), the copy says the shirt may already supply that colour;
+otherwise it says the removed area may show as missing fill or detail on this
+garment. **Background removal itself never reads garment colour** — the
+prepared asset's bytes are proven identical across garments by test — only
+the advisory sentence shown afterward does.
+
+**The assessor is read, never given new power.** `describePreparedArtworkReview`
+calls `assessProductionSourceStrategy` with real measured evidence, but its
+product effect is limited to `reviewRequired`, `garmentMayMatchBackground`,
+and copy. `original_preserving_separation` may appear in the assessment's
+`allowedStrategies` when the garment happens to match, but nothing reads that
+field yet — no route, no button, no job. The experimental separator remains
+exactly as unreachable from production as it was after Phase 1: zero call
+sites outside `.local-acceptance/` and its own pure module.
+
+**What is still missing.** A physical press test, before any separated source
+is ever produced as a plate. And a semantic engine, before the product can
+answer the one question pixel evidence cannot: whether a garment-matched
+region is substrate the shirt may supply, or ink the design requires.
+
 ### pixel dimensions ≠ physical dimensions ≠ density metadata
 
 Three different things, deliberately kept separate:

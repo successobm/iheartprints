@@ -247,4 +247,24 @@ export interface BackgroundPreparationRecord {
   outputHeightPx: number;
   /** Always true for this pipeline — asserted, never assumed. */
   aspectRatioPreserved: boolean;
+  /**
+   * Intelligent Separation Phase 2: `measureExteriorRemovalEnclosure`'s
+   * result comparing the immutable original to THIS prepared image —
+   * `enclosure-evidence.ts`.
+   *
+   * OPTIONAL, and appended at the end of the interface, deliberately: this
+   * field did not exist before Phase 2, `preparation` is persisted as loosely
+   * typed JSON (`ArtworkPreparation.preparation: Record<string, unknown> |
+   * null` in `lib/domain/types.ts`), and no migration accompanies it. A
+   * record written before this phase simply lacks the key; every reader
+   * MUST treat its absence as "not measured", never as "measured zero" —
+   * see `readEnclosureRatio` in `preparation-copy.ts`, the one place that
+   * distinction is made.
+   *
+   * `0` means exterior removal never took a pixel enclosed by surviving
+   * artwork. `> 0` means it did at least once. Neither value says anything
+   * about whether that pixel mattered — see `enclosure-evidence.ts`'s doc
+   * comment for the full boundary of what this number can and cannot prove.
+   */
+  exteriorRemovalEnclosureRatio?: number;
 }

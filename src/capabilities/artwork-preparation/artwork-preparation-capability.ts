@@ -71,6 +71,7 @@ import {
   type GuidedCleanupOperation,
   type GuidedCleanupTool,
 } from "./guided-cleanup-operations";
+import { measureExteriorRemovalEnclosure } from "./enclosure-evidence";
 import type { GuidedRemovalPoint } from "./guided-removal";
 import { decodePngUpload, encodeRgbaToPng } from "./image-decode";
 import { analyzeArtwork } from "./image-analysis";
@@ -89,6 +90,7 @@ import {
   type GuidedCleanupOutcomeCode,
   type PreparedArtworkReviewCopy,
 } from "./preparation-copy";
+import { resolveGarmentColor } from "@/capabilities/shared/production-treatment";
 import { opaquePreparedRevision } from "./prepared-revision";
 import { classifyRepairability } from "./repairability";
 import {
@@ -353,7 +355,25 @@ export function createArtworkPreparationCapability(
       preparedReview:
         preparation.preparedAssetId === null
           ? null
-          : describePreparedArtworkReview(preparation.preparation),
+          : describePreparedArtworkReview(preparation.preparation, {
+              // `analysis` is present on every preparation regardless of age,
+              // so this context is always available — even for a record made
+              // before `exteriorRemovalEnclosureRatio` existed (Goal 15's
+              // fallback: unknown ratio, not "safe by absence").
+              sourceEvidence: {
+                fullyOpaque: analysis.fullyOpaque,
+                hasTransparency: analysis.hasTransparency,
+                disconnectedBackgroundColoredPixels:
+                  analysis.disconnectedBackgroundColoredPixels,
+                backgroundIsEdgeConnected: analysis.backgroundIsEdgeConnected,
+                backgroundConfidence: analysis.backgroundConfidence,
+                estimatedBackgroundColor: analysis.estimatedBackgroundColor,
+              },
+              // Garment colour is review INTERPRETATION evidence only — it
+              // never reaches background removal itself, which ran earlier
+              // and is already fixed in `preparation.preparation`.
+              garmentRgb: resolveGarmentColor(brief.shirtColor)?.rgb ?? null,
+            }),
       preparedRevision: opaquePreparedRevision(preparation.preparedAssetId),
       approved: preparation.status === "approved",
       widthPx: analysis.widthPx,
@@ -442,6 +462,22 @@ export function createArtworkPreparationCapability(
 
     assertPreservesGeometry(image, derived.image);
 
+    // Intelligent Separation Phase 2: the stronger topological evidence,
+    // measured between the immutable original and THIS prepared result and
+    // folded into the same record every other preparation diagnostic already
+    // lives in — no second evidence object, no migration. Computed here,
+    // once, so both call sites (`prepareBackground` and guided cleanup's
+    // apply/undo) record it identically rather than each deciding for
+    // itself whether to.
+    const enclosure = measureExteriorRemovalEnclosure(image, derived.image);
+    const derivedWithEvidence = {
+      ...derived,
+      record: {
+        ...derived.record,
+        exteriorRemovalEnclosureRatio: enclosure.exteriorRemovalEnclosureRatio,
+      },
+    };
+
     // Derived prepared assets are IMMUTABLE. Each persisted derivation needs
     // a unique storage object identity — never `…-${applied.length}` alone.
     // Supabase Storage uses upsert:false; a deterministic key collides with
@@ -467,12 +503,12 @@ export function createArtworkPreparationCapability(
         // bytes" — the original alone no longer explains them.
         derivedFromAssetId: preparation.originalAssetId,
         artworkPreparationId: preparation.id,
-        preparation: derived.record as unknown as Record<string, unknown>,
+        preparation: derivedWithEvidence.record as unknown as Record<string, unknown>,
         guidedRemovals: derived.applied as unknown as Record<string, unknown>[],
       },
     });
 
-    return { asset, derived };
+    return { asset, derived: derivedWithEvidence };
   }
 
   /**

@@ -43,6 +43,8 @@ function preparation(
       headline: "Background prepared",
       guidance: "Review the artwork below before continuing.",
       sharesBackgroundColor: false,
+      reviewRequired: false,
+      garmentMayMatchBackground: null,
     },
     preparedRevision: "rev-fixture-prepared",
     approved: false,

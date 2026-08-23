@@ -194,6 +194,9 @@ export const TEST_FILES = [
   "src/capabilities/shared/brief-diff.test.ts",
   // Print'em All Phase 2 — the DTF halftone production treatment.
   "src/capabilities/shared/production-treatment.test.ts",
+  "src/capabilities/shared/production-source-strategy.test.ts",
+  "src/capabilities/artwork-preparation/enclosure-evidence.test.ts",
+  "src/capabilities/artwork-preparation/garment-conditional-review.test.ts",
   "src/capabilities/final-artwork/halftone-screen.test.ts",
   "src/capabilities/final-artwork-worker/halftone-production.test.ts",
   "src/capabilities/conversation/production-treatment-authorization.test.ts",

@@ -36,16 +36,26 @@ export const VISIBLE_ALPHA_THRESHOLD = 8;
  */
 export const SOLID_REFERENCE_MIN_DISTANCE = 48;
 
+/**
+ * Per-channel (Chebyshev) distance between two colours — the metric the fill
+ * tolerance is expressed in. The buffer-indexed `channelDistance` below is
+ * this same formula applied to one pixel of an image; kept as one function
+ * so a colour-to-colour comparison (e.g. confirmed garment vs detected
+ * background) can never drift from the per-pixel membership test.
+ */
+export function channelDistanceBetweenColors(a: RgbColor, b: RgbColor): number {
+  return Math.max(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b));
+}
+
 /** Per-channel (Chebyshev) distance — the metric the fill tolerance is expressed in. */
 export function channelDistance(
   data: Buffer,
   idx: number,
   color: RgbColor,
 ): number {
-  return Math.max(
-    Math.abs(data[idx]! - color.r),
-    Math.abs(data[idx + 1]! - color.g),
-    Math.abs(data[idx + 2]! - color.b),
+  return channelDistanceBetweenColors(
+    { r: data[idx]!, g: data[idx + 1]!, b: data[idx + 2]! },
+    color,
   );
 }
 
