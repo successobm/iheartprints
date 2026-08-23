@@ -467,6 +467,11 @@ function CompareStep({
     Boolean(onCleanupPoint) &&
     Boolean(preparedImageUrl);
   const pendingConfirmation = Boolean(cleanupPreviewHighlight);
+  // Intelligent Separation Phase 3: the server already decided this — the
+  // client never recomputes readiness from evidence it cannot see. Absent
+  // review copy (no prepared asset yet) reads as the same neutral "safe"
+  // presentation this screen has always had.
+  const reviewRequired = preparation.preparedReview?.reviewRequired ?? false;
 
   function closeWorkspace() {
     onCancelCleanupPreview?.();
@@ -475,13 +480,24 @@ function CompareStep({
 
   return (
     <div>
-      <p className="text-sm font-semibold text-ink">
-        {preparation.preparedReview?.headline ?? "Here's your artwork, prepared"}
-      </p>
-      <p className="mt-1 text-sm text-muted">
-        {preparation.preparedReview?.guidance ??
-          "Review the artwork below before continuing."}
-      </p>
+      <div
+        // Visually distinct when review is recommended, and ONLY then — an
+        // ordinary safe preparation renders exactly as it always has.
+        className={
+          reviewRequired
+            ? "rounded-xl border border-amber-200 bg-amber-50 p-3"
+            : undefined
+        }
+        data-preparation-readiness={reviewRequired ? "review_required" : "safe"}
+      >
+        <p className={reviewRequired ? "text-sm font-semibold text-amber-900" : "text-sm font-semibold text-ink"}>
+          {preparation.preparedReview?.headline ?? "Here's your artwork, prepared"}
+        </p>
+        <p className={reviewRequired ? "mt-1 text-sm text-amber-900" : "mt-1 text-sm text-muted"}>
+          {preparation.preparedReview?.guidance ??
+            "Review the artwork below before continuing."}
+        </p>
+      </div>
       <p className="mt-1 text-sm text-muted">
         The artwork you uploaded is saved exactly as it was, so nothing here is
         permanent until you approve it.
@@ -491,6 +507,7 @@ function CompareStep({
         <ArtworkComparison
           original={{ url: originalImageUrl, loading: originalImageUrl === null }}
           prepared={{ url: preparedImageUrl, loading: preparedImageUrl === null }}
+          reviewRequired={reviewRequired}
         />
       </div>
 
@@ -557,6 +574,9 @@ function CompareStep({
           {PREVIEW_BACKGROUND_COPY.approvalGuidance}
         </p>
         <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.approvalTip}</p>
+        <p className="text-xs text-muted" data-original-safety-copy>
+          Your original upload is saved and unchanged.
+        </p>
         <div className="flex flex-wrap items-center gap-3">
           {/* Approval is ONLY ever this explicit button. Enlarge is view-only;
               Clean Up Background mutates only after confirm, and Done never

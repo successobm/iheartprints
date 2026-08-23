@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { createHash } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { after, before, describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
+import { createArtworkPreparationCapability } from "@/capabilities/artwork-preparation/artwork-preparation-capability";
+import {
+  bowlingStyleArtwork,
+  solidBlackExteriorArtwork,
+  toPngBytes,
+} from "@/capabilities/artwork-preparation/artwork-fixtures";
+import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
+import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
+import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size";
 import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
+import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 import { ArtworkComparison } from "./ArtworkComparison";
 import {
@@ -743,5 +757,354 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
     const html = render();
 
     assert.doesNotMatch(html, /brush|lasso|eraser|freehand|layer|opacity slider/i);
+  });
+});
+
+/**
+ * Intelligent Separation Phase 3 — surfacing the server's already-computed
+ * `preparedReview` state (readiness + garment-conditional copy) in the
+ * Existing Artwork compare screen. Every assertion here is about VIEW state;
+ * nothing here recomputes readiness or a garment relationship — the copy
+ * strings are exactly what `describePreparedArtworkReview` would produce,
+ * asserted the same way Phase 1/2's suites did.
+ */
+describe("Preparation review intelligence — copy states (Phase 3)", () => {
+  const REVIEW_REQUIRED_MISMATCHED = {
+    headline: "Background prepared — review recommended",
+    guidance:
+      "Some removed background-coloured areas also run through the design. On this garment, those areas may show up as missing fill or detail — check the prepared artwork on Gray, White, and Black before continuing.",
+    sharesBackgroundColor: true,
+    reviewRequired: true,
+    garmentMayMatchBackground: false,
+  } as const;
+
+  const REVIEW_REQUIRED_MATCHED = {
+    headline: "Background prepared — review recommended",
+    guidance:
+      "Some of your design uses the same colour as the background. On this garment colour, those areas may already be supplied by the shirt itself — check the prepared artwork on Gray, White, and Black before continuing.",
+    sharesBackgroundColor: true,
+    reviewRequired: true,
+    garmentMayMatchBackground: true,
+  } as const;
+
+  const REVIEW_REQUIRED_UNKNOWN_GARMENT = {
+    headline: "Background prepared — review recommended",
+    guidance:
+      "Some removed background-coloured areas also run through the design. Review the prepared artwork carefully on Gray, White, and Black before continuing.",
+    sharesBackgroundColor: true,
+    reviewRequired: true,
+    garmentMayMatchBackground: null,
+  } as const;
+
+  it("A: a safe preparation renders with no review styling", () => {
+    const html = render("compare", {
+      preparedReview: {
+        headline: "Background prepared",
+        guidance: "Review the artwork below before continuing.",
+        sharesBackgroundColor: false,
+        reviewRequired: false,
+        garmentMayMatchBackground: null,
+      },
+    });
+
+    assert.match(html, /data-preparation-readiness="safe"/);
+    assert.doesNotMatch(html, /data-preparation-readiness="review_required"/);
+    assert.doesNotMatch(html, /review recommended/i);
+    assert.doesNotMatch(html, /border-amber/);
+    assert.doesNotMatch(html, /Check Gray, White, and Black if you(?:'|&#x27;)re unsure/);
+  });
+
+  it("B: review_required renders a visibly distinct, non-catastrophic banner", () => {
+    const html = render("compare", { preparedReview: REVIEW_REQUIRED_MISMATCHED });
+
+    assert.match(html, /data-preparation-readiness="review_required"/);
+    assert.match(html, /review recommended/i);
+    for (const forbidden of [/\bfailed\b/i, /\bunsafe\b/i, /\bdamaged\b/i, /\bbroken\b/i, /\bdestroyed\b/i]) {
+      assert.doesNotMatch(html, forbidden);
+    }
+  });
+
+  it("C: matched-garment copy explains substrate, never claims safety", () => {
+    const html = render("compare", { preparedReview: REVIEW_REQUIRED_MATCHED });
+
+    assert.match(html, /may already be supplied by the shirt itself/i);
+    assert.doesNotMatch(html, /this is safe/i);
+  });
+
+  it("D: mismatched-garment copy warns of missing fill\\/detail, never names an object", () => {
+    const html = render("compare", { preparedReview: REVIEW_REQUIRED_MISMATCHED });
+
+    assert.match(html, /missing fill or detail/i);
+    assert.doesNotMatch(html, /bowling ball|the logo was removed| was removed\b/i);
+  });
+
+  it("E: unknown-garment copy is generic and never infers a colour relationship", () => {
+    const html = render("compare", { preparedReview: REVIEW_REQUIRED_UNKNOWN_GARMENT });
+
+    assert.match(html, /Review the prepared artwork carefully/i);
+    assert.doesNotMatch(html, /On this garment/i);
+    assert.doesNotMatch(html, /supplied by the shirt/i);
+  });
+
+  it("K: original safety wording appears both on the tile and near approval", () => {
+    const html = render("compare");
+
+    assert.match(html, /The artwork you uploaded, untouched\./);
+    assert.match(html, /Your original upload is saved and unchanged\./);
+  });
+
+  it("L: approval stays available and is not additionally gated by review_required", () => {
+    const html = render("compare", { preparedReview: REVIEW_REQUIRED_MISMATCHED });
+
+    const button = html.match(/<button[^>]*>Use Prepared Artwork<\/button>/);
+    assert.ok(button, "the approval button must still render");
+    // The actual `disabled` DOM attribute, not the Tailwind `disabled:*`
+    // variant classes every button carries regardless of state.
+    assert.doesNotMatch(button![0], /\sdisabled(=|>|\s)/);
+  });
+
+  it("I/J: preview state carries no garment identity and never touches the prepared asset URL", () => {
+    const safeHtml = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: "https://signed.example/original.png", loading: false },
+        prepared: { url: "https://signed.example/prepared.png", loading: false },
+        reviewRequired: false,
+      }),
+    );
+    const reviewHtml = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: "https://signed.example/original.png", loading: false },
+        prepared: { url: "https://signed.example/prepared.png", loading: false },
+        reviewRequired: true,
+      }),
+    );
+
+    for (const html of [safeHtml, reviewHtml]) {
+      assert.match(html, /src="https:\/\/signed\.example\/prepared\.png"/);
+      // The preview-background surface never carries or renders garment data.
+      assert.doesNotMatch(html, /garment|shirtColor|shirt color/i);
+    }
+  });
+
+  it("F/G/H: Gray stays default and White\\/Black stay selectable when review is recommended", () => {
+    const html = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: "https://signed.example/original.png", loading: false },
+        prepared: { url: "https://signed.example/prepared.png", loading: false },
+        reviewRequired: true,
+      }),
+    );
+
+    assert.match(html, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
+    assert.match(html, /data-preview-background-option="white"/);
+    assert.match(html, /data-preview-background-option="gray"/);
+    assert.match(html, /data-preview-background-option="black"/);
+    assert.match(html, /Check Gray, White, and Black if you(?:'|&#x27;)re unsure\./);
+  });
+
+  it("the review-emphasis line is absent when review is not recommended", () => {
+    const html = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: "https://signed.example/original.png", loading: false },
+        prepared: { url: "https://signed.example/prepared.png", loading: false },
+        reviewRequired: false,
+      }),
+    );
+
+    assert.doesNotMatch(html, /Check Gray, White, and Black if you(?:'|&#x27;)re unsure/);
+  });
+});
+
+/**
+ * Phase 3, Goals M/N/O/P/Q/R — exercised against a harness with cleanup
+ * wired (`onCleanupPoint` present), mirroring the existing "guided background
+ * cleanup" describe block's local render helper.
+ */
+describe("Preparation review intelligence — no auto-routing, no leaked vocabulary (Phase 3)", () => {
+  function renderCompareFull(overrides: Partial<ArtworkPreparationView> = {}) {
+    return renderToString(
+      createElement(UploadedArtworkPanel, {
+        step: "compare" as UploadedArtworkStep,
+        preparation: preparation(overrides),
+        busy: false,
+        originalImageUrl: "https://signed.example/original.png",
+        preparedImageUrl: "https://signed.example/prepared.png",
+        onUpload: () => {},
+        onSaveDetails: () => {},
+        onPrepare: () => {},
+        onApprove: () => {},
+        onReconsider: () => {},
+        onCleanupPoint: () => {},
+        onUndoCleanup: () => {},
+      }),
+    );
+  }
+
+  const REVIEW_REQUIRED = {
+    headline: "Background prepared — review recommended",
+    guidance:
+      "Some removed background-coloured areas also run through the design. On this garment, those areas may show up as missing fill or detail — check the prepared artwork on Gray, White, and Black before continuing.",
+    sharesBackgroundColor: true,
+    reviewRequired: true,
+    garmentMayMatchBackground: false,
+  } as const;
+
+  it("M: Clean Up Background remains available under review_required", () => {
+    const html = renderCompareFull({
+      preparedReview: REVIEW_REQUIRED,
+      guidedCleanup: { available: true, removalCount: 0 },
+    });
+
+    assert.match(html, /Clean Up Background/);
+  });
+
+  it("N/O/P: review_required renders no production-routing, job, or treatment vocabulary", () => {
+    const html = renderCompareFull({ preparedReview: REVIEW_REQUIRED });
+
+    for (const forbidden of [
+      /Prepare for Print/i,
+      /Finalize/i,
+      /halftone/i,
+      /\btreatment\b/i,
+      /\bLPI\b/,
+      /FinalArtworkJob/i,
+      /provider/i,
+      /Topaz/i,
+    ]) {
+      assert.doesNotMatch(html, forbidden);
+    }
+  });
+
+  it("Q/R: no internal experimental strategy vocabulary reaches rendered markup", () => {
+    const html = renderCompareFull({ preparedReview: REVIEW_REQUIRED });
+
+    for (const forbidden of [
+      /original_preserving_separation/i,
+      /manual_intervention/i,
+      /prepared_background_removed/i,
+      /ProductionSourceStrategy/i,
+      /exteriorRemovalEnclosureRatio/i,
+      /disconnectedBackgroundColoredPixels/i,
+      /assessProductionSourceStrategy/i,
+      /backgroundConfidence/i,
+    ]) {
+      assert.doesNotMatch(html, forbidden);
+    }
+  });
+});
+
+/**
+ * Phase 3, Goals S/T/U — the actual bowling fixture and a genuinely safe
+ * fixture, driven through the REAL preparation capability so the UI is
+ * proven against server-computed evidence rather than hand-typed copy.
+ * Runs entirely in a throwaway temp directory; never touches the real
+ * `.data/sprint1-store.json` and never mutates the live bowling project.
+ */
+describe("Preparation review intelligence — real preparation evidence (Phase 3)", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-panel-review-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function realPrepare(image: Parameters<typeof toPngBytes>[0], productColor: string) {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo = new LocalProjectRepository();
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const capability = createArtworkPreparationCapability(
+      repo,
+      assets,
+      createDesignBriefCapability(repo),
+    );
+    const projectId = (await repo.createProject()).project.id;
+    await capability.uploadOriginal(projectId, {
+      bytes: toPngBytes(image),
+      declaredContentType: "image/png",
+      filename: "artwork.png",
+    });
+    await capability.setProductionContext(projectId, {
+      productSummary: "T-shirts",
+      productColor,
+      printPlacement: "full_front",
+    });
+    const view = await capability.prepareBackground(projectId);
+    const record = await repo.getArtworkPreparation(projectId);
+    const preparedBytes = (await assets.downloadAssetBytes(record!.preparedAssetId!))!.bytes;
+    return { view, preparedBytes };
+  }
+
+  function renderWithView(view: ArtworkPreparationView) {
+    return renderToString(
+      createElement(UploadedArtworkPanel, {
+        step: "compare" as UploadedArtworkStep,
+        preparation: view,
+        busy: false,
+        originalImageUrl: "https://signed.example/original.png",
+        preparedImageUrl: "https://signed.example/prepared.png",
+        onUpload: () => {},
+        onSaveDetails: () => {},
+        onPrepare: () => {},
+        onApprove: () => {},
+        onReconsider: () => {},
+        onCleanupPoint: () => {},
+        onUndoCleanup: () => {},
+      }),
+    );
+  }
+
+  it("S: bowling on a white shirt shows review recommended + mismatched-garment copy", async () => {
+    const { view } = await realPrepare(bowlingStyleArtwork(), "White");
+    assert.equal(view.preparedReview?.reviewRequired, true);
+    assert.equal(view.preparedReview?.garmentMayMatchBackground, false);
+
+    const html = renderWithView(view);
+    assert.match(html, /review recommended/i);
+    assert.match(html, /missing fill or detail/i);
+    assert.match(html, /data-preparation-readiness="review_required"/);
+    assert.match(html, /data-preview-background="gray"/);
+    assert.match(html, /data-preview-background-option="white"/);
+    assert.match(html, /data-preview-background-option="black"/);
+    assert.match(html, /The artwork you uploaded, untouched\./);
+    assert.match(html, /Clean Up Background/);
+    assert.match(html, /Use Prepared Artwork/);
+  });
+
+  it("T: bowling on a black shirt shows review recommended + matched-garment copy, and prepared bytes match the white-shirt run", async () => {
+    const black = await realPrepare(bowlingStyleArtwork(), "Black");
+    const white = await realPrepare(bowlingStyleArtwork(), "White");
+
+    assert.equal(black.view.preparedReview?.reviewRequired, true);
+    assert.equal(black.view.preparedReview?.garmentMayMatchBackground, true);
+    assert.equal(
+      createHash("sha256").update(black.preparedBytes).digest("hex"),
+      createHash("sha256").update(white.preparedBytes).digest("hex"),
+      "garment colour must never change the prepared PNG bytes",
+    );
+
+    const html = renderWithView(black.view);
+    assert.match(html, /review recommended/i);
+    assert.match(html, /supplied by the shirt itself/i);
+  });
+
+  it("U: a safe fixture stays low-friction — no banner, no garment-conditional copy", async () => {
+    const { view } = await realPrepare(solidBlackExteriorArtwork(), "Navy");
+    assert.equal(view.preparedReview?.reviewRequired, false);
+
+    const html = renderWithView(view);
+    assert.doesNotMatch(html, /review recommended/i);
+    assert.match(html, /data-preparation-readiness="safe"/);
+    assert.doesNotMatch(html, /border-amber/);
+    assert.match(html, /Use Prepared Artwork/);
   });
 });

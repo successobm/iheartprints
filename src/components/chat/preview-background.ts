@@ -45,6 +45,13 @@ export const PREVIEW_BACKGROUND_COLORS: Record<PreviewBackground, string> = {
 export const PREVIEW_BACKGROUND_COPY = {
   label: "Preview Background",
   helper: "Check your artwork on different backgrounds before approving it.",
+  /**
+   * Intelligent Separation Phase 3: shown ONLY when the server's preparation
+   * review evidence recommends a closer look (`reviewRequired`). Never
+   * implies a specific surface will reveal a specific problem — it just asks
+   * for the same three-surface check `helper` already offers, more firmly.
+   */
+  reviewEmphasis: "Check Gray, White, and Black if you're unsure.",
   approvalGuidance:
     "Make sure all parts of your design are still there and the background looks clean.",
   approvalTip:

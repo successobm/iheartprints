@@ -506,12 +506,18 @@ export function describePreparedArtworkReview(
   }
 
   // Same headline and the same three preview surfaces named either way — the
-  // distinction Goal 6 asks for is in what the removed colour MEANS on this
-  // garment, never in whether to go look.
+  // distinction Goals 6/7/8 ask for is in what the removed colour MEANS on
+  // this garment, never in whether to go look. Three variants, not two: an
+  // UNKNOWN garment relationship must not read as though a mismatch was
+  // actually established — that would be inferring a colour we were never
+  // given (Phase 3 Goal 8).
   const headline = "Background prepared — review recommended";
-  const guidance = garmentMayMatchBackground
-    ? "Some of your design uses the same colour as the background. On this garment colour, those areas may already be supplied by the shirt itself — check the prepared artwork on Gray, White, and Black before continuing."
-    : "Some removed background-coloured areas also run through the design. On this garment, those areas may show up as missing fill or detail — check the prepared artwork on Gray, White, and Black before continuing.";
+  const guidance =
+    garmentMayMatchBackground === true
+      ? "Some of your design uses the same colour as the background. On this garment colour, those areas may already be supplied by the shirt itself — check the prepared artwork on Gray, White, and Black before continuing."
+      : garmentMayMatchBackground === false
+        ? "Some removed background-coloured areas also run through the design. On this garment, those areas may show up as missing fill or detail — check the prepared artwork on Gray, White, and Black before continuing."
+        : "Some removed background-coloured areas also run through the design. Review the prepared artwork carefully on Gray, White, and Black before continuing.";
 
   return {
     headline,

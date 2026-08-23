@@ -112,6 +112,19 @@ describe("Garment-conditional preparation review (Phase 2)", () => {
     assert.match(review.headline, /review recommended/i);
   });
 
+  it("Phase 3 Goal 8: an unresolvable garment colour gets generic copy, never inferred as a mismatch", async () => {
+    // Not in the garment colour table and not a hex string — resolveGarmentColor
+    // returns null, exactly like an unset colour.
+    const { view } = await prepare(bowlingStyleArtwork(), "Some Unlisted Custom Blend");
+    const review = view.preparedReview!;
+    assert.equal(review.reviewRequired, true);
+    assert.equal(review.garmentMayMatchBackground, null);
+    assert.match(review.guidance, /Review the prepared artwork carefully/i);
+    assert.doesNotMatch(review.guidance, /On this garment/i);
+    assert.doesNotMatch(review.guidance, /supplied by the shirt/i);
+    assert.doesNotMatch(review.guidance, /missing fill or detail/i);
+  });
+
   it("both garment cases still name all three preview surfaces", async () => {
     const black = await prepare(bowlingStyleArtwork(), "Black");
     const white = await prepare(bowlingStyleArtwork(), "White");

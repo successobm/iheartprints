@@ -46,11 +46,20 @@ export interface ArtworkComparisonImage {
 interface ArtworkComparisonProps {
   original: ArtworkComparisonImage;
   prepared: ArtworkComparisonImage;
+  /**
+   * Intelligent Separation Phase 3: true when the server's preparation
+   * review evidence (`preparedReview.reviewRequired`) recommends a closer
+   * look. Adds ONE extra sentence encouraging the existing three-surface
+   * check — never a new surface, never a default change, never a claim
+   * about what checking will find.
+   */
+  reviewRequired?: boolean;
 }
 
 export function ArtworkComparison({
   original,
   prepared,
+  reviewRequired = false,
 }: ArtworkComparisonProps) {
   const [enlarged, setEnlarged] = useState<"original" | "prepared" | null>(null);
   const [previewBackground, setPreviewBackground] = useState<PreviewBackground>(
@@ -69,6 +78,9 @@ export function ArtworkComparison({
           onChange={setPreviewBackground}
         />
         <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.helper}</p>
+        {reviewRequired ? (
+          <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.reviewEmphasis}</p>
+        ) : null}
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
