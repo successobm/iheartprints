@@ -1,0 +1,83 @@
+-- Intelligent Separation Phase 9: operator-confirmed consequential-region
+-- decisions. Additive and forward-only, mirroring the guided_cleanup
+-- migration's discipline exactly: one nullable column; no existing column
+-- changes; no existing row rewritten; every row written before this
+-- migration reads back as "no separation review has happened for this
+-- preparation", which is exactly what was true of them.
+--
+-- NOT APPLIED to any live database by this change. See the Phase 9 report
+-- for why: this repository's convention is to land migration + dependent
+-- code together and apply the migration only as part of an explicit,
+-- reviewed deploy step, never automatically from a feature change.
+--
+-- SCHEMA DISCIPLINE AUDIT
+--
+-- 1. WHAT MUST SURVIVE RELOAD, AND CANNOT ALREADY BE REPRESENTED
+--
+--    WHICH CONSEQUENTIAL INTERIOR REGIONS AN OPERATOR CONFIRMED AS SUBSTRATE
+--    (shirt shows through) VERSUS INK (must print), AND WHEN.
+--
+--    Phases 5-8 established that no deterministic rule and no vision-model
+--    suggestion may become authoritative over these pixels — only an
+--    OPERATOR decision may. That decision is a durable domain fact with no
+--    existing home:
+--
+--    It is NOT `preparation` (`BackgroundPreparationRecord`). That column is
+--    the deterministic background-isolation pass's own per-run diagnostics,
+--    overwritten on every re-preparation. A human's region-intent decision
+--    is a different kind of fact from a different, later stage, and folding
+--    it in would make a single field carry two authorities that invalidate
+--    on different triggers.
+--
+--    It is NOT `guided_cleanup`. That column is the customer's own
+--    background-cleanup CLICKS on the STANDARD prepared asset — a different
+--    workflow, a different source representation (the topologically prepared
+--    PNG, not the immutable original), and a different actor (customer, not
+--    internal operator).
+--
+--    It is NOT `analysis`, which must stay a pure function of the upload
+--    bytes and print placement alone.
+--
+-- 2. WHY THE DECISIONS AND NOT THE RESULTING MASK
+--
+--    Exactly the guided_cleanup precedent's reasoning: a mask is an output
+--    and goes stale the moment the source or algorithm changes. The
+--    decisions (which stable region id → which intent, by whom, when) are
+--    the only things an operator actually authored. Replaying them
+--    deterministically over the immutable original via
+--    `region-separation.ts` reproduces the master exactly, which is what
+--    makes reload, re-review, and staleness detection all cheap and honest.
+--    A stored mask could silently disagree with a re-analysis; a decision
+--    set cannot — it is checked against a fresh region-map hash on every
+--    read and rejected outright if it no longer matches (see
+--    `isDecisionSetStale` in `separation-review.ts`).
+--
+-- 3. WHY NOT A SEPARATE TABLE
+--
+--    One decision set is 1:1 with its preparation, is never queried
+--    independently of it, and needs no ordering column a JSON array does not
+--    already give for free. Same shape of argument the guided_cleanup
+--    migration already made; it applies here without modification.
+--
+-- SHAPE: {
+--   "sourceAssetSha256": text,
+--   "regionMapHash": text,
+--   "algorithmVersion": text,
+--   "decisions": [{"regionId": int, "intent": "substrate"|"ink"|"uncertain",
+--                  "source": "operator"|"semantic_suggestion"|"deterministic",
+--                  "decidedAt": text, "suggestion": object|null}, ...],
+--   "approvedAt": text|null,
+--   "postCheckAtApproval": object|null
+-- }
+--
+-- `approvedAt` is the ONLY field that makes a decision set authoritative
+-- over production pixels (see `approveSeparationMaster` in
+-- `artwork-preparation-capability.ts`) — a non-null value means an operator
+-- explicitly approved the master built from exactly these decisions, and any
+-- decision change after that clears it back to null.
+
+alter table public.artwork_preparations
+  add column if not exists separation jsonb null;
+
+comment on column public.artwork_preparations.separation is
+  'Intelligent Separation Phase 9: the operator-confirmed consequential-region decision set (RegionIntent per stable regionId), pinned to a sourceAssetSha256 + regionMapHash + algorithmVersion. Null means no separation review has happened. approvedAt non-null means the master built from these exact decisions is production-authoritative.';

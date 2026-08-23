@@ -9,6 +9,7 @@ import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
 import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { approvePreparedArtworkForTests } from "@/test-support/approve-prepared-artwork-for-tests";
 
 import {
   bowlingStyleArtwork,
@@ -227,7 +228,7 @@ describe("Bowling acceptance regression — uploaded artwork → prepared artwor
 
     // Approval hands Phase 2 a prepared_upload ArtworkVersion, and claims
     // nothing about print readiness.
-    const approved = await capability.approvePreparedArtwork(projectId);
+    const approved = await approvePreparedArtworkForTests(capability, projectId);
     assert.equal(approved.approved, true);
     assert.equal(approved.customer.enhancementNeeded, true);
 

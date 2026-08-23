@@ -2419,6 +2419,16 @@ export interface ArtworkPreparation {
    * boundary that writes and reads it.
    */
   guidedCleanup: Record<string, unknown> | null;
+  /**
+   * Intelligent Separation Phase 9: the operator-confirmed
+   * `SeparationDecisionSet` (`region-separation-contracts.ts`), when this
+   * preparation has gone through consequential-region review. `null` for
+   * every preparation that never needed it, and for every preparation made
+   * before this phase — loosely typed for the same reason `preparation` and
+   * `guidedCleanup` are: narrowed at the `ArtworkPreparationCapability`
+   * boundary that writes and reads it, never trusted raw.
+   */
+  separation: Record<string, unknown> | null;
   approvedAt: string | null;
   createdAt: string;
   updatedAt: string;

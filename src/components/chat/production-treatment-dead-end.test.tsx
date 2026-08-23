@@ -151,6 +151,7 @@ function render(options: {
 } = {}) {
   return renderToString(
     createElement(UploadedArtworkPanel, {
+      projectId: "test-project-id",
       step: "approved" as const,
       preparation: preparation(),
       busy: options.busy ?? false,

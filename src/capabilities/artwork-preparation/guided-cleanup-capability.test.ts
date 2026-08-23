@@ -13,6 +13,7 @@ import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/ass
 import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import type { ProjectRepository } from "@/lib/db/repository";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+import { approvePreparedArtworkForTests } from "@/test-support/approve-prepared-artwork-for-tests";
 
 import {
   darkOutlinedDisplayArtwork,
@@ -309,7 +310,7 @@ describe("Guided cleanup — capability, persistence and lineage", () => {
     const { projectId } = await prepared(capability, repo);
 
     await removeAt(capability, projectId, COUNTER);
-    const approved = await capability.approvePreparedArtwork(projectId);
+    const approved = await approvePreparedArtworkForTests(capability, projectId);
     const approvedAssetId = (await capability.resolveImageAssetId(projectId, "prepared"))!;
     const approvedBytes = (await assets.downloadAssetBytes(approvedAssetId))!.bytes;
 

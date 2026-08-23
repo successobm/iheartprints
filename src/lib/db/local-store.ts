@@ -2095,6 +2095,7 @@ export class LocalProjectRepository implements ProjectRepository {
       analysis: input.analysis,
       preparation: null,
       guidedCleanup: null,
+      separation: null,
       approvedAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,

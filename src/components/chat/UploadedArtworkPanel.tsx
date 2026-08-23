@@ -25,6 +25,7 @@ import { ArtworkComparison } from "./ArtworkComparison";
 import { GuidedCleanupWorkspace } from "./GuidedCleanupWorkspace";
 import { PREVIEW_BACKGROUND_COPY } from "./preview-background";
 import { PrintReadySizeCard } from "./PrintReadySizeCard";
+import { SeparationReviewPanel } from "./SeparationReviewPanel";
 import type { UploadedArtworkStep } from "./uploaded-artwork-flow";
 
 /**
@@ -58,6 +59,12 @@ export interface UploadedArtworkPanelProps {
   step: UploadedArtworkStep;
   preparation: ArtworkPreparationView | null;
   busy: boolean;
+  /**
+   * Intelligent Separation Phase 10 (Goal 3): the id `SeparationReviewPanel`
+   * fetches and writes its own state against. This panel never reads or
+   * recomputes separation state itself — only mounts the surface that does.
+   */
+  projectId: string;
   /** Signed image URLs the parent resolves. `null` while loading or unavailable. */
   originalImageUrl: string | null;
   preparedImageUrl: string | null;
@@ -75,6 +82,15 @@ export interface UploadedArtworkPanelProps {
   }) => void;
   onPrepare: () => void;
   onApprove: () => void;
+  /**
+   * Intelligent Separation Phase 10 (Goal 3): fired after "Use This
+   * Preparation" succeeds inside `SeparationReviewPanel`. That action
+   * already updated `preparedAssetId` and project status server-side, the
+   * same fields `onApprove` sets — the parent should refresh its snapshot
+   * exactly as it would after any other preparation action, so the flow
+   * advances to the approved step.
+   */
+  onSeparationApproved?: () => void;
   /** "Keep / go back" — returns to the details step without discarding anything. */
   onReconsider: () => void;
   /**
@@ -177,12 +193,14 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
 
       {step === "compare" && preparation ? (
         <CompareStep
+          projectId={props.projectId}
           preparation={preparation}
           busy={busy}
           originalImageUrl={props.originalImageUrl}
           preparedImageUrl={props.preparedImageUrl}
           preparedRevision={props.preparedRevision ?? preparation.preparedRevision}
           onApprove={props.onApprove}
+          onSeparationApproved={props.onSeparationApproved}
           onReconsider={props.onReconsider}
           onCleanupPoint={props.onCleanupPoint}
           onConfirmCleanup={props.onConfirmCleanup}
@@ -429,12 +447,14 @@ function AnalysisStep({
 }
 
 function CompareStep({
+  projectId,
   preparation,
   busy,
   originalImageUrl,
   preparedImageUrl,
   preparedRevision,
   onApprove,
+  onSeparationApproved,
   onReconsider,
   onCleanupPoint,
   onConfirmCleanup,
@@ -443,12 +463,14 @@ function CompareStep({
   cleanupMessage,
   cleanupPreviewHighlight,
 }: {
+  projectId: string;
   preparation: ArtworkPreparationView;
   busy: boolean;
   originalImageUrl: string | null;
   preparedImageUrl: string | null;
   preparedRevision: string | null;
   onApprove: () => void;
+  onSeparationApproved?: () => void;
   onReconsider: () => void;
   onCleanupPoint?: (
     point: ImagePoint,
@@ -461,6 +483,23 @@ function CompareStep({
   cleanupPreviewHighlight: UploadedArtworkPanelProps["cleanupPreviewHighlight"];
 }) {
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  // Intelligent Separation Phase 10 (Goal 3/4): the ONE bit of separation
+  // state this step needs, mirrored down from `SeparationReviewPanel` —
+  // never re-fetched or recomputed here. Starts `null` ("assume not
+  // required") so easy artwork's approval button renders immediately with
+  // no added round trip (Goal 16); if this turns out wrong the server
+  // refuses the legacy approval anyway (`approvePreparedArtwork`), so an
+  // optimistic first render is never an unsafe one.
+  const [separationState, setSeparationState] = useState<
+    | "review_not_required"
+    | "review_required"
+    | "review_in_progress"
+    | "review_complete"
+    | "cannot_safely_automate"
+    | null
+  >(null);
+  const separationGateActive =
+    separationState !== null && separationState !== "review_not_required";
   const cleanup = preparation.guidedCleanup;
   const cleanupOffered =
     cleanup.available &&
@@ -562,6 +601,20 @@ function CompareStep({
         />
       ) : null}
 
+      {/* Intelligent Separation Phase 10 (Goal 2): sits after the
+          comparison and its warning, before the approval controls it can
+          replace. Renders nothing (`null`) for the vast majority of
+          artwork that has no consequential regions — see
+          `SeparationReviewPanel`'s own `review_not_required` short-circuit. */}
+      <div className="mt-3">
+        <SeparationReviewPanel
+          projectId={projectId}
+          garmentColor={preparation.productColor ?? "White"}
+          onStateChange={setSeparationState}
+          onApproved={onSeparationApproved}
+        />
+      </div>
+
       {preparation.customer.enhancementNeeded &&
       preparation.customer.resolutionMessage ? (
         <p className="mt-3 text-sm text-ink">
@@ -570,10 +623,21 @@ function CompareStep({
       ) : null}
 
       <div className="mt-4 space-y-2">
-        <p className="text-xs text-ink" data-approval-safety-copy>
-          {PREVIEW_BACKGROUND_COPY.approvalGuidance}
-        </p>
-        <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.approvalTip}</p>
+        {/* Intelligent Separation Phase 10 (Goal 4/6): once separation
+            review is anything other than not-required, "Use This
+            Preparation" inside the panel above is the only approval action
+            — it sets the exact same fields this button's `onApprove` does.
+            This copy specifically describes THAT button, so it is withheld
+            rather than left to describe a control that would now just be
+            refused server-side. */}
+        {!separationGateActive ? (
+          <>
+            <p className="text-xs text-ink" data-approval-safety-copy>
+              {PREVIEW_BACKGROUND_COPY.approvalGuidance}
+            </p>
+            <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.approvalTip}</p>
+          </>
+        ) : null}
         <p className="text-xs text-muted" data-original-safety-copy>
           Your original upload is saved and unchanged.
         </p>
@@ -581,14 +645,16 @@ function CompareStep({
           {/* Approval is ONLY ever this explicit button. Enlarge is view-only;
               Clean Up Background mutates only after confirm, and Done never
               approves. Preview Background never approves. */}
-          <button
-            type="button"
-            disabled={busy || pendingConfirmation || workspaceOpen}
-            onClick={onApprove}
-            className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Use Prepared Artwork
-          </button>
+          {!separationGateActive ? (
+            <button
+              type="button"
+              disabled={busy || pendingConfirmation || workspaceOpen}
+              onClick={onApprove}
+              className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Use Prepared Artwork
+            </button>
+          ) : null}
           <button
             type="button"
             disabled={busy}
