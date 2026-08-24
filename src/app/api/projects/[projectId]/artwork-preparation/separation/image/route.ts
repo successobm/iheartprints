@@ -11,11 +11,14 @@ import {
   buildSeparationMaster,
   renderRegionContextHighlight,
   renderRegionDetailCrop,
+  renderProposalHighlight,
+  replayPreserveOperations,
+  type ProposalAuthority,
 } from "@/capabilities/artwork-preparation/region-separation";
 import { compositeOverGarment } from "@/capabilities/final-artwork/halftone-screen";
 import { resolveGarmentColor } from "@/capabilities/shared/production-treatment";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
-import type { RegionDecision } from "@/capabilities/artwork-preparation/region-separation-contracts";
+import type { SeparationDecisionSet } from "@/capabilities/artwork-preparation/region-separation-contracts";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
@@ -64,7 +67,11 @@ export async function GET(request: Request, context: RouteContext) {
 
     const url = new URL(request.url);
     const mode = url.searchParams.get("mode") ?? "master";
-    if (!["original", "region-overlay", "region-context", "region-crop", "master", "master-preview"].includes(mode)) {
+    if (
+      !["original", "region-overlay", "region-context", "region-crop", "master", "master-preview", "proposal-highlight"].includes(
+        mode,
+      )
+    ) {
       return new Response("Not found", { status: 404 });
     }
 
@@ -117,10 +124,34 @@ export async function GET(request: Request, context: RouteContext) {
     }
 
     const decisionSet = preparation.separation
-      ? (preparation.separation as unknown as { decisions?: RegionDecision[] })
+      ? (preparation.separation as unknown as SeparationDecisionSet)
       : null;
-    const decisions: RegionDecision[] = decisionSet?.decisions ?? [];
-    const master = buildSeparationMaster(original, computation, decisions);
+    const decisions = decisionSet?.decisions ?? [];
+
+    // Phase 23: the SAME proposal-authority derivation the capability layer
+    // uses (never a second implementation) — a stale or absent decision set
+    // always resolves toward "pending" (retain everything), so this preview
+    // can never show a pixel as removed that the capability would not also
+    // remove.
+    const proposalHash = computation.regionMap.inBoundsProposal?.proposalHash ?? null;
+    const proposalDecision: SeparationDecisionSet["proposalDecision"] =
+      !computation.regionMap.inBoundsProposal || !decisionSet || decisionSet.proposalHash !== proposalHash
+        ? "pending"
+        : decisionSet.proposalDecision;
+    const proposalPreserveOps =
+      decisionSet && decisionSet.proposalHash === proposalHash ? decisionSet.proposalPreserveOps : [];
+    const proposalAuthority: ProposalAuthority = { decision: proposalDecision, preserveOperations: proposalPreserveOps };
+
+    if (mode === "proposal-highlight") {
+      if (!computation.proposalMask) return NextResponseNotFound();
+      const preservedMask =
+        proposalDecision === "preserve_all"
+          ? computation.proposalMask
+          : replayPreserveOperations(computation.proposalMask, original.width, original.height, proposalPreserveOps);
+      return pngResponse(encodePng(renderProposalHighlight(original, computation.proposalMask, preservedMask)));
+    }
+
+    const master = buildSeparationMaster(original, computation, decisions, proposalAuthority);
 
     if (mode === "master") return pngResponse(encodePng(master));
 

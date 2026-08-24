@@ -72,6 +72,16 @@ describe("Separation reload/restart — complete and approved states survive a f
       regionMapHash: review.regionMap.regionMapHash,
       decisions: review.regionMap.consequentialRegions.map((r) => ({ regionId: r.regionId, intent: "ink" as const })),
     });
+    // Phase 23: this fixture also carries a unified in-bounds proposal — a
+    // separate axis from the regions above (Phase 22B Issue 2) — which must
+    // be explicitly resolved too before `review_complete` is reachable.
+    if (review.regionMap.inBoundsProposal) {
+      await capability.submitProposalDecision(projectId, {
+        sourceAssetSha256: review.regionMap.sourceAssetSha256,
+        proposalHash: review.regionMap.inBoundsProposal.proposalHash,
+        decision: "preserve_all",
+      });
+    }
 
     const reloaded = restart(repo, assets);
     const reread = await reloaded.getSeparationReview(projectId);
@@ -88,6 +98,13 @@ describe("Separation reload/restart — complete and approved states survive a f
       regionMapHash: review.regionMap.regionMapHash,
       decisions: review.regionMap.consequentialRegions.map((r) => ({ regionId: r.regionId, intent: "ink" as const })),
     });
+    if (review.regionMap.inBoundsProposal) {
+      await capability.submitProposalDecision(projectId, {
+        sourceAssetSha256: review.regionMap.sourceAssetSha256,
+        proposalHash: review.regionMap.inBoundsProposal.proposalHash,
+        decision: "preserve_all",
+      });
+    }
     const approved = await capability.approveSeparationMaster(projectId);
     assert.equal(approved.isProductionAuthoritative, true);
 

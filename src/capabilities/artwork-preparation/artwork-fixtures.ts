@@ -867,6 +867,173 @@ export function denseBlackCompositionArtwork(): RgbaImage {
 }
 
 /** Encodes any fixture to PNG bytes, the way a real upload arrives. */
+// ---------------------------------------------------------------------------
+// Phase 23 (promoted from Phase 21's scratch investigation, verified there
+// to genuinely produce a nonzero in-bounds proposal — a design lesson from
+// that phase: a fully-enclosed picture-frame produces NO proposal at all,
+// correctly, since nothing reaches the border; an explicit gap wide enough
+// to defeat SILHOUETTE_RADIUS_PX's gap-closing (>6px) is required to
+// reproduce the real INCREDI-BOWLS/Split-Disturbers topology).
+// ---------------------------------------------------------------------------
+
+/** Adversarial: a picture-frame with a narrow-but-unsafe (16px) gap cut through the top bar, exposing a thin corridor of true in-bounds proposal. */
+export function veryThinStripArtwork(): RgbaImage {
+  const image = createCanvas(200, 200, NEAR_BLACK);
+  fillRect(image, 20, 20, 160, 30, WHITE);
+  fillRect(image, 20, 20, 30, 160, WHITE);
+  fillRect(image, 150, 20, 30, 160, WHITE);
+  fillRect(image, 20, 150, 160, 30, WHITE);
+  fillRect(image, 92, 0, 16, 50, NEAR_BLACK);
+  return image;
+}
+
+/** Adversarial: a long (140px) thin slit cut through a white field's top edge — a proposal strip requiring multiple preserve taps to fully cover, mirroring the real ribbon-shadow finding. */
+export function longThinStripArtwork(): RgbaImage {
+  const image = createCanvas(260, 100, NEAR_BLACK);
+  fillRect(image, 10, 10, 240, 80, WHITE);
+  fillRect(image, 60, 10, 140, 4, NEAR_BLACK);
+  fillRect(image, 60, 0, 4, 14, NEAR_BLACK);
+  return image;
+}
+
+/** Adversarial: two open interior pockets joined by a narrow (4px) neck — proves a preserve tap on one pocket should not automatically also preserve the other at a conservative cap. */
+export function narrowNeckArtwork(): RgbaImage {
+  const image = createCanvas(240, 160, NEAR_BLACK);
+  fillRect(image, 20, 20, 200, 30, WHITE);
+  fillRect(image, 20, 20, 30, 120, WHITE);
+  fillRect(image, 190, 20, 30, 120, WHITE);
+  fillRect(image, 20, 110, 200, 30, WHITE);
+  fillRect(image, 104, 0, 16, 50, NEAR_BLACK);
+  fillRect(image, 110, 50, 20, 26, WHITE);
+  fillRect(image, 118, 76, 4, 8, NEAR_BLACK);
+  return image;
+}
+
+/** Adversarial: a red ink block sitting directly against in-bounds proposal background, no buffer — proves preserving the background never alters the adjacent ink's RGB. */
+export function proposalAdjacentToInkArtwork(): RgbaImage {
+  const image = createCanvas(200, 200, NEAR_BLACK);
+  fillRect(image, 20, 20, 160, 30, WHITE);
+  fillRect(image, 20, 20, 30, 160, WHITE);
+  fillRect(image, 150, 20, 30, 160, WHITE);
+  fillRect(image, 20, 150, 160, 30, WHITE);
+  fillRect(image, 92, 0, 16, 50, NEAR_BLACK);
+  fillRect(image, 60, 60, 60, 60, RED);
+  return image;
+}
+
+/** Adversarial: a small (256px) isolated in-bounds proposal pocket reached by a corridor — proves a single tap cleanly selects a tiny pocket without spilling further. */
+export function tinyProposalPocketArtwork(): RgbaImage {
+  const image = createCanvas(200, 200, NEAR_BLACK);
+  fillRect(image, 20, 20, 160, 160, WHITE);
+  fillRect(image, 90, 90, 14, 14, NEAR_BLACK);
+  fillRect(image, 88, 0, 10, 90, NEAR_BLACK);
+  return image;
+}
+
+/** Adversarial: an annulus (ring) with a wide gap in the ring wall — the enclosed interior connects to the exterior via that one gap, directly mirroring the real INCREDI-BOWLS/Split-Disturbers ring topology. */
+export function curvedBandWithGapArtwork(): RgbaImage {
+  const image = createCanvas(240, 240, NEAR_BLACK);
+  fillEllipse(image, 120, 120, 100, 100, WHITE);
+  fillEllipse(image, 120, 120, 80, 80, NEAR_BLACK);
+  fillRect(image, 110, 20, 20, 20, NEAR_BLACK);
+  return image;
+}
+
+/** Adversarial: two separate small in-bounds proposal targets separated by a wide field of genuinely-removable substrate — preserving one must not preserve the other or the substrate between them. */
+export function twoProposalTargetsSeparatedArtwork(): RgbaImage {
+  const image = createCanvas(300, 150, NEAR_BLACK);
+  fillRect(image, 20, 20, 80, 110, WHITE);
+  fillRect(image, 200, 20, 80, 110, WHITE);
+  fillRect(image, 70, 110, 20, 20, NEAR_BLACK);
+  fillRect(image, 210, 110, 20, 20, NEAR_BLACK);
+  return image;
+}
+
+/** Adversarial: a wide-open gapped frame interior with one small deliberate accent inside it — a "large open field" case where one broad decision should efficiently cover the bulk of the proposal. */
+export function largeOpenProposalFieldArtwork(): RgbaImage {
+  const image = createCanvas(280, 280, NEAR_BLACK);
+  fillRect(image, 20, 20, 240, 30, WHITE);
+  fillRect(image, 20, 20, 30, 240, WHITE);
+  fillRect(image, 230, 20, 30, 240, WHITE);
+  fillRect(image, 20, 230, 240, 30, WHITE);
+  fillRect(image, 132, 0, 16, 50, NEAR_BLACK);
+  fillRect(image, 130, 130, 20, 20, NEAR_BLACK);
+  return image;
+}
+
+/** Adversarial: the artwork's own ink starts flush with the canvas edge (x=0, y=0), with an in-bounds gap that also touches that same edge — stress-tests that inkBounds/silhouette/proposal computation never index out of bounds when `artworkBounds.left === 0` / `.top === 0`. */
+export function edgeTouchingArtwork(): RgbaImage {
+  const image = createCanvas(160, 160, NEAR_BLACK);
+  fillRect(image, 0, 0, 140, 20, WHITE);
+  fillRect(image, 0, 0, 20, 140, WHITE);
+  fillRect(image, 120, 0, 20, 140, WHITE);
+  fillRect(image, 0, 120, 140, 20, WHITE);
+  // Gap in the top bar, itself starting at y=0 — the interior connects to
+  // the exterior at the very first row of the canvas, not just somewhere
+  // safely inside it.
+  fillRect(image, 60, 0, 16, 20, NEAR_BLACK);
+  return image;
+}
+
+/**
+ * Phase 23B: OPEN LINE ART. The one adversarial case Phase 23's own
+ * checkpoint report explicitly flagged as not yet covered by a dedicated
+ * fixture.
+ *
+ * Distinct from `curvedBandWithGapArtwork` (a THICK, solid-filled annulus):
+ * this is genuine thin-stroke line work — an open bracket/frame drawn with
+ * 8px strokes, plus a small serif for "meaningful foreground line art"
+ * rather than a bare geometric ring — enclosing a background-colored
+ * (NEAR_BLACK, same as the true exterior) interior. One wall of the frame
+ * has a deliberate 30px gap, far wider than `SILHOUETTE_RADIUS_PX`'s 6px
+ * gap-closing threshold, connecting that interior directly to the true
+ * exterior. Because the interior is the SAME colour as the exterior, it is
+ * invisible to any color-distance classifier; only its FLOOD-CONNECTIVITY
+ * through the gap (with the frame's own ink fully enclosing it, so it sits
+ * inside `artworkBounds`) is what makes it exactly the class of topology
+ * that falsified "border-connected == safe" (Phase 17).
+ *
+ * A second, disconnected far corner is left untouched so a genuinely safe,
+ * unconditionally-removable exterior point exists for comparison.
+ */
+export function openLineArtFrameArtwork(): RgbaImage {
+  const image = createCanvas(260, 260, NEAR_BLACK);
+
+  // The frame: three complete walls...
+  fillRect(image, 60, 60, 140, 8, WHITE); // top
+  fillRect(image, 60, 60, 8, 140, WHITE); // left
+  fillRect(image, 60, 192, 140, 8, WHITE); // bottom
+  // ...and a right wall with a deliberate 30px gap in the middle.
+  fillRect(image, 192, 60, 8, 55, WHITE); // right, upper segment
+  fillRect(image, 192, 145, 8, 55, WHITE); // right, lower segment (gap: y in [115,145))
+
+  // A small serif off the top-left corner — "meaningful foreground line
+  // art", not just a bare rectangle outline.
+  fillRect(image, 45, 60, 15, 6, WHITE);
+
+  return image;
+}
+
+/**
+ * Phase 23B Section 7 (staleness): the SAME open-line-art frame, same
+ * overall footprint and a deliberately similar pixel count, but with the
+ * gap moved from the right wall to the left wall — a genuinely different
+ * proposal MASK shape that a bounds/pixelCount-only identity could still
+ * mistake for the same proposal. Exists specifically to prove
+ * `computeProposalHash` (which hashes the exact canonical mask, not
+ * summary stats) correctly treats this as a different proposal.
+ */
+export function openLineArtFrameGapDriftedArtwork(): RgbaImage {
+  const image = createCanvas(260, 260, NEAR_BLACK);
+  fillRect(image, 60, 60, 140, 8, WHITE); // top
+  fillRect(image, 60, 60, 8, 55, WHITE); // left, upper segment
+  fillRect(image, 60, 145, 8, 55, WHITE); // left, lower segment (gap: y in [115,145))
+  fillRect(image, 60, 192, 140, 8, WHITE); // bottom
+  fillRect(image, 192, 60, 8, 140, WHITE); // right, now solid (no gap)
+  fillRect(image, 45, 60, 15, 6, WHITE); // same serif
+  return image;
+}
+
 export function toPngBytes(image: RgbaImage): Buffer {
   return encodeRgbaToPng(image);
 }

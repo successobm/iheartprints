@@ -96,20 +96,28 @@ import { opaquePreparedRevision } from "./prepared-revision";
 import { classifyRepairability } from "./repairability";
 import {
   buildSeparationMaster,
+  CAP_RULE_VERSION_V1,
   computeRegionMap,
   runSeparationPostChecks,
+  SNAP_RULE_VERSION_V1,
+  type ProposalAuthority,
 } from "./region-separation";
 import type {
+  RegionMap,
   SeparationDecisionSet,
   SeparationReviewView,
+  SubmitProposalDecisionRequest,
   SubmitRegionDecisionsRequest,
 } from "./region-separation-contracts";
 import {
   assessSeparationReviewState,
   buildSeparationReviewView,
-  isDecisionSetComplete,
+  effectiveProposalDecision,
   isDecisionSetStale,
+  isReadyForFinalApproval,
+  mergeProposalDecision,
   mergeRegionDecisions,
+  validateSubmitProposalDecision,
   validateSubmitRegionDecisions,
 } from "./separation-review";
 import {
@@ -342,11 +350,28 @@ export interface ArtworkPreparationCapability {
     request: SubmitRegionDecisionsRequest,
   ): Promise<SeparationReviewView>;
   /**
-   * THE FINAL APPROVAL (Goal 18). Requires every consequential region to
-   * carry an operator decision and the decision set to be current; refuses
-   * otherwise. Builds the master deterministically, uploads it as a NEW
-   * asset, and repoints `preparedAssetId`/`preparedArtworkVersionId` at it —
-   * the exact same fields `approvePreparedArtwork` sets, so
+   * Phase 23: records the operator's decision about the unified in-bounds
+   * removal proposal — `"pending"`/`"remove_with_exceptions"`/
+   * `"preserve_all"` — plus any new preserve taps to add or existing
+   * operation ids to remove. Fails closed on any hash mismatch, exactly like
+   * `submitRegionDecisions`. The client submits only raw tap coordinates and
+   * the chosen decision — never a mask, alpha value, or pixel list; the
+   * actual selection is always recomputed here, server-side, from
+   * `selectPreserveException`.
+   */
+  submitProposalDecision(
+    designId: string,
+    request: SubmitProposalDecisionRequest,
+  ): Promise<SeparationReviewView>;
+  /**
+   * THE FINAL APPROVAL (Goal 18). Requires the decision set to be current
+   * and, when an in-bounds proposal exists, that proposal to be explicitly
+   * resolved (not `"pending"`) — Phase 22B Issue 2: consequential-region
+   * completeness is NOT required, since an undecided isolated region already
+   * retains its pixels exactly as an explicit "ink"/"uncertain" decision
+   * would. Builds the master deterministically, uploads it as a NEW asset,
+   * and repoints `preparedAssetId`/`preparedArtworkVersionId` at it — the
+   * exact same fields `approvePreparedArtwork` sets, so
    * `final-artwork-worker` and every downstream consumer need no changes at
    * all (Goal: production routing changed? NO).
    */
@@ -520,6 +545,27 @@ export function createArtworkPreparationCapability(
       ? (preparation.separation as unknown as SeparationDecisionSet)
       : null;
     return { computation, decisionSet };
+  }
+
+  /**
+   * Phase 23: the authority `buildSeparationMaster`/`runSeparationPostChecks`
+   * need for the in-bounds proposal — derived the SAME way
+   * `buildSeparationReviewView` derives what it shows the operator, so the
+   * live preview and the persisted authority can never silently disagree.
+   * Fail-closed by construction: `effectiveProposalDecision` already resets
+   * to `"pending"` (retain everything) on any staleness, and a stale
+   * decision set's `proposalPreserveOps` are never read here at all.
+   */
+  function proposalAuthorityFor(
+    regionMap: RegionMap,
+    decisionSet: SeparationDecisionSet | null,
+  ): ProposalAuthority {
+    const decision = effectiveProposalDecision(regionMap, decisionSet) ?? "pending";
+    const preserveOperations =
+      decisionSet && decisionSet.proposalHash === (regionMap.inBoundsProposal?.proposalHash ?? null)
+        ? decisionSet.proposalPreserveOps
+        : [];
+    return { decision, preserveOperations };
   }
 
   /**
@@ -1211,12 +1257,14 @@ export function createArtworkPreparationCapability(
       const { preparation } = await loadOwned(designId);
       const { image: original, sha256 } = await loadOriginalImageWithHash(preparation);
       const { computation, decisionSet } = computeSeparationState(preparation, sha256, original);
+      const proposalAuthority = proposalAuthorityFor(computation.regionMap, decisionSet);
       const postCheck = decisionSet
         ? runSeparationPostChecks(
             original,
-            buildSeparationMaster(original, computation, decisionSet.decisions),
+            buildSeparationMaster(original, computation, decisionSet.decisions, proposalAuthority),
             computation,
             decisionSet.decisions,
+            proposalAuthority,
           )
         : null;
       const isProductionAuthoritative =
@@ -1241,8 +1289,40 @@ export function createArtworkPreparationCapability(
         separation: merged as unknown as Record<string, unknown>,
       });
 
-      const master = buildSeparationMaster(original, computation, merged.decisions);
-      const postCheck = runSeparationPostChecks(original, master, computation, merged.decisions);
+      const proposalAuthority = proposalAuthorityFor(computation.regionMap, merged);
+      const master = buildSeparationMaster(original, computation, merged.decisions, proposalAuthority);
+      const postCheck = runSeparationPostChecks(original, master, computation, merged.decisions, proposalAuthority);
+      return buildSeparationReviewView(computation.regionMap, merged, postCheck, false);
+    },
+
+    async submitProposalDecision(designId, request) {
+      const { preparation } = await loadOwned(designId);
+      const { image: original, sha256 } = await loadOriginalImageWithHash(preparation);
+      const { computation, decisionSet: existing } = computeSeparationState(preparation, sha256, original);
+
+      const validity = validateSubmitProposalDecision(computation.regionMap, request);
+      if (!validity.ok) {
+        throw new ArtworkPreparationStateError(validity.reason);
+      }
+
+      const addTapCount = request.addPreserveTaps?.length ?? 0;
+      const newOperationIds = Array.from({ length: addTapCount }, () => randomUUID());
+      const merged = mergeProposalDecision(
+        computation.regionMap,
+        existing,
+        request,
+        new Date().toISOString(),
+        newOperationIds,
+        CAP_RULE_VERSION_V1,
+        SNAP_RULE_VERSION_V1,
+      );
+      await repo.updateArtworkPreparation(preparation.id, {
+        separation: merged as unknown as Record<string, unknown>,
+      });
+
+      const proposalAuthority = proposalAuthorityFor(computation.regionMap, merged);
+      const master = buildSeparationMaster(original, computation, merged.decisions, proposalAuthority);
+      const postCheck = runSeparationPostChecks(original, master, computation, merged.decisions, proposalAuthority);
       return buildSeparationReviewView(computation.regionMap, merged, postCheck, false);
     },
 
@@ -1258,14 +1338,17 @@ export function createArtworkPreparationCapability(
           "This artwork's separation review is out of date. Reload before approving.",
         );
       }
-      if (!isDecisionSetComplete(computation.regionMap, decisionSet)) {
+      if (!isReadyForFinalApproval(computation.regionMap, decisionSet)) {
         throw new ArtworkPreparationStateError(
-          "Every highlighted area needs a decision before this preparation can be used.",
+          computation.regionMap.inBoundsProposal
+            ? "Decide what to do with the highlighted removal before this preparation can be used."
+            : "Every highlighted area needs a decision before this preparation can be used.",
         );
       }
 
-      const master = buildSeparationMaster(original, computation, decisionSet!.decisions);
-      const postCheck = runSeparationPostChecks(original, master, computation, decisionSet!.decisions);
+      const proposalAuthority = proposalAuthorityFor(computation.regionMap, decisionSet);
+      const master = buildSeparationMaster(original, computation, decisionSet!.decisions, proposalAuthority);
+      const postCheck = runSeparationPostChecks(original, master, computation, decisionSet!.decisions, proposalAuthority);
       if (!postCheck.passed) {
         // Unreachable by construction of `buildSeparationMaster` — verified,
         // never assumed. If it ever fires, refuse rather than silently

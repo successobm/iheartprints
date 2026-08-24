@@ -111,7 +111,7 @@ describe("Phase 16: complex-background separation does not implement \"black == 
 
     // regionA (the larger disconnected black ellipse) -> Print Ink: must survive.
     // regionB (the black hole inside white) -> Show Shirt: must become transparent.
-    const updated = await capability.submitRegionDecisions(projectId, {
+    let updated = await capability.submitRegionDecisions(projectId, {
       sourceAssetSha256: review.regionMap.sourceAssetSha256,
       regionMapHash: review.regionMap.regionMapHash,
       decisions: [
@@ -119,6 +119,20 @@ describe("Phase 16: complex-background separation does not implement \"black == 
         { regionId: regionB.regionId, intent: "substrate" },
       ],
     });
+    // Phase 23: this dense composition also produces a unified in-bounds
+    // proposal — a separate axis from the two consequential regions above
+    // (Phase 22B Issue 2) — which must be explicitly resolved too. The
+    // master rebuilt below calls `buildSeparationMaster` directly with the
+    // OLD 3-argument signature, so this decision has no effect on the pixel
+    // assertions that follow; it only unblocks the capability's own
+    // `review_complete` gate.
+    if (review.regionMap.inBoundsProposal) {
+      updated = await capability.submitProposalDecision(projectId, {
+        sourceAssetSha256: review.regionMap.sourceAssetSha256,
+        proposalHash: review.regionMap.inBoundsProposal.proposalHash,
+        decision: "preserve_all",
+      });
+    }
     assert.equal(updated.state, "review_complete");
 
     const { computeRegionMap, buildSeparationMaster } = await import("./region-separation");

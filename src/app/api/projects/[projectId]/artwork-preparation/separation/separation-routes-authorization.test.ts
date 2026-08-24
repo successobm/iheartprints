@@ -67,6 +67,7 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
   async function callRoutes(projectId: string) {
     const getRoute = await import("./route");
     const decisionsRoute = await import("./decisions/route");
+    const proposalRoute = await import("./decisions/proposal/route");
     const approveRoute = await import("./approve/route");
     const imageRoute = await import("./image/route");
     const params = { params: Promise.resolve({ projectId }) };
@@ -78,15 +79,33 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
     // only variable between them is who is asking.
     let decisionBody: { sourceAssetSha256: string; regionMapHash: string; decisions: Array<{ regionId: number; intent: string }> } | null =
       null;
+    // Phase 23: the operator must also resolve the unified in-bounds
+    // proposal (if this fixture has one) before approval is reachable —
+    // `preserve_all` keeps every pixel outcome identical to what this
+    // fixture's pixel assertions already assume, it just makes the decision
+    // explicit rather than leaving it "pending" (Phase 22B Issue 2).
+    let proposalBody: { sourceAssetSha256: string; proposalHash: string; decision: "preserve_all" } | null = null;
     if (getRes.status === 200) {
       const view = (await getRes.clone().json()) as {
-        regionMap: { sourceAssetSha256: string; regionMapHash: string; consequentialRegions: Array<{ regionId: number }> };
+        regionMap: {
+          sourceAssetSha256: string;
+          regionMapHash: string;
+          consequentialRegions: Array<{ regionId: number }>;
+          inBoundsProposal: { proposalHash: string } | null;
+        };
       };
       decisionBody = {
         sourceAssetSha256: view.regionMap.sourceAssetSha256,
         regionMapHash: view.regionMap.regionMapHash,
         decisions: view.regionMap.consequentialRegions.map((r) => ({ regionId: r.regionId, intent: "ink" })),
       };
+      if (view.regionMap.inBoundsProposal) {
+        proposalBody = {
+          sourceAssetSha256: view.regionMap.sourceAssetSha256,
+          proposalHash: view.regionMap.inBoundsProposal.proposalHash,
+          decision: "preserve_all",
+        };
+      }
     }
 
     const decisionsRes = await decisionsRoute.POST(
@@ -104,10 +123,24 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
       params,
     );
 
+    // Same gate, proven the same way, for the sibling proposal-decision
+    // route — a forged body when nothing real is available, exactly like
+    // `decisionsRes` above.
+    const proposalRes = await proposalRoute.POST(
+      new Request("http://localhost/x", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          proposalBody ?? { sourceAssetSha256: "forged", proposalHash: "forged", decision: "preserve_all" },
+        ),
+      }),
+      params,
+    );
+
     const approveRes = await approveRoute.POST(new Request("http://localhost/x", { method: "POST" }), params);
     const imageRes = await imageRoute.GET(new Request("http://localhost/x?mode=original"), params);
 
-    return { getRes, decisionsRes, approveRes, imageRes };
+    return { getRes, decisionsRes, proposalRes, approveRes, imageRes };
   }
 
   it("a public (non-internal) project: GET separation is denied with an uninformative 404", async () => {
@@ -123,6 +156,12 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
     const { projectId } = await seededProject({ internal: false });
     const { decisionsRes } = await callRoutes(projectId);
     assert.equal(decisionsRes.status, 404);
+  });
+
+  it("a public (non-internal) project: proposal decision writes are denied", async () => {
+    const { projectId } = await seededProject({ internal: false });
+    const { proposalRes } = await callRoutes(projectId);
+    assert.equal(proposalRes.status, 404);
   });
 
   it("a public (non-internal) project: approval is denied", async () => {
@@ -171,7 +210,8 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
 
   it("an internal project: approval succeeds once every region is decided, and image access succeeds", async () => {
     const { projectId } = await seededProject({ internal: true });
-    const { approveRes, imageRes } = await callRoutes(projectId);
+    const { proposalRes, approveRes, imageRes } = await callRoutes(projectId);
+    assert.equal(proposalRes.status, 200);
     assert.equal(approveRes.status, 200);
     const body = (await approveRes.json()) as { state: string; isProductionAuthoritative: boolean };
     assert.equal(body.state, "review_complete");

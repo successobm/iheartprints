@@ -22,6 +22,16 @@ import type { ArtworkPreparationCapability } from "@/capabilities/artwork-prepar
  * consequential regions it is exactly `approvePreparedArtwork` — no added
  * step, no behaviour change.
  *
+ * Phase 23: the same widening applies to the unified in-bounds removal
+ * PROPOSAL (a separate axis from consequential regions — see
+ * `region-separation-contracts.ts`'s `ProposalDecision` doc comment).
+ * Tests written before that axis existed expect every one of a fixture's
+ * pixels to survive approval untouched; this helper now also resolves any
+ * proposal with `preserve_all` — the pixel-identical continuation of
+ * "mark every region ink" onto the proposal axis, not a new behavior for
+ * these fixtures to react to. Artwork with no in-bounds proposal is
+ * unaffected — `submitProposalDecision` is only called when one exists.
+ *
  * Test support only. Never imported by application code.
  */
 export async function approvePreparedArtworkForTests(
@@ -41,6 +51,13 @@ export async function approvePreparedArtworkForTests(
       intent: "ink" as const,
     })),
   });
+  if (review.regionMap.inBoundsProposal) {
+    await capability.submitProposalDecision(projectId, {
+      sourceAssetSha256: review.regionMap.sourceAssetSha256,
+      proposalHash: review.regionMap.inBoundsProposal.proposalHash,
+      decision: "preserve_all",
+    });
+  }
   await capability.approveSeparationMaster(projectId);
 
   const preparation = await capability.getPreparation(projectId);

@@ -188,11 +188,21 @@ describe("Intelligent Separation Phase 9 — operator decision workflow", () => 
     const { capability, projectId } = await seeded(toPngBytes(bowlingStyleArtwork()));
     const review = await capability.getSeparationReview(projectId);
     const decisions = review.regionMap.consequentialRegions.map((r) => ({ regionId: r.regionId, intent: "ink" as const }));
-    const afterDecisions = await capability.submitRegionDecisions(projectId, {
+    let afterDecisions = await capability.submitRegionDecisions(projectId, {
       sourceAssetSha256: review.regionMap.sourceAssetSha256,
       regionMapHash: review.regionMap.regionMapHash,
       decisions,
     });
+    // Phase 23: this fixture also carries a unified in-bounds proposal —
+    // resolving it explicitly is a second, separate axis from region
+    // decisions (Phase 22B Issue 2), so `review_complete` needs both here.
+    if (review.regionMap.inBoundsProposal) {
+      afterDecisions = await capability.submitProposalDecision(projectId, {
+        sourceAssetSha256: review.regionMap.sourceAssetSha256,
+        proposalHash: review.regionMap.inBoundsProposal.proposalHash,
+        decision: "preserve_all",
+      });
+    }
     assert.equal(afterDecisions.state, "review_complete");
     assert.equal(afterDecisions.isProductionAuthoritative, false);
     assert.equal(afterDecisions.approvedAt, null);
@@ -211,6 +221,13 @@ describe("Intelligent Separation Phase 9 — operator decision workflow", () => 
       regionMapHash: review.regionMap.regionMapHash,
       decisions,
     });
+    if (review.regionMap.inBoundsProposal) {
+      await capability.submitProposalDecision(projectId, {
+        sourceAssetSha256: review.regionMap.sourceAssetSha256,
+        proposalHash: review.regionMap.inBoundsProposal.proposalHash,
+        decision: "preserve_all",
+      });
+    }
     const approved = await capability.approveSeparationMaster(projectId);
     assert.equal(approved.isProductionAuthoritative, true);
 
@@ -294,6 +311,21 @@ describe("Intelligent Separation Phase 9 — operator decision workflow", () => 
         regionMapHash: review.regionMap.regionMapHash,
         decisions,
       });
+      if (review.regionMap.inBoundsProposal) {
+        // `remove_with_exceptions` with no taps — matching the pre-Phase-23
+        // unconditional exterior-removal default exactly — since this
+        // test's own pixel assumption ("the exterior corner of the trimmed,
+        // screened output carries zero ink") was written against that
+        // removal behavior. `preserve_all` would retain this real asset's
+        // own in-bounds proposal area (a Phase-17-style near-corner defect
+        // this specific bowling logo also has), which is correct new
+        // behavior but not what this sizing/halftone test measures.
+        await capability.submitProposalDecision(projectId, {
+          sourceAssetSha256: review.regionMap.sourceAssetSha256,
+          proposalHash: review.regionMap.inBoundsProposal.proposalHash,
+          decision: "remove_with_exceptions",
+        });
+      }
       const approved = await capability.approveSeparationMaster(projectId);
       assert.equal(approved.state, "review_complete");
       assert.equal(approved.isProductionAuthoritative, true);

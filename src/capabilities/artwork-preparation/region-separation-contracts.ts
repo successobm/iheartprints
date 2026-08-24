@@ -119,6 +119,29 @@ export interface RegionMap {
   consequentialRegions: ConsequentialRegion[];
   /** Every interior region found, consequential or not — diagnostic only. */
   totalRegionCount: number;
+  /**
+   * Phase 23 (Phase 17's finding, Phase 18/22B's design): silhouette-removed
+   * pixels that fall INSIDE `artworkBounds` — proven unsafe to remove
+   * automatically, because border-connectivity alone cannot tell true
+   * background apart from a design's own interior (the INCREDI-BOWLS pin
+   * and ribbon-shadow defects). `null` when there is nothing in-bounds to
+   * propose — the common case, and the ONLY case where this workflow adds
+   * nothing beyond today's existing behavior (Goal: easy artwork stays easy).
+   */
+  inBoundsProposal: InBoundsProposal | null;
+}
+
+/**
+ * Derived summary of the in-bounds proposal mask, for display only.
+ * `proposalHash` is the actual staleness identity — see
+ * `computeProposalHash`'s doc comment for exactly what it covers and why
+ * `pixelCount`/`bounds` alone are NOT sufficient identity (two different
+ * masks can share both while differing in exact membership).
+ */
+export interface InBoundsProposal {
+  proposalHash: string;
+  pixelCount: number;
+  bounds: RegionBounds;
 }
 
 /** An AI suggestion, if one exists. Never authoritative — see the module doc comment. */
@@ -140,19 +163,83 @@ export interface RegionDecision {
 }
 
 /**
+ * Phase 23 (Phase 18/22B): the operator's decision about the UNIFIED
+ * in-bounds proposal — the alternative to reviewing dozens/hundreds of tiny
+ * regions Phase 17-18 falsified. Deliberately three states, not two:
+ *
+ *   pending                  the safe default. Every proposal pixel is
+ *                            retained — identical to how an undecided
+ *                            isolated region already behaves. Blocks final
+ *                            approval ONLY because there is nothing yet to
+ *                            approve, never because pending is unsafe.
+ *   remove_with_exceptions   the proposal becomes eligible for transparency,
+ *                            except any pixel covered by a successfully
+ *                            replayed `PreserveExceptionOperation`.
+ *   preserve_all             the entire proposal is retained, exactly like
+ *                            `pending`'s pixel outcome, but is an EXPLICIT,
+ *                            resolved decision (unlike `pending`) — reached
+ *                            via "Keep All Highlighted", never inferred.
+ */
+export type ProposalDecision = "pending" | "remove_with_exceptions" | "preserve_all";
+
+/**
+ * ONE deterministic operator preserve tap. Mirrors
+ * `GuidedMagicColorCleanupOperation`'s established shape (point-keyed,
+ * replayable, never a persisted mask) — inverted in purpose: this marks a
+ * proposal patch to KEEP, not to remove.
+ *
+ * Only `rawTapX`/`rawTapY` plus the two rule-version strings are
+ * authoritative. Everything else (the snapped seed, the selected mask, its
+ * pixel count, its bounds) is deterministically recomputed from
+ * (sourceAssetSha256, proposalHash, rawTapX, rawTapY, capRuleVersion,
+ * snapRuleVersion) on every read — never persisted, per Phase 21/22's
+ * explicit minimization.
+ */
+export interface PreserveExceptionOperation {
+  operationId: string;
+  rawTapX: number;
+  rawTapY: number;
+  /** Ties to a fixed `distanceLimit` — see `CAP_RULE_VERSION_V1` in `region-separation.ts`. Never a client-supplied radius. */
+  capRuleVersion: string;
+  /** Ties to a fixed `maxSnapDistance` — see `SNAP_RULE_VERSION_V1`. */
+  snapRuleVersion: string;
+  decidedAt: string;
+  /** Always "operator" — documented for symmetry with `RegionDecisionSource`, never actually a second value today. */
+  source: "operator";
+}
+
+/**
  * THE DURABLE, PINNED DECISION SET. Persisted verbatim on
  * `ArtworkPreparation.separation` (additive JSON — see Goal 25's audit in
  * `artwork-preparation-capability.ts`).
  *
  * `approvedAt` is the ONLY field that makes this authoritative over
  * production pixels — see `approveSeparationMaster`. Everything before that
- * is a draft an operator can still revise.
+ * is a draft an operator can still revise. Phase 23: `approvedAt` now also
+ * governs the proposal's authority — there is deliberately no second
+ * "proposal approved" timestamp (Phase 22B considered one and rejected it as
+ * a redundant, potentially-disagreeing second authority; a proposal-decision
+ * change after approval clears this SAME field, exactly like a region
+ * decision change already does).
  */
 export interface SeparationDecisionSet {
   sourceAssetSha256: string;
   regionMapHash: string;
   algorithmVersion: string;
   decisions: RegionDecision[];
+  /**
+   * Phase 23: the operator's decision about the unified in-bounds proposal.
+   * Defaults to `"pending"` when no `SeparationDecisionSet` exists yet or
+   * when the proposal has never been decided. Read together with
+   * `proposalHash` (below) for staleness — a hash mismatch resets this to
+   * the effective safe default (`"pending"`) rather than trusting it.
+   */
+  proposalDecision: ProposalDecision;
+  proposalDecisionAt: string | null;
+  /** The exact `RegionMap.inBoundsProposal.proposalHash` this `proposalDecision`/`proposalPreserveOps` pair was decided against — the staleness key for the proposal axis, independent of `regionMapHash`. `null` only when no proposal decision has ever been recorded. */
+  proposalHash: string | null;
+  /** Preserve taps. Remain STORED (never deleted) even while `proposalDecision === "preserve_all"`, where they have no effect — switching back to `remove_with_exceptions` reactivates any that still replay against the current proposal (Phase 22B Issue 3). */
+  proposalPreserveOps: PreserveExceptionOperation[];
   /** `null` until the operator's explicit final approval (Goal 18). Cleared by any decision change after approval (Goal 12/N). */
   approvedAt: string | null;
   /**
@@ -191,12 +278,17 @@ export interface SeparationReviewView {
   state: SeparationReviewState;
   regionMap: RegionMap;
   decisions: RegionDecision[];
-  /** Regions still needing an operator decision (undecided, or currently "uncertain"). */
+  /** Regions still needing an operator decision (undecided, or currently "uncertain"). Phase 23: informational only — no longer blocks final approval (Phase 22B Issue 2). */
   pendingRegionIds: number[];
   postCheck: SeparationPostCheck | null;
   approvedAt: string | null;
   /** True once `approveSeparationMaster` has made this master the project's `preparedAssetId`. */
   isProductionAuthoritative: boolean;
+  /** `null` when `regionMap.inBoundsProposal` is null — nothing for the operator to decide about the proposal. */
+  proposalDecision: ProposalDecision | null;
+  proposalPreserveOps: PreserveExceptionOperation[];
+  /** True when everything required for `Use This Preparation` is satisfied — the single field the UI needs instead of re-deriving completeness from `state`/`pendingRegionIds`/`proposalDecision` itself. */
+  readyForFinalApproval: boolean;
 }
 
 /** Never accepted from a client — documents the shape a write request is validated against. */
@@ -210,6 +302,23 @@ export interface SubmitRegionDecisionsRequest {
   sourceAssetSha256: string;
   regionMapHash: string;
   decisions: SubmitRegionDecisionInput[];
+}
+
+/**
+ * Phase 23: the client submits only the proposal-level choice plus RAW tap
+ * inputs (Goal: "client never submits pixel masks, alpha values, or
+ * arbitrary pixel lists" — `artwork-preparation-capability.ts` recomputes
+ * the actual selection server-side from these authoritative inputs).
+ */
+export interface SubmitProposalDecisionRequest {
+  sourceAssetSha256: string;
+  /** The client's belief about which proposal it is deciding against — checked against `RegionMap.inBoundsProposal.proposalHash`, never trusted blindly. */
+  proposalHash: string;
+  decision: ProposalDecision;
+  /** New preserve taps to add this call, if any. Existing stored operations are never resubmitted — they are addressed by `operationId` for removal instead (see the decisions route). */
+  addPreserveTaps?: Array<{ rawTapX: number; rawTapY: number }>;
+  /** Operation ids to remove (undo) this call, if any. */
+  removePreserveOperationIds?: string[];
 }
 
 /** Re-exported so callers don't need a second import for a type this module's functions consume. */

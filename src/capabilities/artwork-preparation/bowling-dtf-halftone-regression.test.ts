@@ -123,6 +123,20 @@ describe(
           intent: SUBSTRATE_IDS.has(regionId) ? ("substrate" as const) : ("ink" as const),
         })),
       });
+      // Phase 23: this real asset also carries a unified in-bounds proposal
+      // — a separate axis from the region decisions above (Phase 22B Issue
+      // 2). `remove_with_exceptions` with no taps matches this test's own
+      // "exterior areas carry no ink" expectation, exactly like the sibling
+      // P/Q/R/S sizing test on the same asset in
+      // `separation-decision-workflow.test.ts`.
+      const proposal = review.regionMap.inBoundsProposal;
+      if (proposal) {
+        await preparation.submitProposalDecision(projectId, {
+          sourceAssetSha256: review.regionMap.sourceAssetSha256,
+          proposalHash: proposal.proposalHash,
+          decision: "remove_with_exceptions",
+        });
+      }
       const approvedSeparation = await preparation.approveSeparationMaster(projectId);
       assert.equal(approvedSeparation.isProductionAuthoritative, true);
 

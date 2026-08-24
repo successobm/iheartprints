@@ -29,6 +29,9 @@ import { VISIBLE_ALPHA_THRESHOLD, channelDistance } from "./pixel-metrics";
 import type { RgbColor } from "./contracts";
 import type {
   ConsequentialRegion,
+  InBoundsProposal,
+  PreserveExceptionOperation,
+  ProposalDecision,
   RegionBounds,
   RegionDecision,
   RegionMap,
@@ -241,6 +244,313 @@ function inkBounds(ink: Uint8Array, width: number, height: number): RegionBounds
   return { left: minX, top: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
 }
 
+// ---------------------------------------------------------------------------
+// Phase 23 (Phase 17's finding; Phase 18/22B's design): the IN-BOUNDS
+// REMOVAL PROPOSAL.
+//
+// THE SAFETY BOUNDARY THIS SECTION EXISTS TO DRAW. `computeExteriorSilhouette`
+// above treats any pixel outside its own gap-closed silhouette as
+// unconditionally safe to remove — and Phase 17 proved that assumption FALSE
+// pixel-for-pixel on the real INCREDI-BOWLS artwork: a local gap in the line
+// art let the border-flood travel deep into the design's own footprint,
+// silently stripping the upper-right bowling-pin area and part of the
+// "STRIKINGLY INCREDIBLE" ribbon shadow with zero operator visibility.
+//
+// The one deterministic, MATHEMATICALLY safe distinction Phase 17 found:
+// `artworkBounds` is defined as the tight bounding box of every ink pixel
+// (see `inkBounds` above). By that definition alone, NO ink pixel can ever
+// exist outside it — so silhouette removal STRICTLY outside `artworkBounds`
+// can never destroy foreground content, with a 0% false-removal rate that is
+// provable, not merely observed. Silhouette removal INSIDE `artworkBounds`
+// carries no such guarantee and must become a PROPOSAL an operator reviews,
+// never automatic authority (see `buildSeparationMaster` below).
+// ---------------------------------------------------------------------------
+
+/** v1 fixed default for `PreserveExceptionOperation.capRuleVersion` — Phase 20/21's evidence-based, REVISABLE constant. Never a client-supplied radius, never geometry-derived (Phase 21 falsified that lead). */
+export const CAP_RULE_VERSION_V1 = "cap:v1";
+/** Phase 22B Issue 4: reduced from Phase 20/21's exploratory 25px specifically to limit over-preservation on small/tight proposal geometry (the narrow-neck adversarial case) — pixel safety is unaffected either way (selection always stays inside the proposal), this only trades operator precision. */
+const CAP_RULE_DISTANCE_LIMIT_PX: Record<string, number> = { [CAP_RULE_VERSION_V1]: 20 };
+
+/** v1 fixed default for `PreserveExceptionOperation.snapRuleVersion` — Phase 21's validated value (0/49 ribbon misses at this limit). */
+export const SNAP_RULE_VERSION_V1 = "snap:v1";
+const SNAP_RULE_MAX_DISTANCE_PX: Record<string, number> = { [SNAP_RULE_VERSION_V1]: 12 };
+
+function distanceLimitForCapRule(capRuleVersion: string): number {
+  const limit = CAP_RULE_DISTANCE_LIMIT_PX[capRuleVersion];
+  if (limit === undefined) throw new Error(`Unknown capRuleVersion: ${capRuleVersion}`);
+  return limit;
+}
+
+function maxSnapDistanceForSnapRule(snapRuleVersion: string): number {
+  const limit = SNAP_RULE_MAX_DISTANCE_PX[snapRuleVersion];
+  if (limit === undefined) throw new Error(`Unknown snapRuleVersion: ${snapRuleVersion}`);
+  return limit;
+}
+
+/**
+ * THE IN-BOUNDS PROPOSAL MASK. One byte per pixel (0/1), row-major, same
+ * dimensions as the source — `silhouette[i]===0` (would otherwise be
+ * automatically removed) AND inside `bounds` (the one place that removal is
+ * NOT provably safe). Never persisted (Goal: "derived from the original
+ * source every time") — recomputed by `computeRegionMap` on every read, the
+ * same discipline the region `label` array already follows.
+ */
+export function computeInBoundsProposalMask(
+  silhouette: Uint8Array,
+  bounds: RegionBounds,
+  width: number,
+  height: number,
+): { mask: Uint8Array; pixelCount: number } {
+  const mask = new Uint8Array(width * height);
+  let pixelCount = 0;
+  for (let y = bounds.top; y < bounds.top + bounds.height; y += 1) {
+    for (let x = bounds.left; x < bounds.left + bounds.width; x += 1) {
+      const i = y * width + x;
+      if (silhouette[i] === 0) {
+        mask[i] = 1;
+        pixelCount += 1;
+      }
+    }
+  }
+  return { mask, pixelCount };
+}
+
+function proposalMaskBounds(mask: Uint8Array, width: number, height: number): RegionBounds {
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (!mask[y * width + x]) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0) return { left: 0, top: 0, width: 0, height: 0 };
+  return { left: minX, top: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+/**
+ * THE PROPOSAL STALENESS KEY (Phase 22B Issue 1). Hashes the EXACT canonical
+ * mask buffer, not summary statistics — `pixelCount`/`bounds` alone cannot
+ * distinguish two masks that happen to share both while differing in exact
+ * pixel membership (Phase 22B's falsifying counterexample). `width`/`height`
+ * guard against a degenerate cross-dimension byte collision. `artworkBounds`
+ * is deliberately NOT hashed separately: every proposal pixel is already
+ * inside it by construction, so any bounds change necessarily changes the
+ * mask bytes themselves, which already changes this hash.
+ */
+export function computeProposalHash(
+  sourceAssetSha256: string,
+  algorithmVersion: string,
+  silhouetteRadius: number,
+  width: number,
+  height: number,
+  proposalMask: Uint8Array,
+): string {
+  const hash = createHash("sha256");
+  hash.update(sourceAssetSha256);
+  hash.update("|");
+  hash.update(algorithmVersion);
+  hash.update("|");
+  hash.update(String(silhouetteRadius));
+  hash.update("|");
+  hash.update(String(width));
+  hash.update("x");
+  hash.update(String(height));
+  hash.update("|");
+  hash.update(Buffer.from(proposalMask.buffer, proposalMask.byteOffset, proposalMask.byteLength));
+  return hash.digest("hex");
+}
+
+/**
+ * THE DETERMINISTIC PRESERVE-TAP PRIMITIVE (Phase 19-21's validated result).
+ *
+ * A raw operator tap resolves in two steps, both constrained EXCLUSIVELY to
+ * `proposalMask` (Goal: "selection must always be a subset of proposal
+ * pixels" — enforced by construction, never merely asserted):
+ *
+ *   1. SNAP — if the raw tap did not land on a proposal pixel, search
+ *      outward ring-by-ring (Chebyshev) up to `maxSnapDistance` for the
+ *      nearest one. Phase 21 proved this is necessary: 51% of realistic
+ *      finger placements missed the real ribbon-shadow defect entirely
+ *      without it. Ties break deterministically (lowest y, then lowest x).
+ *   2. CAP — a 4-connected flood fill from the (possibly snapped) seed,
+ *      gated ONLY by proposal-mask membership, stopping at geodesic
+ *      (path-length) distance `distanceLimit`. Geodesic, not Euclidean —
+ *      the cap can never cross through a non-proposal pixel, so it can
+ *      never leak into ink or an unrelated area (Phase 20's falsification
+ *      of unconstrained connectivity-only selection: a single click without
+ *      this cap selected 33% of the entire proposal).
+ *
+ * A tap beyond `maxSnapDistance` from any proposal pixel FAILS explicitly
+ * (`outcome: "tap_outside_snap_range"`) — never a silent no-op, never a
+ * guess at an unrelated area (Phase 22B/Phase 22 Section 5).
+ */
+export interface PreserveSelectionResult {
+  outcome: "eligible" | "tap_outside_snap_range" | "tap_outside_image";
+  mask: Uint8Array;
+  pixelCount: number;
+  bounds: RegionBounds | null;
+  effectiveSeedX: number | null;
+  effectiveSeedY: number | null;
+  snapDistance: number | null;
+}
+
+function snapToProposalPixel(
+  proposalMask: Uint8Array,
+  width: number,
+  height: number,
+  rawX: number,
+  rawY: number,
+  maxSnapDistance: number,
+): { x: number; y: number; distance: number } | null {
+  if (proposalMask[rawY * width + rawX]) return { x: rawX, y: rawY, distance: 0 };
+  for (let r = 1; r <= maxSnapDistance; r += 1) {
+    const candidates: Array<[number, number]> = [];
+    for (let dy = -r; dy <= r; dy += 1) {
+      for (let dx = -r; dx <= r; dx += 1) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = rawX + dx;
+        const y = rawY + dy;
+        if (x < 0 || y < 0 || x >= width || y >= height) continue;
+        if (proposalMask[y * width + x]) candidates.push([x, y]);
+      }
+    }
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+      return { x: candidates[0]![0], y: candidates[0]![1], distance: r };
+    }
+  }
+  return null;
+}
+
+function floodCapped(
+  proposalMask: Uint8Array,
+  width: number,
+  height: number,
+  seedX: number,
+  seedY: number,
+  distanceLimit: number,
+): { mask: Uint8Array; pixelCount: number; bounds: RegionBounds } {
+  const mask = new Uint8Array(width * height);
+  const dist = new Int32Array(width * height).fill(-1);
+  const seed = seedY * width + seedX;
+  const queue: number[] = [seed];
+  mask[seed] = 1;
+  dist[seed] = 0;
+  let qi = 0;
+  let pixelCount = 0;
+  let left = seedX, right = seedX + 1, top = seedY, bottom = seedY + 1;
+  while (qi < queue.length) {
+    const p = queue[qi]!;
+    qi += 1;
+    pixelCount += 1;
+    const px = p % width;
+    const py = (p / width) | 0;
+    if (px < left) left = px;
+    if (px + 1 > right) right = px + 1;
+    if (py < top) top = py;
+    if (py + 1 > bottom) bottom = py + 1;
+    if (dist[p]! >= distanceLimit) continue;
+    const neighbors = [p - 1, p + 1, p - width, p + width];
+    for (const np of neighbors) {
+      if (np < 0 || np >= width * height) continue;
+      const npx = np % width;
+      if (Math.abs(npx - px) > 1) continue;
+      if (mask[np] || !proposalMask[np]) continue;
+      mask[np] = 1;
+      dist[np] = dist[p]! + 1;
+      queue.push(np);
+    }
+  }
+  return { mask, pixelCount, bounds: { left, top, width: right - left, height: bottom - top } };
+}
+
+export function selectPreserveException(
+  proposalMask: Uint8Array,
+  width: number,
+  height: number,
+  rawTapX: number,
+  rawTapY: number,
+  capRuleVersion: string,
+  snapRuleVersion: string,
+): PreserveSelectionResult {
+  const x = Math.floor(rawTapX);
+  const y = Math.floor(rawTapY);
+  const empty = (): PreserveSelectionResult => ({
+    outcome: "tap_outside_image",
+    mask: new Uint8Array(width * height),
+    pixelCount: 0,
+    bounds: null,
+    effectiveSeedX: null,
+    effectiveSeedY: null,
+    snapDistance: null,
+  });
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= width || y >= height) return empty();
+
+  const maxSnapDistance = maxSnapDistanceForSnapRule(snapRuleVersion);
+  const snap = snapToProposalPixel(proposalMask, width, height, x, y, maxSnapDistance);
+  if (!snap) {
+    return {
+      outcome: "tap_outside_snap_range",
+      mask: new Uint8Array(width * height),
+      pixelCount: 0,
+      bounds: null,
+      effectiveSeedX: null,
+      effectiveSeedY: null,
+      snapDistance: null,
+    };
+  }
+
+  const distanceLimit = distanceLimitForCapRule(capRuleVersion);
+  const flood = floodCapped(proposalMask, width, height, snap.x, snap.y, distanceLimit);
+  return {
+    outcome: "eligible",
+    mask: flood.mask,
+    pixelCount: flood.pixelCount,
+    bounds: flood.bounds,
+    effectiveSeedX: snap.x,
+    effectiveSeedY: snap.y,
+    snapDistance: snap.distance,
+  };
+}
+
+/**
+ * Replays every stored `PreserveExceptionOperation` against the CURRENT
+ * proposal mask and unions the results. Order-independent by construction
+ * (union of masks) — Phase 21 proved forward and reversed operation order
+ * produce byte-identical results. An operation whose raw tap no longer lands
+ * on (or within snap range of) the current proposal is silently EXCLUDED
+ * from the union, never treated as an error that blocks the others — this
+ * fails toward MORE removal-eligible area only in the sense that one fewer
+ * exception applies, never toward removing a pixel no live operation
+ * actually covers (see `buildSeparationMaster`'s `pending`/`preserve_all`
+ * branches, which do not depend on this replay at all).
+ */
+export function replayPreserveOperations(
+  proposalMask: Uint8Array,
+  width: number,
+  height: number,
+  operations: readonly PreserveExceptionOperation[],
+): Uint8Array {
+  const union = new Uint8Array(width * height);
+  for (const op of operations) {
+    const result = selectPreserveException(
+      proposalMask,
+      width,
+      height,
+      op.rawTapX,
+      op.rawTapY,
+      op.capRuleVersion,
+      op.snapRuleVersion,
+    );
+    if (result.outcome !== "eligible") continue;
+    for (let i = 0; i < union.length; i += 1) if (result.mask[i]) union[i] = 1;
+  }
+  return union;
+}
+
 /** The staleness key: hashes everything a decision set must still agree with. */
 function computeRegionMapHash(
   algorithmVersion: string,
@@ -262,6 +572,8 @@ export interface RegionMapComputation {
   ink: Uint8Array;
   silhouette: Uint8Array;
   label: Int32Array;
+  /** The full-canvas in-bounds proposal mask (1 = proposal pixel) — `null` when `regionMap.inBoundsProposal` is null. Never persisted; see `computeInBoundsProposalMask`. */
+  proposalMask: Uint8Array | null;
 }
 
 /**
@@ -292,6 +604,28 @@ export function computeRegionMap(
     }))
     .sort((a, b) => b.pixelCount - a.pixelCount);
 
+  const { mask: proposalMask, pixelCount: proposalPixelCount } = computeInBoundsProposalMask(
+    silhouette,
+    bounds,
+    width,
+    height,
+  );
+  const inBoundsProposal: InBoundsProposal | null =
+    proposalPixelCount === 0
+      ? null
+      : {
+          proposalHash: computeProposalHash(
+            sourceAssetSha256,
+            SEPARATION_ALGORITHM_VERSION,
+            SILHOUETTE_RADIUS_PX,
+            width,
+            height,
+            proposalMask,
+          ),
+          pixelCount: proposalPixelCount,
+          bounds: proposalMaskBounds(proposalMask, width, height),
+        };
+
   const regionMap: RegionMap = {
     algorithmVersion: SEPARATION_ALGORITHM_VERSION,
     sourceAssetSha256,
@@ -300,38 +634,96 @@ export function computeRegionMap(
     artworkBounds: bounds,
     consequentialRegions,
     totalRegionCount: regions.length,
+    inBoundsProposal,
   };
 
-  return { regionMap, ink, silhouette, label };
+  return { regionMap, ink, silhouette, label, proposalMask: inBoundsProposal ? proposalMask : null };
 }
 
 /**
- * THE DETERMINISTIC MASTER CONSTRUCTION (Goal 7).
+ * Phase 23: what the operator decided about the unified in-bounds proposal,
+ * plus the preserve taps to replay against it. `undefined` (the function's
+ * default when this parameter is omitted) reproduces PRE-PHASE-23 behavior
+ * EXACTLY — `remove_with_exceptions` with zero exceptions is byte-for-byte
+ * identical to the old unconditional "silhouette===0 -> alpha 0" rule for
+ * every pixel, in-bounds or not. This is a deliberate backward-compatibility
+ * default for the many existing call sites/tests that predate the proposal
+ * concept and have no proposal-related assertion to make — it is NOT how
+ * live production data behaves: a real, freshly-persisted
+ * `SeparationDecisionSet.proposalDecision` always starts at `"pending"`
+ * (retain everything), so production safety comes from the DATA layer's own
+ * safe default, never from this parameter silently defaulting toward
+ * removal.
+ */
+export interface ProposalAuthority {
+  decision: ProposalDecision;
+  preserveOperations: readonly PreserveExceptionOperation[];
+}
+
+/**
+ * THE DETERMINISTIC MASTER CONSTRUCTION (Goal 7), extended by Phase 23 with
+ * the in-bounds proposal authority Phase 17 proved was missing:
  *
- *   exterior (outside the silhouette)     -> alpha 0
- *   region decided "substrate"            -> alpha 0 across that EXACT
+ *   exterior, OUTSIDE artworkBounds        -> alpha 0 automatically
+ *                                             (SAFE_EXTERIOR_AUTO — Phase 17
+ *                                             proved this boundary alone is
+ *                                             mathematically safe)
+ *   in-bounds proposal, "pending"          -> untouched (the safe default —
+ *                                             nothing has been decided yet)
+ *   in-bounds proposal, "preserve_all"     -> untouched
+ *   in-bounds proposal, "remove_with_
+ *     exceptions", NOT covered by a
+ *     successfully replayed preserve op    -> alpha 0
+ *   in-bounds proposal, "remove_with_
+ *     exceptions", covered by a
+ *     successfully replayed preserve op    -> untouched
+ *   region decided "substrate"             -> alpha 0 across that EXACT
  *                                             precomputed region
- *   region decided "ink" or undecided     -> untouched — RGB and alpha
- *                                             copied byte-for-byte
+ *   region decided "ink"/"uncertain"/
+ *     undecided                            -> untouched
  *
  * No RGB is ever written. No pixel's alpha is ever raised above what the
  * original had. No resampling, no redraw, no AI-authored pixel — every
  * safety property is verified by `runSeparationPostChecks`, not assumed.
+ * There is no other alpha-lowering path than the ones listed above.
  */
 export function buildSeparationMaster(
   original: RgbaImage,
   computation: RegionMapComputation,
   decisions: readonly RegionDecision[],
+  proposalAuthority: ProposalAuthority = { decision: "remove_with_exceptions", preserveOperations: [] },
 ): RgbaImage {
-  const { ink, silhouette, label } = computation;
+  const { ink, silhouette, label, proposalMask, regionMap } = computation;
+  const bounds = regionMap.artworkBounds;
+  const { width, height } = original;
+
   const drop = new Set(
     decisions.filter((d) => d.intent === "substrate").map((d) => d.regionId),
   );
+
+  const preserveUnion =
+    proposalMask && proposalAuthority.decision === "remove_with_exceptions"
+      ? replayPreserveOperations(proposalMask, width, height, proposalAuthority.preserveOperations)
+      : null;
+
   const data = Buffer.from(original.data);
-  const { width, height } = original;
   for (let i = 0; i < width * height; i += 1) {
     if (!silhouette[i]) {
-      data[i * 4 + 3] = 0;
+      const x = i % width;
+      const y = (i / width) | 0;
+      const insideBounds = x >= bounds.left && x < bounds.left + bounds.width && y >= bounds.top && y < bounds.top + bounds.height;
+      if (!insideBounds) {
+        // SAFE_EXTERIOR_AUTO — unconditional, matches the pre-Phase-23 rule exactly.
+        data[i * 4 + 3] = 0;
+        continue;
+      }
+      // In-bounds proposal pixel: authority depends on proposalAuthority.decision.
+      if (proposalAuthority.decision === "pending" || proposalAuthority.decision === "preserve_all") {
+        continue; // retain
+      }
+      // remove_with_exceptions
+      if (preserveUnion && preserveUnion[i]) continue; // OPERATOR_PRESERVED_EXCEPTION — retain
+      data[i * 4 + 3] = 0; // OPERATOR_APPROVED_PROPOSAL_SUBSTRATE
       continue;
     }
     const regionId = label[i]!;
@@ -353,10 +745,29 @@ export function runSeparationPostChecks(
   master: RgbaImage,
   computation: RegionMapComputation,
   decisions: readonly RegionDecision[],
+  proposalAuthority: ProposalAuthority = { decision: "remove_with_exceptions", preserveOperations: [] },
 ): SeparationPostCheck {
   const { width, height } = original;
-  const { ink, label } = computation;
+  const { ink, label, proposalMask, regionMap } = computation;
   const dropped = new Set(decisions.filter((d) => d.intent === "substrate").map((d) => d.regionId));
+  const bounds = regionMap.artworkBounds;
+  // Phase 23: a proposal pixel counts as "dropped" for orphan-detection
+  // purposes ONLY when it was actually removed by remove_with_exceptions and
+  // not covered by a preserve exception — mirrors buildSeparationMaster's
+  // own OPERATOR_APPROVED_PROPOSAL_SUBSTRATE branch exactly, so this warning
+  // stays meaningful (an operator-caused removal) rather than noise from the
+  // artwork's own pre-existing exterior boundary (deliberately excluded
+  // below, same as before Phase 23).
+  const preserveUnion =
+    proposalMask && proposalAuthority.decision === "remove_with_exceptions"
+      ? replayPreserveOperations(proposalMask, width, height, proposalAuthority.preserveOperations)
+      : null;
+  function isProposalDropped(i: number): boolean {
+    if (!proposalMask || !proposalMask[i]) return false;
+    if (proposalAuthority.decision !== "remove_with_exceptions") return false;
+    return !(preserveUnion && preserveUnion[i]);
+  }
+  void bounds;
   const lum = new Float32Array(width * height);
   for (let i = 0; i < width * height; i += 1) {
     lum[i] = encodedLuma(original.data[i * 4]!, original.data[i * 4 + 1]!, original.data[i * 4 + 2]!);
@@ -397,6 +808,7 @@ export function runSeparationPostChecks(
           const j = ny * width + nx;
           const jRegion = label[j]!;
           if (jRegion >= 0 && dropped.has(jRegion)) touchesDroppedRegion = true;
+          if (isProposalDropped(j)) touchesDroppedRegion = true;
           if (ink[j] && lum[j]! <= DARK_LUMA) hasDarkInk = true;
         }
       }
@@ -543,6 +955,76 @@ export function renderRegionContextHighlight(
         (label[i + 1] === regionId && (i + 1) % width !== 0) ||
         label[i - width] === regionId ||
         label[i + width] === regionId;
+      if (adjacentToTarget) {
+        data[o] = OUTLINE_OUTER.r;
+        data[o + 1] = OUTLINE_OUTER.g;
+        data[o + 2] = OUTLINE_OUTER.b;
+      } else {
+        data[o] = blendChannel(data[o], DIM_TOWARD.r, DIM_STRENGTH);
+        data[o + 1] = blendChannel(data[o + 1], DIM_TOWARD.g, DIM_STRENGTH);
+        data[o + 2] = blendChannel(data[o + 2], DIM_TOWARD.b, DIM_STRENGTH);
+      }
+    }
+    data[o + 3] = 255;
+  }
+  return { width, height, data };
+}
+
+/**
+ * Phase 23: THE PROPOSAL HIGHLIGHT — the "Proposed Removal" view of Phase
+ * 22's workflow (Step 1: "Check what will be removed"). Reuses the exact
+ * same halo/dim visual language `renderRegionContextHighlight` already
+ * established (Phase 14), applied to the UNIFIED proposal mask instead of a
+ * single labeled region: every proposal pixel not currently covered by a
+ * preserve exception is highlighted magenta with a two-tone outline; every
+ * pixel the operator has already preserved is shown in its own original
+ * colors with a distinct green tint, so progress is visible at a glance;
+ * everything else (safe-exterior, ordinary ink, isolated regions) is left
+ * exactly as `renderRegionContextHighlight` would leave it outside its
+ * target region — dimmed toward neutral gray, never redrawn.
+ */
+const PRESERVED_TINT = { r: 0, g: 200, b: 0 } as const;
+const PRESERVED_TINT_STRENGTH = 0.35;
+
+export function renderProposalHighlight(
+  original: RgbaImage,
+  proposalMask: Uint8Array,
+  preservedMask: Uint8Array,
+): RgbaImage {
+  const { width, height } = original;
+  const data = Buffer.from(original.data);
+  const isTarget = (i: number) => proposalMask[i] === 1 && !preservedMask[i];
+  for (let i = 0; i < width * height; i += 1) {
+    const o = i * 4;
+    if (proposalMask[i] && preservedMask[i]) {
+      data[o] = blendChannel(data[o], PRESERVED_TINT.r, PRESERVED_TINT_STRENGTH);
+      data[o + 1] = blendChannel(data[o + 1], PRESERVED_TINT.g, PRESERVED_TINT_STRENGTH);
+      data[o + 2] = blendChannel(data[o + 2], PRESERVED_TINT.b, PRESERVED_TINT_STRENGTH);
+    } else if (isTarget(i)) {
+      const x = i % width;
+      const y = (i / width) | 0;
+      const boundary =
+        (x === 0 || !isTarget(i - 1)) ||
+        (x === width - 1 || !isTarget(i + 1)) ||
+        (y === 0 || !isTarget(i - width)) ||
+        (y === height - 1 || !isTarget(i + width));
+      if (boundary) {
+        data[o] = OUTLINE_INNER.r;
+        data[o + 1] = OUTLINE_INNER.g;
+        data[o + 2] = OUTLINE_INNER.b;
+      } else {
+        data[o] = blendChannel(data[o], HIGHLIGHT_FILL.r, HIGHLIGHT_STRENGTH);
+        data[o + 1] = blendChannel(data[o + 1], HIGHLIGHT_FILL.g, HIGHLIGHT_STRENGTH);
+        data[o + 2] = blendChannel(data[o + 2], HIGHLIGHT_FILL.b, HIGHLIGHT_STRENGTH);
+      }
+    } else {
+      const x = i % width;
+      const y = (i / width) | 0;
+      const adjacentToTarget =
+        (x > 0 && isTarget(i - 1)) ||
+        (x < width - 1 && isTarget(i + 1)) ||
+        (y > 0 && isTarget(i - width)) ||
+        (y < height - 1 && isTarget(i + width));
       if (adjacentToTarget) {
         data[o] = OUTLINE_OUTER.r;
         data[o + 1] = OUTLINE_OUTER.g;
