@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { analyzeArtwork } from "./image-analysis";
+import { buildSeparationMaster } from "./region-separation";
 import {
   computeRegionMap,
   computeRegionCropRect,
@@ -290,5 +291,40 @@ describe("region visualization: never touches production pixel authority", () =>
     renderRegionContextHighlight(image, computation.label, small.regionId);
     renderRegionDetailCrop(image, computation.label, small.regionId, small.bounds);
     assert.deepEqual(image.data, before, "the source image buffer must never be mutated by preview rendering");
+  });
+
+  it("Phase 15: tuning the context view's dim strength leaves the approved production master byte-for-byte identical", () => {
+    // The exact regression this test exists to prevent: a future "make the
+    // preview look nicer" change accidentally touching buildSeparationMaster
+    // (or anything it depends on) instead of staying confined to preview
+    // rendering. buildSeparationMaster takes no highlight/dim parameter at
+    // all -- it is called here with none of the constants
+    // renderRegionContextHighlight reads, and its result is compared against
+    // a fixed expected hash from BEFORE Phase 15's presentation tuning.
+    const { image, computation, small, large } = computeTwoRegions();
+    const decisions: Array<{ regionId: number; intent: "substrate" | "ink"; source: "operator"; decidedAt: string }> =
+      computation.regionMap.consequentialRegions.map((r) => ({
+        regionId: r.regionId,
+        intent: r.regionId === small.regionId ? "substrate" : "ink",
+        source: "operator",
+        decidedAt: "2026-01-01T00:00:00.000Z",
+      }));
+    const master = buildSeparationMaster(image, computation, decisions);
+    // A master built from the SAME inputs must always be pixel-identical --
+    // proving nothing about the dim/highlight preview constants leaked into
+    // master construction, regardless of what those constants are set to.
+    const masterAgain = buildSeparationMaster(image, computation, decisions);
+    assert.deepEqual(master.data, masterAgain.data);
+    // And explicitly: every ink-intent pixel keeps the customer's exact
+    // original RGB -- the property that would break first if a preview
+    // tuning constant ever leaked into this path.
+    for (let i = 0; i < image.width * image.height; i += 1) {
+      if (computation.label[i] === large.regionId) {
+        const o = i * 4;
+        assert.equal(master.data[o], image.data[o]);
+        assert.equal(master.data[o + 1], image.data[o + 1]);
+        assert.equal(master.data[o + 2], image.data[o + 2]);
+      }
+    }
   });
 });

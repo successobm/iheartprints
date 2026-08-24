@@ -1,6 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import {
+  canStepRegion,
+  computeAutoAdvanceTarget,
+  computeRegionProgress,
+  decisionForRegion,
+  isFinalReviewReady,
+  isRegionPending,
+  regionPosition,
+  selectInitialActiveRegionId,
+  stepRegion,
+  submitApproval,
+  submitRegionDecision,
+} from "./region-review-workspace";
 
 /**
  * Intelligent Separation Phase 9: the INTERNAL OPERATOR's consequential-
@@ -21,6 +35,18 @@ import { useEffect, useState } from "react";
  * it, and every route it calls independently re-enforces the internal-only
  * gate server-side (Goal 21/22) regardless of how this component got
  * mounted.
+ *
+ * Phase 15: WHY A FOCUSED WORKSPACE, NOT 18 CARDS. Phase 14 made each
+ * region's own highlight unmistakable, but a long vertical list of 18 fully
+ * expanded cards still left the operator unable to hold "where is this in
+ * the whole design?" in mind while deciding — a semantic question, not a
+ * geometric one. This component now shows ONE region at a time (question +
+ * decision), alongside a large, persistent view of the complete artwork with
+ * that one region highlighted. Navigation, progress, and the reload-resume
+ * rule all live in `region-review-workspace.ts` as pure functions — nothing
+ * about region identity, decision meaning, or approval eligibility is
+ * recomputed here; every one of those still comes from the server's own
+ * `SeparationReviewView` on every render.
  */
 
 type RegionIntent = "substrate" | "ink" | "uncertain";
@@ -89,20 +115,31 @@ const GARMENT_INSPECTION_SURFACES = [
   { key: "gray", hex: "#C8C8C8", label: "Gray" },
 ] as const;
 
+/** Phase 15 copy: neutral framing that does not presume every region is substrate. */
+const QUESTION_COPY = "Should this highlighted area print?";
+
 const INTENT_COPY: Record<RegionIntent, { label: string; helper: string }> = {
   substrate: {
     label: "Show Shirt",
-    helper: "This area becomes transparent and the garment colour shows through.",
+    helper: "The garment should show through this area.",
   },
   ink: {
     label: "Print Ink",
-    helper: "Keep the original artwork pixels here.",
+    helper: "This area is part of the artwork and should be printed.",
   },
   uncertain: {
     label: "Not Sure",
-    helper: "Preserve the artwork here and require review before this can be used.",
+    helper: "Keep it for review if you cannot confidently decide.",
   },
 };
+
+type ContextMode = "original" | "highlighted" | "result";
+
+const CONTEXT_MODE_OPTIONS: Array<{ key: ContextMode; label: string }> = [
+  { key: "original", label: "Original" },
+  { key: "highlighted", label: "Highlighted" },
+  { key: "result", label: "Result" },
+];
 
 export function SeparationReviewPanel({
   projectId,
@@ -115,12 +152,19 @@ export function SeparationReviewPanel({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [previewSurface, setPreviewSurface] = useState<string>(garmentColor);
-  const [finalReviewOpen, setFinalReviewOpen] = useState(false);
   const [imageNonce, setImageNonce] = useState(0);
+  // Which region the workspace is currently showing. `null` only before the
+  // first load resolves, or while final review owns the screen.
+  const [activeRegionId, setActiveRegionId] = useState<number | null>(null);
+  const [contextMode, setContextMode] = useState<ContextMode>("highlighted");
+  // Lets an operator step BACK from final review into the region workspace
+  // to revisit a decision, without a second, competing definition of
+  // "complete" — see the effect below that clears this the moment the
+  // server's own state says every region is decided again.
+  const [forceShowWorkspace, setForceShowWorkspace] = useState(false);
+  const questionHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const hasInitializedActiveRegion = useRef(false);
 
-  // Called exactly once, from the mount effect below — `loading`/`error`
-  // already start at their correct values (`true`/`null`), so this never
-  // needs to set them synchronously itself.
   async function load() {
     try {
       const res = await fetch(`/api/projects/${projectId}/artwork-preparation/separation`);
@@ -140,10 +184,6 @@ export function SeparationReviewPanel({
 
   useEffect(() => {
     let cancelled = false;
-    // Deferred so the effect body stays free of synchronous setState
-    // (react-hooks/set-state-in-effect) — same pattern
-    // `FinalArtworkDeliveryCard` already uses for the identical fetch-on-
-    // mount shape.
     const timer = setTimeout(() => {
       if (!cancelled) void load();
     }, 0);
@@ -154,267 +194,406 @@ export function SeparationReviewPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  // Mirrors this panel's state up to the parent — a plain callback, not a
-  // second fetch, so `SeparationReviewPanel` stays the only reader/writer of
-  // separation state (Goal 3). Calling a PARENT's setter from here is not
-  // the self-referential pattern `react-hooks/set-state-in-effect` guards
-  // against; that rule targets a component setting its OWN state
-  // synchronously in an effect, which this does not do.
   useEffect(() => {
     onStateChange?.(view?.state ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view?.state]);
 
+  // THE RELOAD-RESUME RULE (Goal G), applied exactly once per successful
+  // load — never on every `view` update, which would otherwise fight manual
+  // navigation and auto-advance every time a decision refreshes `view`.
+  // Deferred via `setTimeout(...,0)`, the same pattern the mount-fetch
+  // effect above and `FinalArtworkDeliveryCard` already use, so this stays
+  // an external-system synchronization rather than a synchronous setState
+  // cascade.
+  useEffect(() => {
+    if (!view || hasInitializedActiveRegion.current) return;
+    hasInitializedActiveRegion.current = true;
+    const nextActiveRegionId = isFinalReviewReady(view) ? null : selectInitialActiveRegionId(view);
+    const timer = setTimeout(() => setActiveRegionId(nextActiveRegionId), 0);
+    return () => clearTimeout(timer);
+  }, [view]);
+
+  // Snap back to final review once every region is decided again — the
+  // natural end of "revisit a decision from final review", without a
+  // second, hand-rolled definition of "complete" living in this component.
+  useEffect(() => {
+    if (!forceShowWorkspace || !view || !isFinalReviewReady(view)) return;
+    const timer = setTimeout(() => setForceShowWorkspace(false), 0);
+    return () => clearTimeout(timer);
+  }, [forceShowWorkspace, view]);
+
+  // Keyboard/screen-reader users land on the new question when the active
+  // region changes, so stepping through 18 regions never silently leaves
+  // focus behind on a control that scrolled out of view.
+  useEffect(() => {
+    questionHeadingRef.current?.focus();
+  }, [activeRegionId]);
+
   async function decide(regionId: number, intent: RegionIntent) {
     if (!view) return;
+    const wasPending = isRegionPending(view, regionId);
     setBusy(true);
     setError(null);
-    try {
-      const res = await fetch(`/api/projects/${projectId}/artwork-preparation/separation/decisions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sourceAssetSha256: view.regionMap.sourceAssetSha256,
-          regionMapHash: view.regionMap.regionMapHash,
-          decisions: [{ regionId, intent }],
-        }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? "That decision could not be saved");
-      }
-      const data = (await res.json()) as SeparationReviewView;
-      setView(data);
+    const result = await submitRegionDecision<SeparationReviewView>(
+      fetch,
+      projectId,
+      view.regionMap.sourceAssetSha256,
+      view.regionMap.regionMapHash,
+      regionId,
+      intent,
+    );
+    // Persistence outcome is known BEFORE any navigation happens — the
+    // `ok: false` branch never carries a `view`, so there is nothing for
+    // `computeAutoAdvanceTarget` to navigate with even by mistake. The
+    // operator is never advanced off a decision that did not actually save.
+    if (result.ok) {
+      setView(result.view);
       setImageNonce((n) => n + 1);
-      // A decision NEVER auto-finalizes anything (Goal 17) — the operator
-      // still has to reach the final review step explicitly.
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "That decision could not be saved");
-    } finally {
-      setBusy(false);
+      // Only navigate when the pure function says to. `targetRegionId` is
+      // `null` in BOTH the "advance to final review" case and the "stay put,
+      // this was a revisit" case — collapsing those by navigating on
+      // `targetRegionId` alone (instead of gating on `shouldAdvance`) would
+      // silently bounce a revisit back to `regions[0]` via the render
+      // fallback below, discarding the operator's position.
+      const { shouldAdvance, targetRegionId } = computeAutoAdvanceTarget(wasPending, result.view);
+      if (shouldAdvance) {
+        setActiveRegionId(targetRegionId);
+      }
+      // A decision NEVER auto-finalizes anything (Goal 17) — reaching final
+      // review here is a NAVIGATION (activeRegionId -> null, which the
+      // final-review branch below renders), never an approval API call.
+    } else {
+      setError(result.error);
     }
+    setBusy(false);
   }
 
   async function approve() {
     setBusy(true);
     setError(null);
-    try {
-      const res = await fetch(`/api/projects/${projectId}/artwork-preparation/separation/approve`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? "This preparation could not be approved");
-      }
-      const data = (await res.json()) as SeparationReviewView;
-      setView(data);
-      setFinalReviewOpen(false);
+    const result = await submitApproval<SeparationReviewView>(fetch, projectId);
+    if (result.ok) {
+      setView(result.view);
       onApproved?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "This preparation could not be approved");
-    } finally {
-      setBusy(false);
+    } else {
+      setError(result.error);
     }
+    setBusy(false);
   }
 
   if (loading) {
     return <p className="text-sm text-muted">Checking whether this artwork needs a separation review…</p>;
   }
   if (!view || view.state === "review_not_required") {
-    // Goal 20: no consequential regions — this artwork needs nothing from
-    // this surface, and the existing Existing Artwork workflow is untouched.
+    // Goal 20 / Phase 15 easy-artwork regression: no consequential regions —
+    // this artwork needs nothing from this surface, and the existing
+    // Existing Artwork workflow is untouched. No extra round trip beyond
+    // the one GET this component always makes on mount.
     return null;
   }
 
-  const complete = view.state === "review_complete";
   const staleOrBroken = view.state === "cannot_safely_automate";
+  const regions = view.regionMap.consequentialRegions;
+  const progress = computeRegionProgress(view);
+  const showFinalReview = isFinalReviewReady(view) && !forceShowWorkspace;
+
+  const errorBanner = error ? (
+    <p className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900" role="alert">
+      {error}
+    </p>
+  ) : null;
+
+  if (staleOrBroken) {
+    return (
+      <div className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm" data-separation-review-state={view.state}>
+        <p className="text-sm font-semibold text-ink">Review the artwork&rsquo;s dark areas</p>
+        <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900" role="alert">
+          This review is out of date — reload before continuing.
+        </p>
+        {errorBanner}
+      </div>
+    );
+  }
+
+  if (showFinalReview) {
+    return (
+      <div className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm" data-separation-review-state={view.state} data-final-review>
+        <p className="text-sm font-semibold text-ink">Review your artwork before continuing.</p>
+        <p className="mt-1 text-sm text-muted">
+          Every highlighted area has a decision. Check the complete result below on a few garment colours before using it.
+        </p>
+        {errorBanner}
+
+        <div className="mt-3 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
+          {GARMENT_INSPECTION_SURFACES.map((s) => (
+            <button
+              key={s.key}
+              type="button"
+              onClick={() => setPreviewSurface(s.hex)}
+              aria-pressed={previewSurface === s.hex}
+              className={
+                previewSurface === s.hex
+                  ? "rounded-full border border-ink bg-ink px-3 py-1.5 text-xs font-medium text-white"
+                  : "rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-ink focus-visible:ring-2 focus-visible:ring-ink/40"
+              }
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink">Original</p>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=original`}
+              alt="Original artwork, untouched"
+              className="mt-1 h-[280px] w-full rounded-lg border border-black/8 object-contain sm:h-[360px]"
+            />
+          </div>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink">Prepared</p>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=master-preview&garment=${encodeURIComponent(previewSurface)}&v=${imageNonce}`}
+              alt="Resulting prepared artwork on the selected garment colour"
+              className="mt-1 h-[280px] w-full rounded-lg border border-black/8 object-contain sm:h-[360px]"
+              style={{ backgroundColor: previewSurface }}
+            />
+          </div>
+        </div>
+
+        {view.postCheck && view.postCheck.orphanedLightInkPixels > 0 ? (
+          <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+            Some light-coloured artwork near a &ldquo;Show Shirt&rdquo; area may lose contrast on light garments. Check the
+            White and Gray previews above before continuing.
+          </p>
+        ) : null}
+
+        <p className="mt-2 text-xs text-muted" data-original-safety-copy>
+          Your original upload is saved and unchanged.
+        </p>
+
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={approve}
+            className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink/40"
+          >
+            Use This Preparation
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setForceShowWorkspace(true);
+              setActiveRegionId(regions[0]?.regionId ?? null);
+            }}
+            className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Review decisions again
+          </button>
+        </div>
+
+        {view.isProductionAuthoritative ? (
+          <p className="mt-3 text-xs text-ink" data-production-authoritative>
+            This preparation is approved and in use.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  // --- The region-by-region workspace -------------------------------------
+  const activeId = activeRegionId ?? regions[0]?.regionId ?? null;
+  if (activeId === null) return null; // Unreachable: `regions.length > 0` whenever review is required.
+  const currentIntent = decisionForRegion(view, activeId);
+  const position = regionPosition(view, activeId);
+  const canGoPrevious = canStepRegion(regions, activeId, "previous");
+  const canGoNext = canStepRegion(regions, activeId, "next");
+
+  const contextImageUrl =
+    contextMode === "original"
+      ? `/api/projects/${projectId}/artwork-preparation/separation/image?mode=original`
+      : contextMode === "highlighted"
+        ? `/api/projects/${projectId}/artwork-preparation/separation/image?mode=region-context&region=${activeId}&v=${imageNonce}`
+        : `/api/projects/${projectId}/artwork-preparation/separation/image?mode=master-preview&garment=${encodeURIComponent(previewSurface)}&v=${imageNonce}`;
 
   return (
     <div className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm" data-separation-review-state={view.state}>
-      <p className="text-sm font-semibold text-ink">Review the artwork&rsquo;s dark areas</p>
-      <p className="mt-1 text-sm text-muted">
-        A few areas of this artwork are the same colour as its background. For each one, decide whether the
-        garment should show through or the artwork should print as ink.
-      </p>
-
-      {error ? (
-        <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900" role="alert">
-          {error}
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-sm font-semibold text-ink">Review the artwork&rsquo;s dark areas</p>
+        <p className="text-xs text-muted" role="status" data-progress>
+          Area {position} of {progress.totalRegions} · {progress.reviewedCount} of {progress.totalRegions} reviewed
         </p>
-      ) : null}
+      </div>
 
-      {staleOrBroken ? (
-        <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900" role="alert">
-          This review is out of date — reload before continuing.
-        </p>
-      ) : null}
+      {errorBanner}
 
-      <div className="mt-3 space-y-3" data-region-list>
-        {view.regionMap.consequentialRegions.map((region) => {
-          const decision = view.decisions.find((d) => d.regionId === region.regionId);
-          const current = decision?.intent ?? null;
+      {/* Compact region navigator (Goal: "do NOT recreate the giant 18-card
+          list") — one small chip per region, current/reviewed/pending state
+          conveyed by both fill AND a label, never colour alone. */}
+      <div className="mt-3 flex flex-wrap gap-1.5" role="group" aria-label="Jump to a specific area" data-region-navigator>
+        {regions.map((region) => {
+          const reviewed = !isRegionPending(view, region.regionId);
+          const isActive = region.regionId === activeId;
           return (
-            <div
+            <button
               key={region.regionId}
-              className="rounded-xl border border-black/8 p-3"
-              data-region-id={region.regionId}
-              data-region-decided={current !== null && current !== "uncertain"}
+              type="button"
+              disabled={busy}
+              onClick={() => setActiveRegionId(region.regionId)}
+              aria-current={isActive ? "step" : undefined}
+              aria-label={`Area ${regionPosition(view, region.regionId)}${reviewed ? ", reviewed" : ", not yet reviewed"}`}
+              data-region-chip={region.regionId}
+              data-region-chip-reviewed={reviewed}
+              className={
+                isActive
+                  ? "flex h-8 w-8 items-center justify-center rounded-full border-2 border-ink bg-ink text-xs font-semibold text-white"
+                  : reviewed
+                    ? "flex h-8 w-8 items-center justify-center rounded-full border border-ink/30 bg-black/[0.04] text-xs font-medium text-ink focus-visible:ring-2 focus-visible:ring-ink/40"
+                    : "flex h-8 w-8 items-center justify-center rounded-full border border-dashed border-black/20 text-xs text-muted focus-visible:ring-2 focus-visible:ring-ink/40"
+              }
             >
-              <div className="flex flex-wrap items-start gap-3">
-                {/* Phase 14: two views, not one. The context thumbnail answers
-                    "where in the whole artwork is this?"; the detail crop
-                    (zoomed to the region's own bounds, never the full
-                    canvas) answers "what exactly am I deciding about?" — the
-                    question the old single full-canvas thumbnail left
-                    unanswerable once 18 regions all looked alike at that
-                    scale. Both derive from the SAME server-computed region
-                    id; neither is a second segmentation implementation. */}
-                <div className="flex shrink-0 flex-col items-center gap-1">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=region-context&region=${region.regionId}&v=${imageNonce}`}
-                    alt={`Full artwork with region ${region.regionId} outlined and everything else dimmed`}
-                    className="h-20 w-20 rounded-lg border border-black/8 object-contain"
-                    data-region-context
-                  />
-                  <span className="text-[10px] text-muted">Full artwork</span>
-                </div>
-                <div className="flex shrink-0 flex-col items-center gap-1">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=region-crop&region=${region.regionId}&v=${imageNonce}`}
-                    alt={`Close-up of region ${region.regionId}, outlined against the surrounding artwork`}
-                    className="h-40 w-40 rounded-lg border-2 border-ink/15 object-contain"
-                    data-region-detail
-                  />
-                  <span className="text-[10px] text-muted">Close-up</span>
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm text-ink">Should the shirt show through here?</p>
-                  <div className="mt-2 flex flex-wrap gap-2" role="group" aria-label={`Decision for region ${region.regionId}`}>
-                    {(["substrate", "ink", "uncertain"] as const).map((intent) => (
-                      <button
-                        key={intent}
-                        type="button"
-                        disabled={busy}
-                        onClick={() => decide(region.regionId, intent)}
-                        aria-pressed={current === intent}
-                        data-intent-button={intent}
-                        className={
-                          current === intent
-                            ? "rounded-full bg-ink px-3 py-1.5 text-xs font-medium text-white"
-                            : "rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-                        }
-                      >
-                        {INTENT_COPY[intent].label}
-                      </button>
-                    ))}
-                  </div>
-                  <p className="mt-1.5 text-[11px] text-muted">
-                    {current ? INTENT_COPY[current].helper : "No decision yet — this area is currently preserved."}
-                  </p>
-                </div>
-              </div>
-            </div>
+              {regionPosition(view, region.regionId)}
+            </button>
           );
         })}
       </div>
 
-      {!finalReviewOpen ? (
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            disabled={busy || !complete}
-            onClick={() => setFinalReviewOpen(true)}
-            className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Review before continuing
-          </button>
-          {!complete ? (
-            <span className="text-xs text-muted" data-pending-count>
-              {view.pendingRegionIds.length} area{view.pendingRegionIds.length === 1 ? "" : "s"} still need a decision
-            </span>
-          ) : null}
-        </div>
-      ) : (
-        <div className="mt-4 rounded-xl border border-black/8 bg-black/[0.02] p-3" data-final-review>
-          <p className="text-sm font-semibold text-ink">Review your artwork before continuing.</p>
+      {/* Two-pane at lg+, single column (context first) below it. */}
+      <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start">
+        {/* CONTEXT PANE — sticky only at lg+; a sticky panel on a phone would
+            just eat the viewport the close-up and controls need. */}
+        <div className="lg:sticky lg:top-4" data-context-pane>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex gap-1.5" role="group" aria-label="Inspection mode">
+              {CONTEXT_MODE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setContextMode(opt.key)}
+                  aria-pressed={contextMode === opt.key}
+                  data-context-mode-button={opt.key}
+                  className={
+                    contextMode === opt.key
+                      ? "rounded-full bg-ink px-3 py-1.5 text-xs font-medium text-white"
+                      : "rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-ink focus-visible:ring-2 focus-visible:ring-ink/40"
+                  }
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
-          <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
-            {GARMENT_INSPECTION_SURFACES.map((s) => (
+          {contextMode === "result" ? (
+            <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
+              {GARMENT_INSPECTION_SURFACES.map((s) => (
+                <button
+                  key={s.key}
+                  type="button"
+                  onClick={() => setPreviewSurface(s.hex)}
+                  aria-pressed={previewSurface === s.hex}
+                  className={
+                    previewSurface === s.hex
+                      ? "rounded-full border border-ink bg-ink px-3 py-1 text-xs font-medium text-white"
+                      : "rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink focus-visible:ring-2 focus-visible:ring-ink/40"
+                  }
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={contextImageUrl}
+            alt="The complete artwork, with the area currently being reviewed highlighted"
+            className="mt-2 h-[300px] w-full rounded-xl border border-black/8 object-contain sm:h-[380px] lg:h-[440px]"
+            style={contextMode === "result" ? { backgroundColor: previewSurface } : undefined}
+            data-context-image
+          />
+          <p className="mt-1.5 text-xs text-muted">Where this area sits in the complete design.</p>
+        </div>
+
+        {/* DECISION PANE */}
+        <div data-decision-pane>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=region-crop&region=${activeId}&v=${imageNonce}`}
+            alt={`Close-up of the current area, area ${position} of ${progress.totalRegions}`}
+            className="h-[220px] w-full rounded-xl border-2 border-ink/15 object-contain sm:h-[260px]"
+            data-region-detail
+          />
+
+          <h3
+            ref={questionHeadingRef}
+            tabIndex={-1}
+            className="mt-3 text-base font-semibold text-ink outline-none"
+            data-region-question
+          >
+            {QUESTION_COPY}
+          </h3>
+
+          <div className="mt-3 grid gap-2 sm:grid-cols-3" role="group" aria-label={`Decision for area ${position}`}>
+            {(["substrate", "ink", "uncertain"] as const).map((intent) => (
               <button
-                key={s.key}
+                key={intent}
                 type="button"
-                onClick={() => setPreviewSurface(s.hex)}
-                aria-pressed={previewSurface === s.hex}
+                disabled={busy}
+                onClick={() => decide(activeId, intent)}
+                aria-pressed={currentIntent === intent}
+                data-intent-button={intent}
                 className={
-                  previewSurface === s.hex
-                    ? "rounded-full border border-ink bg-ink px-3 py-1 text-xs font-medium text-white"
-                    : "rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-ink"
+                  currentIntent === intent
+                    ? "rounded-xl border-2 border-ink bg-ink px-4 py-3 text-sm font-semibold text-white"
+                    : "rounded-xl border-2 border-black/10 px-4 py-3 text-sm font-semibold text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink/40"
                 }
               >
-                {s.label}
+                {INTENT_COPY[intent].label}
               </button>
             ))}
           </div>
+          <dl className="mt-2 space-y-1 text-xs text-muted">
+            {(["substrate", "ink", "uncertain"] as const).map((intent) => (
+              <div key={intent} className="flex gap-1.5">
+                <dt className="font-medium text-ink">{INTENT_COPY[intent].label}:</dt>
+                <dd>{INTENT_COPY[intent].helper}</dd>
+              </div>
+            ))}
+          </dl>
 
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-ink">Original</p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=original`}
-                alt="Original artwork, untouched"
-                className="mt-1 max-h-64 w-full rounded-lg border border-black/8 object-contain"
-              />
-            </div>
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-ink">Prepared</p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=master-preview&garment=${encodeURIComponent(previewSurface)}&v=${imageNonce}`}
-                alt="Resulting prepared artwork on the selected garment colour"
-                className="mt-1 max-h-64 w-full rounded-lg border border-black/8 object-contain"
-                style={{ backgroundColor: previewSurface }}
-              />
-            </div>
-          </div>
+          <p className="mt-3 text-xs text-muted" data-original-safety-copy>
+            Your original upload is saved and unchanged.
+          </p>
 
-          {view.postCheck && view.postCheck.orphanedLightInkPixels > 0 ? (
-            <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
-              Some light-coloured artwork near a &ldquo;Show Shirt&rdquo; area may lose contrast on light garments. Check the
-              White and Gray previews above before continuing.
-            </p>
-          ) : null}
-
-          <p className="mt-2 text-xs text-muted">Your original upload is saved and unchanged.</p>
-
-          <div className="mt-3 flex flex-wrap items-center gap-3">
+          <div className="mt-3 flex items-center justify-between gap-3">
             <button
               type="button"
-              disabled={busy}
-              onClick={approve}
-              className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={busy || !canGoPrevious}
+              onClick={() => setActiveRegionId(stepRegion(regions, activeId, "previous"))}
+              className="rounded-full border border-black/10 px-4 py-2 text-sm font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink/40"
+              data-nav="previous"
             >
-              Use This Preparation
+              Previous
             </button>
             <button
               type="button"
-              disabled={busy}
-              onClick={() => setFinalReviewOpen(false)}
-              className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={busy || !canGoNext}
+              onClick={() => setActiveRegionId(stepRegion(regions, activeId, "next"))}
+              className="rounded-full border border-black/10 px-4 py-2 text-sm font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink/40"
+              data-nav="next"
             >
-              Back to decisions
+              Next
             </button>
           </div>
         </div>
-      )}
-
-      {view.isProductionAuthoritative ? (
-        <p className="mt-3 text-xs text-ink" data-production-authoritative>
-          This preparation is approved and in use.
-        </p>
-      ) : null}
+      </div>
     </div>
   );
 }
