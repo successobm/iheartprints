@@ -26,7 +26,11 @@ import { GuidedCleanupWorkspace } from "./GuidedCleanupWorkspace";
 import { PREVIEW_BACKGROUND_COPY } from "./preview-background";
 import { PrintReadySizeCard } from "./PrintReadySizeCard";
 import { SeparationReviewPanel } from "./SeparationReviewPanel";
-import type { UploadedArtworkStep } from "./uploaded-artwork-flow";
+import {
+  isRoutedToOperatorSeparationReview,
+  needsAutomaticBackgroundReview,
+  type UploadedArtworkStep,
+} from "./uploaded-artwork-flow";
 
 /**
  * Existing Artwork → Print Ready Phase 1: the Upload Existing Artwork
@@ -184,10 +188,12 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
 
       {step === "review_analysis" && preparation ? (
         <AnalysisStep
+          projectId={props.projectId}
           preparation={preparation}
           busy={busy}
           onPrepare={props.onPrepare}
           onChangeDetails={props.onReconsider}
+          onSeparationApproved={props.onSeparationApproved}
         />
       ) : null}
 
@@ -402,28 +408,74 @@ function DetailsStep({
 }
 
 function AnalysisStep({
+  projectId,
   preparation,
   busy,
   onPrepare,
   onChangeDetails,
+  onSeparationApproved,
 }: {
+  projectId: string;
   preparation: ArtworkPreparationView;
   busy: boolean;
   onPrepare: () => void;
   onChangeDetails: () => void;
+  onSeparationApproved?: () => void;
 }) {
   const { customer } = preparation;
+
+  // Phase 16: automatic preparation could not safely resolve this artwork's
+  // background (`classification === "NEEDS_REVIEW"`, `customer.canPrepare
+  // === false`) — the ONLY classification that previously dead-ended here
+  // with no action at all. `getSeparationReview` never required a prepared
+  // asset to exist (it reads the immutable original + the analysis that is
+  // already present at this step), so the SAME self-contained
+  // `SeparationReviewPanel` `CompareStep` already mounts can run here too.
+  // Whether it actually shows anything stays entirely server-decided: the
+  // internal-only gate on its own GET route (`isInternalProject`, checked
+  // before `getSeparationReview` runs) is untouched, so a public/prospect
+  // project still gets a 404 -> `view: null` -> this panel renders nothing,
+  // and the existing terminal message below is the only thing that shows —
+  // byte-for-byte the same experience a public customer has always had.
+  const [separationState, setSeparationState] = useState<
+    | "review_not_required"
+    | "review_required"
+    | "review_in_progress"
+    | "review_complete"
+    | "cannot_safely_automate"
+    | null
+  >(null);
+  const needsReview = needsAutomaticBackgroundReview(preparation.classification);
+  const routedToOperatorReview = isRoutedToOperatorSeparationReview(
+    preparation.classification,
+    separationState,
+  );
 
   return (
     <div>
       <p className="text-sm font-semibold text-ink">Here&apos;s what we found</p>
-      <p className="mt-2 text-sm text-ink">{customer.backgroundMessage}</p>
-      {customer.resolutionMessage ? (
-        <p className="mt-2 text-sm text-ink">{customer.resolutionMessage}</p>
+      {!routedToOperatorReview ? (
+        <>
+          <p className="mt-2 text-sm text-ink">{customer.backgroundMessage}</p>
+          {customer.resolutionMessage ? (
+            <p className="mt-2 text-sm text-ink">{customer.resolutionMessage}</p>
+          ) : null}
+        </>
       ) : null}
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        {customer.canPrepare && customer.prepareActionLabel ? (
+      {needsReview ? (
+        <div className={routedToOperatorReview ? "mt-3" : "hidden"}>
+          <SeparationReviewPanel
+            projectId={projectId}
+            garmentColor={preparation.productColor ?? "White"}
+            onStateChange={setSeparationState}
+            onApproved={onSeparationApproved}
+          />
+        </div>
+      ) : null}
+
+      <div className={routedToOperatorReview ? "mt-3 flex flex-wrap items-center gap-3" : "mt-4 flex flex-wrap items-center gap-3"}>
+        {!routedToOperatorReview && customer.canPrepare && customer.prepareActionLabel ? (
           <button
             type="button"
             disabled={busy}

@@ -5,6 +5,8 @@ import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation"
 
 import {
   deriveUploadedArtworkStep,
+  isRoutedToOperatorSeparationReview,
+  needsAutomaticBackgroundReview,
   uploadedArtworkOwnsSurface,
 } from "./uploaded-artwork-flow";
 
@@ -165,6 +167,90 @@ describe("uploadedArtworkOwnsSurface", () => {
       "approved",
     ] as const) {
       assert.equal(uploadedArtworkOwnsSurface(step), true);
+    }
+  });
+});
+
+/**
+ * Phase 16: complex-background → operator separation routing.
+ *
+ * These are pure-function tests of the routing GATE itself — the actual
+ * mount/reveal of `SeparationReviewPanel` inside `AnalysisStep` is
+ * unreachable from this repo's `renderToString`-only test tooling for the
+ * same reason `CompareStep`'s own separation wiring always has been (no DOM,
+ * no effects). `complex-background-operator-routing.test.ts` proves the
+ * capability layer genuinely supports this without a prepared asset; the
+ * Phase 16 browser acceptance proves the two wired together end to end.
+ */
+describe("needsAutomaticBackgroundReview (Phase 16)", () => {
+  it("A/C: only NEEDS_REVIEW opts an artwork into speculative separation routing", () => {
+    assert.equal(needsAutomaticBackgroundReview("NEEDS_REVIEW"), true);
+    for (const classification of [
+      "REPAIRABLE_AUTOMATICALLY",
+      "REQUIRES_ENHANCEMENT",
+      "PRINT_READY_ALREADY",
+      "NOT_REPAIRABLE",
+    ] as const) {
+      assert.equal(
+        needsAutomaticBackgroundReview(classification),
+        false,
+        `${classification} must not speculatively mount the separation panel`,
+      );
+    }
+  });
+});
+
+describe("isRoutedToOperatorSeparationReview (Phase 16)", () => {
+  it("A: NEEDS_REVIEW + review_required routes into the operator workspace", () => {
+    assert.equal(isRoutedToOperatorSeparationReview("NEEDS_REVIEW", "review_required"), true);
+  });
+
+  it("A: NEEDS_REVIEW + review_in_progress and review_complete also route in (mid-review reload, and full-review revisit)", () => {
+    assert.equal(isRoutedToOperatorSeparationReview("NEEDS_REVIEW", "review_in_progress"), true);
+    assert.equal(isRoutedToOperatorSeparationReview("NEEDS_REVIEW", "review_complete"), true);
+  });
+
+  it("B: still loading (null) never routes — the terminal message is the safe default until the server actually says otherwise", () => {
+    assert.equal(isRoutedToOperatorSeparationReview("NEEDS_REVIEW", null), false);
+  });
+
+  it("B: a public/prospect project's 404 surfaces as this same null default — conservative behavior is unchanged", () => {
+    // SeparationReviewPanel's GET fetch 404s for a non-internal project and
+    // sets `view: null`, which never calls `onStateChange` with anything but
+    // the initial `null` — there is no separate "public" signal to test
+    // here by construction: it is indistinguishable from "still loading".
+    assert.equal(isRoutedToOperatorSeparationReview("NEEDS_REVIEW", null), false);
+  });
+
+  it("D: review_not_required never forces the operator workspace", () => {
+    assert.equal(isRoutedToOperatorSeparationReview("NEEDS_REVIEW", "review_not_required"), false);
+  });
+
+  it("E: cannot_safely_automate fails closed — no invented continuation", () => {
+    assert.equal(isRoutedToOperatorSeparationReview("NEEDS_REVIEW", "cannot_safely_automate"), false);
+  });
+
+  it("C: easy artwork (any non-NEEDS_REVIEW classification) never routes, even if a stray state were somehow reported", () => {
+    for (const classification of [
+      "REPAIRABLE_AUTOMATICALLY",
+      "REQUIRES_ENHANCEMENT",
+      "PRINT_READY_ALREADY",
+      "NOT_REPAIRABLE",
+    ] as const) {
+      for (const state of [
+        "review_required",
+        "review_in_progress",
+        "review_complete",
+        "review_not_required",
+        "cannot_safely_automate",
+        null,
+      ] as const) {
+        assert.equal(
+          isRoutedToOperatorSeparationReview(classification, state),
+          false,
+          `${classification} + ${state} must never route into operator separation review`,
+        );
+      }
     }
   });
 });
