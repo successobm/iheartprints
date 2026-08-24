@@ -820,6 +820,52 @@ export function residualEdgeSpeckArtwork(): RgbaImage {
   return image;
 }
 
+/**
+ * Phase 16: a synthetic stand-in for the class of real-world artwork that
+ * exposed the complex-background → operator-separation routing defect — a
+ * large black exterior field, extensive intentional black WITHIN the
+ * artwork (connected to that same exterior at the pixel level, so a simple
+ * exterior fill cannot tell them apart), disconnected black artwork fully
+ * enclosed by non-black colour, and a black hole/detail inside a non-black
+ * shape. SYNTHETIC ONLY, for the same reason every other fixture in this
+ * file is: no real customer artwork is committed to this repository
+ * (Constitution §16). Colours and geometry are generic — nothing here
+ * encodes any specific brand or composition.
+ *
+ * Deliberately touches a meaningful share of the canvas border with
+ * non-black colour (the red block crossing the top-left corner, the white
+ * block crossing the right edge) so the border itself reads as non-uniform
+ * — `complex_exterior_background` — mirroring why the real artwork needed
+ * manual review in the first place, rather than relying on an
+ * exterior-mask-fraction threshold that a synthetic canvas this small could
+ * miss by construction.
+ */
+export const RED: Rgba = { r: 196, g: 30, b: 40, a: 255 };
+
+export function denseBlackCompositionArtwork(): RgbaImage {
+  const image = createCanvas(200, 200, NEAR_BLACK);
+
+  // Colour crossing the border itself, in two different places, so the
+  // border reads as non-uniform regardless of interior mask fraction.
+  fillRect(image, 0, 0, 60, 50, RED);
+  fillRect(image, 150, 110, 50, 60, WHITE);
+
+  // A disconnected black shape, fully enclosed by a red ring that never
+  // touches the canvas border — topologically separate from the exterior
+  // black mass. Represents intentional black artwork (e.g. a black sphere)
+  // that must survive independently of the background's own black.
+  fillEllipse(image, 100, 100, 34, 34, RED);
+  fillEllipse(image, 100, 100, 18, 18, NEAR_BLACK);
+
+  // A black hole/detail fully inside a non-black (white) artwork shape —
+  // never touching the exterior black mass or the disconnected ellipse.
+  // 16x16 (256px) clears MIN_CONSEQUENTIAL_REGION_PX (150) with margin.
+  fillRect(image, 40, 140, 44, 44, WHITE);
+  fillRect(image, 54, 154, 16, 16, NEAR_BLACK);
+
+  return image;
+}
+
 /** Encodes any fixture to PNG bytes, the way a real upload arrives. */
 export function toPngBytes(image: RgbaImage): Buffer {
   return encodeRgbaToPng(image);

@@ -101,6 +101,60 @@ export function isAtProjectStart(input: {
 }
 
 /**
+ * Phase 16: complex-background → operator separation routing.
+ *
+ * `review_analysis` is reached for EVERY unprepared classification, not just
+ * `NEEDS_REVIEW` (an artwork with a "Remove the Background" button still on
+ * offer passes through here too, on its way to clicking it). Speculatively
+ * mounting `SeparationReviewPanel` for those would add a pointless
+ * round trip and could show an empty/loading panel underneath a still-
+ * actionable prepare button. `NEEDS_REVIEW` (`customer.canPrepare === false`,
+ * `customer.prepareActionLabel === null`) is the ONE classification that
+ * previously reached this step with no action offered at all — reusing it as
+ * the gate keeps this change scoped to exactly the artwork that was
+ * genuinely stuck, and changes nothing for every other classification.
+ */
+export function needsAutomaticBackgroundReview(
+  classification: ArtworkPreparationView["classification"],
+): boolean {
+  return classification === "NEEDS_REVIEW";
+}
+
+/**
+ * Whether the automatic-preparation dead-end should be replaced by the
+ * operator-assisted separation workspace, given what `SeparationReviewPanel`
+ * itself has reported back (`onStateChange`) from its own, server-gated
+ * fetch.
+ *
+ * Deliberately narrow: only the three states that mean "there is a real,
+ * presentable review" route the operator in. `review_not_required` (zero
+ * consequential regions — including a public/prospect project's 404, which
+ * surfaces identically as `view: null`) and `cannot_safely_automate` (a
+ * decision set that cannot be safely carried forward) both mean the
+ * separation capability itself is saying operator review is not the right
+ * continuation, so the existing conservative terminal state stands exactly
+ * as it did before this phase — never invented past what the capability
+ * actually proved.
+ */
+export function isRoutedToOperatorSeparationReview(
+  classification: ArtworkPreparationView["classification"],
+  separationState:
+    | "review_not_required"
+    | "review_required"
+    | "review_in_progress"
+    | "review_complete"
+    | "cannot_safely_automate"
+    | null,
+): boolean {
+  return (
+    needsAutomaticBackgroundReview(classification) &&
+    (separationState === "review_required" ||
+      separationState === "review_in_progress" ||
+      separationState === "review_complete")
+  );
+}
+
+/**
  * The step to render, or `null` when the uploaded-artwork surface should not
  * appear at all — which is every existing Create New Artwork project, so the
  * existing flow is untouched by construction.
