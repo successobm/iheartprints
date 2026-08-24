@@ -430,3 +430,185 @@ export function runSeparationPostChecks(
     reasons,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Phase 14: OPERATOR REGION REVIEW VISUAL CLARITY.
+//
+// THE PROBLEM THIS SECTION FIXES. `overlayRegion` (the route's original
+// preview) tints only the exact region-labelled pixels magenta on the FULL,
+// full-resolution canvas, which the panel then displays in a small fixed box.
+// A region that is a few hundred pixels on a 979x1024 canvas becomes a fleck
+// too small to see once shrunk to thumbnail size — every one of 18 cards
+// looked like the same mostly-black artwork with an imperceptible tint
+// difference. The operator could not tell which exact area a question was
+// about, which is unacceptable for a workflow whose entire purpose is
+// preventing a wrong guess from destroying real artwork.
+//
+// THE FIX IS RENDERING ONLY. Both functions below read the SAME
+// `RegionMapComputation.label` array and `ConsequentialRegion.bounds` the
+// route already computes — no new region analysis, no second segmentation
+// implementation, no change to region identity, hashing, or approval
+// semantics. They produce PREVIEW pixels only; neither is ever written back
+// to `original` or to the approved master (see `buildSeparationMaster`,
+// untouched above).
+// ---------------------------------------------------------------------------
+
+/** A visible boundary is drawn with these two tones (a "halo": a light ring then a dark ring) so the region's edge reads on both light and dark backgrounds without depending on hue — Goal 9 (accessibility) is a contrast/shape requirement, not a color one. */
+const HIGHLIGHT_FILL = { r: 255, g: 0, b: 255 } as const;
+const OUTLINE_OUTER = { r: 255, g: 255, b: 255 } as const;
+const OUTLINE_INNER = { r: 0, g: 0, b: 0 } as const;
+const DIM_TOWARD = { r: 205, g: 205, b: 205 } as const;
+/** Fraction of the way each suppressed pixel is blended toward `DIM_TOWARD`. Deliberately not 100%: total flattening removes the very orientation cues (nearby lettering, canvas edge) the context view exists to preserve. */
+const DIM_STRENGTH = 0.82;
+/** Fraction of the way each target-region pixel is blended toward `HIGHLIGHT_FILL`. Deliberately not 100%: an operator inspecting light vs. dark ink inside the candidate region needs some of its own luminance to survive the highlight. */
+const HIGHLIGHT_STRENGTH = 0.55;
+
+function blendChannel(original: number, toward: number, amount: number): number {
+  return Math.round(original + (toward - original) * amount);
+}
+
+/**
+ * Whether pixel `i` sits on the region's boundary — inside the region but
+ * with at least one 4-neighbor that is not part of it (including the image
+ * edge). Used to draw the halo outline; never used to decide region
+ * membership, which `label` alone already settled.
+ */
+function isBoundaryPixel(label: Int32Array, width: number, height: number, i: number, regionId: number): boolean {
+  const x = i % width;
+  const y = Math.floor(i / width);
+  const neighbors: Array<[number, number]> = [
+    [x - 1, y],
+    [x + 1, y],
+    [x, y - 1],
+    [x, y + 1],
+  ];
+  for (const [nx, ny] of neighbors) {
+    if (nx < 0 || ny < 0 || nx >= width || ny >= height) return true;
+    if (label[ny * width + nx] !== regionId) return true;
+  }
+  return false;
+}
+
+/**
+ * THE CONTEXT VIEW (Goal: TARGET UX §1). Full canvas, one candidate region
+ * unmistakably isolated: every other pixel — background, other regions,
+ * unrelated ink — is suppressed toward neutral gray; the candidate region is
+ * highlighted and outlined with a two-tone halo that reads regardless of the
+ * artwork's own colors underneath it.
+ *
+ * Geometry comes ENTIRELY from `label`, the exact per-pixel output of
+ * `computeRegionMap` — the same array `buildSeparationMaster` itself reads.
+ * Two calls with the same `label` and `regionId` are pixel-identical.
+ */
+export function renderRegionContextHighlight(
+  original: RgbaImage,
+  label: Int32Array,
+  regionId: number,
+): RgbaImage {
+  const { width, height } = original;
+  const data = Buffer.from(original.data);
+  for (let i = 0; i < width * height; i += 1) {
+    const o = i * 4;
+    if (label[i] === regionId) {
+      if (isBoundaryPixel(label, width, height, i, regionId)) {
+        data[o] = OUTLINE_INNER.r;
+        data[o + 1] = OUTLINE_INNER.g;
+        data[o + 2] = OUTLINE_INNER.b;
+      } else {
+        data[o] = blendChannel(data[o], HIGHLIGHT_FILL.r, HIGHLIGHT_STRENGTH);
+        data[o + 1] = blendChannel(data[o + 1], HIGHLIGHT_FILL.g, HIGHLIGHT_STRENGTH);
+        data[o + 2] = blendChannel(data[o + 2], HIGHLIGHT_FILL.b, HIGHLIGHT_STRENGTH);
+      }
+    } else {
+      // The dim side of the same boundary gets the outer halo tone, so the
+      // ring is visible whether the eye lands just inside or just outside
+      // the region's true edge.
+      const adjacentToTarget =
+        (label[i - 1] === regionId && i % width !== 0) ||
+        (label[i + 1] === regionId && (i + 1) % width !== 0) ||
+        label[i - width] === regionId ||
+        label[i + width] === regionId;
+      if (adjacentToTarget) {
+        data[o] = OUTLINE_OUTER.r;
+        data[o + 1] = OUTLINE_OUTER.g;
+        data[o + 2] = OUTLINE_OUTER.b;
+      } else {
+        data[o] = blendChannel(data[o], DIM_TOWARD.r, DIM_STRENGTH);
+        data[o + 1] = blendChannel(data[o + 1], DIM_TOWARD.g, DIM_STRENGTH);
+        data[o + 2] = blendChannel(data[o + 2], DIM_TOWARD.b, DIM_STRENGTH);
+      }
+    }
+    data[o + 3] = 255;
+  }
+  return { width, height, data };
+}
+
+/** Minimum crop edge length, in source pixels, so a tiny region is still zoomed in to something inspectable rather than reproduced at its own (postage-stamp) size. */
+export const REGION_CROP_MIN_SIZE_PX = 220;
+/** Padding added around the region's own bounds, as a fraction of that bound's own width/height, before the minimum-size floor is applied. */
+export const REGION_CROP_PADDING_RATIO = 0.6;
+/** Always-present minimum margin, in source pixels, even for a region whose padded box already exceeds `REGION_CROP_MIN_SIZE_PX` — keeps at least a sliver of surrounding artwork for orientation (TARGET UX §2: "enough neighbouring artwork for orientation"). */
+const REGION_CROP_MIN_MARGIN_PX = 20;
+
+/**
+ * THE DETAIL VIEW's geometry (Goal: TARGET UX §2). Pure arithmetic over the
+ * region's own deterministic `bounds` — no pixel inspection, so it is cheap
+ * to unit test in isolation from image decoding entirely. Clamps to the
+ * image's own dimensions unconditionally: a region flush against an edge
+ * still produces a valid, in-bounds rectangle.
+ */
+export function computeRegionCropRect(
+  bounds: RegionBounds,
+  imageWidth: number,
+  imageHeight: number,
+): RegionBounds {
+  const padX = Math.max(
+    bounds.width * REGION_CROP_PADDING_RATIO,
+    (REGION_CROP_MIN_SIZE_PX - bounds.width) / 2,
+    REGION_CROP_MIN_MARGIN_PX,
+  );
+  const padY = Math.max(
+    bounds.height * REGION_CROP_PADDING_RATIO,
+    (REGION_CROP_MIN_SIZE_PX - bounds.height) / 2,
+    REGION_CROP_MIN_MARGIN_PX,
+  );
+  const left = Math.max(0, Math.round(bounds.left - padX));
+  const top = Math.max(0, Math.round(bounds.top - padY));
+  const right = Math.min(imageWidth, Math.round(bounds.left + bounds.width + padX));
+  const bottom = Math.min(imageHeight, Math.round(bounds.top + bounds.height + padY));
+  return {
+    left,
+    top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+  };
+}
+
+/** Copies a rectangular sub-region out of an `RgbaImage`. Pure pixel-copy — never called on anything but an already-rendered PREVIEW image in this file. */
+export function cropRgbaImage(image: RgbaImage, rect: RegionBounds): RgbaImage {
+  const data = Buffer.alloc(rect.width * rect.height * 4);
+  for (let row = 0; row < rect.height; row += 1) {
+    const srcStart = ((rect.top + row) * image.width + rect.left) * 4;
+    const destStart = row * rect.width * 4;
+    image.data.copy(data, destStart, srcStart, srcStart + rect.width * 4);
+  }
+  return { width: rect.width, height: rect.height, data };
+}
+
+/**
+ * THE DETAIL VIEW (Goal: TARGET UX §2), composed from the two primitives
+ * above: the same highlight/outline/dim treatment as the context view,
+ * cropped to a padded, size-floored, edge-clamped box around the exact
+ * region. Two calls with the same `label`/`bounds`/`regionId` are
+ * pixel-identical, exactly like the context view.
+ */
+export function renderRegionDetailCrop(
+  original: RgbaImage,
+  label: Int32Array,
+  regionId: number,
+  bounds: RegionBounds,
+): RgbaImage {
+  const highlighted = renderRegionContextHighlight(original, label, regionId);
+  const rect = computeRegionCropRect(bounds, original.width, original.height);
+  return cropRgbaImage(highlighted, rect);
+}

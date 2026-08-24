@@ -198,6 +198,8 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/enclosure-evidence.test.ts",
   "src/capabilities/artwork-preparation/garment-conditional-review.test.ts",
   "src/capabilities/artwork-preparation/region-separation.test.ts",
+  "src/capabilities/artwork-preparation/region-review-visual-clarity.test.ts",
+  "src/capabilities/artwork-preparation/bowling-region-review-acceptance.test.ts",
   "src/capabilities/artwork-preparation/separation-review.test.ts",
   "src/capabilities/artwork-preparation/separation-decision-workflow.test.ts",
   "src/app/api/projects/[projectId]/artwork-preparation/separation/separation-routes-authorization.test.ts",

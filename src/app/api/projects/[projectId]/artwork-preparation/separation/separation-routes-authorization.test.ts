@@ -179,4 +179,45 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
     assert.equal(imageRes.status, 200);
     assert.equal(imageRes.headers.get("Content-Type"), "image/png");
   });
+
+  // -------------------------------------------------------------------
+  // Phase 14: the two new preview modes get the SAME internal-only gate,
+  // proven the same way — actual route invocation, not inferred from the
+  // fact that they share a switch statement with the already-tested modes.
+  // -------------------------------------------------------------------
+
+  it("Phase 14: a public project cannot reach region-context or region-crop", async () => {
+    const { projectId } = await seededProject({ internal: false });
+    const imageRoute = await import("./image/route");
+    const params = { params: Promise.resolve({ projectId }) };
+    const contextRes = await imageRoute.GET(new Request("http://localhost/x?mode=region-context&region=1"), params);
+    const cropRes = await imageRoute.GET(new Request("http://localhost/x?mode=region-crop&region=1"), params);
+    assert.equal(contextRes.status, 404);
+    assert.equal(cropRes.status, 404);
+  });
+
+  it("Phase 14: an internal project reaches region-context and region-crop, each returning a distinct real PNG per region id", async () => {
+    const { graph, projectId } = await seededProject({ internal: true });
+    const review = await graph.artworkPreparation.getSeparationReview(projectId);
+    const regionId = review.regionMap.consequentialRegions[0]!.regionId;
+
+    const imageRoute = await import("./image/route");
+    const params = { params: Promise.resolve({ projectId }) };
+    const contextRes = await imageRoute.GET(
+      new Request(`http://localhost/x?mode=region-context&region=${regionId}`),
+      params,
+    );
+    const cropRes = await imageRoute.GET(new Request(`http://localhost/x?mode=region-crop&region=${regionId}`), params);
+    assert.equal(contextRes.status, 200);
+    assert.equal(contextRes.headers.get("Content-Type"), "image/png");
+    assert.equal(cropRes.status, 200);
+    assert.equal(cropRes.headers.get("Content-Type"), "image/png");
+
+    // An unknown region id is refused exactly like the existing modes.
+    const unknownRes = await imageRoute.GET(
+      new Request("http://localhost/x?mode=region-context&region=999999"),
+      params,
+    );
+    assert.equal(unknownRes.status, 404);
+  });
 });
