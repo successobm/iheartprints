@@ -458,8 +458,23 @@ const HIGHLIGHT_FILL = { r: 255, g: 0, b: 255 } as const;
 const OUTLINE_OUTER = { r: 255, g: 255, b: 255 } as const;
 const OUTLINE_INNER = { r: 0, g: 0, b: 0 } as const;
 const DIM_TOWARD = { r: 205, g: 205, b: 205 } as const;
-/** Fraction of the way each suppressed pixel is blended toward `DIM_TOWARD`. Deliberately not 100%: total flattening removes the very orientation cues (nearby lettering, canvas edge) the context view exists to preserve. */
-const DIM_STRENGTH = 0.82;
+/**
+ * Fraction of the way each suppressed pixel is blended toward `DIM_TOWARD`.
+ * Deliberately not 100%: total flattening removes the very orientation cues
+ * (nearby lettering, canvas edge) the context view exists to preserve.
+ *
+ * Phase 15: lowered from 0.82. Phase 14's production smoke found the
+ * complete design became too hard to recognize at 0.82 — an operator
+ * reviewing "where is this in the whole artwork?" needs to still see the
+ * bowling ball, the pins, the lettering, not just their silhouettes.
+ * PRESENTATION ONLY: this constant is read exclusively by
+ * `renderRegionContextHighlight`/`renderRegionDetailCrop` (preview
+ * rendering); `buildSeparationMaster` never calls either function and has
+ * no reference to this value, so the approved production master is
+ * byte-for-byte unaffected by this change (proven in
+ * `region-review-visual-clarity.test.ts`).
+ */
+const DIM_STRENGTH = 0.6;
 /** Fraction of the way each target-region pixel is blended toward `HIGHLIGHT_FILL`. Deliberately not 100%: an operator inspecting light vs. dark ink inside the candidate region needs some of its own luminance to survive the highlight. */
 const HIGHLIGHT_STRENGTH = 0.55;
 
