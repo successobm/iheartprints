@@ -261,13 +261,34 @@ export function SeparationReviewPanel({
               data-region-decided={current !== null && current !== "uncertain"}
             >
               <div className="flex flex-wrap items-start gap-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=region-overlay&region=${region.regionId}&v=${imageNonce}`}
-                  alt={`Artwork with the highlighted area for region ${region.regionId}`}
-                  className="h-40 w-40 shrink-0 rounded-lg border border-black/8 object-contain"
-                  data-region-overlay
-                />
+                {/* Phase 14: two views, not one. The context thumbnail answers
+                    "where in the whole artwork is this?"; the detail crop
+                    (zoomed to the region's own bounds, never the full
+                    canvas) answers "what exactly am I deciding about?" — the
+                    question the old single full-canvas thumbnail left
+                    unanswerable once 18 regions all looked alike at that
+                    scale. Both derive from the SAME server-computed region
+                    id; neither is a second segmentation implementation. */}
+                <div className="flex shrink-0 flex-col items-center gap-1">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=region-context&region=${region.regionId}&v=${imageNonce}`}
+                    alt={`Full artwork with region ${region.regionId} outlined and everything else dimmed`}
+                    className="h-20 w-20 rounded-lg border border-black/8 object-contain"
+                    data-region-context
+                  />
+                  <span className="text-[10px] text-muted">Full artwork</span>
+                </div>
+                <div className="flex shrink-0 flex-col items-center gap-1">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=region-crop&region=${region.regionId}&v=${imageNonce}`}
+                    alt={`Close-up of region ${region.regionId}, outlined against the surrounding artwork`}
+                    className="h-40 w-40 rounded-lg border-2 border-ink/15 object-contain"
+                    data-region-detail
+                  />
+                  <span className="text-[10px] text-muted">Close-up</span>
+                </div>
                 <div className="min-w-0 flex-1">
                   <p className="text-sm text-ink">Should the shirt show through here?</p>
                   <div className="mt-2 flex flex-wrap gap-2" role="group" aria-label={`Decision for region ${region.regionId}`}>

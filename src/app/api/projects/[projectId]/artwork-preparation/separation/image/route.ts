@@ -6,7 +6,12 @@ import { getCapabilityGraph } from "@/capabilities/composition";
 import { getProjectRepository } from "@/lib/db";
 import { decodePngUpload } from "@/capabilities/artwork-preparation/image-decode";
 import { analyzeArtwork } from "@/capabilities/artwork-preparation/image-analysis";
-import { computeRegionMap, buildSeparationMaster } from "@/capabilities/artwork-preparation/region-separation";
+import {
+  computeRegionMap,
+  buildSeparationMaster,
+  renderRegionContextHighlight,
+  renderRegionDetailCrop,
+} from "@/capabilities/artwork-preparation/region-separation";
 import { compositeOverGarment } from "@/capabilities/final-artwork/halftone-screen";
 import { resolveGarmentColor } from "@/capabilities/shared/production-treatment";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
@@ -27,6 +32,16 @@ type RouteContext = {
  * `mode`:
  *   original         the immutable original, unmodified
  *   region-overlay    the original with ONE region tinted magenta (requires `region`)
+ *   region-context     Phase 14: the full canvas with every pixel OUTSIDE the
+ *                       requested region dimmed toward neutral gray and the
+ *                       region itself highlighted with a two-tone outline —
+ *                       so the operator sees exactly which area a question
+ *                       is about, not a same-looking full-canvas thumbnail
+ *                       (requires `region`)
+ *   region-crop        Phase 14: the same highlight, cropped to a padded,
+ *                       size-floored, edge-clamped box around the region's
+ *                       own deterministic bounds — the "detail view"
+ *                       (requires `region`)
  *   master             the deterministic master built from PERSISTED decisions
  *                      (or, if none exist yet, none-dropped — i.e. every
  *                      consequential region shown as ink, so a first-visit
@@ -49,7 +64,7 @@ export async function GET(request: Request, context: RouteContext) {
 
     const url = new URL(request.url);
     const mode = url.searchParams.get("mode") ?? "master";
-    if (!["original", "region-overlay", "master", "master-preview"].includes(mode)) {
+    if (!["original", "region-overlay", "region-context", "region-crop", "master", "master-preview"].includes(mode)) {
       return new Response("Not found", { status: 404 });
     }
 
@@ -82,14 +97,23 @@ export async function GET(request: Request, context: RouteContext) {
       analysis.backgroundTolerance,
     );
 
-    if (mode === "region-overlay") {
+    if (mode === "region-overlay" || mode === "region-context" || mode === "region-crop") {
       const regionId = Number(url.searchParams.get("region"));
       if (!Number.isFinite(regionId)) {
         return NextResponseNotFound();
       }
-      const isKnown = computation.regionMap.consequentialRegions.some((r) => r.regionId === regionId);
-      if (!isKnown) return NextResponseNotFound();
-      return pngResponse(encodePng(overlayRegion(original, computation.label, regionId)));
+      const region = computation.regionMap.consequentialRegions.find((r) => r.regionId === regionId);
+      if (!region) return NextResponseNotFound();
+
+      if (mode === "region-overlay") {
+        return pngResponse(encodePng(overlayRegion(original, computation.label, regionId)));
+      }
+      if (mode === "region-context") {
+        return pngResponse(encodePng(renderRegionContextHighlight(original, computation.label, regionId)));
+      }
+      return pngResponse(
+        encodePng(renderRegionDetailCrop(original, computation.label, regionId, region.bounds)),
+      );
     }
 
     const decisionSet = preparation.separation
