@@ -90,7 +90,7 @@ describe(
 
       // Region 1 → Show Shirt, 73 → Print Ink, 140 → Show Shirt, remaining → Print Ink.
       const SUBSTRATE_IDS = new Set([1, 140]);
-      const submitted = await capability.submitRegionDecisions(projectId, {
+      let submitted = await capability.submitRegionDecisions(projectId, {
         sourceAssetSha256: review.regionMap.sourceAssetSha256,
         regionMapHash: review.regionMap.regionMapHash,
         decisions: ids.map((regionId) => ({
@@ -98,6 +98,22 @@ describe(
           intent: SUBSTRATE_IDS.has(regionId) ? ("substrate" as const) : ("ink" as const),
         })),
       });
+
+      // Phase 23: this real asset now also carries a unified in-bounds
+      // proposal — a SEPARATE axis from the region decisions above (Phase
+      // 22B Issue 2), so `review_complete` is only reached once it too is
+      // explicitly resolved. `preserve_all` leaves every pixel this file
+      // already asserts on (badge, banner, letter counter, tagline, finger
+      // holes) exactly as this suite has always expected. `submitted` is
+      // re-pointed at this call's response so "reaches review_complete"
+      // reflects the FINAL state of both axes, not just the region axis.
+      if (review.regionMap.inBoundsProposal) {
+        submitted = await capability.submitProposalDecision(projectId, {
+          sourceAssetSha256: review.regionMap.sourceAssetSha256,
+          proposalHash: review.regionMap.inBoundsProposal.proposalHash,
+          decision: "preserve_all",
+        });
+      }
 
       const approved = await capability.approveSeparationMaster(projectId);
       const preparation = await repo.getArtworkPreparation(projectId);

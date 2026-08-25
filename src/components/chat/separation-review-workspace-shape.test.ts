@@ -101,14 +101,20 @@ describe("SeparationReviewPanel structure — one region at a time, not 18 cards
   });
 
   it("K: original/prepared final inspection images exist in the final-review branch", () => {
-    const finalReviewBlock = SOURCE.slice(SOURCE.indexOf("showFinalReview) {"), SOURCE.indexOf("// --- The region-by-region workspace"));
+    const finalReviewBlock = SOURCE.slice(
+      SOURCE.indexOf('primaryStep === "final-review") {'),
+      SOURCE.indexOf("// --- The region-by-region workspace"),
+    );
     assert.match(finalReviewBlock, /mode=original/);
     assert.match(finalReviewBlock, /mode=master-preview/);
   });
 
   it("L: White/Gray/Black (and Red) garment inspection remains available in final review and in Result mode", () => {
     assert.match(SOURCE, /GARMENT_INSPECTION_SURFACES/);
-    const finalReviewBlock = SOURCE.slice(SOURCE.indexOf("showFinalReview) {"), SOURCE.indexOf("// --- The region-by-region workspace"));
+    const finalReviewBlock = SOURCE.slice(
+      SOURCE.indexOf('primaryStep === "final-review") {'),
+      SOURCE.indexOf("// --- The region-by-region workspace"),
+    );
     assert.match(finalReviewBlock, /GARMENT_INSPECTION_SURFACES/);
   });
 
@@ -116,19 +122,24 @@ describe("SeparationReviewPanel structure — one region at a time, not 18 cards
     assert.match(SOURCE, /mode=original/);
     assert.match(SOURCE, /mode=region-context/);
     assert.match(SOURCE, /mode=master-preview/);
-    // No fourth, invented mode string anywhere in this file.
+    // Phase 23 adds exactly one new, deliberate mode for the unified
+    // in-bounds proposal screen — `proposal-highlight` — implemented and
+    // tested server-side (`separation/image/route.ts`,
+    // `renderProposalHighlight`). No FIFTH, invented mode string anywhere in
+    // this file.
+    assert.match(SOURCE, /mode=proposal-highlight/);
     const modeMatches = [...SOURCE.matchAll(/mode=([a-z-]+)/g)].map((m) => m[1]);
     const uniqueModes = new Set(modeMatches);
     for (const m of uniqueModes) {
       assert.ok(
-        ["original", "region-context", "region-crop", "master-preview"].includes(m!),
+        ["original", "region-context", "region-crop", "master-preview", "proposal-highlight"].includes(m!),
         `unexpected image mode referenced: ${m}`,
       );
     }
   });
 
-  it("original-upload safety copy is present in both the workspace and final review", () => {
-    assert.equal((SOURCE.match(/data-original-safety-copy/g) ?? []).length, 2);
+  it("original-upload safety copy is present in the proposal screen, the region workspace, and final review (Phase 23 adds the proposal screen as a third surface)", () => {
+    assert.equal((SOURCE.match(/data-original-safety-copy/g) ?? []).length, 3);
   });
 
   it("copy: the neutral question replaces the substrate-presuming wording", () => {
@@ -137,7 +148,7 @@ describe("SeparationReviewPanel structure — one region at a time, not 18 cards
   });
 
   it("decision state is communicated by more than colour: aria-pressed is present on every intent button", () => {
-    const decisionBlock = SOURCE.slice(SOURCE.indexOf("DECISION PANE"), SOURCE.indexOf("mt-2 space-y-1"));
+    const decisionBlock = SOURCE.slice(SOURCE.indexOf("DECISION PANE"), SOURCE.indexOf("INTENT_COPY[intent].helper"));
     assert.match(decisionBlock, /aria-pressed=\{currentIntent === intent\}/);
   });
 
@@ -159,7 +170,7 @@ describe("SeparationReviewPanel structure — one region at a time, not 18 cards
   });
 
   it("N: the three decision buttons use touch-sized padding, not small inline text links", () => {
-    const decisionBlock = SOURCE.slice(SOURCE.indexOf("DECISION PANE"), SOURCE.indexOf("mt-2 space-y-1"));
+    const decisionBlock = SOURCE.slice(SOURCE.indexOf("DECISION PANE"), SOURCE.indexOf("INTENT_COPY[intent].helper"));
     // px-4 py-3 on a rounded-xl button is a comfortably large tap target;
     // the OLD 18-card design used px-3 py-1.5 rounded-full pill buttons.
     assert.match(decisionBlock, /px-4 py-3/);
@@ -187,5 +198,59 @@ describe("SeparationReviewPanel structure — one region at a time, not 18 cards
     const contextImg = SOURCE.slice(SOURCE.indexOf("data-context-image") - 400, SOURCE.indexOf("data-context-image") + 50);
     assert.match(contextImg, /w-full/);
     assert.doesNotMatch(contextImg, /\bw-\[\d{3,}px\]/);
+  });
+
+  // -------------------------------------------------------------------
+  // Phase 23: the unified in-bounds removal proposal screen.
+  // -------------------------------------------------------------------
+
+  it("Phase 23: the proposal screen is a single block, not one per region — exactly one occurrence of its three primary actions", () => {
+    assert.equal((SOURCE.match(/data-proposal-action="looks_good"/g) ?? []).length, 1);
+    assert.equal((SOURCE.match(/data-proposal-action="keep_all"/g) ?? []).length, 1);
+    assert.equal((SOURCE.match(/data-proposal-action="preserve_part"/g) ?? []).length, 1);
+  });
+
+  it("Phase 23: the proposal screen never sends a mask, pixel list, or client-computed selection — only raw tap coordinates via the shared workspace helper", () => {
+    // The click handler and the write itself live in handler functions
+    // above the JSX (same convention as `decide`/`approve`), not inside the
+    // render block — so this checks the whole module, not a JSX slice.
+    assert.match(SOURCE, /mapClickToSourcePixel/);
+    assert.match(SOURCE, /submitProposalDecision/);
+    const proposalBlock = SOURCE.slice(SOURCE.indexOf('primaryStep === "proposal-review"'), SOURCE.indexOf("// --- The region-by-region workspace"));
+    assert.doesNotMatch(proposalBlock, /mask|Uint8Array/i);
+  });
+
+  it("Phase 23: entering preserve mode never itself calls the decision endpoint — only an actual tap does", () => {
+    const beginFn = SOURCE.slice(SOURCE.indexOf("function beginPreservePart"), SOURCE.indexOf("async function handleProposalTap"));
+    assert.doesNotMatch(beginFn, /submitProposalDecision/, "clicking \"Preserve Part of This\" must not itself write a decision — only a tap does");
+    assert.match(beginFn, /setProposalTapMode\(true\)/);
+  });
+
+  it("Phase 23: undo/clear reuse the same submitProposalDecision helper as every other proposal write — never a separate, re-implemented endpoint call", () => {
+    const undoFn = SOURCE.slice(SOURCE.indexOf("async function undoPreserveOp"), SOURCE.indexOf("async function clearAllPreserveOps"));
+    assert.match(undoFn, /submitProposalDecision/);
+    // The operation id to remove is passed positionally as the helper's
+    // last (`removePreserveOperationIds`) argument — `[operationId]` here.
+    assert.match(undoFn, /\[operationId\]/);
+    const clearFn = SOURCE.slice(SOURCE.indexOf("async function clearAllPreserveOps"), SOURCE.indexOf("function continueFromProposal"));
+    assert.match(clearFn, /submitProposalDecision/);
+    assert.match(clearFn, /proposalPreserveOps\.map\(\(op\) => op\.operationId\)/);
+  });
+
+  it("Phase 23: the region-by-region workspace remains reachable, unmodified, via an explicit optional entry point — never forced", () => {
+    assert.match(SOURCE, /data-inspect-individual-areas/);
+    assert.match(SOURCE, /Inspect individual areas/);
+    // Genuinely optional: the link only ever appears guarded on there being
+    // any regions at all, never on the proposal decision's own state.
+    const linkBlock = SOURCE.slice(SOURCE.indexOf("data-inspect-individual-areas") - 500, SOURCE.indexOf("data-inspect-individual-areas"));
+    assert.match(linkBlock, /regions\.length > 0/);
+  });
+
+  it("Phase 23: Goal 20/22 easy-artwork regression — the router falls through to the unmodified region workspace when there is no in-bounds proposal, never showing the proposal screen", () => {
+    assert.match(SOURCE, /selectPrimaryStep/);
+    // `selectPrimaryStep`'s own tests (`proposal-review-workspace.test.ts`)
+    // prove the actual routing logic; this only proves the component wires
+    // it in rather than hand-rolling a second router.
+    assert.doesNotMatch(SOURCE, /assessSeparationReviewState/, "routing must come from the server's own view, never a second client-side state machine");
   });
 });

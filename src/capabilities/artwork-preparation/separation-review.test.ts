@@ -6,10 +6,15 @@ import { describe, it } from "node:test";
 import {
   assessSeparationReviewState,
   buildSeparationReviewView,
+  effectiveProposalDecision,
   isDecisionSetComplete,
   isDecisionSetStale,
+  isProposalStale,
+  isReadyForFinalApproval,
+  mergeProposalDecision,
   mergeRegionDecisions,
   pendingRegionIds,
+  validateSubmitProposalDecision,
   validateSubmitRegionDecisions,
 } from "./separation-review";
 import type {
@@ -32,6 +37,7 @@ function map(regions: ConsequentialRegion[], overrides: Partial<RegionMap> = {})
     artworkBounds: { left: 0, top: 0, width: 100, height: 100 },
     consequentialRegions: regions,
     totalRegionCount: regions.length,
+    inBoundsProposal: null,
     ...overrides,
   };
 }
@@ -46,6 +52,10 @@ function decisionSet(regions: RegionDecision[], overrides: Partial<SeparationDec
     regionMapHash: "hash-a",
     algorithmVersion: "v1",
     decisions: regions,
+    proposalDecision: "pending",
+    proposalDecisionAt: null,
+    proposalHash: null,
+    proposalPreserveOps: [],
     approvedAt: null,
     approvedAssetId: null,
     postCheckAtApproval: null,
@@ -59,22 +69,26 @@ describe("separation-review: state machine", () => {
     assert.equal(assessSeparationReviewState(m, null), "review_not_required");
   });
 
-  it("consequential regions, no decision set -> review_required", () => {
+  it("Phase 23 / Phase 22B Issue 2: consequential regions, no decision set, NO in-bounds proposal -> review_complete (0/N reviewed can still reach final review, since undecided regions already retain by default)", () => {
     const m = map([region(1)]);
-    assert.equal(assessSeparationReviewState(m, null), "review_required");
+    assert.equal(assessSeparationReviewState(m, null), "review_complete");
+    // The individual region is still correctly reported as pending for the
+    // OPTIONAL inspection UI -- only the top-level gate changed, not the
+    // per-region bookkeeping.
+    assert.deepEqual(pendingRegionIds(m, null), [1]);
   });
 
-  it("K/L: some regions decided, one still uncertain -> not complete, blocks approval", () => {
+  it("K/L: some regions decided, one still uncertain, NO proposal -> still review_complete (region completeness no longer gates); isDecisionSetComplete remains an accurate INFORMATIONAL signal", () => {
     const m = map([region(1), region(2)]);
     const ds = decisionSet([decision(1, "ink"), decision(2, "uncertain")]);
-    assert.equal(assessSeparationReviewState(m, ds), "review_in_progress");
-    assert.equal(isDecisionSetComplete(m, ds), false);
+    assert.equal(assessSeparationReviewState(m, ds), "review_complete");
+    assert.equal(isDecisionSetComplete(m, ds), false, "informational completeness is unaffected by the approval-gate change");
   });
 
-  it("some but not all regions decided -> review_in_progress", () => {
+  it("Phase 23: some but not all regions decided, NO proposal -> still review_complete; review_in_progress is now UNREACHABLE when there is no proposal to gate on (documented, not incidental)", () => {
     const m = map([region(1), region(2)]);
     const ds = decisionSet([decision(1, "ink")]);
-    assert.equal(assessSeparationReviewState(m, ds), "review_in_progress");
+    assert.equal(assessSeparationReviewState(m, ds), "review_complete");
   });
 
   it("M: all regions decided (substrate/ink only) -> review_complete, eligible but not yet approved", () => {
@@ -84,11 +98,12 @@ describe("separation-review: state machine", () => {
     assert.equal(isDecisionSetComplete(m, ds), true);
   });
 
-  it("a semantic_suggestion alone never counts as a decision — only operator does", () => {
+  it("a semantic_suggestion alone never counts as a decision — only operator does (informational completeness, unaffected by the approval-gate change; NO proposal here so the state itself is review_complete)", () => {
     const m = map([region(1)]);
     const ds = decisionSet([decision(1, "ink", "semantic_suggestion")]);
-    assert.equal(assessSeparationReviewState(m, ds), "review_required");
+    assert.equal(assessSeparationReviewState(m, ds), "review_complete");
     assert.equal(isDecisionSetComplete(m, ds), false);
+    assert.deepEqual(pendingRegionIds(m, ds), [1], "a semantic_suggestion never resolves a region for the optional-inspection UI either");
   });
 
   it("approved and still matching the current map -> review_complete", () => {
@@ -284,5 +299,116 @@ describe("buildSeparationReviewView", () => {
     assert.equal(view.state, "review_complete");
     assert.equal(view.pendingRegionIds.length, 0);
     assert.equal(view.isProductionAuthoritative, false);
+  });
+});
+
+function proposalMap(regions: ConsequentialRegion[], overrides: Partial<RegionMap> = {}): RegionMap {
+  return map(regions, {
+    inBoundsProposal: { proposalHash: "proposal-hash-a", pixelCount: 500, bounds: { left: 0, top: 0, width: 20, height: 20 } },
+    ...overrides,
+  });
+}
+
+describe("Phase 23: proposal-driven approval gate", () => {
+  it("a proposal exists and is pending -> review_required, blocks approval, EVEN WITH ZERO consequential regions", () => {
+    const m = proposalMap([]);
+    assert.equal(assessSeparationReviewState(m, null), "review_required", "review_not_required would be wrong -- there IS something to review");
+    assert.equal(isReadyForFinalApproval(m, null), false);
+  });
+
+  it("proposal decided remove_with_exceptions -> review_complete, ready for approval, even with 0/N consequential regions decided (Section 9's explicit requirement)", () => {
+    const m = proposalMap([region(1), region(2)]);
+    const ds = decisionSet([], { proposalDecision: "remove_with_exceptions", proposalDecisionAt: "2026-01-01T00:00:00.000Z", proposalHash: "proposal-hash-a" });
+    assert.equal(assessSeparationReviewState(m, ds), "review_complete");
+    assert.equal(isReadyForFinalApproval(m, ds), true);
+    assert.deepEqual(pendingRegionIds(m, ds), [1, 2], "individual regions remain visibly pending for optional inspection, but do not block approval");
+  });
+
+  it("proposal decided preserve_all -> review_complete, ready for approval", () => {
+    const m = proposalMap([]);
+    const ds = decisionSet([], { proposalDecision: "preserve_all", proposalDecisionAt: "2026-01-01T00:00:00.000Z", proposalHash: "proposal-hash-a" });
+    assert.equal(assessSeparationReviewState(m, ds), "review_complete");
+    assert.equal(isReadyForFinalApproval(m, ds), true);
+  });
+
+  it("proposalHash mismatch (geometry drift) fails closed: treated as pending, never remapped onto the new proposal", () => {
+    const m = proposalMap([]);
+    const ds = decisionSet([], { proposalDecision: "remove_with_exceptions", proposalDecisionAt: "2026-01-01T00:00:00.000Z", proposalHash: "STALE-hash" });
+    assert.equal(isProposalStale(m, ds), true);
+    assert.equal(effectiveProposalDecision(m, ds), "pending");
+    assert.equal(isReadyForFinalApproval(m, ds), false);
+    assert.equal(assessSeparationReviewState(m, ds), "review_required");
+  });
+
+  it("a stale proposal is ALWAYS recoverable (never cannot_safely_automate) -- unlike a fully-disjoint region-id staleness", () => {
+    const m = proposalMap([]);
+    const ds = decisionSet([], { proposalDecision: "preserve_all", proposalDecisionAt: "2026-01-01T00:00:00.000Z", proposalHash: "STALE-hash" });
+    assert.notEqual(assessSeparationReviewState(m, ds), "cannot_safely_automate");
+  });
+
+  it("regionMapHash staleness with zero overlap still produces cannot_safely_automate, independent of the proposal axis", () => {
+    const m = proposalMap([region(1)]);
+    const ds = decisionSet([decision(99, "ink")], { regionMapHash: "DIFFERENT-hash", proposalDecision: "remove_with_exceptions", proposalHash: "proposal-hash-a" });
+    assert.equal(assessSeparationReviewState(m, ds), "cannot_safely_automate");
+  });
+
+  it("Phase 22B Issue 3: toggling remove_with_exceptions -> preserve_all invalidates prior approval", () => {
+    const m = proposalMap([]);
+    const approved = decisionSet([], {
+      proposalDecision: "remove_with_exceptions",
+      proposalHash: "proposal-hash-a",
+      approvedAt: "2026-01-01T00:00:00.000Z",
+      approvedAssetId: "asset-1",
+    });
+    const merged = mergeProposalDecision(m, approved, { decision: "preserve_all" }, "2026-01-02T00:00:00.000Z", [], "cap:v1", "snap:v1");
+    assert.equal(merged.approvedAt, null, "switching TO preserve_all must invalidate prior approval");
+  });
+
+  it("Phase 22B Issue 3: toggling preserve_all -> remove_with_exceptions invalidates prior approval", () => {
+    const m = proposalMap([]);
+    const approved = decisionSet([], {
+      proposalDecision: "preserve_all",
+      proposalHash: "proposal-hash-a",
+      approvedAt: "2026-01-01T00:00:00.000Z",
+      approvedAssetId: "asset-1",
+    });
+    const merged = mergeProposalDecision(m, approved, { decision: "remove_with_exceptions" }, "2026-01-02T00:00:00.000Z", [], "cap:v1", "snap:v1");
+    assert.equal(merged.approvedAt, null, "switching AWAY FROM preserve_all must also invalidate prior approval");
+  });
+
+  it("Phase 22B Issue 3: preserve operations remain STORED (not deleted) while preserve_all is active, and reactivate on switching back", () => {
+    const m = proposalMap([]);
+    const withOps = decisionSet([], {
+      proposalDecision: "remove_with_exceptions",
+      proposalHash: "proposal-hash-a",
+      proposalPreserveOps: [
+        { operationId: "op-1", rawTapX: 5, rawTapY: 5, capRuleVersion: "cap:v1", snapRuleVersion: "snap:v1", decidedAt: "2026-01-01T00:00:00.000Z", source: "operator" },
+      ],
+    });
+    const switchedToPreserveAll = mergeProposalDecision(m, withOps, { decision: "preserve_all" }, "2026-01-02T00:00:00.000Z", [], "cap:v1", "snap:v1");
+    assert.equal(switchedToPreserveAll.proposalPreserveOps.length, 1, "the operation must not be deleted merely because preserve_all is now active");
+
+    const switchedBack = mergeProposalDecision(m, switchedToPreserveAll, { decision: "remove_with_exceptions" }, "2026-01-03T00:00:00.000Z", [], "cap:v1", "snap:v1");
+    assert.equal(switchedBack.proposalPreserveOps.length, 1, "the stored operation reactivates when switching back to remove_with_exceptions");
+  });
+
+  it("validateSubmitProposalDecision fails closed on a proposalHash mismatch", () => {
+    const m = proposalMap([]);
+    const result = validateSubmitProposalDecision(m, {
+      sourceAssetSha256: "sha-a",
+      proposalHash: "WRONG-hash",
+      decision: "remove_with_exceptions",
+    });
+    assert.equal(result.ok, false);
+  });
+
+  it("validateSubmitProposalDecision refuses when there is no proposal to decide", () => {
+    const m = map([]); // no inBoundsProposal
+    const result = validateSubmitProposalDecision(m, {
+      sourceAssetSha256: "sha-a",
+      proposalHash: "anything",
+      decision: "remove_with_exceptions",
+    });
+    assert.equal(result.ok, false);
   });
 });
