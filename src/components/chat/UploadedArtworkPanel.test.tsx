@@ -1,25 +1,13 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import { after, before, describe, it } from "node:test";
+import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
-import { createArtworkPreparationCapability } from "@/capabilities/artwork-preparation/artwork-preparation-capability";
-import {
-  bowlingStyleArtwork,
-  solidBlackExteriorArtwork,
-  toPngBytes,
-} from "@/capabilities/artwork-preparation/artwork-fixtures";
-import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
-import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
-import { createDesignBriefCapability } from "@/capabilities/design-brief";
 import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size";
 import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
-import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 import { ArtworkComparison } from "./ArtworkComparison";
 import {
@@ -632,14 +620,21 @@ describe("ArtworkComparison", () => {
   });
 });
 
-describe("UploadedArtworkPanel — guided background cleanup", () => {
-  function render(
-    overrides: Partial<ArtworkPreparationView> = {},
-    props: Record<string, unknown> = {},
-  ) {
+/**
+ * Phase 27E UX correction: the doorway into artwork repair. Replaces the
+ * old "guided background cleanup" describe block — that mechanism
+ * (`GuidedCleanupWorkspace`, single-click background-only removal) is no
+ * longer reachable from this screen; "Fix My Artwork" opens the frozen
+ * Phase 27E Magic Wand correction workspace instead, which handles BOTH
+ * missing artwork and leftover background. See the Phase 27E-UX-correction
+ * report for why the entry point moved out of `SeparationReviewPanel` and
+ * into `CompareStep` itself (reachability, not cosmetics).
+ */
+describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX correction)", () => {
+  function render(overrides: Partial<ArtworkPreparationView> = {}) {
     return renderToString(
       createElement(UploadedArtworkPanel, {
-      projectId: "test-project-id",
+        projectId: "test-project-id",
         step: "compare" as UploadedArtworkStep,
         preparation: preparation(overrides),
         busy: false,
@@ -650,19 +645,33 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
         onPrepare: () => {},
         onApprove: () => {},
         onReconsider: () => {},
-        onCleanupPoint: () => {},
-        onUndoCleanup: () => {},
-        ...props,
       }),
     );
   }
 
-  it("exposes an obvious Clean Up Background action", () => {
+  it("1/10: states the primary heading, exactly", () => {
+    const html = render();
+    assert.match(html, /Review your artwork before continuing/);
+  });
+
+  it("2: supporting copy accounts for BOTH missing artwork and leftover background, in one neutral sentence", () => {
+    const html = render();
+    // Not "brittle to every word" -- but it must mention comparing against
+    // the original, and it must not commit to only one failure direction.
+    assert.match(html, /compare the prepared version with your original/i);
+    assert.match(html, /still there/i); // covers "artwork went missing"
+    assert.match(html, /background remains/i); // covers "background left behind"
+  });
+
+  it("3/4/12: 'Fix My Artwork' is present; the misleading 'Clean Up Background' doorway is gone", () => {
     const html = render();
 
-    assert.match(html, /Still see some background/i);
-    assert.match(html, /Clean Up Background to remove any areas we missed/i);
-    assert.match(html, /Clean Up Background/);
+    assert.match(html, /Fix My Artwork/);
+    assert.match(html, /data-action="fix-my-artwork"/);
+    assert.doesNotMatch(html, /Clean Up Background/);
+    assert.doesNotMatch(html, /Still see some background/i);
+    assert.doesNotMatch(html, /remove any areas we missed/i);
+    assert.doesNotMatch(html, /This Isn.t Right/i);
     // Constitution §6.6: none of the machinery may surface.
     assert.doesNotMatch(
       html,
@@ -670,10 +679,17 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
     );
   });
 
-  it("keeps Use Prepared Artwork as a separate approval action", () => {
+  it("13: helper copy under Fix My Artwork names BOTH repair directions", () => {
+    const html = render();
+    assert.match(html, /Something doesn.t look right/);
+    assert.match(html, /restore missing parts of your design/i);
+    assert.match(html, /remove background that was left behind/i);
+  });
+
+  it("8/14: 'Use Prepared Artwork' remains available under its own 'Looks good?' heading", () => {
     const html = render();
 
-    assert.match(html, /Clean Up Background/);
+    assert.match(html, /Looks good\?/);
     assert.match(html, /Use Prepared Artwork/);
     assert.match(html, /Keep my original for now/);
     assert.match(html, /Enlarge/);
@@ -683,432 +699,154 @@ describe("UploadedArtworkPanel — guided background cleanup", () => {
     const html = render();
 
     assert.match(html, /Preview Background/);
-    assert.match(
-      html,
-      /Make sure all parts of your design are still there and the background looks clean/,
-    );
-    assert.match(html, /Try White to spot dark background residue/);
     assert.match(html, /Use Prepared Artwork/);
-    // Background control is not an approve action.
     assert.match(html, /data-approval-safety-copy/);
   });
 
-  it("offers Undo on compare once something has been removed", () => {
-    assert.doesNotMatch(render({ guidedCleanup: { available: true, removalCount: 0 } }), /Undo Last Removal/);
-    assert.match(render({ guidedCleanup: { available: true, removalCount: 2 } }), /Undo Last Removal/);
-  });
-
-  it("says nothing about cleanup when the server has not offered it", () => {
-    const html = render({ guidedCleanup: { available: false, removalCount: 0 } });
-
-    assert.doesNotMatch(html, /Clean Up Background/);
-    assert.doesNotMatch(html, /Still see some background/i);
-    // The rest of the compare step is untouched.
-    assert.match(html, /Use Prepared Artwork/);
-  });
-
-  it("renders the server's refusal verbatim on compare", () => {
-    // The single most important sentence in the flow. It is authored on the
-    // server and rendered as-is, so the panel can never soften or invent it.
-    const html = render(
-      {},
-      {
-        cleanupMessage:
-          "That area looks like part of the artwork, so we left it unchanged.",
-      },
-    );
-
-    assert.match(html, /That area looks like part of the artwork, so we left it unchanged\./);
-  });
-
-  it("does not put confirm controls on the compare strip before the workspace opens", () => {
-    // Pending highlight + confirm live inside GuidedCleanupWorkspace. Compare
-    // only advertises Clean Up Background so customers are not asked to
-    // confirm on a tiny tile they never clicked.
-    const html = render(
-      {},
-      {
-        cleanupPreviewHighlight: {
-          bounds: { left: 10, top: 10, right: 20, bottom: 20, width: 10, height: 10 },
-          overlayDataUrl: "data:image/png;base64,abc",
-        },
-        onConfirmCleanup: () => {},
-        onCancelCleanupPreview: () => {},
-      },
-    );
-
-    assert.match(html, /Clean Up Background/);
-    assert.doesNotMatch(html, />Remove This Area</);
-    assert.match(html, /Use Prepared Artwork/);
-  });
-
-  it("carries an opaque preparedRevision on the compare preparation view", () => {
-    const html = render({ preparedRevision: "rev-after-d" });
-    // Compare itself does not print the revision; the workspace keys on it.
-    // Opening the workspace requires client state — assert the prop path via
-    // GuidedCleanupWorkspace coverage, and that compare still offers cleanup.
-    assert.match(html, /Clean Up Background/);
-    assert.equal(preparation({ preparedRevision: "rev-after-d" }).preparedRevision, "rev-after-d");
-    assert.notEqual(
-      preparation({ preparedRevision: "rev-after-d" }).preparedRevision,
-      preparation({ preparedRevision: "rev-automatic" }).preparedRevision,
-    );
-  });
-
-  it("is not an image editor", () => {
+  it("K: original safety wording appears both on the tile and near the doorway", () => {
     const html = render();
-
-    assert.doesNotMatch(html, /brush|lasso|eraser|freehand|layer|opacity slider/i);
-  });
-});
-
-/**
- * Intelligent Separation Phase 3 — surfacing the server's already-computed
- * `preparedReview` state (readiness + garment-conditional copy) in the
- * Existing Artwork compare screen. Every assertion here is about VIEW state;
- * nothing here recomputes readiness or a garment relationship — the copy
- * strings are exactly what `describePreparedArtworkReview` would produce,
- * asserted the same way Phase 1/2's suites did.
- */
-describe("Preparation review intelligence — copy states (Phase 3)", () => {
-  const REVIEW_REQUIRED_MISMATCHED = {
-    headline: "Background prepared — review recommended",
-    guidance:
-      "Some removed background-coloured areas also run through the design. On this garment, those areas may show up as missing fill or detail — check the prepared artwork on Gray, White, and Black before continuing.",
-    sharesBackgroundColor: true,
-    reviewRequired: true,
-    garmentMayMatchBackground: false,
-  } as const;
-
-  const REVIEW_REQUIRED_MATCHED = {
-    headline: "Background prepared — review recommended",
-    guidance:
-      "Some of your design uses the same colour as the background. On this garment colour, those areas may already be supplied by the shirt itself — check the prepared artwork on Gray, White, and Black before continuing.",
-    sharesBackgroundColor: true,
-    reviewRequired: true,
-    garmentMayMatchBackground: true,
-  } as const;
-
-  const REVIEW_REQUIRED_UNKNOWN_GARMENT = {
-    headline: "Background prepared — review recommended",
-    guidance:
-      "Some removed background-coloured areas also run through the design. Review the prepared artwork carefully on Gray, White, and Black before continuing.",
-    sharesBackgroundColor: true,
-    reviewRequired: true,
-    garmentMayMatchBackground: null,
-  } as const;
-
-  it("A: a safe preparation renders with no review styling", () => {
-    const html = render("compare", {
-      preparedReview: {
-        headline: "Background prepared",
-        guidance: "Review the artwork below before continuing.",
-        sharesBackgroundColor: false,
-        reviewRequired: false,
-        garmentMayMatchBackground: null,
-      },
-    });
-
-    assert.match(html, /data-preparation-readiness="safe"/);
-    assert.doesNotMatch(html, /data-preparation-readiness="review_required"/);
-    assert.doesNotMatch(html, /review recommended/i);
-    assert.doesNotMatch(html, /border-amber/);
-    assert.doesNotMatch(html, /Check Gray, White, and Black if you(?:'|&#x27;)re unsure/);
-  });
-
-  it("B: review_required renders a visibly distinct, non-catastrophic banner", () => {
-    const html = render("compare", { preparedReview: REVIEW_REQUIRED_MISMATCHED });
-
-    assert.match(html, /data-preparation-readiness="review_required"/);
-    assert.match(html, /review recommended/i);
-    for (const forbidden of [/\bfailed\b/i, /\bunsafe\b/i, /\bdamaged\b/i, /\bbroken\b/i, /\bdestroyed\b/i]) {
-      assert.doesNotMatch(html, forbidden);
-    }
-  });
-
-  it("C: matched-garment copy explains substrate, never claims safety", () => {
-    const html = render("compare", { preparedReview: REVIEW_REQUIRED_MATCHED });
-
-    assert.match(html, /may already be supplied by the shirt itself/i);
-    assert.doesNotMatch(html, /this is safe/i);
-  });
-
-  it("D: mismatched-garment copy warns of missing fill\\/detail, never names an object", () => {
-    const html = render("compare", { preparedReview: REVIEW_REQUIRED_MISMATCHED });
-
-    assert.match(html, /missing fill or detail/i);
-    assert.doesNotMatch(html, /bowling ball|the logo was removed| was removed\b/i);
-  });
-
-  it("E: unknown-garment copy is generic and never infers a colour relationship", () => {
-    const html = render("compare", { preparedReview: REVIEW_REQUIRED_UNKNOWN_GARMENT });
-
-    assert.match(html, /Review the prepared artwork carefully/i);
-    assert.doesNotMatch(html, /On this garment/i);
-    assert.doesNotMatch(html, /supplied by the shirt/i);
-  });
-
-  it("K: original safety wording appears both on the tile and near approval", () => {
-    const html = render("compare");
 
     assert.match(html, /The artwork you uploaded, untouched\./);
     assert.match(html, /Your original upload is saved and unchanged\./);
   });
 
-  it("L: approval stays available and is not additionally gated by review_required", () => {
-    const html = render("compare", { preparedReview: REVIEW_REQUIRED_MISMATCHED });
+  it("6/17/18: Original/Prepared stays prominent with White/Gray/Black inspection, not buried under copy", () => {
+    const html = render();
 
-    const button = html.match(/<button[^>]*>Use Prepared Artwork<\/button>/);
-    assert.ok(button, "the approval button must still render");
-    // The actual `disabled` DOM attribute, not the Tailwind `disabled:*`
-    // variant classes every button carries regardless of state.
-    assert.doesNotMatch(button![0], /\sdisabled(=|>|\s)/);
-  });
-
-  it("I/J: preview state carries no garment identity and never touches the prepared asset URL", () => {
-    const safeHtml = renderToString(
-      createElement(ArtworkComparison, {
-        original: { url: "https://signed.example/original.png", loading: false },
-        prepared: { url: "https://signed.example/prepared.png", loading: false },
-        reviewRequired: false,
-      }),
-    );
-    const reviewHtml = renderToString(
-      createElement(ArtworkComparison, {
-        original: { url: "https://signed.example/original.png", loading: false },
-        prepared: { url: "https://signed.example/prepared.png", loading: false },
-        reviewRequired: true,
-      }),
-    );
-
-    for (const html of [safeHtml, reviewHtml]) {
-      assert.match(html, /src="https:\/\/signed\.example\/prepared\.png"/);
-      // The preview-background surface never carries or renders garment data.
-      assert.doesNotMatch(html, /garment|shirtColor|shirt color/i);
-    }
-  });
-
-  it("F/G/H: Gray stays default and White\\/Black stay selectable when review is recommended", () => {
-    const html = renderToString(
-      createElement(ArtworkComparison, {
-        original: { url: "https://signed.example/original.png", loading: false },
-        prepared: { url: "https://signed.example/prepared.png", loading: false },
-        reviewRequired: true,
-      }),
-    );
-
-    assert.match(html, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
+    assert.match(html, /Original/);
+    assert.match(html, /Prepared/);
     assert.match(html, /data-preview-background-option="white"/);
     assert.match(html, /data-preview-background-option="gray"/);
     assert.match(html, /data-preview-background-option="black"/);
-    assert.match(html, /Check Gray, White, and Black if you(?:'|&#x27;)re unsure\./);
   });
 
-  it("the review-emphasis line is absent when review is not recommended", () => {
-    const html = renderToString(
-      createElement(ArtworkComparison, {
-        original: { url: "https://signed.example/original.png", loading: false },
-        prepared: { url: "https://signed.example/prepared.png", loading: false },
-        reviewRequired: false,
-      }),
-    );
-
-    assert.doesNotMatch(html, /Check Gray, White, and Black if you(?:'|&#x27;)re unsure/);
-  });
-});
-
-/**
- * Phase 3, Goals M/N/O/P/Q/R — exercised against a harness with cleanup
- * wired (`onCleanupPoint` present), mirroring the existing "guided background
- * cleanup" describe block's local render helper.
- */
-describe("Preparation review intelligence — no auto-routing, no leaked vocabulary (Phase 3)", () => {
-  function renderCompareFull(overrides: Partial<ArtworkPreparationView> = {}) {
-    return renderToString(
-      createElement(UploadedArtworkPanel, {
-      projectId: "test-project-id",
-        step: "compare" as UploadedArtworkStep,
-        preparation: preparation(overrides),
-        busy: false,
-        originalImageUrl: "https://signed.example/original.png",
-        preparedImageUrl: "https://signed.example/prepared.png",
-        onUpload: () => {},
-        onSaveDetails: () => {},
-        onPrepare: () => {},
-        onApprove: () => {},
-        onReconsider: () => {},
-        onCleanupPoint: () => {},
-        onUndoCleanup: () => {},
-      }),
-    );
-  }
-
-  const REVIEW_REQUIRED = {
-    headline: "Background prepared — review recommended",
-    guidance:
-      "Some removed background-coloured areas also run through the design. On this garment, those areas may show up as missing fill or detail — check the prepared artwork on Gray, White, and Black before continuing.",
-    sharesBackgroundColor: true,
-    reviewRequired: true,
-    garmentMayMatchBackground: false,
-  } as const;
-
-  it("M: Clean Up Background remains available under review_required", () => {
-    const html = renderCompareFull({
-      preparedReview: REVIEW_REQUIRED,
-      guidedCleanup: { available: true, removalCount: 0 },
+  it("9/15: resolution enhancement is a separate, informational block, phrased distinctly from artwork repair", () => {
+    const html = render({
+      customer: {
+        backgroundMessage: "Your artwork has a solid background that can be removed automatically.",
+        resolutionMessage:
+          'Your artwork is smaller than the recommended print resolution for a 10.5"-wide print on the full front. We\'ll need to enhance it before creating the final print-ready file.',
+        canPrepare: true,
+        prepareActionLabel: "Remove the Background",
+        enhancementNeeded: true,
+      },
     });
 
-    assert.match(html, /Clean Up Background/);
+    assert.match(html, /data-resolution-notice/);
+    assert.match(html, /Resolution enhancement needed/);
+    assert.match(html, /We&#x27;ll need to enhance it/);
+    // It must sit in its own block, AFTER the primary compare/repair
+    // decision area (Section 9) — not nested inside the Fix My Artwork
+    // card, and not phrased as another repair failure.
+    const fixCardMatch = html.match(/data-action="fix-my-artwork"[^]*?<\/div>/);
+    assert.ok(fixCardMatch, "Fix My Artwork card must exist");
+    assert.doesNotMatch(fixCardMatch![0], /Resolution enhancement needed/, "resolution notice must not be nested inside the Fix My Artwork card");
+    const fixIndex = html.indexOf('data-action="fix-my-artwork"');
+    const resolutionIndex = html.indexOf("data-resolution-notice");
+    assert.ok(resolutionIndex > fixIndex, "resolution notice must come after the primary repair decision area");
   });
 
-  it("N/O/P: review_required renders no production-routing, job, or treatment vocabulary", () => {
-    const html = renderCompareFull({ preparedReview: REVIEW_REQUIRED });
+  it("resolution notice is absent when enhancement is not needed", () => {
+    const html = render({
+      customer: {
+        backgroundMessage: "Your artwork already has a clear background.",
+        resolutionMessage: null,
+        canPrepare: false,
+        prepareActionLabel: null,
+        enhancementNeeded: false,
+      },
+    });
+    assert.doesNotMatch(html, /data-resolution-notice/);
+    assert.doesNotMatch(html, /Resolution enhancement needed/);
+  });
 
+  it("11: no provider/algorithm vocabulary leaks into this screen", () => {
+    const html = render();
     for (const forbidden of [
+      /topaz/i,
+      /openai/i,
+      /stripe/i,
       /Prepare for Print/i,
       /Finalize/i,
-      /halftone/i,
       /\btreatment\b/i,
-      /\bLPI\b/,
-      /FinalArtworkJob/i,
       /provider/i,
-      /Topaz/i,
+      /flood.?fill/i,
+      /connectivity/i,
+      /tolerance/i,
     ]) {
-      assert.doesNotMatch(html, forbidden);
+      assert.doesNotMatch(html, forbidden, `leaked term: ${forbidden}`);
     }
   });
 
-  it("Q/R: no internal experimental strategy vocabulary reaches rendered markup", () => {
-    const html = renderCompareFull({ preparedReview: REVIEW_REQUIRED });
+  it("is not an image editor by itself — the workspace only opens on demand", () => {
+    const html = render();
+    assert.doesNotMatch(html, /brush|lasso|eraser|freehand|layer|opacity slider/i);
+    // The workspace's own canvas must not be present before Fix My Artwork is clicked.
+    assert.doesNotMatch(html, /data-correction-canvas/);
+  });
 
-    for (const forbidden of [
-      /original_preserving_separation/i,
-      /manual_intervention/i,
-      /prepared_background_removed/i,
-      /ProductionSourceStrategy/i,
-      /exteriorRemovalEnclosureRatio/i,
-      /disconnectedBackgroundColoredPixels/i,
-      /assessProductionSourceStrategy/i,
-      /backgroundConfidence/i,
-    ]) {
-      assert.doesNotMatch(html, forbidden);
+  it("does not imply automatic preparation succeeded perfectly, nor that it definitely failed", () => {
+    const html = render();
+    for (const overclaim of [/perfect/i, /flawless/i, /failed/i, /broken/i, /damaged/i, /ruined/i]) {
+      assert.doesNotMatch(html, overclaim);
     }
   });
 });
 
 /**
- * Phase 3, Goals S/T/U — the actual bowling fixture and a genuinely safe
- * fixture, driven through the REAL preparation capability so the UI is
- * proven against server-computed evidence rather than hand-typed copy.
- * Runs entirely in a throwaway temp directory; never touches the real
- * `.data/sprint1-store.json` and never mutates the live bowling project.
+ * Phase 27E UX correction, item 5: "Fix My Artwork" must open the EXACT
+ * correction workspace already built in Phase 27E — same component, same
+ * frozen controls (Restore Missing Artwork / Remove Background / zoom /
+ * pan / Undo / Start Over / Done Editing), reached with no algorithm
+ * change and no new route. `renderToString` cannot execute the `onClick`
+ * that flips local state (no browser event loop), so this is proven at
+ * the SOURCE level: the button's handler and the workspace's own contract
+ * are both asserted directly, which is exactly how this repo's other
+ * client-state doorways are proven (see `separation-review-workspace-shape.test.ts`).
  */
-describe("Preparation review intelligence — real preparation evidence (Phase 3)", () => {
-  let tempDir = "";
-  let previousCwd = "";
+describe("Fix My Artwork routing (Phase 27E UX correction)", () => {
+  const PANEL_SOURCE = readFileSync(path.join(__dirname, "UploadedArtworkPanel.tsx"), "utf8");
+  const WORKSPACE_SOURCE = readFileSync(path.join(__dirname, "CorrectionWorkspace.tsx"), "utf8");
 
-  before(() => {
-    previousCwd = process.cwd();
-    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-panel-review-"));
-    process.chdir(tempDir);
+  it("19: CompareStep's Fix My Artwork button sets correctionMode to 'editing', which renders CorrectionWorkspace", () => {
+    // The button and its onClick are adjacent JSX attributes on the same
+    // element -- match them as one block rather than assuming an exact
+    // attribute order.
+    const buttonBlock = PANEL_SOURCE.match(/<button[^>]*data-action="fix-my-artwork"[^>]*>/) ?? PANEL_SOURCE.match(/<button[\s\S]*?data-action="fix-my-artwork"/);
+    assert.ok(buttonBlock, "Fix My Artwork button must exist");
+    assert.match(PANEL_SOURCE, /onClick=\{\(\)\s*=>\s*setCorrectionMode\("editing"\)\}/);
+    assert.match(PANEL_SOURCE, /correctionMode === "editing"/);
+    assert.match(PANEL_SOURCE, /<CorrectionWorkspace/);
+    assert.match(PANEL_SOURCE, /<CorrectionFinalReview/);
   });
 
-  after(async () => {
-    await cleanupTempWorkspace(tempDir, previousCwd);
+  it("no new correction route or algorithm import was introduced by this UX pass", () => {
+    assert.doesNotMatch(PANEL_SOURCE, /magic-wand-algorithm/);
+    assert.doesNotMatch(PANEL_SOURCE, /floodFillSelect|unionMasks|filterClicksContaining/);
+    // The panel only imports the already-built, frozen components.
+    assert.match(PANEL_SOURCE, /from "\.\/CorrectionWorkspace"/);
+    assert.match(PANEL_SOURCE, /from "\.\/CorrectionFinalReview"/);
   });
 
-  async function realPrepare(image: Parameters<typeof toPngBytes>[0], productColor: string) {
-    const { LocalProjectRepository } = await import("@/lib/db/local-store");
-    const repo = new LocalProjectRepository();
-    const assets = createAssetCapability(
-      repo,
-      new DataUriAssetStorageProvider(),
-      new PngThumbnailGenerator(),
-    );
-    const capability = createArtworkPreparationCapability(
-      repo,
-      assets,
-      createDesignBriefCapability(repo),
-    );
-    const projectId = (await repo.createProject()).project.id;
-    await capability.uploadOriginal(projectId, {
-      bytes: toPngBytes(image),
-      declaredContentType: "image/png",
-      filename: "artwork.png",
-    });
-    await capability.setProductionContext(projectId, {
-      productSummary: "T-shirts",
-      productColor,
-      printPlacement: "full_front",
-    });
-    const view = await capability.prepareBackground(projectId);
-    const record = await repo.getArtworkPreparation(projectId);
-    const preparedBytes = (await assets.downloadAssetBytes(record!.preparedAssetId!))!.bytes;
-    return { view, preparedBytes };
-  }
-
-  function renderWithView(view: ArtworkPreparationView) {
-    return renderToString(
-      createElement(UploadedArtworkPanel, {
-      projectId: "test-project-id",
-        step: "compare" as UploadedArtworkStep,
-        preparation: view,
-        busy: false,
-        originalImageUrl: "https://signed.example/original.png",
-        preparedImageUrl: "https://signed.example/prepared.png",
-        onUpload: () => {},
-        onSaveDetails: () => {},
-        onPrepare: () => {},
-        onApprove: () => {},
-        onReconsider: () => {},
-        onCleanupPoint: () => {},
-        onUndoCleanup: () => {},
-      }),
-    );
-  }
-
-  it("S: bowling on a white shirt shows review recommended + mismatched-garment copy", async () => {
-    const { view } = await realPrepare(bowlingStyleArtwork(), "White");
-    assert.equal(view.preparedReview?.reviewRequired, true);
-    assert.equal(view.preparedReview?.garmentMayMatchBackground, false);
-
-    const html = renderWithView(view);
-    assert.match(html, /review recommended/i);
-    assert.match(html, /missing fill or detail/i);
-    assert.match(html, /data-preparation-readiness="review_required"/);
-    assert.match(html, /data-preview-background="gray"/);
-    assert.match(html, /data-preview-background-option="white"/);
-    assert.match(html, /data-preview-background-option="black"/);
-    assert.match(html, /The artwork you uploaded, untouched\./);
-    assert.match(html, /Clean Up Background/);
-    assert.match(html, /Use Prepared Artwork/);
+  it("20/21: the workspace CorrectionWorkspace opens still exposes Restore Missing Artwork and Remove Background", () => {
+    assert.match(WORKSPACE_SOURCE, /data-mode="restore"/);
+    assert.match(WORKSPACE_SOURCE, /data-mode="remove"/);
+    assert.match(WORKSPACE_SOURCE, />Restore Missing Artwork</);
+    assert.match(WORKSPACE_SOURCE, />Remove Background</);
   });
 
-  it("T: bowling on a black shirt shows review recommended + matched-garment copy, and prepared bytes match the white-shirt run", async () => {
-    const black = await realPrepare(bowlingStyleArtwork(), "Black");
-    const white = await realPrepare(bowlingStyleArtwork(), "White");
-
-    assert.equal(black.view.preparedReview?.reviewRequired, true);
-    assert.equal(black.view.preparedReview?.garmentMayMatchBackground, true);
-    assert.equal(
-      createHash("sha256").update(black.preparedBytes).digest("hex"),
-      createHash("sha256").update(white.preparedBytes).digest("hex"),
-      "garment colour must never change the prepared PNG bytes",
-    );
-
-    const html = renderWithView(black.view);
-    assert.match(html, /review recommended/i);
-    assert.match(html, /supplied by the shirt itself/i);
-  });
-
-  it("U: a safe fixture stays low-friction — no banner, no garment-conditional copy", async () => {
-    const { view } = await realPrepare(solidBlackExteriorArtwork(), "Navy");
-    assert.equal(view.preparedReview?.reviewRequired, false);
-
-    const html = renderWithView(view);
-    assert.doesNotMatch(html, /review recommended/i);
-    assert.match(html, /data-preparation-readiness="safe"/);
-    assert.doesNotMatch(html, /border-amber/);
-    assert.match(html, /Use Prepared Artwork/);
+  it("all other Phase 27D/27E controls remain present in the frozen workspace", () => {
+    for (const control of [
+      /data-action="zoom-fit"/,
+      /data-action="zoom-in"/,
+      /data-action="zoom-out"/,
+      /data-action="zoom-100"/,
+      /data-pan-toggle/,
+      /data-action="undo-correction"/,
+      /data-action="start-over"/,
+      /data-action="done-editing"/,
+    ]) {
+      assert.match(WORKSPACE_SOURCE, control);
+    }
   });
 });

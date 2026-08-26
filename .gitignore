@@ -62,3 +62,4 @@ research/phase-2d-bakeoff/reports/
 research/phase-2d-bakeoff/sources/*.png
 research/phase-2e-acceptance/acceptance-*.json
 research/phase-2e-acceptance/run.log
+.local-lab-assets/

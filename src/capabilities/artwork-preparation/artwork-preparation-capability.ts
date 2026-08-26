@@ -55,6 +55,25 @@ import {
   previewGuidedRemovalAt,
   revalidateGuidedRemovalCandidate,
 } from "./background-isolation";
+import {
+  isToleranceLevel,
+  MAGIC_WAND_ALGORITHM_VERSION,
+  type CorrectionAction,
+  type Point,
+  type ToleranceLevel,
+} from "./magic-wand-algorithm";
+import {
+  acceptSessionOperation,
+  clearSession as clearCorrectionSession,
+  computeCurrentResult as computeCorrectionResult,
+  computeSelectionPreview as computeCorrectionSelectionPreview,
+  getOrCreateSession,
+  getSession as getCorrectionSession,
+  hasFreshSession,
+  resetSessionOperations,
+  undoLastSessionOperation,
+  type CorrectionOperationRecord,
+} from "./magic-wand-correction";
 import type { ArtworkAnalysis, RepairabilityAssessment } from "./contracts";
 import {
   buildSelectionHighlight,
@@ -376,6 +395,71 @@ export interface ArtworkPreparationCapability {
    * all (Goal: production routing changed? NO).
    */
   approveSeparationMaster(designId: string): Promise<SeparationReviewView>;
+
+  /**
+   * Phase 27E: the graduated Magic Wand correction workspace. A correction
+   * session's "base" image is exactly the CURRENT `preparedAssetId` bytes —
+   * this never re-runs `computeRegionMap`/`buildSeparationMaster` or any
+   * other automatic-removal logic (Phase 27E §2). Sessions live only in
+   * server memory (never persisted) until `finalizeCorrection` is called;
+   * closing the workspace without finalizing leaves the project's
+   * authoritative prepared artwork completely untouched.
+   *
+   * NOT internally gated here, same as `getSeparationReview` — callers
+   * (routes) enforce internal-only access.
+   */
+  previewCorrectionSelection(designId: string, request: CorrectionSelectionRequest): Promise<CorrectionSelectionResult>;
+  /** Persists (in memory only, for this session) the raw click list + mode + tolerance — never a mask. */
+  acceptCorrectionOperation(designId: string, request: CorrectionAcceptRequest): Promise<{ operationId: string; algorithmVersion: string }>;
+  undoCorrectionOperation(designId: string): Promise<void>;
+  /** Resets the session's operations to empty — back to the CURRENT prepared asset, unmodified. Never touches the original. */
+  resetCorrectionSession(designId: string): Promise<void>;
+  /** Read-only PNG bytes of the immutable original, for the workspace's "compare to original" panel. */
+  getCorrectionOriginalPng(designId: string): Promise<Buffer>;
+  /** Read-only PNG bytes of the session's current result — the damaged/base image with every accepted operation replayed. Recomputed fresh every call. */
+  getCorrectionResultPng(designId: string): Promise<Buffer>;
+  /**
+   * Read-only: how many operations are currently accepted in this
+   * project's correction session. Exists so the workspace UI can seed its
+   * "Corrections applied" counter from server truth on mount — the session
+   * itself is always correct (see `computeCorrectionResult`); without this,
+   * a component that unmounts and remounts (e.g. "Back to Editing") would
+   * have no way to know the count without re-deriving it from a diff.
+   */
+  getCorrectionSessionInfo(designId: string): Promise<{ operationCount: number }>;
+  /**
+   * "Use This Artwork" — THE authoritative handoff (Phase 27E §7). Replays
+   * every accepted operation deterministically from the session's base,
+   * uploads the exact resulting pixels as a NEW asset (never overwrites
+   * anything), creates a matching new `prepared_upload` `ArtworkVersion`,
+   * and repoints `preparedAssetId`/`preparedArtworkVersionId` at it — the
+   * same pair `approveSeparationMaster` repoints together, so
+   * `final-artwork-worker`'s `primaryAssetId === sourceAsset.id` check
+   * keeps passing with no changes anywhere downstream. Clears the session
+   * on success. Throws if there is no prepared artwork yet, or no active
+   * session (nothing to finalize).
+   */
+  finalizeCorrection(designId: string): Promise<ArtworkPreparationView>;
+}
+
+export interface CorrectionSelectionRequest {
+  clicks: Point[];
+  mode: CorrectionAction;
+  toleranceLevel: ToleranceLevel;
+  removeAt?: Point;
+}
+export interface CorrectionAcceptRequest {
+  clicks: Point[];
+  mode: CorrectionAction;
+  toleranceLevel: ToleranceLevel;
+}
+export interface CorrectionSelectionResult {
+  pixelCount: number;
+  bounds: { left: number; top: number; width: number; height: number } | null;
+  touchesEdge: boolean;
+  broad: boolean;
+  overlayPng: Buffer;
+  effectiveClicks: Point[];
 }
 
 export function createArtworkPreparationCapability(
@@ -525,6 +609,49 @@ export function createArtworkPreparationCapability(
       image: decodePngUpload(downloaded.bytes).image,
       sha256: createHash("sha256").update(downloaded.bytes).digest("hex"),
     };
+  }
+
+  /**
+   * Phase 27E: makes sure this project has a correction session whose base
+   * image is exactly the CURRENT `preparedAssetId` bytes. Downloads and
+   * decodes the original + prepared images ONLY when there is no session
+   * yet, or the existing one is based on a `preparedAssetId` that has since
+   * changed (e.g. a separation re-approval happened in another tab) — never
+   * on every click, and never by recomputing a removal.
+   */
+  async function ensureCorrectionSession(designId: string): Promise<void> {
+    const { preparation } = await loadOwned(designId);
+    if (!preparation.preparedAssetId) {
+      throw new ArtworkPreparationStateError("No prepared artwork exists yet to correct.");
+    }
+    if (hasFreshSession(designId, preparation.preparedAssetId)) return;
+
+    const { image: original } = await loadOriginalImageWithHash(preparation);
+    const preparedDownload = await assets.downloadAssetBytes(preparation.preparedAssetId);
+    if (!preparedDownload) {
+      throw new ArtworkPreparationStateError("We couldn't find the prepared artwork to correct. Please try again.");
+    }
+    const base = decodePngUpload(preparedDownload.bytes).image;
+    getOrCreateSession(designId, original, base, preparation.preparedAssetId);
+  }
+
+  function validateCorrectionRequest(request: { clicks: Point[]; mode: CorrectionAction; toleranceLevel: ToleranceLevel; removeAt?: Point }): void {
+    if (!Array.isArray(request.clicks) || request.clicks.length === 0 || !request.clicks.every(isPoint)) {
+      throw new ArtworkPreparationStateError("At least one valid click point is required.");
+    }
+    if (request.mode !== "restore" && request.mode !== "remove") {
+      throw new ArtworkPreparationStateError("mode must be 'restore' or 'remove'.");
+    }
+    if (!isToleranceLevel(request.toleranceLevel)) {
+      throw new ArtworkPreparationStateError("toleranceLevel must be 'less', 'default', or 'more'.");
+    }
+    if (request.removeAt !== undefined && !isPoint(request.removeAt)) {
+      throw new ArtworkPreparationStateError("removeAt must be a valid {x,y} point.");
+    }
+  }
+
+  function isPoint(value: unknown): value is Point {
+    return !!value && typeof value === "object" && typeof (value as Point).x === "number" && typeof (value as Point).y === "number";
   }
 
   /**
@@ -1418,6 +1545,127 @@ export function createArtworkPreparationCapability(
       await repo.setProjectStatus(designId, "approved");
 
       return buildSeparationReviewView(computation.regionMap, finalDecisionSet, postCheck, true);
+    },
+
+    // --- Phase 27E: graduated Magic Wand correction workspace -------------
+
+    async previewCorrectionSelection(designId, request) {
+      validateCorrectionRequest(request);
+      await ensureCorrectionSession(designId);
+      const result = computeCorrectionSelectionPreview(designId, request.clicks, request.mode, request.toleranceLevel, request.removeAt);
+      return {
+        pixelCount: result.selection.pixelCount,
+        bounds: result.selection.bounds,
+        touchesEdge: result.selection.touchesEdge,
+        broad: result.selection.broad,
+        overlayPng: encodeRgbaToPng(result.overlay),
+        effectiveClicks: result.effectiveClicks,
+      };
+    },
+
+    async acceptCorrectionOperation(designId, request) {
+      validateCorrectionRequest(request);
+      await ensureCorrectionSession(designId);
+      const op: CorrectionOperationRecord = acceptSessionOperation(designId, request.clicks, request.mode, request.toleranceLevel);
+      return { operationId: op.operationId, algorithmVersion: op.algorithmVersion };
+    },
+
+    async undoCorrectionOperation(designId) {
+      await ensureCorrectionSession(designId);
+      undoLastSessionOperation(designId);
+    },
+
+    async resetCorrectionSession(designId) {
+      await ensureCorrectionSession(designId);
+      resetSessionOperations(designId);
+    },
+
+    async getCorrectionOriginalPng(designId) {
+      const { preparation } = await loadOwned(designId);
+      const { image } = await loadOriginalImageWithHash(preparation);
+      return encodeRgbaToPng(image);
+    },
+
+    async getCorrectionResultPng(designId) {
+      await ensureCorrectionSession(designId);
+      return encodeRgbaToPng(computeCorrectionResult(designId));
+    },
+
+    async getCorrectionSessionInfo(designId) {
+      await ensureCorrectionSession(designId);
+      const session = getCorrectionSession(designId);
+      return { operationCount: session?.operations.length ?? 0 };
+    },
+
+    async finalizeCorrection(designId) {
+      const snapshot = await repo.getProject(designId);
+      if (!snapshot) throw new ArtworkPreparationStateError("Project not found");
+      const { brief, preparation } = await loadOwned(designId);
+      await ensureCorrectionSession(designId);
+      const session = getCorrectionSession(designId);
+      if (!session) {
+        throw new ArtworkPreparationStateError("No active correction session to use.");
+      }
+
+      // Deterministic replay from the session's base + immutable original —
+      // NEVER a second automatic removal (Phase 27E §2). Byte-exact: this is
+      // the SAME function `getCorrectionResultPng`/the workspace preview
+      // already called, so what was reviewed is exactly what gets persisted.
+      const corrected = computeCorrectionResult(designId);
+
+      const asset = await assets.uploadCustomerArtwork(designId, {
+        conceptId: `correction-${preparation.id}-${randomUUID()}`,
+        bytes: encodeRgbaToPng(corrected),
+        contentType: "image/png",
+        widthPx: corrected.width,
+        heightPx: corrected.height,
+        hasTransparency: true,
+        kind: "png",
+        metadata: {
+          // Lineage mirrors `separationLineage` in `approveSeparationMaster`
+          // — raw operator intent only, never a mask (Phase 27E §9).
+          derivedFromAssetId: preparation.originalAssetId,
+          artworkPreparationId: preparation.id,
+          correctionLineage: {
+            algorithmVersion: MAGIC_WAND_ALGORITHM_VERSION,
+            baseAssetId: session.baseAssetId,
+            operations: session.operations,
+          },
+        },
+      });
+
+      const nextVersionNumber = snapshot.artworkVersions.reduce((highest, v) => Math.max(highest, v.versionNumber), 0) + 1;
+      const [artworkVersion] = await repo.addArtworkVersions(designId, [
+        {
+          versionNumber: nextVersionNumber,
+          kind: "prepared_upload",
+          title: "Your artwork, manually corrected",
+          summary: "Your prepared artwork with operator-applied background corrections.",
+          placeholderLabel: "Your artwork",
+          accentColor: "#173F35",
+          designBriefVersionId: null,
+          generationJobId: null,
+          providerKey: null,
+          primaryAssetId: asset.id,
+          thumbnailAssetId: null,
+          sourceArtworkVersionId: null,
+          conceptDirectionKey: null,
+        },
+      ]);
+
+      const approvedAt = new Date().toISOString();
+      await repo.updateArtworkPreparation(preparation.id, {
+        status: "approved",
+        preparedAssetId: asset.id,
+        preparedArtworkVersionId: artworkVersion!.id,
+        approvedAt,
+      });
+      await repo.setProjectStatus(designId, "approved");
+      clearCorrectionSession(designId);
+
+      const updated = await repo.getArtworkPreparation(designId);
+      if (!updated) throw new ArtworkPreparationStateError("Artwork preparation not found");
+      return toView(updated, brief);
     },
 
     async resolveImageAssetId(designId, role) {

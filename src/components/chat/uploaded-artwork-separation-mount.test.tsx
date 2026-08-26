@@ -144,7 +144,7 @@ describe("UploadedArtworkPanel — SeparationReviewPanel mount (Intelligent Sepa
 
   it("X: separation review is positioned after the comparison and its warning, before the approval controls", () => {
     const html = render("compare");
-    const comparisonAt = html.indexOf("Background prepared");
+    const comparisonAt = html.indexOf("Review your artwork before continuing");
     const separationAt = html.indexOf(SEPARATION_LOADING_TEXT);
     const approvalAt = html.indexOf("Your original upload is saved and unchanged.");
     assert.ok(comparisonAt !== -1 && separationAt !== -1 && approvalAt !== -1);
