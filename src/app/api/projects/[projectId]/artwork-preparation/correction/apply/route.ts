@@ -20,9 +20,36 @@ export async function POST(request: Request, context: RouteContext) {
 
   try {
     const body = (await request.json().catch(() => null)) as
-      | { clicks?: unknown; mode?: unknown; toleranceLevel?: unknown }
+      | { tool?: unknown; clicks?: unknown; mode?: unknown; toleranceLevel?: unknown; click?: unknown; points?: unknown; radius?: unknown }
       | null;
-    if (!body || !Array.isArray(body.clicks)) {
+    if (!body) {
+      return NextResponse.json({ error: "A request body is required" }, { status: 400 });
+    }
+
+    if (body.tool === "restore_fill") {
+      if (!body.click || typeof body.click !== "object") {
+        return NextResponse.json({ error: "click is required" }, { status: 400 });
+      }
+      const result = await graph.artworkPreparation.acceptCorrectionOperation(projectId, {
+        tool: "restore_fill",
+        click: body.click as { x: number; y: number },
+      });
+      return NextResponse.json(result);
+    }
+
+    if (body.tool === "restore_brush" || body.tool === "erase_brush") {
+      if (!Array.isArray(body.points) || typeof body.radius !== "number") {
+        return NextResponse.json({ error: "points and radius are required" }, { status: 400 });
+      }
+      const result = await graph.artworkPreparation.acceptCorrectionOperation(projectId, {
+        tool: body.tool,
+        points: body.points as { x: number; y: number }[],
+        radius: body.radius,
+      });
+      return NextResponse.json(result);
+    }
+
+    if (!Array.isArray(body.clicks)) {
       return NextResponse.json({ error: "clicks, mode, toleranceLevel are required" }, { status: 400 });
     }
     const result = await graph.artworkPreparation.acceptCorrectionOperation(projectId, {

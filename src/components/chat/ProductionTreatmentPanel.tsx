@@ -38,6 +38,19 @@ export type TreatmentPreviewMode = "prepared" | "halftone" | "garment";
 export interface ProductionTreatmentPanelProps {
   view: ProductionTreatmentView;
   busy: boolean;
+  /**
+   * Phase 27M: which treatment SELECTION request is actually in flight right
+   * now, or `null` when none is. Distinct from `busy` — `busy` also covers
+   * every OTHER in-flight action in the whole chat surface (uploads, size
+   * confirmation, ...), which is correct for disabling controls but says
+   * nothing about which of THESE two buttons a click just landed on. Without
+   * this, `busy` alone renders every control merely `disabled`, and a
+   * customer clicking Standard Raster or DTF Halftone has no way to tell
+   * "my click registered and is being processed" from "this happens to be
+   * unavailable right now" — precisely the confusion Phase 27L's Wand-apply
+   * clarity fix addressed for a different control.
+   */
+  pendingTreatment?: "standard_raster" | "halftone_dtf" | null;
   /** Preview image URLs by mode, resolved by the parent. `null` while loading or unavailable. */
   previewUrls: Partial<Record<TreatmentPreviewMode, string | null>>;
   onSelectStandardRaster: () => void;
@@ -53,6 +66,7 @@ export interface ProductionTreatmentPanelProps {
 export function ProductionTreatmentPanel({
   view,
   busy,
+  pendingTreatment = null,
   previewUrls,
   onSelectStandardRaster,
   onSelectHalftone,
@@ -125,7 +139,39 @@ export function ProductionTreatmentPanel({
           DTF Halftone
         </button>
       </div>
+      {/* Phase 27M §8/§10: immediate, concrete feedback for the ONE request
+          actually in flight -- attached to the real asynchronous boundary
+          (the `production-treatment` POST), never a fabricated stage. Takes
+          over from the static descriptive copy below only while its own
+          request is pending, so a click never reads as "did that work?" */}
+      {pendingTreatment ? (
+        <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted" role="status">
+          <span className="inline-flex gap-0.5" aria-hidden="true">
+            <span className="animate-pulse">●</span>
+            <span className="animate-pulse [animation-delay:150ms]">●</span>
+            <span className="animate-pulse [animation-delay:300ms]">●</span>
+          </span>
+          {pendingTreatment === "halftone_dtf"
+            ? "Loading halftone options…"
+            : "Switching treatment…"}
+        </p>
+      ) : (
+        /* Phase 27L §9: short, concrete copy distinguishing the two
+            treatments -- never a physical-print claim (the disclaimer above
+            already covers that honestly; this just says what each button
+            DOES). */
+        <p className="mt-2 text-[11px] text-muted">
+          {halftoneActive
+            ? "DTF Halftone — uses a halftone treatment for supported DTF artwork."
+            : "Standard Raster — normal full-color print preparation."}
+        </p>
+      )}
 
+      {/* Phase 27L §9: once a genuine prerequisite (e.g. confirmed physical
+          size) is satisfied, this message disappears on its own -- it is
+          never a separate flag to clear, only ever the live result of
+          `assessHalftoneEligibility`, the same eligibility check the write
+          side re-enforces. */}
       {!view.offerable && view.offerBlockedReason ? (
         <p className="mt-2 text-xs text-amber-800">{view.offerBlockedReason}</p>
       ) : null}

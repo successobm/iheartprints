@@ -341,7 +341,7 @@ describe("PrepareForPrintAction — size is shown before the commitment", () => 
 
     assert.match(html, /Print size/);
     assert.match(html, /10\.5&quot;/);
-    assert.match(html, /Prepare Print-Ready Artwork/);
+    assert.match(html, /Create Print-Ready Artwork/);
     assert.match(html, /Adjust size/);
   });
 
@@ -360,7 +360,7 @@ describe("PrepareForPrintAction — size is shown before the commitment", () => 
     // The action is still SHOWN — hiding it would leave the customer without
     // any sense of what happens next — but it cannot be pressed, and the card
     // directly above says why.
-    assert.match(unconfirmed, /Prepare Print-Ready Artwork/);
+    assert.match(unconfirmed, /Create Print-Ready Artwork/);
     assert.match(unconfirmed, /disabled=""/);
     assert.match(textOf(unconfirmed), /Confirm the print size before preparation/);
 
@@ -390,7 +390,7 @@ describe("PrepareForPrintAction — size is shown before the commitment", () => 
       }),
     );
 
-    assert.match(html, /Prepare Print-Ready Artwork/);
+    assert.match(html, /Create Print-Ready Artwork/);
     assert.doesNotMatch(html, /Print-ready size/);
   });
 
@@ -404,7 +404,7 @@ describe("PrepareForPrintAction — size is shown before the commitment", () => 
       }),
     );
 
-    assert.match(html, /Preparing your print-ready artwork/);
+    assert.match(html, /Creating your print-ready artwork/);
     assert.match(html, /3–4 minutes/);
     assert.doesNotMatch(html, /is ready/i);
   });

@@ -404,7 +404,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     const text = visibleText(render("approved", approvedState));
 
     assert.match(text, /Ready for print preparation/);
-    assert.match(text, /Prepare Print-Ready Artwork/);
+    assert.match(text, /Create Print-Ready Artwork/);
     // Size and resolution, stated in the customer's own units.
     assert.match(text, /10\.5" × 10\.34"/);
     assert.match(text, /300 DPI/);
@@ -463,7 +463,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
       },
     });
 
-    assert.match(html, /Prepare Print-Ready Artwork/);
+    assert.match(html, /Create Print-Ready Artwork/);
     assert.doesNotMatch(html, /needs to be enhanced for this print size/);
   });
 
@@ -472,9 +472,9 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
       finalizationStatus: "preparing",
     });
 
-    assert.match(html, /Preparing your print-ready artwork/);
+    assert.match(html, /Creating your print-ready artwork/);
     assert.match(html, /about 3–4 minutes/);
-    assert.doesNotMatch(html, /Prepare Print-Ready Artwork/);
+    assert.doesNotMatch(html, /Create Print-Ready Artwork/);
     // Size is not changeable once production has started.
     assert.doesNotMatch(html, /Adjust size/);
   });
@@ -499,7 +499,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     assert.match(html, /Print-ready preparation couldn/);
     assert.match(html, /Retry Preparation/);
     assert.match(html, /type="button"/);
-    assert.doesNotMatch(html, /Preparing your print-ready artwork/);
+    assert.doesNotMatch(html, /Creating your print-ready artwork/);
     assert.doesNotMatch(html, /Try Again/);
     assert.doesNotMatch(
       html,
@@ -525,7 +525,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
 
     // The delivery card owns the "it's ready" message; this panel must not
     // compete with it.
-    assert.doesNotMatch(html, /Prepare Print-Ready Artwork/);
+    assert.doesNotMatch(html, /Create Print-Ready Artwork/);
     assert.doesNotMatch(html, /Ready for print preparation/);
     // But the only route an upload customer has to a different size stays.
     assert.match(html, /Adjust size/);
@@ -536,7 +536,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
 
     assert.doesNotMatch(html, /Adjust size/);
     assert.doesNotMatch(html, /300 DPI/);
-    assert.match(html, /Prepare Print-Ready Artwork/);
+    assert.match(html, /Create Print-Ready Artwork/);
   });
 });
 
@@ -624,13 +624,19 @@ describe("ArtworkComparison", () => {
  * Phase 27E UX correction: the doorway into artwork repair. Replaces the
  * old "guided background cleanup" describe block — that mechanism
  * (`GuidedCleanupWorkspace`, single-click background-only removal) is no
- * longer reachable from this screen; "Fix My Artwork" opens the frozen
- * Phase 27E Magic Wand correction workspace instead, which handles BOTH
- * missing artwork and leftover background. See the Phase 27E-UX-correction
+ * longer reachable from this screen; the manual fallback doorway opens the
+ * frozen Phase 27E Magic Wand correction workspace instead, which handles
+ * BOTH missing artwork and leftover background. See the Phase 27E-UX-correction
  * report for why the entry point moved out of `SeparationReviewPanel` and
  * into `CompareStep` itself (reachability, not cosmetics).
+ *
+ * Phase 27G renamed the doorway from "Fix My Artwork" to "Remove Background
+ * Manually" — the old label wrongly implied automatic preparation hadn't
+ * already been an attempt at "fixing." The doorway now also makes explicit
+ * that the manual tool starts over from the original upload, not from
+ * repairing whatever automatic preparation produced.
  */
-describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX correction)", () => {
+describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX correction, Phase 27G renamed)", () => {
   function render(overrides: Partial<ArtworkPreparationView> = {}) {
     return renderToString(
       createElement(UploadedArtworkPanel, {
@@ -663,15 +669,18 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
     assert.match(html, /background remains/i); // covers "background left behind"
   });
 
-  it("3/4/12: 'Fix My Artwork' is present; the misleading 'Clean Up Background' doorway is gone", () => {
+  it("3/4/12/A/B: 'Remove Background Manually' is present; every stale doorway label is gone", () => {
     const html = render();
 
-    assert.match(html, /Fix My Artwork/);
-    assert.match(html, /data-action="fix-my-artwork"/);
+    assert.match(html, /Remove Background Manually/);
+    assert.match(html, /data-action="remove-background-manually"/);
+    assert.doesNotMatch(html, /Fix My Artwork/);
+    assert.doesNotMatch(html, /data-action="fix-my-artwork"/);
     assert.doesNotMatch(html, /Clean Up Background/);
     assert.doesNotMatch(html, /Still see some background/i);
     assert.doesNotMatch(html, /remove any areas we missed/i);
     assert.doesNotMatch(html, /This Isn.t Right/i);
+    assert.doesNotMatch(html, /Background Repair/i);
     // Constitution §6.6: none of the machinery may surface.
     assert.doesNotMatch(
       html,
@@ -679,11 +688,11 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
     );
   });
 
-  it("13: helper copy under Fix My Artwork names BOTH repair directions", () => {
+  it("13: helper copy under 'Not quite right?' names BOTH repair directions and does not hide behind 'Fix My Artwork' framing", () => {
     const html = render();
-    assert.match(html, /Something doesn.t look right/);
-    assert.match(html, /restore missing parts of your design/i);
-    assert.match(html, /remove background that was left behind/i);
+    assert.match(html, /Not quite right\?/);
+    assert.match(html, /removed part of your design/i);
+    assert.match(html, /left background behind/i);
   });
 
   it("8/14: 'Use Prepared Artwork' remains available under its own 'Looks good?' heading", () => {
@@ -736,12 +745,16 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
     assert.match(html, /Resolution enhancement needed/);
     assert.match(html, /We&#x27;ll need to enhance it/);
     // It must sit in its own block, AFTER the primary compare/repair
-    // decision area (Section 9) — not nested inside the Fix My Artwork
-    // card, and not phrased as another repair failure.
-    const fixCardMatch = html.match(/data-action="fix-my-artwork"[^]*?<\/div>/);
-    assert.ok(fixCardMatch, "Fix My Artwork card must exist");
-    assert.doesNotMatch(fixCardMatch![0], /Resolution enhancement needed/, "resolution notice must not be nested inside the Fix My Artwork card");
-    const fixIndex = html.indexOf('data-action="fix-my-artwork"');
+    // decision area (Section 9) — not nested inside the Remove Background
+    // Manually card, and not phrased as another repair failure.
+    const fixCardMatch = html.match(/data-action="remove-background-manually"[^]*?<\/div>/);
+    assert.ok(fixCardMatch, "Remove Background Manually card must exist");
+    assert.doesNotMatch(
+      fixCardMatch![0],
+      /Resolution enhancement needed/,
+      "resolution notice must not be nested inside the Remove Background Manually card",
+    );
+    const fixIndex = html.indexOf('data-action="remove-background-manually"');
     const resolutionIndex = html.indexOf("data-resolution-notice");
     assert.ok(resolutionIndex > fixIndex, "resolution notice must come after the primary repair decision area");
   });
@@ -781,7 +794,8 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
   it("is not an image editor by itself — the workspace only opens on demand", () => {
     const html = render();
     assert.doesNotMatch(html, /brush|lasso|eraser|freehand|layer|opacity slider/i);
-    // The workspace's own canvas must not be present before Fix My Artwork is clicked.
+    // The workspace's own canvas must not be present before Remove Background
+    // Manually is clicked.
     assert.doesNotMatch(html, /data-correction-canvas/);
   });
 
@@ -794,30 +808,44 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
 });
 
 /**
- * Phase 27E UX correction, item 5: "Fix My Artwork" must open the EXACT
- * correction workspace already built in Phase 27E — same component, same
- * frozen controls (Restore Missing Artwork / Remove Background / zoom /
- * pan / Undo / Start Over / Done Editing), reached with no algorithm
- * change and no new route. `renderToString` cannot execute the `onClick`
- * that flips local state (no browser event loop), so this is proven at
- * the SOURCE level: the button's handler and the workspace's own contract
- * are both asserted directly, which is exactly how this repo's other
- * client-state doorways are proven (see `separation-review-workspace-shape.test.ts`).
+ * Phase 27E UX correction, item 5 (renamed by Phase 27G): "Remove Background
+ * Manually" must open the EXACT correction workspace already built in Phase
+ * 27E — same component, same frozen controls (Restore Missing Artwork /
+ * Remove Background / zoom / pan / Undo / Start Over / Done Editing),
+ * reached with no algorithm change and no new route. `renderToString`
+ * cannot execute the `onClick` that flips local state (no browser event
+ * loop), so this is proven at the SOURCE level: the button's handler and
+ * the workspace's own contract are both asserted directly, which is
+ * exactly how this repo's other client-state doorways are proven (see
+ * `separation-review-workspace-shape.test.ts`).
  */
-describe("Fix My Artwork routing (Phase 27E UX correction)", () => {
+describe("Remove Background Manually routing (Phase 27E UX correction, Phase 27G renamed)", () => {
   const PANEL_SOURCE = readFileSync(path.join(__dirname, "UploadedArtworkPanel.tsx"), "utf8");
   const WORKSPACE_SOURCE = readFileSync(path.join(__dirname, "CorrectionWorkspace.tsx"), "utf8");
 
-  it("19: CompareStep's Fix My Artwork button sets correctionMode to 'editing', which renders CorrectionWorkspace", () => {
+  it("19: CompareStep's Remove Background Manually button sets correctionMode to 'editing', which renders CorrectionWorkspace", () => {
     // The button and its onClick are adjacent JSX attributes on the same
     // element -- match them as one block rather than assuming an exact
     // attribute order.
-    const buttonBlock = PANEL_SOURCE.match(/<button[^>]*data-action="fix-my-artwork"[^>]*>/) ?? PANEL_SOURCE.match(/<button[\s\S]*?data-action="fix-my-artwork"/);
-    assert.ok(buttonBlock, "Fix My Artwork button must exist");
+    const buttonBlock =
+      PANEL_SOURCE.match(/<button[^>]*data-action="remove-background-manually"[^>]*>/) ??
+      PANEL_SOURCE.match(/<button[\s\S]*?data-action="remove-background-manually"/);
+    assert.ok(buttonBlock, "Remove Background Manually button must exist");
     assert.match(PANEL_SOURCE, /onClick=\{\(\)\s*=>\s*setCorrectionMode\("editing"\)\}/);
     assert.match(PANEL_SOURCE, /correctionMode === "editing"/);
     assert.match(PANEL_SOURCE, /<CorrectionWorkspace/);
     assert.match(PANEL_SOURCE, /<CorrectionFinalReview/);
+  });
+
+  it("L: Use Prepared Artwork calls onApprove directly and is not gated behind correctionMode/editing (automatic-success path never requires opening the manual workspace)", () => {
+    // "Use Prepared Artwork" must be wired to onApprove as a plain,
+    // top-level button -- not conditioned on correctionMode === "editing"
+    // or on CorrectionWorkspace/CorrectionFinalReview having rendered.
+    // This is what proves Phase 27G's automatic-success regression
+    // requirement: the short path (upload -> automatic prep -> review ->
+    // Use Prepared Artwork) never forces a detour through Magic Wand.
+    const useButtonBlock = PANEL_SOURCE.match(/onClick=\{onApprove\}[\s\S]{0,400}Use Prepared Artwork/);
+    assert.ok(useButtonBlock, "Use Prepared Artwork must call onApprove directly");
   });
 
   it("no new correction route or algorithm import was introduced by this UX pass", () => {
@@ -828,11 +856,34 @@ describe("Fix My Artwork routing (Phase 27E UX correction)", () => {
     assert.match(PANEL_SOURCE, /from "\.\/CorrectionFinalReview"/);
   });
 
-  it("20/21: the workspace CorrectionWorkspace opens still exposes Restore Missing Artwork and Remove Background", () => {
+  it("20/21: the workspace CorrectionWorkspace opens still exposes Restore Missing Artwork and Remove Background as Wand's own sub-mode (Phase 27I toolbar)", () => {
     assert.match(WORKSPACE_SOURCE, /data-mode="restore"/);
     assert.match(WORKSPACE_SOURCE, /data-mode="remove"/);
     assert.match(WORKSPACE_SOURCE, />Restore Missing Artwork</);
     assert.match(WORKSPACE_SOURCE, />Remove Background</);
+  });
+
+  it("E: CorrectionWorkspace's default mode is 'remove', not 'restore' (Phase 27G), and its default TOOL is the Wand (Phase 27I)", () => {
+    assert.match(WORKSPACE_SOURCE, /useState<WandMode>\("remove"\)/);
+    assert.match(WORKSPACE_SOURCE, /useState<Tool>\("magic_wand"\)/);
+  });
+
+  it("5: Remove Background is the primary/first Wand-mode button, Restore Missing Artwork is secondary (Phase 27G)", () => {
+    const removeIndex = WORKSPACE_SOURCE.indexOf('data-mode="remove"');
+    const restoreIndex = WORKSPACE_SOURCE.indexOf('data-mode="restore"');
+    assert.ok(removeIndex >= 0 && restoreIndex >= 0, "both mode buttons must exist");
+    assert.ok(removeIndex < restoreIndex, "Remove Background must render before Restore Missing Artwork");
+  });
+
+  it("Phase 27I: the toolbar exposes Wand/Fill/Brush/Eraser, with Wand first/default", () => {
+    assert.match(WORKSPACE_SOURCE, /data-tool=\{t\.tool\}/, "the toolbar must render one button per TOOLS entry with a data-tool attribute");
+    assert.match(WORKSPACE_SOURCE, /tool:\s*"magic_wand"/);
+    assert.match(WORKSPACE_SOURCE, /tool:\s*"restore_fill"/);
+    assert.match(WORKSPACE_SOURCE, /tool:\s*"restore_brush"/);
+    assert.match(WORKSPACE_SOURCE, /tool:\s*"erase_brush"/);
+    const wandIndex = WORKSPACE_SOURCE.indexOf('tool: "magic_wand"');
+    const fillIndex = WORKSPACE_SOURCE.indexOf('tool: "restore_fill"');
+    assert.ok(wandIndex >= 0 && fillIndex >= 0 && wandIndex < fillIndex, "Wand must be listed first in the toolbar");
   });
 
   it("all other Phase 27D/27E controls remain present in the frozen workspace", () => {

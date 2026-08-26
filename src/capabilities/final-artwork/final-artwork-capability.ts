@@ -36,6 +36,7 @@ import {
 } from "@/lib/domain/types";
 import type {
   ArtworkPreparation,
+  AssetRecord,
   FinalArtworkJob,
   FinalDirectionApproval,
   StoredRequestedProductionOutput,
@@ -216,6 +217,47 @@ export interface FinalArtworkCapability {
   resolveCurrentProductionDelivery(
     projectId: string,
   ): Promise<CurrentProductionDelivery | null>;
+  /**
+   * Print'em All Phase 3 (V1 multi-variant package): the same job-resolution
+   * logic `resolveCurrentMatchingProductionJob` uses, generalized to an
+   * EXPLICIT treatment key instead of the project's current one — so a
+   * caller can ask "what is the state of the halftone_dtf variant?" and "what
+   * is the state of the standard_raster variant?" independently, regardless
+   * of which one the operator currently has selected.
+   *
+   * Read-only, side-effect free. Never creates, revives, or mutates a job —
+   * see `requestPreparedUploadFinalArtwork` for that. Physical width and
+   * requested output are still read from the project's CURRENT authority
+   * (Goal 14 — a plate made at a width the customer has since changed is
+   * never presented as current for any treatment), so this answers "if the
+   * operator switched to this treatment right now, what would they see?"
+   * rather than "what did this treatment ever produce, at any size, ever."
+   *
+   * Returns a "nothing" shape (every field `null`) rather than `null` itself
+   * — matching the historical no-project-found and no-job-yet cases
+   * uniformly, so a caller building a package view never has to special-case
+   * "resolution failed" versus "resolution found nothing".
+   */
+  resolveProductionVariantState(
+    projectId: string,
+    treatmentKey: string,
+  ): Promise<ProductionVariantJobState>;
+}
+
+/**
+ * See `FinalArtworkCapability.resolveProductionVariantState`.
+ *
+ * `asset` is populated for ANY completed job (not only a validated-`ready`
+ * one) — a `needs_attention` variant still has a real production asset on
+ * disk, and its measured pixel dimensions are exactly what a customer/
+ * operator needs to understand why it fell short, not something only a
+ * `print_ready` variant gets to report.
+ */
+export interface ProductionVariantJobState {
+  job: FinalArtworkJob | null;
+  asset: AssetRecord | null;
+  validationStatus: string | null;
+  validationReport: Record<string, unknown> | null;
 }
 
 /**
@@ -522,6 +564,74 @@ export function createFinalArtworkCapability(
 
     async resolveCurrentProductionDelivery(projectId) {
       return resolveSatisfiedProductionDelivery(repo, projectId);
+    },
+
+    async resolveProductionVariantState(projectId, treatmentKey) {
+      const nothing: ProductionVariantJobState = {
+        job: null,
+        asset: null,
+        validationStatus: null,
+        validationReport: null,
+      };
+
+      const snapshot = await repo.getProject(projectId);
+      if (!snapshot) return nothing;
+
+      const currentIntent = normalizeProductionIntent(
+        snapshot.brief.requestedProductionOutput,
+      );
+
+      // Same width resolution as `resolveCurrentMatchingProductionJob` —
+      // deliberately NOT `requireConfirmedProductionSize` (Goal 21: this
+      // answers "what would show for this treatment", never "may we spend
+      // money", so an unconfirmed project still gets an honest answer rather
+      // than an exception).
+      const confirmation = resolveProductionSizeConfirmation(snapshot.brief);
+      const currentWidthIn = confirmation.confirmed
+        ? confirmation.size.widthIn
+        : (resolveProductionWidth(
+            snapshot.brief.printPlacement,
+            snapshot.brief.intendedPrintWidthIn,
+          )?.widthIn ?? null);
+      if (currentWidthIn === null) return nothing;
+
+      let job: FinalArtworkJob | null = null;
+      const activeApproval = await repo.getActiveFinalDirectionApproval(projectId);
+      if (activeApproval) {
+        job = findDeliverableJob(
+          await repo.listFinalArtworkJobsForApproval(projectId, activeApproval.id),
+          currentWidthIn,
+          currentIntent,
+          treatmentKey,
+        );
+      } else {
+        const preparation = await repo.getArtworkPreparation(projectId);
+        if (preparation && preparation.status === "approved") {
+          job = findDeliverableJob(
+            await repo.listFinalArtworkJobsForPreparation(projectId, preparation.id),
+            currentWidthIn,
+            currentIntent,
+            treatmentKey,
+          );
+        }
+      }
+      if (!job) return nothing;
+      if (job.status !== "completed") {
+        return { job, asset: null, validationStatus: null, validationReport: null };
+      }
+
+      const assetId = await findProductionAssetIdForJob(repo, projectId, job.id);
+      const asset = assetId ? await repo.getAssetById(assetId) : null;
+      const validation = await repo.getLatestProductionAssetValidationForJob(
+        projectId,
+        job.id,
+      );
+      return {
+        job,
+        asset: asset ?? null,
+        validationStatus: validation?.status ?? null,
+        validationReport: validation?.report ?? null,
+      };
     },
   };
 }

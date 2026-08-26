@@ -371,7 +371,15 @@ describe("A2 Correction 2 — fail-closed and legacy normalization", () => {
       "fail closed for an unreadable request too",
     );
     assert.deepEqual(
-      toCustomerFinalizationView("print_ready", "completed", "production_png"),
+      // Phase 27P: explicit `matchingJobExists`/`currentRequestSatisfied`
+      // rather than relying on their defaults -- a real "retracting to PNG"
+      // caller (`customerFinalizationViewForProject`) always computes both,
+      // and a genuinely still-valid completed plate means BOTH are true.
+      // (`completed` + unsatisfied is now its own durable `needs_review`
+      // verdict regardless of a stale `projectStatus`, so leaving
+      // `currentRequestSatisfied` at its default `false` here would no
+      // longer exercise "the existing plate still answers" at all.)
+      toCustomerFinalizationView("print_ready", "completed", "production_png", true, true),
       { status: "print_ready" },
       "R: retracting to PNG lets the existing plate answer again",
     );

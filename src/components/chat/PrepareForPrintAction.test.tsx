@@ -27,7 +27,7 @@ describe("PrepareForPrintAction (Sprint 2M Phase 2B)", () => {
         onPrepare: () => {},
       }),
     );
-    assert.match(html, /Prepare Print-Ready Artwork/);
+    assert.match(html, /Create Print-Ready Artwork/);
   });
 
   it("renders a truthful 'preparing' state, never claiming print-ready", () => {
@@ -39,7 +39,7 @@ describe("PrepareForPrintAction (Sprint 2M Phase 2B)", () => {
         onPrepare: () => {},
       }),
     );
-    assert.match(html, /Preparing your print-ready artwork/);
+    assert.match(html, /Creating your print-ready artwork/);
     assert.doesNotMatch(html, /is ready/i);
   });
 
@@ -66,7 +66,7 @@ describe("PrepareForPrintAction (Sprint 2M Phase 2B)", () => {
     );
     assert.match(html, /We need to review your artwork before it can be finalized/);
     assert.doesNotMatch(html, /is ready/i);
-    assert.doesNotMatch(html, /Preparing your print-ready artwork/);
+    assert.doesNotMatch(html, /Creating your print-ready artwork/);
     assert.doesNotMatch(html, /Retry Preparation/);
   });
 
@@ -83,7 +83,7 @@ describe("PrepareForPrintAction (Sprint 2M Phase 2B)", () => {
     assert.match(html, /Retry Preparation/);
     assert.match(html, /type="button"/);
     assert.match(html, /role="alert"/);
-    assert.doesNotMatch(html, /Preparing your print-ready artwork/);
+    assert.doesNotMatch(html, /Creating your print-ready artwork/);
     assert.doesNotMatch(html, /Retry Preparation[\s\S]*disabled/);
     assert.doesNotMatch(
       html,

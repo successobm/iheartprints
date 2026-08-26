@@ -126,7 +126,7 @@ describe("Sprint A5.5 — ProductionUnlockCard", () => {
     assert.match(html, /Your design is unlocked for production/);
     // The finalization control is a separate, existing component the customer
     // still chooses to press. Payment must never auto-start a FinalArtworkJob.
-    assert.equal(/Prepare Print-Ready Artwork/.test(html), false);
+    assert.equal(/Create Print-Ready Artwork/.test(html), false);
     assert.equal(/<button/.test(html), false);
   });
 

@@ -43,8 +43,14 @@ export const ALTERNATIVE_CONCEPTS_WAITING_MESSAGE = `Generating a few new direct
 /** Targeted revision of the one selected concept. */
 export const TARGETED_REVISION_WAITING_MESSAGE = `Updating your selected concept with those changes. ${APPROXIMATE_WAIT_NOTE}`;
 
-/** Production finalization — the print-ready artwork pipeline. */
-export const PRINT_READY_WAITING_MESSAGE = `Preparing your print-ready artwork. ${APPROXIMATE_WAIT_NOTE}`;
+/**
+ * Production finalization — the print-ready artwork pipeline.
+ *
+ * Phase 27M: "Creating", matching the CTA's "Create Print-Ready Artwork" —
+ * by this step the artwork is already prepared and approved, so this wait is
+ * for the production artifact being created, not a preparation step repeating.
+ */
+export const PRINT_READY_WAITING_MESSAGE = `Creating your print-ready artwork. ${APPROXIMATE_WAIT_NOTE}`;
 
 /**
  * Infrastructure/processing failure while the project is still finalizing.

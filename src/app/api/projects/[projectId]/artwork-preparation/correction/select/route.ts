@@ -25,9 +25,37 @@ export async function POST(request: Request, context: RouteContext) {
 
   try {
     const body = (await request.json().catch(() => null)) as
-      | { clicks?: unknown; mode?: unknown; toleranceLevel?: unknown; removeAt?: unknown }
+      | { tool?: unknown; clicks?: unknown; mode?: unknown; toleranceLevel?: unknown; removeAt?: unknown; click?: unknown }
       | null;
-    if (!body || !Array.isArray(body.clicks)) {
+    if (!body) {
+      return NextResponse.json({ error: "A request body is required" }, { status: 400 });
+    }
+
+    // Phase 27I §C: Restore Fill's preview takes a single click, not a
+    // clicks[]/mode/toleranceLevel triple -- a distinct request shape,
+    // dispatched on `tool` before falling back to the Magic Wand shape
+    // every existing caller already sends.
+    if (body.tool === "restore_fill") {
+      if (!body.click || typeof body.click !== "object") {
+        return NextResponse.json({ error: "click is required" }, { status: 400 });
+      }
+      const result = await graph.artworkPreparation.previewCorrectionSelection(projectId, {
+        tool: "restore_fill",
+        click: body.click as { x: number; y: number },
+      });
+      return NextResponse.json({
+        pixelCount: result.pixelCount,
+        bounds: result.bounds,
+        touchesEdge: result.touchesEdge,
+        broad: result.broad,
+        overlayDataUrl: `data:image/png;base64,${result.overlayPng.toString("base64")}`,
+        effectiveClicks: result.effectiveClicks,
+        refused: result.refused ?? false,
+        refusalReason: result.refusalReason ?? null,
+      });
+    }
+
+    if (!Array.isArray(body.clicks)) {
       return NextResponse.json({ error: "clicks, mode, toleranceLevel are required" }, { status: 400 });
     }
     const result = await graph.artworkPreparation.previewCorrectionSelection(projectId, {

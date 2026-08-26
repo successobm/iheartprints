@@ -16,6 +16,13 @@ interface PrepareForPrintActionProps {
   /** A concept must be selected, and current, before this renders at all. */
   canRequest: boolean;
   busy: boolean;
+  /**
+   * Phase 27M: true from the moment "Create Print-Ready Artwork" is clicked
+   * until that request's own response comes back — see the identical prop on
+   * `UploadedArtworkPanelProps` for why this is distinct from `busy` and from
+   * `finalizationStatus === "preparing"`.
+   */
+  preparing?: boolean;
   onPrepare: () => void;
   /**
    * Live Acceptance Cleanup (Issue 5): the physical size this artwork will
@@ -47,6 +54,7 @@ export function PrepareForPrintAction({
   finalizationStatus,
   canRequest,
   busy,
+  preparing = false,
   onPrepare,
   printReadySize = null,
   onChoosePrintWidth,
@@ -138,9 +146,23 @@ export function PrepareForPrintAction({
           type="button"
           disabled={busy || sizeConfirmationPending}
           onClick={onPrepare}
-          className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Prepare Print-Ready Artwork
+          {/* Phase 27M §8: visible the instant the click handler runs, same
+              reasoning as the identical treatment in `UploadedArtworkPanel`'s
+              `PrintReadyStep`. */}
+          {preparing ? (
+            <>
+              <span className="inline-flex gap-0.5" aria-hidden="true">
+                <span className="animate-pulse">●</span>
+                <span className="animate-pulse [animation-delay:150ms]">●</span>
+                <span className="animate-pulse [animation-delay:300ms]">●</span>
+              </span>
+              Creating Print-Ready Artwork…
+            </>
+          ) : (
+            "Create Print-Ready Artwork"
+          )}
         </button>
       </div>
     </div>
