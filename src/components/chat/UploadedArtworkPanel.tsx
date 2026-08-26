@@ -5,7 +5,6 @@ import { useState, type ReactNode } from "react";
 import {
   describeApprovedPreparation,
   describePrintReadyPreparation,
-  GUIDED_CLEANUP_COPY,
   PRINT_READY_NEEDS_ATTENTION_MESSAGE,
   UPLOAD_QUALITY_GUIDANCE_COPY,
   type ArtworkPreparationView,
@@ -22,7 +21,8 @@ import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
 import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { ArtworkComparison } from "./ArtworkComparison";
-import { GuidedCleanupWorkspace } from "./GuidedCleanupWorkspace";
+import CorrectionFinalReview from "./CorrectionFinalReview";
+import CorrectionWorkspace from "./CorrectionWorkspace";
 import { PREVIEW_BACKGROUND_COPY } from "./preview-background";
 import { PrintReadySizeCard } from "./PrintReadySizeCard";
 import { SeparationReviewPanel } from "./SeparationReviewPanel";
@@ -504,16 +504,9 @@ function CompareStep({
   busy,
   originalImageUrl,
   preparedImageUrl,
-  preparedRevision,
   onApprove,
   onSeparationApproved,
   onReconsider,
-  onCleanupPoint,
-  onConfirmCleanup,
-  onCancelCleanupPreview,
-  onUndoCleanup,
-  cleanupMessage,
-  cleanupPreviewHighlight,
 }: {
   projectId: string;
   preparation: ArtworkPreparationView;
@@ -534,7 +527,16 @@ function CompareStep({
   cleanupMessage: string | null;
   cleanupPreviewHighlight: UploadedArtworkPanelProps["cleanupPreviewHighlight"];
 }) {
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  // Phase 27E UX correction: "Fix My Artwork" opens the SAME frozen
+  // correction workspace/review built in Phase 27E (CorrectionWorkspace /
+  // CorrectionFinalReview) — no new algorithm, no new route. This state
+  // lives HERE (not inside SeparationReviewPanel) specifically so the
+  // doorway is reachable regardless of whether separation review itself
+  // has anything to show (see the Phase 27E-UX-correction report §19 for
+  // why the earlier placement inside SeparationReviewPanel's own
+  // final-review branch left this unreachable whenever no consequential
+  // regions existed at all).
+  const [correctionMode, setCorrectionMode] = useState<"none" | "editing" | "review">("none");
   // Intelligent Separation Phase 10 (Goal 3/4): the ONE bit of separation
   // state this step needs, mirrored down from `SeparationReviewPanel` —
   // never re-fetched or recomputed here. Starts `null` ("assume not
@@ -552,112 +554,70 @@ function CompareStep({
   >(null);
   const separationGateActive =
     separationState !== null && separationState !== "review_not_required";
-  const cleanup = preparation.guidedCleanup;
-  const cleanupOffered =
-    cleanup.available &&
-    Boolean(onCleanupPoint) &&
-    Boolean(preparedImageUrl);
-  const pendingConfirmation = Boolean(cleanupPreviewHighlight);
-  // Intelligent Separation Phase 3: the server already decided this — the
-  // client never recomputes readiness from evidence it cannot see. Absent
-  // review copy (no prepared asset yet) reads as the same neutral "safe"
-  // presentation this screen has always had.
-  const reviewRequired = preparation.preparedReview?.reviewRequired ?? false;
 
-  function closeWorkspace() {
-    onCancelCleanupPreview?.();
-    setWorkspaceOpen(false);
+  if (correctionMode === "editing") {
+    return (
+      <CorrectionWorkspace
+        projectId={projectId}
+        onDoneEditing={() => setCorrectionMode("review")}
+        onCancel={() => setCorrectionMode("none")}
+      />
+    );
+  }
+  if (correctionMode === "review") {
+    return (
+      <CorrectionFinalReview
+        projectId={projectId}
+        onBackToEditing={() => setCorrectionMode("editing")}
+        onUsed={() => {
+          setCorrectionMode("none");
+          onSeparationApproved?.();
+        }}
+      />
+    );
   }
 
   return (
     <div>
-      <div
-        // Visually distinct when review is recommended, and ONLY then — an
-        // ordinary safe preparation renders exactly as it always has.
-        className={
-          reviewRequired
-            ? "rounded-xl border border-amber-200 bg-amber-50 p-3"
-            : undefined
-        }
-        data-preparation-readiness={reviewRequired ? "review_required" : "safe"}
-      >
-        <p className={reviewRequired ? "text-sm font-semibold text-amber-900" : "text-sm font-semibold text-ink"}>
-          {preparation.preparedReview?.headline ?? "Here's your artwork, prepared"}
-        </p>
-        <p className={reviewRequired ? "mt-1 text-sm text-amber-900" : "mt-1 text-sm text-muted"}>
-          {preparation.preparedReview?.guidance ??
-            "Review the artwork below before continuing."}
-        </p>
-      </div>
+      <p className="text-sm font-semibold text-ink">Review your artwork before continuing</p>
       <p className="mt-1 text-sm text-muted">
-        The artwork you uploaded is saved exactly as it was, so nothing here is
-        permanent until you approve it.
+        We removed the background automatically. Compare the prepared version with your original to make sure all
+        parts of your design are still there and no unwanted background remains.
+      </p>
+      <p className="mt-1 text-sm text-muted" data-original-safety-copy>
+        The artwork you uploaded is saved exactly as it was, so nothing here is permanent until you approve it.
       </p>
 
       <div className="mt-3">
         <ArtworkComparison
           original={{ url: originalImageUrl, loading: originalImageUrl === null }}
           prepared={{ url: preparedImageUrl, loading: preparedImageUrl === null }}
-          reviewRequired={reviewRequired}
+          reviewRequired={false}
         />
       </div>
 
-      {cleanupOffered ? (
-        <div className="mt-3 rounded-xl border border-black/8 bg-black/[0.02] p-3">
-          <p className="text-sm text-ink">{GUIDED_CLEANUP_COPY.invitation}</p>
-          <div className="mt-2.5 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              disabled={busy || !preparedImageUrl}
-              onClick={() => setWorkspaceOpen(true)}
-              className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {GUIDED_CLEANUP_COPY.enterActionLabel}
-            </button>
-            {cleanup.removalCount > 0 && onUndoCleanup ? (
-              <button
-                type="button"
-                disabled={busy || workspaceOpen}
-                onClick={onUndoCleanup}
-                className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {GUIDED_CLEANUP_COPY.undoActionLabel}
-              </button>
-            ) : null}
-          </div>
-          {cleanupMessage && !workspaceOpen ? (
-            <p className="mt-2 text-xs text-ink" role="status">
-              {cleanupMessage}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {workspaceOpen && preparedImageUrl && onCleanupPoint ? (
-        <GuidedCleanupWorkspace
-          preparedImageUrl={preparedImageUrl}
-          preparedRevision={
-            preparedRevision ?? preparation.preparedRevision ?? "prepared"
-          }
-          sourceWidthPx={preparation.widthPx}
-          sourceHeightPx={preparation.heightPx}
-          busy={busy}
-          removalCount={cleanup.removalCount}
-          cleanupMessage={cleanupMessage}
-          pendingHighlight={cleanupPreviewHighlight ?? null}
-          onSelectPoint={onCleanupPoint}
-          onConfirm={() => onConfirmCleanup?.()}
-          onCancelPreview={() => onCancelCleanupPreview?.()}
-          onUndo={() => onUndoCleanup?.()}
-          onDone={closeWorkspace}
-        />
-      ) : null}
+      <div className="mt-4 rounded-xl border border-black/8 bg-black/[0.02] p-3">
+        <p className="text-sm font-medium text-ink">Something doesn&rsquo;t look right?</p>
+        <p className="mt-1 text-xs text-muted">
+          You can restore missing parts of your design or remove background that was left behind.
+        </p>
+        <button
+          type="button"
+          disabled={busy || !preparedImageUrl}
+          onClick={() => setCorrectionMode("editing")}
+          className="mt-2.5 rounded-full border border-black/10 px-3.5 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+          data-action="fix-my-artwork"
+        >
+          Fix My Artwork
+        </button>
+      </div>
 
       {/* Intelligent Separation Phase 10 (Goal 2): sits after the
-          comparison and its warning, before the approval controls it can
-          replace. Renders nothing (`null`) for the vast majority of
-          artwork that has no consequential regions — see
-          `SeparationReviewPanel`'s own `review_not_required` short-circuit. */}
+          comparison, before the approval controls it can replace. Renders
+          nothing (`null`) for the vast majority of artwork that has no
+          consequential regions — see `SeparationReviewPanel`'s own
+          `review_not_required` short-circuit. Unrelated to, and untouched
+          by, the "Fix My Artwork" doorway above. */}
       <div className="mt-3">
         <SeparationReviewPanel
           projectId={projectId}
@@ -667,10 +627,9 @@ function CompareStep({
         />
       </div>
 
-      {preparation.customer.enhancementNeeded &&
-      preparation.customer.resolutionMessage ? (
-        <p className="mt-3 text-sm text-ink">
-          {preparation.customer.resolutionMessage}
+      {preparation.customer.enhancementNeeded && preparation.customer.resolutionMessage ? (
+        <p className="mt-3 text-sm text-ink" data-resolution-notice>
+          Resolution enhancement needed. {preparation.customer.resolutionMessage}
         </p>
       ) : null}
 
@@ -684,23 +643,24 @@ function CompareStep({
             refused server-side. */}
         {!separationGateActive ? (
           <>
+            <p className="text-sm font-medium text-ink">Looks good?</p>
             <p className="text-xs text-ink" data-approval-safety-copy>
               {PREVIEW_BACKGROUND_COPY.approvalGuidance}
             </p>
             <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.approvalTip}</p>
           </>
         ) : null}
-        <p className="text-xs text-muted" data-original-safety-copy>
+        <p className="text-xs text-muted" data-original-safety-copy-near-approval>
           Your original upload is saved and unchanged.
         </p>
         <div className="flex flex-wrap items-center gap-3">
           {/* Approval is ONLY ever this explicit button. Enlarge is view-only;
-              Clean Up Background mutates only after confirm, and Done never
-              approves. Preview Background never approves. */}
+              Fix My Artwork mutates only after Use This Artwork, and Done
+              Editing never approves. Preview Background never approves. */}
           {!separationGateActive ? (
             <button
               type="button"
-              disabled={busy || pendingConfirmation || workspaceOpen}
+              disabled={busy}
               onClick={onApprove}
               className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
             >
