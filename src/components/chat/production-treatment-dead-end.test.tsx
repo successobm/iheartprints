@@ -267,7 +267,7 @@ describe("Internal Existing Artwork must never dead-end on production size", () 
     assert.equal(retryCount, 1, "exactly one retry action");
     assert.doesNotMatch(
       text,
-      /Prepare Print-Ready Artwork/,
+      /Create Print-Ready Artwork/,
       "the first-run action must not appear alongside a retry",
     );
   });
@@ -419,7 +419,7 @@ describe("Internal Existing Artwork must never dead-end on production size", () 
     const text = visibleText(render({ finalizationStatus: "not_requested" }));
     const sizeAt = text.indexOf("Standard Adult");
     const treatmentAt = text.indexOf("Production treatment");
-    const actionAt = text.indexOf("Prepare Print-Ready Artwork");
+    const actionAt = text.indexOf("Create Print-Ready Artwork");
 
     assert.ok(sizeAt >= 0 && treatmentAt >= 0 && actionAt >= 0);
     assert.ok(sizeAt < treatmentAt, "size authority must come before treatment");
@@ -464,7 +464,7 @@ describe("Internal Existing Artwork must never dead-end on production size", () 
       }),
     );
     assert.doesNotMatch(nowHalftone, /Retry Preparation/);
-    assert.match(nowHalftone, /Prepare Print-Ready Artwork/);
+    assert.match(nowHalftone, /Create Print-Ready Artwork/);
     // The failure itself is still reported — the banner is informational and
     // does not disappear just because the plan changed.
     assert.match(nowHalftone, /Print-ready preparation couldn/);

@@ -124,7 +124,10 @@ export function describePrintReadyPreparation(
     enhancementMessage: enhancementNeeded
       ? "Your artwork needs to be enhanced for this print size. We'll take care of that — your design, wording, and colours stay exactly as they are."
       : null,
-    actionLabel: "Prepare Print-Ready Artwork",
+    // Phase 27M: by this step the artwork has already been prepared,
+    // reviewed, and (for a manual correction) accepted — this action creates
+    // the actual production artifact, so "Create" is the accurate verb.
+    actionLabel: "Create Print-Ready Artwork",
   };
 }
 

@@ -226,7 +226,21 @@ export const TEST_FILES = [
   "src/capabilities/shared/garment-production-sizing.test.ts",
   "src/capabilities/conversation/concept-selection-lifecycle.test.ts",
   "src/capabilities/conversation/production-size-lifecycle.test.ts",
+  // Phase 27L: garment-class selection now confirms print size in the same
+  // action -- registered immediately per the established discipline.
+  "src/capabilities/conversation/print-size-garment-confirmation.test.ts",
+  "src/capabilities/conversation/incredi-bowls-print-size-acceptance.test.ts",
   "src/components/chat/PrintReadySizeCard.test.tsx",
+  // Phase 27M: the real final-generation failure (root cause + fix) and the
+  // async waiting-state UX regressions -- registered immediately per the
+  // established discipline (Phase 27H found these previously omitted).
+  "src/capabilities/final-artwork-worker/print-ready-generation-failure.test.ts",
+  "src/components/chat/print-ready-waiting-state-ux.test.tsx",
+  // Phase 27P: multi-variant print-ready package -- registered immediately
+  // per the established discipline (Phase 27H found these previously omitted).
+  "src/capabilities/shared/production-variant.test.ts",
+  "src/capabilities/conversation/print-ready-multi-variant-package.test.ts",
+  "src/components/chat/PrintReadyPackageCard.test.tsx",
   // Existing Artwork → Print Ready Phase 1.
   "src/capabilities/artwork-preparation/upload-security.test.ts",
   "src/capabilities/artwork-preparation/image-analysis.test.ts",
@@ -273,6 +287,35 @@ export const TEST_FILES = [
   "src/components/chat/PreviewBackgroundControl.test.tsx",
   "src/components/chat/uploaded-artwork-flow.test.ts",
   "src/components/chat/UploadedArtworkPanel.test.tsx",
+  // Phase 27H: same "existed but was never registered" gap as the preview-
+  // background inspection surface above -- the entire Magic Wand manual
+  // correction system (Phase 27D-27H: session authority, the frozen
+  // algorithm's own exhaustive suite, the workspace's own shape contract,
+  // route-level authorization, and the real-asset acceptance test) had
+  // never been part of `npm run test`/`npm run verify` at all. Found while
+  // reconciling this phase's regression totals; registering it here is
+  // exactly the same one-line fix used last time this happened.
+  "src/experimental/magic-wand/magic-wand.test.ts",
+  "src/capabilities/artwork-preparation/magic-wand-correction-capability.test.ts",
+  "src/capabilities/artwork-preparation/incredi-bowls-manual-fallback-acceptance.test.ts",
+  // Phase 27I: TOOLBOX V1 (Restore Fill, Restore Brush, Eraser) -- new
+  // files registered immediately, learning from Phase 27H's discovery that
+  // an unregistered test file is silently invisible to `npm run test`/
+  // `npm run verify` no matter how many times it's run individually.
+  "src/capabilities/artwork-preparation/correction-tools.test.ts",
+  "src/capabilities/artwork-preparation/correction-toolbox-capability.test.ts",
+  "src/capabilities/artwork-preparation/incredi-bowls-toolbox-acceptance.test.ts",
+  // Phase 27J: operation-composition/replay regression human acceptance
+  // reported on the real INCREDI-BOWLS text -- registered immediately per
+  // Phase 27H/27I's own "never leave a new test file unregistered" lesson.
+  "src/capabilities/artwork-preparation/operation-composition-regression.test.ts",
+  "src/capabilities/artwork-preparation/incredi-bowls-operation-composition-acceptance.test.ts",
+  // Phase 27K: Wand selection/apply UX-clarity regression -- registered
+  // immediately per the established "never leave a new test file
+  // unregistered" discipline from Phase 27H/27I/27J.
+  "src/capabilities/artwork-preparation/wand-selection-apply-clarity.test.ts",
+  "src/components/chat/correction-workspace-shape.test.ts",
+  "src/app/api/projects/[projectId]/artwork-preparation/correction/correction-routes-authorization.test.ts",
   "src/app/api/projects/[projectId]/artwork-upload/route.test.ts",
   // Existing Artwork → Print Ready Phase 2: enhancement decision, production
   // finalization, the uploaded-preserve validation profile, and the synthetic

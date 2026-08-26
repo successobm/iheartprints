@@ -53,11 +53,14 @@ const PLACEMENT_OPTIONS = Object.entries(PRINT_PLACEMENT_LABELS) as Array<
 >;
 
 import type { ProductionTreatmentView } from "@/lib/services/conversation-service";
+import type { PrintReadyPackageView } from "@/capabilities/shared/production-variant";
+import { describePackageGuidance } from "@/capabilities/shared/production-variant";
 
 import {
   ProductionTreatmentPanel,
   type TreatmentPreviewMode,
 } from "./ProductionTreatmentPanel";
+import { PrintReadyPackageCard } from "./PrintReadyPackageCard";
 
 export interface UploadedArtworkPanelProps {
   step: UploadedArtworkStep;
@@ -110,8 +113,18 @@ export interface UploadedArtworkPanelProps {
   onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   /** Customer-safe finalization state. Never a job id, provider name, or internal status. */
   finalizationStatus?: CustomerFinalizationStatus;
-  /** The explicit "Prepare Print-Ready Artwork" action. Idempotent server-side, so a double click is safe. */
+  /** The explicit "Create Print-Ready Artwork" action. Idempotent server-side, so a double click is safe. */
   onPrepareForPrint?: () => void;
+  /**
+   * Phase 27M: true from the moment "Create Print-Ready Artwork" (or "Try
+   * Again") is clicked until that request's own response comes back —
+   * distinct from `finalizationStatus === "preparing"`, which only becomes
+   * true AFTER the server has answered and the project is durably
+   * `"finalizing"`. Without this, the request itself has a silent gap: the
+   * button merely looks disabled for the round trip, with nothing saying a
+   * click registered at all.
+   */
+  preparingForPrint?: boolean;
   /**
    * Print'em All Phase 2: the INTERNAL operator's production-treatment
    * surface, or `undefined` for every other project.
@@ -123,6 +136,14 @@ export interface UploadedArtworkPanelProps {
    * the write.
    */
   productionTreatment?: ProductionTreatmentView;
+  /**
+   * Print'em All Phase 3 (V1 multi-variant package): the fixed two-variant
+   * print-ready package, or `undefined` for every project the server did
+   * not include one for (same absence rule as `productionTreatment`).
+   */
+  printReadyPackage?: PrintReadyPackageView;
+  /** Phase 27M: which treatment SELECTION request is actually in flight, or `null`/`undefined`. */
+  pendingTreatment?: "standard_raster" | "halftone_dtf" | null;
   treatmentPreviewUrls?: Partial<Record<TreatmentPreviewMode, string | null>>;
   onSelectStandardRaster?: () => void;
   onSelectHalftoneTreatment?: (settings: {
@@ -229,6 +250,7 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           onChooseGarmentSize={props.onChooseGarmentSize}
           finalizationStatus={props.finalizationStatus ?? "not_requested"}
           onPrepareForPrint={props.onPrepareForPrint}
+          preparingForPrint={props.preparingForPrint ?? false}
           preparesDifferentTreatment={
             props.productionTreatment?.treatment === "halftone_dtf"
           }
@@ -245,9 +267,23 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
               <ProductionTreatmentPanel
                 view={props.productionTreatment}
                 busy={busy}
+                pendingTreatment={props.pendingTreatment ?? null}
                 previewUrls={props.treatmentPreviewUrls ?? {}}
                 onSelectStandardRaster={props.onSelectStandardRaster}
                 onSelectHalftone={props.onSelectHalftoneTreatment}
+              />
+            ) : null
+          }
+          printReadyPackageCard={
+            // Print'em All Phase 3: sits AFTER the treatment controls and
+            // BEFORE the single-treatment action button/banner below it — a
+            // completed variant is a fact about the past, independent of
+            // whatever the operator is about to try next.
+            props.printReadyPackage && props.printReadyPackage.variants.length > 0 ? (
+              <PrintReadyPackageCard
+                projectId={props.projectId}
+                variants={props.printReadyPackage.variants}
+                guidance={describePackageGuidance(props.printReadyPackage.variants)}
               />
             ) : null
           }
@@ -527,12 +563,13 @@ function CompareStep({
   cleanupMessage: string | null;
   cleanupPreviewHighlight: UploadedArtworkPanelProps["cleanupPreviewHighlight"];
 }) {
-  // Phase 27E UX correction: "Fix My Artwork" opens the SAME frozen
-  // correction workspace/review built in Phase 27E (CorrectionWorkspace /
-  // CorrectionFinalReview) — no new algorithm, no new route. This state
-  // lives HERE (not inside SeparationReviewPanel) specifically so the
-  // doorway is reachable regardless of whether separation review itself
-  // has anything to show (see the Phase 27E-UX-correction report §19 for
+  // Phase 27E/27G UX correction: "Remove Background Manually" opens the
+  // SAME frozen correction workspace/review built in Phase 27E
+  // (CorrectionWorkspace / CorrectionFinalReview) — no new algorithm, no
+  // new route. This state lives HERE (not inside SeparationReviewPanel)
+  // specifically so the doorway is reachable regardless of whether
+  // separation review itself has anything to show (see the
+  // Phase 27E-UX-correction report §19 for
   // why the earlier placement inside SeparationReviewPanel's own
   // final-review branch left this unreachable whenever no consequential
   // regions existed at all).
@@ -596,19 +633,36 @@ function CompareStep({
         />
       </div>
 
+      {/* Phase 27H §0: "Remove Background Manually" is an independent,
+          human-authoritative path -- it is available whether or not this
+          artwork's automatic separation review is pending, because a
+          deliberately completed manual correction (Done Editing -> Final
+          Review -> Use This Artwork) now supersedes that review for the
+          resulting artwork (`finalizeCorrection`; see
+          `hasAcceptedManualOverride`). Phase 27G briefly hid this doorway
+          while separation review was active, back when the server-side
+          bypass this doorway could have created was still open; now that
+          the authority transition is correctly gated at explicit manual
+          finalization rather than at doorway visibility, hiding it would
+          just re-create the exact dead end Phase 27H exists to remove
+          (proven on the real INCREDI-BOWLS asset, which needs both). "Use
+          Prepared Artwork" below is UNCHANGED and stays hidden while
+          separation review is pending -- only the automatic-approval path
+          is gated by that review; the manual path is not. */}
       <div className="mt-4 rounded-xl border border-black/8 bg-black/[0.02] p-3">
-        <p className="text-sm font-medium text-ink">Something doesn&rsquo;t look right?</p>
+        <p className="text-sm font-medium text-ink">Not quite right?</p>
         <p className="mt-1 text-xs text-muted">
-          You can restore missing parts of your design or remove background that was left behind.
+          If the automatic background removal removed part of your design or left background behind, you can
+          remove the background manually with our Magic Wand tool.
         </p>
         <button
           type="button"
           disabled={busy || !preparedImageUrl}
           onClick={() => setCorrectionMode("editing")}
           className="mt-2.5 rounded-full border border-black/10 px-3.5 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-          data-action="fix-my-artwork"
+          data-action="remove-background-manually"
         >
-          Fix My Artwork
+          Remove Background Manually
         </button>
       </div>
 
@@ -617,7 +671,7 @@ function CompareStep({
           nothing (`null`) for the vast majority of artwork that has no
           consequential regions — see `SeparationReviewPanel`'s own
           `review_not_required` short-circuit. Unrelated to, and untouched
-          by, the "Fix My Artwork" doorway above. */}
+          by, the "Remove Background Manually" doorway above. */}
       <div className="mt-3">
         <SeparationReviewPanel
           projectId={projectId}
@@ -655,8 +709,8 @@ function CompareStep({
         </p>
         <div className="flex flex-wrap items-center gap-3">
           {/* Approval is ONLY ever this explicit button. Enlarge is view-only;
-              Fix My Artwork mutates only after Use This Artwork, and Done
-              Editing never approves. Preview Background never approves. */}
+              Remove Background Manually mutates only after Use This Artwork,
+              and Done Editing never approves. Preview Background never approves. */}
           {!separationGateActive ? (
             <button
               type="button"
@@ -692,7 +746,9 @@ function ApprovedStep({
   onChooseGarmentSize,
   finalizationStatus,
   onPrepareForPrint,
+  preparingForPrint,
   treatmentControls,
+  printReadyPackageCard,
   preparesDifferentTreatment,
 }: {
   preparation: ArtworkPreparationView;
@@ -707,6 +763,8 @@ function ApprovedStep({
   onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   finalizationStatus: CustomerFinalizationStatus;
   onPrepareForPrint?: () => void;
+  /** Phase 27M: the "Create Print-Ready Artwork" request's own in-flight state — see the prop doc on `UploadedArtworkPanelProps`. */
+  preparingForPrint?: boolean;
   preparesDifferentTreatment?: boolean;
   /**
    * Print'em All Phase 2: the internal operator's production-treatment
@@ -720,6 +778,12 @@ function ApprovedStep({
    * requested, and the ordering on screen should say so.
    */
   treatmentControls?: ReactNode;
+  /**
+   * Print'em All Phase 3: the print-ready package (both variants' current
+   * status/download), or `null`. Same slot pattern as `treatmentControls`
+   * and for the same reason.
+   */
+  printReadyPackageCard?: ReactNode;
 }) {
   const copy = describeApprovedPreparation(preparation.customer.enhancementNeeded);
 
@@ -746,7 +810,9 @@ function ApprovedStep({
         onChooseGarmentSize={onChooseGarmentSize}
         finalizationStatus={finalizationStatus}
         onPrepareForPrint={onPrepareForPrint}
+        preparingForPrint={preparingForPrint}
         treatmentControls={treatmentControls}
+        printReadyPackageCard={printReadyPackageCard}
         preparesDifferentTreatment={preparesDifferentTreatment}
       />
     </div>
@@ -772,7 +838,9 @@ function PrintReadyStep({
   onChooseGarmentSize,
   finalizationStatus,
   onPrepareForPrint,
+  preparingForPrint,
   treatmentControls,
+  printReadyPackageCard,
   preparesDifferentTreatment,
 }: {
   enhancementNeeded: boolean;
@@ -785,7 +853,11 @@ function PrintReadyStep({
   onChooseGarmentSize?: (garmentSizeClass: GarmentSizeClass) => void;
   finalizationStatus: CustomerFinalizationStatus;
   onPrepareForPrint?: () => void;
+  /** Phase 27M: the "Create Print-Ready Artwork" request's own in-flight state — see the prop doc on `UploadedArtworkPanelProps`. */
+  preparingForPrint?: boolean;
   treatmentControls?: ReactNode;
+  /** Print'em All Phase 3: the print-ready package slot — see `ApprovedStep`'s identical prop. */
+  printReadyPackageCard?: ReactNode;
   /**
    * Print'em All Phase 2: true when the production treatment now differs from
    * the continuous-tone attempt that failed, so the action about to run is a
@@ -873,6 +945,12 @@ function PrintReadyStep({
           action, so the screen reads in the order the work happens. */}
       {treatmentControls}
 
+      {/* Print'em All Phase 3: completed variant outputs, independent of
+          whatever the operator is about to try next below. A successful
+          DTF Halftone file stays visible and downloadable here even while
+          Standard Raster is the currently-configured treatment (Phase 27O). */}
+      {printReadyPackageCard}
+
       {finalizationStatus === "needs_review" ? (
         <p
           className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
@@ -908,15 +986,30 @@ function PrintReadyStep({
             disabled={busy || sizeConfirmationPending}
             aria-busy={busy}
             onClick={onPrepareForPrint}
-            className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {/* Print'em All Phase 2 (Goal 11): after a failed Standard Raster
+            {/* Phase 27M §8: the request's OWN in-flight state, visible the
+                instant the click handler runs — before the round trip
+                returns and `finalizationStatus` has any chance to become
+                `"preparing"`. That gap (click -> disabled-looking button ->
+                eventual spinner banner) is exactly the "did my click work?"
+                silence Phase 27L's human acceptance reported. */}
+            {preparingForPrint ? (
+              <>
+                <span className="inline-flex gap-0.5" aria-hidden="true">
+                  <span className="animate-pulse">●</span>
+                  <span className="animate-pulse [animation-delay:150ms]">●</span>
+                  <span className="animate-pulse [animation-delay:300ms]">●</span>
+                </span>
+                Creating Print-Ready Artwork…
+              </>
+            ) : /* Print'em All Phase 2 (Goal 11): after a failed Standard Raster
                 attempt, choosing DTF Halftone makes the next action a
                 different piece of work — it prepares a screened plate and
                 never re-sends the failed reconstruction request. Calling that
                 "Retry Preparation" would describe an action that does not
-                happen. */}
-            {retryableFailure && preparesDifferentTreatment
+                happen. */
+            retryableFailure && preparesDifferentTreatment
               ? copy.actionLabel
               : retryableFailure
                 ? PRINT_READY_RETRY_ACTION_LABEL

@@ -24,12 +24,27 @@ import {
   MIN_HALFTONE_LPI,
   MIN_HALFTONE_MIDTONE,
   assessHalftoneEligibility,
+  currentProductionTreatmentKey,
+  productionTreatmentKey,
   recommendedHalftoneSettings,
   resolveGarmentColor,
+  treatmentKeyMatchesJob,
   type GarmentColor,
   type HalftoneSettings,
   type ProductionTreatment,
 } from "@/capabilities/shared/production-treatment";
+import {
+  PRODUCTION_VARIANT_TREATMENTS,
+  describeProductionVariantCostSummary,
+  describeProductionVariantStatus,
+  describeVariantAttentionReason,
+  firstBlockingFailedCheck,
+  productionVariantDescription,
+  productionVariantLabel,
+  type PrintReadyPackageView,
+  type ProductionVariantTreatment,
+  type ProductionVariantView,
+} from "@/capabilities/shared/production-variant";
 import {
   toCustomerArtworkVersions,
   toCustomerConceptStatusView,
@@ -181,6 +196,21 @@ export function toCustomerFinalizationView(
   // resumed. Same reasoning: offer the action rather than a stale verdict.
   if (latestJobStatus === "cancelled") return { status: "not_requested" };
 
+  // Print'em All Phase 3 (Phase 27P): a COMPLETED job for the current intent
+  // that did NOT satisfy it (`currentRequestSatisfied` is already known
+  // `false` by this point) is itself a durable, honest verdict — the exact
+  // shape Phase 27M's fix produces for a genuine print-readiness refusal.
+  // That verdict must never be overridden by `project.status` still reading
+  // `"print_ready"` from a DIFFERENT, earlier-satisfied treatment/intent
+  // (Phase 27P's multi-variant package: switching from a successful DTF
+  // Halftone run back to Standard Raster leaves `project.status` at
+  // `"print_ready"` — truthfully, about halftone — while Standard Raster's
+  // own latest job completed without satisfying anything). Checked ahead of
+  // the `projectStatus` fallback below for exactly that reason: this is the
+  // CURRENT job's own conclusion, and it is always more current than a
+  // shared, last-write-wins project field.
+  if (latestJobStatus === "completed") return { status: "needs_review" };
+
   // (4) Project terminal states, which durably record what authoritative
   // validation concluded for a job bound to this same intent. These stay
   // ahead of job status on purpose: a `print_ready` project must not be
@@ -200,10 +230,22 @@ export function toCustomerFinalizationView(
  * New approval's job, or the newest job on an approved upload preparation.
  * Older failed jobs on a superseded approval or earlier print size must
  * not leak into the view.
+ *
+ * Print'em All Phase 3 (Phase 27O fix): also matched against the project's
+ * CURRENT production-treatment identity, exactly as
+ * `resolveCurrentMatchingProductionJob` (the delivery/download resolver) has
+ * always done. Before this, a job's TREATMENT was never part of "is this the
+ * current one?" for STATUS purposes — only its requested output was — so a
+ * failed Standard Raster attempt kept reading as the verdict for whatever
+ * treatment was later selected, including one (DTF Halftone) that had never
+ * even been attempted. `treatmentKeyMatchesJob` is the same helper the
+ * stale-intent fence uses, so a legacy job (`null` key) still abstains to
+ * "standard raster" rather than being newly excluded.
  */
 async function resolveCurrentFinalArtworkJob(
   projectId: string,
   currentIntent: StoredRequestedProductionOutput | null,
+  currentTreatmentKey: string,
 ): Promise<FinalArtworkJob | null> {
   try {
     const repo = getProjectRepository();
@@ -215,7 +257,8 @@ async function resolveCurrentFinalArtworkJob(
     // separations, and how a completed unsupported job used to speak for a
     // customer who had retracted back to PNG.
     const matchesIntent = (job: FinalArtworkJob) =>
-      productionIntentMatches(job.requestedProductionOutput, currentIntent);
+      productionIntentMatches(job.requestedProductionOutput, currentIntent) &&
+      treatmentKeyMatchesJob(currentTreatmentKey, job.productionTreatmentKey);
 
     const approval = await repo.getActiveFinalDirectionApproval(projectId);
     if (approval) {
@@ -240,13 +283,14 @@ async function customerFinalizationViewForProject(
   projectId: string,
   projectStatus: ProjectStatus,
   currentIntent: StoredRequestedProductionOutput | null,
+  currentTreatmentKey: string,
 ): Promise<CustomerFinalizationView> {
   // Sprint A2 Correction 2: the matching job is resolved for EVERY project
   // status now, not only `"finalizing"`. A project sitting at `print_ready`
   // still has to answer "…for the thing you are currently asking for?", and
   // that answer lives in whether a job bound to the current intent exists and
   // how it ended.
-  const job = await resolveCurrentFinalArtworkJob(projectId, currentIntent);
+  const job = await resolveCurrentFinalArtworkJob(projectId, currentIntent, currentTreatmentKey);
   // Sprint A2 Correction 3: the same evidence the delivery routes resolve on,
   // read through the same capability, so the state a customer is shown and
   // the file they can actually download can never disagree.
@@ -320,6 +364,15 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * synthesized this object would gain a rendered panel and no capability.
    */
   productionTreatment?: ProductionTreatmentView;
+  /**
+   * Print'em All Phase 3 (V1 multi-variant package): the fixed two-variant
+   * (`standard_raster` / `halftone_dtf`) production package for the
+   * Existing Artwork workflow — see `production-variant.ts`. Same presence
+   * rule as `productionTreatment` (optional/absent, never `null`, internal
+   * projects only) for the identical reason: this is where a variant a
+   * customer does not yet have access to would otherwise leak.
+   */
+  printReadyPackage?: PrintReadyPackageView;
 };
 
 /**
@@ -426,6 +479,244 @@ async function resolveProductionTreatmentView(
   };
 }
 
+/**
+ * Print'em All Phase 3 — THE PACKAGE VIEW.
+ *
+ * Builds the fixed, two-variant (`standard_raster` / `halftone_dtf`)
+ * print-ready package for an Existing Artwork project: what each variant's
+ * status, file, and cost facts are RIGHT NOW, independent of which treatment
+ * the operator currently has selected.
+ *
+ * Gated exactly like `resolveProductionTreatmentView` (internal projects
+ * only, absent rather than `null` for everyone else) — this is presentation
+ * of the same authority, never a second one; the server-side write path
+ * (`selectProductionTreatment`, `requestPreparedUploadFinalArtwork`) is
+ * unchanged and remains the only real gate.
+ *
+ * No new persistence. Every fact is derived, read-only, from existing
+ * `FinalArtworkJob` / `AssetRecord` / `ProductionAssetValidation` records via
+ * `FinalArtworkCapability.resolveProductionVariantState` (Phase 27P Gate A).
+ */
+async function resolvePrintReadyPackage(
+  snapshot: ProjectSnapshot,
+  artworkPreparation: ArtworkPreparationView | null,
+): Promise<PrintReadyPackageView | undefined> {
+  const graph = getCapabilityGraph();
+  try {
+    if (!(await graph.acquisition.isInternalProject(snapshot.project.id))) {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+
+  // A package is only meaningful once there is an approved uploaded source
+  // to build variants FROM — mirrors the same guard `resolveProductionTreatmentView`
+  // effectively applies via `preparedSourceAvailable`.
+  if (!artworkPreparation?.approved || !artworkPreparation.hasPreparedArtwork) {
+    return undefined;
+  }
+
+  const variants: ProductionVariantView[] = [];
+  for (const treatment of PRODUCTION_VARIANT_TREATMENTS) {
+    variants.push(
+      await resolveOneProductionVariant(graph, getProjectRepository(), snapshot, treatment),
+    );
+  }
+  return { variants };
+}
+
+/**
+ * The treatment-key identity for ONE variant slot.
+ *
+ * Standard Raster has exactly one identity, always. DTF Halftone's identity
+ * is the CURRENT working configuration when there is one (Section 14 — a
+ * brand-new, not-yet-run LPI/angle/dot combination must show as its own
+ * genuinely `not_created` variant, never silently merged into an older
+ * configuration's result).
+ *
+ * THE PHASE 27P TRAP THIS GUARDS AGAINST. `selectProductionTreatment`'s
+ * `standard_raster` branch calls `clearProductionTreatment`, which sets
+ * `halftoneSettings` back to `null` — by design, since the brief's
+ * `halftoneSettings` column is the CURRENT WORKING CONFIGURATION, not a
+ * history. Reading ONLY that column for identity (this function's first
+ * draft) meant that the instant an operator switched back to Standard
+ * Raster, the halftone variant's own identity became unrecoverable — a
+ * completed, print-ready DTF Halftone file would have silently reported
+ * `not_created`, even though nothing about the file itself had changed.
+ * That is exactly the "switching treatment invalidates a completed variant"
+ * defect Section 0/6 explicitly forbids, just reached from the read side
+ * instead of a write that deletes anything.
+ *
+ * So: when there is no CURRENT halftone configuration (because standard
+ * raster is currently selected, or halftone was never configured at all),
+ * fall back to the MOST RECENT halftone-family job's OWN recorded
+ * `productionTreatmentKey` — never reconstructed from cleared settings,
+ * always read from the job's own immutable, enqueue-time snapshot. `null`
+ * only when neither a current configuration nor any historical job exists.
+ */
+async function resolveVariantTreatmentKey(
+  repo: ReturnType<typeof getProjectRepository>,
+  projectId: string,
+  snapshot: ProjectSnapshot,
+  treatment: ProductionVariantTreatment,
+): Promise<string | null> {
+  if (treatment === "standard_raster") {
+    return productionTreatmentKey({ treatment: "standard_raster" });
+  }
+  if (snapshot.brief.halftoneSettings) {
+    return productionTreatmentKey({
+      treatment: "halftone_dtf",
+      halftone: snapshot.brief.halftoneSettings,
+    });
+  }
+
+  const approval = await repo.getActiveFinalDirectionApproval(projectId);
+  const jobs = approval
+    ? await repo.listFinalArtworkJobsForApproval(projectId, approval.id)
+    : await resolveJobsForApprovedPreparation(repo, projectId);
+  const halftoneJobs = jobs
+    .filter((job) => job.productionTreatmentKey?.startsWith("halftone_dtf/"))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return halftoneJobs.at(-1)?.productionTreatmentKey ?? null;
+}
+
+async function resolveJobsForApprovedPreparation(
+  repo: ReturnType<typeof getProjectRepository>,
+  projectId: string,
+): Promise<FinalArtworkJob[]> {
+  const preparation = await repo.getArtworkPreparation(projectId);
+  if (!preparation || preparation.status !== "approved") return [];
+  return repo.listFinalArtworkJobsForPreparation(projectId, preparation.id);
+}
+
+async function resolveOneProductionVariant(
+  graph: ReturnType<typeof getCapabilityGraph>,
+  repo: ReturnType<typeof getProjectRepository>,
+  snapshot: ProjectSnapshot,
+  treatment: ProductionVariantTreatment,
+): Promise<ProductionVariantView> {
+  const emptyCostSummary = describeProductionVariantCostSummary(null, null);
+  const emptyVariant = (status: ProductionVariantView["status"] = "not_created"): ProductionVariantView => ({
+    treatment,
+    label: productionVariantLabel(treatment),
+    description: productionVariantDescription(treatment),
+    status,
+    finalArtworkJobId: null,
+    finalAssetId: null,
+    createdAt: null,
+    physicalWidthIn: null,
+    physicalHeightIn: null,
+    pixelWidth: null,
+    pixelHeight: null,
+    halftone: null,
+    attentionReason: null,
+    costSummary: emptyCostSummary,
+  });
+
+  const treatmentKey = await resolveVariantTreatmentKey(
+    repo,
+    snapshot.project.id,
+    snapshot,
+    treatment,
+  );
+  if (treatmentKey === null) {
+    // Halftone has never been configured for this project, currently or
+    // historically -- no job could possibly exist for it. A bare
+    // "not created" slot, with nothing guessed about future settings.
+    return emptyVariant();
+  }
+
+  const state = await graph.finalArtwork.resolveProductionVariantState(
+    snapshot.project.id,
+    treatmentKey,
+  );
+
+  // Display settings for the halftone slot: prefer the job's OWN recorded
+  // screen evidence (the durable, per-variant truth) over the brief's
+  // current working configuration, which may since have been cleared or
+  // changed to a different prospective configuration entirely.
+  const assetHalftone =
+    treatment === "halftone_dtf" &&
+    state.asset?.metadata &&
+    typeof state.asset.metadata === "object" &&
+    "halftone" in state.asset.metadata &&
+    state.asset.metadata.halftone &&
+    typeof state.asset.metadata.halftone === "object"
+      ? (state.asset.metadata.halftone as { lpi?: unknown; angleDeg?: unknown; dotShape?: unknown })
+      : null;
+  const halftoneForDisplay =
+    treatment !== "halftone_dtf"
+      ? null
+      : assetHalftone &&
+          typeof assetHalftone.lpi === "number" &&
+          typeof assetHalftone.angleDeg === "number" &&
+          typeof assetHalftone.dotShape === "string"
+        ? { lpi: assetHalftone.lpi, angleDeg: assetHalftone.angleDeg, dotShape: assetHalftone.dotShape }
+        : snapshot.brief.halftoneSettings
+          ? {
+              lpi: snapshot.brief.halftoneSettings.lpi,
+              angleDeg: snapshot.brief.halftoneSettings.angleDeg,
+              dotShape: snapshot.brief.halftoneSettings.dotShape,
+            }
+          : null;
+  const status = describeProductionVariantStatus(
+    state.job?.status ?? null,
+    state.validationStatus,
+  );
+  const attentionReason =
+    status === "needs_attention" || status === "retryable_failure"
+      ? describeVariantAttentionReason(
+          treatment,
+          firstBlockingFailedCheck(state.validationReport),
+        )
+      : null;
+
+  const normalization = state.asset?.metadata &&
+    typeof state.asset.metadata === "object" &&
+    "normalization" in state.asset.metadata
+    ? (state.asset.metadata as { normalization?: Record<string, unknown> }).normalization
+    : undefined;
+  const physicalWidthIn =
+    typeof normalization?.intendedWidthIn === "number"
+      ? normalization.intendedWidthIn
+      : state.job?.productionWidthIn ?? null;
+  const physicalHeightIn =
+    typeof normalization?.intendedHeightIn === "number" ? normalization.intendedHeightIn : null;
+
+  const providerRequestId =
+    state.asset?.metadata &&
+    typeof state.asset.metadata === "object" &&
+    typeof (state.asset.metadata as { providerRequestId?: unknown }).providerRequestId === "string"
+      ? ((state.asset.metadata as { providerRequestId: string }).providerRequestId)
+      : null;
+
+  return {
+    treatment,
+    label: productionVariantLabel(treatment),
+    description: productionVariantDescription(treatment),
+    status,
+    finalArtworkJobId: state.job?.id ?? null,
+    // Deliberately only exposed once genuinely `print_ready` -- an asset can
+    // exist for a `needs_attention` job too (see `ProductionVariantJobState`'s
+    // doc), but it is not a file this variant offers for download.
+    finalAssetId: status === "print_ready" ? (state.asset?.id ?? null) : null,
+    createdAt: state.job?.createdAt ?? null,
+    physicalWidthIn,
+    physicalHeightIn,
+    pixelWidth: state.asset?.widthPx ?? null,
+    pixelHeight: state.asset?.heightPx ?? null,
+    halftone: halftoneForDisplay,
+    attentionReason,
+    costSummary: state.job
+      ? describeProductionVariantCostSummary(
+          { attempts: state.job.attempts, providerKey: state.job.providerKey },
+          providerRequestId,
+        )
+      : emptyCostSummary,
+  };
+}
+
 async function withConceptStatus(
   snapshot: ProjectSnapshot,
 ): Promise<ApiProjectSnapshot> {
@@ -443,6 +734,7 @@ async function withConceptStatus(
       snapshot.project.id,
       snapshot.project.status,
       snapshot.brief.requestedProductionOutput,
+      currentProductionTreatmentKey(snapshot.brief),
     ),
     printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
     artworkPreparation,
@@ -452,6 +744,7 @@ async function withConceptStatus(
       snapshot,
       artworkPreparation,
     ),
+    printReadyPackage: await resolvePrintReadyPackage(snapshot, artworkPreparation),
   };
 }
 
@@ -1023,6 +1316,7 @@ export async function getFinalizationStatus(
     projectId,
     snapshot.project.status,
     snapshot.brief.requestedProductionOutput,
+    currentProductionTreatmentKey(snapshot.brief),
   );
 }
 
@@ -1227,4 +1521,79 @@ async function resolveCurrentProductionArtwork(projectId: string): Promise<{
 
 function readFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Print'em All Phase 3 (Goal 16 — DOWNLOAD IDENTITY): the treatment-scoped
+ * counterpart of `getProductionArtworkDownload`.
+ *
+ * THE INVARIANT THIS EXISTS TO GUARANTEE: a customer who asks for the
+ * Standard Raster file always receives the Standard Raster asset, and a
+ * customer who asks for the DTF Halftone file always receives the DTF
+ * Halftone asset — regardless of which treatment the operator currently has
+ * SELECTED in the controls. `getProductionArtworkDownload` (unscoped) reads
+ * "the current deliverable", which is exactly the single project-level
+ * pointer Phase 27O's audit identified as unable to represent two
+ * independently-completed variants; this resolves a NAMED variant instead,
+ * via `resolveVariantTreatmentKey` + `resolveProductionVariantState` — the
+ * same identity the package view itself is built from, so the two can never
+ * disagree about which bytes a variant means.
+ *
+ * Returns `null` for every miss uniformly (no project, no preparation, no
+ * job for this exact variant, or a job that has not reached `print_ready`)
+ * — a customer must never be able to distinguish "this variant doesn't
+ * exist" from "it exists but isn't ready" from the response shape alone.
+ */
+export async function getProductionArtworkDownloadForVariant(
+  projectId: string,
+  treatment: ProductionVariantTreatment,
+): Promise<{
+  bytes: Buffer;
+  contentType: string;
+  filename: string;
+} | null> {
+  const graph = getCapabilityGraph();
+  const snapshot = await graph.conversation.get(projectId);
+  if (!snapshot) return null;
+
+  const treatmentKey = await resolveVariantTreatmentKey(
+    getProjectRepository(),
+    projectId,
+    snapshot,
+    treatment,
+  );
+  if (treatmentKey === null) return null;
+
+  const state = await graph.finalArtwork.resolveProductionVariantState(
+    projectId,
+    treatmentKey,
+  );
+  const status = describeProductionVariantStatus(
+    state.job?.status ?? null,
+    state.validationStatus,
+  );
+  if (status !== "print_ready" || !state.asset) return null;
+
+  const downloaded = await graph.assets.downloadAssetBytes(state.asset.id);
+  if (!downloaded) return null;
+
+  const mimeType = state.asset.contentType ?? "image/png";
+  const preparation = await resolveArtworkPreparation(projectId);
+  const baseFilename = buildPrintReadyFilename({
+    uploadedFilename: preparation?.originalFilename ?? null,
+    exactText: snapshot.brief.exactText,
+    productSummary: snapshot.brief.productSummary,
+    mimeType,
+  });
+  // Two variants sharing one base name would otherwise silently overwrite
+  // each other on a customer's own downloads folder — the one filename-level
+  // consequence of "two files now exist" that this layer must account for.
+  const suffix = treatment === "standard_raster" ? "-standard-raster" : "-dtf-halftone";
+  const filename = baseFilename.replace(/(\.[^./\\]+)?$/, (ext) => `${suffix}${ext}`);
+
+  return {
+    bytes: downloaded.bytes,
+    contentType: downloaded.contentType || mimeType,
+    filename,
+  };
 }

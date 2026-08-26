@@ -57,15 +57,17 @@ import {
 } from "./background-isolation";
 import {
   isToleranceLevel,
-  MAGIC_WAND_ALGORITHM_VERSION,
   type CorrectionAction,
   type Point,
   type ToleranceLevel,
 } from "./magic-wand-algorithm";
 import {
+  acceptBrushOperation,
+  acceptFillOperation,
   acceptSessionOperation,
   clearSession as clearCorrectionSession,
   computeCurrentResult as computeCorrectionResult,
+  computeFillPreview,
   computeSelectionPreview as computeCorrectionSelectionPreview,
   getOrCreateSession,
   getSession as getCorrectionSession,
@@ -442,16 +444,48 @@ export interface ArtworkPreparationCapability {
   finalizeCorrection(designId: string): Promise<ArtworkPreparationView>;
 }
 
-export interface CorrectionSelectionRequest {
+/**
+ * Phase 27I: `tool` is optional and defaults to `"magic_wand"` so every
+ * existing caller (and every existing test) that never mentions `tool` at
+ * all keeps working completely unchanged — this is the "extend it
+ * minimally" instruction applied to the wire contract, not just the
+ * session internals.
+ */
+export interface MagicWandSelectionRequest {
+  tool?: "magic_wand";
   clicks: Point[];
   mode: CorrectionAction;
   toleranceLevel: ToleranceLevel;
   removeAt?: Point;
 }
-export interface CorrectionAcceptRequest {
-  clicks: Point[];
-  mode: CorrectionAction;
-  toleranceLevel: ToleranceLevel;
+export interface RestoreFillRequest {
+  tool: "restore_fill";
+  click: Point;
+}
+export interface BrushStrokeRequest {
+  tool: "restore_brush" | "erase_brush";
+  points: Point[];
+  radius: number;
+}
+export type CorrectionSelectionRequest = MagicWandSelectionRequest | RestoreFillRequest;
+export type CorrectionAcceptRequest =
+  | Omit<MagicWandSelectionRequest, "removeAt">
+  | RestoreFillRequest
+  | BrushStrokeRequest;
+
+/**
+ * TypeScript's discriminated-union narrowing does not reliably eliminate
+ * constituents here across a mix of an OPTIONAL discriminant
+ * (`tool?: "magic_wand"`) and required ones on the other constituents --
+ * a known sharp edge, not a bug in the modeling itself. Explicit type
+ * predicates sidestep it entirely instead of fighting control-flow
+ * narrowing with more `if`s.
+ */
+function isFillRequest(request: { tool?: string }): request is RestoreFillRequest {
+  return request.tool === "restore_fill";
+}
+function isBrushRequest(request: { tool?: string }): request is BrushStrokeRequest {
+  return request.tool === "restore_brush" || request.tool === "erase_brush";
 }
 export interface CorrectionSelectionResult {
   pixelCount: number;
@@ -459,7 +493,12 @@ export interface CorrectionSelectionResult {
   touchesEdge: boolean;
   broad: boolean;
   overlayPng: Buffer;
+  /** Only meaningful for `magic_wand` (additive/subtractive click history) — empty for every other tool. */
   effectiveClicks: Point[];
+  /** Phase 27I §C: true when Fill found a missing area but refused it (border-connected/unsafe). Always false/absent for other tools. */
+  refused?: boolean;
+  /** Plain-language reason shown to the operator when `refused` is true — e.g. "This area isn't enclosed. Use the Brush to restore it." */
+  refusalReason?: string;
 }
 
 export function createArtworkPreparationCapability(
@@ -619,20 +658,41 @@ export function createArtworkPreparationCapability(
    * changed (e.g. a separation re-approval happened in another tab) — never
    * on every click, and never by recomputing a removal.
    */
+  /**
+   * Phase 27G: the manual correction workspace ALWAYS initializes from the
+   * immutable ORIGINAL upload — never from `preparedAssetId`, a separation
+   * candidate, or any other automatically-derived master. This is the
+   * central acceptance criterion of Phase 27G: automatic preparation may
+   * have damaged legitimate artwork, and the manual fallback exists
+   * precisely so the operator repairs the ORIGINAL by hand rather than
+   * repairing the damage automatic preparation caused. The automatic
+   * `preparedAssetId` is read nowhere in this function and is left
+   * completely untouched — it remains exactly what it was until (and
+   * unless) `finalizeCorrection` repoints it.
+   *
+   * `originalAssetId` never changes for a project, so keying the session's
+   * freshness check on it (instead of the old, mutable `preparedAssetId`)
+   * means a session is always considered fresh for as long as it exists —
+   * exactly right, since its base can never legitimately go stale under
+   * it. A session only ever gets recreated after `finalizeCorrection`
+   * clears it, at which point a fresh one is correctly rebuilt from the
+   * same immutable original again.
+   */
   async function ensureCorrectionSession(designId: string): Promise<void> {
     const { preparation } = await loadOwned(designId);
     if (!preparation.preparedAssetId) {
+      // Sanity/ordering guard only (Phase 27G §0: automatic preparation
+      // always runs first in this product flow) -- NOT used as the base.
       throw new ArtworkPreparationStateError("No prepared artwork exists yet to correct.");
     }
-    if (hasFreshSession(designId, preparation.preparedAssetId)) return;
+    if (hasFreshSession(designId, preparation.originalAssetId)) return;
 
     const { image: original } = await loadOriginalImageWithHash(preparation);
-    const preparedDownload = await assets.downloadAssetBytes(preparation.preparedAssetId);
-    if (!preparedDownload) {
-      throw new ArtworkPreparationStateError("We couldn't find the prepared artwork to correct. Please try again.");
-    }
-    const base = decodePngUpload(preparedDownload.bytes).image;
-    getOrCreateSession(designId, original, base, preparation.preparedAssetId);
+    // An independent buffer copy, not a shared reference -- the session's
+    // `base` and `original` must never alias the same underlying memory,
+    // even though they start byte-identical.
+    const base: RgbaImage = { width: original.width, height: original.height, data: Buffer.from(original.data) };
+    getOrCreateSession(designId, original, base, preparation.originalAssetId);
   }
 
   function validateCorrectionRequest(request: { clicks: Point[]; mode: CorrectionAction; toleranceLevel: ToleranceLevel; removeAt?: Point }): void {
@@ -654,6 +714,22 @@ export function createArtworkPreparationCapability(
     return !!value && typeof value === "object" && typeof (value as Point).x === "number" && typeof (value as Point).y === "number";
   }
 
+  /** Phase 27I §D/E — shared validation + accept for Restore Brush and Eraser strokes (identical stroke geometry, only the resulting action differs). */
+  function acceptBrushStroke(
+    designId: string,
+    tool: "restore_brush" | "erase_brush",
+    request: { points: Point[]; radius: number },
+  ): { operationId: string; algorithmVersion: string } {
+    if (!Array.isArray(request.points) || request.points.length === 0 || !request.points.every(isPoint)) {
+      throw new ArtworkPreparationStateError("At least one valid stroke point is required.");
+    }
+    if (typeof request.radius !== "number" || !(request.radius > 0)) {
+      throw new ArtworkPreparationStateError("A positive brush radius is required.");
+    }
+    const op = acceptBrushOperation(designId, tool, request.points, request.radius);
+    return { operationId: op.operationId, algorithmVersion: op.algorithmVersion };
+  }
+
   /**
    * Recomputes the current region map from the immutable original and reads
    * back the persisted decision set, if any. Pure composition of
@@ -672,6 +748,30 @@ export function createArtworkPreparationCapability(
       ? (preparation.separation as unknown as SeparationDecisionSet)
       : null;
     return { computation, decisionSet };
+  }
+
+  /**
+   * Phase 27H §0: true only once an operator has explicitly finalized a
+   * manual correction (`finalizeCorrection`) and that result is STILL the
+   * current `preparedAssetId` -- never a permanent flag, never keyed off
+   * `status === "approved"` alone (automatic approval and
+   * `approveSeparationMaster` both also set that status). No new column:
+   * `finalizeCorrection` already stamps `correctionLineage` onto the new
+   * asset's existing `metadata` field (Phase 27E), and only that function
+   * ever writes that particular shape -- checking for its presence on the
+   * CURRENT prepared asset is a precise, reusable "was this exact result a
+   * deliberately accepted manual override" signal, satisfying "supersedes
+   * separation review for THAT accepted prepared-artwork result" without
+   * any schema change. If the artwork is later re-uploaded or automatic
+   * preparation produces a new asset, `preparedAssetId` no longer points
+   * at a correction-lineage asset and this naturally reverts to false --
+   * the override is tied to the specific accepted result, not global.
+   */
+  async function hasAcceptedManualOverride(designId: string, preparation: ArtworkPreparation): Promise<boolean> {
+    if (!preparation.preparedAssetId) return false;
+    const projectAssets = await assets.listAssets(designId);
+    const current = projectAssets.find((asset) => asset.id === preparation.preparedAssetId);
+    return Boolean(current && (current.metadata as Record<string, unknown> | undefined)?.correctionLineage);
   }
 
   /**
@@ -1398,7 +1498,21 @@ export function createArtworkPreparationCapability(
         Boolean(decisionSet?.approvedAt) &&
         decisionSet?.approvedAssetId !== null &&
         decisionSet?.approvedAssetId === preparation.preparedAssetId;
-      return buildSeparationReviewView(computation.regionMap, decisionSet, postCheck, isProductionAuthoritative);
+      const view = buildSeparationReviewView(computation.regionMap, decisionSet, postCheck, isProductionAuthoritative);
+
+      // Phase 27H §0: a deliberately finalized manual correction supersedes
+      // separation review for THIS accepted result -- the operator already
+      // reviewed the corrected pixels by hand and explicitly clicked Use
+      // This Artwork, so they must not be sent back to decide Show
+      // Shirt/Print Ink/Not Sure for the same artwork (`SeparationReviewPanel`
+      // renders nothing once `state` is `review_not_required`). Every other
+      // field (regionMap, decisions, postCheck) is left exactly as computed
+      // -- purely historical/diagnostic once overridden -- only `state` is
+      // overridden.
+      if (await hasAcceptedManualOverride(designId, preparation)) {
+        return { ...view, state: "review_not_required" };
+      }
+      return view;
     },
 
     async submitRegionDecisions(designId, request) {
@@ -1457,6 +1571,21 @@ export function createArtworkPreparationCapability(
       const snapshot = await repo.getProject(designId);
       if (!snapshot) throw new ArtworkPreparationStateError("Project not found");
       const { preparation } = await loadOwned(designId);
+
+      // Phase 27H §3: defense in depth, matching this codebase's existing
+      // "a hidden button is not a security boundary" pattern. Once an
+      // operator has explicitly finalized a manual correction, that result
+      // is the authority -- a stale client still holding an old separation
+      // review screen open must not be able to silently overwrite it by
+      // submitting decisions/approving anyway. `getSeparationReview` already
+      // reports `review_not_required` in this state so the UI never offers
+      // this action; this is the server-side backstop.
+      if (await hasAcceptedManualOverride(designId, preparation)) {
+        throw new ArtworkPreparationStateError(
+          "This artwork's background was already manually corrected and approved. Automatic separation approval is no longer available for it.",
+        );
+      }
+
       const { image: original, sha256 } = await loadOriginalImageWithHash(preparation);
       const { computation, decisionSet } = computeSeparationState(preparation, sha256, original);
 
@@ -1550,8 +1679,30 @@ export function createArtworkPreparationCapability(
     // --- Phase 27E: graduated Magic Wand correction workspace -------------
 
     async previewCorrectionSelection(designId, request) {
-      validateCorrectionRequest(request);
       await ensureCorrectionSession(designId);
+
+      // Phase 27I §C: Restore Fill's read-only preview. Reasons about the
+      // CURRENT result's transparency, never the original's colour
+      // connectivity -- see `computeFillPreview`'s doc comment.
+      if (isFillRequest(request)) {
+        if (!isPoint(request.click)) {
+          throw new ArtworkPreparationStateError("A valid click point is required.");
+        }
+        const result = computeFillPreview(designId, request.click);
+        const unsafe = result.pixelCount > 0 && !result.safe;
+        return {
+          pixelCount: unsafe ? 0 : result.pixelCount,
+          bounds: unsafe ? null : result.bounds,
+          touchesEdge: unsafe,
+          broad: false,
+          overlayPng: encodeRgbaToPng(result.overlay),
+          effectiveClicks: unsafe ? [] : result.pixelCount > 0 ? [request.click] : [],
+          refused: unsafe,
+          refusalReason: unsafe ? "This area isn't enclosed. Use the Brush to restore it." : undefined,
+        };
+      }
+
+      validateCorrectionRequest(request);
       const result = computeCorrectionSelectionPreview(designId, request.clicks, request.mode, request.toleranceLevel, request.removeAt);
       return {
         pixelCount: result.selection.pixelCount,
@@ -1564,8 +1715,25 @@ export function createArtworkPreparationCapability(
     },
 
     async acceptCorrectionOperation(designId, request) {
-      validateCorrectionRequest(request);
       await ensureCorrectionSession(designId);
+
+      if (isFillRequest(request)) {
+        if (!isPoint(request.click)) {
+          throw new ArtworkPreparationStateError("A valid click point is required.");
+        }
+        try {
+          const op = acceptFillOperation(designId, request.click);
+          return { operationId: op.operationId, algorithmVersion: op.algorithmVersion };
+        } catch (error) {
+          throw new ArtworkPreparationStateError(error instanceof Error ? error.message : "Could not restore that area.");
+        }
+      }
+
+      if (isBrushRequest(request)) {
+        return acceptBrushStroke(designId, request.tool, request);
+      }
+
+      validateCorrectionRequest(request);
       const op: CorrectionOperationRecord = acceptSessionOperation(designId, request.clicks, request.mode, request.toleranceLevel);
       return { operationId: op.operationId, algorithmVersion: op.algorithmVersion };
     },
@@ -1597,10 +1765,38 @@ export function createArtworkPreparationCapability(
       return { operationCount: session?.operations.length ?? 0 };
     },
 
+    /**
+     * Phase 27H §0: a DELIBERATELY COMPLETED manual correction is
+     * authoritative. This function is reachable ONLY from the explicit
+     * "Use This Artwork" click at the end of Remove Background Manually ->
+     * Magic Wand -> Done Editing -> Final Review (see
+     * `UploadedArtworkPanel`'s wiring, proven structurally in
+     * `UploadedArtworkPanel.test.tsx`) — there is no earlier call site that
+     * reaches this function. That is exactly what makes it safe to treat
+     * this call itself as the authority-transition moment: opening the
+     * workspace, clicking around, previewing, and even reaching Final
+     * Review all stop short of calling this function at all (§1's
+     * "critical distinction" is enforced by the call graph, not by a flag
+     * here). Phase 27G had this function refuse whenever separation review
+     * was unresolved, mirroring `approvePreparedArtwork`'s gate exactly --
+     * that closed a real bypass (a customer could dodge mandatory
+     * confirmation just by choosing the manual tool) but also produced a
+     * dead end: an operator who manually reviewed and explicitly accepted
+     * a corrected result could never finalize it if the original also
+     * happened to need separation review (proven live on the real
+     * INCREDI-BOWLS asset). Phase 27H's product decision is explicit: for
+     * artwork reaching this exact point, the manually reviewed pixels ARE
+     * the authority, and the operator must not be sent back to answer Show
+     * Shirt/Print Ink/Not Sure for the same artwork. The automatic path's
+     * own gates (`approvePreparedArtwork`, `approveSeparationMaster`) are
+     * completely untouched -- this changes nothing about what happens when
+     * an operator chooses the automatic path.
+     */
     async finalizeCorrection(designId) {
       const snapshot = await repo.getProject(designId);
       if (!snapshot) throw new ArtworkPreparationStateError("Project not found");
       const { brief, preparation } = await loadOwned(designId);
+
       await ensureCorrectionSession(designId);
       const session = getCorrectionSession(designId);
       if (!session) {
@@ -1627,7 +1823,13 @@ export function createArtworkPreparationCapability(
           derivedFromAssetId: preparation.originalAssetId,
           artworkPreparationId: preparation.id,
           correctionLineage: {
-            algorithmVersion: MAGIC_WAND_ALGORITHM_VERSION,
+            // Phase 27I: a session can now mix Magic Wand, Restore Fill,
+            // and Brush/Eraser operations -- a single `algorithmVersion`
+            // field would overclaim "this was entirely magic-wand:v1" for
+            // a mixed session. Every distinct algorithm version actually
+            // used is listed instead; each operation's own
+            // `algorithmVersion` remains the per-operation source of truth.
+            algorithmVersions: Array.from(new Set(session.operations.map((op) => op.algorithmVersion))),
             baseAssetId: session.baseAssetId,
             operations: session.operations,
           },

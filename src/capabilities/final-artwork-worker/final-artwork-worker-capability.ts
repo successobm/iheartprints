@@ -565,6 +565,33 @@ export function createFinalArtworkWorkerCapability(
           providerStatus: null,
         });
       }
+
+      // Phase 27M: `TopazTransparencyUpscaleProvider.produce()` raises
+      // exactly this shape (`invalid_request` + `not_dispatched`) for a
+      // request it can honestly never fulfil — the source lacks enough real
+      // pixels for the confirmed physical size, or has no visible artwork at
+      // all (`resolveReconstructionRequest`'s `insufficient_reconstruction` /
+      // `no_visible_artwork`). Nothing left this process and nothing was
+      // billed, but the more important fact is durable, not transient: THIS
+      // source cannot satisfy THIS confirmed size, and it never will on an
+      // unchanged retry. `failJob` (the fallback below) leaves
+      // `PrintProject.status` at `"finalizing"`, which `toCustomerFinalizationView`
+      // reads as `retryable_failure` — a false promise that clicking "Retry
+      // Preparation" again could succeed. `completeWithoutAsset` is the
+      // existing, correct verdict for exactly this shape of conclusion
+      // ("nothing crashed, the truth is simply this cannot be auto-finalized")
+      // and is what every other genuine print-readiness verdict in this file
+      // already uses — this was the one dispatch failure that fell through to
+      // the generic infrastructure-failure path instead.
+      if (
+        error instanceof ProviderError &&
+        error.classification === "invalid_request" &&
+        error.dispatch === "not_dispatched"
+      ) {
+        await completeWithoutAsset(job, error.message);
+        return { status: "handled" };
+      }
+
       await failJob(job, describeFinalArtworkError(error));
       return { status: "handled" };
     }

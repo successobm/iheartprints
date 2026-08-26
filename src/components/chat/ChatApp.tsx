@@ -9,6 +9,7 @@ import type {
   RecommendationAction,
 } from "@/capabilities/shared/contracts";
 import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
+import { PRODUCTION_BOX_RECOMMENDATIONS } from "@/capabilities/shared/garment-production-sizing";
 import type { ApiProjectSnapshot } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { deriveChatAffordances } from "./chat-affordances";
@@ -66,6 +67,19 @@ export function ChatApp() {
    * previous settings.
    */
   const [treatmentPreviewNonce, setTreatmentPreviewNonce] = useState(0);
+  /**
+   * Phase 27M §8/§10: which of the two async waiting-state gaps the human
+   * acceptance test reported is actually in flight right now — set
+   * synchronously at the top of the handler, before the first `await`, so it
+   * is true for the very same render the button becomes disabled in.
+   * `null`/`false` the rest of the time. Deliberately local UI state, never
+   * persisted and never read by any capability: it says nothing the server
+   * doesn't already know, it only says it sooner than a round trip can.
+   */
+  const [pendingTreatment, setPendingTreatment] = useState<
+    "standard_raster" | "halftone_dtf" | null
+  >(null);
+  const [preparingForPrint, setPreparingForPrint] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conceptBannerDismissed, setConceptBannerDismissed] = useState(false);
   /**
@@ -573,18 +587,46 @@ export function ChatApp() {
   }
 
   /**
-   * Print'em All Phase 1: which garment the print is going on.
+   * Print'em All Phase 1 / Phase 27L: which garment the print is going on.
    *
-   * Moves the RECOMMENDATION and nothing else. It writes the durable
-   * garmentSizeClass, recomputes the suggested box — and deliberately does
-   * NOT confirm a size, create a job, or reach a provider. It also withdraws
-   * any existing confirmation server-side, because consent was given to a
-   * size on a kind of garment and the second half just changed.
+   * Writes the durable garmentSizeClass and recomputes the suggested box.
+   *
+   * Phase 27L: when this (garment class, placement) has an authoritative
+   * recommendation box, choosing it now ALSO confirms that box in the SAME
+   * request (`useRecommended: true`) — bringing this control in line with
+   * how `applyProductionPrintWidth` (the width chips / typed width) has
+   * always behaved: "an explicit human decision about physical size... is
+   * an explicit human decision", confirming immediately rather than
+   * waiting for a second, separate click. This was the exact source of the
+   * human-observed contradiction (Standard Adult rendered selected while
+   * the orange "confirm the print size" copy still showed) — the garment
+   * picker was the one control in this surface that didn't confirm on
+   * selection, not because a garment category can't determine physical
+   * dimensions (it does, deterministically, via
+   * `PRODUCTION_BOX_RECOMMENDATIONS`), but because this call simply never
+   * asked the (already-supporting) server to confirm it.
+   *
+   * `custom` has no authoritative box (see `PRODUCTION_BOX_RECOMMENDATIONS`'s
+   * own doc: a shipped guess at an unnamed garment would be indistinguishable
+   * from a real production decision) -- selecting it must NOT attempt to
+   * confirm anything; the width-entry surface (`requiresExplicitWidth`)
+   * remains the one honest route forward, exactly as before.
+   *
+   * Still withdraws any existing (now-stale) confirmation as a side effect
+   * of the server applying the new garment class first -- the same
+   * "consent named a size on a kind of garment that just changed" rule,
+   * just resolved in the same round trip instead of leaving the project
+   * briefly unconfirmed.
    */
   async function chooseGarmentSize(garmentSizeClass: GarmentSizeClass) {
     if (!snapshot || sending) return;
     setSending(true);
     setError(null);
+
+    const placement = snapshot.brief.printPlacement;
+    const hasRecommendationBox = Boolean(
+      placement && PRODUCTION_BOX_RECOMMENDATIONS[garmentSizeClass][placement],
+    );
 
     try {
       const response = await fetch(
@@ -592,8 +634,11 @@ export function ChatApp() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          // No `useRecommended`: choosing a garment is not choosing a size.
-          body: JSON.stringify({ garmentSizeClass }),
+          body: JSON.stringify(
+            hasRecommendationBox
+              ? { garmentSizeClass, useRecommended: true }
+              : { garmentSizeClass },
+          ),
         },
       );
       const data = await response.json();
@@ -637,6 +682,7 @@ export function ChatApp() {
   }) {
     if (!snapshot || sending) return;
     setSending(true);
+    setPendingTreatment(body.treatment);
     setError(null);
 
     try {
@@ -665,6 +711,7 @@ export function ChatApp() {
       );
     } finally {
       setSending(false);
+      setPendingTreatment(null);
     }
   }
 
@@ -811,6 +858,7 @@ export function ChatApp() {
     const artworkVersionId = snapshot?.project.selectedArtworkVersionId;
     if (!snapshot || sending || !artworkVersionId) return;
     setSending(true);
+    setPreparingForPrint(true);
     setError(null);
 
     try {
@@ -835,6 +883,7 @@ export function ChatApp() {
       );
     } finally {
       setSending(false);
+      setPreparingForPrint(false);
     }
   }
 
@@ -1074,16 +1123,21 @@ export function ChatApp() {
    * start a second run — or a second paid one.
    */
   async function prepareUploadedArtworkForPrint() {
-    if (!snapshot) return;
-    await submitPreparationAction(
-      () =>
-        fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "print_ready" }),
-        }),
-      "Failed to prepare your print-ready artwork",
-    );
+    if (!snapshot || sending) return;
+    setPreparingForPrint(true);
+    try {
+      await submitPreparationAction(
+        () =>
+          fetch(`/api/projects/${snapshot.project.id}/artwork-preparation`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "print_ready" }),
+          }),
+        "Failed to prepare your print-ready artwork",
+      );
+    } finally {
+      setPreparingForPrint(false);
+    }
   }
 
   async function refresh() {
@@ -1589,7 +1643,10 @@ export function ChatApp() {
                 }
                 finalizationStatus={snapshot?.finalization.status ?? "not_requested"}
                 onPrepareForPrint={() => void prepareUploadedArtworkForPrint()}
+                preparingForPrint={preparingForPrint}
                 productionTreatment={snapshot?.productionTreatment}
+                printReadyPackage={snapshot?.printReadyPackage}
+                pendingTreatment={pendingTreatment}
                 treatmentPreviewUrls={treatmentPreviewUrls}
                 onSelectStandardRaster={() =>
                   void selectProductionTreatment({ treatment: "standard_raster" })
@@ -1724,6 +1781,7 @@ export function ChatApp() {
                 finalizationStatus={snapshot.finalization.status}
                 canRequest={canRequestFinalArtwork}
                 busy={sending}
+                preparing={preparingForPrint}
                 onPrepare={() => void approveFinalDirection()}
                 printReadySize={snapshot.printReadySize}
                 onChoosePrintWidth={(widthIn) => void choosePrintWidth(widthIn)}
