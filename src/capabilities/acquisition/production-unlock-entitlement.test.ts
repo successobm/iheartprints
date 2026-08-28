@@ -648,12 +648,27 @@ describe("Sprint A5.1/A5.2 — the production unlock at the finalization gate", 
     await harness.conversation.confirmRecommendedProductionSize(projectId);
     assert.equal((await viewFor()).confirmed, true);
 
-    // ...then override it with an explicit width inside the left-chest band,
-    // which re-confirms at the new figure rather than reverting to 4in.
+    // ...then override it with an explicit width inside the left-chest
+    // WIDTH band (2-5in) -- the confirmation itself records 4.5, exactly
+    // what was asked for.
     await harness.conversation.setProductionPrintWidth(projectId, 4.5);
     const overridden = await viewFor();
     assert.equal(overridden.confirmed, true);
-    assert.equal(overridden.widthIn, 4.5);
+    // Phase 28C (Bug B correction): the artwork here is SQUARE (900x900),
+    // and left_chest's own placement technical limit caps HEIGHT at 4in --
+    // tighter than the 5in width band alone suggests. A square print that
+    // is genuinely 4.5in wide would need 4.5in of height too, which this
+    // placement cannot produce, so the artwork is proportionally contained
+    // down to 4x4 (both axes together, aspect preserved) rather than
+    // printing 4.5in wide with an impossible 4.5in-tall canvas. Before this
+    // fix, the primary "will print at" width statement simply echoed back
+    // whatever width was confirmed (4.5) with no check that the artwork's
+    // own proportions could actually reach it at this placement --
+    // exactly the class of bug this phase exists to fix, caught here by a
+    // pre-existing test that had never actually verified `widthIn` against
+    // a real, height-constraining aspect ratio.
+    assert.equal(overridden.widthIn, 4);
+    assert.equal(overridden.heightIn, 4);
     assert.equal(overridden.recommendation!.boxWidthIn, 4);
     assert.equal(overridden.recommendation!.isConfirmed, false);
 

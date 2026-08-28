@@ -302,9 +302,21 @@ describe("buildSeparationReviewView", () => {
   });
 });
 
+// Genuinely blocking by default — `fullRemovalSafe: false` — so every
+// existing test below (written before Phase 28C) keeps testing exactly what
+// it always tested: a real proposal that DOES need an explicit decision.
+// Phase 28C's own tests (below) construct a `fullRemovalSafe: true` map
+// directly, rather than overriding this helper's default, so the two
+// behaviors stay visibly distinct rather than one silently becoming the
+// other's edge case.
 function proposalMap(regions: ConsequentialRegion[], overrides: Partial<RegionMap> = {}): RegionMap {
   return map(regions, {
-    inBoundsProposal: { proposalHash: "proposal-hash-a", pixelCount: 500, bounds: { left: 0, top: 0, width: 20, height: 20 } },
+    inBoundsProposal: {
+      proposalHash: "proposal-hash-a",
+      pixelCount: 500,
+      bounds: { left: 0, top: 0, width: 20, height: 20 },
+      fullRemovalSafe: false,
+    },
     ...overrides,
   });
 }
@@ -410,5 +422,68 @@ describe("Phase 23: proposal-driven approval gate", () => {
       decision: "remove_with_exceptions",
     });
     assert.equal(result.ok, false);
+  });
+});
+
+/** A proposal whose full, fully-automatic removal is already provably safe. */
+function safeProposalMap(regions: ConsequentialRegion[], overrides: Partial<RegionMap> = {}): RegionMap {
+  return map(regions, {
+    inBoundsProposal: {
+      proposalHash: "proposal-hash-safe",
+      pixelCount: 500,
+      bounds: { left: 0, top: 0, width: 20, height: 20 },
+      fullRemovalSafe: true,
+    },
+    ...overrides,
+  });
+}
+
+describe("Phase 28C: a provably-safe proposal never blocks review_not_required by itself", () => {
+  it("fullRemovalSafe proposal + zero consequential regions -> review_not_required", () => {
+    const m = safeProposalMap([]);
+    assert.equal(assessSeparationReviewState(m, null), "review_not_required");
+  });
+
+  it("a BLOCKING proposal (fullRemovalSafe: false) + zero consequential regions still -> review_required (the untouched existing behavior)", () => {
+    const m = proposalMap([]);
+    assert.equal(assessSeparationReviewState(m, null), "review_required");
+  });
+
+  it("fullRemovalSafe proposal + a genuine consequential region -> STILL review_required (the safe axis never masks a real one)", () => {
+    const m = safeProposalMap([region(1)]);
+    assert.equal(assessSeparationReviewState(m, null), "review_required");
+  });
+
+  it("fullRemovalSafe proposal + all consequential regions explicitly decided (region AND proposal both decided) -> review_complete -- fullRemovalSafe changes nothing about isReadyForFinalApproval, which still requires an explicit proposal decision once regions exist and the review UI is genuinely entered", () => {
+    const m = safeProposalMap([region(1), region(2)]);
+    const ds = decisionSet([decision(1, "ink"), decision(2, "substrate")], {
+      proposalDecision: "remove_with_exceptions",
+      proposalDecisionAt: "2026-01-01T00:00:00.000Z",
+      proposalHash: "proposal-hash-safe",
+    });
+    assert.equal(assessSeparationReviewState(m, ds), "review_complete");
+  });
+
+  it("a fullRemovalSafe proposal alone stays review_not_required regardless of whatever decision set is passed -- nothing to decide, so nothing can move it off review_not_required", () => {
+    // Contrast with `proposalMap` (fullRemovalSafe: false) above, where an
+    // undecided/pending decision set is exactly what keeps it at
+    // review_required -- here there is deliberately nothing left to decide,
+    // so even a stale or absent decision set changes nothing.
+    const m = safeProposalMap([]);
+    assert.equal(assessSeparationReviewState(m, null), "review_not_required");
+    const pendingDs = decisionSet([], {
+      proposalDecision: "pending",
+      proposalHash: "proposal-hash-safe",
+    });
+    assert.equal(assessSeparationReviewState(m, pendingDs), "review_not_required");
+  });
+
+  it("isReadyForFinalApproval still requires an explicit decision on a fullRemovalSafe proposal -- this field changes ONLY the automatic no-mandatory-review gate, never the separate proposal-approval gate an operator who does enter the review UI relies on", () => {
+    const m = safeProposalMap([]);
+    assert.equal(
+      isReadyForFinalApproval(m, null),
+      false,
+      "isReadyForFinalApproval is untouched by fullRemovalSafe on purpose -- see its own doc comment",
+    );
   });
 });

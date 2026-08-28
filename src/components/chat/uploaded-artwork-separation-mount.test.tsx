@@ -142,24 +142,42 @@ describe("UploadedArtworkPanel — SeparationReviewPanel mount (Intelligent Sepa
     assert.match(html, new RegExp(SEPARATION_LOADING_TEXT));
   });
 
-  it("X: separation review is positioned after the comparison and its warning, before the approval controls", () => {
+  it("X: separation review is positioned after the review area (loading state, on first render), before the approval controls", () => {
+    // Phase 28G Defect A: "Review your artwork" (the ordinary comparison's
+    // own heading) no longer renders on the FIRST render at all -- the
+    // very first render is now the review-loading state
+    // (`data-review-loading-state`), which occupies the same structural
+    // position the comparison used to. The ordering guarantee this test
+    // protects is unchanged: the review area comes first, then
+    // `SeparationReviewPanel`'s own mount point, then the approval
+    // controls area.
     const html = render("compare");
-    const comparisonAt = html.indexOf("Review your artwork before continuing");
+    const reviewAreaAt = html.indexOf("data-review-loading-state");
     const separationAt = html.indexOf(SEPARATION_LOADING_TEXT);
     const approvalAt = html.indexOf("Your original upload is saved and unchanged.");
-    assert.ok(comparisonAt !== -1 && separationAt !== -1 && approvalAt !== -1);
+    assert.ok(reviewAreaAt !== -1 && separationAt !== -1 && approvalAt !== -1);
     assert.ok(
-      comparisonAt < separationAt && separationAt < approvalAt,
-      "expected order: comparison -> separation review -> approval controls",
+      reviewAreaAt < separationAt && separationAt < approvalAt,
+      "expected order: review area -> separation review -> approval controls",
     );
   });
 
-  it("Goal 16: easy artwork's approval button renders on the FIRST render, with no wait on the separation check", () => {
-    // Optimistic by construction: `CompareStep` starts `separationState` at
-    // `null` ("assume not required") specifically so this button never waits
-    // on `SeparationReviewPanel`'s fetch — see `UploadedArtworkPanel.tsx`.
+  it("Phase 28G Defect A CORRECTION of 'Goal 16': easy artwork's approval button does NOT render on the FIRST render -- it fails closed until separation status resolves", () => {
+    // BEFORE Phase 28G, this test asserted the opposite: `CompareStep`
+    // started `separationState` at `null` ("assume not required")
+    // specifically so this button never waited on `SeparationReviewPanel`'s
+    // fetch. Human acceptance on the real Chili & Salsa order proved that
+    // optimism unsafe -- for the ~10 seconds the fetch took, the customer
+    // saw and could click an approval button before the system had
+    // actually established whether approving it that way was safe. This is
+    // the CENTRAL behavior Phase 28G Defect A fixes: `separationState` now
+    // starts at `"checking"`, and this button is withheld until it
+    // resolves. See `uploaded-artwork-single-review.test.tsx` for the full
+    // suite proving this, and for the source-level proof that the button
+    // DOES render once resolved to "no gate required".
     const html = render("compare");
-    assert.match(html, /Use Prepared Artwork/);
+    assert.doesNotMatch(html, /Use This Artwork/);
+    assert.match(html, /data-review-loading-state/);
   });
 
   it("Goal 16: no amber warning appears solely because the separation feature exists", () => {

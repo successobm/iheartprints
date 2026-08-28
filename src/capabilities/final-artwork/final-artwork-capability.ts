@@ -58,6 +58,8 @@ import {
   STANDARD_RASTER_TREATMENT_KEY,
   currentProductionTreatmentKey,
 } from "@/capabilities/shared/production-treatment";
+import { describeProductionVariantStatus } from "@/capabilities/shared/production-variant";
+import { ArtworkFinalizationRasterNotReadyError } from "./raster-not-ready-error";
 
 export interface RequestFinalArtworkResult {
   approval: FinalDirectionApproval;
@@ -513,6 +515,39 @@ export function createFinalArtworkCapability(
       const productionTreatmentKey = currentProductionTreatmentKey(
         snapshot.brief,
       );
+
+      // Phase 28I Section 9/10 — THE RASTER-FIRST HARD GATE, enforced HERE,
+      // not in the UI. "Halftone must not be created until Standard Raster
+      // is genuinely print_ready" is a production-integrity rule, and a
+      // button being hidden is not integrity: a direct
+      // `POST /production-treatment` + `POST /artwork-preparation`
+      // sequence reaches this exact function, with or without the button
+      // ever rendering. Checked against the SAME confirmed width and the
+      // SAME approved preparation this job itself is about to target
+      // (`resolveProductionVariantState` reads the project's own current
+      // confirmed size), so a Halftone request can never race ahead of, or
+      // disagree with, what Standard Raster's own card is showing.
+      //
+      // Scoped to NEW job creation only — an existing, already-completed
+      // Halftone job from before this gate existed (Phase 28H's real
+      // Chili & Salsa order) is untouched: nothing here mutates, hides, or
+      // re-validates a prior result, and every READ path
+      // (`resolveProductionVariantState`, the download route,
+      // `resolveOneProductionVariant`) is completely unaffected by this
+      // check, which only ever runs on the way IN to creating a job.
+      if (productionTreatmentKey !== STANDARD_RASTER_TREATMENT_KEY) {
+        const rasterState = await this.resolveProductionVariantState(
+          projectId,
+          STANDARD_RASTER_TREATMENT_KEY,
+        );
+        const rasterStatus = describeProductionVariantStatus(
+          rasterState.job?.status ?? null,
+          rasterState.validationStatus,
+        );
+        if (rasterStatus !== "print_ready") {
+          throw new ArtworkFinalizationRasterNotReadyError(rasterStatus);
+        }
+      }
 
       const { job, alreadyRequested } = await resolvePreparedUploadJob(
         repo,

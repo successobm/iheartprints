@@ -18,6 +18,7 @@
 
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
 import { createNewWorkflowChosen } from "@/lib/domain/conversation";
+import type { SeparationCheckStatus } from "./SeparationReviewPanel";
 
 /**
  * Transient, client-only, and now UPLOAD-ONLY. Correction A removed the
@@ -134,17 +135,16 @@ export function needsAutomaticBackgroundReview(
  * separation capability itself is saying operator review is not the right
  * continuation, so the existing conservative terminal state stands exactly
  * as it did before this phase — never invented past what the capability
- * actually proved.
+ * actually proved. Phase 28G's `"checking"` (the fetch has not resolved
+ * yet) and `"error"` (it resolved but failed outright) fall through the
+ * same way `null` always did: neither is one of the three enumerated
+ * states, so neither routes the operator in until the answer is actually
+ * known — this function was never the place `CompareStep`'s own fail-
+ * closed loading state lives (see that component instead).
  */
 export function isRoutedToOperatorSeparationReview(
   classification: ArtworkPreparationView["classification"],
-  separationState:
-    | "review_not_required"
-    | "review_required"
-    | "review_in_progress"
-    | "review_complete"
-    | "cannot_safely_automate"
-    | null,
+  separationState: SeparationCheckStatus | null,
 ): boolean {
   return (
     needsAutomaticBackgroundReview(classification) &&

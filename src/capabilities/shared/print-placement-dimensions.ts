@@ -362,3 +362,33 @@ export function resolveWidthConstrainedSizing(
     constrainedBy,
   };
 }
+
+/**
+ * Phase 28I: the ARTWORK-EDGE SAFETY MARGIN, moved here from
+ * `final-artwork/alpha-trim.ts` (which now imports it back — see that
+ * file's re-export) so it has exactly ONE definition reachable from BOTH
+ * the customer-facing size preview (`print-ready-size.ts`, which must never
+ * import from `final-artwork` per the dependency direction documented in
+ * `capability-boundaries.ts`) and the production worker's actual pixel
+ * trim. Before this move, `print-ready-size.ts` computed the customer's
+ * quoted print size from the RAW alpha bounding box, while
+ * `production-normalization.ts` computed the plate actually produced from
+ * that SAME box plus this margin — a real, if small (a few hundredths of an
+ * inch), disagreement between the number a customer saw before confirming
+ * and the file actually delivered. Both now derive from this one function.
+ *
+ * A few pixels of breathing room so a printer's own edge handling never
+ * clips an anti-aliased or glowing outer pixel — deliberately tiny and
+ * proportional to the artwork's own size, never a fixed padded canvas.
+ */
+export const MIN_SAFETY_MARGIN_PX = 8;
+/** Proportional component of the safety margin — a fraction of the artwork's own longest side. */
+export const SAFETY_MARGIN_FRACTION = 0.005;
+
+export function safetyMarginPxFor(bounds: { width: number; height: number }): number {
+  const longestSide = Math.max(bounds.width, bounds.height);
+  return Math.max(
+    MIN_SAFETY_MARGIN_PX,
+    Math.ceil(longestSide * SAFETY_MARGIN_FRACTION),
+  );
+}

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   PRODUCTION_VARIANT_TREATMENTS,
+  classifyVariantAttentionKind,
   describePackageGuidance,
   describeProductionVariantCostSummary,
   describeProductionVariantStatus,
@@ -85,6 +86,34 @@ describe("describeVariantAttentionReason", () => {
     assert.doesNotMatch(raster!, /some_future_check/);
     assert.doesNotMatch(halftone!, /some_future_check/);
     assert.notEqual(raster, halftone);
+  });
+});
+
+/**
+ * Phase 28H Section 10 — DETERMINISTIC vs. OTHER, from actual internal
+ * evidence. Standard Raster's validation profile has several OTHER blocking
+ * checks entirely unrelated to insufficient resolution
+ * (`aspect_ratio_preserved`, `alpha_bound_artwork`, `transparent_dead_canvas`,
+ * `physical_width_policy`, ...) -- this proves the classification keys off
+ * the SAME three checks `describeVariantAttentionReason` uses for its
+ * specific sentence, never a broader "any Standard Raster needs_attention"
+ * inference.
+ */
+describe("classifyVariantAttentionKind", () => {
+  it("reconstruction_sufficiency / effective_resolution / minimum_raster_dimensions -> deterministic_enhancement", () => {
+    assert.equal(classifyVariantAttentionKind("reconstruction_sufficiency"), "deterministic_enhancement");
+    assert.equal(classifyVariantAttentionKind("effective_resolution"), "deterministic_enhancement");
+    assert.equal(classifyVariantAttentionKind("minimum_raster_dimensions"), "deterministic_enhancement");
+  });
+
+  it("null -> null (nothing to classify)", () => {
+    assert.equal(classifyVariantAttentionKind(null), null);
+  });
+
+  it("an unrelated blocking check (e.g. aspect ratio distortion, dead canvas, alpha-bound artwork) -> 'other', never 'deterministic_enhancement'", () => {
+    for (const check of ["aspect_ratio_preserved", "alpha_bound_artwork", "transparent_dead_canvas", "physical_width_policy", "halftone_tonal_sufficiency"]) {
+      assert.equal(classifyVariantAttentionKind(check), "other", `${check} must not be classified as deterministic_enhancement`);
+    }
   });
 });
 
@@ -188,6 +217,7 @@ function variant(overrides: Partial<ProductionVariantView>): ProductionVariantVi
     pixelHeight: null,
     halftone: null,
     attentionReason: null,
+    attentionKind: null,
     costSummary: describeProductionVariantCostSummary(null, null),
     ...overrides,
   };

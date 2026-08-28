@@ -149,8 +149,6 @@ function visibleText(html: string): string {
 function renderPanel(options: {
   finalizationStatus?: CustomerFinalizationStatus;
   preparingForPrint?: boolean;
-  pendingTreatment?: "standard_raster" | "halftone_dtf" | null;
-  treatment?: ProductionTreatmentView;
   busy?: boolean;
 }) {
   return renderToString(
@@ -164,9 +162,6 @@ function renderPanel(options: {
       printReadySize: confirmedSize(),
       finalizationStatus: options.finalizationStatus ?? "not_requested",
       preparingForPrint: options.preparingForPrint ?? false,
-      productionTreatment: options.treatment ?? treatmentView(),
-      pendingTreatment: options.pendingTreatment ?? null,
-      treatmentPreviewUrls: {},
       onUpload: () => {},
       onSaveDetails: () => {},
       onPrepare: () => {},
@@ -176,68 +171,23 @@ function renderPanel(options: {
       onUseRecommendedSize: () => {},
       onChooseGarmentSize: () => {},
       onPrepareForPrint: () => {},
-      onSelectStandardRaster: () => {},
-      onSelectHalftoneTreatment: () => {},
     }),
   );
 }
 
-describe("Phase 27M — treatment selection shows immediate, request-specific waiting feedback (UploadedArtworkPanel path)", () => {
-  it("D/H: no pending treatment -> no waiting copy, static distinguishing copy shown instead", () => {
-    const text = visibleText(renderPanel({}));
-    assert.doesNotMatch(text, /Switching treatment…/);
-    assert.doesNotMatch(text, /Loading halftone options…/);
-    assert.match(text, /Standard Raster — normal full-color print preparation\./);
-  });
-
-  it("D: selecting Standard Raster immediately shows 'Switching treatment…'", () => {
-    const text = visibleText(
-      renderPanel({ pendingTreatment: "standard_raster", busy: true }),
-    );
-    assert.match(text, /Switching treatment…/);
-  });
-
-  it("D: selecting DTF Halftone immediately shows 'Loading halftone options…'", () => {
-    const text = visibleText(
-      renderPanel({ pendingTreatment: "halftone_dtf", busy: true }),
-    );
-    assert.match(text, /Loading halftone options…/);
-  });
-
-  it("H: DTF Halftone -> Standard Raster shows the SAME 'Switching treatment…' feedback, not the halftone-specific copy", () => {
-    // The click that starts this transition asks for "standard_raster" —
-    // whichever treatment was active before is irrelevant to which pending
-    // label is correct; only the TARGET of the in-flight request is.
-    const text = visibleText(
-      renderPanel({
-        treatment: treatmentView({ treatment: "halftone_dtf" }),
-        pendingTreatment: "standard_raster",
-        busy: true,
-      }),
-    );
-    assert.match(text, /Switching treatment…/);
-    assert.doesNotMatch(text, /Loading halftone options…/);
-  });
-
-  it("E: while pending, both treatment buttons are actually disabled (real disabled attribute, not just styling)", () => {
-    const html = renderPanel({ pendingTreatment: "halftone_dtf", busy: true });
-    const compact = html.replace(/\s+/g, " ");
-    for (const label of ["Standard Raster", "DTF Halftone"]) {
-      const match = new RegExp(`<button([^>]*)>\\s*${label}\\s*</button>`).exec(compact);
-      assert.ok(match, `no <button> labelled "${label}"`);
-      assert.match(match![1], / disabled=""/, `${label} must be disabled while a treatment request is pending`);
-    }
-  });
-
-  it("F/G: pending clears on both success and failure — this is prop-driven, not sticky client state", () => {
-    // Two independent renders of "not pending" (as ChatApp's `finally` leaves
-    // it after either a success or a caught failure) must render identically
-    // to the baseline — nothing about a prior pending state survives.
-    const afterSuccess = renderPanel({ pendingTreatment: null, busy: false });
-    const baseline = renderPanel({});
-    assert.equal(afterSuccess, baseline);
-  });
-});
+// Phase 28H removed the entire "Phase 27M — treatment selection shows
+// immediate, request-specific waiting feedback (UploadedArtworkPanel path)"
+// describe block that used to live here: `ProductionTreatmentPanel` is no
+// longer mounted inside `UploadedArtworkPanel` at all (Standard Raster is
+// now attempted automatically, with no customer treatment choice
+// beforehand), so `pendingTreatment`/`onSelectStandardRaster`/
+// `onSelectHalftoneTreatment` no longer exist on `UploadedArtworkPanelProps`.
+// `ProductionTreatmentPanel`'s OWN pending-copy behavior is still proven
+// directly below ("ProductionTreatmentPanel unit-level pending copy") since
+// the component itself is untouched — only its customer-facing mount point
+// was removed. See `uploaded-artwork-print-ready-flow.test.tsx` for the
+// Phase 28H replacement coverage (Standard-Raster-only initial creation,
+// the optional Halftone offer, and its own "Creating…" feedback).
 
 describe("Phase 27M — Create Print-Ready Artwork shows immediate feedback on click (both surfaces)", () => {
   it("J: UploadedArtworkPanel path — preparingForPrint immediately swaps the label to 'Creating Print-Ready Artwork…'", () => {

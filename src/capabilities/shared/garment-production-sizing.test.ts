@@ -113,26 +113,39 @@ describe("Print'em All Phase 1 — recommendation is not authority", () => {
     // The operator's initial Print'em All production recommendations, pinned
     // exactly. These are expected to evolve from real production evidence;
     // this test is what makes an unintended drift visible rather than silent.
-    const expected = {
+    // youth/womens_small/adult_standard remain SQUARE recommendations — a
+    // recommendation is an AREA, and the artwork's own proportions decide
+    // how much of it gets used.
+    const squareExpected = {
       youth: 8.5,
       womens_small: 9,
       adult_standard: 10.5,
-      adult_plus: 12,
     } as const;
 
-    for (const [garmentSizeClass, widthIn] of Object.entries(expected)) {
+    for (const [garmentSizeClass, widthIn] of Object.entries(squareExpected)) {
       for (const placement of ["full_front", "full_back"] as const) {
         assert.deepEqual(
           recommendProductionBox({
             placement,
-            garmentSizeClass: garmentSizeClass as keyof typeof expected,
+            garmentSizeClass: garmentSizeClass as keyof typeof squareExpected,
           })!.box,
-          // Square, because a recommendation is an AREA — the artwork's own
-          // proportions decide how much of it gets used.
           { maxWidthIn: widthIn, maxHeightIn: widthIn },
           `${garmentSizeClass} @ ${placement}`,
         );
       }
+    }
+
+    // Phase 28I: adult_plus is no longer square. It shares adult_standard's
+    // 10.5in WIDTH ceiling (a larger garment does not by itself justify MORE
+    // width than the standard, economical DTF envelope) while keeping a
+    // taller 12in HEIGHT ceiling a larger garment can still make good use of
+    // for a portrait design.
+    for (const placement of ["full_front", "full_back"] as const) {
+      assert.deepEqual(
+        recommendProductionBox({ placement, garmentSizeClass: "adult_plus" })!.box,
+        { maxWidthIn: 10.5, maxHeightIn: 12 },
+        `adult_plus @ ${placement}`,
+      );
     }
   });
 
@@ -321,7 +334,15 @@ describe("Print'em All Phase 1 — the live 562x486 full-back fixture", () => {
       { garmentSizeClass: "youth", widthIn: 8.5, heightIn: 7.35 },
       { garmentSizeClass: "womens_small", widthIn: 9, heightIn: 7.78 },
       { garmentSizeClass: "adult_standard", widthIn: 10.5, heightIn: 9.08 },
-      { garmentSizeClass: "adult_plus", widthIn: 12, heightIn: 10.38 },
+      // Phase 28I: this LANDSCAPE fixture is width-constrained in every box
+      // (it never reaches the height ceiling), so adult_plus -- which now
+      // shares adult_standard's 10.5in width ceiling instead of an
+      // independent 12in one -- produces the IDENTICAL result to
+      // adult_standard here. That is the intended effect: a larger garment
+      // no longer gets more WIDTH just for being larger; see the
+      // TALL/portrait test below for where adult_plus's still-taller 12in
+      // height ceiling continues to matter.
+      { garmentSizeClass: "adult_plus", widthIn: 10.5, heightIn: 9.08 },
     ] as const;
 
     for (const row of expected) {
@@ -349,11 +370,71 @@ describe("Print'em All Phase 1 — the live 562x486 full-back fixture", () => {
     }
   });
 
-  it("L: the view reports the same three figures a customer would read", () => {
+  it("Phase 28C, D-G: a TALL/portrait design contains proportionally into EVERY garment class's own box -- height controls in every one, and increasing garment size never lets a tall design exceed that class's OWN height policy merely because more width happens to be available", () => {
+    // The reported live order's own proportions: a 2:3 portrait.
+    const tallWidthPx = 2000;
+    const tallHeightPx = 3000;
+    const sourceAspect = tallHeightPx / tallWidthPx;
+
     const expected = [
-      { garmentSizeClass: "youth", widthIn: 8.5, heightIn: 7.35 },
-      { garmentSizeClass: "adult_standard", widthIn: 10.5, heightIn: 9.08 },
-      { garmentSizeClass: "adult_plus", widthIn: 12, heightIn: 10.38 },
+      { garmentSizeClass: "youth", widthIn: 5.67, heightIn: 8.5 },
+      { garmentSizeClass: "womens_small", widthIn: 6, heightIn: 9 },
+      { garmentSizeClass: "adult_standard", widthIn: 7, heightIn: 10.5 },
+      { garmentSizeClass: "adult_plus", widthIn: 8, heightIn: 12 },
+    ] as const;
+
+    let previousHeightIn = 0;
+    for (const row of expected) {
+      const box = recommendProductionBox({
+        placement: "full_front",
+        garmentSizeClass: row.garmentSizeClass,
+      })!.box!;
+      const contained = containWithinBox(
+        "full_front",
+        box.maxWidthIn,
+        box.maxHeightIn,
+        tallWidthPx,
+        tallHeightPx,
+      );
+
+      assert.equal(round2(contained.widthIn), row.widthIn, row.garmentSizeClass);
+      assert.equal(round2(contained.heightIn), row.heightIn, row.garmentSizeClass);
+      // The defining assertion: for THIS artwork, height is what controls
+      // in every single garment class -- never width, regardless of how
+      // much wider the box gets.
+      assert.equal(contained.constrainedBy, "max_height", row.garmentSizeClass);
+      assert.ok(
+        Math.abs(contained.heightPx / contained.widthPx - sourceAspect) < 1e-3,
+        `${row.garmentSizeClass} distorted the artwork`,
+      );
+      // Neither axis may ever exceed this class's own box.
+      assert.ok(contained.widthIn <= box.maxWidthIn + 1e-9, `${row.garmentSizeClass} width exceeded its own box`);
+      assert.ok(contained.heightIn <= box.maxHeightIn + 1e-9, `${row.garmentSizeClass} height exceeded its own box`);
+      // Exactly this class's OWN height policy, never a neighboring class's --
+      // e.g. moving from youth to Standard Adult must land on Standard
+      // Adult's 10.5in ceiling, never silently stay at youth's 8.5in just
+      // because nothing forced a recompute.
+      assert.equal(contained.heightIn, box.maxHeightIn, `${row.garmentSizeClass} height must equal its own box's max height, not a neighboring class's`);
+      // Monotonically larger with a larger garment class -- moving from
+      // Youth to 2XL-4XL must never SHRINK the result.
+      assert.ok(contained.heightIn > previousHeightIn, `${row.garmentSizeClass} must be strictly larger than the previous, smaller class`);
+      previousHeightIn = contained.heightIn;
+    }
+  });
+
+  it("L: the view reports the same three figures a customer would read", () => {
+    // Phase 28I: heights are ~0.03-0.04in taller than before this phase --
+    // the recommendation card now applies the SAME artwork-edge safety
+    // margin production actually uses (`withArtworkEdgeSafetyMargin`), so
+    // this figure agrees exactly with the plate that gets produced instead
+    // of quoting the pre-margin raw bounding box. adult_plus no longer
+    // recommends more WIDTH than adult_standard (Phase 28I's economical
+    // envelope) -- for this LANDSCAPE fixture (width-constrained in every
+    // box), that makes it identical to adult_standard's own figures.
+    const expected = [
+      { garmentSizeClass: "youth", widthIn: 8.5, heightIn: 7.38 },
+      { garmentSizeClass: "adult_standard", widthIn: 10.5, heightIn: 9.12 },
+      { garmentSizeClass: "adult_plus", widthIn: 10.5, heightIn: 9.12 },
     ] as const;
 
     for (const row of expected) {
@@ -562,7 +643,9 @@ describe("Print'em All Phase 1 — the size view says all three things", () => {
     assert.equal(view.recommendation!.boxWidthIn, 10.5);
     assert.equal(view.recommendation!.boxHeightIn, 10.5);
     assert.equal(view.recommendation!.artworkWidthIn, 10.5);
-    assert.equal(view.recommendation!.artworkHeightIn, 9.08);
+    // Phase 28I: +0.04in vs. before this phase -- the artwork-edge safety
+    // margin production actually applies is now included in this figure.
+    assert.equal(view.recommendation!.artworkHeightIn, 9.12);
     assert.equal(view.recommendation!.isConfirmed, false);
   });
 
@@ -583,7 +666,8 @@ describe("Print'em All Phase 1 — the size view says all three things", () => {
     assert.equal(view.blockingMessage, null);
     assert.equal(view.recommendation!.isConfirmed, true);
     assert.equal(view.widthIn, 10.5);
-    assert.equal(view.heightIn, 9.08);
+    // Phase 28I: +0.04in vs. before this phase -- see the margin note above.
+    assert.equal(view.heightIn, 9.12);
   });
 
   it("F: a confirmed 12in oversize is REPORTED as 12in, beside the 10.5 recommendation", () => {
@@ -599,7 +683,8 @@ describe("Print'em All Phase 1 — the size view says all three things", () => {
     })!;
 
     assert.equal(view.widthIn, 12);
-    assert.equal(view.heightIn, 10.38);
+    // Phase 28I: +0.04in vs. before this phase -- see the margin note above.
+    assert.equal(view.heightIn, 10.42);
     // The recommendation is still stated — and is still 10.5. Recommendation
     // and confirmed size are allowed to differ; that is the whole point.
     assert.equal(view.recommendation!.boxWidthIn, 10.5);
@@ -624,10 +709,21 @@ describe("Print'em All Phase 1 — the size view says all three things", () => {
     })!;
     assert.equal(widthOnly.confirmed, true);
     assert.equal(widthOnly.recommendation!.isConfirmed, false);
-    // A width alone lets the portrait run past the recommended area, bounded
-    // only by the 14in technical height limit.
+    // Phase 28C (Bug B correction): a width alone lets the portrait run past
+    // the recommended area, bounded only by the 14in technical height limit
+    // — but width and height must still describe the SAME aspect-preserving
+    // plate. Before this fix, `widthIn` and `heightIn` were sourced from two
+    // different computations: `heightIn` was correctly clipped to the 14in
+    // ceiling, but `widthIn` was left at the bare confirmed 10.5in — an
+    // internally inconsistent "10.5 x 14" pair that does not describe this
+    // artwork's own 2:3 aspect ratio at all (10.5:14 is 3:4). The correct,
+    // aspect-preserving pair for a 2:3 portrait clipped to 14in tall is
+    // ~9.33 x 14 — the same `resolveWidthConstrainedSizing` call that
+    // clipped the height ALSO narrows the width to match. Phase 28I: +0.05in
+    // vs. before this phase -- the artwork-edge safety margin production
+    // actually applies is now included in this figure too.
     assert.equal(widthOnly.heightIn, 14);
-    assert.equal(widthOnly.widthIn, 10.5);
+    assert.equal(widthOnly.widthIn, 9.38);
 
     const asBox = describePrintReadySize({
       printPlacement: "full_back",
@@ -642,7 +738,16 @@ describe("Print'em All Phase 1 — the size view says all three things", () => {
     assert.equal(asBox.recommendation!.isConfirmed, true);
     // Contained within the recommended area: 7.0 x 10.5, aspect preserved.
     assert.equal(asBox.heightIn, 10.5);
-    assert.equal(asBox.recommendation!.artworkWidthIn, 7);
+    // Phase 28C (Bug B correction): the PRIMARY "Your artwork will print
+    // at" statement (`widthIn`/`heightIn`) must agree with the
+    // recommendation's own already-correct contained figures — before this
+    // fix, `asBox.widthIn` was silently left at the raw confirmed 10.5in
+    // box width (never asserted here, which is exactly how this
+    // inconsistency went unnoticed) while only `heightIn` was genuinely
+    // contained. Phase 28I: +0.03in vs. before this phase -- see the margin
+    // note above.
+    assert.equal(asBox.widthIn, 7.03);
+    assert.equal(asBox.recommendation!.artworkWidthIn, 7.03);
     assert.equal(asBox.recommendation!.artworkHeightIn, 10.5);
   });
 
@@ -693,9 +798,10 @@ describe("Print'em All Phase 1 — the size view says all three things", () => {
 
     assert.equal(confirmed.widthIn, 13);
     assert.equal(confirmed.confirmed, true);
-    // The recommendation is still stated, and is still 12 — recommendation
+    // The recommendation is still stated, and is still 10.5 (Phase 28I:
+    // adult_plus no longer recommends 12in of width) — recommendation
     // and confirmed size are allowed to disagree. That is the whole point.
-    assert.equal(confirmed.recommendation!.boxWidthIn, 12);
+    assert.equal(confirmed.recommendation!.boxWidthIn, 10.5);
     assert.equal(confirmed.recommendation!.isConfirmed, false);
   });
 

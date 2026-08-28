@@ -222,7 +222,7 @@ describe("SeparationReviewPanel structure — one region at a time, not 18 cards
 
   it("Phase 23: entering preserve mode never itself calls the decision endpoint — only an actual tap does", () => {
     const beginFn = SOURCE.slice(SOURCE.indexOf("function beginPreservePart"), SOURCE.indexOf("async function handleProposalTap"));
-    assert.doesNotMatch(beginFn, /submitProposalDecision/, "clicking \"Preserve Part of This\" must not itself write a decision — only a tap does");
+    assert.doesNotMatch(beginFn, /submitProposalDecision/, "clicking \"Keep Part of Pink Area\" must not itself write a decision — only a tap does");
     assert.match(beginFn, /setProposalTapMode\(true\)/);
   });
 

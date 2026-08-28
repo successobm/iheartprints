@@ -142,6 +142,32 @@ export interface InBoundsProposal {
   proposalHash: string;
   pixelCount: number;
   bounds: RegionBounds;
+  /**
+   * Phase 28C: true when fully removing this ENTIRE proposal — the
+   * automatic worst case, zero preserve exceptions, zero region decisions,
+   * exactly `buildSeparationMaster`'s own default `ProposalAuthority` — would
+   * orphan zero light-ink pixels (`runSeparationPostChecks`'s
+   * `orphanedLightInkPixels`, the SAME production-defect signal Phase 6
+   * already validated). Computed once, here, from geometry alone — never
+   * fitted to any one fixture.
+   *
+   * A tall, edge-to-edge design (poster-style artwork with ink reaching
+   * near every border) makes `artworkBounds` — the tight bbox of ALL ink —
+   * span nearly the whole canvas, which puts almost every removed
+   * background pixel "in bounds" by pure geometry, regardless of whether
+   * removing it could ever plausibly harm real content. This field is what
+   * lets `assessSeparationReviewState` tell that case apart from a proposal
+   * whose full removal genuinely would strip contrast out from under real
+   * ink (the INCREDI-BOWLS class this whole mechanism exists to protect).
+   *
+   * Deliberately narrow: this says nothing about `consequentialRegions` —
+   * an interior region an operator must still decide "substrate" or "ink"
+   * for is a SEPARATE axis, and this field never influences it. A region's
+   * pixels can be genuinely ambiguous (a color the analyzer cannot tell
+   * apart from background) even when the wide-open proposal margin around
+   * it is not.
+   */
+  fullRemovalSafe: boolean;
 }
 
 /** An AI suggestion, if one exists. Never authoritative — see the module doc comment. */
@@ -178,7 +204,8 @@ export interface RegionDecision {
  *   preserve_all             the entire proposal is retained, exactly like
  *                            `pending`'s pixel outcome, but is an EXPLICIT,
  *                            resolved decision (unlike `pending`) — reached
- *                            via "Keep All Highlighted", never inferred.
+ *                            via "Keep Pink Area" (Phase 28E; was "Keep All
+ *                            Highlighted"), never inferred.
  */
 export type ProposalDecision = "pending" | "remove_with_exceptions" | "preserve_all";
 
@@ -287,7 +314,7 @@ export interface SeparationReviewView {
   /** `null` when `regionMap.inBoundsProposal` is null — nothing for the operator to decide about the proposal. */
   proposalDecision: ProposalDecision | null;
   proposalPreserveOps: PreserveExceptionOperation[];
-  /** True when everything required for `Use This Preparation` is satisfied — the single field the UI needs instead of re-deriving completeness from `state`/`pendingRegionIds`/`proposalDecision` itself. */
+  /** True when everything required for `Use This Artwork` (Phase 28F; was `Use This Preparation`) is satisfied — the single field the UI needs instead of re-deriving completeness from `state`/`pendingRegionIds`/`proposalDecision` itself. */
   readyForFinalApproval: boolean;
 }
 

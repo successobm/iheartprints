@@ -307,16 +307,22 @@ describe("UploadedArtworkPanel", () => {
     assert.doesNotMatch(html, /Remove the Background/);
   });
 
-  it("comparison step labels both images and offers exactly one approval", () => {
+  it("Phase 28G Defect A: the FIRST comparison-step render fails closed — no images, no approval yet, only the review-loading state and the always-available exit/edit doorways", () => {
+    // `separationState` now starts at `"checking"` specifically so this
+    // render can never show an approval-capable review before the system
+    // has established which one is authoritative -- see
+    // `uploaded-artwork-single-review.test.tsx` for the full Phase 28G
+    // Defect A suite this mirrors, and for the source-level proof that
+    // Original/Prepared/"Use This Artwork" DO render once separation
+    // status resolves to "no gate required".
     const html = render("compare");
 
-    assert.match(html, /Original/);
-    assert.match(html, /Prepared/);
-    assert.match(html, /Use Prepared Artwork/);
+    assert.match(html, /data-review-loading-state/);
+    assert.doesNotMatch(html, /Use This Artwork/);
+    assert.doesNotMatch(html, /Enlarge original artwork/);
+    assert.doesNotMatch(html, /Enlarge prepared artwork/);
     assert.match(html, /Keep my original for now/);
-    // "Enlarge" is a separate control from approval — viewing never approves.
-    assert.match(html, /Enlarge original artwork/);
-    assert.match(html, /Enlarge prepared artwork/);
+    assert.match(html, /Edit Artwork/);
   });
 
   it("approved + enhancement required is a truthful Phase 1 terminal — not print-ready", () => {
@@ -324,7 +330,7 @@ describe("UploadedArtworkPanel", () => {
 
     assert.doesNotMatch(approved, /Your artwork is ready to go/);
     assert.doesNotMatch(approved, /print-ready file is ready|print ready now/i);
-    assert.doesNotMatch(approved, /Use Prepared Artwork/);
+    assert.doesNotMatch(approved, /Use This Artwork/);
     assert.doesNotMatch(approved, /Approve|Finalize|Download|Enhance now/i);
 
     assert.match(approved, /Background preparation complete/);
@@ -353,7 +359,7 @@ describe("UploadedArtworkPanel", () => {
     });
 
     assert.doesNotMatch(approved, /Your artwork is ready to go/);
-    assert.doesNotMatch(approved, /Use Prepared Artwork/);
+    assert.doesNotMatch(approved, /Use This Artwork/);
     assert.match(approved, /Background preparation complete/);
     assert.match(approved, /ready for final print preparation/);
     assert.doesNotMatch(approved, /still needs to be enhanced/);
@@ -380,11 +386,21 @@ describe("UploadedArtworkPanel", () => {
     });
     assert.match(html, /Background preparation complete/);
     assert.match(html, /still needs to be enhanced/);
-    assert.doesNotMatch(html, /Use Prepared Artwork/);
+    assert.doesNotMatch(html, /Use This Artwork/);
   });
 
   it("shows a loading state rather than a broken image while URLs resolve", () => {
-    const html = render("compare", {}, { original: null, prepared: null });
+    // `ArtworkComparison` itself owns this behavior, and is only ever
+    // mounted by `CompareStep` once separation status resolves to "no gate
+    // required" (Phase 28G Defect A) -- exercised directly here, exactly
+    // as the dedicated "ArtworkComparison" describe block below already
+    // does for its other behaviors.
+    const html = renderToString(
+      createElement(ArtworkComparison, {
+        original: { url: null, loading: true },
+        prepared: { url: null, loading: true },
+      }),
+    );
     assert.match(html, /Loading…/);
   });
 });
@@ -479,14 +495,24 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     assert.doesNotMatch(html, /Adjust size/);
   });
 
-  it("states an honest needs-attention message, and offers a retry, on failure", () => {
+  it("states an honest needs-attention message, without a misleading 'Try Again', on failure", () => {
+    // Phase 28H Section 7/O: `needs_review` is Standard Raster's
+    // deterministic `finalization_required` -- a plain retry recomputes the
+    // identical verdict, so this button no longer calls itself "Try Again"
+    // (that framing is now reserved for `retryable_failure`, a genuine
+    // infrastructure hiccup where retrying might actually help). The
+    // fallback banner itself (shown here because no `printReadyPackage` is
+    // passed -- see the Phase 28H suite in
+    // `uploaded-artwork-print-ready-flow.test.tsx` for the package-present
+    // case) is unchanged.
     const html = render("approved", approvedState, {}, {
       finalizationStatus: "needs_review",
     });
 
     assert.match(html, /needs attention before we can finish/);
     assert.match(html, /uploaded artwork and the prepared version are both safe/);
-    assert.match(html, /Try Again/);
+    assert.doesNotMatch(html, /Try Again/);
+    assert.match(html, /Create Print-Ready Artwork/);
     assert.doesNotMatch(html, /Retry Preparation/);
     assert.doesNotMatch(html, /is ready|print-ready file is ready/i);
   });
@@ -598,7 +624,7 @@ describe("ArtworkComparison", () => {
       }),
     );
 
-    assert.doesNotMatch(html, /Use Prepared Artwork/);
+    assert.doesNotMatch(html, /Use This Artwork/);
     assert.doesNotMatch(html, />Approve</i);
     assert.doesNotMatch(html, />Select</i);
   });
@@ -637,6 +663,15 @@ describe("ArtworkComparison", () => {
  * repairing whatever automatic preparation produced.
  */
 describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX correction, Phase 27G renamed)", () => {
+  // Phase 28G Defect A: several assertions below describe content that
+  // only renders once separation status resolves to "no gate required" —
+  // unreachable from a single `renderToString` call now that the very
+  // first render is the review-loading state (see that section's own
+  // dedicated suite). Those are proven at the source level instead, the
+  // same pattern the "Edit Artwork routing" describe block below already
+  // uses for its own effect-driven assertions.
+  const PANEL_SOURCE = readFileSync(path.join(__dirname, "UploadedArtworkPanel.tsx"), "utf8");
+
   function render(overrides: Partial<ArtworkPreparationView> = {}) {
     return renderToString(
       createElement(UploadedArtworkPanel, {
@@ -656,23 +691,32 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
   }
 
   it("1/10: states the primary heading, exactly", () => {
-    const html = render();
-    assert.match(html, /Review your artwork before continuing/);
+    // Phase 28G Defect A: this heading only renders once separation status
+    // resolves to "no gate required" -- the very first render is the
+    // review-loading state instead (its own, differently-worded heading;
+    // see the Phase 28G Defect A suite in
+    // `uploaded-artwork-single-review.test.tsx`). Proven at the source
+    // level here, exactly the same way this file already proves other
+    // resolved-only content (e.g. "Edit Artwork routing" below).
+    assert.match(PANEL_SOURCE, /Review your artwork</);
   });
 
   it("2: supporting copy accounts for BOTH missing artwork and leftover background, in one neutral sentence", () => {
-    const html = render();
     // Not "brittle to every word" -- but it must mention comparing against
     // the original, and it must not commit to only one failure direction.
-    assert.match(html, /compare the prepared version with your original/i);
-    assert.match(html, /still there/i); // covers "artwork went missing"
-    assert.match(html, /background remains/i); // covers "background left behind"
+    // Source-level for the same reason as "1/10" above.
+    assert.match(PANEL_SOURCE, /compare the prepared version with your original/i);
+    assert.match(PANEL_SOURCE, /still there/i); // covers "artwork went missing"
+    assert.match(PANEL_SOURCE, /background remains/i); // covers "background left behind"
   });
 
-  it("3/4/12/A/B: 'Remove Background Manually' is present; every stale doorway label is gone", () => {
+  it("3/4/12/A/B: 'Edit Artwork' is present (Phase 28F; was 'Remove Background Manually'); every stale doorway label is gone", () => {
     const html = render();
 
-    assert.match(html, /Remove Background Manually/);
+    assert.match(html, /Edit Artwork/);
+    // The internal data-action hook is a stable test/analytics id, kept
+    // unchanged across the Phase 28F customer-facing rename — see
+    // Phase 28E's identical precedent for `data-proposal-action`.
     assert.match(html, /data-action="remove-background-manually"/);
     assert.doesNotMatch(html, /Fix My Artwork/);
     assert.doesNotMatch(html, /data-action="fix-my-artwork"/);
@@ -681,6 +725,7 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
     assert.doesNotMatch(html, /remove any areas we missed/i);
     assert.doesNotMatch(html, /This Isn.t Right/i);
     assert.doesNotMatch(html, /Background Repair/i);
+    assert.doesNotMatch(html, />Remove Background Manually</);
     // Constitution §6.6: none of the machinery may surface.
     assert.doesNotMatch(
       html,
@@ -688,45 +733,55 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
     );
   });
 
-  it("13: helper copy under 'Not quite right?' names BOTH repair directions and does not hide behind 'Fix My Artwork' framing", () => {
+  it("13: helper copy under the Edit Artwork doorway explains the toolbox in plain language", () => {
     const html = render();
-    assert.match(html, /Not quite right\?/);
-    assert.match(html, /removed part of your design/i);
-    assert.match(html, /left background behind/i);
+    assert.match(html, /Want to make changes\?/);
+    assert.match(html, /select what to keep, clean up what shouldn&#x27;t be there/i);
   });
 
-  it("8/14: 'Use Prepared Artwork' remains available under its own 'Looks good?' heading", () => {
+  it("8/14: 'Use This Artwork' (Phase 28F; was 'Use Prepared Artwork') remains available under its own 'Looks good?' heading", () => {
     const html = render();
-
-    assert.match(html, /Looks good\?/);
-    assert.match(html, /Use Prepared Artwork/);
+    // Both are gated behind the same "resolved, no gate" condition (Phase
+    // 28G Defect A) -- not renderable from one `renderToString` call, so
+    // proven at the source level; "Keep my original for now" has no such
+    // gate and is proven directly against the live render.
+    assert.match(PANEL_SOURCE, /Looks good\?/);
+    assert.match(PANEL_SOURCE, /Use This Artwork/);
+    assert.match(PANEL_SOURCE, /<ArtworkComparison\b/); // renders "Enlarge" once mounted -- see the ArtworkComparison describe block for direct proof
     assert.match(html, /Keep my original for now/);
-    assert.match(html, /Enlarge/);
   });
 
   it("Q/R/S: approval safety copy stays separate from Preview Background", () => {
-    const html = render();
-
-    assert.match(html, /Preview Background/);
-    assert.match(html, /Use Prepared Artwork/);
-    assert.match(html, /data-approval-safety-copy/);
+    // Both only render once resolved to "no gate required" (Preview
+    // Background lives inside `ArtworkComparison`, only mounted then) --
+    // proven at the source level that both exist and are distinct blocks.
+    assert.match(PANEL_SOURCE, /<ArtworkComparison/); // renders "Preview Background" once mounted -- see the ArtworkComparison describe block for direct proof
+    assert.match(PANEL_SOURCE, /Use This Artwork/);
+    assert.match(PANEL_SOURCE, /data-approval-safety-copy/);
   });
 
   it("K: original safety wording appears both on the tile and near the doorway", () => {
     const html = render();
-
-    assert.match(html, /The artwork you uploaded, untouched\./);
+    // The tile's own "untouched" caption lives inside `ArtworkComparison`,
+    // only mounted once resolved to "no gate required" -- proven directly
+    // against that component (see the ArtworkComparison describe block),
+    // referenced here at the source level.
+    assert.match(PANEL_SOURCE, /<ArtworkComparison/);
+    const artworkComparisonSource = readFileSync(path.join(__dirname, "ArtworkComparison.tsx"), "utf8");
+    assert.match(artworkComparisonSource, /The artwork you uploaded, untouched\./);
+    // The doorway-adjacent copy has no such gate and IS present on the
+    // very first render.
     assert.match(html, /Your original upload is saved and unchanged\./);
   });
 
   it("6/17/18: Original/Prepared stays prominent with White/Gray/Black inspection, not buried under copy", () => {
-    const html = render();
-
-    assert.match(html, /Original/);
-    assert.match(html, /Prepared/);
-    assert.match(html, /data-preview-background-option="white"/);
-    assert.match(html, /data-preview-background-option="gray"/);
-    assert.match(html, /data-preview-background-option="black"/);
+    // `ArtworkComparison` (mounted only once resolved to "no gate
+    // required" -- Phase 28G Defect A) owns Original/Prepared and the
+    // White/Gray/Black inspection controls; proven directly against that
+    // component in the "ArtworkComparison" describe block below. Here we
+    // only need to confirm `CompareStep` actually mounts it in the
+    // resolved, no-gate case.
+    assert.match(PANEL_SOURCE, /<ArtworkComparison\b/);
   });
 
   it("9/15: resolution enhancement is a separate, informational block, phrased distinctly from artwork repair", () => {
@@ -745,14 +800,14 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
     assert.match(html, /Resolution enhancement needed/);
     assert.match(html, /We&#x27;ll need to enhance it/);
     // It must sit in its own block, AFTER the primary compare/repair
-    // decision area (Section 9) — not nested inside the Remove Background
-    // Manually card, and not phrased as another repair failure.
+    // decision area (Section 9) — not nested inside the Edit Artwork card,
+    // and not phrased as another repair failure.
     const fixCardMatch = html.match(/data-action="remove-background-manually"[^]*?<\/div>/);
-    assert.ok(fixCardMatch, "Remove Background Manually card must exist");
+    assert.ok(fixCardMatch, "Edit Artwork card must exist");
     assert.doesNotMatch(
       fixCardMatch![0],
       /Resolution enhancement needed/,
-      "resolution notice must not be nested inside the Remove Background Manually card",
+      "resolution notice must not be nested inside the Edit Artwork card",
     );
     const fixIndex = html.indexOf('data-action="remove-background-manually"');
     const resolutionIndex = html.indexOf("data-resolution-notice");
@@ -808,8 +863,8 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
 });
 
 /**
- * Phase 27E UX correction, item 5 (renamed by Phase 27G): "Remove Background
- * Manually" must open the EXACT correction workspace already built in Phase
+ * Phase 27E UX correction, item 5 (renamed by Phase 27G, then Phase 28F to
+ * "Edit Artwork"): the doorway must open the EXACT correction workspace already built in Phase
  * 27E — same component, same frozen controls (Restore Missing Artwork /
  * Remove Background / zoom / pan / Undo / Start Over / Done Editing),
  * reached with no algorithm change and no new route. `renderToString`
@@ -819,33 +874,33 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
  * exactly how this repo's other client-state doorways are proven (see
  * `separation-review-workspace-shape.test.ts`).
  */
-describe("Remove Background Manually routing (Phase 27E UX correction, Phase 27G renamed)", () => {
+describe("Edit Artwork routing (Phase 27E UX correction, Phase 27G/28F renamed)", () => {
   const PANEL_SOURCE = readFileSync(path.join(__dirname, "UploadedArtworkPanel.tsx"), "utf8");
   const WORKSPACE_SOURCE = readFileSync(path.join(__dirname, "CorrectionWorkspace.tsx"), "utf8");
 
-  it("19: CompareStep's Remove Background Manually button sets correctionMode to 'editing', which renders CorrectionWorkspace", () => {
+  it("19: CompareStep's Edit Artwork button sets correctionMode to 'editing', which renders CorrectionWorkspace", () => {
     // The button and its onClick are adjacent JSX attributes on the same
     // element -- match them as one block rather than assuming an exact
     // attribute order.
     const buttonBlock =
       PANEL_SOURCE.match(/<button[^>]*data-action="remove-background-manually"[^>]*>/) ??
       PANEL_SOURCE.match(/<button[\s\S]*?data-action="remove-background-manually"/);
-    assert.ok(buttonBlock, "Remove Background Manually button must exist");
+    assert.ok(buttonBlock, "Edit Artwork button must exist");
     assert.match(PANEL_SOURCE, /onClick=\{\(\)\s*=>\s*setCorrectionMode\("editing"\)\}/);
     assert.match(PANEL_SOURCE, /correctionMode === "editing"/);
     assert.match(PANEL_SOURCE, /<CorrectionWorkspace/);
     assert.match(PANEL_SOURCE, /<CorrectionFinalReview/);
   });
 
-  it("L: Use Prepared Artwork calls onApprove directly and is not gated behind correctionMode/editing (automatic-success path never requires opening the manual workspace)", () => {
-    // "Use Prepared Artwork" must be wired to onApprove as a plain,
+  it("L: Use This Artwork calls onApprove directly and is not gated behind correctionMode/editing (automatic-success path never requires opening the manual workspace)", () => {
+    // "Use This Artwork" must be wired to onApprove as a plain,
     // top-level button -- not conditioned on correctionMode === "editing"
     // or on CorrectionWorkspace/CorrectionFinalReview having rendered.
     // This is what proves Phase 27G's automatic-success regression
     // requirement: the short path (upload -> automatic prep -> review ->
-    // Use Prepared Artwork) never forces a detour through Magic Wand.
-    const useButtonBlock = PANEL_SOURCE.match(/onClick=\{onApprove\}[\s\S]{0,400}Use Prepared Artwork/);
-    assert.ok(useButtonBlock, "Use Prepared Artwork must call onApprove directly");
+    // Use This Artwork) never forces a detour through Magic Wand.
+    const useButtonBlock = PANEL_SOURCE.match(/onClick=\{onApprove\}[\s\S]{0,400}Use This Artwork/);
+    assert.ok(useButtonBlock, "Use This Artwork must call onApprove directly");
   });
 
   it("no new correction route or algorithm import was introduced by this UX pass", () => {

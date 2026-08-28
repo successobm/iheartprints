@@ -1,7 +1,8 @@
 /**
  * Intelligent Separation Phase 23: pure state/geometry logic for the
  * unified in-bounds removal PROPOSAL workflow — "Check What Will Be
- * Removed" -> optional "Preserve Part of This" tap mode -> final review.
+ * Removed" -> optional "Keep Part of Pink Area" tap mode (Phase 28E name;
+ * was "Preserve Part of This") -> final review.
  * Extracted from `SeparationReviewPanel` for the same reason
  * `region-review-workspace.ts` was: this repo's test tooling is `node:test`
  * + `renderToString` (no DOM, no effects), so anything provable across a
@@ -134,8 +135,10 @@ export function hasInBoundsProposal(view: ProposalViewLike): boolean {
 
 /**
  * Whether the operator still needs to make the top-level proposal call
- * ("Looks Good" / "Keep All Highlighted" / "Preserve Part of This") before
- * anything else in the workflow is reachable. `null`/missing decisions and
+ * ("Remove Pink Area" / "Keep Pink Area" / "Keep Part of Pink Area" — Phase
+ * 28E renamed these from "Looks Good" / "Keep All Highlighted" / "Preserve
+ * Part of This") before anything else in the workflow is reachable.
+ * `null`/missing decisions and
  * `"pending"` are the same thing here — both mean "not yet decided",
  * matching the server's own fail-closed `effectiveProposalDecision`.
  */

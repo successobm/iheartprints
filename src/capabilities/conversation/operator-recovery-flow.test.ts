@@ -11,13 +11,6 @@ import { runAdaptiveInterviewToSummary } from "@/test-support/run-adaptive-inter
 import { createAcquisitionCapability } from "@/capabilities/acquisition";
 import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
 import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
-import { createFinalArtworkWorkerCapability } from "@/capabilities/final-artwork-worker";
-import { createPrintValidationCapability } from "@/capabilities/print-validation";
-import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
-import type {
-  FinalArtworkProvider,
-  FinalArtworkProviderOutput,
-} from "@/capabilities/final-artwork/provider";
 import type { ProjectRepository } from "@/lib/db/repository";
 
 /**
@@ -49,15 +42,6 @@ import type { ProjectRepository } from "@/lib/db/repository";
  * These scenarios drive the REAL capability graph over a real repository — the
  * same functions the HTTP routes call — rather than asserting on constants.
  */
-
-class ForbiddenReconstructionProvider implements FinalArtworkProvider {
-  readonly providerKey = "forbidden_paid_reconstruction";
-  calls = 0;
-  async produce(): Promise<FinalArtworkProviderOutput> {
-    this.calls += 1;
-    throw new Error("PAID PROVIDER REACHED — the halftone recovery path must never call it");
-  }
-}
 
 describe("Internal operator recovery after a failed Standard Raster job", () => {
   let tempDir = "";
@@ -385,78 +369,60 @@ describe("Internal operator recovery after a failed Standard Raster job", () => 
   // GOAL 8 — the whole flow, end to end
   // -------------------------------------------------------------------------
 
-  it("M+N+O+P+Q: the full recovery reaches print_ready with zero provider calls", async () => {
+  it("Phase 28I HARD CORRECTION of 'M+N+O+P+Q': switching straight to Halftone instead of Standard Raster is no longer a recovery path -- it is REJECTED, full stop", async () => {
+    // Before Phase 28I, this exact sequence (an earlier failed Standard
+    // Raster attempt, then switching treatment straight to Halftone at a
+    // NEW size) was the file's own headline "recovery" story: Halftone
+    // would run independently and reach print_ready with zero provider
+    // calls, never even attempting Standard Raster at the new size at all.
+    // Product policy explicitly overrules that now -- Standard Raster must
+    // itself reach print_ready, AT THE CURRENT CONFIRMED SIZE, before
+    // Halftone is even offered. The current confirmed size (4in) has never
+    // had ANY Standard Raster attempt -- the 10.5in historical failure is a
+    // different job identity entirely (Section 11) -- so the honest current
+    // status is `not_created`, and that alone is enough to block Halftone.
+    // `halftone-production.test.ts` and
+    // `print-ready-progressive-creation.test.ts` still prove Halftone's own
+    // zero-provider-call mechanics once Raster IS print_ready; this test's
+    // job now is to prove the gate itself holds for exactly the scenario
+    // that used to be this file's success story.
     const repo = await freshRepo();
     const { projectId, historical } = await setupLiveFailureShape(repo);
     const graph = await graphFor(repo);
 
-    // --- exactly the operator's clicks, through the real capabilities -------
     await graph.conversation.setGarmentSizeClass(projectId, "adult_standard");
     await graph.conversation.confirmRecommendedProductionSize(projectId);
     await graph.conversation.selectProductionTreatment(projectId, {
       treatment: "halftone_dtf",
-      // A small plate keeps this scenario fast; the geometry itself is proven
-      // at full production size in `halftone-production.test.ts`.
       halftone: { lpi: 35 },
     });
     await graph.conversation.setProductionPrintWidth(projectId, 4);
 
-    const requested = await graph.finalArtwork.requestPreparedUploadFinalArtwork(
-      projectId,
+    await assert.rejects(
+      () => graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Standard Raster/);
+        assert.match(error.message, /not_created/);
+        return true;
+      },
+      "Standard Raster was never even attempted at the current confirmed size -- Halftone must not unlock, regardless of an unrelated historical failure at a different size",
     );
 
-    // N: a NEW job, distinct from the failed Standard Raster one.
-    assert.notEqual(requested.job.id, historical.id);
-    assert.match(String(requested.job.productionTreatmentKey), /^halftone_dtf\//);
-
-    // --- run the real worker with a paid provider that THROWS if reached ---
-    const assets = createAssetCapability(
-      repo,
-      new DataUriAssetStorageProvider(),
-      new PngThumbnailGenerator(),
-    );
-    const paid = new ForbiddenReconstructionProvider();
-    const worker = createFinalArtworkWorkerCapability(
-      repo,
-      assets,
-      paid,
-      createPrintValidationCapability(),
-      {
-        async evaluate() {
-          throw new Error("Concept Evaluation must never run for uploaded artwork");
-        },
-      } as never,
-      new LocalRasterInterpolationProvider(),
-    );
-    await worker.processNextJob();
-
-    // O: print_ready, from a validated production asset.
-    const finished = (await repo.getProject(projectId))!;
-    assert.equal(finished.project.status, "print_ready");
-
-    const validation = await repo.getLatestProductionAssetValidationForJob(
-      projectId,
-      requested.job.id,
-    );
-    assert.equal(validation?.status, "ready");
-    assert.ok(validation?.assetId);
-
-    const asset = await repo.getAssetById(validation!.assetId);
-    assert.equal(asset?.hasTransparency, true);
-    assert.equal(
-      (asset!.metadata as Record<string, unknown>).resolutionProvenance,
-      "halftone_generated",
-    );
-
-    // P/Q: no paid provider, no OpenAI. The provider throws if called at all.
-    assert.equal(paid.calls, 0);
-
-    // M: the historical failure is untouched evidence.
+    // M: the historical failure (at the OLD 10.5in size) is untouched evidence, exactly as before.
     const after = await repo.getFinalArtworkJob(historical.id);
     assert.equal(after!.status, "failed");
     assert.equal(after!.lastError, historical.lastError);
     assert.equal(after!.completedAt, historical.completedAt);
     assert.equal(after!.productionTreatmentKey, "standard_raster");
+
+    // The rejected attempt must never leave behind a new Halftone job.
+    const preparation = await repo.getArtworkPreparation(projectId);
+    const jobs = await repo.listFinalArtworkJobsForPreparation(projectId, preparation!.id);
+    assert.ok(
+      !jobs.some((j) => j.productionTreatmentKey?.startsWith("halftone_dtf")),
+      "a rejected Halftone request must never create a job at all",
+    );
   });
 
   // -------------------------------------------------------------------------

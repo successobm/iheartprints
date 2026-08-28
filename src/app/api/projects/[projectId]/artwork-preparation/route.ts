@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { ArtworkFinalizationRasterNotReadyError } from "@/capabilities/final-artwork/raster-not-ready-error";
 import { getPersistenceMode } from "@/lib/db";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
 import type { PrintPlacement } from "@/lib/domain/types";
@@ -142,6 +143,17 @@ export async function POST(request: Request, context: RouteContext) {
     if (error instanceof ArtworkPreparationStateError) {
       const status = error.message.includes("not found") ? 404 : 409;
       return NextResponse.json({ error: error.message }, { status });
+    }
+
+    // Phase 28I Section 10: the Raster-first hard gate's own rejection --
+    // a legitimate, expected business-rule refusal (never a server
+    // malfunction), so it gets its own 409 with a stable, machine-readable
+    // `safeErrorCode` rather than falling into the generic 500 branch below.
+    if (error instanceof ArtworkFinalizationRasterNotReadyError) {
+      return NextResponse.json(
+        { error: error.message, safeErrorCode: error.safeErrorCode },
+        { status: 409 },
+      );
     }
 
     const message =

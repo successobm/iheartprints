@@ -123,6 +123,36 @@ export function describeVariantAttentionReason(
 }
 
 /**
+ * Phase 28H Section 10 — DETERMINISTIC vs. OTHER, as actual internal
+ * evidence rather than an inference from the top-level `needs_attention`/
+ * `finalization_required` string alone. `standard_raster`'s validation
+ * profile has several OTHER blocking checks entirely unrelated to
+ * insufficient resolution (`aspect_ratio_preserved`, `alpha_bound_artwork`,
+ * `transparent_dead_canvas`, `physical_width_policy`, ...) — any of those
+ * failing also produces `needs_attention`, but calling THAT "Needs
+ * Additional Enhancement" would misdescribe a distortion or dead-canvas
+ * defect as a resolution problem. This reuses the exact same three checks
+ * `describeVariantAttentionReason` already keys its specific sentence off
+ * of — one classification, read from the SAME evidence, never duplicated
+ * or re-inferred from displayed text.
+ */
+export type VariantAttentionKind = "deterministic_enhancement" | "other";
+
+export function classifyVariantAttentionKind(
+  firstBlockingFailedCheck: string | null,
+): VariantAttentionKind | null {
+  if (firstBlockingFailedCheck === null) return null;
+  if (
+    firstBlockingFailedCheck === "reconstruction_sufficiency" ||
+    firstBlockingFailedCheck === "effective_resolution" ||
+    firstBlockingFailedCheck === "minimum_raster_dimensions"
+  ) {
+    return "deterministic_enhancement";
+  }
+  return "other";
+}
+
+/**
  * Non-monetary, structural cost facts derived from a job's own recorded
  * provider identity — never a dollar figure (Phase 27P Gate: no pricing data
  * exists anywhere in this repository; see the phase report). Safe to show
@@ -216,6 +246,8 @@ export interface ProductionVariantView {
   halftone: { lpi: number; angleDeg: number; dotShape: string } | null;
   /** Plain-language reason, or `null` when there is nothing to explain (see `describeVariantAttentionReason`). */
   attentionReason: string | null;
+  /** Phase 28H Section 10: the SAME evidence `attentionReason` was derived from, exposed as a stable kind rather than requiring callers to pattern-match display text. `null` alongside `attentionReason === null`. */
+  attentionKind: VariantAttentionKind | null;
   costSummary: ProductionVariantCostSummary;
 }
 

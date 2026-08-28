@@ -12,7 +12,11 @@
  */
 
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
-import { sizingPolicyForPlacement } from "@/capabilities/shared/print-placement-dimensions";
+import { recommendProductionBox, sizingPolicyForProductionBox } from "@/capabilities/shared/garment-production-sizing";
+import {
+  resolveWidthConstrainedSizing,
+  sizingPolicyForPlacement,
+} from "@/capabilities/shared/print-placement-dimensions";
 import type { PrintPlacement } from "@/lib/domain/types";
 
 import {
@@ -115,6 +119,7 @@ export function analyzeArtwork(input: AnalyzeArtworkInput): ArtworkAnalysis {
     backgroundConfidence: scoreBackgroundConfidence(edge),
     pixelSufficiency: measurePixelSufficiency(
       mask.bounds?.width ?? image.width,
+      mask.bounds?.height ?? image.height,
       input.printPlacement,
       input.intendedPrintWidthIn,
     ),
@@ -312,24 +317,57 @@ function scoreBackgroundConfidence(edge: EdgeStatistics): number {
  * module never restates a print-sizing rule (Goal: "do not duplicate print-
  * sizing rules in artwork preparation").
  *
- * Measured against the artwork's own width, not the canvas width: transparent
- * padding is not resolution.
+ * Measured against the artwork's own width AND height, not the canvas
+ * dimensions: transparent padding is not resolution.
+ *
+ * Phase 28C: when nobody has expressed an explicit print width yet
+ * (`intendedPrintWidthIn === null` — the ordinary case at upload time, before
+ * any garment size is even chosen), the required width is CONTAINED against
+ * the artwork's own aspect ratio inside the best-available garment
+ * recommendation (`recommendProductionBox`'s assumed `adult_standard` box,
+ * the same assumption every other recommendation surface uses and reports as
+ * assumed). Before this, a tall/portrait upload was always compared against
+ * the placement's flat default width (10.5in for a full front, regardless of
+ * the artwork's own proportions) — overstating how many source pixels a
+ * design that will actually print considerably narrower than 10.5in (because
+ * its height controls once correctly contained) genuinely needs, and
+ * producing the misleading "smaller than the recommended print resolution
+ * for a 10.5"-wide print" message for artwork that was never going to print
+ * 10.5in wide in the first place.
+ *
+ * Once a customer HAS expressed an explicit width, that choice is honoured
+ * exactly as before (no box substituted for it) — this containment only ever
+ * narrows the DEFAULT case, never a stated one.
  */
 export function measurePixelSufficiency(
   artworkWidthPx: number,
+  artworkHeightPx: number,
   placement: PrintPlacement | null,
   intendedPrintWidthIn: number | null,
 ): PixelSufficiency | null {
   const policy = sizingPolicyForPlacement(placement, intendedPrintWidthIn);
   if (!policy || !placement) return null;
 
-  const requiredWidthPx = Math.round(policy.targetWidthIn * policy.targetPpi);
+  const recommendation =
+    intendedPrintWidthIn === null
+      ? recommendProductionBox({ placement, garmentSizeClass: null })
+      : null;
+  const containmentPolicy = recommendation?.box
+    ? sizingPolicyForProductionBox(policy, policy.targetWidthIn, recommendation.box.maxHeightIn)
+    : policy;
+
+  const contained = resolveWidthConstrainedSizing(
+    containmentPolicy,
+    artworkWidthPx,
+    artworkHeightPx,
+  );
+  const requiredWidthPx = Math.round(contained.widthIn * policy.targetPpi);
   const coverageRatio =
     requiredWidthPx === 0 ? 0 : Math.min(99, artworkWidthPx / requiredWidthPx);
 
   return {
     placement,
-    targetWidthIn: policy.targetWidthIn,
+    targetWidthIn: contained.widthIn,
     targetPpi: policy.targetPpi,
     requiredWidthPx,
     availableWidthPx: artworkWidthPx,

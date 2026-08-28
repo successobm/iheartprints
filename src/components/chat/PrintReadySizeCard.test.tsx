@@ -136,17 +136,22 @@ describe("PrintReadySizeCard", () => {
 
   it("Goal 4/5/6: each garment class shows its own recommended area", () => {
     const expected = [
-      { garmentSizeClass: "youth", label: "Youth", area: "8.5" },
+      { garmentSizeClass: "youth", label: "Youth", areaWidth: "8.5", areaHeight: "8.5" },
       {
         garmentSizeClass: "womens_small",
         label: "Women's / Smaller Garment",
-        area: "9",
+        areaWidth: "9",
+        areaHeight: "9",
       },
-      { garmentSizeClass: "adult_standard", label: "Standard Adult", area: "10.5" },
+      { garmentSizeClass: "adult_standard", label: "Standard Adult", areaWidth: "10.5", areaHeight: "10.5" },
       {
+        // Phase 28I: adult_plus is no longer a square recommendation -- it
+        // shares adult_standard's 10.5in width ceiling and keeps a taller
+        // 12in height ceiling instead of an independent, wider 12x12 box.
         garmentSizeClass: "adult_plus",
         label: "2XL–4XL / Larger Garment",
-        area: "12",
+        areaWidth: "10.5",
+        areaHeight: "12",
       },
     ] as const;
 
@@ -173,7 +178,7 @@ describe("PrintReadySizeCard", () => {
       );
       assert.match(
         text,
-        new RegExp(`Recommended area: ${row.area}" × ${row.area}"`),
+        new RegExp(`Recommended area: ${row.areaWidth}" × ${row.areaHeight}"`),
         row.garmentSizeClass,
       );
     }

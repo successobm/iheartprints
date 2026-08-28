@@ -241,6 +241,14 @@ export const TEST_FILES = [
   "src/capabilities/shared/production-variant.test.ts",
   "src/capabilities/conversation/print-ready-multi-variant-package.test.ts",
   "src/components/chat/PrintReadyPackageCard.test.tsx",
+  // Phase 28H: progressive print-ready file creation -- Standard Raster is
+  // always attempted first, automatically, with no customer treatment
+  // choice beforehand; DTF Halftone is offered only after Raster reaches a
+  // terminal state (print_ready, needs_attention, or retryable_failure),
+  // and creating it never touches Raster's own job/asset -- registered
+  // immediately per the established discipline.
+  "src/capabilities/conversation/print-ready-progressive-creation.test.ts",
+  "src/components/chat/uploaded-artwork-print-ready-flow.test.tsx",
   // Existing Artwork → Print Ready Phase 1.
   "src/capabilities/artwork-preparation/upload-security.test.ts",
   "src/capabilities/artwork-preparation/image-analysis.test.ts",
@@ -421,4 +429,44 @@ export const TEST_FILES = [
   // /price, and the reads themselves throwing) while proving the prospect
   // funnel, legacy grandfathering, and the offer itself are unchanged.
   "src/capabilities/payment/internal-entitlement-payment-view.test.ts",
+  // Phase 28A: manual cleanup is now reachable from the automatic
+  // background/separation review screen for an upload automatic
+  // preparation never successfully ran on -- registered immediately per
+  // the established discipline (Phase 27H found these previously omitted).
+  "src/capabilities/artwork-preparation/manual-cleanup-from-automatic-review.test.ts",
+  "src/components/chat/clean-up-manually-doorway.test.tsx",
+  // Phase 28C: the false-positive separation-review fix (a tall,
+  // edge-to-edge design's in-bounds proposal no longer forces a mandatory
+  // review when fully removing it is provably safe) and the real
+  // production/enhancement sizing fix (a confirmed garment box's height now
+  // narrows production sizing, not just the placement's generic technical
+  // ceiling) -- registered immediately per the established discipline.
+  "src/capabilities/artwork-preparation/false-separation-review-fix.test.ts",
+  "src/capabilities/print-validation/production-requirements-confirmed-box.test.ts",
+  // Phase 28E: the Proposed Removal visual contract (retained artwork stays
+  // full-color; only the exact proposal-mask pixels are tinted) and the
+  // matching customer-facing copy/label rename -- registered immediately
+  // per the established discipline.
+  "src/capabilities/artwork-preparation/proposal-highlight-visual-contract.test.ts",
+  "src/components/chat/separation-review-proposal-copy.test.ts",
+  // Phase 28F: one consolidated customer artwork review -- the redundant
+  // first-review heading/comparison/approve trio is suppressed exactly
+  // when SeparationReviewPanel's own large review has a real decision to
+  // show; renamed "Use Prepared/This Preparation" -> "Use This Artwork"
+  // and "Remove Background Manually" -> "Edit Artwork" -- registered
+  // immediately per the established discipline.
+  "src/components/chat/uploaded-artwork-single-review.test.tsx",
+  // Phase 28G: async review + preview state hardening -- fail-closed
+  // three-state separation-check status (never optimistically shows the
+  // ordinary approval review while unknown or errored), the Edit Artwork
+  // doorway repositioned below the review area, an honest loading/error
+  // state for the correction editor's canvas with stale-request
+  // suppression, and an atomic (never partially-composited) garment-colour
+  // preview swap with latest-request-wins stale-response suppression --
+  // registered immediately per the established discipline.
+  "src/components/chat/separation-check-status.test.ts",
+  "src/components/chat/preview-image-commit.test.ts",
+  "src/components/chat/garment-preview-image.test.ts",
+  "src/components/chat/correction-image-load.test.ts",
+  "src/components/chat/correction-workspace-loading.test.ts",
 ];

@@ -149,16 +149,29 @@ export const PRODUCTION_BOX_RECOMMENDATIONS: Record<
     ...ACCENT_PLACEMENT_RECOMMENDATIONS,
   },
   /**
-   * 2XL-4XL and larger garments: a 12in front/back box.
+   * 2XL-4XL and larger garments: Phase 28I correction.
    *
-   * 12in is a RECOMMENDATION, not a ceiling. The full front / full back
-   * technical band runs to 14in, so an operator who deliberately wants 13in
-   * on a 4XL back gets 13in — see `normalizeConfirmableWidth`, which honors
-   * anything inside the band and REFUSES (never clamps) anything outside it.
+   * This class used to recommend a 12x12 SQUARE box — strictly bigger than
+   * `adult_standard`'s in both dimensions, on the theory that a larger
+   * garment should get a larger print. That is not iHeartPrints' economical
+   * DTF production model: the standard portrait production envelope is
+   * 10.5in wide x 12in tall (~126 sq in) regardless of garment size, and a
+   * larger garment does not by itself justify exceeding it. This box now
+   * shares `adult_standard`'s 10.5in WIDTH ceiling while keeping the taller
+   * 12in HEIGHT ceiling a larger garment can still make good use of for a
+   * portrait design — it can never again recommend MORE width than
+   * `adult_standard`, only proportionally more height for artwork whose own
+   * aspect ratio wants it.
+   *
+   * 10.5x12 is still a RECOMMENDATION, not a ceiling. The full front / full
+   * back technical band runs to 14in, so an operator who deliberately wants
+   * 13in on a 4XL back still gets 13in — see `normalizeConfirmableWidth`,
+   * which honors anything inside the band and REFUSES (never clamps)
+   * anything outside it.
    */
   adult_plus: {
-    full_front: { maxWidthIn: 12, maxHeightIn: 12 },
-    full_back: { maxWidthIn: 12, maxHeightIn: 12 },
+    full_front: { maxWidthIn: 10.5, maxHeightIn: 12 },
+    full_back: { maxWidthIn: 10.5, maxHeightIn: 12 },
     ...ACCENT_PLACEMENT_RECOMMENDATIONS,
   },
   /**

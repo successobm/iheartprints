@@ -5,10 +5,7 @@ import { describe, it } from "node:test";
 
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
 import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size";
-import type {
-  CustomerFinalizationStatus,
-  ProductionTreatmentView,
-} from "@/lib/services/conversation-service";
+import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
 
 import { UploadedArtworkPanel } from "./UploadedArtworkPanel";
 
@@ -111,42 +108,9 @@ function unconfirmedSize(
   } as PrintReadySizeView;
 }
 
-function treatmentView(
-  overrides: Partial<ProductionTreatmentView> = {},
-): ProductionTreatmentView {
-  const garment = { label: "Black", hex: "#000000", rgb: { r: 0, g: 0, b: 0 } };
-  return {
-    treatment: "standard_raster",
-    halftone: null,
-    recommended: {
-      lpi: 35,
-      angleDeg: 45,
-      dotShape: "round",
-      midtone: 1,
-      chokePx: 0,
-      garment,
-      algorithmVersion: "iheartprints_halftone_am_v1",
-    },
-    selectedAt: null,
-    garment,
-    offerable: false,
-    offerBlockedReason:
-      "The halftone screen is generated for a confirmed physical size; no size has been confirmed for this project.",
-    controls: {
-      lpi: { min: 25, max: 55, recommended: 35 },
-      angles: [22.5, 45],
-      dotShapes: ["round", "ellipse"],
-      midtone: { min: 0.5, max: 2, recommended: 1 },
-      chokePx: { min: 0, max: 2, recommended: 0 },
-    },
-    ...overrides,
-  } as ProductionTreatmentView;
-}
-
 function render(options: {
   finalizationStatus?: CustomerFinalizationStatus;
   size?: PrintReadySizeView | null;
-  treatment?: ProductionTreatmentView | undefined;
   busy?: boolean;
 } = {}) {
   return renderToString(
@@ -159,9 +123,6 @@ function render(options: {
       preparedImageUrl: "https://signed.example/prepared.png",
       printReadySize: "size" in options ? options.size! : unconfirmedSize(),
       finalizationStatus: options.finalizationStatus ?? "not_requested",
-      productionTreatment:
-        "treatment" in options ? options.treatment : treatmentView(),
-      treatmentPreviewUrls: {},
       onUpload: () => {},
       onSaveDetails: () => {},
       onPrepare: () => {},
@@ -171,8 +132,6 @@ function render(options: {
       onUseRecommendedSize: () => {},
       onChooseGarmentSize: () => {},
       onPrepareForPrint: () => {},
-      onSelectStandardRaster: () => {},
-      onSelectHalftoneTreatment: () => {},
     }),
   );
 }
@@ -326,42 +285,22 @@ describe("Internal Existing Artwork must never dead-end on production size", () 
         ],
       }),
     });
-    // Still unconfirmed, so the treatment is still refused and the primary
-    // action is still disabled. A class is a context for a SUGGESTION; consent
-    // is a separate act.
+    // Still unconfirmed, so the primary action is still disabled. A class is
+    // a context for a SUGGESTION; consent is a separate act.
     assert.match(visibleText(html), /confirm/i);
-    assert.equal(buttonIsDisabled(html, "DTF Halftone"), true);
     assert.equal(buttonIsDisabled(html, "Retry Preparation"), true);
   });
 
-  it("G: DTF Halftone is NOT selectable before confirmation, and says why", () => {
-    const html = render({ finalizationStatus: "retryable_failure" });
-    const text = visibleText(html);
-    assert.match(text, /DTF Halftone/);
-    assert.match(text, /no size has been confirmed for this project/i);
-
-    // The disabled control is the halftone one specifically — Standard
-    // Raster stays selectable, because retracting to it is always allowed.
-    assert.equal(buttonIsDisabled(html, "DTF Halftone"), true);
-    assert.equal(buttonIsDisabled(html, "Standard Raster"), false);
-  });
-
-  it("H: DTF Halftone becomes selectable once the size is confirmed", () => {
-    const html = render({
-      finalizationStatus: "retryable_failure",
-      size: unconfirmedSize({
-        confirmed: true,
-        confirmedAt: "2026-08-21T00:00:00.000Z",
-        blockingMessage: null,
-      }),
-      treatment: treatmentView({ offerable: true, offerBlockedReason: null }),
-    });
-    const text = visibleText(html);
-    assert.match(text, /DTF Halftone/);
-    assert.doesNotMatch(text, /no size has been confirmed/i);
-
-    assert.equal(buttonIsDisabled(html, "DTF Halftone"), false);
-  });
+  // Phase 28H removed the customer-facing Production Treatment selection
+  // card entirely (`ProductionTreatmentPanel` is no longer mounted inside
+  // `UploadedArtworkPanel`) — the two tests that used to live here ("G: DTF
+  // Halftone is NOT selectable before confirmation" / "H: DTF Halftone
+  // becomes selectable once the size is confirmed") proved a pre-creation
+  // treatment CHOICE that no longer exists: Standard Raster is now always
+  // attempted first, automatically, and DTF Halftone is offered only AFTER
+  // it reaches a terminal state — see
+  // `uploaded-artwork-print-ready-flow.test.tsx` for that replacement
+  // coverage, including its own size-confirmation prerequisites.
 
   it("F: confirming also re-enables the production request itself", () => {
     const html = render({
@@ -371,10 +310,9 @@ describe("Internal Existing Artwork must never dead-end on production size", () 
         confirmedAt: "2026-08-21T00:00:00.000Z",
         blockingMessage: null,
       }),
-      treatment: treatmentView({ offerable: true, offerBlockedReason: null }),
     });
     // The retry button is present and NOT disabled — confirming the size
-    // unblocks the production request itself, not just the treatment.
+    // unblocks the production request itself.
     assert.equal(buttonIsDisabled(html, "Retry Preparation"), false);
   });
 
@@ -413,119 +351,41 @@ describe("Internal Existing Artwork must never dead-end on production size", () 
     );
   });
 
-  it("the ordering reads: size authority → treatment → production request", () => {
-    // The operator workflow should read in the order the work happens. Before
-    // the fix the treatment panel was appended AFTER the prepare action.
+  it("the ordering reads: size authority → production request", () => {
+    // The operator workflow should read in the order the work happens.
     const text = visibleText(render({ finalizationStatus: "not_requested" }));
     const sizeAt = text.indexOf("Standard Adult");
-    const treatmentAt = text.indexOf("Production treatment");
     const actionAt = text.indexOf("Create Print-Ready Artwork");
 
-    assert.ok(sizeAt >= 0 && treatmentAt >= 0 && actionAt >= 0);
-    assert.ok(sizeAt < treatmentAt, "size authority must come before treatment");
-    assert.ok(
-      treatmentAt < actionAt,
-      "treatment must come before the production request it configures",
-    );
+    assert.ok(sizeAt >= 0 && actionAt >= 0);
+    assert.ok(sizeAt < actionAt, "size authority must come before the production request");
   });
 
-  it("V: after switching to halftone, the action stops calling itself a retry", () => {
-    // The failed attempt was Standard Raster. Preparing a halftone plate is a
-    // different piece of work — it never re-sends the reconstruction request
-    // that failed — so labelling it "Retry Preparation" would describe an
-    // action that does not happen.
-    const stillStandard = visibleText(
-      render({ finalizationStatus: "retryable_failure" }),
-    );
-    assert.match(stillStandard, /Retry Preparation/);
+  // Phase 28H removed "V: after switching to halftone, the action stops
+  // calling itself a retry" and "L: choosing halftone reveals the screen
+  // controls" -- both proved behavior of the removed pre-creation treatment
+  // CHOICE (switching the primary action's own target treatment via
+  // `ProductionTreatmentPanel`). DTF Halftone is now created through its own
+  // dedicated "Create DTF Halftone Version" action (see
+  // `PrintReadyPackageCard`/`uploaded-artwork-print-ready-flow.test.tsx`),
+  // which never relabels or reconfigures Standard Raster's own retry button.
 
-    const nowHalftone = visibleText(
-      render({
-        finalizationStatus: "retryable_failure",
-        size: unconfirmedSize({
-          confirmed: true,
-          confirmedAt: "2026-08-21T00:00:00.000Z",
-          blockingMessage: null,
-        }),
-        treatment: treatmentView({
-          treatment: "halftone_dtf",
-          offerable: true,
-          offerBlockedReason: null,
-          halftone: {
-            lpi: 35,
-            angleDeg: 45,
-            dotShape: "round",
-            midtone: 1,
-            chokePx: 0,
-            garment: { label: "Black", hex: "#000000", rgb: { r: 0, g: 0, b: 0 } },
-            algorithmVersion: "iheartprints_halftone_am_v1",
-          },
-        } as never),
-      }),
-    );
-    assert.doesNotMatch(nowHalftone, /Retry Preparation/);
-    assert.match(nowHalftone, /Create Print-Ready Artwork/);
-    // The failure itself is still reported — the banner is informational and
-    // does not disappear just because the plan changed.
-    assert.match(nowHalftone, /Print-ready preparation couldn/);
-  });
-
-  it("L: choosing halftone reveals the screen controls", () => {
-    const text = visibleText(
-      render({
-        finalizationStatus: "retryable_failure",
-        size: unconfirmedSize({
-          confirmed: true,
-          confirmedAt: "2026-08-21T00:00:00.000Z",
-          blockingMessage: null,
-        }),
-        treatment: treatmentView({
-          treatment: "halftone_dtf",
-          offerable: true,
-          offerBlockedReason: null,
-          halftone: {
-            lpi: 35,
-            angleDeg: 45,
-            dotShape: "round",
-            midtone: 1,
-            chokePx: 0,
-            garment: { label: "Black", hex: "#000000", rgb: { r: 0, g: 0, b: 0 } },
-            algorithmVersion: "iheartprints_halftone_am_v1",
-          },
-        } as never),
-      }),
-    );
-    for (const control of [
-      "Line frequency",
-      "Screen angle",
-      "Dot shape",
-      "Tone",
-      "Edge cleanup",
-      "Reset to recommended defaults",
-    ]) {
-      assert.ok(text.includes(control), `${control} must be offered`);
+  it("M: no 'Production treatment' selection card renders at all, for any finalization status -- Phase 28H Section 13.A", () => {
+    for (const status of ["not_requested", "retryable_failure", "needs_review", "print_ready"] as const) {
+      const html = render({ finalizationStatus: status });
+      const text = visibleText(html);
+      assert.doesNotMatch(text, /Production treatment/i, `status=${status}`);
+      assert.doesNotMatch(text, /\bINTERNAL\b/, `status=${status}`);
     }
-  });
-
-  it("M: a PUBLIC project renders no treatment controls at all", () => {
-    // The server omits the key entirely for a non-internal project, so the
-    // panel has nothing to render — and the size authority is unaffected.
-    const html = render({
-      finalizationStatus: "retryable_failure",
-      treatment: undefined,
-    });
-    const text = visibleText(html);
-    assert.doesNotMatch(text, /Production treatment/);
-    assert.doesNotMatch(text, /DTF Halftone/);
-    assertSizeAuthorityVisible(html, "public");
+    // The size authority is unaffected by any of this.
+    assertSizeAuthorityVisible(render({ finalizationStatus: "retryable_failure" }), "no treatment card");
   });
 
   it("`preparing` is still the one state that replaces the controls", () => {
-    // Not an oversight. Both the size confirmation and the treatment are
-    // refused server-side while a plate is being made, so offering them would
-    // put the page and the server into open disagreement.
+    // Not an oversight. The size confirmation is refused server-side while a
+    // plate is being made, so offering it would put the page and the server
+    // into open disagreement.
     const text = visibleText(render({ finalizationStatus: "preparing" }));
     assert.doesNotMatch(text, /Standard Adult/);
-    assert.doesNotMatch(text, /DTF Halftone/);
   });
 });

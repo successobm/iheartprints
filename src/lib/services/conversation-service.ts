@@ -35,6 +35,7 @@ import {
 } from "@/capabilities/shared/production-treatment";
 import {
   PRODUCTION_VARIANT_TREATMENTS,
+  classifyVariantAttentionKind,
   describeProductionVariantCostSummary,
   describeProductionVariantStatus,
   describeVariantAttentionReason,
@@ -611,6 +612,7 @@ async function resolveOneProductionVariant(
     pixelHeight: null,
     halftone: null,
     attentionReason: null,
+    attentionKind: null,
     costSummary: emptyCostSummary,
   });
 
@@ -664,12 +666,14 @@ async function resolveOneProductionVariant(
     state.job?.status ?? null,
     state.validationStatus,
   );
+  const firstBlockingFailedCheckName = firstBlockingFailedCheck(state.validationReport);
   const attentionReason =
     status === "needs_attention" || status === "retryable_failure"
-      ? describeVariantAttentionReason(
-          treatment,
-          firstBlockingFailedCheck(state.validationReport),
-        )
+      ? describeVariantAttentionReason(treatment, firstBlockingFailedCheckName)
+      : null;
+  const attentionKind =
+    status === "needs_attention" || status === "retryable_failure"
+      ? classifyVariantAttentionKind(firstBlockingFailedCheckName)
       : null;
 
   const normalization = state.asset?.metadata &&
@@ -708,6 +712,7 @@ async function resolveOneProductionVariant(
     pixelHeight: state.asset?.heightPx ?? null,
     halftone: halftoneForDisplay,
     attentionReason,
+    attentionKind,
     costSummary: state.job
       ? describeProductionVariantCostSummary(
           { attempts: state.job.attempts, providerKey: state.job.providerKey },

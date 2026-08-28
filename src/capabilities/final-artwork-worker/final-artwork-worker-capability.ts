@@ -65,7 +65,10 @@ import {
   confirmedSizeMatchesJobWidth,
   resolveProductionSizeConfirmation,
 } from "@/capabilities/shared/confirmed-production-size";
-import { type PlacementSizingPolicy } from "@/capabilities/shared/print-placement-dimensions";
+import {
+  resolveWidthConstrainedSizing,
+  type PlacementSizingPolicy,
+} from "@/capabilities/shared/print-placement-dimensions";
 import type { FinalArtworkProvider, FinalArtworkProviderResumeContext } from "@/capabilities/final-artwork/provider";
 import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwork/production-normalization";
 import { computeAlphaBounds, DEFAULT_ALPHA_THRESHOLD } from "@/capabilities/final-artwork/alpha-trim";
@@ -88,6 +91,7 @@ import { ProviderError } from "@/capabilities/providers/provider-error";
 import { checkSourceEligibleForFinalization } from "./source-eligibility";
 import { verifyProductionArtwork } from "./production-verification";
 import {
+  logFinalArtworkEnhancementProviderGap,
   logFinalArtworkPaidCallDecision,
   logFinalArtworkReconstructionOutcome,
 } from "./final-artwork-observability";
@@ -1077,6 +1081,21 @@ export function createFinalArtworkWorkerCapability(
     }
 
     const intendedPrintWidthIn = job.productionWidthIn;
+    // Phase 28C: the confirmed BOX's height bound, read from the LIVE brief —
+    // safe only because the stale-intent fence just above already proved
+    // `snapshot.brief`'s current confirmed WIDTH agrees with this job's own
+    // frozen `productionWidthIn`. `productionSizeConfirmedWidthIn` and
+    // `productionSizeConfirmedMaxHeightIn` are always written together, in
+    // one `confirmProductionSize` call (`confirmed-production-size.ts`), so a
+    // width match is sufficient proof the height bound is the SAME
+    // confirmation this job was created to satisfy — never a value from some
+    // later, different confirmation. `null` (never confirmed, or a bare width
+    // with no box) preserves exactly today's behavior in
+    // `deriveProductionRequirements`.
+    const sizeConfirmation = resolveProductionSizeConfirmation(snapshot.brief);
+    const confirmedMaxHeightIn = sizeConfirmation.confirmed
+      ? sizeConfirmation.size.boxMaxHeightIn
+      : null;
     // Sprint A2 Correction 2: the job's OWN bound intent, exactly like the
     // width above — not the live working brief. The fence just above proved
     // the two agree; using the bound value from here on means nothing this
@@ -1087,6 +1106,7 @@ export function createFinalArtworkWorkerCapability(
       designDescription: null,
       intendedPrintWidthIn,
       requestedProductionOutput: job.requestedProductionOutput,
+      confirmedMaxHeightIn,
     });
 
     if (requirements.category !== "apparel_raster") {
@@ -1124,13 +1144,30 @@ export function createFinalArtworkWorkerCapability(
     const treatment = resolveProductionTreatment(snapshot.brief);
     const halftone = treatment.treatment === "halftone_dtf" ? treatment.halftone : null;
 
+    // Phase 28C: the artwork's OWN proportionally-contained target width —
+    // never `sizing.targetWidthIn` (the box's raw nominal width) directly.
+    // For a tall design whose HEIGHT controls (`resolveWidthConstrainedSizing`
+    // narrows both axes together once the naive width-first height would
+    // exceed the box), the artwork will actually print narrower than the
+    // box's own width — e.g. 7.35in inside a 10.5x10.5 Standard Adult box —
+    // so requiring `sourceVisibleWidthPx` to cover the FULL 10.5in
+    // (3150px) overstates how many real pixels this artwork needs by the
+    // same amount the plate itself is later corrected. Source and target
+    // share one aspect ratio by construction, so checking the contained
+    // WIDTH alone is equivalent to checking both axes.
+    const contained = resolveWidthConstrainedSizing(
+      sizing,
+      measured.alphaBBoxWidthPx,
+      measured.alphaBBoxHeightPx,
+    );
+
     // Recorded either way, because the two questions are independent and only
     // one of them is about spend. `decideEnhancement` answers "would this
     // artwork have needed a paid reconstruction?" — worth knowing, and worth
     // logging, even on a path that will not buy one.
     const enhancement = decideEnhancement({
       sourceVisibleWidthPx: measured.alphaBBoxWidthPx,
-      targetWidthIn: sizing.targetWidthIn,
+      targetWidthIn: contained.widthIn,
       targetPpi: sizing.targetPpi,
     });
 
@@ -1150,6 +1187,21 @@ export function createFinalArtworkWorkerCapability(
       : enhancement.requiresReconstruction
         ? provider
         : localNormalizationProvider;
+
+    // Phase 28I Section 9(I)/10: purely diagnostic — see
+    // `logFinalArtworkEnhancementProviderGap`'s own doc comment. Fires only
+    // when reconstruction is genuinely required AND the environment has no
+    // real enhancement provider configured (or it was refused in test/dev
+    // safety) — never when local normalization is the CORRECT choice
+    // (`!enhancement.requiresReconstruction`).
+    if (enhancement.requiresReconstruction && activeProvider.providerKey === "local_raster_interpolation") {
+      logFinalArtworkEnhancementProviderGap({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        configuredProviderKey: activeProvider.providerKey,
+        requiredScale: enhancement.coverageRatio > 0 ? 1 / enhancement.coverageRatio : Infinity,
+      });
+    }
 
     const uploadedPreserveMeta: UploadedPreserveMeta = {
       preparedArtworkVersionId: artwork.id,

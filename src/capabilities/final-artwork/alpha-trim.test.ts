@@ -83,17 +83,11 @@ describe("computeAlphaBounds (Print-Ready Normalization Phase 1)", () => {
 
 describe("safetyMarginPxFor", () => {
   it("uses the 8px floor for small artwork", () => {
-    assert.equal(
-      safetyMarginPxFor({ left: 0, top: 0, right: 200, bottom: 200, width: 200, height: 200 }),
-      MIN_SAFETY_MARGIN_PX,
-    );
+    assert.equal(safetyMarginPxFor({ width: 200, height: 200 }), MIN_SAFETY_MARGIN_PX);
   });
 
   it("scales at 0.5% of the longest side for large artwork", () => {
-    assert.equal(
-      safetyMarginPxFor({ left: 0, top: 0, right: 3200, bottom: 2000, width: 3200, height: 2000 }),
-      16,
-    );
+    assert.equal(safetyMarginPxFor({ width: 3200, height: 2000 }), 16);
   });
 });
 

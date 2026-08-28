@@ -23,6 +23,14 @@ import {
   submitProposalDecision,
   type ProposalDecision,
 } from "./proposal-review-workspace";
+import {
+  initialPreviewCommitState,
+  requestPreviewCommit,
+  resolvePreviewCommitFailure,
+  resolvePreviewCommitSuccess,
+  shouldRequestPreviewCommit,
+  type CommittedPreview,
+} from "./preview-image-commit";
 
 /**
  * Intelligent Separation Phase 9: the INTERNAL OPERATOR's consequential-
@@ -63,8 +71,10 @@ import {
  * REGIONS (Phase 9's isolated-interior-island concept) — they are part of
  * the border-connected exterior flood, just gated on being genuinely
  * in-bounds. The operator now sees and decides that whole area FIRST, as
- * ONE decision ("Looks Good" / "Keep All Highlighted" / "Preserve Part of
- * This"), with the pre-existing region-by-region workspace demoted to an
+ * ONE decision ("Remove Pink Area" / "Keep Pink Area" / "Keep Part of Pink
+ * Area" — Phase 28E renamed these from "Looks Good" / "Keep All Highlighted"
+ * / "Preserve Part of This" for clarity; the underlying decisions are
+ * unchanged), with the pre-existing region-by-region workspace demoted to an
  * explicitly optional "Inspect individual areas" entry point — genuinely
  * optional (Phase 22B Issue 2: an undecided isolated region already retains
  * its pixels by default, so requiring an answer for every one of them
@@ -132,22 +142,67 @@ interface SeparationReviewView {
   readyForFinalApproval: boolean;
 }
 
+/**
+ * Phase 28G Defect A: the mirrored status `onStateChange` reports upward.
+ *
+ * BEFORE this phase, `onStateChange` reported `view?.state ?? null` —
+ * meaning `null` meant BOTH "we have not fetched yet" AND "we fetched and
+ * there is genuinely nothing to review", with no way for a listener to
+ * tell those two apart. `CompareStep` treated both identically ("not
+ * required"), so it rendered its own ordinary approval review —
+ * including a one-click "Use This Artwork" button — for the entire
+ * duration of this panel's own fetch. On the real Chili & Salsa order
+ * (whose separation check took roughly ten seconds), that ordinary review
+ * was visibly on screen, invitingly approvable, before flipping to the
+ * actual required proposal review underneath it — exactly the "wrong
+ * review surface flashes first" defect human acceptance reported.
+ *
+ * `"checking"` is the fix: an explicit third state a listener can fail
+ * closed on, distinct from both `"review_not_required"` (positively
+ * resolved, nothing to review) and every state that means there IS
+ * something to review. `"error"` is reported the same way when the
+ * INITIAL check itself fails outright (no `view` was ever obtained) — an
+ * unknown answer must never be silently treated as "not required" either;
+ * see the initial-load failure branch below.
+ */
+export type SeparationCheckStatus = SeparationReviewView["state"] | "checking" | "error";
+
+/**
+ * Phase 28G Defect A: the pure decision behind the doc comment above —
+ * extracted so it is directly unit-testable (this repo's test tooling is
+ * `node:test` + `renderToString`, no DOM, no effects, so the actual
+ * `useEffect` this feeds cannot be exercised by a render call; see
+ * `separation-check-status.test.ts`).
+ */
+export function computeSeparationCheckStatus(input: {
+  loading: boolean;
+  error: string | null;
+  viewState: SeparationReviewView["state"] | undefined;
+}): SeparationCheckStatus {
+  if (input.loading) return "checking";
+  if (input.error && input.viewState === undefined) return "error";
+  return input.viewState ?? "review_not_required";
+}
+
 export interface SeparationReviewPanelProps {
   projectId: string;
   /** The garment colour to preview against, as a hex string or a name `resolveGarmentColor` understands. Preview only — never pixel authority (Goal 6). */
   garmentColor: string;
   /**
    * Intelligent Separation Phase 10: fires whenever this panel's
-   * authoritative state changes, including the initial load (`null` while
-   * loading or when no review exists at all). This is the ONE piece of
+   * authoritative status changes, including the initial load. Phase 28G:
+   * now reports the explicit `"checking"` / `"error"` states described on
+   * `SeparationCheckStatus` above, rather than collapsing "not yet known"
+   * into the same `null` a genuinely resolved "nothing to review" used to
+   * report — see that type's doc comment for why. This is the ONE piece of
    * separation state the surrounding Existing Artwork flow needs — whether
-   * its own one-click "Use Prepared Artwork" control remains safe to offer —
+   * its own one-click "Use This Artwork" control remains safe to offer —
    * and it is lifted rather than re-fetched, so this panel stays the single
    * place that reads or writes separation state (Goal 3).
    */
-  onStateChange?: (state: SeparationReviewView["state"] | null) => void;
+  onStateChange?: (state: SeparationCheckStatus) => void;
   /**
-   * Fires after "Use This Preparation" succeeds. `approveSeparationMaster`
+   * Fires after "Use This Artwork" succeeds. `approveSeparationMaster`
    * updates `preparedAssetId` and the project's status server-side, which
    * this self-contained panel has no reason to know how to re-fetch — the
    * parent already owns that refresh (the same one every other preparation
@@ -199,6 +254,96 @@ const PROPOSAL_VIEW_MODE_OPTIONS: Array<{ key: ProposalViewMode; label: string }
 
 const PROPOSAL_MAGNIFIER_SIZE = 160;
 const PROPOSAL_MAGNIFIER_ZOOM = 6;
+
+/**
+ * Phase 28G Defect D: the final side-by-side review's garment-colour
+ * preview, made atomic. See `preview-image-commit.ts` for the state
+ * machine and the reasoning behind it — this component is the thin
+ * effects wrapper around it: it notices a new `(src, backgroundColor)`
+ * request, preloads it off-screen with a plain `Image`, and only ever
+ * commits the visible `<img>`'s `src` and its container's background
+ * colour TOGETHER, once that preload has actually finished. A generation
+ * counter (owned by `preview-image-commit.ts`) means a request superseded
+ * by a newer one before it resolves is silently discarded — the visible
+ * frame can only ever reflect the MOST RECENTLY requested colour, never an
+ * earlier one arriving late.
+ *
+ * Scoped deliberately to just this one call site (the final-review step's
+ * Original/Prepared comparison) — the only place Defect D was reported
+ * against. `SeparationReviewPanel` has two other `previewSurface`-driven
+ * images (the proposal screen's "Result" tab, the region workspace's
+ * "Result" context image) that share the same underlying pattern but are
+ * entangled with magnifier/tap-to-preserve ref logic this phase's hard
+ * boundaries do not touch; see the Phase 28G final report for why they
+ * were left as they were.
+ */
+function GarmentPreviewImage({
+  src,
+  backgroundColor,
+  alt,
+  className,
+}: {
+  src: string;
+  backgroundColor: string;
+  alt: string;
+  className: string;
+}) {
+  const [state, setState] = useState(initialPreviewCommitState);
+  const lastRequestedRef = useRef<CommittedPreview | null>(null);
+
+  useEffect(() => {
+    const requested: CommittedPreview = { src, backgroundColor };
+    if (!shouldRequestPreviewCommit(state, requested, lastRequestedRef.current)) return;
+    lastRequestedRef.current = requested;
+
+    const { state: nextState, generation } = requestPreviewCommit(state);
+    setState(nextState);
+
+    const img = new window.Image();
+    img.onload = () => {
+      setState((current) => resolvePreviewCommitSuccess(current, generation, requested));
+    };
+    img.onerror = () => {
+      setState((current) => resolvePreviewCommitFailure(current, generation));
+    };
+    img.src = src;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src, backgroundColor]);
+
+  return (
+    <div className="relative" data-garment-preview>
+      {state.committed ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={state.committed.src}
+          alt={alt}
+          className={className}
+          style={{ backgroundColor: state.committed.backgroundColor }}
+        />
+      ) : (
+        <div className={className} aria-hidden="true" />
+      )}
+      {state.switching ? (
+        <div
+          className="absolute inset-0 flex items-center justify-center rounded-lg bg-white/50"
+          data-preview-updating
+        >
+          <span className="rounded-full bg-black/70 px-2.5 py-1 text-[11px] font-medium text-white">
+            Updating preview…
+          </span>
+        </div>
+      ) : null}
+      {!state.switching && state.failed ? (
+        <div
+          className="absolute inset-0 flex items-center justify-center rounded-lg bg-white/80"
+          data-preview-update-failed
+        >
+          <p className="px-2 text-center text-[11px] font-medium text-ink">Couldn&apos;t update the preview.</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export function SeparationReviewPanel({
   projectId,
@@ -252,6 +397,7 @@ export function SeparationReviewPanel({
   const hasInitializedActiveRegion = useRef(false);
 
   async function load() {
+    setError(null);
     try {
       const res = await fetch(`/api/projects/${projectId}/artwork-preparation/separation`);
       if (res.status === 404) {
@@ -268,6 +414,18 @@ export function SeparationReviewPanel({
     }
   }
 
+  /**
+   * Phase 28G Defect A / Section 8: the retry path for an INITIAL load
+   * failure (no `view` was ever obtained — see the render branch below).
+   * Deliberately just re-runs the exact same read-only `load()` the mount
+   * effect calls — no new session, no mutation, nothing "automatic
+   * correction" or capability-shaped about retrying a display fetch.
+   */
+  function retryLoad() {
+    setLoading(true);
+    void load();
+  }
+
   useEffect(() => {
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -280,10 +438,19 @@ export function SeparationReviewPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
+  // Phase 28G Defect A: reports the explicit three(-plus)-state status —
+  // `"checking"` while `loading`, `"error"` when the initial load failed
+  // outright (no `view` was ever obtained), otherwise the real, resolved
+  // `view.state` (including `"review_not_required"` for both an
+  // explicit server answer and the 404/no-review-exists case, which have
+  // always meant the same thing to callers). `loading` is in the
+  // dependency list specifically so the `loading: true -> false` edge
+  // itself re-evaluates and emits status, even in the 404 case where
+  // `view?.state` never changes (stays `undefined` throughout).
   useEffect(() => {
-    onStateChange?.(view?.state ?? null);
+    onStateChange?.(computeSeparationCheckStatus({ loading, error, viewState: view?.state }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view?.state]);
+  }, [loading, error, view?.state]);
 
   // THE RELOAD-RESUME RULE (Goal G), applied exactly once per successful
   // load — never on every `view` update, which would otherwise fight manual
@@ -391,7 +558,7 @@ export function SeparationReviewPanel({
     if (result.ok) {
       setView(result.view);
       setImageNonce((n) => n + 1);
-      // "Looks Good" / "Keep All Highlighted" are complete decisions —
+      // "Remove Pink Area" / "Keep Pink Area" are complete decisions —
       // leave the workspace immediately so the router advances to final
       // review (Phase 23's fast path: one click, done).
       setForceShowWorkspace(false);
@@ -487,10 +654,10 @@ export function SeparationReviewPanel({
   /**
    * Phase 23 browser-acceptance finding: `proposalTapMode` is local UI
    * state, so returning to this screen via "Review decisions again" (or any
-   * fresh mount) after previously using "Preserve Part of This" left the
+   * fresh mount) after previously using "Keep Part of Pink Area" left the
    * kept-spots panel hidden even though the taps themselves had persisted
    * correctly — the operator had no visible confirmation their spots were
-   * still there without re-clicking "Preserve Part of This" first. The
+   * still there without re-clicking "Keep Part of Pink Area" first. The
    * panel now also shows itself whenever the SERVER's own state already
    * reflects an exceptions-based decision with at least one stored tap,
    * regardless of whether the local toggle was ever flipped this session.
@@ -518,6 +685,28 @@ export function SeparationReviewPanel({
 
   if (loading) {
     return <p className="text-sm text-muted">Checking whether this artwork needs a separation review…</p>;
+  }
+  if (error && !view) {
+    // Phase 28G Section 8: the INITIAL check itself failed — never
+    // silently fall back to "review_not_required" (that would let
+    // `CompareStep` show its ordinary approval review over an artwork we
+    // never actually established was safe to approve that way — the exact
+    // "do not silently fall back to ordinary approval" instruction).
+    // `onStateChange` above already reported `"error"`, which
+    // `CompareStep` treats the same as a genuine gate: its own approval
+    // controls stay withheld while this retry surface is what is shown.
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3" role="alert">
+        <p className="text-sm text-amber-900">We couldn&apos;t check whether this artwork needs a separation review.</p>
+        <button
+          type="button"
+          onClick={retryLoad}
+          className="mt-2 rounded-full border border-amber-300 px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100"
+        >
+          Try Again
+        </button>
+      </div>
+    );
   }
   if (!view || view.state === "review_not_required") {
     // Goal 20 / Phase 15 easy-artwork regression: no consequential regions
@@ -558,7 +747,7 @@ export function SeparationReviewPanel({
   if (primaryStep === "final-review") {
     return (
       <div className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm" data-separation-review-state={view.state} data-final-review>
-        <p className="text-sm font-semibold text-ink">Review your artwork before continuing.</p>
+        <p className="text-sm font-semibold text-ink">Review your artwork</p>
         <p className="mt-1 text-sm text-muted">
           Every highlighted area has a decision. Check the complete result below on a few garment colours before using it.
         </p>
@@ -594,12 +783,11 @@ export function SeparationReviewPanel({
           </div>
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-ink">Prepared</p>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
+            <GarmentPreviewImage
               src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=master-preview&garment=${encodeURIComponent(previewSurface)}&v=${imageNonce}`}
+              backgroundColor={previewSurface}
               alt="Resulting prepared artwork on the selected garment colour"
               className="mt-1 h-[280px] w-full rounded-lg border border-black/8 object-contain sm:h-[360px]"
-              style={{ backgroundColor: previewSurface }}
             />
           </div>
         </div>
@@ -622,7 +810,7 @@ export function SeparationReviewPanel({
             onClick={approve}
             className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink/40"
           >
-            Use This Preparation
+            Use This Artwork
           </button>
           <button
             type="button"
@@ -669,8 +857,8 @@ export function SeparationReviewPanel({
       <div className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm" data-separation-review-state={view.state} data-proposal-review>
         <p className="text-sm font-semibold text-ink">Check what will be removed</p>
         <p className="mt-1 text-sm text-muted">
-          The highlighted area is connected to the background and would normally show the shirt through. Tell us what to
-          do with it — or keep specific spots if only part of it matters.
+          Only the pink area will become transparent. Everything else stays exactly as shown — tell us what to do
+          with the pink area, or keep specific spots if only part of it matters.
         </p>
         {errorBanner}
 
@@ -719,7 +907,7 @@ export function SeparationReviewPanel({
           src={proposalImageUrl}
           alt={
             proposalViewMode === "proposal"
-              ? "The artwork with the proposed removal highlighted, and any spots you've chosen to keep tinted differently"
+              ? "Your artwork at full color. The pink area will become transparent; any spots you've chosen to keep are tinted green."
               : proposalViewMode === "result"
                 ? "The resulting artwork on the selected garment colour"
                 : "The original artwork, untouched"
@@ -739,9 +927,9 @@ export function SeparationReviewPanel({
 
         {showPreserveMode() ? (
           <div className="mt-3 rounded-xl border border-black/8 bg-black/[0.02] p-3" data-preserve-mode>
-            <p className="text-xs font-semibold text-ink">Preserve part of this</p>
+            <p className="text-xs font-semibold text-ink">Keep part of the pink area</p>
             <p className="mt-1 text-xs text-muted">
-              Tap anywhere in the highlighted area above that you want to keep. We&rsquo;ll keep a small area around your
+              Tap anywhere in the pink area above that you want to keep. We&rsquo;ll keep a small area around your
               tap and remove the rest.
             </p>
             {proposalViewMode !== "proposal" ? (
@@ -805,7 +993,7 @@ export function SeparationReviewPanel({
           Your original upload is saved and unchanged.
         </p>
 
-        <div className="mt-3 grid gap-2 sm:grid-cols-3" role="group" aria-label="What to do with the highlighted area">
+        <div className="mt-3 grid gap-2 sm:grid-cols-3" role="group" aria-label="What to do with the pink area">
           <button
             type="button"
             disabled={busy}
@@ -818,7 +1006,7 @@ export function SeparationReviewPanel({
                 : "rounded-xl border-2 border-black/10 px-4 py-3 text-sm font-semibold text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink/40"
             }
           >
-            Looks Good
+            Remove Pink Area
           </button>
           <button
             type="button"
@@ -832,7 +1020,7 @@ export function SeparationReviewPanel({
                 : "rounded-xl border-2 border-black/10 px-4 py-3 text-sm font-semibold text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink/40"
             }
           >
-            Keep All Highlighted
+            Keep Pink Area
           </button>
           <button
             type="button"
@@ -846,21 +1034,21 @@ export function SeparationReviewPanel({
                 : "rounded-xl border-2 border-black/10 px-4 py-3 text-sm font-semibold text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink/40"
             }
           >
-            Preserve Part of This
+            Keep Part of Pink Area
           </button>
         </div>
         <dl className="mt-2 space-y-1 text-xs text-muted">
           <div className="flex gap-1.5">
-            <dt className="font-medium text-ink">Looks Good:</dt>
-            <dd>Remove the highlighted area, exactly as shown.</dd>
+            <dt className="font-medium text-ink">Remove Pink Area:</dt>
+            <dd>Make only the pink area transparent.</dd>
           </div>
           <div className="flex gap-1.5">
-            <dt className="font-medium text-ink">Keep All Highlighted:</dt>
-            <dd>Keep the highlighted area instead of removing it.</dd>
+            <dt className="font-medium text-ink">Keep Pink Area:</dt>
+            <dd>Keep the pink area as part of your artwork.</dd>
           </div>
           <div className="flex gap-1.5">
-            <dt className="font-medium text-ink">Preserve Part of This:</dt>
-            <dd>Tap specific spots you want to keep, and remove the rest.</dd>
+            <dt className="font-medium text-ink">Keep Part of Pink Area:</dt>
+            <dd>Choose which parts of the pink area should stay.</dd>
           </div>
         </dl>
 

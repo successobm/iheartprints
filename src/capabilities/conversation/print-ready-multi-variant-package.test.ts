@@ -19,16 +19,23 @@ import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
  *
  * Reproduces exactly what the real project (`44f528f2-...`, Phase 27O)
  * lived through: Standard Raster genuinely cannot be reconstructed at this
- * confirmed size (5.45x needed, no real detail to add), DTF Halftone
- * genuinely succeeds on the SAME approved source at the SAME size. Proves
- * the two coexist, neither masquerades as the other, and switching which
- * treatment is currently configured never mutates either's completed state
- * (Section 15's regression, verbatim).
+ * confirmed size (5.45x needed, no real detail to add).
+ *
+ * PHASE 28I HARD CORRECTION: Phase 27P's original story continued past that
+ * point to prove DTF Halftone could succeed independently and the two
+ * variants would coexist without contaminating each other. That sequence --
+ * Halftone reachable while Raster is only `needs_attention` -- is now
+ * EXACTLY the sequence Phase 28I forbids (Section 9/19): "Halftone MUST NOT
+ * be available until Standard Raster is genuinely print_ready. No bypass.
+ * No Halftone after Raster needs_attention." This file now proves the new
+ * behavior on the same real asset: Raster fails honestly, and the Halftone
+ * request that Phase 27P expected to succeed is instead rejected outright,
+ * with Raster's own verdict and the source assets left provably untouched.
  *
  * Uses the REAL wired capability graph's REAL final-artwork scheduler and
  * REAL providers throughout -- no fakes, no mocks. This environment has no
- * Topaz key configured (verified in Phase 27M/N), so both jobs run entirely
- * local: zero network, zero cost, zero paid-provider calls.
+ * Topaz key configured (verified in Phase 27M/N), so the raster job runs
+ * entirely local: zero network, zero cost, zero paid-provider calls.
  */
 const INCREDI_BOWLS_PATH =
   "C:/Users/eric/Downloads/e0078e6f-e802-4da1-ba3d-9f97490c4868_image_1_.png";
@@ -57,7 +64,7 @@ describe("Phase 27P — multi-variant print-ready package (real INCREDI-BOWLS)",
     await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
-  it("Raster refuses honestly, Halftone succeeds, neither masquerades as the other across repeated treatment switches", async () => {
+  it("Phase 28I HARD CORRECTION: Raster refuses honestly, and Halftone -- no longer an independent success path -- is rejected outright, with Raster's own verdict and the source assets left untouched", async () => {
     const { resetCapabilityGraphForTests, getCapabilityGraph } = await import("@/capabilities/composition");
     resetCapabilityGraphForTests();
     const graph = getCapabilityGraph();
@@ -158,122 +165,41 @@ describe("Phase 27P — multi-variant print-ready package (real INCREDI-BOWLS)",
     raster = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "standard_raster")!;
     assert.equal(raster.status, "needs_attention", "switching treatment away must not clear/mutate raster's own verdict");
 
-    // --- B/A/Q/R: RUN DTF HALFTONE (succeeds, zero paid calls, own validation unchanged) ---
-    const halftoneRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-    assert.notEqual(
-      halftoneRequest.job.id,
-      rasterRequest.job.id,
-      "A: raster and halftone must be genuinely separate, coexisting jobs",
+    // --- Phase 28I HARD GATE: requesting Halftone now is REJECTED outright,
+    // because Standard Raster has not reached print_ready. This is exactly
+    // the sequence Phase 27P originally proved as a valid success path; that
+    // rule is explicitly overruled. ---
+    await assert.rejects(
+      () => graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId),
+      (error: Error & { safeErrorCode?: string }) => {
+        assert.equal(error.name, "ArtworkFinalizationRasterNotReadyError");
+        assert.equal(error.safeErrorCode, "STANDARD_RASTER_NOT_PRINT_READY");
+        assert.match(error.message, /Standard Raster/);
+        assert.match(error.message, /needs_attention/);
+        return true;
+      },
+      "Phase 28I: Halftone must not be reachable while Raster is only needs_attention",
     );
     await graph.finalArtworkScheduler.runBatch();
-    const halftoneJob = (await repo.getFinalArtworkJob(halftoneRequest.job.id))!;
-    assert.equal(halftoneJob.status, "completed");
-    assert.equal(halftoneJob.providerKey, null, "R: local providers never persist a providerKey (no external request identity)");
 
-    const halftoneValidation = await repo.getLatestProductionAssetValidationForJob(projectId, halftoneJob.id);
-    assert.equal(halftoneValidation?.status, "ready", "Q: halftone's own validation is unchanged from Phase 27N's proof");
-    const halftoneChecks = (halftoneValidation!.report as { checks: Array<{ check: string; status: string }> }).checks;
-    assert.equal(halftoneChecks.find((c) => c.check === "halftone_tonal_sufficiency")?.status, "pass");
-    assert.equal(halftoneChecks.find((c) => c.check === "halftone_screen_geometry")?.status, "pass");
-    assert.equal(halftoneChecks.find((c) => c.check === "halftone_final_size_generation")?.status, "pass");
-
+    // Neither variant moved as a result of the rejected attempt: raster
+    // keeps its own prior verdict, and halftone -- never actually
+    // dispatched -- remains honestly not_created, not any flavor of failure.
     snapshot = (await getConversation(projectId))!;
     raster = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "standard_raster")!;
     halftone = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "halftone_dtf")!;
-    assert.equal(halftone.status, "print_ready");
-    assert.equal(raster.status, "needs_attention", "J: raster's own prior failure is unaffected by halftone succeeding");
-    // I: halftone metadata displays the correct real settings.
-    assert.deepEqual(halftone.halftone, { lpi: 35, angleDeg: 45, dotShape: "round" });
+    assert.equal(raster.status, "needs_attention", "J: raster's own prior verdict is unaffected by the rejected halftone attempt");
+    assert.equal(halftone.status, "not_created", "the rejected request never created or ran a halftone job");
+    assert.equal(halftone.finalArtworkJobId, null);
 
-    // --- C/B: SWITCH BACK TO STANDARD RASTER, then back to HALFTONE, repeatedly ---
-    for (let i = 0; i < 3; i += 1) {
-      await treatmentRoute.POST(
-        new Request("http://localhost/x", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ treatment: "standard_raster" }),
-        }),
-        { params: Promise.resolve({ projectId }) },
-      );
-      snapshot = (await getConversation(projectId))!;
-      raster = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "standard_raster")!;
-      halftone = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "halftone_dtf")!;
-      assert.equal(raster.status, "needs_attention", "C: raster keeps its own state while re-selected");
-      assert.equal(halftone.status, "print_ready", "B: the completed halftone output survives switching to raster");
-
-      await treatmentRoute.POST(
-        new Request("http://localhost/x", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            treatment: "halftone_dtf",
-            halftone: { lpi: 35, angleDeg: 45, dotShape: "round", midtone: 1, chokePx: 0 },
-          }),
-        }),
-        { params: Promise.resolve({ projectId }) },
-      );
-      snapshot = (await getConversation(projectId))!;
-      raster = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "standard_raster")!;
-      halftone = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "halftone_dtf")!;
-      assert.equal(halftone.status, "print_ready", "halftone remains print_ready across repeated re-selection");
-      assert.equal(raster.status, "needs_attention", "raster remains needs_attention throughout");
-    }
-
-    // F: the completed-file identity never depends on the CURRENT selector.
-    // The brief is currently on halftone_dtf (last loop iteration); the
-    // package still reports BOTH variants by their own true identity.
-    const finalBrief = (await repo.getProject(projectId))!.brief;
-    assert.equal(finalBrief.productionTreatment, "halftone_dtf");
-    assert.equal(raster.treatment, "standard_raster");
-    assert.equal(raster.label, "Standard Raster");
-    assert.equal(halftone.treatment, "halftone_dtf");
-    assert.equal(halftone.label, "DTF Halftone");
-
-    // --- G/H: DOWNLOAD IDENTITY -- each variant's download returns THAT variant's asset ---
+    // G: raster never became print_ready, so it must never be downloadable;
+    // and there is no halftone artifact to download either.
     const rasterDownload = await getProductionArtworkDownloadForVariant(projectId, "standard_raster");
     assert.equal(rasterDownload, null, "G: raster never became print_ready, so it must never be downloadable");
-
     const halftoneDownload = await getProductionArtworkDownloadForVariant(projectId, "halftone_dtf");
-    assert.ok(halftoneDownload, "H: the successfully-generated halftone file must be downloadable");
-    const halftoneAssetBytes = (await assets.downloadAssetBytes(halftone.finalAssetId!))!.bytes;
-    assert.equal(
-      createHash("sha256").update(halftoneDownload!.bytes).digest("hex"),
-      createHash("sha256").update(halftoneAssetBytes).digest("hex"),
-      "H: the downloaded bytes are exactly the halftone variant's own asset -- never raster's, never 'whichever is current'",
-    );
-    assert.match(halftoneDownload!.filename, /dtf-halftone/);
+    assert.equal(halftoneDownload, null, "a rejected request must never produce a downloadable halftone file");
 
-    // K: requesting the SAME variant/configuration again reuses the completed job.
-    const halftoneAgain = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-    assert.equal(halftoneAgain.job.id, halftoneJob.id, "K: an unchanged halftone configuration must reuse the completed job");
-    assert.equal(halftoneAgain.alreadyRequested, true);
-
-    // L: a MATERIALLY DIFFERENT halftone configuration (different LPI) is a
-    // genuinely different variant, not silently merged into the same job/output.
-    await treatmentRoute.POST(
-      new Request("http://localhost/x", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          treatment: "halftone_dtf",
-          halftone: { lpi: 45, angleDeg: 45, dotShape: "round", midtone: 1, chokePx: 0 },
-        }),
-      }),
-      { params: Promise.resolve({ projectId }) },
-    );
-    const differentLpiRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-    assert.notEqual(
-      differentLpiRequest.job.id,
-      halftoneJob.id,
-      "L: 35 LPI and 45 LPI must never be presented as the same output",
-    );
-    await graph.finalArtworkScheduler.runBatch();
-    // The ORIGINAL 35 LPI job/asset are untouched by this new, separate job.
-    const originalHalftoneJobStill = (await repo.getFinalArtworkJob(halftoneJob.id))!;
-    assert.equal(originalHalftoneJobStill.status, "completed");
-    assert.equal(originalHalftoneJobStill.id, halftoneJob.id);
-
-    // M/N: source authority and original immutability survive everything above.
+    // M/N: source authority and original immutability survive the rejected attempt.
     const correctedBytesAfter = (await assets.downloadAssetBytes(correctedAssetId))!.bytes;
     const originalBytesAfter = (await assets.downloadAssetBytes(originalAssetId))!.bytes;
     assert.equal(
@@ -300,12 +226,11 @@ describe("Phase 27P — multi-variant print-ready package (real INCREDI-BOWLS)",
     );
   });
 
-  it("E: a Halftone-specific failure does not contaminate Raster's own status/reason", async () => {
-    // A small synthetic square, deliberately too low-detail for a 55 LPI
-    // screen at 10.5in (tonal PPI well under the LPI it would need to
-    // support) -- exercises `halftone_tonal_sufficiency`'s REAL, unmodified
-    // rule with a genuinely different underlying source than the main test,
-    // so this failure's own reason can be proven independent of Raster's.
+  it("Phase 28I HARD CORRECTION of 'E': attempting Halftone while Raster is needs_attention is rejected outright -- Raster's own status/reason is provably untouched by the attempt", async () => {
+    // A small synthetic square, deliberately too low-detail to reconstruct
+    // -- exercises the real, unmodified Raster refusal path with a
+    // genuinely different underlying source than the main test above, so
+    // this rejection can be proven independent of that test's asset.
     const size = 400;
     const png = new PNG({ width: size, height: size });
     const cx = size / 2;
@@ -376,8 +301,9 @@ describe("Phase 27P — multi-variant print-ready package (real INCREDI-BOWLS)",
     const rasterJob = (await repo.getFinalArtworkJob(rasterRequest.job.id))!;
     assert.equal(rasterJob.status, "completed");
 
-    // Halftone at the maximum supported LPI -- fails tonal sufficiency for
-    // THIS small source (a real, unmodified validation outcome).
+    // Attempting Halftone now -- Raster is only needs_attention -- must be
+    // rejected outright by the Phase 28I gate, before any halftone-specific
+    // validation (tonal sufficiency, screen geometry, etc.) ever runs.
     const treatmentRoute = await import("@/app/api/projects/[projectId]/production-treatment/route");
     await treatmentRoute.POST(
       new Request("http://localhost/x", {
@@ -390,30 +316,32 @@ describe("Phase 27P — multi-variant print-ready package (real INCREDI-BOWLS)",
       }),
       { params: Promise.resolve({ projectId }) },
     );
-    const halftoneRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-    await graph.finalArtworkScheduler.runBatch();
-    const halftoneJob = (await repo.getFinalArtworkJob(halftoneRequest.job.id))!;
-    assert.equal(halftoneJob.status, "completed");
-    const halftoneValidation = await repo.getLatestProductionAssetValidationForJob(projectId, halftoneJob.id);
-    const halftoneChecks = (halftoneValidation!.report as { checks: Array<{ check: string; status: string }> }).checks;
-    assert.equal(
-      halftoneChecks.find((c) => c.check === "halftone_tonal_sufficiency")?.status,
-      "fail",
-      "this fixture must genuinely fail tonal sufficiency for this test to prove anything",
+    await assert.rejects(
+      () => graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId),
+      (error: Error & { safeErrorCode?: string }) => {
+        assert.equal(error.name, "ArtworkFinalizationRasterNotReadyError");
+        assert.equal(error.safeErrorCode, "STANDARD_RASTER_NOT_PRINT_READY");
+        return true;
+      },
     );
+    await graph.finalArtworkScheduler.runBatch();
 
     const snapshot = (await getConversation(projectId))!;
     const raster = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "standard_raster")!;
     const halftone = snapshot.printReadyPackage!.variants.find((v) => v.treatment === "halftone_dtf")!;
 
+    // Raster's own status/reason is exactly what it was before the rejected
+    // attempt -- provably untouched by it.
     assert.equal(raster.status, "needs_attention");
-    assert.equal(halftone.status, "needs_attention");
-    // The two failures are independent facts: neither variant's job id,
-    // reason, or asset is shared with the other's.
-    assert.notEqual(raster.finalArtworkJobId, halftone.finalArtworkJobId);
-    assert.notEqual(raster.attentionReason, halftone.attentionReason);
-    assert.doesNotMatch(raster.attentionReason ?? "", /tonal/i);
-    assert.doesNotMatch(halftone.attentionReason ?? "", /enhancement/i);
+    assert.equal(raster.finalArtworkJobId, rasterJob.id);
+    const rasterReasonBefore = raster.attentionReason;
+    assert.ok(rasterReasonBefore);
+    // Halftone was never dispatched, so it is honestly not_created -- not a
+    // "failure" borrowed from, or contaminated by, Raster's own reason.
+    assert.equal(halftone.status, "not_created");
+    assert.equal(halftone.finalArtworkJobId, null);
+    assert.equal(halftone.attentionReason, null);
+    assert.doesNotMatch(rasterReasonBefore ?? "", /tonal/i);
   });
 
   it("S: printReadyPackage is absent (never null) for a non-internal project", async () => {

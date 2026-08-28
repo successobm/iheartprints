@@ -123,11 +123,11 @@ describe("analyzeArtwork", () => {
 
 describe("measurePixelSufficiency", () => {
   it("says nothing at all when there is no print placement yet", () => {
-    assert.equal(measurePixelSufficiency(1000, null, null), null);
+    assert.equal(measurePixelSufficiency(1000, 1000, null, null), null);
   });
 
-  it("reads the shared placement policy rather than restating a print size", () => {
-    const sufficiency = measurePixelSufficiency(923, "full_front", null);
+  it("reads the shared placement policy rather than restating a print size (square artwork -- the box never narrows a square)", () => {
+    const sufficiency = measurePixelSufficiency(923, 923, "full_front", null);
     assert.ok(sufficiency);
     assert.equal(sufficiency!.targetWidthIn, 10.5);
     assert.equal(sufficiency!.targetPpi, 300);
@@ -135,10 +135,27 @@ describe("measurePixelSufficiency", () => {
     assert.equal(sufficiency!.sufficient, false);
   });
 
-  it("honours a customer-chosen production width", () => {
-    const sufficiency = measurePixelSufficiency(1200, "full_front", 4);
+  it("honours a customer-chosen production width -- the assumed garment box never overrides an explicit width", () => {
+    const sufficiency = measurePixelSufficiency(1200, 1200, "full_front", 4);
     assert.equal(sufficiency!.requiredWidthPx, 1200);
     assert.equal(sufficiency!.sufficient, true);
+  });
+
+  it("Phase 28C: a tall/portrait artwork's required width is CONTAINED against the assumed Standard Adult box, not the placement's flat 10.5in default", () => {
+    // A 2:3 portrait (height = 1.5x width) inside the assumed adult_standard
+    // 10.5x10.5in box is height-controlled: widthIn = 10.5/1.5 = 7.0.
+    const sufficiency = measurePixelSufficiency(2000, 3000, "full_front", null);
+    assert.ok(sufficiency);
+    assert.equal(sufficiency!.targetWidthIn, 7);
+    assert.equal(sufficiency!.requiredWidthPx, Math.round(7 * 300));
+    // 2000px already exceeds the 2100px this artwork actually needs at its
+    // correctly-contained 7in width -- nowhere near the old 3150px (10.5in)
+    // requirement a flat width-only check would have wrongly demanded.
+    assert.equal(sufficiency!.sufficient, false);
+    assert.ok(
+      sufficiency!.requiredWidthPx < 3150,
+      "the contained requirement must be strictly less than the old flat 10.5in requirement",
+    );
   });
 
   it("measures the artwork's width, never the padded canvas", () => {

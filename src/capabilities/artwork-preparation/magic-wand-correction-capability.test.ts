@@ -290,10 +290,31 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
     assert.ok(pixelsEqual(await decodedPixels(first), await decodedPixels(second)), "replay must be deterministic");
   });
 
-  it("fails closed with no prepared artwork to correct", async () => {
+  // Phase 28A superseded this test's original premise: it asserted
+  // `ensureCorrectionSession` refused to start whenever `preparedAssetId`
+  // was absent, on the assumption (stated explicitly in the pre-Phase-28A
+  // doc comment) that automatic preparation always runs first. That
+  // assumption is exactly what a `NEEDS_REVIEW`-classified upload violates
+  // -- `prepareBackground` refuses to run at all for it, so
+  // `preparedAssetId` stays permanently null, and the manual correction
+  // workspace is the ONLY way forward. See
+  // `manual-cleanup-from-automatic-review.test.ts` for the full coverage of
+  // that path. What genuinely still "fails closed" is unchanged: a project
+  // with no upload/preparation record at all.
+  it("succeeds with only an upload and no automatic preparation -- Phase 28A's manual-cleanup entry point", async () => {
     const { repo, capability } = await harness();
     const projectId = (await repo.createProject()).project.id;
     await capability.uploadOriginal(projectId, { bytes: toPngBytes(solidBlackExteriorArtwork()), declaredContentType: "image/png", filename: "artwork.png" });
+    const preview = await capability.previewCorrectionSelection(projectId, { clicks: [{ x: 5, y: 5 }], mode: "remove", toleranceLevel: "default" });
+    assert.ok(preview.overlayPng.length > 0);
+    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 5, y: 5 }], mode: "remove", toleranceLevel: "default" });
+    const view = await capability.finalizeCorrection(projectId);
+    assert.equal(view.hasPreparedArtwork, true);
+  });
+
+  it("still fails closed with no upload/preparation record at all", async () => {
+    const { repo, capability } = await harness();
+    const projectId = (await repo.createProject()).project.id;
     await assert.rejects(() => capability.previewCorrectionSelection(projectId, { clicks: [{ x: 5, y: 5 }], mode: "remove", toleranceLevel: "default" }));
     await assert.rejects(() => capability.finalizeCorrection(projectId));
   });

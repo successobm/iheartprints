@@ -61,25 +61,15 @@ export function ChatApp() {
   const [snapshot, setSnapshot] = useState<ApiSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
-  /**
-   * Print'em All Phase 2: bumped whenever the treatment changes, so the
-   * preview <img> elements re-fetch instead of showing a plate made with the
-   * previous settings.
-   */
-  const [treatmentPreviewNonce, setTreatmentPreviewNonce] = useState(0);
-  /**
-   * Phase 27M §8/§10: which of the two async waiting-state gaps the human
-   * acceptance test reported is actually in flight right now — set
-   * synchronously at the top of the handler, before the first `await`, so it
-   * is true for the very same render the button becomes disabled in.
-   * `null`/`false` the rest of the time. Deliberately local UI state, never
-   * persisted and never read by any capability: it says nothing the server
-   * doesn't already know, it only says it sooner than a round trip can.
-   */
-  const [pendingTreatment, setPendingTreatment] = useState<
-    "standard_raster" | "halftone_dtf" | null
-  >(null);
   const [preparingForPrint, setPreparingForPrint] = useState(false);
+  /**
+   * Phase 28H: "Create DTF Halftone Version" is a distinct action from
+   * "Create Print-Ready Artwork" — its own in-flight indicator, for the same
+   * reason `preparingForPrint` exists (Phase 27M §8): the click's own gap
+   * before a response returns must never look identical to nothing having
+   * happened.
+   */
+  const [creatingHalftoneVersion, setCreatingHalftoneVersion] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conceptBannerDismissed, setConceptBannerDismissed] = useState(false);
   /**
@@ -667,67 +657,77 @@ export function ChatApp() {
    * against, so it gets its own route rather than riding on a width write.
    */
   /**
-   * Print'em All Phase 2: the internal operator's production-treatment
-   * choice.
+   * Phase 28H: "Create DTF Halftone Version" — the OPTIONAL, explicit
+   * second-variant action offered once Standard Raster has reached a
+   * terminal state (`print_ready` or `needs_attention`/`finalization_required`).
    *
-   * Persists immediately rather than accumulating in component state, which
-   * is the point rather than a shortcut (Goal 16): the treatment IS the
-   * production authority, so the thing the operator is looking at and the
-   * thing the pipeline will produce have to be the same record. Retraction
-   * is one click, so committing early costs nothing.
+   * Two existing, unmodified routes, called in sequence, exactly the way an
+   * internal operator's own two clicks (select the treatment, then request
+   * print-ready) already worked in Print'em All Phase 2/3 — this is not a
+   * new capability, just the same two steps folded into one customer-facing
+   * action with empty `{}` halftone settings (the route/capability already
+   * resolve an empty request to the recommended defaults for the garment;
+   * see `normalizeHalftoneSettings`). Deliberately ONE combined
+   * `sending`/`creatingHalftoneVersion` window across both requests, not two
+   * separate ones — releasing `sending` between them would open a real
+   * double-submit gap.
+   *
+   * Never touches Standard Raster: by the time this is reachable at all,
+   * Raster's own job has already reached a terminal (`completed`) state —
+   * `ApprovedStep`/`PrintReadyPackageCard` only expose this action once that
+   * is true — so switching the brief's currently-selected treatment to
+   * `halftone_dtf` here cannot supersede/cancel a still-queued Raster job
+   * (the stale-intent fence only ever acts on a QUEUED job).
    */
-  async function selectProductionTreatment(body: {
-    treatment: "standard_raster" | "halftone_dtf";
-    halftone?: Record<string, number | string>;
-  }) {
+  async function createHalftoneVersion() {
     if (!snapshot || sending) return;
     setSending(true);
-    setPendingTreatment(body.treatment);
+    setCreatingHalftoneVersion(true);
     setError(null);
 
     try {
-      const response = await fetch(
+      const treatmentResponse = await fetch(
         `/api/projects/${snapshot.project.id}/production-treatment`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ treatment: "halftone_dtf", halftone: {} }),
         },
       );
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to set the production treatment");
+      const treatmentData = await treatmentResponse.json();
+      if (!treatmentResponse.ok) {
+        throw new Error(
+          treatmentData.error || "Failed to configure the DTF Halftone version",
+        );
       }
-      setSnapshot(data as ApiSnapshot);
-      // Busts the preview <img> cache without a cache-control dance: the
-      // previews are derived from settings that just changed, and a stale one
-      // would have an operator judging a plate they are no longer making.
-      setTreatmentPreviewNonce((value) => value + 1);
+      setSnapshot(treatmentData as ApiSnapshot);
+
+      const printReadyResponse = await fetch(
+        `/api/projects/${snapshot.project.id}/artwork-preparation`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "print_ready" }),
+        },
+      );
+      const printReadyData = await printReadyResponse.json();
+      if (!printReadyResponse.ok) {
+        throw new Error(
+          printReadyData.error || "Failed to create the DTF Halftone version",
+        );
+      }
+      setSnapshot(printReadyData as ApiSnapshot);
     } catch (err) {
       setError(
         err instanceof Error
           ? err.message
-          : "Failed to set the production treatment",
+          : "Failed to create the DTF Halftone version",
       );
     } finally {
       setSending(false);
-      setPendingTreatment(null);
+      setCreatingHalftoneVersion(false);
     }
   }
-
-  /**
-   * Preview URLs for the operator panel. Present only when the SERVER
-   * included the treatment view — the same condition that governs whether the
-   * panel renders at all, so a client cannot conjure a preview URL for a
-   * project it has no entitlement on (the route re-checks anyway).
-   */
-  const treatmentPreviewUrls = snapshot?.productionTreatment
-    ? {
-        prepared: `/api/projects/${snapshot.project.id}/production-treatment/preview?mode=prepared&v=${treatmentPreviewNonce}`,
-        halftone: `/api/projects/${snapshot.project.id}/production-treatment/preview?mode=halftone&v=${treatmentPreviewNonce}`,
-        garment: `/api/projects/${snapshot.project.id}/production-treatment/preview?mode=garment&v=${treatmentPreviewNonce}`,
-      }
-    : {};
 
   async function confirmRecommendedPrintSize() {
     if (!snapshot || sending) return;
@@ -1644,19 +1644,9 @@ export function ChatApp() {
                 finalizationStatus={snapshot?.finalization.status ?? "not_requested"}
                 onPrepareForPrint={() => void prepareUploadedArtworkForPrint()}
                 preparingForPrint={preparingForPrint}
-                productionTreatment={snapshot?.productionTreatment}
                 printReadyPackage={snapshot?.printReadyPackage}
-                pendingTreatment={pendingTreatment}
-                treatmentPreviewUrls={treatmentPreviewUrls}
-                onSelectStandardRaster={() =>
-                  void selectProductionTreatment({ treatment: "standard_raster" })
-                }
-                onSelectHalftoneTreatment={(halftone) =>
-                  void selectProductionTreatment({
-                    treatment: "halftone_dtf",
-                    halftone,
-                  })
-                }
+                onCreateHalftoneVersion={() => void createHalftoneVersion()}
+                creatingHalftoneVersion={creatingHalftoneVersion}
               />
             ) : null}
 

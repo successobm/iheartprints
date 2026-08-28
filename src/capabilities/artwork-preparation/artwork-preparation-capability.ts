@@ -680,11 +680,14 @@ export function createArtworkPreparationCapability(
    */
   async function ensureCorrectionSession(designId: string): Promise<void> {
     const { preparation } = await loadOwned(designId);
-    if (!preparation.preparedAssetId) {
-      // Sanity/ordering guard only (Phase 27G §0: automatic preparation
-      // always runs first in this product flow) -- NOT used as the base.
-      throw new ArtworkPreparationStateError("No prepared artwork exists yet to correct.");
-    }
+    // Phase 27G §0 originally assumed automatic preparation always runs
+    // first, so this guard checked `preparedAssetId` as a proxy for "there
+    // is an upload to correct." Phase 28A: a NEEDS_REVIEW-classified upload
+    // never gets a `preparedAssetId` from `prepareBackground` (it refuses to
+    // run automatically at all), so that proxy no longer holds -- the
+    // actual precondition, `originalAssetId`, is guaranteed by `loadOwned`
+    // succeeding at all (every preparation row gets one at upload time; see
+    // `uploadOriginal`), so no separate check is needed here.
     if (hasFreshSession(designId, preparation.originalAssetId)) return;
 
     const { image: original } = await loadOriginalImageWithHash(preparation);
@@ -1768,8 +1771,9 @@ export function createArtworkPreparationCapability(
     /**
      * Phase 27H §0: a DELIBERATELY COMPLETED manual correction is
      * authoritative. This function is reachable ONLY from the explicit
-     * "Use This Artwork" click at the end of Remove Background Manually ->
-     * Magic Wand -> Done Editing -> Final Review (see
+     * "Use This Artwork" click at the end of Edit Artwork (Phase 28F; was
+     * "Remove Background Manually") -> Magic Wand -> Done Editing -> Final
+     * Review (see
      * `UploadedArtworkPanel`'s wiring, proven structurally in
      * `UploadedArtworkPanel.test.tsx`) — there is no earlier call site that
      * reaches this function. That is exactly what makes it safe to treat

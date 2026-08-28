@@ -37,6 +37,7 @@ import {
   PRINT_PLACEMENT_SIZING_POLICY,
   resolveProductionWidth,
   resolveWidthConstrainedSizing,
+  safetyMarginPxFor,
   sizingPolicyForPlacement,
 } from "./print-placement-dimensions";
 
@@ -157,6 +158,27 @@ export interface PrintReadyRecommendationView {
 /** How far the smaller/larger ready-made options sit from the standard width. */
 const OPTION_STEP_IN = 1.5;
 
+/**
+ * Phase 28I: the ONE place this file applies the artwork-edge safety margin
+ * (`shared/print-placement-dimensions.ts`'s `safetyMarginPxFor`) before
+ * containing a raw alpha-bounding-box pair — both containment call sites in
+ * this file (the main view's `widthIn`/`heightIn`, and the recommendation
+ * card's own "your artwork will print at") route through this so they can
+ * never independently drift from each other, or from the production
+ * worker's own trim-then-contain math (`final-artwork/production-
+ * normalization.ts`), which applies the identical margin to the identical
+ * raw bounding box. `null` in, `null` out — mirrors the "artwork dimensions
+ * not yet known" case every caller already handles.
+ */
+function withArtworkEdgeSafetyMargin(
+  artworkWidthPx: number | null,
+  artworkHeightPx: number | null,
+): { widthPx: number; heightPx: number } | null {
+  if (!artworkWidthPx || !artworkHeightPx) return null;
+  const margin = safetyMarginPxFor({ width: artworkWidthPx, height: artworkHeightPx });
+  return { widthPx: artworkWidthPx + 2 * margin, heightPx: artworkHeightPx + 2 * margin };
+}
+
 const PLACEMENT_LABELS: Record<PrintPlacement, string> = {
   full_front: "Full Front",
   full_back: "Full Back",
@@ -202,20 +224,6 @@ export function describePrintReadySize(
   );
   if (!resolved || !policy || !input.printPlacement) return null;
 
-  // Derived from the SAME function the production transform uses, so the
-  // figure shown before finalizing and the plate produced afterwards can
-  // never come from two different pieces of arithmetic.
-  const heightIn =
-    input.artworkWidthPx && input.artworkHeightPx
-      ? roundInches(
-          resolveWidthConstrainedSizing(
-            policy,
-            input.artworkWidthPx,
-            input.artworkHeightPx,
-          ).heightIn,
-        )
-      : null;
-
   const confirmation = resolveProductionSizeConfirmation({
     printPlacement: input.printPlacement,
     productionSizeConfirmedAt: input.productionSizeConfirmedAt ?? null,
@@ -230,9 +238,45 @@ export function describePrintReadySize(
   const confirmedPolicy = confirmation.confirmed
     ? sizingPolicyForConfirmedSize(input.printPlacement, confirmation.size)
     : null;
-  const displayHeightIn = confirmedPolicy
-    ? containedHeightIn(confirmedPolicy, input)
-    : heightIn;
+  const effectivePolicy = confirmedPolicy ?? policy;
+
+  // Phase 28C (Bug B): width and height must come from the SAME
+  // `resolveWidthConstrainedSizing` call, against the SAME effective policy
+  // (the confirmed BOX when one exists, the placement default otherwise) —
+  // never width from one source (the box's raw nominal width, or the
+  // placement default) and height from a second, independently-contained
+  // computation. For ANY design where height controls (portrait art inside a
+  // square or near-square box), sourcing them separately produced an
+  // internally inconsistent pair: a correctly box-contained height paired
+  // with the box's full, uncontained width — e.g. "10.5in wide x 10.5in
+  // tall" for artwork that, correctly contained, actually prints 7.35 x
+  // 10.5. `null` only when the artwork's own pixel dimensions are not yet
+  // known — a width without a known aspect ratio cannot be honestly
+  // contained, so this falls back to the placement/box's stated width with
+  // no height claim, exactly as before.
+  // Phase 28I: the SAME artwork-edge safety margin production actually
+  // applies (`final-artwork/alpha-trim.ts`'s `trimToAlphaBounds`) is applied
+  // here too, to the same raw alpha-bounding-box dimensions, before
+  // containment — so the size quoted here and the plate production
+  // actually produces come from the SAME effective artwork dimensions.
+  // Before this, this preview contained the RAW bounding box while
+  // production contained bounding-box-plus-margin, which quoted a customer
+  // ~0.04in narrower/shorter than the file they would actually receive.
+  // Unclamped (production also clamps the margin to how much canvas
+  // actually surrounds the artwork, which this preview has no way to know
+  // without decoding the full image) — the rare artwork-touches-the-canvas-
+  // edge case can make this preview a hair more generous than the clamped
+  // production result, never less.
+  const marginAdjusted = withArtworkEdgeSafetyMargin(input.artworkWidthPx, input.artworkHeightPx);
+  const contained = marginAdjusted
+    ? resolveWidthConstrainedSizing(effectivePolicy, marginAdjusted.widthPx, marginAdjusted.heightPx)
+    : null;
+  const displayWidthIn = contained
+    ? roundInches(contained.widthIn)
+    : confirmation.confirmed
+      ? confirmation.size.widthIn
+      : resolved.widthIn;
+  const displayHeightIn = contained ? roundInches(contained.heightIn) : null;
 
   const recommendation = recommendProductionBox({
     placement: input.printPlacement,
@@ -240,7 +284,7 @@ export function describePrintReadySize(
   });
 
   return {
-    widthIn: confirmation.confirmed ? confirmation.size.widthIn : resolved.widthIn,
+    widthIn: displayWidthIn,
     heightIn: displayHeightIn,
     dpi: policy.targetPpi,
     placementLabel: PLACEMENT_LABELS[input.printPlacement],
@@ -298,14 +342,17 @@ function describeRecommendation(
     box.maxWidthIn,
     box.maxHeightIn,
   );
-  const contained =
-    input.artworkWidthPx && input.artworkHeightPx
-      ? resolveWidthConstrainedSizing(
-          boxPolicy,
-          input.artworkWidthPx,
-          input.artworkHeightPx,
-        )
-      : null;
+  // Phase 28I: same artwork-edge safety margin as the main `contained`
+  // computation above — see that call site's comment. This is the SECOND
+  // of what would otherwise be three independent containment calculations
+  // (this one, the main view's, and the worker's) claiming to state the
+  // same "what your artwork will actually print at" fact; without this,
+  // fixing the main view alone would have left the RECOMMENDATION card
+  // quoting the old, pre-margin number instead.
+  const marginAdjusted = withArtworkEdgeSafetyMargin(input.artworkWidthPx, input.artworkHeightPx);
+  const contained = marginAdjusted
+    ? resolveWidthConstrainedSizing(boxPolicy, marginAdjusted.widthPx, marginAdjusted.heightPx)
+    : null;
 
   return {
     recommendedFor: `${GARMENT_SIZE_CLASS_LABELS[garmentSizeClass]} · ${PLACEMENT_LABELS[placement]}`,
@@ -320,21 +367,6 @@ function describeRecommendation(
       confirmedSize.boxMaxHeightIn !== null &&
       Math.abs(confirmedSize.boxMaxHeightIn - box.maxHeightIn) < 1e-9,
   };
-}
-
-/** Contained height for one policy, or `null` when the artwork's proportions are unknown. */
-function containedHeightIn(
-  policy: Parameters<typeof resolveWidthConstrainedSizing>[0],
-  input: DescribePrintReadySizeInput,
-): number | null {
-  if (!input.artworkWidthPx || !input.artworkHeightPx) return null;
-  return roundInches(
-    resolveWidthConstrainedSizing(
-      policy,
-      input.artworkWidthPx,
-      input.artworkHeightPx,
-    ).heightIn,
-  );
 }
 
 function buildWidthOptions(

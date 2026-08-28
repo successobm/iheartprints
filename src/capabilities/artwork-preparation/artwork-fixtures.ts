@@ -1034,6 +1034,56 @@ export function openLineArtFrameGapDriftedArtwork(): RgbaImage {
   return image;
 }
 
+/**
+ * Phase 28C — the "tall event-poster" class of artwork the live Chili &
+ * Salsa Cook-Off / Rodeo / Car Show order exposed a false-positive
+ * separation-review trigger on. A synthetic stand-in reproducing the
+ * geometry that made that case hard, never the customer's actual design
+ * (Constitution §16 — same reasoning as `bowlingStyleArtwork`'s own doc
+ * comment):
+ *
+ *   - a TALL portrait canvas
+ *   - a solid white exterior background, touching all four edges
+ *   - ink (badge plates + a central icon) reaching near BOTH the top and
+ *     bottom edges, which is what makes `artworkBounds` — the tight bbox
+ *     of ALL ink — span nearly the WHOLE canvas. This is the actual
+ *     mechanism behind the false positive: a background-removal proposal
+ *     that falls entirely "in bounds" purely because of this geometry,
+ *     regardless of whether removing it could plausibly harm anything.
+ *   - intentional cream/light TEXT blocks inside the top/bottom badges,
+ *     far enough from the background colour (Chebyshev distance 60, well
+ *     above the fill tolerance) to be correctly classified as ink rather
+ *     than background — proving intentional light interior content
+ *     survives, per Section 13's explicit adversarial requirement.
+ *
+ * `CREAM_TEXT` is deliberately far from the background here; a NEAR-bg
+ * cream (within fill tolerance) is a genuinely different, still-ambiguous
+ * case — see the region-separation tests for that variant, which correctly
+ * stays gated for review rather than becoming a second "safe" fixture.
+ */
+export const CREAM_TEXT: Rgba = { r: 245, g: 210, b: 190, a: 255 };
+
+export function tallEventPosterArtwork(): RgbaImage {
+  const width = 200;
+  const height = 700;
+  const image = createCanvas(width, height, WHITE);
+
+  // Top badge plate + cream text block, reaching near the top edge.
+  fillRect(image, 10, 10, 180, 40, RED);
+  fillRect(image, 30, 20, 140, 20, CREAM_TEXT);
+
+  // Bottom badge plate + cream text block, reaching near the bottom edge.
+  fillRect(image, 10, height - 50, 180, 40, RED);
+  fillRect(image, 30, height - 40, 140, 20, CREAM_TEXT);
+
+  // Central icon — a black disc with a yellow core — spanning most of the
+  // canvas's own height, exactly like a pepper/chili silhouette would.
+  fillEllipse(image, width / 2, height / 2, 70, 220, NEAR_BLACK);
+  fillEllipse(image, width / 2, height / 2, 35, 170, GOLD);
+
+  return image;
+}
+
 export function toPngBytes(image: RgbaImage): Buffer {
   return encodeRgbaToPng(image);
 }

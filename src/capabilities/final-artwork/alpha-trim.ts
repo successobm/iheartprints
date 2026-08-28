@@ -20,6 +20,11 @@
  */
 
 import type { RgbaImage } from "./raster-transform";
+import {
+  MIN_SAFETY_MARGIN_PX,
+  SAFETY_MARGIN_FRACTION,
+  safetyMarginPxFor,
+} from "@/capabilities/shared/print-placement-dimensions";
 
 /**
  * Alpha at or above this value counts as meaningful artwork. Deliberately
@@ -30,10 +35,15 @@ import type { RgbaImage } from "./raster-transform";
  */
 export const DEFAULT_ALPHA_THRESHOLD = 8;
 
-/** Absolute floor for the artwork-edge safety margin, in pixels. */
-export const MIN_SAFETY_MARGIN_PX = 8;
-/** Proportional component of the safety margin — a fraction of the alpha bounding box's longest side. */
-export const SAFETY_MARGIN_FRACTION = 0.005;
+/**
+ * Phase 28I: moved to `shared/print-placement-dimensions.ts` so the
+ * customer-facing size preview can share this EXACT computation without
+ * importing from `final-artwork` (see that file's own doc comment on
+ * `safetyMarginPxFor` for why the two disagreed before this move).
+ * Re-exported here unchanged so every existing import from this module
+ * keeps working.
+ */
+export { MIN_SAFETY_MARGIN_PX, SAFETY_MARGIN_FRACTION, safetyMarginPxFor };
 
 export interface AlphaBoundingBox {
   left: number;
@@ -131,19 +141,6 @@ export function computeAlphaBounds(
     width: right + 1 - left,
     height: bottom + 1 - top,
   };
-}
-
-/**
- * The audited safety-margin policy: `max(8px, 0.5% of the alpha bounding
- * box's longest side)`. Deterministic, and scale-aware so a 3200px
- * reconstruction gets proportionally the same breathing room as a 400px one.
- */
-export function safetyMarginPxFor(bbox: AlphaBoundingBox): number {
-  const longestSide = Math.max(bbox.width, bbox.height);
-  return Math.max(
-    MIN_SAFETY_MARGIN_PX,
-    Math.ceil(longestSide * SAFETY_MARGIN_FRACTION),
-  );
 }
 
 /**

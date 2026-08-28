@@ -46,6 +46,7 @@
 import { UNRECOGNIZED_PRODUCTION_OUTPUT } from "@/lib/domain/types";
 import type { PrintPlacement, StoredRequestedProductionOutput } from "@/lib/domain/types";
 import { PRODUCT_NOUN_CANONICAL } from "@/capabilities/shared/field-normalization";
+import { sizingPolicyForProductionBox } from "@/capabilities/shared/garment-production-sizing";
 import {
   sizingPolicyForPlacement,
   targetDimensionsForPlacement,
@@ -312,6 +313,32 @@ export interface DeriveProductionRequirementsInput {
    * Production PNG path, which is every historical project's behavior.
    */
   requestedProductionOutput?: StoredRequestedProductionOutput | null;
+  /**
+   * Phase 28C: the HEIGHT half of an explicit human confirmation
+   * (`ConfirmedProductionSize.boxMaxHeightIn`, `confirmed-production-size.ts`)
+   * — a garment-class-aware containing BOX bound, never a bare width's
+   * placement-wide technical ceiling.
+   *
+   * Before this field existed, this module always sized production off
+   * `sizingPolicyForPlacement` alone, whose `maxHeightIn` is the PLACEMENT's
+   * generic technical limit (14in for a full front/back) — much looser than
+   * any garment recommendation (10.5in for Standard Adult, 8.5in for Youth,
+   * ...). A confirmed WIDTH that happens to equal the placement default (as
+   * every garment-box recommendation's width does, by construction) left
+   * `sizingPolicyForPlacement` returning that same loose 14in ceiling
+   * unchanged — so a tall design correctly confirmed against a 10.5x10.5
+   * Standard Adult box was still produced against a 10.5x14 envelope,
+   * oversized relative to the box a human actually approved.
+   *
+   * `undefined`/`null` preserves EXACTLY today's behavior (the placement's
+   * own technical `maxHeightIn`) — every caller that does not pass this
+   * (a legacy job, a not-yet-confirmed project, a `generated_concept` whose
+   * caller has not been updated) sizes exactly as before. Passing it only
+   * ever NARROWS the height ceiling below the placement's technical limit —
+   * never widens it — because it always originates from a human-approved
+   * box, never invented here.
+   */
+  confirmedMaxHeightIn?: number | null;
 }
 
 /**
@@ -370,9 +397,20 @@ export function deriveProductionRequirements(
         // width here is what makes their choice authoritative all the way to
         // the plate — output pixels are `targetWidthIn x targetPpi`, so the
         // 300-PPI guarantee holds at whatever width they picked.
-        sizing: sizingPolicyForPlacement(
-          input.printPlacement,
-          intendedPrintWidthIn,
+        //
+        // Phase 28C: when a confirmed BOX height exists, it narrows the
+        // placement's generic technical ceiling down to the garment
+        // recommendation a human actually approved — see
+        // `confirmedMaxHeightIn`'s own doc comment above for why the
+        // placement policy alone is not authoritative for a tall design.
+        // `sizingPolicyForProductionBox` is the SAME function
+        // `sizingPolicyForConfirmedSize`/`describePrintReadySize` already use
+        // for the pre-finalization preview, so the figure shown before
+        // finalizing and the plate produced afterwards read the confirmed
+        // box identically.
+        sizing: applyConfirmedMaxHeight(
+          sizingPolicyForPlacement(input.printPlacement, intendedPrintWidthIn),
+          input.confirmedMaxHeightIn,
         ),
         requiredOutputType: "raster",
         targetPpi: targetDimensions ? APPAREL_RASTER_TARGET_PPI : null,
@@ -527,4 +565,24 @@ export function deriveProductionRequirements(
       };
     }
   }
+}
+
+/**
+ * Narrows a placement policy's height ceiling to a confirmed garment box's
+ * height, when one is known. `null`/`undefined` — no confirmed box, or no
+ * policy to narrow at all — returns `policy` completely untouched, which is
+ * every existing call site's exact prior behavior.
+ *
+ * Only ever NARROWS: `sizingPolicyForProductionBox` reuses `policy`'s own
+ * `targetWidthIn` (unchanged) and simply substitutes `maxHeightIn`. Nothing
+ * here can widen a technical limit or invent a width nobody confirmed.
+ */
+function applyConfirmedMaxHeight(
+  policy: ReturnType<typeof sizingPolicyForPlacement>,
+  confirmedMaxHeightIn: number | null | undefined,
+): ReturnType<typeof sizingPolicyForPlacement> {
+  if (!policy || confirmedMaxHeightIn === null || confirmedMaxHeightIn === undefined) {
+    return policy;
+  }
+  return sizingPolicyForProductionBox(policy, policy.targetWidthIn, confirmedMaxHeightIn);
 }

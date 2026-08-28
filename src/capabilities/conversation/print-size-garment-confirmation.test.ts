@@ -160,7 +160,13 @@ describe("Phase 27L: garment-class selection and print-size confirmation", () =>
 
     await chooseAndConfirm("adult_plus");
     size = await printReadySizeFor(repo, projectId);
-    assert.equal(size!.widthIn, 12, "dimensions must update to the NEW class's box, not the stale 10.5");
+    // Phase 28I: adult_plus's box is no longer 12x12 -- it shares
+    // adult_standard's 10.5in WIDTH ceiling now, so widthIn staying 10.5
+    // here is CORRECT, not stale. The box genuinely updating is provable on
+    // its HEIGHT ceiling instead, which adult_plus still recommends taller
+    // (12in) than adult_standard's own 10.5in.
+    assert.equal(size!.widthIn, 10.5, "adult_plus no longer recommends more WIDTH than adult_standard");
+    assert.equal(size!.recommendation!.boxHeightIn, 12, "dimensions must update to the NEW class's box height, not the stale 10.5");
     assert.equal(size!.confirmed, true, "the new class's box is confirmed in the same action -- never a moment of falling back to unconfirmed");
     assert.equal(size!.garmentSizeOptions.find((o) => o.value === "adult_plus")!.isSelected, true);
     assert.equal(size!.garmentSizeOptions.find((o) => o.value === "adult_standard")!.isSelected, false, "styling must move with the actual state, not linger on the old choice");

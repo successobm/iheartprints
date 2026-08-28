@@ -109,7 +109,24 @@ export function assessSeparationReviewState(
 ): SeparationReviewState {
   const hasConsequentialRegions = regionMap.consequentialRegions.length > 0;
   const hasProposal = regionMap.inBoundsProposal !== null;
-  if (!hasConsequentialRegions && !hasProposal) return "review_not_required";
+  // Phase 28C: a proposal whose FULL, fully-automatic removal is already
+  // provably safe (`InBoundsProposal.fullRemovalSafe` — see its own doc
+  // comment) never, by itself, forces a mandatory review. This is exactly
+  // the case a tall, edge-to-edge poster design hits: `artworkBounds` (the
+  // tight bbox of ALL ink) spans nearly the whole canvas purely because ink
+  // sits near every border, which geometrically puts almost every removed
+  // background pixel "in bounds" regardless of whether removing it could
+  // ever plausibly harm real content. Deliberately narrow: this affects
+  // ONLY whether a proposal alone can block `review_not_required` below —
+  // every other branch of this function (staleness, `review_complete`,
+  // `review_in_progress`) still reasons about a real proposal exactly as
+  // before, so an operator who explicitly enters the separation review UI
+  // and works the proposal decision still gets the SAME behavior it always
+  // had; only the automatic "does this need a mandatory review AT ALL"
+  // gate changes.
+  const hasBlockingProposal =
+    hasProposal && !regionMap.inBoundsProposal!.fullRemovalSafe;
+  if (!hasConsequentialRegions && !hasBlockingProposal) return "review_not_required";
 
   if (isDecisionSetStale(regionMap, decisionSet)) {
     // A stale set with SOME overlapping region ids is still recoverable by

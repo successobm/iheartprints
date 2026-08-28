@@ -53,3 +53,35 @@ export function logFinalArtworkPaidCallDecision(
 ): void {
   console.info("[final-artwork-worker] paid-call decision", details);
 }
+
+/**
+ * Phase 28I Section 0/6/9(I/J): `decideEnhancement` correctly determined
+ * this job NEEDS a real reconstruction provider, but the environment's
+ * configured provider is `local_raster_interpolation` — pure geometric
+ * resampling, which invents no detail and is architecturally certain to
+ * fail `reconstruction_sufficiency`/`effective_resolution`/
+ * `minimum_raster_dimensions` (see those checks' own doc comments).
+ *
+ * This is NOT the same as "reconstruction was not required, local
+ * normalization is correct" — that path never reaches this log at all. It
+ * fires ONLY when local interpolation is about to stand in for a genuine
+ * enhancement provider that either was never configured
+ * (`FINAL_ARTWORK_PROVIDER` unset — the default in this repository's
+ * `.env.example`) or was deliberately refused (test/dev safety). Purely
+ * diagnostic — it changes no behavior and blocks nothing; the existing
+ * validation checks are what actually refuse the result, honestly, exactly
+ * as designed. This log exists so that refusal's ROOT CAUSE (a missing
+ * real-enhancement provider, not a validation defect) is visible without
+ * having to re-derive it from a validation report every time.
+ */
+export function logFinalArtworkEnhancementProviderGap(details: {
+  projectId: string;
+  finalArtworkJobId: string;
+  configuredProviderKey: string;
+  requiredScale: number;
+}): void {
+  console.warn(
+    "[final-artwork-worker] reconstruction required but no real enhancement provider is configured -- local interpolation will produce a plate that print-validation is expected to correctly refuse",
+    details,
+  );
+}

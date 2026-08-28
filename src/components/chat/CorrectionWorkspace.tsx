@@ -35,6 +35,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
+import {
+  beginImageLoad,
+  initialImageLoadState,
+  resolveImageLoadFailure,
+  resolveImageLoadSuccess,
+} from "./correction-image-load";
+
 type Point = { x: number; y: number };
 type WandMode = "restore" | "remove";
 type ToleranceLevel = "less" | "default" | "more";
@@ -104,7 +111,15 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
   const ORIGINAL_URL = `${base}/original`;
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [resultImg, setResultImg] = useState<HTMLImageElement | null>(null);
+  // Phase 28G Defect C: `loadState.status` drives the loading/ready/error
+  // presentation below; `resultImg` stays the plain `HTMLImageElement |
+  // null` every existing line below already expects, so this is the only
+  // place that needed to know about `ImageLoadState` at all.
+  const [loadState, setLoadState] = useState(initialImageLoadState<HTMLImageElement>);
+  const loadStateRef = useRef(loadState);
+  loadStateRef.current = loadState;
+  const resultImg = loadState.value;
+  const imageReady = loadState.status === "ready";
   const [resultNonce, setResultNonce] = useState(0);
   const [correctionCount, setCorrectionCount] = useState(0);
 
@@ -133,6 +148,10 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
   const strokePointsRef = useRef<Point[]>([]);
 
   const [busy, setBusy] = useState(false);
+  // Phase 28G Defect C: every image-dependent tool stays disabled until the
+  // editable artwork is actually ready — a click that would otherwise fail
+  // (or silently do nothing useful) while the canvas is still loading.
+  const toolsDisabled = busy || !imageReady;
   const [message, setMessage] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
 
@@ -167,10 +186,25 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
 
   const canvasSize = { width: 1100, height: 760 };
 
+  // Phase 28G Defect C: `resultNonce` already re-triggers this effect after
+  // every accepted correction (see the operations below that bump it) —
+  // this phase adds no new trigger, only an honest loading/ready/error
+  // presentation around the SAME fetch. `beginImageLoad` mints a fresh
+  // generation per attempt; a resolution only lands if it is still
+  // answering the most recent one (see `correction-image-load.ts`).
   useEffect(() => {
-    loadImage(`${RESULT_URL}?v=${resultNonce}`).then(setResultImg).catch(() => setMessage("Could not load the artwork. Please try again."));
+    const { state: nextState, generation } = beginImageLoad(loadStateRef.current);
+    setLoadState(nextState);
+    loadImage(`${RESULT_URL}?v=${resultNonce}`)
+      .then((img) => setLoadState((s) => resolveImageLoadSuccess(s, generation, img)))
+      .catch(() => setLoadState((s) => resolveImageLoadFailure(s, generation)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resultNonce]);
+
+  /** Phase 28G Section 8: retries the SAME read-only load — no new session, no mutation, nothing "automatic correction"-shaped about retrying a display fetch. */
+  function retryLoadResult() {
+    setResultNonce((n) => n + 1);
+  }
 
   // Phase 27E: seed the "Corrections applied" counter from server truth on
   // mount -- this component can remount (e.g. "Back to Editing" returning
@@ -692,6 +726,7 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
               key={t.tool}
               type="button"
               onClick={() => selectTool(t.tool)}
+              disabled={toolsDisabled}
               style={btnStyle(activeTool === t.tool)}
               title={t.tooltip}
               data-tool={t.tool}
@@ -702,7 +737,7 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
           ))}
           <button
             onClick={undoLastCorrection}
-            disabled={busy || correctionCount === 0}
+            disabled={toolsDisabled || correctionCount === 0}
             style={btnStyle(false)}
             data-action="undo-correction"
           >
@@ -714,28 +749,28 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
 
       {activeTool === "magic_wand" ? (
         <div role="group" aria-label="Wand mode" className="mt-2 flex flex-wrap gap-2">
-          <button onClick={() => changeWandMode("remove")} style={btnStyle(wandMode === "remove")} data-mode="remove">Remove Background</button>
-          <button onClick={() => changeWandMode("restore")} style={btnStyle(wandMode === "restore")} data-mode="restore">Restore Missing Artwork</button>
+          <button onClick={() => changeWandMode("remove")} disabled={toolsDisabled} style={btnStyle(wandMode === "remove")} data-mode="remove">Remove Background</button>
+          <button onClick={() => changeWandMode("restore")} disabled={toolsDisabled} style={btnStyle(wandMode === "restore")} data-mode="restore">Restore Missing Artwork</button>
         </div>
       ) : null}
 
       {activeTool === "restore_brush" || activeTool === "erase_brush" ? (
         <div role="group" aria-label="Brush size" className="mt-2 flex flex-wrap gap-2">
-          <button onClick={() => setBrushSize("small")} style={btnStyle(brushSize === "small")} data-brush-size="small">Small</button>
-          <button onClick={() => setBrushSize("medium")} style={btnStyle(brushSize === "medium")} data-brush-size="medium">Medium</button>
-          <button onClick={() => setBrushSize("large")} style={btnStyle(brushSize === "large")} data-brush-size="large">Large</button>
+          <button onClick={() => setBrushSize("small")} disabled={toolsDisabled} style={btnStyle(brushSize === "small")} data-brush-size="small">Small</button>
+          <button onClick={() => setBrushSize("medium")} disabled={toolsDisabled} style={btnStyle(brushSize === "medium")} data-brush-size="medium">Medium</button>
+          <button onClick={() => setBrushSize("large")} disabled={toolsDisabled} style={btnStyle(brushSize === "large")} data-brush-size="large">Large</button>
         </div>
       ) : null}
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <div role="group" aria-label="Zoom" style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          <button onClick={() => zoomToFit()} style={btnStyle(false)} data-action="zoom-fit">Fit</button>
-          <button onClick={() => setZoomKeepingCenter(1)} style={btnStyle(false)} data-action="zoom-100">100%</button>
-          <button onClick={() => setZoomKeepingCenter(zoom / 1.4)} style={btnStyle(false)} data-action="zoom-out">−</button>
+          <button onClick={() => zoomToFit()} disabled={toolsDisabled} style={btnStyle(false)} data-action="zoom-fit">Fit</button>
+          <button onClick={() => setZoomKeepingCenter(1)} disabled={toolsDisabled} style={btnStyle(false)} data-action="zoom-100">100%</button>
+          <button onClick={() => setZoomKeepingCenter(zoom / 1.4)} disabled={toolsDisabled} style={btnStyle(false)} data-action="zoom-out">−</button>
           <span style={{ fontSize: 13, fontWeight: 600, minWidth: 44, textAlign: "center" }} data-zoom-indicator>{zoomPct}%</span>
-          <button onClick={() => setZoomKeepingCenter(zoom * 1.4)} style={btnStyle(false)} data-action="zoom-in">+</button>
+          <button onClick={() => setZoomKeepingCenter(zoom * 1.4)} disabled={toolsDisabled} style={btnStyle(false)} data-action="zoom-in">+</button>
         </div>
-        <button onClick={() => setPanModeToggle((p) => !p)} style={btnStyle(panModeToggle || spaceHeld)} data-pan-toggle>
+        <button onClick={() => setPanModeToggle((p) => !p)} disabled={toolsDisabled} style={btnStyle(panModeToggle || spaceHeld)} data-pan-toggle>
           {panModeToggle || spaceHeld ? "Pan: ON (drag to move)" : "Pan: off (or hold Space)"}
         </button>
         <span style={{ fontSize: 12, color: "#888", marginLeft: "auto" }}>
@@ -744,7 +779,16 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
         </span>
       </div>
 
-      <div className="mt-2" style={{ border: "2px solid #222", borderRadius: 8, overflow: "hidden", background: "#fafafa" }}>
+      {/* Phase 28G Defect C: the canvas area itself now always shows
+          SOMETHING explicit while the editable artwork isn't ready yet —
+          never a blank rectangle a customer could mistake for a broken
+          editor. The overlay sits on top of (not instead of) the canvas,
+          in the same `position: relative` box, so it also physically
+          intercepts pointer events reaching the still-empty canvas
+          underneath — no change to the frozen pointer-handler logic itself
+          was needed for "no correction action may be submitted" while
+          loading. */}
+      <div className="mt-2 relative" style={{ border: "2px solid #222", borderRadius: 8, overflow: "hidden", background: "#fafafa" }}>
         <canvas
           ref={canvasRef}
           width={canvasSize.width}
@@ -755,6 +799,49 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
           data-correction-canvas
           style={{ width: "100%", height: "auto", display: "block", cursor: canvasCursor, touchAction: "none" }}
         />
+        {loadState.status === "loading" ? (
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[#fafafa]"
+            data-editor-loading-state
+            role="status"
+          >
+            <span
+              aria-hidden="true"
+              className="h-6 w-6 shrink-0 animate-spin rounded-full border-2 border-black/20 border-t-ink"
+            />
+            <p className="text-sm font-semibold text-ink">Loading your artwork…</p>
+            <p className="text-xs text-muted">Getting the editable version ready.</p>
+          </div>
+        ) : null}
+        {loadState.status === "error" ? (
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[#fafafa] p-4 text-center"
+            data-editor-load-error
+            role="alert"
+          >
+            <p className="text-sm font-semibold text-ink">We couldn&apos;t load the editable artwork.</p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={retryLoadResult}
+                className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-ink/90"
+                data-action="retry-load-artwork"
+              >
+                Try Again
+              </button>
+              {onCancel ? (
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  className="rounded-full border border-black/10 px-3.5 py-1.5 text-xs font-medium text-ink transition hover:border-ink/30"
+                  data-action="cancel-workspace-from-error"
+                >
+                  Cancel
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {message ? (
@@ -769,9 +856,9 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
             Selection {pendingClicks.length > 1 ? `(${pendingClicks.length} areas)` : ""}
           </p>
           <div className="mb-2 flex flex-wrap gap-2">
-            <button onClick={() => changeTolerance("less")} style={btnStyle(tolerance === "less")} disabled={busy} data-tolerance="less">Less</button>
-            <button onClick={() => changeTolerance("default")} style={btnStyle(tolerance === "default")} disabled={busy} data-tolerance="default">Default</button>
-            <button onClick={() => changeTolerance("more")} style={btnStyle(tolerance === "more")} disabled={busy} data-tolerance="more">More</button>
+            <button onClick={() => changeTolerance("less")} style={btnStyle(tolerance === "less")} disabled={toolsDisabled} data-tolerance="less">Less</button>
+            <button onClick={() => changeTolerance("default")} style={btnStyle(tolerance === "default")} disabled={toolsDisabled} data-tolerance="default">Default</button>
+            <button onClick={() => changeTolerance("more")} style={btnStyle(tolerance === "more")} disabled={toolsDisabled} data-tolerance="more">More</button>
           </div>
           {/* Phase 27K §12: "Remove Selected Area"/"Restore Selected Area"
               are longer than the labels this row previously held --
@@ -783,10 +870,10 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
                 specifically communicates that only the selected region is
                 affected and that the current preview is not yet committed
                 -- the exact distinction human testing found missing. */}
-            <button onClick={applyWandSelection} disabled={busy} style={btnStylePrimary()} data-action="apply">
+            <button onClick={applyWandSelection} disabled={toolsDisabled} style={btnStylePrimary()} data-action="apply">
               {wandMode === "restore" ? "Restore Selected Area" : "Remove Selected Area"}
             </button>
-            <button onClick={clearWandSelection} disabled={busy} style={btnStyle(false)} data-action="clear-selection">Clear Selection</button>
+            <button onClick={clearWandSelection} disabled={toolsDisabled} style={btnStyle(false)} data-action="clear-selection">Clear Selection</button>
           </div>
         </div>
       ) : null}
@@ -800,9 +887,9 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
           )}
           <div className="flex gap-2">
             {!fillPreview.refusalReason ? (
-              <button onClick={applyFill} disabled={busy} style={btnStylePrimary()} data-action="apply-fill">Restore This Area</button>
+              <button onClick={applyFill} disabled={toolsDisabled} style={btnStylePrimary()} data-action="apply-fill">Restore This Area</button>
             ) : null}
-            <button onClick={clearFillPreview} disabled={busy} style={btnStyle(false)} data-action="clear-fill">
+            <button onClick={clearFillPreview} disabled={toolsDisabled} style={btnStyle(false)} data-action="clear-fill">
               {fillPreview.refusalReason ? "OK" : "Clear"}
             </button>
           </div>
@@ -811,8 +898,8 @@ export default function CorrectionWorkspace({ projectId, onDoneEditing, onCancel
 
       {!(activeTool === "magic_wand" && selection) && !(activeTool === "restore_fill" && fillPreview) ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button onClick={startOver} disabled={busy} style={btnStyle(false)} data-action="start-over">Start Over</button>
-          <button onClick={onDoneEditing} disabled={busy} style={btnStyleDone()} data-action="done-editing">Done Editing</button>
+          <button onClick={startOver} disabled={toolsDisabled} style={btnStyle(false)} data-action="start-over">Start Over</button>
+          <button onClick={onDoneEditing} disabled={toolsDisabled} style={btnStyleDone()} data-action="done-editing">Done Editing</button>
         </div>
       ) : null}
 

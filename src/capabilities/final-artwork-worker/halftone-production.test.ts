@@ -237,6 +237,79 @@ describe("Print'em All Phase 2 — DTF halftone production", () => {
     /** Halftone settings to select, or omitted to leave the project on standard raster. */
     halftone?: HalftoneSettingsRequest;
     shirtColor?: string;
+    /**
+     * Phase 28I Section 9/10 — THE RASTER-FIRST HARD GATE: a Halftone job
+     * request is now server-side REJECTED unless Standard Raster is
+     * genuinely `print_ready` at the SAME confirmed width. This file's own
+     * `LIVE_FIXTURE` is deliberately too small for Standard Raster to ever
+     * reach `print_ready` locally (its entire premise, predating this
+     * phase, was proving Halftone succeeds independently of that refusal —
+     * see the file's own top-of-file doc comment). To keep every one of
+     * this file's genuinely orthogonal Halftone-mechanics assertions
+     * (dot pitch, LPI, angle, garment colour, tonal sufficiency, lineage,
+     * staleness/supersession) reachable without a real paid reconstruction
+     * call, this inserts a SYNTHETIC already-completed, already-validated
+     * Standard Raster job for the same preparation + confirmed width —
+     * honestly documented as test scaffolding, never a claim that this
+     * artwork's Standard Raster genuinely succeeds in reality. Defaults to
+     * `true`; set `false` for a test that specifically wants to prove the
+     * gate's own REJECTION (see "Phase 28I: the gate itself" below).
+     */
+    rasterAlreadyPrintReady?: boolean;
+  }
+
+  /**
+   * Phase 28I test scaffolding -- see `Setup.rasterAlreadyPrintReady`'s own
+   * doc comment for why this exists. Inserts a completed `FinalArtworkJob`
+   * (`productionTreatmentKey: "standard_raster"`) plus a `ready`
+   * `ProductionAssetValidation`, at the SAME preparation and confirmed
+   * width a real Halftone request in this test file will target -- exactly
+   * what `resolveProductionVariantState`/`describeProductionVariantStatus`
+   * need to see to report Standard Raster as genuinely `print_ready`.
+   * Deliberately minimal (an empty validation report; the report's CONTENT
+   * is irrelevant to the gate, which only reads job status + validation
+   * status) -- this is test scaffolding to reach the code under test, never
+   * a claim that this file's deliberately-undersized `LIVE_FIXTURE`
+   * genuinely satisfies Standard Raster's real validation in production.
+   */
+  async function insertSyntheticPrintReadyStandardRaster(
+    repo: ProjectRepository,
+    assets: ReturnType<typeof buildPipeline>["assets"],
+    projectId: string,
+    preparationId: string,
+    artworkVersionId: string,
+    widthIn: number,
+  ) {
+    const job = await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "prepared_upload",
+      artworkPreparationId: preparationId,
+      artworkVersionId,
+      productionWidthIn: widthIn,
+      requestedProductionOutput: "production_png",
+      productionTreatmentKey: "standard_raster",
+    });
+    const asset = await assets.uploadProductionAsset(projectId, {
+      conceptId: `synthetic-raster-${job.id}`,
+      bytes: preparedTransparentPng(),
+      contentType: "image/png",
+      widthPx: LIVE_FIXTURE.canvasWidthPx,
+      heightPx: LIVE_FIXTURE.canvasHeightPx,
+      hasTransparency: true,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "completed",
+      completedAt: new Date().toISOString(),
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "ready",
+      report: { checks: [] },
+    });
+    return job;
   }
 
   async function setupLiveFixture(
@@ -320,9 +393,20 @@ describe("Print'em All Phase 2 — DTF halftone production", () => {
     await repo.setProjectStatus(projectId, "approved");
 
     if (options.confirmSize !== false) {
+      const confirmedWidthIn = options.widthIn ?? 10.5;
       await confirmProductionSizeForTests(repo, projectId, {
-        widthIn: options.widthIn ?? 10.5,
+        widthIn: confirmedWidthIn,
       });
+      if (options.rasterAlreadyPrintReady !== false) {
+        await insertSyntheticPrintReadyStandardRaster(
+          repo,
+          assets,
+          projectId,
+          preparation.id,
+          artwork!.id,
+          confirmedWidthIn,
+        );
+      }
     }
 
     if (options.halftone) {
@@ -460,8 +544,12 @@ describe("Print'em All Phase 2 — DTF halftone production", () => {
       //
       // What this scenario owns is the outcome: selecting no treatment leaves
       // the project on standard raster, and standard raster does not produce
-      // a plate for this artwork at this size.
-      const { result } = await runOnce({});
+      // a plate for this artwork at this size. `rasterAlreadyPrintReady:
+      // false` -- this is the one test in the file that specifically wants
+      // to observe Standard Raster's OWN real (failing) attempt, not the
+      // synthetic print_ready precondition the rest of the file's
+      // Halftone-mechanics tests rely on (Phase 28I's gate).
+      const { result } = await runOnce({ rasterAlreadyPrintReady: false });
       assert.notEqual(result.projectStatus, "print_ready");
       assert.equal(result.validationStatus, null);
       assert.equal(result.asset, null);
@@ -829,36 +917,36 @@ describe("Print'em All Phase 2 — DTF halftone production", () => {
       );
     });
 
-    it("K: confirm size, choose halftone, and a NEW job is created for the new intent", async () => {
+    it("Phase 28I HARD CORRECTION of 'K': confirm size, choose halftone -- the request is now REJECTED, because Standard Raster has never reached print_ready at this size (only a historical failure exists)", async () => {
       const repo = await freshRepo();
       const setup = await setupUnrecoveredProject(repo);
 
       // Exactly the two acts the restored UI makes available, in order.
       await confirmProductionSizeForTests(repo, setup.projectId, { widthIn: 10.5 });
-      const settings = await selectHalftone(repo, setup.projectId, { lpi: 35 });
+      await selectHalftone(repo, setup.projectId, { lpi: 35 });
 
       const finalArtwork = createFinalArtworkCapability(repo);
-      const requested = await finalArtwork.requestPreparedUploadFinalArtwork(
-        setup.projectId,
+      await assert.rejects(
+        () => finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId),
+        (error: Error) => {
+          assert.match(error.message, /Standard Raster/);
+          assert.match(error.message, /retryable_failure/);
+          return true;
+        },
+        "Phase 28I: a failed Standard Raster attempt no longer unlocks Halftone -- Phase 28H's opposite rule is explicitly overruled",
       );
-
-      assert.notEqual(requested.job.id, setup.historical.id);
-      assert.equal(requested.alreadyRequested, false);
-      assert.equal(
-        requested.job.productionTreatmentKey,
-        productionTreatmentKey({ treatment: "halftone_dtf", halftone: settings }),
-      );
-      assert.equal(requested.job.status, "queued");
     });
 
-    it("J: the earlier failed Standard Raster job is left untouched as evidence", async () => {
+    it("J: the earlier failed Standard Raster job is left untouched as evidence, even after a (now rejected) Halftone attempt", async () => {
       const repo = await freshRepo();
       const setup = await setupUnrecoveredProject(repo);
 
       await confirmProductionSizeForTests(repo, setup.projectId, { widthIn: 10.5 });
       await selectHalftone(repo, setup.projectId, { lpi: 35 });
-      await createFinalArtworkCapability(repo).requestPreparedUploadFinalArtwork(
-        setup.projectId,
+      await assert.rejects(() =>
+        createFinalArtworkCapability(repo).requestPreparedUploadFinalArtwork(
+          setup.projectId,
+        ),
       );
 
       const after = await repo.getFinalArtworkJob(setup.historical.id);
@@ -869,15 +957,35 @@ describe("Print'em All Phase 2 — DTF halftone production", () => {
       assert.equal(after!.completedAt, setup.historical.completedAt);
       assert.equal(after!.productionTreatmentKey, "standard_raster");
       assert.equal(after!.productionWidthIn, 10.5);
+
+      // And the rejected attempt left behind no new Halftone job either.
+      const jobs = await repo.listFinalArtworkJobsForPreparation(setup.projectId, setup.preparationId);
+      assert.ok(!jobs.some((j) => j.productionTreatmentKey?.startsWith("halftone_dtf")));
     });
 
-    it("the recovered project runs to a validated print-ready halftone plate", async () => {
+    it("the recovered project runs to a validated print-ready halftone plate ONCE Standard Raster is ALSO print_ready at the new size", async () => {
       const repo = await freshRepo();
+      const { assets } = buildPipeline(repo);
       const setup = await setupUnrecoveredProject(repo);
 
       await confirmProductionSizeForTests(repo, setup.projectId, {
         widthIn: SMALL_WIDTH_IN,
       });
+      // Phase 28I: recovery via Halftone ALONE (skipping Standard Raster
+      // entirely) is no longer a valid sequence -- see the "K"/"J" tests
+      // above for that rejection. A genuine recovery now requires Standard
+      // Raster to ALSO reach print_ready at the new size first; this uses
+      // the same synthetic-precondition scaffolding the rest of this file's
+      // Halftone-mechanics tests rely on (`insertSyntheticPrintReadyStandardRaster`)
+      // to isolate Halftone's own mechanics from that separate, already-covered concern.
+      await insertSyntheticPrintReadyStandardRaster(
+        repo,
+        assets,
+        setup.projectId,
+        setup.preparationId,
+        setup.artworkVersionId,
+        SMALL_WIDTH_IN,
+      );
       await selectHalftone(repo, setup.projectId, { lpi: 35 });
 
       const result = await runToCompletion(repo, setup.projectId);
@@ -885,7 +993,7 @@ describe("Print'em All Phase 2 — DTF halftone production", () => {
       assert.equal(result.validationStatus, "ready");
       assert.equal(result.projectStatus, "print_ready");
       assert.equal(result.paidCalls, 0);
-      // And the historical job is still exactly where it was.
+      // And the historical job (at the OLD 10.5in size) is still exactly where it was.
       const after = await repo.getFinalArtworkJob(setup.historical.id);
       assert.equal(after!.status, "failed");
     });

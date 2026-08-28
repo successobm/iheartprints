@@ -294,7 +294,12 @@ describe("Production size lifecycle", () => {
       ["youth", 8.5],
       ["womens_small", 9],
       ["adult_standard", 10.5],
-      ["adult_plus", 12],
+      // Phase 28I: adult_plus no longer recommends MORE width than
+      // adult_standard -- both now share the same 10.5in economical
+      // production width ceiling; adult_plus keeps a taller 12in height
+      // ceiling instead (proven elsewhere; this view's own artwork is
+      // square, so it never reaches the extra height headroom).
+      ["adult_plus", 10.5],
     ] as const) {
       await graph.conversation.setGarmentSizeClass(projectId, garmentSizeClass);
       const snapshot = await graph.conversation.get(projectId);

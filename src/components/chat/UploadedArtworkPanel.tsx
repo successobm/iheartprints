@@ -25,7 +25,7 @@ import CorrectionFinalReview from "./CorrectionFinalReview";
 import CorrectionWorkspace from "./CorrectionWorkspace";
 import { PREVIEW_BACKGROUND_COPY } from "./preview-background";
 import { PrintReadySizeCard } from "./PrintReadySizeCard";
-import { SeparationReviewPanel } from "./SeparationReviewPanel";
+import { SeparationReviewPanel, type SeparationCheckStatus } from "./SeparationReviewPanel";
 import {
   isRoutedToOperatorSeparationReview,
   needsAutomaticBackgroundReview,
@@ -52,14 +52,9 @@ const PLACEMENT_OPTIONS = Object.entries(PRINT_PLACEMENT_LABELS) as Array<
   [PrintPlacement, string]
 >;
 
-import type { ProductionTreatmentView } from "@/lib/services/conversation-service";
 import type { PrintReadyPackageView } from "@/capabilities/shared/production-variant";
 import { describePackageGuidance } from "@/capabilities/shared/production-variant";
 
-import {
-  ProductionTreatmentPanel,
-  type TreatmentPreviewMode,
-} from "./ProductionTreatmentPanel";
 import { PrintReadyPackageCard } from "./PrintReadyPackageCard";
 
 export interface UploadedArtworkPanelProps {
@@ -126,33 +121,22 @@ export interface UploadedArtworkPanelProps {
    */
   preparingForPrint?: boolean;
   /**
-   * Print'em All Phase 2: the INTERNAL operator's production-treatment
-   * surface, or `undefined` for every other project.
-   *
-   * Undefined rather than a boolean flag, and that is the point: the panel
-   * exists only when the SERVER included it, so there is no client-side
-   * condition here that could be flipped to reveal it. See
-   * `ProductionTreatmentPanel` — visibility is presentation, the gate is on
-   * the write.
-   */
-  productionTreatment?: ProductionTreatmentView;
-  /**
    * Print'em All Phase 3 (V1 multi-variant package): the fixed two-variant
    * print-ready package, or `undefined` for every project the server did
-   * not include one for (same absence rule as `productionTreatment`).
+   * not include one for (internal-only, same as the removed production-
+   * treatment surface used to be).
    */
   printReadyPackage?: PrintReadyPackageView;
-  /** Phase 27M: which treatment SELECTION request is actually in flight, or `null`/`undefined`. */
-  pendingTreatment?: "standard_raster" | "halftone_dtf" | null;
-  treatmentPreviewUrls?: Partial<Record<TreatmentPreviewMode, string | null>>;
-  onSelectStandardRaster?: () => void;
-  onSelectHalftoneTreatment?: (settings: {
-    lpi: number;
-    angleDeg: number;
-    dotShape: string;
-    midtone: number;
-    chokePx: number;
-  }) => void;
+  /**
+   * Phase 28H: the OPTIONAL "Create DTF Halftone Version" action — offered
+   * only once Standard Raster has reached a terminal state (see
+   * `PrintReadyPackageCard`, which is where this actually renders). Creates
+   * ONLY the Halftone variant; never re-runs, overwrites, or invalidates
+   * Standard Raster.
+   */
+  onCreateHalftoneVersion?: () => void;
+  /** True from the moment "Create DTF Halftone Version" is clicked until that request's own response returns — same reasoning as `preparingForPrint`. */
+  creatingHalftoneVersion?: boolean;
   /**
    * Existing Artwork → Print Ready Phase 1.3: the customer pointed at an
    * area to PREVIEW — not yet remove. Receives SOURCE IMAGE pixels.
@@ -251,39 +235,25 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           finalizationStatus={props.finalizationStatus ?? "not_requested"}
           onPrepareForPrint={props.onPrepareForPrint}
           preparingForPrint={props.preparingForPrint ?? false}
-          preparesDifferentTreatment={
-            props.productionTreatment?.treatment === "halftone_dtf"
-          }
-          treatmentControls={
-            // Print'em All Phase 2: rendered INSIDE the approved step rather
-            // than appended after it, so it lands between the size
-            // confirmation it depends on and the production request it
-            // configures. Appended, it sat below "Prepare Print-Ready
-            // Artwork" — reading as an afterthought to an action it is
-            // supposed to precede.
-            props.productionTreatment &&
-            props.onSelectStandardRaster &&
-            props.onSelectHalftoneTreatment ? (
-              <ProductionTreatmentPanel
-                view={props.productionTreatment}
-                busy={busy}
-                pendingTreatment={props.pendingTreatment ?? null}
-                previewUrls={props.treatmentPreviewUrls ?? {}}
-                onSelectStandardRaster={props.onSelectStandardRaster}
-                onSelectHalftone={props.onSelectHalftoneTreatment}
-              />
-            ) : null
-          }
           printReadyPackageCard={
-            // Print'em All Phase 3: sits AFTER the treatment controls and
-            // BEFORE the single-treatment action button/banner below it — a
-            // completed variant is a fact about the past, independent of
-            // whatever the operator is about to try next.
+            // Phase 28H: THE production-request authority now. Sits BEFORE
+            // the single-treatment action button/banner below it — a
+            // completed (or terminally-stalled) Standard Raster attempt is a
+            // fact about the past, independent of whatever the operator is
+            // about to try next, and the OPTIONAL "Create DTF Halftone
+            // Version" affordance now lives inside this card (see
+            // `PrintReadyPackageCard`) rather than behind a separate
+            // pre-creation treatment CHOICE (Print'em All Phase 2's
+            // `ProductionTreatmentPanel`, removed this phase — Standard
+            // Raster is always attempted first, automatically, with no
+            // customer decision required before it runs).
             props.printReadyPackage && props.printReadyPackage.variants.length > 0 ? (
               <PrintReadyPackageCard
                 projectId={props.projectId}
                 variants={props.printReadyPackage.variants}
                 guidance={describePackageGuidance(props.printReadyPackage.variants)}
+                onCreateHalftoneVersion={props.onCreateHalftoneVersion}
+                creatingHalftoneVersion={props.creatingHalftoneVersion ?? false}
               />
             ) : null
           }
@@ -473,19 +443,45 @@ function AnalysisStep({
   // project still gets a 404 -> `view: null` -> this panel renders nothing,
   // and the existing terminal message below is the only thing that shows —
   // byte-for-byte the same experience a public customer has always had.
-  const [separationState, setSeparationState] = useState<
-    | "review_not_required"
-    | "review_required"
-    | "review_in_progress"
-    | "review_complete"
-    | "cannot_safely_automate"
-    | null
-  >(null);
+  const [separationState, setSeparationState] = useState<SeparationCheckStatus | null>(null);
   const needsReview = needsAutomaticBackgroundReview(preparation.classification);
   const routedToOperatorReview = isRoutedToOperatorSeparationReview(
     preparation.classification,
     separationState,
   );
+
+  // Phase 28A: this is the scenario the doorway exists for — automatic
+  // preparation could not run at all (`needsReview`), so there is no
+  // "prepare" button above and, depending on `separationState`, sometimes
+  // not even a review surface with content in it. Gated on `needsReview`
+  // alone (not `routedToOperatorReview`) because "automatic preparation ...
+  // never successfully runs at all" is explicitly in scope here, not just
+  // the sub-case where a review screen happens to have something to show.
+  // Reuses the SAME frozen CorrectionWorkspace/CorrectionFinalReview pair
+  // `CompareStep` already opens — no new editor, no new algorithm.
+  const [correctionMode, setCorrectionMode] = useState<"none" | "editing" | "review">("none");
+
+  if (correctionMode === "editing") {
+    return (
+      <CorrectionWorkspace
+        projectId={projectId}
+        onDoneEditing={() => setCorrectionMode("review")}
+        onCancel={() => setCorrectionMode("none")}
+      />
+    );
+  }
+  if (correctionMode === "review") {
+    return (
+      <CorrectionFinalReview
+        projectId={projectId}
+        onBackToEditing={() => setCorrectionMode("editing")}
+        onUsed={() => {
+          setCorrectionMode("none");
+          onSeparationApproved?.();
+        }}
+      />
+    );
+  }
 
   return (
     <div>
@@ -507,6 +503,31 @@ function AnalysisStep({
             onStateChange={setSeparationState}
             onApproved={onSeparationApproved}
           />
+        </div>
+      ) : null}
+
+      {/* Phase 28A: a discoverable, non-competing fallback for exactly the
+          case above — automatic couldn't safely handle this artwork, with
+          or without a review surface that has anything to show. Prefer
+          fixing the underlying automatic result whenever it can run at all;
+          this is only ever the secondary path, never the default one
+          (`AnalysisStep` only renders when automatic could not run). */}
+      {needsReview ? (
+        <div className="mt-3 rounded-xl border border-black/8 bg-black/[0.02] p-3">
+          <p className="text-sm font-medium text-ink">Prefer to do it yourself?</p>
+          <p className="mt-1 text-xs text-muted">
+            You can remove the background yourself with our simple tools — select what to keep, brush away what
+            shouldn&apos;t be there, and see the result before deciding.
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setCorrectionMode("editing")}
+            className="mt-2.5 rounded-full border border-black/10 px-3.5 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+            data-action="clean-up-manually"
+          >
+            Clean Up Manually
+          </button>
         </div>
       ) : null}
 
@@ -563,8 +584,9 @@ function CompareStep({
   cleanupMessage: string | null;
   cleanupPreviewHighlight: UploadedArtworkPanelProps["cleanupPreviewHighlight"];
 }) {
-  // Phase 27E/27G UX correction: "Remove Background Manually" opens the
-  // SAME frozen correction workspace/review built in Phase 27E
+  // Phase 27E/27G UX correction: "Edit Artwork" (Phase 28F; was "Remove
+  // Background Manually") opens the SAME frozen correction workspace/review
+  // built in Phase 27E
   // (CorrectionWorkspace / CorrectionFinalReview) — no new algorithm, no
   // new route. This state lives HERE (not inside SeparationReviewPanel)
   // specifically so the doorway is reachable regardless of whether
@@ -576,21 +598,27 @@ function CompareStep({
   const [correctionMode, setCorrectionMode] = useState<"none" | "editing" | "review">("none");
   // Intelligent Separation Phase 10 (Goal 3/4): the ONE bit of separation
   // state this step needs, mirrored down from `SeparationReviewPanel` —
-  // never re-fetched or recomputed here. Starts `null` ("assume not
-  // required") so easy artwork's approval button renders immediately with
-  // no added round trip (Goal 16); if this turns out wrong the server
-  // refuses the legacy approval anyway (`approvePreparedArtwork`), so an
-  // optimistic first render is never an unsafe one.
-  const [separationState, setSeparationState] = useState<
-    | "review_not_required"
-    | "review_required"
-    | "review_in_progress"
-    | "review_complete"
-    | "cannot_safely_automate"
-    | null
-  >(null);
-  const separationGateActive =
-    separationState !== null && separationState !== "review_not_required";
+  // never re-fetched or recomputed here.
+  //
+  // Phase 28G Defect A CORRECTION: this used to start at `null` ("assume
+  // not required") specifically so the approval button rendered on the
+  // very first render, with no added round trip. Human acceptance on the
+  // real Chili & Salsa order proved that assumption unsafe: the artwork's
+  // separation check took roughly ten seconds, and for that entire window
+  // this step showed its own ordinary, one-click-approvable review — the
+  // customer began approving an answer the system had not actually
+  // reached yet. `"checking"` is now the starting value and stays the
+  // starting value: FAIL CLOSED. The approval button (and the ordinary
+  // comparison above it) render only once `SeparationReviewPanel` has
+  // positively reported which review path is authoritative — see
+  // `separationChecking` / `separationGateActive` below, and
+  // `ReviewPreparingState` for what shows meanwhile. This does add one
+  // render's worth of visible waiting to EVERY upload, including the easy
+  // ones — the alternative is showing an approval control before the
+  // system knows whether approving it is safe, which is worse.
+  const [separationState, setSeparationState] = useState<SeparationCheckStatus>("checking");
+  const separationChecking = separationState === "checking";
+  const separationGateActive = !separationChecking && separationState !== "review_not_required";
 
   if (correctionMode === "editing") {
     return (
@@ -614,46 +642,109 @@ function CompareStep({
     );
   }
 
+  // Phase 28F — ONE CUSTOMER REVIEW, NOT TWO. When `SeparationReviewPanel`
+  // has a genuine decision to show (a real proposal or consequential
+  // regions — `separationGateActive`), IT is the large review: it already
+  // has its own Original/Proposed Removal/Result comparison, its own
+  // background-colour inspection, and its own decision actions. Showing
+  // THIS step's own heading, comparison, and "Use This Artwork" button
+  // above it asked the customer to approve essentially the same result
+  // twice — human acceptance on the real Chili & Salsa order confirmed
+  // this read as confusing and redundant. The fix is presentation-only:
+  // when the panel below has something to decide, this step renders only
+  // the Edit Artwork doorway (still reachable regardless of separation
+  // state, per Phase 27H §0's invariant, restated below) and defers
+  // entirely to the panel. When it does NOT (the ordinary case — most
+  // artwork has no consequential regions at all), this step's own
+  // comparison and approval remain exactly as they always were: ONE
+  // review, no change in behavior.
+  //
+  // Phase 28G Defect A — a THIRD state now sits in front of both:
+  // `separationChecking`. Neither the ordinary comparison/approval block
+  // NOR `SeparationReviewPanel`'s own review are shown while it is true;
+  // `ReviewPreparingState` occupies the review area instead, so the
+  // customer is never looking at a legacy review that then gets swapped
+  // out from underneath them.
+  //
+  // Phase 28G Defect B — the Edit Artwork doorway is repositioned to sit
+  // AFTER the review area (loading state, ordinary comparison, or
+  // `SeparationReviewPanel`, whichever applies) instead of above it. The
+  // customer sees what was created before being offered the choice to
+  // change it. Its reachability is unchanged by this move: still
+  // unconditional on both `separationChecking` and `separationGateActive`,
+  // per the Phase 27H §0 invariant restated at its new location below.
   return (
     <div>
-      <p className="text-sm font-semibold text-ink">Review your artwork before continuing</p>
-      <p className="mt-1 text-sm text-muted">
-        We removed the background automatically. Compare the prepared version with your original to make sure all
-        parts of your design are still there and no unwanted background remains.
-      </p>
-      <p className="mt-1 text-sm text-muted" data-original-safety-copy>
-        The artwork you uploaded is saved exactly as it was, so nothing here is permanent until you approve it.
-      </p>
+      {separationChecking ? (
+        <ReviewPreparingState />
+      ) : !separationGateActive ? (
+        <>
+          <p className="text-sm font-semibold text-ink">Review your artwork</p>
+          <p className="mt-1 text-sm text-muted">
+            We removed the background automatically. Compare the prepared version with your original to make sure all
+            parts of your design are still there and no unwanted background remains.
+          </p>
+          <p className="mt-1 text-sm text-muted" data-original-safety-copy>
+            The artwork you uploaded is saved exactly as it was, so nothing here is permanent until you approve it.
+          </p>
 
-      <div className="mt-3">
-        <ArtworkComparison
-          original={{ url: originalImageUrl, loading: originalImageUrl === null }}
-          prepared={{ url: preparedImageUrl, loading: preparedImageUrl === null }}
-          reviewRequired={false}
+          <div className="mt-3">
+            <ArtworkComparison
+              original={{ url: originalImageUrl, loading: originalImageUrl === null }}
+              prepared={{ url: preparedImageUrl, loading: preparedImageUrl === null }}
+              reviewRequired={false}
+            />
+          </div>
+        </>
+      ) : null}
+
+      {/* Intelligent Separation Phase 10 (Goal 2): sits after the
+          comparison, before the approval controls it can replace. Renders
+          nothing (`null`) for the vast majority of artwork that has no
+          consequential regions — see `SeparationReviewPanel`'s own
+          `review_not_required` short-circuit. Phase 28F: when this DOES
+          render something, it is now the SOLE large review — see the
+          block comment above. Phase 28G: kept MOUNTED (never unmounted)
+          even while `separationChecking` is true, so its own fetch fires
+          and reports back on schedule — only its OWN visible output is
+          hidden meanwhile, the same established pattern `AnalysisStep`
+          already uses for the identical need. This avoids ever showing
+          this panel's own "Checking…" line stacked underneath
+          `ReviewPreparingState`'s equivalent copy above. */}
+      <div className={separationChecking ? "hidden" : "mt-3"}>
+        <SeparationReviewPanel
+          projectId={projectId}
+          garmentColor={preparation.productColor ?? "White"}
+          onStateChange={setSeparationState}
+          onApproved={onSeparationApproved}
         />
       </div>
 
-      {/* Phase 27H §0: "Remove Background Manually" is an independent,
-          human-authoritative path -- it is available whether or not this
-          artwork's automatic separation review is pending, because a
-          deliberately completed manual correction (Done Editing -> Final
-          Review -> Use This Artwork) now supersedes that review for the
-          resulting artwork (`finalizeCorrection`; see
-          `hasAcceptedManualOverride`). Phase 27G briefly hid this doorway
-          while separation review was active, back when the server-side
-          bypass this doorway could have created was still open; now that
-          the authority transition is correctly gated at explicit manual
-          finalization rather than at doorway visibility, hiding it would
-          just re-create the exact dead end Phase 27H exists to remove
-          (proven on the real INCREDI-BOWLS asset, which needs both). "Use
-          Prepared Artwork" below is UNCHANGED and stays hidden while
-          separation review is pending -- only the automatic-approval path
-          is gated by that review; the manual path is not. */}
+      {/* Phase 27H §0: this doorway is an independent, human-authoritative
+          path -- it is available whether or not this artwork's automatic
+          separation review is pending, because a deliberately completed
+          manual correction (Done Editing -> Final Review -> Use This
+          Artwork) now supersedes that review for the resulting artwork
+          (`finalizeCorrection`; see `hasAcceptedManualOverride`). Phase 27G
+          briefly hid this doorway while separation review was active, back
+          when the server-side bypass this doorway could have created was
+          still open; now that the authority transition is correctly gated
+          at explicit manual finalization rather than at doorway
+          visibility, hiding it would just re-create the exact dead end
+          Phase 27H exists to remove (proven on the real INCREDI-BOWLS
+          asset, which needs both). Phase 28F renamed it from "Remove
+          Background Manually" to "Edit Artwork" -- the editor's toolbox
+          (Wand/Fill/Brush/Eraser) is broader than background removal
+          alone, and the old label undersold it. Phase 28G Defect B: moved
+          here, below the review area, so the customer sees IHeartPrints'
+          result before being offered the choice to change it — still
+          unconditional on `separationChecking`/`separationGateActive`,
+          same invariant as always, just a different position. */}
       <div className="mt-4 rounded-xl border border-black/8 bg-black/[0.02] p-3">
-        <p className="text-sm font-medium text-ink">Not quite right?</p>
+        <p className="text-sm font-medium text-ink">Want to make changes?</p>
         <p className="mt-1 text-xs text-muted">
-          If the automatic background removal removed part of your design or left background behind, you can
-          remove the background manually with our Magic Wand tool.
+          Use our simple tools to select what to keep, clean up what shouldn&apos;t be there, and see the result
+          before deciding.
         </p>
         <button
           type="button"
@@ -662,23 +753,8 @@ function CompareStep({
           className="mt-2.5 rounded-full border border-black/10 px-3.5 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
           data-action="remove-background-manually"
         >
-          Remove Background Manually
+          Edit Artwork
         </button>
-      </div>
-
-      {/* Intelligent Separation Phase 10 (Goal 2): sits after the
-          comparison, before the approval controls it can replace. Renders
-          nothing (`null`) for the vast majority of artwork that has no
-          consequential regions — see `SeparationReviewPanel`'s own
-          `review_not_required` short-circuit. Unrelated to, and untouched
-          by, the "Remove Background Manually" doorway above. */}
-      <div className="mt-3">
-        <SeparationReviewPanel
-          projectId={projectId}
-          garmentColor={preparation.productColor ?? "White"}
-          onStateChange={setSeparationState}
-          onApproved={onSeparationApproved}
-        />
       </div>
 
       {preparation.customer.enhancementNeeded && preparation.customer.resolutionMessage ? (
@@ -689,13 +765,14 @@ function CompareStep({
 
       <div className="mt-4 space-y-2">
         {/* Intelligent Separation Phase 10 (Goal 4/6): once separation
-            review is anything other than not-required, "Use This
-            Preparation" inside the panel above is the only approval action
-            — it sets the exact same fields this button's `onApprove` does.
-            This copy specifically describes THAT button, so it is withheld
-            rather than left to describe a control that would now just be
-            refused server-side. */}
-        {!separationGateActive ? (
+            review is anything other than not-required, the panel above's
+            own decision actions are the only approval action — they set
+            the exact same fields this button's `onApprove` does. This copy
+            specifically describes THAT button, so it is withheld rather
+            than left to describe a control that would now just be refused
+            server-side. Phase 28G: also withheld while `separationChecking`
+            — same reasoning as the button itself below. */}
+        {!separationChecking && !separationGateActive ? (
           <>
             <p className="text-sm font-medium text-ink">Looks good?</p>
             <p className="text-xs text-ink" data-approval-safety-copy>
@@ -709,16 +786,19 @@ function CompareStep({
         </p>
         <div className="flex flex-wrap items-center gap-3">
           {/* Approval is ONLY ever this explicit button. Enlarge is view-only;
-              Remove Background Manually mutates only after Use This Artwork,
-              and Done Editing never approves. Preview Background never approves. */}
-          {!separationGateActive ? (
+              Edit Artwork mutates only after Use This Artwork, and Done
+              Editing never approves. Preview Background never approves.
+              Phase 28G Defect A: also withheld while `separationChecking`
+              — FAIL CLOSED, never rendered until the system has positively
+              established which review path is authoritative. */}
+          {!separationChecking && !separationGateActive ? (
             <button
               type="button"
               disabled={busy}
               onClick={onApprove}
               className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Use Prepared Artwork
+              Use This Artwork
             </button>
           ) : null}
           <button
@@ -730,6 +810,35 @@ function CompareStep({
             Keep my original for now
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Phase 28G Defect A: occupies the review area while `CompareStep` does
+ * not yet know whether separation review is required. Deliberately plain
+ * — a lightweight spinner, two lines of existing-tone copy, no fake
+ * progress percentage, no animation beyond the spinner itself. Internal
+ * vocabulary ("separation", "region map", "proposal") never appears here;
+ * see Section 3 of the Phase 28G report for why.
+ */
+function ReviewPreparingState() {
+  return (
+    <div
+      className="flex items-center gap-3 rounded-xl border border-black/8 bg-black/[0.02] p-4"
+      data-review-loading-state
+      role="status"
+    >
+      <span
+        aria-hidden="true"
+        className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-black/20 border-t-ink"
+      />
+      <div>
+        <p className="text-sm font-semibold text-ink">Preparing your artwork for review…</p>
+        <p className="mt-0.5 text-xs text-muted">
+          Checking the background removal and making sure your design stays intact.
+        </p>
       </div>
     </div>
   );
@@ -747,9 +856,7 @@ function ApprovedStep({
   finalizationStatus,
   onPrepareForPrint,
   preparingForPrint,
-  treatmentControls,
   printReadyPackageCard,
-  preparesDifferentTreatment,
 }: {
   preparation: ArtworkPreparationView;
   busy: boolean;
@@ -765,23 +872,15 @@ function ApprovedStep({
   onPrepareForPrint?: () => void;
   /** Phase 27M: the "Create Print-Ready Artwork" request's own in-flight state — see the prop doc on `UploadedArtworkPanelProps`. */
   preparingForPrint?: boolean;
-  preparesDifferentTreatment?: boolean;
-  /**
-   * Print'em All Phase 2: the internal operator's production-treatment
-   * controls, or `null`.
-   *
-   * A SLOT rather than props threaded through two layers, because the panel it
-   * renders is already wired once in `UploadedArtworkPanel` and duplicating
-   * that wiring here would be a second place for the two to drift. What this
-   * slot decides is only WHERE the controls sit — which matters, because a
-   * treatment is chosen after a size is confirmed and before production is
-   * requested, and the ordering on screen should say so.
-   */
-  treatmentControls?: ReactNode;
   /**
    * Print'em All Phase 3: the print-ready package (both variants' current
-   * status/download), or `null`. Same slot pattern as `treatmentControls`
-   * and for the same reason.
+   * status/download, plus — Phase 28H — the optional "Create DTF Halftone
+   * Version" affordance), or `null`.
+   *
+   * A SLOT rather than props threaded through two layers, because the card
+   * it renders is already wired once in `UploadedArtworkPanel` and
+   * duplicating that wiring here would be a second place for the two to
+   * drift.
    */
   printReadyPackageCard?: ReactNode;
 }) {
@@ -811,9 +910,7 @@ function ApprovedStep({
         finalizationStatus={finalizationStatus}
         onPrepareForPrint={onPrepareForPrint}
         preparingForPrint={preparingForPrint}
-        treatmentControls={treatmentControls}
         printReadyPackageCard={printReadyPackageCard}
-        preparesDifferentTreatment={preparesDifferentTreatment}
       />
     </div>
   );
@@ -839,9 +936,7 @@ function PrintReadyStep({
   finalizationStatus,
   onPrepareForPrint,
   preparingForPrint,
-  treatmentControls,
   printReadyPackageCard,
-  preparesDifferentTreatment,
 }: {
   enhancementNeeded: boolean;
   busy: boolean;
@@ -855,15 +950,8 @@ function PrintReadyStep({
   onPrepareForPrint?: () => void;
   /** Phase 27M: the "Create Print-Ready Artwork" request's own in-flight state — see the prop doc on `UploadedArtworkPanelProps`. */
   preparingForPrint?: boolean;
-  treatmentControls?: ReactNode;
-  /** Print'em All Phase 3: the print-ready package slot — see `ApprovedStep`'s identical prop. */
+  /** Print'em All Phase 3 / Phase 28H: the print-ready package slot — see `ApprovedStep`'s identical prop. */
   printReadyPackageCard?: ReactNode;
-  /**
-   * Print'em All Phase 2: true when the production treatment now differs from
-   * the continuous-tone attempt that failed, so the action about to run is a
-   * genuinely different piece of work rather than a repeat of the failed one.
-   */
-  preparesDifferentTreatment?: boolean;
 }) {
   // The ONE state that legitimately replaces the production authorities
   // rather than sitting alongside them: work is in the oven right now, and
@@ -940,18 +1028,25 @@ function PrintReadyStep({
         />
       ) : null}
 
-      {/* Then the treatment, which is a decision ABOUT the confirmed size and
-          is only selectable once there is one. Between the size and the
-          action, so the screen reads in the order the work happens. */}
-      {treatmentControls}
-
-      {/* Print'em All Phase 3: completed variant outputs, independent of
-          whatever the operator is about to try next below. A successful
-          DTF Halftone file stays visible and downloadable here even while
-          Standard Raster is the currently-configured treatment (Phase 27O). */}
+      {/* Print'em All Phase 3 / Phase 28H: completed (or terminally-stalled)
+          variant outputs, independent of whatever the operator is about to
+          try next below. A successful DTF Halftone file stays visible and
+          downloadable here even while Standard Raster needs enhancement
+          (Phase 27O), and the OPTIONAL "Create DTF Halftone Version" action
+          lives inside this card once Standard Raster reaches a terminal
+          state — see `PrintReadyPackageCard`. There is no longer a
+          pre-creation treatment CHOICE here at all: Standard Raster is
+          always attempted first, automatically. */}
       {printReadyPackageCard}
 
-      {finalizationStatus === "needs_review" ? (
+      {/* Phase 28H: this generic banner is now a FALLBACK only, for the
+          (currently theoretical) case where `printReadyPackageCard` itself
+          is absent -- for every project that actually has one, the card's
+          own per-variant status/reason is strictly more accurate than this
+          project-level "needs attention" sentence, and showing both would
+          be exactly the redundant/conflicting messaging Phase 28F already
+          ruled out for the artwork review step. */}
+      {finalizationStatus === "needs_review" && !printReadyPackageCard ? (
         <p
           className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
           role="alert"
@@ -1003,19 +1098,24 @@ function PrintReadyStep({
                 </span>
                 Creating Print-Ready Artwork…
               </>
-            ) : /* Print'em All Phase 2 (Goal 11): after a failed Standard Raster
-                attempt, choosing DTF Halftone makes the next action a
-                different piece of work — it prepares a screened plate and
-                never re-sends the failed reconstruction request. Calling that
-                "Retry Preparation" would describe an action that does not
-                happen. */
-            retryableFailure && preparesDifferentTreatment
-              ? copy.actionLabel
-              : retryableFailure
-                ? PRINT_READY_RETRY_ACTION_LABEL
-                : finalizationStatus === "needs_review"
-                  ? "Try Again"
-                  : copy.actionLabel}
+            ) : retryableFailure ? (
+              // An infrastructure problem — trying again with unchanged
+              // inputs might genuinely help (`retryable_failure`'s own
+              // documented meaning; see `production-variant.ts`).
+              PRINT_READY_RETRY_ACTION_LABEL
+            ) : (
+              // Phase 28H: `needs_review` (Standard Raster's deterministic
+              // `finalization_required`) NO LONGER shows "Try Again" here —
+              // that framing implied a plain retry might fix a verdict that
+              // will recompute identically on unchanged inputs (Section 7:
+              // "Do NOT invite an identical retry when nothing has
+              // changed"). The accurate explanation now lives on
+              // `printReadyPackageCard`'s own Standard Raster tile. This
+              // button still runs the exact same, still-idempotent request
+              // — genuinely useful again if the customer changes the print
+              // size first — just never mislabelled as a magic fix.
+              copy.actionLabel
+            )}
           </button>
         </>
       ) : null}

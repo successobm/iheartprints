@@ -610,6 +610,44 @@ export function computeRegionMap(
     width,
     height,
   );
+
+  // Phase 28C: whether this proposal, taken as a whole and REGARDLESS of any
+  // region decision, is provably safe to fully remove automatically —
+  // computed BEFORE `regionMap`/the returned `RegionMapComputation` exist, so
+  // it is built against a minimal, throwaway computation carrying exactly
+  // the fields `buildSeparationMaster`/`runSeparationPostChecks` read
+  // (`ink`, `silhouette`, `label`, `proposalMask`, `regionMap.artworkBounds`)
+  // — never against the artwork's actual, possibly-undecided, decision set.
+  const provisionalRegionMap: RegionMap = {
+    algorithmVersion: SEPARATION_ALGORITHM_VERSION,
+    sourceAssetSha256,
+    regionMapHash: computeRegionMapHash(SEPARATION_ALGORITHM_VERSION, SILHOUETTE_RADIUS_PX, consequentialRegions),
+    silhouetteRadius: SILHOUETTE_RADIUS_PX,
+    artworkBounds: bounds,
+    consequentialRegions,
+    totalRegionCount: regions.length,
+    // Placeholder — only `fullRemovalSafe` itself may still read `null` here
+    // (it does not), everything else this pass touches ignores it entirely.
+    inBoundsProposal: null,
+  };
+  const fullRemovalSafe = ((): boolean => {
+    if (proposalPixelCount === 0) return true; // vacuously — nothing to remove
+    const provisionalComputation = {
+      regionMap: provisionalRegionMap,
+      ink,
+      silhouette,
+      label,
+      proposalMask,
+    };
+    // The automatic worst case: EVERY region undecided, proposal fully
+    // removed with zero preserve exceptions — `buildSeparationMaster`'s own
+    // default `ProposalAuthority`, exactly what an unconditional
+    // border-flood removal would already have done to this same geometry.
+    const master = buildSeparationMaster(original, provisionalComputation, []);
+    const postCheck = runSeparationPostChecks(original, master, provisionalComputation, []);
+    return postCheck.orphanedLightInkPixels === 0;
+  })();
+
   const inBoundsProposal: InBoundsProposal | null =
     proposalPixelCount === 0
       ? null
@@ -624,16 +662,11 @@ export function computeRegionMap(
           ),
           pixelCount: proposalPixelCount,
           bounds: proposalMaskBounds(proposalMask, width, height),
+          fullRemovalSafe,
         };
 
   const regionMap: RegionMap = {
-    algorithmVersion: SEPARATION_ALGORITHM_VERSION,
-    sourceAssetSha256,
-    regionMapHash: computeRegionMapHash(SEPARATION_ALGORITHM_VERSION, SILHOUETTE_RADIUS_PX, consequentialRegions),
-    silhouetteRadius: SILHOUETTE_RADIUS_PX,
-    artworkBounds: bounds,
-    consequentialRegions,
-    totalRegionCount: regions.length,
+    ...provisionalRegionMap,
     inBoundsProposal,
   };
 
@@ -972,16 +1005,35 @@ export function renderRegionContextHighlight(
 
 /**
  * Phase 23: THE PROPOSAL HIGHLIGHT — the "Proposed Removal" view of Phase
- * 22's workflow (Step 1: "Check what will be removed"). Reuses the exact
- * same halo/dim visual language `renderRegionContextHighlight` already
- * established (Phase 14), applied to the UNIFIED proposal mask instead of a
- * single labeled region: every proposal pixel not currently covered by a
- * preserve exception is highlighted magenta with a two-tone outline; every
- * pixel the operator has already preserved is shown in its own original
- * colors with a distinct green tint, so progress is visible at a glance;
- * everything else (safe-exterior, ordinary ink, isolated regions) is left
- * exactly as `renderRegionContextHighlight` would leave it outside its
- * target region — dimmed toward neutral gray, never redrawn.
+ * 22's workflow (Step 1: "Check what will be removed"). Every proposal pixel
+ * not currently covered by a preserve exception is highlighted magenta with
+ * a two-tone-capable outline; every pixel the operator has already preserved
+ * is shown in its own original colors with a distinct green tint, so
+ * progress is visible at a glance.
+ *
+ * Phase 28E — THE VISUAL CONTRACT CORRECTION. Before this phase, everything
+ * outside the proposal was ALSO rewritten — dimmed toward neutral gray
+ * (reusing `renderRegionContextHighlight`'s operator-tool visual language,
+ * Phase 14/15), with a white outline ring just outside the highlight. A real
+ * customer order (the Chili & Salsa Cook-Off / Rodeo / Car Show design,
+ * Phase 28D's diagnostic) proved that combination actively misrepresents a
+ * SAFE proposal: 0% of the proposal's pixels overlapped real ink, clicking
+ * the accept action would not have damaged the design at all — yet a design
+ * rich with color, uniformly grayed out around a large pink border, read to
+ * the customer as "my whole artwork is being removed."
+ *
+ * This is a CUSTOMER-facing screen, not the internal operator's per-region
+ * context tool `renderRegionContextHighlight` (Phase 14/15) still uses that
+ * gray-dim language for a DIFFERENT reason — the operator explicitly wants
+ * one candidate region isolated from a busy full design — and that function,
+ * and the shared `DIM_TOWARD`/`DIM_STRENGTH`/`OUTLINE_OUTER` constants it
+ * reads, are UNTOUCHED by this phase.
+ *
+ * The corrected contract, proven in `region-separation-proposal-visual-
+ * contract.test.ts`: a pixel outside the proposal mask is untouched, full
+ * stop — `renderedRGB === originalRGB`, exactly. `data` already starts as a
+ * byte copy of `original.data`; simply never writing to a non-proposal,
+ * non-preserved pixel IS the fix.
  */
 const PRESERVED_TINT = { r: 0, g: 200, b: 0 } as const;
 const PRESERVED_TINT_STRENGTH = 0.35;
@@ -1017,24 +1069,11 @@ export function renderProposalHighlight(
         data[o + 1] = blendChannel(data[o + 1], HIGHLIGHT_FILL.g, HIGHLIGHT_STRENGTH);
         data[o + 2] = blendChannel(data[o + 2], HIGHLIGHT_FILL.b, HIGHLIGHT_STRENGTH);
       }
-    } else {
-      const x = i % width;
-      const y = (i / width) | 0;
-      const adjacentToTarget =
-        (x > 0 && isTarget(i - 1)) ||
-        (x < width - 1 && isTarget(i + 1)) ||
-        (y > 0 && isTarget(i - width)) ||
-        (y < height - 1 && isTarget(i + width));
-      if (adjacentToTarget) {
-        data[o] = OUTLINE_OUTER.r;
-        data[o + 1] = OUTLINE_OUTER.g;
-        data[o + 2] = OUTLINE_OUTER.b;
-      } else {
-        data[o] = blendChannel(data[o], DIM_TOWARD.r, DIM_STRENGTH);
-        data[o + 1] = blendChannel(data[o + 1], DIM_TOWARD.g, DIM_STRENGTH);
-        data[o + 2] = blendChannel(data[o + 2], DIM_TOWARD.b, DIM_STRENGTH);
-      }
     }
+    // else: not in the proposal at all -- Phase 28E's exact visual contract.
+    // `data` is already a byte-for-byte copy of `original.data` here, so
+    // leaving this branch empty IS "retained artwork stays exactly as it
+    // is" -- no dim, no desaturation, no outline ring, no exception.
     data[o + 3] = 255;
   }
   return { width, height, data };
