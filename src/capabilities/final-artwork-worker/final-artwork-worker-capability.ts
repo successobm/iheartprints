@@ -116,6 +116,7 @@ import { verifyProductionArtwork } from "./production-verification";
 import {
   logFinalArtworkEnhancementProviderGap,
   logFinalArtworkPaidCallDecision,
+  logFinalArtworkProviderFailure,
   logFinalArtworkReconstructionOutcome,
 } from "./final-artwork-observability";
 
@@ -717,6 +718,13 @@ export function createFinalArtworkWorkerCapability(
         : null;
 
     let submittedNewPaidRequest = false;
+    // "Fix Topaz Resume/Download Failure" Phase 4: tracked purely for
+    // observability on the failure path below — the job's OWN persisted
+    // `providerRequestId` is already updated durably by
+    // `onProviderRequestSubmitted` itself; this local mirror just avoids a
+    // redundant re-read of the job row solely to log what this attempt
+    // already knows.
+    let currentProviderRequestId = existingProviderRequest?.providerRequestId ?? null;
     const providerStartedAt = Date.now();
     let output;
     try {
@@ -728,6 +736,7 @@ export function createFinalArtworkWorkerCapability(
           existingProviderRequest,
           onProviderRequestSubmitted: async (providerRequestId) => {
             submittedNewPaidRequest = true;
+            currentProviderRequestId = providerRequestId;
             // Persisted BEFORE the provider polls/downloads anything
             // further — the entire point of this hook (Goal 3): a crash
             // any time after this write is resumable without a second
@@ -798,6 +807,22 @@ export function createFinalArtworkWorkerCapability(
         return { status: "handled" };
       }
 
+      // "Fix Topaz Resume/Download Failure" Phase 4: the live incident this
+      // fix exists for was "nearly invisible" — persisted as `failed` while
+      // the terminal showed an unrelated batch progressing. Logged BEFORE
+      // `failJob` so the failure is visible the instant it happens, using
+      // only whitelisted, non-secret fields (see
+      // `logFinalArtworkProviderFailure`'s own doc comment).
+      logFinalArtworkProviderFailure({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        providerKey: activeProvider.providerKey,
+        providerRequestId: currentProviderRequestId,
+        stage: error instanceof ProviderError ? (error.stage ?? null) : null,
+        sanitizedError: describeFinalArtworkError(error),
+        submittedNewPaidRequest,
+        attemptedResume: existingProviderRequest !== null,
+      });
       await failJob(job, describeFinalArtworkError(error));
       return { status: "handled" };
     }

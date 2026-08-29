@@ -96,16 +96,32 @@ export class ProviderError extends Error {
    * stays valid and none of them silently become "safe to retry".
    */
   readonly dispatch: ProviderDispatchState;
+  /**
+   * "Fix Topaz Resume/Download Failure" — an OPTIONAL, free-text label for
+   * which step of a provider's own pipeline raised this (e.g. `"submit"`,
+   * `"poll"`, `"download"`). Purely additive/diagnostic: `undefined` for
+   * every existing call site that does not set it (nothing changes for
+   * them), and never itself affects `classification`/`dispatch`/retry
+   * behavior. Exists so a failure log can say WHERE in a multi-step
+   * provider pipeline something broke without callers having to parse
+   * `message` text to find out — see `describeFinalArtworkError`'s doc
+   * comment: `message` is internal-only (never customer-facing), but a
+   * structured field is still more useful for logging than string-parsing
+   * it back out.
+   */
+  readonly stage?: string;
 
   constructor(
     classification: ProviderErrorClassification,
     message: string,
     dispatch?: ProviderDispatchState,
+    stage?: string,
   ) {
     super(message);
     this.name = "ProviderError";
     this.classification = classification;
     this.dispatch = dispatch ?? defaultDispatchState(classification);
+    this.stage = stage;
   }
 }
 

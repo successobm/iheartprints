@@ -117,6 +117,25 @@ const DEFAULT_SUBMIT_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_TIMEOUT_MS = 6 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
 const DEFAULT_MAX_POLL_ATTEMPTS_FOR_RETRY = 3;
+/**
+ * "Fix Topaz Resume/Download Failure" — how long a single readback of the
+ * already-completed output may take before it is treated as hung rather
+ * than merely slow. Generous: a large reconstructed PNG over a slow
+ * connection should still finish well inside this, and this timeout exists
+ * to catch a genuine hang, not to race a normal download.
+ */
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 2 * 60 * 1000;
+/**
+ * "Fix Topaz Resume/Download Failure" — how many times `download()` (the
+ * ENTIRE metadata-fetch + bytes-fetch cycle, always re-fetching a fresh
+ * result URL by `processId`) may be retried within ONE `produce()` call
+ * before propagating failure up to a full job-level retry. Mirrors
+ * `DEFAULT_MAX_POLL_ATTEMPTS_FOR_RETRY`'s existing bound for the identical
+ * reason: bounded resilience against a transient blip, never an unbounded
+ * loop, and never a resubmission — see `isRetryableProviderError`, reused
+ * unchanged.
+ */
+const DEFAULT_DOWNLOAD_ATTEMPTS = 3;
 
 export interface TopazTransparencyUpscaleProviderConfig {
   apiKey: string;
@@ -127,6 +146,8 @@ export interface TopazTransparencyUpscaleProviderConfig {
   submitTimeoutMs?: number;
   pollTimeoutMs?: number;
   pollIntervalMs?: number;
+  downloadTimeoutMs?: number;
+  downloadAttempts?: number;
 }
 
 interface TopazStatusPayload {
@@ -565,6 +586,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
   private readonly submitTimeoutMs: number;
   private readonly pollTimeoutMs: number;
   private readonly pollIntervalMs: number;
+  private readonly downloadTimeoutMs: number;
+  private readonly downloadAttempts: number;
 
   constructor(config: TopazTransparencyUpscaleProviderConfig) {
     if (!config.apiKey) {
@@ -576,6 +599,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
     this.submitTimeoutMs = config.submitTimeoutMs ?? DEFAULT_SUBMIT_TIMEOUT_MS;
     this.pollTimeoutMs = config.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
     this.pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.downloadTimeoutMs = config.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+    this.downloadAttempts = config.downloadAttempts ?? DEFAULT_DOWNLOAD_ATTEMPTS;
   }
 
   async produce(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput> {
@@ -878,7 +903,28 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       onProviderRequestSubmitted,
     );
     await this.pollUntilDone(processId);
-    const bytes = await this.download(processId);
+    // "Fix Topaz Resume/Download Failure": bounded, LOCAL retry of the
+    // readback step only — `download()` always re-fetches a FRESH result
+    // URL from `/download/{processId}` on every call (never reuses a
+    // previously-returned signed URL across attempts), so each retry here
+    // genuinely obtains current download metadata rather than repeating a
+    // stale one. Never resubmits anything: `processId` is fixed for the
+    // lifetime of this call, `submitOrResumePass` already ran exactly once
+    // above, and nothing below this point can reach it again. Only the
+    // classifications `isRetryableProviderError` already recognizes as safe
+    // (`network`/`rate_limited`/`unavailable`, and only when provably
+    // `not_dispatched` — true by construction for every failure `download()`
+    // itself can raise, since reading back an already-produced result is
+    // never itself a billable dispatch) are retried; a `malformed_response`
+    // (e.g. the provider reporting the result is no longer available) or a
+    // `timeout` propagates immediately, unretried, exactly as `pollUntilDone`
+    // already treats them.
+    const bytes = await withRetry(() => this.download(processId), {
+      attempts: this.downloadAttempts,
+      isRetryable: isRetryableProviderError,
+      delayMs: (attempt) => 500 * attempt,
+      sleep: this.sleepImpl,
+    });
     let png: PNG;
     try {
       png = PNG.sync.read(bytes);
@@ -888,6 +934,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
         `The production reconstruction provider returned bytes that could not be decoded as a PNG: ${
           error instanceof Error ? error.message : String(error)
         }`,
+        undefined,
+        "download",
       );
     }
     return { processId, png };
@@ -972,11 +1020,21 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
         throw new ProviderError(
           "timeout",
           "The production reconstruction provider did not accept the submission in time.",
+          undefined,
+          "submit",
         );
       }
+      // Deliberately NOT `not_dispatched` here (unlike `fetchStatus`'s and
+      // `download`'s equivalent catches below): this is the one call in
+      // this file that IS a paid dispatch, so the stack genuinely cannot
+      // prove the request never reached — and was never billed by — the
+      // provider. Left at its conservative default (`dispatched_ambiguous`)
+      // exactly as before; only the message gains diagnostic detail.
       throw new ProviderError(
         "network",
-        "The production reconstruction provider could not be reached.",
+        `The production reconstruction provider could not be reached (${describeFetchFailure(error)}).`,
+        undefined,
+        "submit",
       );
     } finally {
       clearTimeout(timeout);
@@ -991,6 +1049,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       throw new ProviderError(
         "malformed_response",
         "The production reconstruction provider returned an unreadable submission response.",
+        undefined,
+        "submit",
       );
     }
 
@@ -999,6 +1059,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       throw new ProviderError(
         "malformed_response",
         "The production reconstruction provider's submission response did not include a request id.",
+        undefined,
+        "submit",
       );
     }
     return processId;
@@ -1019,6 +1081,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
         throw new ProviderError(
           "provider_job_failed",
           `The production reconstruction provider reported this request as "${status}".`,
+          undefined,
+          "poll",
         );
       }
       await this.sleepImpl(this.pollIntervalMs);
@@ -1026,6 +1090,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
     throw new ProviderError(
       "timeout",
       "The production reconstruction provider did not complete within the allotted time.",
+      undefined,
+      "poll",
     );
   }
 
@@ -1035,14 +1101,27 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       response = await this.fetchImpl(`${TOPAZ_API_BASE}/status/${processId}`, {
         headers: { "X-API-Key": this.apiKey },
       });
-    } catch {
+    } catch (error) {
+      // "Fix Topaz Resume/Download Failure": a status check is NEVER itself
+      // a billable dispatch — it only reads back the state of an already
+      // (or not-yet) submitted paid request — so, unlike `submit()`'s own
+      // network catch, this is honestly `not_dispatched` regardless of what
+      // the underlying transport failure was. Without this explicit
+      // override, `isRetryableProviderError` silently could never retry a
+      // network hiccup here (its default for an unspecified `network`
+      // failure is the conservative `dispatched_ambiguous`, correct for a
+      // PAID call but wrong for this one) — making the `withRetry` wrapper
+      // around this call in `pollUntilDone` a no-op for the exact class of
+      // failure it exists to absorb.
       throw new ProviderError(
         "network",
-        "The production reconstruction provider's status endpoint could not be reached.",
+        `The production reconstruction provider's status endpoint could not be reached (${describeFetchFailure(error)}).`,
+        "not_dispatched",
+        "poll",
       );
     }
 
-    classifyPollResponse(response.status);
+    classifyPollResponse(response.status, "poll");
 
     let payload: TopazStatusPayload;
     try {
@@ -1051,24 +1130,39 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       throw new ProviderError(
         "malformed_response",
         "The production reconstruction provider returned an unreadable status response.",
+        undefined,
+        "poll",
       );
     }
     return typeof payload.status === "string" ? payload.status : "";
   }
 
+  /**
+   * Reads back the CURRENT result for an already-completed (or in-progress)
+   * process id — never a paid dispatch. Always fetches a FRESH result URL
+   * from `/download/{processId}` on every call rather than trusting one
+   * returned by a prior call (Goal: a caller retrying this — see
+   * `runReconstructionPass`'s bounded `withRetry` wrapper — never risks
+   * reusing an expired signed URL, because it never reuses one at all).
+   */
   private async download(processId: string): Promise<Buffer> {
     let metaResponse: Response;
     try {
       metaResponse = await this.fetchImpl(`${TOPAZ_API_BASE}/download/${processId}`, {
         headers: { "X-API-Key": this.apiKey },
       });
-    } catch {
+    } catch (error) {
+      // Same reasoning as `fetchStatus`'s catch above: reading back result
+      // metadata is never itself billable, so this is honestly
+      // `not_dispatched` — never `dispatched_ambiguous` by default.
       throw new ProviderError(
         "network",
-        "The production reconstruction provider's download endpoint could not be reached.",
+        `The production reconstruction provider's download endpoint could not be reached (${describeFetchFailure(error)}).`,
+        "not_dispatched",
+        "download",
       );
     }
-    classifyPollResponse(metaResponse.status);
+    classifyPollResponse(metaResponse.status, "download");
 
     let meta: { url?: unknown; download_url?: unknown };
     try {
@@ -1077,6 +1171,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       throw new ProviderError(
         "malformed_response",
         "The production reconstruction provider returned an unreadable download response.",
+        undefined,
+        "download",
       );
     }
     const url = typeof meta.url === "string" ? meta.url : typeof meta.download_url === "string" ? meta.download_url : null;
@@ -1084,22 +1180,52 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       throw new ProviderError(
         "malformed_response",
         "The production reconstruction provider's download response did not include a URL.",
+        undefined,
+        "download",
       );
     }
 
+    // "Fix Topaz Resume/Download Failure": `submit()` bounds its own
+    // request with a timeout; this fetch — which can transfer a large PNG
+    // — previously had none at all, so a genuine hang surfaced (after
+    // whatever the runtime's own, unconfigured default eventually did)
+    // as the same generic, undiagnosable "could not be fetched" as every
+    // other transport failure. An explicit, bounded, DISTINCTLY classified
+    // timeout makes a hang legible without changing what a fast failure
+    // (DNS, refused connection, reset) reports.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.downloadTimeoutMs);
     let imageResponse: Response;
     try {
-      imageResponse = await this.fetchImpl(url);
-    } catch {
+      imageResponse = await this.fetchImpl(url, { signal: controller.signal });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new ProviderError(
+          "timeout",
+          "The production reconstruction provider's downloaded artwork did not finish transferring in time.",
+          "not_dispatched",
+          "download",
+        );
+      }
+      // Never the URL itself (it is a signed, single-purpose result link) —
+      // only the error's own name/code, e.g. "ENOTFOUND", "ECONNRESET",
+      // enough to tell DNS/TLS/reset/refused apart on the NEXT occurrence
+      // without ever logging a secret or a fetchable link.
       throw new ProviderError(
         "network",
-        "The production reconstruction provider's downloaded artwork could not be fetched.",
+        `The production reconstruction provider's downloaded artwork could not be fetched (${describeFetchFailure(error)}).`,
+        "not_dispatched",
+        "download",
       );
+    } finally {
+      clearTimeout(timeout);
     }
     if (!imageResponse.ok) {
       throw new ProviderError(
         "network",
-        `The production reconstruction provider's downloaded artwork request failed (${imageResponse.status}).`,
+        `The production reconstruction provider's downloaded artwork request failed (${imageResponse.status}${describeHttpStatusHint(imageResponse.status)}).`,
+        "not_dispatched",
+        "download",
       );
     }
     const contentType = imageResponse.headers.get("content-type") ?? "";
@@ -1107,6 +1233,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       throw new ProviderError(
         "malformed_response",
         `The production reconstruction provider's downloaded artwork had an unexpected content type (${contentType}).`,
+        undefined,
+        "download",
       );
     }
 
@@ -1116,6 +1244,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       throw new ProviderError(
         "malformed_response",
         "The production reconstruction provider's downloaded artwork was empty.",
+        undefined,
+        "download",
       );
     }
     return buffer;
@@ -1155,57 +1285,105 @@ function classifySubmitResponse(status: number): void {
     throw new ProviderError(
       "auth",
       "The production reconstruction provider rejected the configured credentials.",
+      undefined,
+      "submit",
     );
   }
   if (status === 412) {
     throw new ProviderError(
       "insufficient_credits",
       "The production reconstruction provider reported the account cannot afford this request.",
+      undefined,
+      "submit",
     );
   }
   if (status === 429) {
     throw new ProviderError(
       "rate_limited",
       "The production reconstruction provider is rate-limiting requests right now.",
+      undefined,
+      "submit",
     );
   }
   if (status >= 500) {
+    // Deliberately NOT overriding dispatch here: this is the PAID
+    // submission call, and a 5xx genuinely cannot prove whether the
+    // provider accepted (and started billing) the request before failing —
+    // stays at its conservative default (`dispatched_ambiguous`), unlike
+    // `classifyPollResponse`'s identical-looking branch below.
     throw new ProviderError(
       "unavailable",
       "The production reconstruction provider is temporarily unavailable.",
+      undefined,
+      "submit",
     );
   }
   if (status < 200 || status >= 300) {
     throw new ProviderError(
       "malformed_response",
       `The production reconstruction provider returned an unexpected submission status (${status}).`,
+      undefined,
+      "submit",
     );
   }
 }
 
-function classifyPollResponse(status: number): void {
+/**
+ * Shared by `fetchStatus` (poll) and `download`'s metadata call — NEITHER
+ * is ever itself a billable dispatch, which is what justifies overriding
+ * `unavailable`'s dispatch to `not_dispatched` here (unlike
+ * `classifySubmitResponse`'s own 5xx branch, which must stay ambiguous: it
+ * guards the actual paid call). `stage` labels the resulting `ProviderError`
+ * for observability only — never changes classification or dispatch.
+ */
+function classifyPollResponse(status: number, stage: "poll" | "download"): void {
   if (status === 401 || status === 403) {
     throw new ProviderError(
       "auth",
       "The production reconstruction provider rejected the configured credentials.",
+      undefined,
+      stage,
     );
   }
   if (status === 429) {
     throw new ProviderError(
       "rate_limited",
       "The production reconstruction provider is rate-limiting requests right now.",
+      undefined,
+      stage,
+    );
+  }
+  if (status === 404 || status === 410) {
+    // "Fix Topaz Resume/Download Failure" Phase 3: a distinct, honest
+    // verdict for "the provider no longer has this" — never itself a
+    // reason to submit a fresh paid request (nothing here or in any caller
+    // does that automatically; see this file's and the worker's own
+    // resume-never-resubmit contract). `malformed_response`'s own default
+    // dispatch (`dispatched_billed`) is exactly right: the ORIGINAL
+    // submission most likely already completed and was billed, even though
+    // its result can no longer be retrieved.
+    throw new ProviderError(
+      "malformed_response",
+      `The production reconstruction provider reports this request is no longer available (status ${status}) — ` +
+        `it may have expired, or already been retrieved and cleared on the provider's side.`,
+      undefined,
+      stage,
     );
   }
   if (status >= 500) {
     throw new ProviderError(
       "unavailable",
       "The production reconstruction provider is temporarily unavailable.",
+      "not_dispatched",
+      stage,
     );
   }
   if (status < 200 || status >= 300) {
     throw new ProviderError(
       "malformed_response",
       `The production reconstruction provider returned an unexpected status (${status}).`,
+      undefined,
+      stage,
     );
   }
 }
@@ -1225,4 +1403,37 @@ function isAbortError(error: unknown): boolean {
     error instanceof Error &&
     (error.name === "AbortError" || error.name === "TimeoutError")
   );
+}
+
+/**
+ * "Fix Topaz Resume/Download Failure" Phase 1/4: a SANITIZED, low-level
+ * description of why a `fetch` call itself threw — the error's `name` plus,
+ * when present, undici's own `error.cause.code` (e.g. `"ENOTFOUND"`,
+ * `"ECONNREFUSED"`, `"ECONNRESET"`, `"CERT_HAS_EXPIRED"`). This is exactly
+ * what distinguishes DNS failure / connection refusal / TLS problem / reset
+ * from one another in a log or persisted `lastError` — the ONE thing the
+ * previous blanket `catch { throw ProviderError("network", "...could not be
+ * fetched.") }` discarded, making every transport failure look identical.
+ * Never includes the request URL, any header, or any credential — only the
+ * JS error's own identity.
+ */
+function describeFetchFailure(error: unknown): string {
+  if (!(error instanceof Error)) return "unknown error";
+  const cause = (error as { cause?: unknown }).cause;
+  const code =
+    cause && typeof cause === "object" && "code" in cause && typeof (cause as { code: unknown }).code === "string"
+      ? (cause as { code: string }).code
+      : null;
+  return code ? `${error.name}: ${code}` : error.name || "unknown error";
+}
+
+/** A short, sanitized, human-readable hint for a handful of HTTP statuses that commonly mean something specific for a signed download link — never more than that status's own well-known meaning. */
+function describeHttpStatusHint(status: number): string {
+  if (status === 401 || status === 403) {
+    return " — the signed download link may have expired or been rejected";
+  }
+  if (status === 404 || status === 410) {
+    return " — the reconstructed output may no longer be available from the provider";
+  }
+  return "";
 }

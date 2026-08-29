@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { PNG } from "pngjs";
 
 import { PRINT_PLACEMENT_SIZING_POLICY } from "@/capabilities/shared/print-placement-dimensions";
+import { ProviderError } from "@/capabilities/providers/provider-error";
 
 import {
   resolveReconstructionRequest,
@@ -224,6 +225,14 @@ interface PassFakeSpec {
   processId: string;
   statusSequence?: string[];
   downloadBytes: Buffer;
+  /**
+   * "Fix Topaz Resume/Download Failure": how many times THIS pass's final
+   * image-bytes fetch should throw a transient transport error before
+   * succeeding — proves a mid-two-pass download hiccup recovers via bounded
+   * local retry without ever resubmitting either pass. `0`/absent preserves
+   * every existing caller's exact prior behavior (never fails).
+   */
+  imageFailuresBeforeSuccess?: number;
 }
 
 /**
@@ -238,6 +247,7 @@ function buildTwoPassFakeFetch(specs: PassFakeSpec[], submissionOrder: string[] 
   const calls: { url: string; method: string }[] = [];
   let submitIndex = 0;
   const statusCallIndexByProcessId = new Map<string, number>();
+  const imageCallCountByProcessId = new Map<string, number>();
 
   const impl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -267,6 +277,11 @@ function buildTwoPassFakeFetch(specs: PassFakeSpec[], submissionOrder: string[] 
     }
     const match = specs.find((p) => url === `https://cdn.example.com/${p.processId}.png`);
     if (match) {
+      const seen = imageCallCountByProcessId.get(match.processId) ?? 0;
+      imageCallCountByProcessId.set(match.processId, seen + 1);
+      if (match.imageFailuresBeforeSuccess && seen < match.imageFailuresBeforeSuccess) {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+      }
       return new Response(new Uint8Array(match.downloadBytes), {
         status: 200,
         headers: { "content-type": "image/png" },
@@ -898,6 +913,43 @@ describe("Phase 28V — two-pass reconstruction", () => {
       assert.equal(output.providerRequestId, "pass2-id");
     });
 
+    // --- "Fix Topaz Resume/Download Failure" -----------------------------
+    it("pass 2's download recovers from a transient failure via bounded local retry, without resubmitting either pass", async () => {
+      const { fetchImpl, calls } = buildTwoPassFakeFetch(
+        [{ processId: "pass2-id", downloadBytes: buildRectFixturePng(4019, 3475), imageFailuresBeforeSuccess: 1 }],
+        [],
+      );
+      const provider = new TopazTransparencyUpscaleProvider({
+        apiKey: "test-key",
+        fetchImpl,
+        sleepImpl: noSleep,
+        pollIntervalMs: 1,
+      });
+
+      const output = await provider.produce(
+        realLikeInput({
+          existingIntermediateReconstruction: {
+            bytes: buildRectFixturePng(2248, 1944),
+            widthPx: 2248,
+            heightPx: 1944,
+            providerRequestId: "pass1-id",
+          },
+          existingProviderRequest: {
+            providerKey: "topaz_transparency_upscale",
+            providerRequestId: "pass2-id",
+            providerStatus: "submitted",
+          },
+          onProviderRequestSubmitted: async () => {
+            throw new Error("must not submit anything — pass 1 already exists, pass 2 is being resumed");
+          },
+        }),
+      );
+
+      assert.equal(output.providerRequestId, "pass2-id");
+      const submitCalls = calls.filter((c) => c.url.endsWith("/tool/async"));
+      assert.equal(submitCalls.length, 0, "the transient download hiccup must never trigger a resubmission of either pass");
+    });
+
     it("J: pass 1 returning the wrong geometry fails safely — no pass 2 submission", async () => {
       const { fetchImpl, calls } = buildTwoPassFakeFetch([
         // Exceeds the requested canvas but with a distorted aspect ratio.
@@ -972,5 +1024,256 @@ describe("Phase 28V — two-pass reconstruction", () => {
       const submitCalls = calls.filter((c) => c.url.endsWith("/tool/async"));
       assert.equal(submitCalls.length, 1, "no third pass — pass 1 ran once, pass 2 was correctly never attempted");
     });
+  });
+});
+
+/**
+ * "Fix Topaz Resume/Download Failure" — a purpose-built fake fetch for the
+ * download/resume lifecycle, mirroring `buildFakeFetch`'s shape but adding
+ * the ability to inject transient transport failures, a permanently-gone
+ * metadata response, or a hang, on EITHER the download-metadata call or the
+ * final image-bytes call — independently. Every metadata fetch that
+ * succeeds returns a URL suffixed with its own call count, so a test can
+ * prove a retry genuinely re-fetched fresh metadata rather than reusing a
+ * memoized one.
+ */
+interface DownloadFailureFakeFetchOptions {
+  /** How many times `/download/{id}` (the metadata call) throws a transient transport error before succeeding. */
+  metaTransientFailures?: number;
+  /** How many times the final image-bytes fetch throws a transient transport error before succeeding. */
+  imageTransientFailures?: number;
+  /** When set, `/download/{id}` always returns this HTTP status — never succeeds. */
+  metaHttpStatus?: number;
+  /** When true, the image-bytes fetch never settles on its own — only rejects with an AbortError once the caller's AbortSignal fires. */
+  hangImageFetch?: boolean;
+  downloadBytes?: Buffer;
+}
+
+function buildDownloadFailureFakeFetch(options: DownloadFailureFakeFetchOptions = {}) {
+  const calls: string[] = [];
+  let metaCallCount = 0;
+  let imageCallCount = 0;
+  let submitCallCount = 0;
+
+  const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push(url);
+
+    if (url.endsWith("/tool/async")) {
+      submitCallCount += 1;
+      return jsonResponse(200, { process_id: "resume-test-process-id" });
+    }
+    if (url.includes("/status/")) {
+      return jsonResponse(200, { status: "Completed" });
+    }
+    if (url.includes("/download/")) {
+      metaCallCount += 1;
+      if (options.metaHttpStatus) {
+        return jsonResponse(options.metaHttpStatus, { error: "gone" });
+      }
+      if (options.metaTransientFailures && metaCallCount <= options.metaTransientFailures) {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+      }
+      // A distinct URL per successful metadata call — proves a retry
+      // genuinely re-fetches fresh metadata rather than reusing a stored one.
+      return jsonResponse(200, { url: `https://cdn.example.com/output.png?attempt=${metaCallCount}` });
+    }
+    if (url.startsWith("https://cdn.example.com/output.png")) {
+      imageCallCount += 1;
+      if (options.hangImageFetch) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            const err = new Error("This operation was aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        });
+      }
+      if (options.imageTransientFailures && imageCallCount <= options.imageTransientFailures) {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+      }
+      const bytes = options.downloadBytes ?? buildFixturePng(expectedRequest().widthPx);
+      return new Response(new Uint8Array(bytes), {
+        status: 200,
+        headers: { "content-type": "image/png" },
+      });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  }) as typeof fetch;
+
+  return {
+    fetchImpl: impl,
+    calls,
+    metaCallCount: () => metaCallCount,
+    imageCallCount: () => imageCallCount,
+    submitCallCount: () => submitCallCount,
+  };
+}
+
+describe("Fix Topaz Resume/Download Failure", () => {
+  it("A: bounded local retry recovers from a transient download image-bytes failure, without resubmitting", async () => {
+    const { fetchImpl, imageCallCount, submitCallCount } = buildDownloadFailureFakeFetch({
+      imageTransientFailures: 2,
+    });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    const output = await provider.produce(baseInput());
+
+    assert.equal(output.providerRequestId, "resume-test-process-id");
+    assert.equal(imageCallCount(), 3, "two transient failures, then a third, successful attempt");
+    assert.equal(submitCallCount(), 1, "the transient download hiccup must never trigger a second paid submission");
+  });
+
+  it("B: bounded local retry recovers from a transient download-metadata failure, always refreshing the result URL", async () => {
+    const { fetchImpl, metaCallCount, submitCallCount } = buildDownloadFailureFakeFetch({
+      metaTransientFailures: 2,
+    });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    const output = await provider.produce(baseInput());
+
+    assert.equal(output.providerRequestId, "resume-test-process-id");
+    assert.equal(metaCallCount(), 3, "two transient metadata failures, then a third, successful attempt");
+    assert.equal(submitCallCount(), 1, "never resubmits merely because the metadata call itself was flaky");
+  });
+
+  it("C: exhausting every bounded download attempt still fails honestly, classified network/download, never resubmitting", async () => {
+    const { fetchImpl, imageCallCount, submitCallCount } = buildDownloadFailureFakeFetch({
+      imageTransientFailures: 10, // more than DEFAULT_DOWNLOAD_ATTEMPTS
+    });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () => provider.produce(baseInput()),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.classification, "network");
+        assert.equal(error.dispatch, "not_dispatched");
+        assert.equal(error.stage, "download");
+        return true;
+      },
+    );
+    assert.equal(imageCallCount(), 3, "bounded at DEFAULT_DOWNLOAD_ATTEMPTS — never an unbounded loop");
+    assert.equal(submitCallCount(), 1, "an exhausted download retry must never fall back to a fresh paid submission");
+  });
+
+  it("D: a permanently-gone provider result (404) fails distinctly and is never retried or resubmitted", async () => {
+    const { fetchImpl, metaCallCount, submitCallCount } = buildDownloadFailureFakeFetch({ metaHttpStatus: 404 });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () => provider.produce(baseInput()),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.classification, "malformed_response");
+        assert.match(error.message, /no longer available/i);
+        return true;
+      },
+    );
+    assert.equal(metaCallCount(), 1, "a distinctly-classified permanent failure is never locally retried");
+    assert.equal(submitCallCount(), 1, "must never silently resubmit merely because the result is gone");
+  });
+
+  it("E: a hung download fetch times out distinctly, without being treated as an ordinary retryable network blip", async () => {
+    const { fetchImpl, imageCallCount, submitCallCount } = buildDownloadFailureFakeFetch({ hangImageFetch: true });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+      downloadTimeoutMs: 5,
+    });
+
+    await assert.rejects(
+      () => provider.produce(baseInput()),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.classification, "timeout");
+        assert.equal(error.stage, "download");
+        return true;
+      },
+    );
+    assert.equal(imageCallCount(), 1, "a timeout is not one of the locally-retried classifications -- exactly one attempt");
+    assert.equal(submitCallCount(), 1, "a download timeout must never trigger a second paid submission");
+  });
+
+  // --- F: THE LIVE-INCIDENT SHAPE -- resuming an existing provider request whose download previously failed.
+  it("F: resuming an existing provider request recovers from a transient download failure without a second paid submission", async () => {
+    const { fetchImpl, imageCallCount, submitCallCount } = buildDownloadFailureFakeFetch({
+      imageTransientFailures: 1,
+    });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    const onProviderRequestSubmitted = async () => {
+      throw new Error("must not be called -- this run resumes an already-submitted request");
+    };
+
+    const output = await provider.produce(
+      baseInput({
+        existingProviderRequest: {
+          providerKey: "topaz_transparency_upscale",
+          providerRequestId: "01a04f6b-180c-7bbb-9e63-49f326c52bb0",
+          providerStatus: "submitted",
+        },
+        onProviderRequestSubmitted,
+      }),
+    );
+
+    assert.equal(output.providerRequestId, "01a04f6b-180c-7bbb-9e63-49f326c52bb0", "resumes the SAME already-paid request id");
+    assert.equal(submitCallCount(), 0, "resuming must never submit a fresh paid request, even after a download failure");
+    assert.equal(imageCallCount(), 2, "one transient failure, then recovery, entirely within the resumed request");
+  });
+
+  it("G: a resumed request whose result is permanently gone fails clearly rather than silently resubmitting", async () => {
+    const { fetchImpl, submitCallCount } = buildDownloadFailureFakeFetch({ metaHttpStatus: 410 });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () =>
+        provider.produce(
+          baseInput({
+            existingProviderRequest: {
+              providerKey: "topaz_transparency_upscale",
+              providerRequestId: "01a04f6b-180c-7bbb-9e63-49f326c52bb0",
+              providerStatus: "submitted",
+            },
+            onProviderRequestSubmitted: async () => {
+              throw new Error("must not be called -- resuming, not submitting");
+            },
+          }),
+        ),
+      /no longer available/i,
+    );
+    assert.equal(submitCallCount(), 0, "a permanently-gone resumed result must never fall back to a fresh paid submission");
   });
 });

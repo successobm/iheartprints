@@ -85,3 +85,39 @@ export function logFinalArtworkEnhancementProviderGap(details: {
     details,
   );
 }
+
+/**
+ * "Fix Topaz Resume/Download Failure" Phase 4: the live INCREDI-BOWLS-class
+ * incident that motivated this was "nearly invisible" — a job persisted as
+ * `failed` while the terminal showed an unrelated batch progressing. Every
+ * claimed final-artwork job that ends in `failJob` now logs this, so the
+ * NEXT such failure is visible the moment it happens, without needing to
+ * separately query job state.
+ *
+ * Whitelisted fields only — same discipline as every other function in this
+ * file. `sanitizedError` is `ProviderError.message` (or an `Error.message`
+ * for a non-provider failure) — already internal-only and never containing
+ * a URL, header, or credential (see `describeFinalArtworkError`'s doc
+ * comment in `final-artwork-worker-capability.ts` and
+ * `describeFetchFailure`'s in `topaz-transparency-upscale-provider.ts`),
+ * but this function additionally accepts it as a plain string precisely so
+ * it can never receive a raw `Error`/`ProviderError` object (and, with it,
+ * a stack trace or anything else not already reviewed for safety).
+ */
+export interface FinalArtworkProviderFailureLogDetails {
+  projectId: string;
+  finalArtworkJobId: string;
+  providerKey: string;
+  providerRequestId: string | null;
+  /** `ProviderError.stage`, when the failure carried one (e.g. `"submit"`, `"poll"`, `"download"`) — `null` for a failure with no such concept (e.g. asset persistence, a non-`ProviderError` throw). */
+  stage: string | null;
+  sanitizedError: string;
+  /** `true` only when THIS attempt actually made a new paid submission before failing — mirrors `FinalArtworkPaidCallLogDetails.submittedNewPaidRequest`. */
+  submittedNewPaidRequest: boolean;
+  /** Whether this attempt started from an existing paid request it intended to resume, regardless of whether resuming actually succeeded. `false` on a genuine first attempt or for a provider with no paid-request concept. */
+  attemptedResume: boolean;
+}
+
+export function logFinalArtworkProviderFailure(details: FinalArtworkProviderFailureLogDetails): void {
+  console.error("[final-artwork-worker] job failed", details);
+}

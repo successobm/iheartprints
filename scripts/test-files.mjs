@@ -251,6 +251,7 @@ export const TEST_FILES = [
   // class exactly once for a genuinely undersized source, and never at all
   // for a source that already satisfies the production target.
   "src/capabilities/final-artwork-worker/topaz-provider-selection-and-invocation.test.ts",
+  "src/capabilities/final-artwork-worker/topaz-download-resume-recovery.test.ts",
   "src/capabilities/conversation/production-treatment-authorization.test.ts",
   "src/components/chat/production-treatment-dead-end.test.tsx",
   "src/capabilities/conversation/operator-recovery-flow.test.ts",
