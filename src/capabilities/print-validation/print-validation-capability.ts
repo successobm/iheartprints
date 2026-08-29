@@ -42,12 +42,14 @@ import {
 import {
   classifyDtfFeatureWidth,
   classifyDtfPartialAlphaFeature,
+  classifyStructuralFragility,
   DTF_ISOLATED_COMPONENT_BLOCKING_DIAMETER_MM,
   DTF_ISOLATED_COMPONENT_WARNING_DIAMETER_MM,
   DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM,
   DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM,
   DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM,
   DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM,
+  type StructuralFragilityResult,
 } from "@/capabilities/shared/dtf-feature-integrity-profile";
 
 /**
@@ -1606,16 +1608,34 @@ function formatMm(value: number): string {
   return `${value.toFixed(2)}mm`;
 }
 
+/**
+ * Phase 2A: renders one `classifyStructuralFragility` result into the
+ * `kind`-appropriate clause of a check's `reason` string. Shared between the
+ * positive-feature and negative-space checks, which differ only in
+ * vocabulary ("stroke" vs "gap").
+ */
+function describeStructuralFragility(
+  result: StructuralFragilityResult,
+  nounPhrase: string,
+): string {
+  if (result.kind === "structural") {
+    return (
+      `a SUBSTANTIAL PORTION of this structure's own geometry — not merely one isolated point — is this ${nounPhrase}. ` +
+      "The minimum is representative of the shape as a whole, not an outlier."
+    );
+  }
+  return (
+    `this is a small, isolated dip within an otherwise more robust structure (a terminal tip, thin crack, or attached ` +
+    `decorative detail) — the overwhelming majority of the structure's own geometry is NOT this ${nounPhrase}. ` +
+    "Per this phase's plan, one pathological point must not by itself block an otherwise-robust structure."
+  );
+}
+
 function checkDtfPositiveFeatureIntegrity(
   dtf: DtfFeatureIntegritySummary,
 ): PrintValidationCheck {
-  const widthMm = dtf.positive.globalMinStrokeWidthMm;
-  const tier = classifyDtfFeatureWidth(
-    widthMm,
-    DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM,
-    DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM,
-  );
-  if (widthMm === null) {
+  const worst = dtf.positive.worstStructuralComponent;
+  if (!worst) {
     return {
       check: "dtf_positive_feature_integrity",
       status: "pass",
@@ -1623,43 +1643,49 @@ function checkDtfPositiveFeatureIntegrity(
       reason: "No positive ink feature was measured; there is nothing narrow to flag.",
     };
   }
-  if (tier === "blocking") {
+
+  const result = classifyStructuralFragility(
+    worst.minStrokeWidthMm,
+    worst.fractionBelowBlockingFloor,
+    worst.fractionBelowWarningFloor,
+    DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM,
+    DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM,
+  );
+  const widthMm = worst.minStrokeWidthMm;
+
+  if (result.effectiveTier === "pass") {
     return {
       check: "dtf_positive_feature_integrity",
-      status: "fail",
-      severity: "blocking",
-      reason:
-        `The thinnest measured positive ink feature is ${formatMm(widthMm)} wide at this artwork's confirmed print size — below the provisional ` +
-        `${formatMm(DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM)} DTF floor (uncalibrated; see the DTF Feature Integrity profile). This is a measurement of ` +
-        "physical geometry at the confirmed size, not a claim about the source pixels.",
-    };
-  }
-  if (tier === "warning") {
-    return {
-      check: "dtf_positive_feature_integrity",
-      status: "warning",
+      status: "pass",
       severity: "warning",
-      reason: `The thinnest measured positive ink feature is ${formatMm(widthMm)} wide at this artwork's confirmed print size — worth an operator's attention, not yet refused.`,
+      reason:
+        widthMm === null
+          ? "No positive ink feature was measured; there is nothing narrow to flag."
+          : `The thinnest measured positive ink feature is ${formatMm(widthMm)} wide at this artwork's confirmed print size.`,
     };
   }
+
+  const floorMm =
+    result.minimumTier === "blocking"
+      ? DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM
+      : DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM;
+  const reason =
+    `The thinnest measured positive ink feature is ${formatMm(widthMm!)} wide at this artwork's confirmed print size — below the provisional ` +
+    `${formatMm(floorMm)} DTF floor (uncalibrated; see the DTF Feature Integrity profile) — and ${describeStructuralFragility(result, "thin")}`;
+
   return {
     check: "dtf_positive_feature_integrity",
-    status: "pass",
-    severity: "warning",
-    reason: `The thinnest measured positive ink feature is ${formatMm(widthMm)} wide at this artwork's confirmed print size.`,
+    status: result.effectiveTier === "blocking" ? "fail" : "warning",
+    severity: result.effectiveTier === "blocking" ? "blocking" : "warning",
+    reason,
   };
 }
 
 function checkDtfNegativeSpaceIntegrity(
   dtf: DtfFeatureIntegritySummary,
 ): PrintValidationCheck {
-  const widthMm = dtf.negative.globalMinGapWidthMm;
-  const tier = classifyDtfFeatureWidth(
-    widthMm,
-    DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM,
-    DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM,
-  );
-  if (widthMm === null) {
+  const worst = dtf.negative.worstStructuralComponent;
+  if (!worst) {
     return {
       check: "dtf_negative_space_integrity",
       status: "pass",
@@ -1667,29 +1693,41 @@ function checkDtfNegativeSpaceIntegrity(
       reason: "No enclosed or between-artwork negative space was measured; there is nothing narrow to flag.",
     };
   }
-  if (tier === "blocking") {
+
+  const result = classifyStructuralFragility(
+    worst.minGapWidthMm,
+    worst.fractionBelowBlockingFloor,
+    worst.fractionBelowWarningFloor,
+    DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM,
+    DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM,
+  );
+  const widthMm = worst.minGapWidthMm;
+
+  if (result.effectiveTier === "pass") {
     return {
       check: "dtf_negative_space_integrity",
-      status: "fail",
-      severity: "blocking",
-      reason:
-        `The narrowest measured negative space (a letter counter or gap between shapes) is ${formatMm(widthMm)} wide at this artwork's confirmed print size — below the provisional ` +
-        `${formatMm(DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM)} DTF floor (uncalibrated). Adhesive powder bridging a gap this narrow is a real production risk, not yet proven by a physical print.`,
-    };
-  }
-  if (tier === "warning") {
-    return {
-      check: "dtf_negative_space_integrity",
-      status: "warning",
+      status: "pass",
       severity: "warning",
-      reason: `The narrowest measured negative space is ${formatMm(widthMm)} wide at this artwork's confirmed print size — worth an operator's attention, not yet refused.`,
+      reason:
+        widthMm === null
+          ? "No enclosed or between-artwork negative space was measured; there is nothing narrow to flag."
+          : `The narrowest measured negative space is ${formatMm(widthMm)} wide at this artwork's confirmed print size.`,
     };
   }
+
+  const floorMm =
+    result.minimumTier === "blocking"
+      ? DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM
+      : DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM;
+  const reason =
+    `The narrowest measured negative space (a letter counter or gap between shapes) is ${formatMm(widthMm!)} wide at this artwork's confirmed print size — below the provisional ` +
+    `${formatMm(floorMm)} DTF floor (uncalibrated) — and ${describeStructuralFragility(result, "narrow")}`;
+
   return {
     check: "dtf_negative_space_integrity",
-    status: "pass",
-    severity: "warning",
-    reason: `The narrowest measured negative space is ${formatMm(widthMm)} wide at this artwork's confirmed print size.`,
+    status: result.effectiveTier === "blocking" ? "fail" : "warning",
+    severity: result.effectiveTier === "blocking" ? "blocking" : "warning",
+    reason,
   };
 }
 
@@ -1702,12 +1740,25 @@ function checkDtfIsolatedFeatureIntegrity(
     DTF_ISOLATED_COMPONENT_BLOCKING_DIAMETER_MM,
     DTF_ISOLATED_COMPONENT_WARNING_DIAMETER_MM,
   );
+  // Phase 2A (Section 7): population-level context — informational, and
+  // included on every status so an operator can tell "one small component"
+  // apart from "hundreds of them totaling a meaningful share of the plate,"
+  // regardless of which single component happens to be smallest.
+  const micro = dtf.isolated.microComponents;
+  const microNote =
+    micro.microComponentCount > 0
+      ? ` Separately, ${micro.microComponentCount} isolated micro component(s) were measured, together covering ` +
+        `${formatPercent(micro.fractionOfPrintedArea)} of all printed area` +
+        (micro.meanPartialAlphaFraction > 0.5
+          ? " (predominantly faint/partial-alpha — may be background-removal residue rather than intentional detail; this measurement cannot tell the difference)."
+          : " (predominantly crisp/opaque marks).")
+      : "";
   if (diameterMm === null) {
     return {
       check: "dtf_isolated_feature_integrity",
       status: "pass",
       severity: "warning",
-      reason: "No isolated printable component was measured; there is nothing small to flag.",
+      reason: `No isolated printable component was measured; there is nothing small to flag.${microNote}`,
     };
   }
   if (tier === "blocking") {
@@ -1718,7 +1769,7 @@ function checkDtfIsolatedFeatureIntegrity(
       reason:
         `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size — below the provisional ` +
         `${formatMm(DTF_ISOLATED_COMPONENT_BLOCKING_DIAMETER_MM)} DTF floor (uncalibrated). This describes measured geometry, not creative intent — a genuinely intentional tiny distressed fragment ` +
-        "can still measure this small; a human reviewer, not this check, is the one who knows which.",
+        `can still measure this small; a human reviewer, not this check, is the one who knows which.${microNote}`,
     };
   }
   if (tier === "warning") {
@@ -1726,14 +1777,14 @@ function checkDtfIsolatedFeatureIntegrity(
       check: "dtf_isolated_feature_integrity",
       status: "warning",
       severity: "warning",
-      reason: `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size — worth an operator's attention, not yet refused.`,
+      reason: `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size — worth an operator's attention, not yet refused.${microNote}`,
     };
   }
   return {
     check: "dtf_isolated_feature_integrity",
     status: "pass",
     severity: "warning",
-    reason: `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size.`,
+    reason: `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size.${microNote}`,
   };
 }
 

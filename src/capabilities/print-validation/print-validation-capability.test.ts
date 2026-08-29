@@ -350,7 +350,21 @@ describe("PrintValidationCapability — normalized production plates (Print-Read
   });
 });
 
-/** A synthetic DTF Feature Integrity summary, comfortably inside every provisional tier by default. */
+/**
+ * A synthetic DTF Feature Integrity summary, comfortably inside every
+ * provisional tier by default. `positiveWorst`/`negativeWorst` build the
+ * `worstStructuralComponent` pair a real measurement would produce —
+ * `fraction` defaults to 0 (a robust structure whose "minimum" happens to
+ * pass) so tests only need to name the fraction that matters for what
+ * they're proving.
+ */
+function positiveWorst(minStrokeWidthMm: number | null, fraction = 0): DtfFeatureIntegritySummary["positive"]["worstStructuralComponent"] {
+  return { minStrokeWidthMm, fractionBelowBlockingFloor: fraction, fractionBelowWarningFloor: fraction };
+}
+function negativeWorst(minGapWidthMm: number | null, fraction = 0): DtfFeatureIntegritySummary["negative"]["worstStructuralComponent"] {
+  return { minGapWidthMm, fractionBelowBlockingFloor: fraction, fractionBelowWarningFloor: fraction };
+}
+
 function dtfSummary(
   overrides: Partial<{
     positive: Partial<DtfFeatureIntegritySummary["positive"]>;
@@ -363,9 +377,31 @@ function dtfSummary(
     algorithmVersion: "iheartprints_feature_integrity_v1",
     pixelPitchXMm: 0.0847,
     pixelPitchYMm: 0.0847,
-    positive: { measuredComponentCount: 1, globalMinStrokeWidthMm: 5, percentile5StrokeWidthMm: 5, ...overrides.positive },
-    negative: { measuredChannelCount: 1, globalMinGapWidthMm: 5, percentile5GapWidthMm: 5, ...overrides.negative },
-    isolated: { totalComponentCount: 1, smallestEquivalentDiameterMm: 5, ...overrides.isolated },
+    positive: {
+      measuredComponentCount: 1,
+      globalMinStrokeWidthMm: 5,
+      percentile5StrokeWidthMm: 5,
+      worstStructuralComponent: positiveWorst(5),
+      ...overrides.positive,
+    },
+    negative: {
+      measuredChannelCount: 1,
+      globalMinGapWidthMm: 5,
+      percentile5GapWidthMm: 5,
+      worstStructuralComponent: negativeWorst(5),
+      ...overrides.negative,
+    },
+    isolated: {
+      totalComponentCount: 1,
+      smallestEquivalentDiameterMm: 5,
+      microComponents: {
+        microComponentCount: 0,
+        totalMicroComponentPhysicalAreaMm2: 0,
+        fractionOfPrintedArea: 0,
+        meanPartialAlphaFraction: 0,
+      },
+      ...overrides.isolated,
+    },
     partialAlpha: { partialAlphaFractionOfVisible: 0, smallestEquivalentDiameterMm: null, ...overrides.partialAlpha },
     riskRegions: [],
     limitations: [],
@@ -402,23 +438,40 @@ describe("PrintValidationCapability — DTF Feature Integrity (Phase 1)", () => 
     assert.equal(report.status, "ready");
   });
 
-  it("blocks on a critically thin positive feature", () => {
+  it("blocks on a critically thin positive feature whose fragility is STRUCTURAL (a majority of its own geometry)", () => {
     const report = printValidation.validateArtwork(
       normalizedFullBackInput({
-        input: { dtfFeatureIntegrity: dtfSummary({ positive: { globalMinStrokeWidthMm: 0.1 } }) },
+        input: { dtfFeatureIntegrity: dtfSummary({ positive: { worstStructuralComponent: positiveWorst(0.1, 0.9) } }) },
       }),
     );
     const check = report.checks.find((c) => c.check === "dtf_positive_feature_integrity");
     assert.equal(check?.status, "fail");
     assert.equal(check?.severity, "blocking");
+    assert.match(check!.reason, /SUBSTANTIAL PORTION/);
     assert.notEqual(report.status, "ready");
     assert.ok(report.requiredTransformations.includes("require_human_review"));
   });
 
-  it("warns (without blocking) on a moderately thin positive feature", () => {
+  it("Section 9: never blocks on a critically thin MINIMUM alone when it is only an INCIDENTAL dip in an otherwise robust component", () => {
     const report = printValidation.validateArtwork(
       normalizedFullBackInput({
-        input: { dtfFeatureIntegrity: dtfSummary({ positive: { globalMinStrokeWidthMm: 0.7 } }) },
+        // Same pathological 0.1mm minimum as the structural case above, but
+        // only a tiny fraction (5%) of the component's own ridge is that
+        // thin — a terminal tip/crack in an otherwise robust shape.
+        input: { dtfFeatureIntegrity: dtfSummary({ positive: { worstStructuralComponent: positiveWorst(0.1, 0.05) } }) },
+      }),
+    );
+    const check = report.checks.find((c) => c.check === "dtf_positive_feature_integrity");
+    assert.equal(check?.status, "warning");
+    assert.equal(check?.severity, "warning");
+    assert.match(check!.reason, /isolated dip/);
+    assert.equal(report.status, "ready", "an incidental dip must never block print_ready");
+  });
+
+  it("warns (without blocking) on a moderately thin, structurally-representative positive feature", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: { dtfFeatureIntegrity: dtfSummary({ positive: { worstStructuralComponent: positiveWorst(0.7, 0.5) } }) },
       }),
     );
     const check = report.checks.find((c) => c.check === "dtf_positive_feature_integrity");
@@ -426,14 +479,25 @@ describe("PrintValidationCapability — DTF Feature Integrity (Phase 1)", () => 
     assert.equal(report.status, "ready", "a warning-severity check never blocks print_ready");
   });
 
-  it("blocks on a critically narrow negative space", () => {
+  it("blocks on a critically narrow negative space whose fragility is STRUCTURAL", () => {
     const report = printValidation.validateArtwork(
       normalizedFullBackInput({
-        input: { dtfFeatureIntegrity: dtfSummary({ negative: { globalMinGapWidthMm: 0.1 } }) },
+        input: { dtfFeatureIntegrity: dtfSummary({ negative: { worstStructuralComponent: negativeWorst(0.1, 0.9) } }) },
       }),
     );
     assert.equal(report.checks.find((c) => c.check === "dtf_negative_space_integrity")?.status, "fail");
     assert.notEqual(report.status, "ready");
+  });
+
+  it("never blocks a negative space whose critically narrow minimum is only an INCIDENTAL pinch point", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: { dtfFeatureIntegrity: dtfSummary({ negative: { worstStructuralComponent: negativeWorst(0.1, 0.05) } }) },
+      }),
+    );
+    const check = report.checks.find((c) => c.check === "dtf_negative_space_integrity");
+    assert.equal(check?.status, "warning");
+    assert.equal(report.status, "ready");
   });
 
   it("blocks on a critically small isolated component", () => {
@@ -444,6 +508,29 @@ describe("PrintValidationCapability — DTF Feature Integrity (Phase 1)", () => 
     );
     assert.equal(report.checks.find((c) => c.check === "dtf_isolated_feature_integrity")?.status, "fail");
     assert.notEqual(report.status, "ready");
+  });
+
+  it("Section 7: mentions the micro-component population in the isolated-feature check's reason", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: {
+          dtfFeatureIntegrity: dtfSummary({
+            isolated: {
+              microComponents: {
+                microComponentCount: 250,
+                totalMicroComponentPhysicalAreaMm2: 12,
+                fractionOfPrintedArea: 0.08,
+                meanPartialAlphaFraction: 0.7,
+              },
+            },
+          }),
+        },
+      }),
+    );
+    const check = report.checks.find((c) => c.check === "dtf_isolated_feature_integrity");
+    assert.match(check!.reason, /250 isolated micro component/);
+    assert.match(check!.reason, /8%/);
+    assert.match(check!.reason, /residue/i);
   });
 
   it("never blocks on partial-alpha geometry, no matter how small", () => {
@@ -468,7 +555,7 @@ describe("PrintValidationCapability — DTF Feature Integrity (Phase 1)", () => 
         input: {
           validationProfile: "uploaded_preserve",
           productionTreatment: "halftone_dtf",
-          dtfFeatureIntegrity: dtfSummary({ positive: { globalMinStrokeWidthMm: 0.01 } }),
+          dtfFeatureIntegrity: dtfSummary({ positive: { worstStructuralComponent: positiveWorst(0.01, 0.9) } }),
           uploadedPreserve: {
             preparedArtworkVersionId: "artwork-1",
             preparedAssetId: "asset-1",

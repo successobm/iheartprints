@@ -113,6 +113,103 @@ export function classifyDtfFeatureWidth(
   return "pass";
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2A: structural vs. incidental fragility
+// ---------------------------------------------------------------------------
+
+/**
+ * Provisional. The fraction of a component's OWN ridge (medial-axis) length
+ * that must sit below the blocking/warning floor before that component's
+ * fragility is called STRUCTURAL — representative of the whole shape —
+ * rather than INCIDENTAL — a small dip (a terminal tip, a thin crack, a
+ * decorative flourish) inside an otherwise robust structure.
+ *
+ * 0.5 (half the structure's own length) is a deliberately conservative
+ * majority-rule floor: a component only earns "structurally blocking"
+ * classification when the thin geometry is not merely present but
+ * DOMINANT. This is a distinct, later-calibrated number from the width
+ * floors above — a design decision, not (yet) a measured physical fact —
+ * chosen to satisfy Section 9's explicit instruction: "A component should
+ * not become BLOCKING merely because it contains one pathological
+ * minimum-width point if the overwhelming majority of the component is
+ * robust." Requires the same physical DTF calibration as every other
+ * number in this file.
+ */
+export const DTF_STRUCTURAL_BLOCKING_FRACTION = 0.5;
+/**
+ * The warning-tier counterpart — a much lower bar than the blocking
+ * fraction, deliberately, so a structure that is meaningfully (not just
+ * majority) thin still reads as "structural" attention rather than being
+ * dismissed as one incidental dip. "Detect aggressively" (Section 9) means
+ * this number stays low; "block conservatively" is what
+ * `DTF_STRUCTURAL_BLOCKING_FRACTION` is for.
+ */
+export const DTF_STRUCTURAL_WARNING_FRACTION = 0.2;
+
+export type StructuralFragilityKind = "robust" | "incidental" | "structural";
+
+export interface StructuralFragilityResult {
+  /** The tier the raw minimum width alone would suggest — unchanged from `classifyDtfFeatureWidth`. */
+  minimumTier: DtfFeatureIntegrityTier;
+  /**
+   * Whether the minimum's severity is representative of the WHOLE structure
+   * ("structural") or an isolated dip within an otherwise robust structure
+   * ("incidental"). "robust" whenever the minimum itself already passes —
+   * there is nothing to classify.
+   *
+   * IMPORTANT: this is a judgment about GEOMETRY, never about artistic
+   * intent. "Incidental" does not mean "unintentional distress"; it means
+   * "a small fraction of this structure's own length is this thin," which
+   * is exactly as true for a deliberate crack effect as for background-
+   * removal noise. This function has no way to tell those apart and does
+   * not attempt to (Section 5).
+   */
+  kind: StructuralFragilityKind;
+  /**
+   * The tier PrintValidation should actually act on. "structural" keeps
+   * `minimumTier` unchanged (a majority-thin structure remains eligible for
+   * blocking). "incidental" is downgraded one step — blocking becomes
+   * warning — per Section 9's rule that one pathological point must never
+   * block a predominantly robust component; a merely-warning minimum stays
+   * a warning either way, since incidental was never going to elevate it.
+   * "robust" is always `"pass"`.
+   */
+  effectiveTier: DtfFeatureIntegrityTier;
+}
+
+/**
+ * Combines a component's minimum width with its OWN fraction-below-floor
+ * values (both drawn from the SAME component — see
+ * `PositiveFeatureGeometry.worstStructuralComponent`'s doc comment on why
+ * that pairing must never be broken) into a structural-vs-incidental
+ * verdict.
+ */
+export function classifyStructuralFragility(
+  minWidthMm: number | null,
+  fractionBelowBlockingFloor: number,
+  fractionBelowWarningFloor: number,
+  blockingFloorMm: number,
+  warningFloorMm: number,
+  structuralBlockingFraction: number = DTF_STRUCTURAL_BLOCKING_FRACTION,
+  structuralWarningFraction: number = DTF_STRUCTURAL_WARNING_FRACTION,
+): StructuralFragilityResult {
+  const minimumTier = classifyDtfFeatureWidth(minWidthMm, blockingFloorMm, warningFloorMm);
+  if (minimumTier === "pass") {
+    return { minimumTier, kind: "robust", effectiveTier: "pass" };
+  }
+  const isStructural =
+    fractionBelowBlockingFloor >= structuralBlockingFraction ||
+    fractionBelowWarningFloor >= structuralWarningFraction;
+  if (isStructural) {
+    return { minimumTier, kind: "structural", effectiveTier: minimumTier };
+  }
+  return {
+    minimumTier,
+    kind: "incidental",
+    effectiveTier: minimumTier === "blocking" ? "warning" : minimumTier,
+  };
+}
+
 /**
  * Partial-alpha classification never reaches `"blocking"` — see this file's
  * doc comment and `DTF_PARTIAL_ALPHA_WARNING_DIAMETER_MM`'s own comment for

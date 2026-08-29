@@ -680,7 +680,7 @@ export interface HalftoneProductionEvidence {
 }
 
 // ---------------------------------------------------------------------------
-// DTF Feature Integrity Phase 1
+// DTF Feature Integrity (Phase 1 + Phase 2A structural discrimination)
 // ---------------------------------------------------------------------------
 
 export type DtfFeatureRiskKind =
@@ -698,7 +698,7 @@ export interface DtfFeatureRiskBoundingBox {
 
 /**
  * One diagnostic risk region — enough to locate WHERE a risk is (Section 17
- * of this phase's plan), never a repair instruction. Capped and worst-first;
+ * of Phase 1's plan), never a repair instruction. Capped and worst-first;
  * `DtfFeatureIntegritySummary.limitations` states when the full measurement
  * found more than survived here.
  */
@@ -709,6 +709,13 @@ export interface DtfFeatureRiskRegion {
   measuredWidthMm: number | null;
   /** Measured equivalent diameter, in mm — set for `isolated_component_small`/`partial_alpha_fragile`, `null` otherwise. */
   measuredDiameterMm: number | null;
+  /** Phase 2A: this region's own physical area, in mm². */
+  physicalAreaMm2: number | null;
+  /** Phase 2A: median stroke/gap width across this region's own ridge — set for `positive_feature_thin`/`negative_space_narrow` only. Paired with `measuredWidthMm` (the region's minimum) to give a human a sense of whether the minimum is representative or an outlier. */
+  medianWidthMm: number | null;
+  /** Phase 2A: this region's OWN fraction-below-floor pair (see `StructuralFractions`), always both `null` or both present together. `null` for `isolated_component_small`/`partial_alpha_fragile`, which have no internal ridge distribution to speak of. */
+  fractionBelowBlockingFloor: number | null;
+  fractionBelowWarningFloor: number | null;
   pixelArea: number;
 }
 
@@ -738,15 +745,47 @@ export interface DtfFeatureIntegritySummary {
     measuredComponentCount: number;
     globalMinStrokeWidthMm: number | null;
     percentile5StrokeWidthMm: number | null;
+    /**
+     * Phase 2A: the single component whose own fraction-below-floor is
+     * highest, paired with THAT SAME component's own minimum width — see
+     * `final-artwork/feature-integrity`'s `PositiveFeatureGeometry.worstStructuralComponent`
+     * for why this pairing is computed before any capping and must never be
+     * reconstructed by mixing fields from two different regions. This is
+     * what `checkDtfPositiveFeatureIntegrity` actually classifies
+     * structural-vs-incidental from. `null` when no component was measured.
+     */
+    worstStructuralComponent: {
+      minStrokeWidthMm: number | null;
+      fractionBelowBlockingFloor: number;
+      fractionBelowWarningFloor: number;
+    } | null;
   };
   negative: {
     measuredChannelCount: number;
     globalMinGapWidthMm: number | null;
     percentile5GapWidthMm: number | null;
+    /** Phase 2A — same contract as `positive.worstStructuralComponent`, for negative-space channels. */
+    worstStructuralComponent: {
+      minGapWidthMm: number | null;
+      fractionBelowBlockingFloor: number;
+      fractionBelowWarningFloor: number;
+    } | null;
   };
   isolated: {
     totalComponentCount: number;
     smallestEquivalentDiameterMm: number | null;
+    /**
+     * Phase 2A (Section 7): population-level view of isolated MICRO
+     * components — how many, how much combined area, what fraction of all
+     * printed area, and whether they read as crisp marks or faint residue.
+     * Diagnostic only; never itself a pass/fail input.
+     */
+    microComponents: {
+      microComponentCount: number;
+      totalMicroComponentPhysicalAreaMm2: number;
+      fractionOfPrintedArea: number;
+      meanPartialAlphaFraction: number;
+    };
   };
   partialAlpha: {
     partialAlphaFractionOfVisible: number;

@@ -8913,6 +8913,268 @@ phase — this one does not claim to have performed it.
 
 ---
 
+## 23l. DTF Feature Integrity — Structural Discrimination & Coverage Intelligence (Phase 2A)
+
+Phase 1's first real benchmark (Incredi-Bowls) exposed a genuine limitation:
+a single 4-connected positive-ink component can legitimately contain both
+the bulk of a robust design AND a thin distressed crack or serif tip,
+because they really are one connected shape. Reporting that whole
+component's risk from its single thinnest pixel conflates two different
+situations — **structural fragility** (a substantial fraction of the
+structure's own geometry is narrow) and **incidental fragility** (a small,
+low-arc-length dip — a terminal tip, a thin crack, a decorative flourish —
+inside an otherwise robust structure). **Minimum width alone is not
+structural fragility.** This phase adds the geometry needed to tell them
+apart, and a separate, foundational coverage-measurement capability for a
+later production-treatment decision phase.
+
+### Width distributions, not just a minimum
+
+Each positive-ink component and negative-space channel now keeps a bounded
+distribution — minimum, 25th percentile, and median stroke/gap width — over
+its own ridge (medial-axis) samples, computed once during measurement and
+never persisted as a raw sample array (`final-artwork/feature-integrity/measure-feature-integrity.ts`).
+A large, mostly-robust shape with one thin appendage has a low minimum but a
+normal median; a shape that is predominantly narrow has all three clustered
+together. **Equal-weight-per-ridge-sample statistics need no additional
+length weighting**: ridge (non-maximum-suppression) detection already
+produces roughly one ridge pixel per unit of medial-axis arc length, so a
+long stroke's centerline naturally contributes many samples while a short
+terminal tip contributes only as many samples as its own short extent — a
+tiny appendage's few thin samples can only ever pull a large component's
+fraction up by a small amount, while a genuinely lengthy thin structure
+contributes proportionally many thin samples and correctly dominates its
+own fraction. No separate weighting scheme was needed or added.
+
+### Structural fractions — injected thresholds, never hardcoded
+
+To compute "what fraction of this component's own geometry is below the
+DTF blocking/warning floor" without persisting every raw ridge sample, the
+measurement engine accepts **physical-width floors as caller-supplied
+numeric parameters** (`StructuralFractionThresholds` — `blockingFloorMm`/
+`warningFloorMm`) and computes each component's own `StructuralFractions`
+against them. The engine treats these as opaque numbers; it has no idea
+they are DTF's numbers specifically, and a future DTG/screen profile could
+supply entirely different values through the exact same parameter. The
+actual VALUES remain owned exclusively by
+`shared/dtf-feature-integrity-profile.ts` — `FinalArtworkWorkerCapability`
+is the only place that imports the profile's constants and passes them into
+`measureFeatureIntegrity`, mirroring how it already imports halftone/
+production-treatment constants for the same "policy lives in `shared/`"
+reason. This keeps the measurement engine's "produce geometry, never a
+verdict" boundary (Phase 1) intact while still enabling fraction-based
+classification.
+
+**Positive features and enclosed cavities** compute their fractions from
+their own complete, unfiltered pixel set. **Open negative-space channels**
+are different: Phase 1's diagnostic clustering pre-filters ridge pixels to
+"already narrower than 5% of the raster's shorter side" before grouping
+them into a discrete channel — meaning any resulting cluster is, by
+construction, ~100% narrow, which would make structural-vs-incidental
+classification meaningless for exactly the case it needs to work (a brief
+pinch point inside an otherwise wide, healthy opening). Open-channel
+fractions are therefore computed from a **wider local context window**
+around the narrow cluster — every gap ridge pixel (narrow or not) within
+that window belonging to the same background region — while the channel's
+own reported minimum/p25/median stay computed from the tight, original
+cluster (the actual measured risk spot). This is a pragmatic, bounded
+approximation, documented as such in the module itself; enclosed cavities
+never needed it because a cavity's own connected component already is the
+complete, correct population.
+
+### Classification (`shared/dtf-feature-integrity-profile.ts`)
+
+`classifyStructuralFragility(minWidth, fractionBelowBlockingFloor,
+fractionBelowWarningFloor, blockingFloorMm, warningFloorMm,
+structuralBlockingFraction, structuralWarningFraction)` combines a
+component's minimum with its OWN fraction pair (never mixing one
+component's minimum with a different component's fraction — see
+`worstStructuralComponent`'s doc comment below) into:
+
+- `kind: "robust"` — the minimum itself already passes; nothing to classify.
+- `kind: "structural"` — a substantial fraction (provisionally 50% for
+  blocking, 20% for warning — `DTF_STRUCTURAL_BLOCKING_FRACTION`/
+  `DTF_STRUCTURAL_WARNING_FRACTION`, both requiring physical calibration
+  like every other number in this profile) of the component's own geometry
+  is below the relevant floor. `effectiveTier` keeps the minimum's tier
+  unchanged — a majority-thin structure remains eligible for blocking.
+- `kind: "incidental"` — only a small fraction dips below the floor.
+  `effectiveTier` is **downgraded one step** (blocking → warning; a
+  merely-warning minimum stays warning) — Section 9's explicit rule: "a
+  component should not become BLOCKING merely because it contains one
+  pathological minimum-width point if the overwhelming majority of the
+  component is robust." **Detect aggressively, block conservatively.**
+
+This is a judgment about GEOMETRY, never about artistic intent —
+"incidental" does not mean "unintentional," and this function has no way to
+tell a deliberate distress crack from background-removal residue and does
+not attempt to.
+
+### Where the per-component pair survives capping
+
+`PositiveFeatureGeometry`/`NegativeSpaceGeometry` each carry a
+`worstStructuralComponent` — the single component whose own
+`fractionBelowBlockingFloor` is highest (ties broken by
+`fractionBelowWarningFloor`), computed from the FULL per-component list
+**before** it is capped to `FEATURE_INTEGRITY_MAX_RECORDS_PER_CATEGORY`
+(40, per category). `DtfFeatureIntegritySummary` (Print Validation's own
+independent copy) carries this same pair straight through — it is what
+`checkDtfPositiveFeatureIntegrity`/`checkDtfNegativeSpaceIntegrity` actually
+classify from, never a value reconstructed from the smaller, cross-category
+`riskRegions[]` diagnostic list (capped at 30 across all four risk kinds
+combined), which could otherwise starve one category's genuine signal by
+mixing it with another's. `riskRegions[]` also gained
+`fractionBelowBlockingFloor`/`fractionBelowWarningFloor`/`medianWidthMm`/
+`physicalAreaMm2` per region, for human-facing diagnostics only.
+
+### Isolated micro-components — a population, not individuals
+
+Section 7's ask — distinguish "isolated micro-components" from "structural
+narrow geometry inside a larger component" — is answered by keeping these
+as two clearly separate views. `IsolatedComponentGeometry` gained
+`microComponents: MicroComponentAggregate` (count, total physical area,
+fraction of all printed area, mean partial-alpha fraction) over isolated
+components below `MICRO_COMPONENT_DIAGNOSTIC_DIAMETER_MM` (2.0mm) — a
+DIAGNOSTIC categorization boundary distinct from and unrelated to the DTF
+profile's own (smaller) isolated-component print-readiness floors, so
+changing one never has to touch the other. `checkDtfIsolatedFeatureIntegrity`
+reports this population context in its `reason` on every status, so an
+operator can tell "one small component" apart from "hundreds of them
+totaling a meaningful share of the plate" regardless of which single
+component happens to be smallest, and whether they read as crisp marks or
+faint (possibly-residue) partial alpha.
+
+### A known, honestly-documented limitation: convex-corner ridge taper
+
+Any filled polygon's true medial axis reaches every one of its corners,
+where the inscribed-circle radius — and so the ridge's own distance-
+transform value — shrinks toward zero AT the vertex. This is a real,
+well-known artifact of skeletonization near a sharp corner, not genuine
+stroke fragility, and it means a plain rectangle's (or any sharp-cornered
+letterform's) structural fraction is measurably inflated by an amount that
+depends on its aspect ratio and corner count. Phase 2A's synthetic test
+fixtures deliberately use rounded/capsule shapes to isolate the property
+under test from this confound (see `measure-feature-integrity.test.ts`'s
+`fillCapsule` doc comment) — but real bold sans-serif letterforms DO have
+corners, and the Incredi-Bowls benchmark run (below) shows this
+contributing to why even large, robust lettering can show a nonzero
+(though still small, and correctly classified INCIDENTAL) fraction below
+the floor. A future phase may need ridge pruning near sharp vertices
+(a standard step in real skeletonization pipelines) to fully remove this;
+Phase 2A's fraction-based approach substantially improves discrimination
+without requiring it.
+
+### DTF Coverage Intelligence Foundation (`final-artwork/dtf-coverage/`)
+
+A new, independent sibling capability to Feature Integrity, answering a
+different question. The long-term DTF objective has two axes:
+
+- **Axis 1 — Reproduction integrity**: will the intended visual geometry
+  survive production? (Feature Integrity's question.)
+- **Axis 2 — Transfer/hand efficiency**: is more continuous ink/underbase/
+  adhesive-bearing area being printed than the visual result requires?
+  (Coverage's question.)
+
+**Coverage measurement is NOT a softness/hand prediction, and this phase
+does not claim it is one.** Film, powder, ink chemistry, white underbase,
+curing, printer/RIP settings, garment fabric, and press conditions all
+affect actual DTF transfer hand, and none of them are observable from a
+PNG's pixels. Naming throughout this module is deliberately restrained —
+`coverage`, `continuousCoverage`, `plateDensity` — never `softness`, `hand
+score`, or any "N% softer" claim. See `dtf-coverage-types.ts`'s own doc
+comment for the full boundary this module observes.
+
+`measureDtfCoverage` reuses `buildAlphaMasks`/`labelConnectedComponents`
+from Feature Integrity's own module (same capability, sibling directories —
+never duplicated logic) but computes independently rather than accepting a
+precomputed `FeatureIntegrityMeasurement`. Both are cheap O(n) passes; two
+of them (once here, once in Feature Integrity, when both run for the same
+standard-raster job) is not the accidentally-quadratic shape Section 23
+warns against, and independence is what keeps this module usable on its
+own for a halftone plate, where Feature Integrity never runs at all.
+
+Measures, per plate:
+
+- **Visible / strong-ink / partial-alpha coverage** — the same canonical
+  `DEFAULT_ALPHA_THRESHOLD`/`STRONG_INK_ALPHA_THRESHOLD` masks Feature
+  Integrity uses, so "opaque" always means exactly the same thing across
+  both capabilities.
+- **Alpha-weighted coverage** (`sum(alpha/255) / totalPixels`) — a
+  continuous metric crediting partial-alpha pixels proportionally, rather
+  than the binary in/out view the fraction metrics give.
+- **Physical area conversions** for each — never just a percentage, since a
+  4x4in plate at 80% coverage is not physically equivalent to a 14x16in
+  plate at 80% (Section 15). `alphaWeightedEquivalentAreaMm2` is
+  deliberately never called "ink consumption" — it is an objective pixel
+  property, not a claim about what a RIP/printer will actually lay down.
+- **Continuous strong-ink regions** — connected-component analysis of the
+  `strongInk` mask, largest-first, capped at 20. Distinguishes "20%
+  coverage as one giant continuous plate" from "20% coverage as a thousand
+  tiny separated marks" (Section 13) — physically different situations a
+  bare coverage percentage cannot tell apart. `largeRegionCount` uses a
+  DIAGNOSTIC-only categorization boundary
+  (`LARGE_CONTINUOUS_REGION_MIN_FRACTION_OF_PRINTED_AREA`, 5% of printed
+  area) — never a treatment threshold.
+- **Alpha bands** (`transparent`/`low`/`medium`/`high`/`opaque`, five fixed
+  bands whose `low`/`opaque` boundaries reuse Feature Integrity's own
+  canonical thresholds) — a compact histogram for future reasoning about
+  whether a plate is mostly solid or already carries substantial tonal
+  transparency.
+
+**Applies to both `standard_raster` and `halftone_dtf`** (Section 18) —
+coverage is measured unconditionally in `produceProductionAsset`, unlike
+Feature Integrity's standard-raster-only gate, because "how much continuous
+ink does this actually require" is equally meaningful for either
+representation and draws no conclusion about halftone dot-lattice geometric
+validity (that remains `halftone_screen_geometry`'s job — a separate
+concern from coverage entirely).
+
+**Not yet consumed by anything.** No new PrintValidation check, no
+raster-vs-halftone recommendation, no automatic treatment selection exists
+in this phase — the measurement is persisted on the production asset's
+metadata (`AssetRecord.metadata.dtfCoverage`) purely as a foundation. A
+future phase may use it to identify candidate situations (a large
+continuous dark tonal region, a large high-opacity background, a large
+coverage area with relatively little structural detail) for a real
+production-treatment decision; building that decision engine is explicitly
+out of scope here.
+
+### Incredi-Bowls re-benchmark: what changed
+
+Re-running the same local benchmark process (background-isolation-prepared,
+gitignored, not committed) at 10/12/14in shows the intended effect
+directly: the large "INCREDI-BOWLS" lettering component (77415px, by far
+the plate's largest) has a minimum stroke width that dips as low as
+~0.87mm at 10in width — but a MEDIAN of ~4.35mm, roughly 5x higher, and
+`fractionBelowBlockingFloor: 0`. `classifyStructuralFragility` correctly
+resolves this as **`kind: "incidental"`**, not structural — exactly the
+Phase 1 problem this phase set out to fix. Hundreds of 1-24px specks
+(background-removal residue or genuine fine distress — this measurement
+cannot tell which) are now cleanly separated into the isolated
+micro-component population (345 components, ~0.65% of printed area, zero
+mean partial-alpha fraction — crisp, not faint) rather than dragging down
+any larger structure's classification. See the Phase 2A final report for
+the full run, including the honestly-reported limitation that this ad-hoc
+exploration measured the same fixed-resolution prepared raster at three
+physical sizes without first running the real reconstruction/upscaling
+pipeline a production job would — so the specific mm values at 12-14in
+(where minimums happen to clear the warning floor) reflect that raster
+being interpreted as physically larger per pixel, not a faithful
+reproduction of what an actual larger-format production job would measure.
+
+### Explicitly out of scope for Phase 2A
+
+Automatic strengthening, dilation/erosion/closing/opening, automatic
+micro-component deletion, automatic background cleanup, OCR, semantic text
+detection, automatic black-garment ink knockout, garment-color
+substitution, automatic raster-vs-halftone selection, selective/hybrid
+halftoning, physical hand prediction, white-underbase simulation, powder
+modeling, RIP modeling, and printer-specific calibration. This phase
+improves discrimination and adds a measurement foundation; it does not act
+on either.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

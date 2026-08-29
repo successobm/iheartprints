@@ -1,5 +1,5 @@
 /**
- * DTF Feature Integrity Phase 1: the measurement orchestrator.
+ * DTF Feature Integrity: the measurement orchestrator.
  *
  * Ties together alpha classification, distance transforms, ridge detection,
  * and connected-component labelling into one deterministic
@@ -33,6 +33,43 @@
  *     threshold (those live in the DTF profile) — it only decides how
  *     diagnostic bounding boxes are grouped, never a check's pass/fail
  *     outcome, which is always computed from the raw measured widths.
+ *
+ * Phase 2A — WHY MINIMUM WIDTH ALONE IS NOT STRUCTURAL FRAGILITY:
+ *
+ * The first real benchmark (Incredi-Bowls) showed that a single 4-connected
+ * component can legitimately contain both the bulk of a robust design AND a
+ * thin distressed crack or serif tip, because they really are one connected
+ * shape. Reporting that whole component's risk as "as fragile as its single
+ * thinnest pixel" conflates two very different situations:
+ *
+ *   INCIDENTAL fragility — a small, low-arc-length dip in an otherwise
+ *   robust structure (a terminal tip, a thin crack, a decorative flourish
+ *   attached to bold lettering).
+ *
+ *   STRUCTURAL fragility — the structure's geometry is predominantly narrow;
+ *   the "minimum" is representative of the whole, not an outlier.
+ *
+ * This module answers that by keeping each component's full ridge WIDTH
+ * DISTRIBUTION (min / p25 / median) rather than only its minimum, plus — when
+ * the caller supplies physical-width floors via `structuralFractionThresholds`
+ * — the FRACTION of that component's own ridge length below each floor.
+ * Classifying structural-vs-incidental from those fractions is the DTF
+ * profile's job (`shared/dtf-feature-integrity-profile.ts`'s
+ * `classifyStructuralFragility`); this module only measures the geometry.
+ *
+ * WHY EQUAL-WEIGHT-PER-RIDGE-SAMPLE NEEDS NO ADDITIONAL LENGTH WEIGHTING
+ * (Section 4): ridge (medial-axis) detection via non-maximum suppression
+ * already produces roughly one ridge pixel per unit of arc length along a
+ * shape's skeleton — a long stroke's centerline naturally contributes many
+ * ridge samples, while a short terminal tip contributes only as many samples
+ * as its own short extent. Fraction-below-floor and percentile statistics
+ * computed with equal weight per ridge SAMPLE are therefore already
+ * approximately weighted by medial-axis LENGTH, with no separate weighting
+ * scheme required: a tiny appendage's few thin samples can only ever pull a
+ * large component's fraction up by a small amount, while a genuinely
+ * lengthy thin structure (most of a small tagline's own strokes, for
+ * example) contributes proportionally many thin samples and correctly
+ * dominates its own fraction.
  */
 
 import type { RgbaImage } from "../raster-transform";
@@ -46,11 +83,15 @@ import { labelConnectedComponents, type ComponentBounds } from "./connected-comp
 import {
   FEATURE_INTEGRITY_ALGORITHM_VERSION,
   FEATURE_INTEGRITY_MAX_RECORDS_PER_CATEGORY,
+  MICRO_COMPONENT_DIAGNOSTIC_DIAMETER_MM,
   type FeatureIntegrityMeasurement,
   type IsolatedComponent,
+  type MicroComponentAggregate,
   type NegativeSpaceChannel,
   type PartialAlphaComponent,
   type PositiveFeatureComponent,
+  type StructuralFractionThresholds,
+  type StructuralFractions,
 } from "./feature-integrity-types";
 
 const MM_PER_INCH = 25.4;
@@ -63,6 +104,22 @@ export interface MeasureFeatureIntegrityInput {
   image: RgbaImage;
   confirmedWidthIn: number;
   confirmedHeightIn: number;
+  /**
+   * Phase 2A: optional physical-width floors used ONLY to compute each
+   * component's `StructuralFractions` — see this module's and
+   * `feature-integrity-types.ts`'s doc comments. Omitted entirely (both
+   * default to `undefined`) means every `structuralFractions` field in the
+   * output is `null` and no `worstStructuralComponent` is computed — the
+   * measurement otherwise behaves exactly as it did before this option
+   * existed.
+   */
+  positiveFeatureThresholds?: StructuralFractionThresholds;
+  negativeSpaceThresholds?: StructuralFractionThresholds;
+}
+
+/** A width sample plus which component it belongs to — collected once per ridge pixel, reduced into per-component distributions, then discarded (never persisted; Section 6). */
+interface ComponentDistribution {
+  widthsMm: number[];
 }
 
 export function measureFeatureIntegrity(
@@ -94,9 +151,11 @@ export function measureFeatureIntegrity(
 
   let visibleArtPixelCount = 0;
   let partialAlphaPixelCount = 0;
+  let strongInkPixelCount = 0;
   for (let i = 0; i < width * height; i += 1) {
     if (masks.visibleArt[i]) visibleArtPixelCount += 1;
     if (masks.partialAlpha[i]) partialAlphaPixelCount += 1;
+    if (masks.strongInk[i]) strongInkPixelCount += 1;
   }
 
   // ---------------------------------------------------------------------
@@ -125,27 +184,28 @@ export function measureFeatureIntegrity(
     ? ridgeMask(masks.strongInk, inkDt, width, height)
     : new Uint8Array(width * height);
 
-  const positiveByComponent: Array<{ minPx: number | null; sampleCount: number }> =
-    inkLabelled.components.map(() => ({ minPx: null, sampleCount: 0 }));
+  const positiveDistributions: ComponentDistribution[] = inkLabelled.components.map(() => ({
+    widthsMm: [],
+  }));
   for (let i = 0; i < width * height; i += 1) {
     if (!inkRidge[i]) continue;
     const id = inkLabelled.labels[i]!;
-    const entry = positiveByComponent[id]!;
-    const widthPx = inkDt[i]! * 2;
-    entry.sampleCount += 1;
-    if (entry.minPx === null || widthPx < entry.minPx) entry.minPx = widthPx;
+    positiveDistributions[id]!.widthsMm.push(inkDt[i]! * 2 * isotropicPitchMm);
   }
 
   const positiveComponents: PositiveFeatureComponent[] = inkLabelled.components.map((c, id) => {
-    const measured = positiveByComponent[id]!;
-    const minStrokeWidthPx = measured.minPx;
+    const stats = distributionStats(positiveDistributions[id]!.widthsMm, input.positiveFeatureThresholds);
     return {
       id,
       pixelArea: c.pixelCount,
       boundsPx: c.bounds,
-      minStrokeWidthPx,
-      minStrokeWidthMm: minStrokeWidthPx === null ? null : minStrokeWidthPx * isotropicPitchMm,
-      ridgeSampleCount: measured.sampleCount,
+      physicalAreaMm2: c.pixelCount * areaMmPerPx,
+      minStrokeWidthPx: stats.minMm === null ? null : stats.minMm / isotropicPitchMm,
+      minStrokeWidthMm: stats.minMm,
+      p25StrokeWidthMm: stats.p25Mm,
+      medianStrokeWidthMm: stats.medianMm,
+      structuralFractions: stats.fractions,
+      ridgeSampleCount: stats.sampleCount,
     };
   });
 
@@ -157,6 +217,9 @@ export function measureFeatureIntegrity(
       "No ink component was large enough to produce a measurable ridge; positive-feature width could not be determined for any component.",
     );
   }
+  const worstPositiveStructural = worstStructuralComponent(
+    positiveComponents.map((c) => ({ minMm: c.minStrokeWidthMm, fractions: c.structuralFractions })),
+  );
 
   // ---------------------------------------------------------------------
   // Negative space geometry
@@ -186,25 +249,27 @@ export function measureFeatureIntegrity(
   // raster border (a letter's counter, a fully surrounded hole).
   for (const cavity of gapLabelled.components) {
     if (cavity.touchesBorder) continue;
-    let minPx: number | null = null;
-    let sampleCount = 0;
+    const widthsMm: number[] = [];
     for (let y = cavity.bounds.top; y < cavity.bounds.bottom; y += 1) {
       for (let x = cavity.bounds.left; x < cavity.bounds.right; x += 1) {
         const i = y * width + x;
         if (gapLabelled.labels[i] !== cavity.id || !gapRidge[i]) continue;
-        const widthPx = gapDt[i]! * 2;
-        sampleCount += 1;
-        if (minPx === null || widthPx < minPx) minPx = widthPx;
+        widthsMm.push(gapDt[i]! * 2 * isotropicPitchMm);
       }
     }
+    const stats = distributionStats(widthsMm, input.negativeSpaceThresholds);
     negativeComponents.push({
       id: negativeChannelId++,
       pixelArea: cavity.pixelCount,
       boundsPx: cavity.bounds,
+      physicalAreaMm2: cavity.pixelCount * areaMmPerPx,
       enclosed: true,
-      minGapWidthPx: minPx,
-      minGapWidthMm: minPx === null ? null : minPx * isotropicPitchMm,
-      ridgeSampleCount: sampleCount,
+      minGapWidthPx: stats.minMm === null ? null : stats.minMm / isotropicPitchMm,
+      minGapWidthMm: stats.minMm,
+      p25GapWidthMm: stats.p25Mm,
+      medianGapWidthMm: stats.medianMm,
+      structuralFractions: stats.fractions,
+      ridgeSampleCount: stats.sampleCount,
     });
   }
 
@@ -221,26 +286,64 @@ export function measureFeatureIntegrity(
     if (gapDt[i]! * 2 < clusteringCutoffPx) narrowOpenRidge[i] = 1;
   }
   const openClusters = labelConnectedComponents(narrowOpenRidge, width, height);
+  // Phase 2A: a narrow cluster is, by construction, a group of pixels that
+  // ALREADY passed a "this is narrow" filter — its OWN fraction-below-floor
+  // is therefore always ~100% no matter what it contains, which would make
+  // structural-vs-incidental classification meaningless for open channels
+  // specifically (unlike ink components or enclosed cavities, which are
+  // measured over their own COMPLETE, unfiltered pixel set). Structural
+  // fractions for an open channel are instead computed from a WIDER local
+  // context window around the narrow cluster — every gap ridge pixel
+  // (narrow or not) within that window, belonging to the SAME background
+  // region — so a brief pinch surrounded by a genuinely wide corridor
+  // correctly reads as a small fraction of its own local context, while a
+  // corridor that is narrow for its whole length still reads as
+  // predominantly narrow. `minGapWidthMm`/`p25`/`median` stay computed from
+  // the TIGHT cluster itself (the actual measured risk spot); only the
+  // fraction pair looks at the wider context.
+  const structuralContextMarginPx = Math.round(clusteringCutoffPx * 4);
   for (const cluster of openClusters.components) {
-    let minPx: number | null = null;
-    let sampleCount = 0;
+    const widthsMm: number[] = [];
+    let ownerBackgroundLabel = -1;
     for (let y = cluster.bounds.top; y < cluster.bounds.bottom; y += 1) {
       for (let x = cluster.bounds.left; x < cluster.bounds.right; x += 1) {
         const i = y * width + x;
         if (openClusters.labels[i] !== cluster.id) continue;
-        const widthPx = gapDt[i]! * 2;
-        sampleCount += 1;
-        if (minPx === null || widthPx < minPx) minPx = widthPx;
+        widthsMm.push(gapDt[i]! * 2 * isotropicPitchMm);
+        if (ownerBackgroundLabel < 0) ownerBackgroundLabel = gapLabelled.labels[i]!;
       }
     }
+    const stats = distributionStats(widthsMm, undefined);
+
+    let fractions: StructuralFractions | null = null;
+    if (input.negativeSpaceThresholds) {
+      const contextWidthsMm: number[] = [];
+      const ctxTop = Math.max(0, cluster.bounds.top - structuralContextMarginPx);
+      const ctxBottom = Math.min(height, cluster.bounds.bottom + structuralContextMarginPx);
+      const ctxLeft = Math.max(0, cluster.bounds.left - structuralContextMarginPx);
+      const ctxRight = Math.min(width, cluster.bounds.right + structuralContextMarginPx);
+      for (let y = ctxTop; y < ctxBottom; y += 1) {
+        for (let x = ctxLeft; x < ctxRight; x += 1) {
+          const i = y * width + x;
+          if (!gapRidge[i] || gapLabelled.labels[i] !== ownerBackgroundLabel) continue;
+          contextWidthsMm.push(gapDt[i]! * 2 * isotropicPitchMm);
+        }
+      }
+      fractions = distributionStats(contextWidthsMm, input.negativeSpaceThresholds).fractions;
+    }
+
     negativeComponents.push({
       id: negativeChannelId++,
       pixelArea: cluster.pixelCount,
       boundsPx: cluster.bounds,
+      physicalAreaMm2: cluster.pixelCount * areaMmPerPx,
       enclosed: false,
-      minGapWidthPx: minPx,
-      minGapWidthMm: minPx === null ? null : minPx * isotropicPitchMm,
-      ridgeSampleCount: sampleCount,
+      minGapWidthPx: stats.minMm === null ? null : stats.minMm / isotropicPitchMm,
+      minGapWidthMm: stats.minMm,
+      p25GapWidthMm: stats.p25Mm,
+      medianGapWidthMm: stats.medianMm,
+      structuralFractions: fractions,
+      ridgeSampleCount: stats.sampleCount,
     });
   }
 
@@ -252,6 +355,9 @@ export function measureFeatureIntegrity(
   for (let i = 0; i < width * height; i += 1) {
     if (gapRidge[i]) allGapRidgeWidthsMm.push(gapDt[i]! * 2 * isotropicPitchMm);
   }
+  const worstNegativeStructural = worstStructuralComponent(
+    negativeComponents.map((c) => ({ minMm: c.minGapWidthMm, fractions: c.structuralFractions })),
+  );
 
   // ---------------------------------------------------------------------
   // Isolated component geometry (reuses the ink components above)
@@ -325,6 +431,27 @@ export function measureFeatureIntegrity(
     };
   });
 
+  // Phase 2A (Section 7): population-level view of the smallest isolated
+  // components — see `MicroComponentAggregate`'s doc comment for why this is
+  // kept distinct from `structuralFractions` (a population of separate tiny
+  // OBJECTS is a different diagnostic question than narrow geometry INSIDE
+  // one larger object).
+  const microComponents = isolatedComponents.filter(
+    (c) => c.equivalentDiameterMm < MICRO_COMPONENT_DIAGNOSTIC_DIAMETER_MM,
+  );
+  const microComponentAggregate: MicroComponentAggregate = {
+    microComponentCount: microComponents.length,
+    totalMicroComponentPixelArea: microComponents.reduce((sum, c) => sum + c.pixelArea, 0),
+    totalMicroComponentPhysicalAreaMm2: microComponents.reduce((sum, c) => sum + c.physicalAreaMm2, 0),
+    fractionOfPrintedArea:
+      strongInkPixelCount > 0
+        ? microComponents.reduce((sum, c) => sum + c.pixelArea, 0) / strongInkPixelCount
+        : 0,
+    meanPartialAlphaFraction: microComponents.length
+      ? microComponents.reduce((sum, c) => sum + c.partialAlphaFraction, 0) / microComponents.length
+      : 0,
+  };
+
   // ---------------------------------------------------------------------
   // Partial-alpha geometry
   // ---------------------------------------------------------------------
@@ -363,12 +490,22 @@ export function measureFeatureIntegrity(
       totalComponentCount: positiveComponents.length,
       globalMinStrokeWidthMm: positiveWidthsMm.length ? Math.min(...positiveWidthsMm) : null,
       percentile5StrokeWidthMm: percentile(positiveWidthsMm, 0.05),
+      worstStructuralComponent: worstPositiveStructural && {
+        minStrokeWidthMm: worstPositiveStructural.minMm,
+        fractionBelowBlockingFloor: worstPositiveStructural.fractions.fractionBelowBlockingFloor,
+        fractionBelowWarningFloor: worstPositiveStructural.fractions.fractionBelowWarningFloor,
+      },
     },
     negative: {
       components: capWorstFirst(negativeComponents, (c) => c.minGapWidthMm),
       totalComponentCount: negativeComponents.length,
       globalMinGapWidthMm: allGapRidgeWidthsMm.length ? Math.min(...allGapRidgeWidthsMm) : null,
       percentile5GapWidthMm: percentile(allGapRidgeWidthsMm, 0.05),
+      worstStructuralComponent: worstNegativeStructural && {
+        minGapWidthMm: worstNegativeStructural.minMm,
+        fractionBelowBlockingFloor: worstNegativeStructural.fractions.fractionBelowBlockingFloor,
+        fractionBelowWarningFloor: worstNegativeStructural.fractions.fractionBelowWarningFloor,
+      },
     },
     isolated: {
       components: capWorstFirst(isolatedComponents, (c) => c.equivalentDiameterMm),
@@ -376,6 +513,7 @@ export function measureFeatureIntegrity(
       smallestEquivalentDiameterMm: isolatedComponents.length
         ? Math.min(...isolatedComponents.map((c) => c.equivalentDiameterMm))
         : null,
+      microComponents: microComponentAggregate,
     },
     partialAlpha: {
       partialAlphaFractionOfVisible:
@@ -388,6 +526,69 @@ export function measureFeatureIntegrity(
     },
     limitations,
   };
+}
+
+interface DistributionStats {
+  minMm: number | null;
+  p25Mm: number | null;
+  medianMm: number | null;
+  fractions: StructuralFractions | null;
+  sampleCount: number;
+}
+
+/** Reduces one component's raw ridge-width samples (transient — never returned or persisted) into its bounded distribution summary. */
+function distributionStats(
+  widthsMm: number[],
+  thresholds: StructuralFractionThresholds | undefined,
+): DistributionStats {
+  if (widthsMm.length === 0) {
+    return { minMm: null, p25Mm: null, medianMm: null, fractions: null, sampleCount: 0 };
+  }
+  const sorted = [...widthsMm].sort((a, b) => a - b);
+  let fractions: StructuralFractions | null = null;
+  if (thresholds) {
+    let belowBlocking = 0;
+    let belowWarning = 0;
+    for (const w of sorted) {
+      if (w < thresholds.blockingFloorMm) belowBlocking += 1;
+      if (w < thresholds.warningFloorMm) belowWarning += 1;
+    }
+    fractions = {
+      fractionBelowBlockingFloor: belowBlocking / sorted.length,
+      fractionBelowWarningFloor: belowWarning / sorted.length,
+    };
+  }
+  return {
+    minMm: sorted[0]!,
+    p25Mm: percentile(sorted, 0.25),
+    medianMm: percentile(sorted, 0.5),
+    fractions,
+    sampleCount: sorted.length,
+  };
+}
+
+/**
+ * The component whose own `fractionBelowBlockingFloor` is highest (ties
+ * broken by `fractionBelowWarningFloor`), computed from the FULL list before
+ * any worst-first capping — see `PositiveFeatureGeometry.worstStructuralComponent`'s
+ * doc comment for why that ordering matters.
+ */
+function worstStructuralComponent(
+  candidates: Array<{ minMm: number | null; fractions: StructuralFractions | null }>,
+): { minMm: number | null; fractions: StructuralFractions } | null {
+  let worst: { minMm: number | null; fractions: StructuralFractions } | null = null;
+  for (const c of candidates) {
+    if (!c.fractions) continue;
+    if (
+      !worst ||
+      c.fractions.fractionBelowBlockingFloor > worst.fractions.fractionBelowBlockingFloor ||
+      (c.fractions.fractionBelowBlockingFloor === worst.fractions.fractionBelowBlockingFloor &&
+        c.fractions.fractionBelowWarningFloor > worst.fractions.fractionBelowWarningFloor)
+    ) {
+      worst = { minMm: c.minMm, fractions: c.fractions };
+    }
+  }
+  return worst;
 }
 
 function capWorstFirst<T>(

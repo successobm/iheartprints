@@ -64,6 +64,14 @@ import type {
 } from "@/capabilities/print-validation/contracts";
 import { measureFeatureIntegrity } from "@/capabilities/final-artwork/feature-integrity";
 import type { FeatureIntegrityMeasurement } from "@/capabilities/final-artwork/feature-integrity";
+import { measureDtfCoverage } from "@/capabilities/final-artwork/dtf-coverage";
+import type { DtfCoverageMeasurement } from "@/capabilities/final-artwork/dtf-coverage";
+import {
+  DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM,
+  DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM,
+  DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM,
+  DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM,
+} from "@/capabilities/shared/dtf-feature-integrity-profile";
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
 import {
   confirmedSizeMatchesJobWidth,
@@ -819,6 +827,18 @@ export function createFinalArtworkWorkerCapability(
       ? null
       : measureDtfFeatureIntegrity(output.bytes, output.normalization);
 
+    // --- DTF Coverage Intelligence (Phase 2A) -------------------------------
+    // Unlike Feature Integrity, coverage measurement applies to BOTH
+    // standard-raster and halftone plates (Section 18 of this phase's
+    // plan) — it asks an orthogonal question ("how much continuous ink does
+    // reproducing this actually require?") that is equally meaningful for
+    // either representation, never a claim about the halftone dot lattice's
+    // geometric validity (that remains `halftone_screen_geometry`'s job).
+    // Diagnostic-only in this phase: no check, no decision, and no
+    // raster-vs-halftone recommendation consumes this yet (Section 19/25) —
+    // it is persisted purely as a foundation for a later phase.
+    const dtfCoverage = measureDtfCoverageForPlate(output.bytes, output.normalization);
+
     let productionAsset: AssetRecord;
     try {
       productionAsset = await assets.uploadProductionAsset(job.projectId, {
@@ -861,6 +881,12 @@ export function createFinalArtworkWorkerCapability(
           // re-decoding and re-measuring the plate — same rationale as
           // `normalization`/`halftone` above.
           featureIntegrity: dtfFeatureIntegrity as unknown as Record<string, unknown> | null,
+          // DTF Coverage Intelligence (Phase 2A): same rationale as
+          // `featureIntegrity` above — persisted so a recovered/retried
+          // attempt never re-decodes and re-measures the plate. `null` only
+          // on a decode/measurement failure, which (like feature integrity)
+          // is diagnostic-only and never fails the job.
+          dtfCoverage: dtfCoverage as unknown as Record<string, unknown> | null,
           ...params.extraAssetMetadata,
         },
       });
@@ -1945,8 +1971,47 @@ function measureDtfFeatureIntegrity(
       image: { width: decoded.width, height: decoded.height, data: decoded.data },
       confirmedWidthIn: normalization.intendedWidthIn,
       confirmedHeightIn: normalization.intendedHeightIn,
+      // Phase 2A: these are plain numeric parameters as far as the engine is
+      // concerned (see `measureFeatureIntegrity`'s doc comment) — the
+      // profile file remains the sole owner of what these numbers actually
+      // ARE. Passing them through here lets the engine compute each
+      // component's own fraction-below-floor without this worker (or
+      // PrintValidation) ever needing the raw per-pixel ridge samples.
+      positiveFeatureThresholds: {
+        blockingFloorMm: DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM,
+        warningFloorMm: DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM,
+      },
+      negativeSpaceThresholds: {
+        blockingFloorMm: DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM,
+        warningFloorMm: DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM,
+      },
     });
     return toDtfFeatureIntegritySummary(measurement);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * DTF Coverage Intelligence (Phase 2A): decodes the final production PNG
+ * bytes and runs the coverage engine against them at the plate's own
+ * recorded intended physical size. Unlike
+ * `measureDtfFeatureIntegrity`, this runs for EVERY production treatment,
+ * including halftone (Section 18). Never throws — a decode/measurement
+ * failure here is diagnostic-only and never fails an otherwise-successful
+ * production job.
+ */
+function measureDtfCoverageForPlate(
+  bytes: Buffer,
+  normalization: ProductionNormalizationMetadata,
+): DtfCoverageMeasurement | null {
+  try {
+    const decoded = PNG.sync.read(bytes);
+    return measureDtfCoverage({
+      image: { width: decoded.width, height: decoded.height, data: decoded.data },
+      confirmedWidthIn: normalization.intendedWidthIn,
+      confirmedHeightIn: normalization.intendedHeightIn,
+    });
   } catch {
     return null;
   }
@@ -1971,6 +2036,10 @@ function toDtfFeatureIntegritySummary(
       boundingBoxPx: { ...c.boundsPx },
       measuredWidthMm: c.minStrokeWidthMm,
       measuredDiameterMm: null,
+      physicalAreaMm2: c.physicalAreaMm2,
+      medianWidthMm: c.medianStrokeWidthMm,
+      fractionBelowBlockingFloor: c.structuralFractions?.fractionBelowBlockingFloor ?? null,
+      fractionBelowWarningFloor: c.structuralFractions?.fractionBelowWarningFloor ?? null,
       pixelArea: c.pixelArea,
     })),
     ...measurement.negative.components.map((c) => ({
@@ -1978,6 +2047,10 @@ function toDtfFeatureIntegritySummary(
       boundingBoxPx: { ...c.boundsPx },
       measuredWidthMm: c.minGapWidthMm,
       measuredDiameterMm: null,
+      physicalAreaMm2: c.physicalAreaMm2,
+      medianWidthMm: c.medianGapWidthMm,
+      fractionBelowBlockingFloor: c.structuralFractions?.fractionBelowBlockingFloor ?? null,
+      fractionBelowWarningFloor: c.structuralFractions?.fractionBelowWarningFloor ?? null,
       pixelArea: c.pixelArea,
     })),
     ...measurement.isolated.components.map((c) => ({
@@ -1985,6 +2058,10 @@ function toDtfFeatureIntegritySummary(
       boundingBoxPx: { ...c.boundsPx },
       measuredWidthMm: null,
       measuredDiameterMm: c.equivalentDiameterMm,
+      physicalAreaMm2: c.physicalAreaMm2,
+      medianWidthMm: null,
+      fractionBelowBlockingFloor: null,
+      fractionBelowWarningFloor: null,
       pixelArea: c.pixelArea,
     })),
     ...measurement.partialAlpha.components.map((c) => ({
@@ -1992,6 +2069,10 @@ function toDtfFeatureIntegritySummary(
       boundingBoxPx: { ...c.boundsPx },
       measuredWidthMm: null,
       measuredDiameterMm: c.equivalentDiameterMm,
+      physicalAreaMm2: null,
+      medianWidthMm: null,
+      fractionBelowBlockingFloor: null,
+      fractionBelowWarningFloor: null,
       pixelArea: c.pixelArea,
     })),
   ];
@@ -2012,15 +2093,24 @@ function toDtfFeatureIntegritySummary(
       measuredComponentCount: measurement.positive.totalComponentCount,
       globalMinStrokeWidthMm: measurement.positive.globalMinStrokeWidthMm,
       percentile5StrokeWidthMm: measurement.positive.percentile5StrokeWidthMm,
+      worstStructuralComponent: measurement.positive.worstStructuralComponent,
     },
     negative: {
       measuredChannelCount: measurement.negative.totalComponentCount,
       globalMinGapWidthMm: measurement.negative.globalMinGapWidthMm,
       percentile5GapWidthMm: measurement.negative.percentile5GapWidthMm,
+      worstStructuralComponent: measurement.negative.worstStructuralComponent,
     },
     isolated: {
       totalComponentCount: measurement.isolated.totalComponentCount,
       smallestEquivalentDiameterMm: measurement.isolated.smallestEquivalentDiameterMm,
+      microComponents: {
+        microComponentCount: measurement.isolated.microComponents.microComponentCount,
+        totalMicroComponentPhysicalAreaMm2:
+          measurement.isolated.microComponents.totalMicroComponentPhysicalAreaMm2,
+        fractionOfPrintedArea: measurement.isolated.microComponents.fractionOfPrintedArea,
+        meanPartialAlphaFraction: measurement.isolated.microComponents.meanPartialAlphaFraction,
+      },
     },
     partialAlpha: {
       partialAlphaFractionOfVisible: measurement.partialAlpha.partialAlphaFractionOfVisible,
@@ -2061,6 +2151,50 @@ function readDtfFeatureIntegritySummary(value: unknown): DtfFeatureIntegritySumm
 
   const optionalNumber = (v: unknown): number | null => (typeof v === "number" ? v : null);
 
+  const readWorstStructuralPositive = (
+    value: unknown,
+  ): { minStrokeWidthMm: number | null; fractionBelowBlockingFloor: number; fractionBelowWarningFloor: number } | null => {
+    if (!value || typeof value !== "object") return null;
+    const w = value as Record<string, unknown>;
+    if (typeof w.fractionBelowBlockingFloor !== "number" || typeof w.fractionBelowWarningFloor !== "number") {
+      return null;
+    }
+    return {
+      minStrokeWidthMm: optionalNumber(w.minStrokeWidthMm),
+      fractionBelowBlockingFloor: w.fractionBelowBlockingFloor,
+      fractionBelowWarningFloor: w.fractionBelowWarningFloor,
+    };
+  };
+  const readWorstStructuralNegative = (
+    value: unknown,
+  ): { minGapWidthMm: number | null; fractionBelowBlockingFloor: number; fractionBelowWarningFloor: number } | null => {
+    if (!value || typeof value !== "object") return null;
+    const w = value as Record<string, unknown>;
+    if (typeof w.fractionBelowBlockingFloor !== "number" || typeof w.fractionBelowWarningFloor !== "number") {
+      return null;
+    }
+    return {
+      minGapWidthMm: optionalNumber(w.minGapWidthMm),
+      fractionBelowBlockingFloor: w.fractionBelowBlockingFloor,
+      fractionBelowWarningFloor: w.fractionBelowWarningFloor,
+    };
+  };
+
+  const microComponentsRaw = isolated.microComponents as Record<string, unknown> | undefined;
+  const microComponents =
+    microComponentsRaw &&
+    typeof microComponentsRaw.microComponentCount === "number" &&
+    typeof microComponentsRaw.totalMicroComponentPhysicalAreaMm2 === "number" &&
+    typeof microComponentsRaw.fractionOfPrintedArea === "number" &&
+    typeof microComponentsRaw.meanPartialAlphaFraction === "number"
+      ? {
+          microComponentCount: microComponentsRaw.microComponentCount,
+          totalMicroComponentPhysicalAreaMm2: microComponentsRaw.totalMicroComponentPhysicalAreaMm2,
+          fractionOfPrintedArea: microComponentsRaw.fractionOfPrintedArea,
+          meanPartialAlphaFraction: microComponentsRaw.meanPartialAlphaFraction,
+        }
+      : { microComponentCount: 0, totalMicroComponentPhysicalAreaMm2: 0, fractionOfPrintedArea: 0, meanPartialAlphaFraction: 0 };
+
   return {
     algorithmVersion: meta.algorithmVersion,
     pixelPitchXMm: meta.pixelPitchXMm,
@@ -2069,15 +2203,18 @@ function readDtfFeatureIntegritySummary(value: unknown): DtfFeatureIntegritySumm
       measuredComponentCount: positive.measuredComponentCount as number,
       globalMinStrokeWidthMm: optionalNumber(positive.globalMinStrokeWidthMm),
       percentile5StrokeWidthMm: optionalNumber(positive.percentile5StrokeWidthMm),
+      worstStructuralComponent: readWorstStructuralPositive(positive.worstStructuralComponent),
     },
     negative: {
       measuredChannelCount: negative.measuredChannelCount as number,
       globalMinGapWidthMm: optionalNumber(negative.globalMinGapWidthMm),
       percentile5GapWidthMm: optionalNumber(negative.percentile5GapWidthMm),
+      worstStructuralComponent: readWorstStructuralNegative(negative.worstStructuralComponent),
     },
     isolated: {
       totalComponentCount: isolated.totalComponentCount as number,
       smallestEquivalentDiameterMm: optionalNumber(isolated.smallestEquivalentDiameterMm),
+      microComponents,
     },
     partialAlpha: {
       partialAlphaFractionOfVisible: partialAlpha.partialAlphaFractionOfVisible as number,

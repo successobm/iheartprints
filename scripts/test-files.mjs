@@ -160,6 +160,7 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork/local-raster-provider.test.ts",
   "src/capabilities/final-artwork/feature-integrity/distance-transform.test.ts",
   "src/capabilities/final-artwork/feature-integrity/measure-feature-integrity.test.ts",
+  "src/capabilities/final-artwork/dtf-coverage/measure-dtf-coverage.test.ts",
   "src/capabilities/shared/dtf-feature-integrity-profile.test.ts",
   "src/capabilities/final-artwork-worker/final-artwork-worker-capability.test.ts",
   "src/capabilities/final-artwork-worker/two-pass-reconstruction.test.ts",
