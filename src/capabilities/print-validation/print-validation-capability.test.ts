@@ -13,6 +13,7 @@ import { classifyProduction, deriveProductionRequirements } from "./production-r
 import { targetDimensionsForPlacement } from "@/capabilities/shared/print-placement-dimensions";
 import { assembleUploadedPreserveProductionPrintValidationInput } from "./assemble-input";
 import type {
+  DtfFeatureIntegritySummary,
   PrintValidationInput,
   ProductionNormalizationSummary,
 } from "./contracts";
@@ -345,6 +346,165 @@ describe("PrintValidationCapability — normalized production plates (Print-Read
         undefined,
         `${check} must not appear for a concept that was never normalized`,
       );
+    }
+  });
+});
+
+/** A synthetic DTF Feature Integrity summary, comfortably inside every provisional tier by default. */
+function dtfSummary(
+  overrides: Partial<{
+    positive: Partial<DtfFeatureIntegritySummary["positive"]>;
+    negative: Partial<DtfFeatureIntegritySummary["negative"]>;
+    isolated: Partial<DtfFeatureIntegritySummary["isolated"]>;
+    partialAlpha: Partial<DtfFeatureIntegritySummary["partialAlpha"]>;
+  }> = {},
+): DtfFeatureIntegritySummary {
+  return {
+    algorithmVersion: "iheartprints_feature_integrity_v1",
+    pixelPitchXMm: 0.0847,
+    pixelPitchYMm: 0.0847,
+    positive: { measuredComponentCount: 1, globalMinStrokeWidthMm: 5, percentile5StrokeWidthMm: 5, ...overrides.positive },
+    negative: { measuredChannelCount: 1, globalMinGapWidthMm: 5, percentile5GapWidthMm: 5, ...overrides.negative },
+    isolated: { totalComponentCount: 1, smallestEquivalentDiameterMm: 5, ...overrides.isolated },
+    partialAlpha: { partialAlphaFractionOfVisible: 0, smallestEquivalentDiameterMm: null, ...overrides.partialAlpha },
+    riskRegions: [],
+    limitations: [],
+  };
+}
+
+describe("PrintValidationCapability — DTF Feature Integrity (Phase 1)", () => {
+  const printValidation = createPrintValidationCapability();
+
+  it("is not emitted at all when no measurement is present", () => {
+    const report = printValidation.validateArtwork(normalizedFullBackInput());
+    for (const check of [
+      "dtf_positive_feature_integrity",
+      "dtf_negative_space_integrity",
+      "dtf_isolated_feature_integrity",
+      "dtf_partial_alpha_feature_integrity",
+    ]) {
+      assert.equal(report.checks.find((c) => c.check === check), undefined, check);
+    }
+  });
+
+  it("passes every DTF check for comfortably robust geometry", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({ input: { dtfFeatureIntegrity: dtfSummary() } }),
+    );
+    for (const check of [
+      "dtf_positive_feature_integrity",
+      "dtf_negative_space_integrity",
+      "dtf_isolated_feature_integrity",
+      "dtf_partial_alpha_feature_integrity",
+    ]) {
+      assert.equal(report.checks.find((c) => c.check === check)?.status, "pass", check);
+    }
+    assert.equal(report.status, "ready");
+  });
+
+  it("blocks on a critically thin positive feature", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: { dtfFeatureIntegrity: dtfSummary({ positive: { globalMinStrokeWidthMm: 0.1 } }) },
+      }),
+    );
+    const check = report.checks.find((c) => c.check === "dtf_positive_feature_integrity");
+    assert.equal(check?.status, "fail");
+    assert.equal(check?.severity, "blocking");
+    assert.notEqual(report.status, "ready");
+    assert.ok(report.requiredTransformations.includes("require_human_review"));
+  });
+
+  it("warns (without blocking) on a moderately thin positive feature", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: { dtfFeatureIntegrity: dtfSummary({ positive: { globalMinStrokeWidthMm: 0.7 } }) },
+      }),
+    );
+    const check = report.checks.find((c) => c.check === "dtf_positive_feature_integrity");
+    assert.equal(check?.status, "warning");
+    assert.equal(report.status, "ready", "a warning-severity check never blocks print_ready");
+  });
+
+  it("blocks on a critically narrow negative space", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: { dtfFeatureIntegrity: dtfSummary({ negative: { globalMinGapWidthMm: 0.1 } }) },
+      }),
+    );
+    assert.equal(report.checks.find((c) => c.check === "dtf_negative_space_integrity")?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("blocks on a critically small isolated component", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: { dtfFeatureIntegrity: dtfSummary({ isolated: { smallestEquivalentDiameterMm: 0.1 } }) },
+      }),
+    );
+    assert.equal(report.checks.find((c) => c.check === "dtf_isolated_feature_integrity")?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("never blocks on partial-alpha geometry, no matter how small", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: {
+          dtfFeatureIntegrity: dtfSummary({
+            partialAlpha: { smallestEquivalentDiameterMm: 0.0001, partialAlphaFractionOfVisible: 0.9 },
+          }),
+        },
+      }),
+    );
+    const check = report.checks.find((c) => c.check === "dtf_partial_alpha_feature_integrity");
+    assert.equal(check?.status, "warning");
+    assert.equal(check?.severity, "warning");
+    assert.equal(report.status, "ready");
+  });
+
+  it("is never emitted for a halftone_dtf plate, even if a measurement were somehow present (Section 14/18-K)", () => {
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: {
+          validationProfile: "uploaded_preserve",
+          productionTreatment: "halftone_dtf",
+          dtfFeatureIntegrity: dtfSummary({ positive: { globalMinStrokeWidthMm: 0.01 } }),
+          uploadedPreserve: {
+            preparedArtworkVersionId: "artwork-1",
+            preparedAssetId: "asset-1",
+            originalAssetId: "original-1",
+            sourceBytesSha256: "abc",
+            sourceAlphaBBoxWidthPx: 3100,
+            sourceAlphaBBoxHeightPx: 3320,
+            enhancement: "halftone_screened",
+          },
+          halftone: {
+            algorithmVersion: "iheartprints_halftone_am_v1",
+            lpi: 35,
+            angleDeg: 45,
+            dotShape: "round",
+            midtone: 1,
+            chokePx: 0,
+            garmentHex: "#000000",
+            targetPpi: 300,
+            cellPx: 300 / 35,
+            achievedLpi: 35,
+            minDotRadiusPx: 1,
+            screenWidthPx: 3150,
+            screenHeightPx: 3375,
+            visiblePixelCount: 1000,
+            inkedPixelFraction: 0.5,
+          },
+        },
+      }),
+    );
+    for (const check of [
+      "dtf_positive_feature_integrity",
+      "dtf_negative_space_integrity",
+      "dtf_isolated_feature_integrity",
+      "dtf_partial_alpha_feature_integrity",
+    ]) {
+      assert.equal(report.checks.find((c) => c.check === check), undefined, check);
     }
   });
 });

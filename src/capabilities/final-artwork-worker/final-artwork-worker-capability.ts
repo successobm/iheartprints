@@ -52,6 +52,8 @@ import {
   deriveProductionRequirements,
 } from "@/capabilities/print-validation";
 import type {
+  DtfFeatureIntegritySummary,
+  DtfFeatureRiskRegion,
   HalftoneProductionEvidence,
   PrintValidationInput,
   PrintValidationReport,
@@ -60,6 +62,8 @@ import type {
   ResolutionProvenance,
   UploadedPreserveEvidence,
 } from "@/capabilities/print-validation/contracts";
+import { measureFeatureIntegrity } from "@/capabilities/final-artwork/feature-integrity";
+import type { FeatureIntegrityMeasurement } from "@/capabilities/final-artwork/feature-integrity";
 import { getWorkerHeartbeatIntervalMs } from "@/lib/config/worker-config";
 import {
   confirmedSizeMatchesJobWidth,
@@ -152,6 +156,14 @@ interface ProductionProvenanceMeta {
    * recorded.
    */
   halftone: HalftoneProductionEvidence | null;
+  /**
+   * DTF Feature Integrity Phase 1: the production plate's measured feature
+   * geometry, when it was measured. `null` for a halftone plate (Section 14
+   * of this phase's plan — a dot lattice is not continuous-tone stroke/gap
+   * geometry), for a plate whose bytes could not be decoded/measured, or for
+   * a production asset persisted before this phase existed.
+   */
+  dtfFeatureIntegrity: DtfFeatureIntegritySummary | null;
 }
 
 /**
@@ -561,6 +573,7 @@ export function createFinalArtworkWorkerCapability(
         typeof meta.providerRequestId === "string" ? meta.providerRequestId : null,
       normalization,
       halftone: readHalftoneEvidence(meta.halftone),
+      dtfFeatureIntegrity: readDtfFeatureIntegritySummary(meta.featureIntegrity),
     };
   }
 
@@ -790,6 +803,22 @@ export function createFinalArtworkWorkerCapability(
       providerRequestId: output.providerRequestId,
     });
 
+    // --- DTF Feature Integrity Phase 1 --------------------------------------
+    // Measured against the FINAL production raster — `output.bytes` is the
+    // exact PNG the customer will download, already post-reconstruction and
+    // post-normalization (Section 15 of this phase's plan: source pixels are
+    // never authoritative here, only the produced plate is). Skipped for a
+    // halftone plate (`output.halftone` present): its dot lattice is not
+    // continuous-tone stroke/gap geometry, and applying this analysis to it
+    // would misclassify every legitimate halftone dot as a defect (Section
+    // 14). A measurement failure is diagnostic-only and must never fail an
+    // otherwise-successful production job — it simply leaves the four
+    // `dtf_*` Print Validation checks unemitted for this asset, exactly as
+    // they are for any plate produced before this phase existed.
+    const dtfFeatureIntegrity = output.halftone
+      ? null
+      : measureDtfFeatureIntegrity(output.bytes, output.normalization);
+
     let productionAsset: AssetRecord;
     try {
       productionAsset = await assets.uploadProductionAsset(job.projectId, {
@@ -826,6 +855,12 @@ export function createFinalArtworkWorkerCapability(
           // same recorded evidence, and a physical print six months from now
           // must be explainable from the asset alone.
           halftone: (output.halftone ?? null) as unknown as Record<string, unknown> | null,
+          // DTF Feature Integrity Phase 1: the summary (never the full,
+          // per-pixel measurement), so a recovered/retried attempt
+          // re-validates against the same recorded evidence rather than
+          // re-decoding and re-measuring the plate — same rationale as
+          // `normalization`/`halftone` above.
+          featureIntegrity: dtfFeatureIntegrity as unknown as Record<string, unknown> | null,
           ...params.extraAssetMetadata,
         },
       });
@@ -858,6 +893,7 @@ export function createFinalArtworkWorkerCapability(
         providerRequestId: output.providerRequestId,
         normalization: toNormalizationSummary(output.normalization, sizing),
         halftone: toHalftoneEvidence(output.halftone ?? null),
+        dtfFeatureIntegrity,
       },
       providerLatencyMs,
     };
@@ -1126,6 +1162,7 @@ export function createFinalArtworkWorkerCapability(
       conceptEvaluationStatus: conceptEvaluationStatusForValidation,
       conceptEvaluation: conceptEvaluationForValidation,
       normalization: provenance.normalization,
+      dtfFeatureIntegrity: provenance.dtfFeatureIntegrity,
     });
 
     await finishValidatedJob({
@@ -1506,6 +1543,7 @@ export function createFinalArtworkWorkerCapability(
       // rather than the one it was about to make.
       productionTreatment: treatment.treatment,
       halftone: provenance.halftone,
+      dtfFeatureIntegrity: provenance.dtfFeatureIntegrity,
     });
 
     await finishValidatedJob({
@@ -1884,6 +1922,169 @@ function readHalftoneEvidence(value: unknown): HalftoneProductionEvidence | null
     screenHeightPx: meta.screenHeightPx as number,
     visiblePixelCount: meta.visiblePixelCount as number,
     inkedPixelFraction: meta.inkedPixelFraction as number,
+  };
+}
+
+/** Capped, worst-first, across all four categories — see `DtfFeatureIntegritySummary.riskRegions`'s own doc comment. */
+const DTF_RISK_REGION_REPORT_CAP = 30;
+
+/**
+ * DTF Feature Integrity Phase 1: decodes the final production PNG bytes and
+ * runs the measurement engine against them at the plate's own recorded
+ * intended physical size. Never throws — a decode or measurement failure is
+ * diagnostic-only (see the call site's comment) and simply means the four
+ * `dtf_*` Print Validation checks are not emitted for this asset.
+ */
+function measureDtfFeatureIntegrity(
+  bytes: Buffer,
+  normalization: ProductionNormalizationMetadata,
+): DtfFeatureIntegritySummary | null {
+  try {
+    const decoded = PNG.sync.read(bytes);
+    const measurement = measureFeatureIntegrity({
+      image: { width: decoded.width, height: decoded.height, data: decoded.data },
+      confirmedWidthIn: normalization.intendedWidthIn,
+      confirmedHeightIn: normalization.intendedHeightIn,
+    });
+    return toDtfFeatureIntegritySummary(measurement);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reduces the engine's full `FeatureIntegrityMeasurement` onto the smaller,
+ * independent shape Print Validation and asset-metadata persistence both
+ * consume — mirrors `toNormalizationSummary`/`toHalftoneEvidence`. Only the
+ * aggregate fields and a capped, worst-first `riskRegions` list survive;
+ * per-component detail beyond that cap is intentionally not persisted
+ * (Section 17 of this phase's plan: keep payload sizes reasonable, and never
+ * silently imply a capped list is complete — hence the `limitations` note
+ * below when capping actually drops something).
+ */
+function toDtfFeatureIntegritySummary(
+  measurement: FeatureIntegrityMeasurement,
+): DtfFeatureIntegritySummary {
+  const regions: DtfFeatureRiskRegion[] = [
+    ...measurement.positive.components.map((c) => ({
+      kind: "positive_feature_thin" as const,
+      boundingBoxPx: { ...c.boundsPx },
+      measuredWidthMm: c.minStrokeWidthMm,
+      measuredDiameterMm: null,
+      pixelArea: c.pixelArea,
+    })),
+    ...measurement.negative.components.map((c) => ({
+      kind: "negative_space_narrow" as const,
+      boundingBoxPx: { ...c.boundsPx },
+      measuredWidthMm: c.minGapWidthMm,
+      measuredDiameterMm: null,
+      pixelArea: c.pixelArea,
+    })),
+    ...measurement.isolated.components.map((c) => ({
+      kind: "isolated_component_small" as const,
+      boundingBoxPx: { ...c.boundsPx },
+      measuredWidthMm: null,
+      measuredDiameterMm: c.equivalentDiameterMm,
+      pixelArea: c.pixelArea,
+    })),
+    ...measurement.partialAlpha.components.map((c) => ({
+      kind: "partial_alpha_fragile" as const,
+      boundingBoxPx: { ...c.boundsPx },
+      measuredWidthMm: null,
+      measuredDiameterMm: c.equivalentDiameterMm,
+      pixelArea: c.pixelArea,
+    })),
+  ];
+  regions.sort((a, b) => (a.measuredWidthMm ?? a.measuredDiameterMm ?? Infinity) - (b.measuredWidthMm ?? b.measuredDiameterMm ?? Infinity));
+
+  const limitations = [...measurement.limitations];
+  if (regions.length > DTF_RISK_REGION_REPORT_CAP) {
+    limitations.push(
+      `${regions.length} diagnostic risk regions were measured across all categories; only the ${DTF_RISK_REGION_REPORT_CAP} most at-risk are recorded here.`,
+    );
+  }
+
+  return {
+    algorithmVersion: measurement.algorithmVersion,
+    pixelPitchXMm: measurement.pixelPitchXMm,
+    pixelPitchYMm: measurement.pixelPitchYMm,
+    positive: {
+      measuredComponentCount: measurement.positive.totalComponentCount,
+      globalMinStrokeWidthMm: measurement.positive.globalMinStrokeWidthMm,
+      percentile5StrokeWidthMm: measurement.positive.percentile5StrokeWidthMm,
+    },
+    negative: {
+      measuredChannelCount: measurement.negative.totalComponentCount,
+      globalMinGapWidthMm: measurement.negative.globalMinGapWidthMm,
+      percentile5GapWidthMm: measurement.negative.percentile5GapWidthMm,
+    },
+    isolated: {
+      totalComponentCount: measurement.isolated.totalComponentCount,
+      smallestEquivalentDiameterMm: measurement.isolated.smallestEquivalentDiameterMm,
+    },
+    partialAlpha: {
+      partialAlphaFractionOfVisible: measurement.partialAlpha.partialAlphaFractionOfVisible,
+      smallestEquivalentDiameterMm: measurement.partialAlpha.smallestEquivalentDiameterMm,
+    },
+    riskRegions: regions.slice(0, DTF_RISK_REGION_REPORT_CAP),
+    limitations,
+  };
+}
+
+/**
+ * Reads a DTF Feature Integrity summary back off an already-persisted
+ * production asset (the idempotent-retry/reuse path) — mirrors
+ * `readNormalizationSummary`/`readHalftoneEvidence`. Returns `null` for
+ * anything incomplete rather than filling gaps: a plate whose recorded
+ * measurement is partial is treated exactly like one produced before this
+ * phase existed, never patched up with invented numbers.
+ */
+function readDtfFeatureIntegritySummary(value: unknown): DtfFeatureIntegritySummary | null {
+  if (!value || typeof value !== "object") return null;
+  const meta = value as Record<string, unknown>;
+  if (typeof meta.algorithmVersion !== "string" || !meta.algorithmVersion) return null;
+  if (typeof meta.pixelPitchXMm !== "number" || typeof meta.pixelPitchYMm !== "number") return null;
+
+  const positive = meta.positive as Record<string, unknown> | undefined;
+  const negative = meta.negative as Record<string, unknown> | undefined;
+  const isolated = meta.isolated as Record<string, unknown> | undefined;
+  const partialAlpha = meta.partialAlpha as Record<string, unknown> | undefined;
+  if (
+    !positive || typeof positive.measuredComponentCount !== "number" ||
+    !negative || typeof negative.measuredChannelCount !== "number" ||
+    !isolated || typeof isolated.totalComponentCount !== "number" ||
+    !partialAlpha || typeof partialAlpha.partialAlphaFractionOfVisible !== "number"
+  ) {
+    return null;
+  }
+  if (!Array.isArray(meta.riskRegions) || !Array.isArray(meta.limitations)) return null;
+
+  const optionalNumber = (v: unknown): number | null => (typeof v === "number" ? v : null);
+
+  return {
+    algorithmVersion: meta.algorithmVersion,
+    pixelPitchXMm: meta.pixelPitchXMm,
+    pixelPitchYMm: meta.pixelPitchYMm,
+    positive: {
+      measuredComponentCount: positive.measuredComponentCount as number,
+      globalMinStrokeWidthMm: optionalNumber(positive.globalMinStrokeWidthMm),
+      percentile5StrokeWidthMm: optionalNumber(positive.percentile5StrokeWidthMm),
+    },
+    negative: {
+      measuredChannelCount: negative.measuredChannelCount as number,
+      globalMinGapWidthMm: optionalNumber(negative.globalMinGapWidthMm),
+      percentile5GapWidthMm: optionalNumber(negative.percentile5GapWidthMm),
+    },
+    isolated: {
+      totalComponentCount: isolated.totalComponentCount as number,
+      smallestEquivalentDiameterMm: optionalNumber(isolated.smallestEquivalentDiameterMm),
+    },
+    partialAlpha: {
+      partialAlphaFractionOfVisible: partialAlpha.partialAlphaFractionOfVisible as number,
+      smallestEquivalentDiameterMm: optionalNumber(partialAlpha.smallestEquivalentDiameterMm),
+    },
+    riskRegions: meta.riskRegions as DtfFeatureRiskRegion[],
+    limitations: meta.limitations as string[],
   };
 }
 

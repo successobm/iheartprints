@@ -8696,6 +8696,223 @@ completely unchanged.
 
 ---
 
+## 23k. DTF Feature Integrity (Phase 1)
+
+An artwork file can satisfy every existing production check — decodable PNG,
+correct transparency, correct physical dimensions, 300 PPI effective
+resolution, correct lineage, valid production geometry — and still contain
+features unreliable for DTF (direct-to-film) production: very small
+typography, thin positive strokes, narrow negative spaces, tiny isolated
+components, fragile distressed fragments, and weak partial-alpha detail.
+**PPI alone is insufficient.** DTF involves ink printed to film, adhesive
+powder adhering to that ink, curing, transfer, and peel — a very small mark
+or gap may be unreliable through that process even when the source pixels
+are technically valid at the target density.
+
+**FEATURE INTEGRITY IS PROCESS-SPECIFIC.** A file can be ready for one
+production process and unsuitable for another. This phase measures and
+classifies for DTF specifically; a future DTG/screen/embroidery profile
+would read the same underlying geometry through its own, differently
+calibrated profile — never this one relabeled.
+
+### Physical-size-aware geometry, not a source-pixel heuristic
+
+The one rule this phase is built around: **no "small text < N pixels = bad"
+heuristic, ever.** A feature's risk is a fact about its PHYSICAL size at the
+artwork's CONFIRMED production dimensions, never about its raw pixel count.
+The same pixel-perfect stroke, printed at 3 inches vs. 12 inches, is two
+different physical objects — the smaller print is the more fragile one, even
+though not a single pixel changed. Measurement therefore always runs against
+the FINAL production raster (post-reconstruction, post-normalization — never
+the original source, which Topaz or normalization may sharpen, smooth,
+invent, or otherwise change the thin geometry of) at its confirmed physical
+width/height, converting pixel measurements to millimeters via the plate's
+own pixel pitch (`confirmedWidthIn * 25.4 / productionWidthPx`, and
+independently for height — never assumed square, see `PixelPitchAnisotropy`
+handling below).
+
+### The measurement engine (`final-artwork/feature-integrity/`)
+
+Process-neutral pixel geometry, pure functions, no I/O — mirrors
+`final-artwork/halftone-screen.ts`'s own reason for existing as a sibling
+module rather than living inside the worker:
+
+- `distance-transform.ts` — a (5,7) Borgefors chamfer distance transform
+  (~2-3% worst-case error vs. true Euclidean; chosen over an exact
+  parabola-envelope transform for implementation simplicity, and over this
+  codebase's existing Chebyshev transform — `region-separation.ts`'s
+  `chebyshevDistanceTransform`, ~30-40% diagonal error — which would
+  systematically under-measure a diagonal stroke's true physical width
+  here); a ridge (non-maximum-suppression) function that turns a raw
+  distance map into medial-axis/skeleton-approximate points, because only
+  AT a shape's ridge does the distance-to-boundary value equal half the
+  shape's true local width — one step off the ridge, distance measures
+  proximity to an edge, not width; and `nearestSeedTransform`, a
+  distance-transform-with-label-propagation used to answer "how far is this
+  ink component from its nearest neighbor?" for every component in one O(n)
+  pass, rather than one distance transform per component (which would be
+  the accidentally-quadratic shape Phase 1 was explicitly warned against).
+- `connected-components.ts` — 4-connected component labelling (matching
+  every other labeller in this codebase — `region-separation.ts`,
+  `background-cavities.ts` — deliberately, so a diagonal single-pixel gap is
+  never treated as connectivity here either), also recording whether a
+  component touches the raster's outer edge.
+- `alpha-masks.ts` — THREE named, centralized masks (Section 6 of the
+  phase's plan: never treat every alpha > 0 pixel as equally printable):
+  `visibleArt` (alpha >= `DEFAULT_ALPHA_THRESHOLD`, matching
+  `final-artwork/alpha-trim.ts`'s own visibility floor exactly, so
+  measurement and production trimming agree on "visible"), `strongInk`
+  (alpha >= the new, provisional `STRONG_INK_ALPHA_THRESHOLD = 200` — solid,
+  reliably-printable ink; POSITIVE FEATURE geometry is measured on this mask,
+  never on `visibleArt`, so a stroke's anti-aliased edge feather never
+  inflates its measured thickness), and `partialAlpha` (`visibleArt AND NOT
+  strongInk` — soft glows, faint distress, anti-aliased edges, characterized
+  separately rather than folded into either extreme).
+- `measure-feature-integrity.ts` — the orchestrator. Returns a
+  `FeatureIntegrityMeasurement`: structured measurements only, deliberately
+  never a single "DTF quality score" (Section 2 of the phase's plan).
+
+### Positive vs. negative geometry — measured differently, on purpose
+
+**Positive features** (letters, decorative marks, distressed fragments) are
+already discrete objects: `strongInk`'s own connected components ARE the
+things to measure. For each, the module finds the minimum distance-transform
+value at any RIDGE pixel within that component and doubles it — the
+component's narrowest local stroke width, not its bounding box or area
+(Section 3: a long 1-pixel line has a huge bounding box while remaining
+physically fragile; this measurement is immune to that).
+
+**Negative space** has no equivalent natural objects — after production
+trimming, almost all of it is ONE connected region (the artwork's own margin,
+contiguous with every gap between separate ink shapes) plus a handful of
+genuinely enclosed cavities (letter counters, holes). The module therefore:
+
+1. Labels the full background/transparent mask's connected components. Any
+   component that never touches the raster's outer edge is an **enclosed**
+   cavity (Section 4's "counters inside letters," "small holes") — measured
+   individually, exactly like a positive-feature component.
+2. For the remaining, border-touching open region, clusters only its RIDGE
+   pixels that are already locally narrower than 5% of the raster's shorter
+   side (`DIAGNOSTIC_CLUSTERING_WIDTH_FRACTION` — a diagnostic clustering aid
+   for producing legible bounding boxes, explicitly never a print-readiness
+   threshold) into discrete **open channel** records (Section 4's "spacing
+   between small letters," "narrow separation between neighboring shapes").
+3. The TRUE global minimum/percentile gap width is read directly off every
+   background ridge pixel, independent of that clustering step — clustering
+   only ever affects which bounding boxes are reported, never the raw
+   aggregate a check classifies against.
+
+Positive-too-thin and negative-too-narrow are reported as fully independent
+measurements (`positive` vs. `negative`), because future repair differs:
+a thin stroke is a dilation candidate; a narrow gap is a preservation/opening
+candidate. Phase 1 implements neither repair.
+
+### Isolated components and partial alpha
+
+`isolated` reuses the SAME `strongInk` connected components as `positive`,
+viewed differently — area, physical size, equivalent diameter, and distance
+to the nearest OTHER component (via `nearestSeedTransform`, described above).
+Small is never automatically defective: distressed artwork intentionally
+contains tiny fragments (Section 5/10), so this is a measurement, not a
+verdict — see classification below.
+
+`partialAlpha` labels and measures the `partialAlpha` mask's own connected
+components separately (mean alpha, size, diameter) — the least understood
+category in this phase, since a soft/faint feature's actual DTF behavior at
+partial ink coverage is not something pixel geometry alone can observe.
+
+### The provisional DTF profile (`shared/dtf-feature-integrity-profile.ts`)
+
+ONE centralized module holds every threshold — never scattered through
+validators. Every constant is explicitly documented as **PROVISIONAL and
+REQUIRING PHYSICAL DTF CALIBRATION**: conservative engineering starting
+points, not validated DTF physics, not derived from a controlled print test,
+and not a claim of a universal minimum DTF feature size. A single Roland DTG
+test print (CMYK, no white underbase, no adhesive powder, no film transfer,
+no black-shirt integration — see AGENTS.md) can exercise this measurement
+framework's geometry but cannot calibrate its numbers either; only a real DTF
+print can. Four categories, each with a WARNING floor and a stricter,
+lower BLOCKING floor — "detect aggressively, block rarely" (Section 10 of the
+phase's plan): positive feature width, negative space width, isolated
+component diameter, and partial-alpha diameter (which never reaches
+`"blocking"` at all — see `classifyDtfPartialAlphaFeature`, deliberately
+diagnostic-only).
+
+### PrintValidation integration — supplements, never replaces
+
+`PrintValidationCapability` remains the sole authority for `print_ready`.
+Four new checks (`dtf_positive_feature_integrity`,
+`dtf_negative_space_integrity`, `dtf_isolated_feature_integrity`,
+`dtf_partial_alpha_feature_integrity`) are emitted alongside every existing
+check, never in place of any of them. Consistent with the halftone
+dependency rule already established (`capability-boundaries.ts`: "Print
+Validation MUST NOT import the engine"), `print-validation/contracts.ts`
+defines its OWN independent `DtfFeatureIntegritySummary` type — a structural
+mirror of `FeatureIntegrityMeasurement`, never an import of it — and
+`FinalArtworkWorkerCapability`, which legitimately knows both shapes, is the
+one place a real measurement is reduced onto that summary
+(`toDtfFeatureIntegritySummary`), mirroring `toNormalizationSummary`/
+`toHalftoneEvidence` exactly. The summary carries raw measurements only
+(aggregates plus a capped, worst-first `riskRegions[]` diagnostic list with
+bounding boxes — Section 17: keep payload sizes reasonable, never persist
+millions of coordinates, and never let a capped list silently pass as
+complete); classification against the provisional profile happens exactly
+once, inside `print-validation-capability.ts`'s own check functions.
+
+**Where measurement happens**: `FinalArtworkWorkerCapability.produceProductionAsset`,
+immediately after a provider produces the final production PNG bytes —
+`output.bytes` IS the exact file the customer downloads, already
+post-reconstruction and post-normalization. The worker decodes those bytes
+(the same `PNG.sync.read` pattern `measurePreparedSource` already uses
+elsewhere in this file) and measures against `output.normalization`'s own
+recorded intended physical size. A decode or measurement failure is
+diagnostic-only and never fails the job — it simply leaves the four `dtf_*`
+checks unemitted, exactly like a production asset persisted before this
+phase existed.
+
+**Standard raster only (Section 14).** Skipped entirely whenever
+`output.halftone` is present (the plate's production treatment is
+`halftone_dtf`): a dot lattice is a lattice of legitimate small "isolated"
+dots BY DESIGN, and a continuous-tone stroke/gap rule applied to it would
+misclassify every correct halftone plate ever produced. Halftone geometry
+already has its own, separately validated checks
+(`halftone_treatment`/`halftone_final_size_generation`/
+`halftone_screen_geometry`/`halftone_tonal_sufficiency`) — Feature Integrity
+supplements the continuous-tone path, never the halftone one. This is the
+smallest correct architecture for Phase 1: a future phase could add
+treatment-aware measurement rules for halftone specifically, but nothing
+about this phase requires it, and guessing at halftone-specific thresholds
+without any calibration would be worse than not measuring at all.
+
+Applies identically to BOTH `PrintValidationProfile`s — a Create New Artwork
+production PNG and an uploaded/prepared production PNG are equally subject
+to physical feature fragility; neither the approved brief nor the customer's
+own pixels change what DTF production physically requires. Placed in
+`print-validation-capability.ts`'s existing `if (normalization)` block
+(alongside `production_normalization`/`alpha_bound_artwork`/etc.), which
+already runs for both profiles — never nested inside the `uploaded_preserve`-
+only block the halftone/reconstruction checks currently occupy.
+
+### Explicitly out of scope for Phase 1
+
+No automatic dilation, erosion, morphological closing/opening, text
+reconstruction, OCR, font substitution, generative recreation of small text,
+selective halftoning, or raster-vs-halftone decision intelligence. This
+phase measures, detects, classifies, and explains — it does not repair.
+Garment color is not used as an automatic trigger for anything (no "black
+garment implies halftone," no automatic black-ink removal). See AGENTS.md's
+DTF Feature Integrity Phase 1 scope for the complete list.
+
+### Future physical calibration
+
+This phase's entire purpose is to give real prints something to calibrate
+against quickly: every threshold lives in one file, is a plain named
+constant, and is documented with why its current value was chosen and what
+would justify changing it. Calibration is explicitly a separate, future
+phase — this one does not claim to have performed it.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

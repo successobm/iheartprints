@@ -20,6 +20,7 @@
 import { deriveProductionRequirements } from "./production-requirements";
 import { calculateEffectiveResolution } from "./effective-resolution";
 import type {
+  DtfFeatureIntegritySummary,
   FinalizationTransformation,
   PrintValidationCheck,
   PrintValidationInput,
@@ -38,6 +39,16 @@ import {
   MIN_PRINTABLE_DOT_RADIUS_PX,
   type ProductionTreatment,
 } from "@/capabilities/shared/production-treatment";
+import {
+  classifyDtfFeatureWidth,
+  classifyDtfPartialAlphaFeature,
+  DTF_ISOLATED_COMPONENT_BLOCKING_DIAMETER_MM,
+  DTF_ISOLATED_COMPONENT_WARNING_DIAMETER_MM,
+  DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM,
+  DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM,
+  DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM,
+  DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM,
+} from "@/capabilities/shared/dtf-feature-integrity-profile";
 
 /**
  * Print-Ready Normalization Phase 1 tolerances. Explicit, named, and always
@@ -345,6 +356,41 @@ function validate(input: PrintValidationInput): PrintValidationReport {
     // Informational only — density metadata is never allowed to stand in for
     // real pixel geometry (see `effective-resolution.ts`).
     checks.push(checkDensityMetadata(normalization));
+
+    // --- DTF Feature Integrity Phase 1 --------------------------------------
+    // Standard-raster continuous-tone plates only (Section 14 of this
+    // phase's plan): a halftone plate's dot lattice is not stroke/gap
+    // geometry, and applying a continuous-tone rule to it would misclassify
+    // every legitimate halftone dot as a "tiny isolated component." Applies
+    // to BOTH validation profiles — a Create New Artwork production PNG and
+    // an uploaded/prepared production PNG are equally subject to physical
+    // feature fragility, and neither the brief nor the customer's own pixels
+    // change what DTF production physically requires.
+    //
+    // Emitted only when the measurement is actually present (a standard-
+    // raster asset whose final production raster was decoded and measured);
+    // never emitted as a false pass, mirroring how halftone/reconstruction
+    // checks are absent rather than defaulted outside their own applicable
+    // case.
+    if (!halftoneTreatment && input.dtfFeatureIntegrity) {
+      const dtf = input.dtfFeatureIntegrity;
+
+      const positiveCheck = checkDtfPositiveFeatureIntegrity(dtf);
+      checks.push(positiveCheck);
+      if (positiveCheck.status === "fail") requiredTransformations.add("require_human_review");
+
+      const negativeCheck = checkDtfNegativeSpaceIntegrity(dtf);
+      checks.push(negativeCheck);
+      if (negativeCheck.status === "fail") requiredTransformations.add("require_human_review");
+
+      const isolatedCheck = checkDtfIsolatedFeatureIntegrity(dtf);
+      checks.push(isolatedCheck);
+      if (isolatedCheck.status === "fail") requiredTransformations.add("require_human_review");
+
+      // Diagnostic-only — see the profile module. Never contributes to
+      // `requiredTransformations` and never carries `severity: "blocking"`.
+      checks.push(checkDtfPartialAlphaFeatureIntegrity(dtf));
+    }
 
     // --- Existing Artwork → Print Ready Phase 2: preservation checks -------
     // Only meaningful against a real plate, and only for artwork whose source
@@ -1541,6 +1587,191 @@ function checkDensityMetadata(
     reason: agrees
       ? `Embedded physical-resolution metadata declares ~${Math.round(declaredPpi)} PPI, agreeing with the intended ${normalization.targetPpi} PPI production specification.`
       : `Embedded physical-resolution metadata declares ~${Math.round(declaredPpi)} PPI, disagreeing with the intended ${normalization.targetPpi} PPI production specification (pixel geometry remains authoritative).`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DTF Feature Integrity Phase 1
+// ---------------------------------------------------------------------------
+//
+// All four checks below classify already-measured physical widths/diameters
+// (`DtfFeatureIntegritySummary`, assembled by `FinalArtworkWorkerCapability`
+// from a real `FeatureIntegrityMeasurement`) against the ONE centralized,
+// explicitly provisional profile in `shared/dtf-feature-integrity-profile.ts`.
+// No threshold is declared here — see that module for why, and for why every
+// number in it requires physical DTF calibration before it means anything
+// more than "a conservative engineering starting point."
+
+function formatMm(value: number): string {
+  return `${value.toFixed(2)}mm`;
+}
+
+function checkDtfPositiveFeatureIntegrity(
+  dtf: DtfFeatureIntegritySummary,
+): PrintValidationCheck {
+  const widthMm = dtf.positive.globalMinStrokeWidthMm;
+  const tier = classifyDtfFeatureWidth(
+    widthMm,
+    DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM,
+    DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM,
+  );
+  if (widthMm === null) {
+    return {
+      check: "dtf_positive_feature_integrity",
+      status: "pass",
+      severity: "warning",
+      reason: "No positive ink feature was measured; there is nothing narrow to flag.",
+    };
+  }
+  if (tier === "blocking") {
+    return {
+      check: "dtf_positive_feature_integrity",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `The thinnest measured positive ink feature is ${formatMm(widthMm)} wide at this artwork's confirmed print size — below the provisional ` +
+        `${formatMm(DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM)} DTF floor (uncalibrated; see the DTF Feature Integrity profile). This is a measurement of ` +
+        "physical geometry at the confirmed size, not a claim about the source pixels.",
+    };
+  }
+  if (tier === "warning") {
+    return {
+      check: "dtf_positive_feature_integrity",
+      status: "warning",
+      severity: "warning",
+      reason: `The thinnest measured positive ink feature is ${formatMm(widthMm)} wide at this artwork's confirmed print size — worth an operator's attention, not yet refused.`,
+    };
+  }
+  return {
+    check: "dtf_positive_feature_integrity",
+    status: "pass",
+    severity: "warning",
+    reason: `The thinnest measured positive ink feature is ${formatMm(widthMm)} wide at this artwork's confirmed print size.`,
+  };
+}
+
+function checkDtfNegativeSpaceIntegrity(
+  dtf: DtfFeatureIntegritySummary,
+): PrintValidationCheck {
+  const widthMm = dtf.negative.globalMinGapWidthMm;
+  const tier = classifyDtfFeatureWidth(
+    widthMm,
+    DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM,
+    DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM,
+  );
+  if (widthMm === null) {
+    return {
+      check: "dtf_negative_space_integrity",
+      status: "pass",
+      severity: "warning",
+      reason: "No enclosed or between-artwork negative space was measured; there is nothing narrow to flag.",
+    };
+  }
+  if (tier === "blocking") {
+    return {
+      check: "dtf_negative_space_integrity",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `The narrowest measured negative space (a letter counter or gap between shapes) is ${formatMm(widthMm)} wide at this artwork's confirmed print size — below the provisional ` +
+        `${formatMm(DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM)} DTF floor (uncalibrated). Adhesive powder bridging a gap this narrow is a real production risk, not yet proven by a physical print.`,
+    };
+  }
+  if (tier === "warning") {
+    return {
+      check: "dtf_negative_space_integrity",
+      status: "warning",
+      severity: "warning",
+      reason: `The narrowest measured negative space is ${formatMm(widthMm)} wide at this artwork's confirmed print size — worth an operator's attention, not yet refused.`,
+    };
+  }
+  return {
+    check: "dtf_negative_space_integrity",
+    status: "pass",
+    severity: "warning",
+    reason: `The narrowest measured negative space is ${formatMm(widthMm)} wide at this artwork's confirmed print size.`,
+  };
+}
+
+function checkDtfIsolatedFeatureIntegrity(
+  dtf: DtfFeatureIntegritySummary,
+): PrintValidationCheck {
+  const diameterMm = dtf.isolated.smallestEquivalentDiameterMm;
+  const tier = classifyDtfFeatureWidth(
+    diameterMm,
+    DTF_ISOLATED_COMPONENT_BLOCKING_DIAMETER_MM,
+    DTF_ISOLATED_COMPONENT_WARNING_DIAMETER_MM,
+  );
+  if (diameterMm === null) {
+    return {
+      check: "dtf_isolated_feature_integrity",
+      status: "pass",
+      severity: "warning",
+      reason: "No isolated printable component was measured; there is nothing small to flag.",
+    };
+  }
+  if (tier === "blocking") {
+    return {
+      check: "dtf_isolated_feature_integrity",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size — below the provisional ` +
+        `${formatMm(DTF_ISOLATED_COMPONENT_BLOCKING_DIAMETER_MM)} DTF floor (uncalibrated). This describes measured geometry, not creative intent — a genuinely intentional tiny distressed fragment ` +
+        "can still measure this small; a human reviewer, not this check, is the one who knows which.",
+    };
+  }
+  if (tier === "warning") {
+    return {
+      check: "dtf_isolated_feature_integrity",
+      status: "warning",
+      severity: "warning",
+      reason: `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size — worth an operator's attention, not yet refused.`,
+    };
+  }
+  return {
+    check: "dtf_isolated_feature_integrity",
+    status: "pass",
+    severity: "warning",
+    reason: `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size.`,
+  };
+}
+
+/**
+ * Diagnostic-only (Section 10/13 of this phase's plan) — partial-alpha
+ * geometry is the least understood category this phase measures, so this
+ * check never returns `severity: "blocking"` regardless of what it measures.
+ * See `classifyDtfPartialAlphaFeature`.
+ */
+function checkDtfPartialAlphaFeatureIntegrity(
+  dtf: DtfFeatureIntegritySummary,
+): PrintValidationCheck {
+  const diameterMm = dtf.partialAlpha.smallestEquivalentDiameterMm;
+  const tier = classifyDtfPartialAlphaFeature(diameterMm);
+  if (diameterMm === null) {
+    return {
+      check: "dtf_partial_alpha_feature_integrity",
+      status: "pass",
+      severity: "warning",
+      reason: "No partial-alpha (soft/faint) fine feature was measured.",
+    };
+  }
+  if (tier === "warning") {
+    return {
+      check: "dtf_partial_alpha_feature_integrity",
+      status: "warning",
+      severity: "warning",
+      reason:
+        `The smallest partial-alpha fine feature measures ${formatMm(diameterMm)} equivalent diameter, carrying ` +
+        `${formatPercent(dtf.partialAlpha.partialAlphaFractionOfVisible)} of visible artwork at partial alpha overall — diagnostic only. ` +
+        "How a soft/faint feature this small actually reproduces through DTF ink and adhesive powder is not something this measurement can observe.",
+    };
+  }
+  return {
+    check: "dtf_partial_alpha_feature_integrity",
+    status: "pass",
+    severity: "warning",
+    reason: `The smallest partial-alpha fine feature measures ${formatMm(diameterMm)} equivalent diameter.`,
   };
 }
 

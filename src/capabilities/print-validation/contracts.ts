@@ -343,6 +343,25 @@ export const PRINT_VALIDATION_CHECK_CODES = [
    * treatment is not a way to print anything at any size.
    */
   "halftone_tonal_sufficiency",
+  // --- DTF Feature Integrity Phase 1 ---------------------------------------
+  // Emitted only when a `dtfFeatureIntegrity` measurement is present on the
+  // input — a standard-raster (never halftone_dtf) production plate whose
+  // final production geometry was actually measured. Supplements every check
+  // above rather than replacing any of them: a file can pass every existing
+  // check (valid PNG, correct physical size, 300 PPI, correct lineage) and
+  // still contain features too physically small or fragile for reliable DTF
+  // production — that is exactly the gap this phase closes. See
+  // ARCHITECTURE.md's "DTF Feature Integrity" section and
+  // `shared/dtf-feature-integrity-profile.ts` for the (explicitly
+  // provisional) thresholds these checks classify against.
+  /** Positive ink strokes/marks too physically thin, per the provisional DTF profile. */
+  "dtf_positive_feature_integrity",
+  /** Negative spaces (letter counters, gaps between shapes) too physically narrow. */
+  "dtf_negative_space_integrity",
+  /** Small/isolated printable components at risk of being lost during DTF powder/cure/peel. Never blindly flags every tiny fragment — distressed artwork intentionally contains them. */
+  "dtf_isolated_feature_integrity",
+  /** Diagnostic-only (never blocking — see the profile module): faint/partial-alpha fine features whose printed behavior this framework cannot observe. */
+  "dtf_partial_alpha_feature_integrity",
 ] as const;
 
 export type PrintValidationCheckCode =
@@ -660,6 +679,85 @@ export interface HalftoneProductionEvidence {
   inkedPixelFraction: number;
 }
 
+// ---------------------------------------------------------------------------
+// DTF Feature Integrity Phase 1
+// ---------------------------------------------------------------------------
+
+export type DtfFeatureRiskKind =
+  | "positive_feature_thin"
+  | "negative_space_narrow"
+  | "isolated_component_small"
+  | "partial_alpha_fragile";
+
+export interface DtfFeatureRiskBoundingBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One diagnostic risk region — enough to locate WHERE a risk is (Section 17
+ * of this phase's plan), never a repair instruction. Capped and worst-first;
+ * `DtfFeatureIntegritySummary.limitations` states when the full measurement
+ * found more than survived here.
+ */
+export interface DtfFeatureRiskRegion {
+  kind: DtfFeatureRiskKind;
+  boundingBoxPx: DtfFeatureRiskBoundingBox;
+  /** Measured stroke/gap width, in mm — set for `positive_feature_thin`/`negative_space_narrow`, `null` otherwise. */
+  measuredWidthMm: number | null;
+  /** Measured equivalent diameter, in mm — set for `isolated_component_small`/`partial_alpha_fragile`, `null` otherwise. */
+  measuredDiameterMm: number | null;
+  pixelArea: number;
+}
+
+/**
+ * Print Validation's own, independent copy of the Feature Integrity
+ * engine's measurement — mirrors `ProductionNormalizationSummary`'s
+ * relationship to `final-artwork`'s `ProductionNormalizationMetadata` and
+ * `HalftoneProductionEvidence`'s relationship to `HalftoneScreenMetadata`.
+ * Print Validation must never depend on the Final Artwork capability
+ * (ARCHITECTURE.md dependency direction; `capability-boundaries.ts`'s
+ * explicit "print-validation MUST NOT import the engine" rule for the
+ * structurally identical halftone case) — `FinalArtworkWorkerCapability`,
+ * which legitimately knows both shapes, is the one place a real
+ * `FeatureIntegrityMeasurement` is reduced onto this summary.
+ *
+ * Deliberately RAW measurements only — no pass/warning/blocking verdict is
+ * carried here. Classification against the provisional DTF profile happens
+ * once, inside `print-validation-capability.ts`'s own check functions, so
+ * the tier logic is never duplicated between this assembly step and the
+ * capability that is supposed to be the sole judge of it.
+ */
+export interface DtfFeatureIntegritySummary {
+  algorithmVersion: string;
+  pixelPitchXMm: number;
+  pixelPitchYMm: number;
+  positive: {
+    measuredComponentCount: number;
+    globalMinStrokeWidthMm: number | null;
+    percentile5StrokeWidthMm: number | null;
+  };
+  negative: {
+    measuredChannelCount: number;
+    globalMinGapWidthMm: number | null;
+    percentile5GapWidthMm: number | null;
+  };
+  isolated: {
+    totalComponentCount: number;
+    smallestEquivalentDiameterMm: number | null;
+  };
+  partialAlpha: {
+    partialAlphaFractionOfVisible: number;
+    smallestEquivalentDiameterMm: number | null;
+  };
+  /** Capped, worst-first diagnostic regions across all four categories. Never authoritative by itself — the checks below recompute their own verdicts from the aggregate fields above. */
+  riskRegions: DtfFeatureRiskRegion[];
+  /** Honest measurement limitations/notes carried through from the engine (e.g. non-square pixel pitch, capped region lists). */
+  limitations: string[];
+}
+
 /**
  * Everything `PrintValidationCapability.validateArtwork` needs, already
  * resolved by the caller. Print Validation itself never reads a repository
@@ -739,4 +837,17 @@ export interface PrintValidationInput {
    * did before this phase.
    */
   productionNormalization?: ProductionNormalizationSummary | null;
+  /**
+   * DTF Feature Integrity Phase 1: the production plate's measured feature
+   * geometry, when it was measured. Present only for a standard-raster
+   * (never `halftone_dtf`) production-asset validation whose final raster
+   * was actually decoded and measured — `null`/absent for provisional
+   * concept-stage validation, a halftone plate (its dot lattice is not
+   * continuous-tone stroke/gap geometry — see ARCHITECTURE.md), or a
+   * production asset persisted before this phase existed. Never emitted as
+   * a false pass: the four `dtf_*` checks are not emitted at all when this
+   * is absent, mirroring how halftone/reconstruction checks are not emitted
+   * outside their own applicable profile.
+   */
+  dtfFeatureIntegrity?: DtfFeatureIntegritySummary | null;
 }

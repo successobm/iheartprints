@@ -46,4 +46,8 @@ export {
   type ProductionNormalizationSummary,
   type ResolutionProvenance,
   type UploadedPreserveEvidence,
+  type DtfFeatureIntegritySummary,
+  type DtfFeatureRiskKind,
+  type DtfFeatureRiskRegion,
+  type DtfFeatureRiskBoundingBox,
 } from "./contracts";

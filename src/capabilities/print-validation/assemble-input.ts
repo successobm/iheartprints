@@ -22,6 +22,7 @@ import type {
 import type { ProductionTreatment } from "@/capabilities/shared/production-treatment";
 
 import type {
+  DtfFeatureIntegritySummary,
   HalftoneProductionEvidence,
   PrintValidationAssetSummary,
   PrintValidationInput,
@@ -170,6 +171,14 @@ export interface AssembleAuthoritativeProductionPrintValidationInputParams {
    * measured geometry.
    */
   normalization: ProductionNormalizationSummary;
+  /**
+   * DTF Feature Integrity Phase 1: the production plate's measured feature
+   * geometry, when it was measured. `null`/absent for a halftone plate (its
+   * dot lattice is not continuous-tone stroke/gap geometry) or when
+   * measurement could not be performed — passed straight through, never
+   * derived or defaulted here.
+   */
+  dtfFeatureIntegrity?: DtfFeatureIntegritySummary | null;
 }
 
 /**
@@ -209,6 +218,7 @@ export function assembleAuthoritativeProductionPrintValidationInput(
     requestedProductionOutput: params.requestedProductionOutput ?? null,
     primaryAsset,
     productionNormalization: params.normalization,
+    dtfFeatureIntegrity: params.dtfFeatureIntegrity ?? null,
   };
 }
 
@@ -243,6 +253,13 @@ export interface AssembleUploadedPreserveProductionPrintValidationInputParams {
    * is that it is the transform's own account of what it did.
    */
   halftone?: HalftoneProductionEvidence | null;
+  /**
+   * DTF Feature Integrity Phase 1: the production plate's measured feature
+   * geometry, when it was measured. Same contract as the Create New Artwork
+   * assembler above — `null`/absent for a halftone plate or when measurement
+   * could not be performed.
+   */
+  dtfFeatureIntegrity?: DtfFeatureIntegritySummary | null;
 }
 
 /**
@@ -295,5 +312,6 @@ export function assembleUploadedPreserveProductionPrintValidationInput(
     productionNormalization: params.normalization,
     productionTreatment: params.productionTreatment,
     halftone: params.halftone ?? null,
+    dtfFeatureIntegrity: params.dtfFeatureIntegrity ?? null,
   };
 }
