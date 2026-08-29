@@ -369,6 +369,8 @@ type DbFinalArtworkJob = {
   provider_key: string | null;
   provider_request_id: string | null;
   provider_status: string | null;
+  /** "Separate Provider Recovery Attempt Budget" — see `FinalArtworkJob.providerRecoveryAttempts`'s domain doc. Nullable only for rows written before the column existed; normalized to `0` in `mapFinalArtworkJob`. */
+  provider_recovery_attempts: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -734,6 +736,7 @@ function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
     providerKey: row.provider_key ?? null,
     providerRequestId: row.provider_request_id ?? null,
     providerStatus: row.provider_status ?? null,
+    providerRecoveryAttempts: row.provider_recovery_attempts ?? 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2467,6 +2470,9 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.providerKey !== undefined) payload.provider_key = patch.providerKey;
     if (patch.providerRequestId !== undefined) payload.provider_request_id = patch.providerRequestId;
     if (patch.providerStatus !== undefined) payload.provider_status = patch.providerStatus;
+    if (patch.providerRecoveryAttempts !== undefined) {
+      payload.provider_recovery_attempts = patch.providerRecoveryAttempts;
+    }
 
     const { data, error } = await this.client
       .from("final_artwork_jobs")

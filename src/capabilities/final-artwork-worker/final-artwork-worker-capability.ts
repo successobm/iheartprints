@@ -115,6 +115,7 @@ import { checkSourceEligibleForFinalization } from "./source-eligibility";
 import { verifyProductionArtwork } from "./production-verification";
 import {
   logFinalArtworkEnhancementProviderGap,
+  logFinalArtworkAttemptBudgetExhausted,
   logFinalArtworkPaidCallDecision,
   logFinalArtworkProviderFailure,
   logFinalArtworkReconstructionOutcome,
@@ -122,8 +123,49 @@ import {
 
 /** Mirrors `DEFAULT_STALE_JOB_MS` — a "running" job with no heartbeat for this long is presumed abandoned. */
 export const DEFAULT_FINAL_ARTWORK_STALE_JOB_MS = 15 * 60 * 1000;
-/** Mirrors `MAX_GENERATION_ATTEMPTS` — caps attempts across customer retries and worker-recovery reclaims combined. */
+/**
+ * "Separate Provider Recovery Attempt Budget": the FRESH-EXECUTION budget
+ * only — a claim capable of issuing a brand-new paid provider submission.
+ * Mirrors `MAX_GENERATION_ATTEMPTS` — caps attempts across customer retries
+ * and worker-recovery reclaims combined. Unchanged from before this phase;
+ * no longer the ONLY ceiling `produceProductionAsset` enforces — see
+ * `MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS` for the other one.
+ */
 export const MAX_FINAL_ARTWORK_ATTEMPTS = 3;
+/**
+ * "Separate Provider Recovery Attempt Budget": the RESUME/RECOVERY budget —
+ * how many separate claims may attempt to poll/download an EXISTING,
+ * already-paid, still-matching provider request before this job gives up
+ * on ever retrieving it. Deliberately a SEPARATE, more generous ceiling
+ * than `MAX_FINAL_ARTWORK_ATTEMPTS`: resuming never risks a duplicate paid
+ * submission (`submitOrResumePass` structurally cannot resubmit while
+ * `existingProviderRequest` is set), so exhausting attempts here can only
+ * ever mean "we could not read back a result Topaz may already have
+ * finished and billed" — a case worth trying harder on before concluding
+ * it is unrecoverable, but still a FINITE, bounded number of independent
+ * external reclaim cycles, never an unlimited loop.
+ *
+ * 5, not an unbounded/very large number: each individual claim ALREADY
+ * gets its own bounded local retry inside the provider itself (3
+ * attempts per download call, `TopazTransparencyUpscaleProvider`'s
+ * `downloadAttempts` — "Fix Topaz Resume/Download Failure"), so 5 separate
+ * claims already means up to 15 total download attempts across
+ * independent worker reclaims before this ceiling is reached — enough to
+ * absorb several distinct infrastructure incidents without becoming an
+ * unbounded retry loop.
+ */
+export const MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS = 5;
+
+/**
+ * "Separate Provider Recovery Attempt Budget": which of the two ceilings
+ * above applies to a given claim, decided ONCE, from persisted provider
+ * state and the CURRENTLY configured provider's identity — never from a
+ * customer/UI assumption. `"fresh_execution"` means this claim could still
+ * result in a brand-new paid submission; `"resume"` means a valid,
+ * matching, already-paid provider request exists and this claim can only
+ * ever poll/download it.
+ */
+export type FinalArtworkAttemptClassification = "fresh_execution" | "resume";
 
 export interface FinalArtworkWorkerCapability {
   /**
@@ -641,20 +683,6 @@ export function createFinalArtworkWorkerCapability(
       };
     }
 
-    if (job.attempts > MAX_FINAL_ARTWORK_ATTEMPTS) {
-      await failJob(
-        job,
-        `Exceeded maximum finalization attempts (${MAX_FINAL_ARTWORK_ATTEMPTS}) after repeated recovery.`,
-      );
-      return { status: "handled" };
-    }
-
-    const source = await assets.downloadAssetBytes(sourceAsset.id);
-    if (!source) {
-      await failJob(job, params.missingSourceBytesReason);
-      return { status: "handled" };
-    }
-
     // --- Phase 28V (Section 7/8): does a two-pass reconstruction's PASS 1
     // already durably exist for this job? If so, it must never be
     // resubmitted, and the job's single outstanding-request slot — if it
@@ -662,6 +690,14 @@ export function createFinalArtworkWorkerCapability(
     // crash landed between persisting the intermediate and clearing this
     // slot — is self-healed here, BEFORE it could be mistaken for an
     // in-flight pass 2 request.
+    //
+    // "Separate Provider Recovery Attempt Budget": moved above the
+    // attempt-budget check below (and above the source-bytes download) —
+    // classifying this claim requires knowing the CURRENT provider-request
+    // identity, and that classification must happen before either budget
+    // is charged. Neither this call nor the self-heal it may perform reads
+    // `source`, so nothing here changes what a fresh-execution-exhausted
+    // claim costs: it still fails before any asset bytes are read.
     const existingIntermediate = await resolveExistingIntermediateReconstruction(job);
     let effectiveJob = job;
     if (
@@ -673,8 +709,109 @@ export function createFinalArtworkWorkerCapability(
         providerKey: null,
         providerRequestId: null,
         providerStatus: null,
+        // A cleared identity has no recovery history of its own — the next
+        // real provider request (pass 2's fresh submission) starts its own
+        // recovery budget at zero, exactly like a brand-new job would.
+        providerRecoveryAttempts: 0,
       });
-      effectiveJob = { ...effectiveJob, providerKey: null, providerRequestId: null, providerStatus: null };
+      effectiveJob = {
+        ...effectiveJob,
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      };
+    }
+
+    // --- "Separate Provider Recovery Attempt Budget" (Phase 2/3): classify
+    // THIS claim before enforcing either ceiling. Reuses EXACTLY the
+    // identity check `submitOrResumePass` itself performs
+    // (`providerKey` match + a non-null `providerRequestId`) — never a
+    // second, possibly-disagreeing determination of "is this resumable."
+    // `providerRequestId` is a column on THIS job row, never shared across
+    // jobs/operations, so it can only ever refer to either this job's
+    // single-pass request or (after the self-heal above clears a retired
+    // pass 1 identity) its pass 2 request — never a stale request for a
+    // different operation. A configured-provider change between attempts
+    // (`effectiveJob.providerKey !== activeProvider.providerKey`) is
+    // therefore ALSO correctly classified as "fresh": resuming against a
+    // provider no longer configured would not be a safe recovery.
+    const existingProviderRequest: FinalArtworkProviderResumeContext | null =
+      effectiveJob.providerKey === activeProvider.providerKey && effectiveJob.providerRequestId
+        ? {
+            providerKey: effectiveJob.providerKey,
+            providerRequestId: effectiveJob.providerRequestId,
+            providerStatus: effectiveJob.providerStatus,
+          }
+        : null;
+    const attemptClassification: FinalArtworkAttemptClassification = existingProviderRequest
+      ? "resume"
+      : "fresh_execution";
+
+    if (attemptClassification === "fresh_execution") {
+      // UNCHANGED from before this phase: a claim that could still result
+      // in a brand-new paid submission stays bound by the original,
+      // finite fresh-execution budget.
+      if (job.attempts > MAX_FINAL_ARTWORK_ATTEMPTS) {
+        logFinalArtworkAttemptBudgetExhausted({
+          projectId: job.projectId,
+          finalArtworkJobId: job.id,
+          attempts: job.attempts,
+          classification: attemptClassification,
+          providerKey: activeProvider.providerKey,
+          hasProviderRequestId: false,
+          freshExecutionBudget: { used: job.attempts, max: MAX_FINAL_ARTWORK_ATTEMPTS },
+          recoveryBudget: null,
+        });
+        await failJob(
+          job,
+          `Exceeded maximum finalization attempts (${MAX_FINAL_ARTWORK_ATTEMPTS}) after repeated recovery.`,
+        );
+        return { status: "handled" };
+      }
+    } else {
+      // A valid, matching paid provider request already exists — this
+      // claim can only poll/download it, never submit a new one (enforced
+      // structurally by `submitOrResumePass`, unmodified). Bounded by its
+      // OWN, separate, finite ceiling so infrastructure/readback failures
+      // against already-paid work never exhaust — and are never blocked
+      // by — the fresh-execution budget above, while still never becoming
+      // an unbounded retry loop.
+      if (effectiveJob.providerRecoveryAttempts >= MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS) {
+        logFinalArtworkAttemptBudgetExhausted({
+          projectId: job.projectId,
+          finalArtworkJobId: job.id,
+          attempts: job.attempts,
+          classification: attemptClassification,
+          providerKey: activeProvider.providerKey,
+          hasProviderRequestId: true,
+          freshExecutionBudget: null,
+          recoveryBudget: {
+            used: effectiveJob.providerRecoveryAttempts,
+            max: MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS,
+          },
+        });
+        await failJob(
+          job,
+          `This reconstruction's existing paid provider request could not be recovered after ${MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS} attempts. ` +
+            "It was never resubmitted -- the paid request itself may need manual attention.",
+        );
+        return { status: "handled" };
+      }
+      // Charged BEFORE the resume is actually attempted — mirrors
+      // `claimNextQueuedFinalArtworkJob`'s own "spend the budget unit at
+      // the moment of committing to try" discipline, so a crash mid-resume
+      // still counts against this ceiling on the next reclaim rather than
+      // granting an extra free attempt.
+      const nextRecoveryAttempts = effectiveJob.providerRecoveryAttempts + 1;
+      await repo.updateFinalArtworkJob(job.id, { providerRecoveryAttempts: nextRecoveryAttempts });
+      effectiveJob = { ...effectiveJob, providerRecoveryAttempts: nextRecoveryAttempts };
+    }
+
+    const source = await assets.downloadAssetBytes(sourceAsset.id);
+    if (!source) {
+      await failJob(job, params.missingSourceBytesReason);
+      return { status: "handled" };
     }
 
     let existingIntermediateReconstruction: FinalArtworkProviderIntermediateReconstruction | null = null;
@@ -704,19 +841,6 @@ export function createFinalArtworkWorkerCapability(
       };
     }
 
-    // --- Sprint 2M Phase 2E (Goal 3): resume a prior paid request for
-    // THIS exact job when one exists and belongs to THIS exact provider —
-    // never resubmit while a paid reconstruction may still be in flight
-    // or already complete server-side.
-    const existingProviderRequest: FinalArtworkProviderResumeContext | null =
-      effectiveJob.providerKey === activeProvider.providerKey && effectiveJob.providerRequestId
-        ? {
-            providerKey: effectiveJob.providerKey,
-            providerRequestId: effectiveJob.providerRequestId,
-            providerStatus: effectiveJob.providerStatus,
-          }
-        : null;
-
     let submittedNewPaidRequest = false;
     // "Fix Topaz Resume/Download Failure" Phase 4: tracked purely for
     // observability on the failure path below — the job's OWN persisted
@@ -745,6 +869,15 @@ export function createFinalArtworkWorkerCapability(
               providerKey: activeProvider.providerKey,
               providerRequestId,
               providerStatus: "submitted",
+              // "Separate Provider Recovery Attempt Budget": a genuinely
+              // NEW paid request has no recovery history against it yet.
+              // Belt-and-suspenders — every path that sets a NEW
+              // `providerRequestId` here should already have reset this to
+              // `0` when the OLD one was last cleared, but this claim is
+              // the one place that actually SPENDS the new request's
+              // future recovery budget, so it is asserted explicitly here
+              // too.
+              providerRecoveryAttempts: 0,
             });
           },
           existingIntermediateReconstruction,
@@ -766,6 +899,10 @@ export function createFinalArtworkWorkerCapability(
           providerKey: null,
           providerRequestId: null,
           providerStatus: null,
+          // A provably dead request carries no recovery budget forward —
+          // whatever fresh request a future attempt submits starts its own
+          // recovery accounting at zero.
+          providerRecoveryAttempts: 0,
         });
       }
 

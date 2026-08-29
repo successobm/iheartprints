@@ -101,6 +101,18 @@ export function maybeTriggerLocalFinalArtworkWorker(
     const batchPromise = graph.finalArtworkScheduler.runBatch();
     void batchPromise
       .then((result) => {
+        // "Separate Provider Recovery Attempt Budget" Phase 6 naming note:
+        // `claimedJobIds` means exactly "these job ids were claimed and ran
+        // to SOME conclusion this batch" — success, an ordinary provider
+        // failure, OR an instant attempt-budget refusal before any
+        // provider call. It does NOT mean "succeeded" or even "made
+        // progress." A job appearing here can still have failed with no
+        // further log line elsewhere — see
+        // `logFinalArtworkProviderFailure`/`logFinalArtworkAttemptBudgetExhausted`
+        // in `final-artwork-observability.ts` for the actual outcome.
+        // Left unrenamed deliberately: this exact key may already be
+        // relied on by external log queries/alerts, and a rename here is
+        // out of this phase's narrow scope — see the accompanying report.
         logTrigger("local trigger batch progressed", {
           projectId: input.projectId,
           reason: input.reason,

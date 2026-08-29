@@ -310,6 +310,7 @@ export type UpdateFinalArtworkJobInput = Partial<
     | "providerKey"
     | "providerRequestId"
     | "providerStatus"
+    | "providerRecoveryAttempts"
   >
 >;
 

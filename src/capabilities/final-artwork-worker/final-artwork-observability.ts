@@ -121,3 +121,36 @@ export interface FinalArtworkProviderFailureLogDetails {
 export function logFinalArtworkProviderFailure(details: FinalArtworkProviderFailureLogDetails): void {
   console.error("[final-artwork-worker] job failed", details);
 }
+
+/**
+ * "Separate Provider Recovery Attempt Budget" Phase 6: fires whenever
+ * `produceProductionAsset` refuses a claim outright because its relevant
+ * attempt budget is exhausted — BEFORE any source download, provider poll,
+ * or provider download. This is a genuinely different moment from
+ * `logFinalArtworkProviderFailure`: that log fires only when
+ * `activeProvider.produce()` was actually invoked and threw; a
+ * budget-exhaustion refusal never reaches that call at all, which is
+ * exactly the gap the live INCREDI-BOWLS-class incident exposed — a job
+ * claimed and "processed" (see `local-final-artwork-trigger.ts`'s own
+ * `claimedJobIds` naming note) with no structured failure output anywhere.
+ *
+ * Exactly one of `freshExecutionBudget`/`recoveryBudget` is non-null,
+ * matching `classification` — never both, never neither.
+ */
+export interface FinalArtworkAttemptBudgetExhaustedLogDetails {
+  projectId: string;
+  finalArtworkJobId: string;
+  /** The job's generic claim counter at the moment of refusal (see `FinalArtworkJob.attempts`'s own doc for what this counts). */
+  attempts: number;
+  classification: "fresh_execution" | "resume";
+  providerKey: string;
+  hasProviderRequestId: boolean;
+  freshExecutionBudget: { used: number; max: number } | null;
+  recoveryBudget: { used: number; max: number } | null;
+}
+
+export function logFinalArtworkAttemptBudgetExhausted(
+  details: FinalArtworkAttemptBudgetExhaustedLogDetails,
+): void {
+  console.error("[final-artwork-worker] attempt budget exhausted", details);
+}

@@ -2318,6 +2318,21 @@ export interface FinalArtworkJob {
   providerKey: string | null;
   providerRequestId: string | null;
   providerStatus: string | null;
+  /**
+   * "Separate Provider Recovery Attempt Budget": how many claims have
+   * attempted to poll/download the CURRENT `providerRequestId` (never a
+   * fresh paid submission) — the separate, more generous budget that lets
+   * infrastructure/readback retries against an already-paid request
+   * recover without being blocked by, or consuming, `attempts`'s own
+   * fresh-execution ceiling (`MAX_FINAL_ARTWORK_ATTEMPTS`, in
+   * `final-artwork-worker-capability.ts`, next to
+   * `MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS`, its counterpart). Reset to `0`
+   * every time `providerKey`/`providerRequestId` are cleared or replaced —
+   * this counts recovery attempts against ONE specific paid request, never
+   * across a job's whole lifetime. `0` for a job that has never had a
+   * provider request, or whose provider has no paid-request concept.
+   */
+  providerRecoveryAttempts: number;
   createdAt: string;
   updatedAt: string;
 }
