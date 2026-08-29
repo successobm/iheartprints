@@ -767,6 +767,58 @@ export function buildSeparationMaster(
 }
 
 /**
+ * THE CORRECTION-BASE IDENTITY for a dynamic separation master ("Fix
+ * Separation Review -> Edit Artwork Authority Handoff"). A separation
+ * master has no persisted asset id of its own until `approveSeparationMaster`
+ * uploads one — and even then, any further decision change clears
+ * `approvedAt` and makes the persisted `preparedAssetId` stale again. Before
+ * approval, and in that stale window after it, the only thing that actually
+ * identifies "this exact master" is the tuple of inputs `buildSeparationMaster`
+ * itself consumes: the region map (already pinned to the source asset,
+ * algorithm version, and region set — see `RegionMap.regionMapHash`'s doc
+ * comment), the operator's region decisions, and the resolved proposal
+ * authority. Hashing exactly those, and NOTHING else, is what makes this
+ * identity change if and only if the resulting master's PIXELS could change.
+ *
+ * Deliberately excludes garment colour: compositing a transparent master
+ * over a preview garment (`compositeOverGarment`, called only for the
+ * `master-preview` review mode) is display-only and never changes the
+ * master's own pixels, so it must never invalidate a correction session
+ * either.
+ *
+ * Colocated with `buildSeparationMaster` so the two can never drift apart —
+ * anyone who changes what inputs the master depends on sees this function
+ * right next to it.
+ */
+export function computeSeparationMasterIdentity(
+  regionMap: RegionMap,
+  decisions: readonly RegionDecision[],
+  proposalAuthority: ProposalAuthority,
+): string {
+  const decisionsPart = [...decisions]
+    .map((d) => `${d.regionId}:${d.intent}`)
+    .sort()
+    .join(",");
+  const preservePart = [...proposalAuthority.preserveOperations]
+    .map((op) => `${op.operationId}:${op.rawTapX}:${op.rawTapY}:${op.capRuleVersion}:${op.snapRuleVersion}`)
+    .sort()
+    .join(",");
+  const hash = createHash("sha256");
+  hash.update(regionMap.sourceAssetSha256);
+  hash.update("|");
+  hash.update(regionMap.regionMapHash);
+  hash.update("|");
+  hash.update(regionMap.inBoundsProposal?.proposalHash ?? "no-proposal");
+  hash.update("|");
+  hash.update(decisionsPart);
+  hash.update("|");
+  hash.update(proposalAuthority.decision);
+  hash.update("|");
+  hash.update(preservePart);
+  return `separation-master:${hash.digest("hex")}`;
+}
+
+/**
  * THE DETERMINISTIC SAFETY NET (Goal 15). Runs regardless of how confident
  * or how human-confirmed the decisions were — Phase 6 proved a semantically
  * CORRECT substrate decision can still create a production concern (the

@@ -12,29 +12,38 @@ import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 import { createArtworkPreparationCapability } from "./artwork-preparation-capability";
 import { decodePngUpload } from "./image-decode";
+import { buildIndependentSeparationMaster } from "./separation-master-test-support";
 
 /**
- * Phase 27G/27H/28-correction-base — REAL-ASSET ACCEPTANCE for the manual
- * correction workspace, using the actual INCREDI-BOWLS upload the customer
- * used during production human-testing. Read-only on the customer's file:
- * only ever `readFileSync`d, never written to. Everything else here runs in
- * an isolated temp workspace with its own throwaway local repository -- no
- * live production project is ever touched.
+ * Phase 27G/27H/28-correction-base/28-separation-handoff — REAL-ASSET
+ * ACCEPTANCE for the manual correction workspace, using the actual
+ * INCREDI-BOWLS upload the customer used during production human-testing.
+ * Read-only on the customer's file: only ever `readFileSync`d, never written
+ * to. Everything else here runs in an isolated temp workspace with its own
+ * throwaway local repository -- no live production project is ever touched.
  *
- * This is also the exact real asset that surfaced two defects in sequence:
+ * This is also the exact real asset that surfaced THREE defects in sequence:
  *
  *   - Phase 27G/27H: `finalizeCorrection` refusing because this artwork
  *     independently requires separation review -- fixed by making an
  *     explicitly finalized manual correction authoritative regardless.
- *   - The correction-base defect this revision fixes: opening Edit Artwork
- *     re-initialized the correction session from the immutable ORIGINAL
- *     upload (Phase 27G's own choice, made for a different reason -- see
- *     `ensureCorrectionSession`'s doc comment) rather than from what
- *     automatic preparation had already produced, forcing the operator to
- *     redo cleanup automatic preparation already completed. The tests below
- *     now assert the FIXED behavior: opening the workspace shows the
- *     CURRENT PREPARED ARTWORK, and Undo/Start Over return to it, never to
- *     the original.
+ *   - The correction-base defect Phase 28-correction-base fixed: opening
+ *     Edit Artwork re-initialized the correction session from the immutable
+ *     ORIGINAL upload (Phase 27G's own choice, made for a different reason)
+ *     rather than from what automatic preparation had already produced,
+ *     forcing the operator to redo cleanup automatic preparation already
+ *     completed.
+ *   - "Fix Separation Review -> Edit Artwork Authority Handoff" (this
+ *     revision): this asset independently requires separation review (see
+ *     the DIAGNOSTIC test below) -- so once the prior fix landed, opening
+ *     Edit Artwork showed the STALE automatic `preparedAssetId` (the plain
+ *     `isolateBackground` output) while the review screen the operator had
+ *     just been looking at showed the LIVE `buildSeparationMaster` preview.
+ *     The tests below now assert the FULLY FIXED behavior: opening the
+ *     workspace shows the CURRENT dynamic separation master -- exactly what
+ *     `SeparationReviewPanel` labels PREPARED -- and Undo/Start Over return
+ *     to THAT, never to the original AND never to the earlier automatic
+ *     isolation asset.
  *
  * Skips entirely if the file isn't present on this machine, exactly like
  * every other real-asset acceptance test in this repo.
@@ -60,7 +69,7 @@ function countChangedPixels(a: { data: Buffer; width: number; height: number }, 
   return changed;
 }
 
-describe("INCREDI-BOWLS real-asset acceptance — manual correction workspace starts from prepared artwork", { skip: !hasAsset }, () => {
+describe("INCREDI-BOWLS real-asset acceptance — manual correction workspace starts from the reviewed separation master", { skip: !hasAsset }, () => {
   let tempDir = "";
   let previousCwd = "";
   let originalBytes: Buffer;
@@ -110,15 +119,20 @@ describe("INCREDI-BOWLS real-asset acceptance — manual correction workspace st
     assert.ok(changed > 0, "sanity: automatic preparation must have changed at least some pixels for this real asset");
   });
 
-  it("2/C: immediately after opening the manual workspace, the canvas shows the CURRENT PREPARED ARTWORK (not the original), with correction count 0", async () => {
+  it("2/C: immediately after opening the manual workspace, the canvas shows the CURRENT dynamic separation master -- the same raster labeled PREPARED on the review screen, not the original AND not the earlier automatic isolation asset", async () => {
     const { assets, capability, projectId } = await seed();
     const { LocalProjectRepository } = await import("@/lib/db/local-store");
     const repo = new LocalProjectRepository();
 
     const prep = await repo.getArtworkPreparation(projectId);
-    const preparedBytes = (await assets.downloadAssetBytes(prep!.preparedAssetId!))!.bytes;
-    const preparedPixels = await decoded(preparedBytes);
+    const automaticBytes = (await assets.downloadAssetBytes(prep!.preparedAssetId!))!.bytes;
+    const automaticPixels = await decoded(automaticBytes);
     const originalPixels = await decoded(originalBytes);
+    // Independently reconstructed via the SAME pure functions the review
+    // screen's `/separation/image?mode=master` uses -- see
+    // `buildIndependentSeparationMaster`'s own doc comment for why this is
+    // an independent call site, not a re-test of the fix against itself.
+    const separationMasterPixels = await buildIndependentSeparationMaster(repo, projectId, originalBytes);
 
     // This is the exact call the manual workspace makes on open (before any
     // click) -- Section 1's "critical authority rule".
@@ -126,20 +140,24 @@ describe("INCREDI-BOWLS real-asset acceptance — manual correction workspace st
     assert.equal(info.operationCount, 0, "opening the manual workspace must start with zero corrections");
 
     // THE FIX under acceptance test here: opening Edit Artwork must show
-    // exactly what automatic preparation already produced -- never the
-    // large original black background again, and never forcing the
-    // operator to redo cleanup automatic preparation already completed.
+    // exactly what the separation review screen is ALREADY labeling
+    // PREPARED -- never the large original black background again, and
+    // never the earlier automatic isolation asset the operator was never
+    // actually looking at.
     const shownOnOpen = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(countChangedPixels(preparedPixels, shownOnOpen), 0, "the manual workspace must show the CURRENT PREPARED ARTWORK exactly on open");
+    assert.equal(countChangedPixels(separationMasterPixels, shownOnOpen), 0, "the manual workspace must show the CURRENT dynamic separation master exactly on open");
     assert.ok(countChangedPixels(originalPixels, shownOnOpen) > 0, "the manual workspace must NOT revert to the original upload on open");
+    assert.ok(
+      countChangedPixels(automaticPixels, shownOnOpen) > 0,
+      "sanity: for this real asset the separation master and the earlier automatic isolation asset actually differ, so this test would have caught the reported authority-handoff defect",
+    );
   });
 
-  it("3-8: manual remove on the artwork, verify preview leaves the result untouched until applied, Delete removes, legitimate artwork remains, Undo restores, Start Over returns exactly to the prepared base", async () => {
-    const { assets, capability, projectId } = await seed();
+  it("3-8: manual remove on the artwork, verify preview leaves the result untouched until applied, Delete removes, legitimate artwork remains, Undo restores, Start Over returns exactly to the separation-review base", async () => {
+    const { capability, projectId } = await seed();
     const { LocalProjectRepository } = await import("@/lib/db/local-store");
     const repo = new LocalProjectRepository();
-    const prep = await repo.getArtworkPreparation(projectId);
-    const preparedPixels = await decoded((await assets.downloadAssetBytes(prep!.preparedAssetId!))!.bytes);
+    const preparedPixels = await buildIndependentSeparationMaster(repo, projectId, originalBytes);
 
     // A point solidly inside the bowling ball's own dark fill (per
     // `incredi-bowls-toolbox-acceptance.test.ts`'s header comment) -- the

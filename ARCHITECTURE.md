@@ -6170,6 +6170,125 @@ Artwork."
 
 ---
 
+## 13l. Separation Review -> Edit Artwork Authority Handoff
+
+§13k established that the correction workspace must start from whatever the
+customer is actually reviewing as PREPARED, not the immutable original. That
+was incomplete: when Intelligent Separation review (§9/§17/§23) owns the
+reviewed surface, PREPARED is not `preparedAssetId` at all — it is
+`SeparationReviewPanel`'s dynamic `buildSeparationMaster(...)` preview,
+rendered live from the CURRENT persisted region/proposal decisions. Before
+this section's fix, opening Edit Artwork during separation review still read
+`preparedAssetId`, which at that stage is usually the earlier automatic
+`isolateBackground` output — a genuinely different raster the customer was
+never shown as PREPARED.
+
+**The general invariant, of which §13k's is the ordinary-path special case:**
+
+    reviewedArtworkAuthority == correctionBaseAuthority
+
+Concretely:
+
+    correctionBase = rawSeparationMaster(original, current separation decisions)
+        -- whenever Intelligent Separation review owns the reviewed surface
+    correctionBase = preparedAssetId
+        -- otherwise (§13k's ordinary path: no consequential regions/proposal
+           exist, OR a manual correction has already been finalized and
+           accepted for this exact result)
+    currentCorrectionResult = correctionBase + acceptedCorrectionOperations
+        -- unconditionally, regardless of which correctionBase applied
+
+Garment compositing (`compositeOverGarment`, the `master-preview` review
+mode) is preview-only and never artwork authority: it runs strictly AFTER
+`correctionBase` is decided, reads it without mutating it, and never
+influences `correctionBase`'s own identity.
+
+### Which authority applies, and how it is decided
+
+`ensureCorrectionSession` (`artwork-preparation-capability.ts`) decides this
+on every session-affecting call via `resolveSeparationCorrectionBase`, using
+the EXACT SAME predicate `approvePreparedArtwork` already gates its own
+automatic-approval path on, and the same one `SeparationReviewPanel`'s
+reported `state` (mirrored into `UploadedArtworkPanel`'s
+`separationGateActive`) drives client-side:
+
+    assessSeparationReviewState(regionMap, decisionSet) !== "review_not_required"
+
+A deliberately finalized manual correction
+(`hasAcceptedManualOverride` — §13k, Phase 27H §0) always wins over this:
+once an operator has accepted a corrected result, `preparedAssetId` already
+IS that result, and no further separation authority applies to it — reusing
+one existing rule rather than adding a second, possibly disagreeing, one.
+
+### Single producer
+
+The separation-master path calls the exact same `buildSeparationMaster`
+(and `computeRegionMap`) the review image route
+(`/artwork-preparation/separation/image?mode=master`) calls — never a
+second implementation of the algorithm. The two are independent CALL SITES
+(the capability's own `computeSeparationState`/`proposalAuthorityFor`
+helpers vs. the route's equivalent inline derivation), but both feed the
+same pure, deterministic functions with equivalent-by-construction
+arguments, so they cannot drift in what they compute — the same discipline
+`approveSeparationMaster` already relies on for its own, separate call to
+`buildSeparationMaster`.
+
+### Correction-base identity for a dynamic master
+
+A dynamic separation master has no persisted asset id until
+`approveSeparationMaster` uploads one — and even then, any further decision
+change clears `approvedAt`, making the persisted `preparedAssetId` stale
+again. `computeSeparationMasterIdentity` (colocated with
+`buildSeparationMaster` in `region-separation.ts` so the two can never drift
+apart) fills this gap: a `separation-master:<hash>` fingerprint hashing
+exactly the inputs that could change the master's pixels — the region map
+(source asset identity, algorithm version, region set —
+`RegionMap.sourceAssetSha256`/`regionMapHash`), the operator's region
+decisions, and the resolved proposal decision/preserve-ops. It deliberately
+excludes garment colour: compositing over a preview garment never touches
+the master's own pixels, so it must never appear in — or invalidate —
+this identity. This is the "narrowest explicit correction-base identity"
+this handoff needs; no new persisted column or asset was introduced.
+
+### Stale-session protection, extended
+
+§13k's existing `baseAssetId` freshness comparison (`getOrCreateSession`/
+`hasFreshSession`) needed no new mechanism — it already invalidates a
+session whenever its key changes. This handoff just widens what that key
+can be: a real asset id (ordinary path) or a `computeSeparationMasterIdentity`
+fingerprint (separation path). A changed region or proposal decision while a
+correction session is open produces a different fingerprint, so the next
+correction-session entry starts fresh from the NEW master rather than
+silently replaying stale operations onto it. An unrelated change — a
+garment-colour preview, a re-render, a second read of the same state —
+never changes the fingerprint, so an in-progress correction session (and
+its accepted operations) survives exactly as before.
+
+### Geometry, restore, and finalization — unchanged authorities
+
+- **Geometry**: `buildSeparationMaster` returns an image with the ORIGINAL's
+  exact `width`/`height` by construction (it only ever zeroes alpha on a
+  copy of the original's own buffer). `ensureCorrectionSession` still calls
+  `assertPreservesGeometry` defensively regardless of which path produced
+  `base`, so a hypothetical future violation in either path fails loudly
+  rather than silently misaligning Restore.
+- **Restore Missing Artwork**: unchanged — always reads from
+  `session.original`, the immutable original, regardless of which authority
+  produced `session.base`.
+- **Finalization**: unchanged — `finalizeCorrection` is already generic on
+  `session.base` + operations, so once `base` is correctly the separation
+  master, "final corrected artwork = raw separation master + accepted
+  correction operations" falls out for free and persists as the new
+  `preparedAssetId`, never rebuilt from the earlier automatic asset.
+- **Review after finalization**: unchanged — `hasAcceptedManualOverride`
+  already makes a finalized manual result supersede separation review for
+  that exact artwork, which is also what makes `resolveSeparationCorrectionBase`
+  correctly fall back to the ordinary (now-finalized) `preparedAssetId` path
+  on any later reopen, rather than recomputing a fresh separation preview
+  that would silently hide the customer's accepted edits.
+
+---
+
 ## 14. Background Worker Architecture
 
 Two independent job queues, two independent workers — deliberately never

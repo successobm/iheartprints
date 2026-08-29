@@ -7,14 +7,21 @@
  * (the project's CURRENT prepared asset, not a freshly recomputed
  * separation baseline) differ.
  *
- * CRITICAL INVARIANT (Phase 27E §2, restored): the session's "base" image is
- * exactly the bytes of whatever `preparedAssetId` pointed to when the
- * session started — falling back to the immutable original only when no
- * prepared asset exists yet (see `ensureCorrectionSession`'s doc comment in
+ * CRITICAL INVARIANT (Phase 27E §2, restored and extended for the
+ * separation-review authority handoff): the session's "base" image is
+ * exactly whatever the customer was actually reviewing as PREPARED when the
+ * session started — the CURRENT dynamic separation master while
+ * Intelligent Separation review owns that surface, else the CURRENT
+ * `preparedAssetId` bytes, else (only when neither exists yet) the
+ * immutable original. `baseAssetId` is correspondingly either a
+ * content-derived separation-master identity or a real asset id — see
+ * `ensureCorrectionSession`'s doc comment in
  * `artwork-preparation-capability.ts`, the caller responsible for resolving
- * both images). This module never calls `computeRegionMap`/
- * `buildSeparationMaster` or any other automatic-removal logic itself — it
- * only holds whatever `base` it was given. Restoring still reads from the
+ * both images and deciding which of the three applies. This module never
+ * calls `computeRegionMap`/`buildSeparationMaster` or any other
+ * automatic-removal logic itself — it only holds whatever `base` it was
+ * given, and treats `baseAssetId` as an opaque freshness key, never as a
+ * literal asset id to look anything up by. Restoring still reads from the
  * immutable original; removing still reads from the evolving current
  * result — nothing here re-derives a removal decision.
  *
@@ -93,7 +100,17 @@ interface CorrectionSession {
   projectId: string;
   original: RgbaImage;
   base: RgbaImage;
-  /** The `preparedAssetId` this session's `base` image was loaded from — used to detect a stale/superseded session. */
+  /**
+   * The identity of whatever `base` was loaded from — used to detect a
+   * stale/superseded session. Usually the real `preparedAssetId` (or
+   * `originalAssetId` when no prepared asset exists yet), but while
+   * Intelligent Separation review owns the reviewed surface this is a
+   * content-derived `separation-master:<hash>` fingerprint instead (see
+   * `computeSeparationMasterIdentity`) — there is no real asset id for a
+   * dynamic, not-yet-persisted master. Either way it is opaque here: this
+   * module only ever compares it for equality, never parses or looks
+   * anything up by it.
+   */
   baseAssetId: string;
   operations: CorrectionOperationRecord[];
 }

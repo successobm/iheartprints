@@ -119,6 +119,7 @@ import {
   buildSeparationMaster,
   CAP_RULE_VERSION_V1,
   computeRegionMap,
+  computeSeparationMasterIdentity,
   runSeparationPostChecks,
   SNAP_RULE_VERSION_V1,
   type ProposalAuthority,
@@ -666,45 +667,117 @@ export function createArtworkPreparationCapability(
   }
 
   /**
-   * Phase 27E: makes sure this project has a correction session whose base
-   * image is exactly the CURRENT `preparedAssetId` bytes. Downloads and
-   * decodes the original + prepared images ONLY when there is no session
-   * yet, or the existing one is based on a `preparedAssetId` that has since
-   * changed (e.g. a separation re-approval happened in another tab) — never
-   * on every click, and never by recomputing a removal.
+   * "Fix Separation Review -> Edit Artwork Authority Handoff": whether
+   * Intelligent Separation review currently OWNS this artwork's reviewed
+   * "PREPARED" surface — i.e. whether the customer's PREPARED screen is
+   * `SeparationReviewPanel`'s dynamic `buildSeparationMaster(...)` preview
+   * rather than the ordinary `preparedAssetId` comparison. This is the
+   * SAME predicate `approvePreparedArtwork` already gates its own
+   * automatic-approval path on
+   * (`assessSeparationReviewState(...) !== "review_not_required"`), and the
+   * same one `SeparationReviewPanel`'s reported `state` (mirrored into
+   * `UploadedArtworkPanel`'s `separationGateActive`) drives client-side —
+   * reused here, never re-derived, so "what the customer sees" and "what
+   * the correction workspace edits" cannot structurally disagree.
+   *
+   * Returns `null` when the ordinary `preparedAssetId` path is authoritative
+   * (no consequential regions/proposal at all, OR a deliberately finalized
+   * manual correction already supersedes separation review for this exact
+   * result — Phase 27H §0's `hasAcceptedManualOverride`, unchanged).
+   * Otherwise builds the CURRENT dynamic master from the CURRENT persisted
+   * decisions via the exact same `buildSeparationMaster` call
+   * `/separation/image?mode=master` uses (never a second implementation —
+   * see that route's own doc comment), plus a `baseIdentity` fingerprint
+   * (`computeSeparationMasterIdentity`, colocated with `buildSeparationMaster`
+   * in `region-separation.ts` so the two can never drift) that changes if
+   * and only if the resulting master's pixels could change: original asset
+   * identity, region map (algorithm version + region set), region
+   * decisions, and proposal decision/preserve-ops all fold into it;
+   * garment colour deliberately does not (compositing over a preview
+   * garment never touches the master's own pixels).
+   *
+   * Recomputes the region map and rebuilds the master on every call while
+   * separation review is active, exactly like `getSeparationReview` and
+   * `approvePreparedArtwork` already do — no caching layer is introduced
+   * here, so this can never disagree with what those already show. This is
+   * an accepted, bounded cost (one image decode + one region-map pass) already
+   * paid by the review screen itself; it is not novel here.
    */
+  async function resolveSeparationCorrectionBase(
+    designId: string,
+    preparation: ArtworkPreparation,
+  ): Promise<{ original: RgbaImage; base: RgbaImage; baseIdentity: string } | null> {
+    if (await hasAcceptedManualOverride(designId, preparation)) return null;
+
+    const { image: original, sha256 } = await loadOriginalImageWithHash(preparation);
+    const { computation, decisionSet } = computeSeparationState(preparation, sha256, original);
+    if (assessSeparationReviewState(computation.regionMap, decisionSet) === "review_not_required") {
+      return null;
+    }
+
+    const proposalAuthority = proposalAuthorityFor(computation.regionMap, decisionSet);
+    const decisions = decisionSet?.decisions ?? [];
+    const base = buildSeparationMaster(original, computation, decisions, proposalAuthority);
+    const baseIdentity = computeSeparationMasterIdentity(computation.regionMap, decisions, proposalAuthority);
+    return { original, base, baseIdentity };
+  }
+
   /**
    * The manual correction workspace initializes from whatever the customer
-   * was actually reviewing immediately before opening it: the CURRENT
-   * `preparedAssetId` when one exists, falling back to the immutable
-   * ORIGINAL only when automatic preparation has never produced one (a
-   * `NEEDS_REVIEW`-classified upload, or "Clean Up Manually" reached before
-   * any automatic attempt — Phase 28A's entry point). This is the fix for
-   * the reported "corrections=0 shows the large original background again"
-   * defect: automatic preparation's own work is never silently discarded
-   * merely because the operator opened Edit Artwork.
+   * was actually reviewing immediately before opening it:
    *
-   * `original` is ALWAYS the immutable original upload, never the prepared
-   * asset — Restore Missing Artwork's recovery authority and "compare
-   * against the original" both depend on this remaining the true original
-   * regardless of what `base` is. Geometry between the two is guaranteed
-   * identical (never a crop/resize/reframe) by `assertPreservesGeometry`,
-   * enforced wherever a prepared asset is derived — see that function's own
-   * doc comment — so no coordinate mapping is needed between them.
+   *   1. the CURRENT dynamic separation master, when Intelligent Separation
+   *      review owns the reviewed surface (`resolveSeparationCorrectionBase`
+   *      above) — the fix for the reported "PREPARED shows the separation
+   *      master but Edit Artwork shows the earlier automatic isolation
+   *      result" authority mismatch;
+   *   2. otherwise the CURRENT `preparedAssetId`, when one exists — the fix
+   *      for the earlier "corrections=0 shows the large original background
+   *      again" defect (0934613);
+   *   3. falling back to the immutable ORIGINAL only when automatic
+   *      preparation has never produced anything at all (a
+   *      `NEEDS_REVIEW`-classified upload, or "Clean Up Manually" reached
+   *      before any automatic attempt — Phase 28A's entry point).
    *
-   * `baseAssetId` is keyed on the SAME id that decided `base`
-   * (`preparedAssetId ?? originalAssetId`), which is what makes
+   * `original` is ALWAYS the immutable original upload, never a separation
+   * master or prepared asset — Restore Missing Artwork's recovery
+   * authority and "compare against the original" both depend on this
+   * remaining the true original regardless of what `base` is. Geometry
+   * between the two is guaranteed identical (never a crop/resize/reframe):
+   * `buildSeparationMaster` returns an image with the ORIGINAL's exact
+   * `width`/`height` by construction (it only ever zeroes alpha on a copy
+   * of the original's own buffer — see its doc comment), and
+   * `assertPreservesGeometry` is asserted defensively below regardless of
+   * which of the three paths produced `base`, so a hypothetical future
+   * violation in ANY path fails loudly rather than silently misaligning
+   * Restore.
+   *
+   * `baseAssetId` is keyed on whichever identity decided `base` in each
+   * case above (`baseIdentity` from separation, else
+   * `preparedAssetId ?? originalAssetId`), which is what makes
    * `getOrCreateSession`'s existing `baseAssetId` comparison correctly
-   * detect a stale session: if automatic (or guided) preparation produces a
-   * NEW `preparedAssetId` while a correction session for the OLD one is
+   * detect a stale session: if separation decisions change, automatic (or
+   * guided) preparation produces a new `preparedAssetId`, or a manual
+   * correction is finalized while a correction session for the OLD base is
    * still open (e.g. another tab), the next call here sees a different key
    * and starts a fresh session from the new base — never silently reusing
-   * a session built on a prepared asset that no longer exists as "current."
-   * A session only ever gets discarded this way or by `finalizeCorrection`
-   * clearing it; accepted operations are never dropped by a mere reopen.
+   * a session built on a base that is no longer current. A session only
+   * ever gets discarded this way or by `finalizeCorrection` clearing it;
+   * accepted operations are never dropped by a mere reopen with an
+   * unchanged base.
    */
   async function ensureCorrectionSession(designId: string): Promise<void> {
     const { preparation } = await loadOwned(designId);
+
+    const separationBase = await resolveSeparationCorrectionBase(designId, preparation);
+    if (separationBase) {
+      const { original, base, baseIdentity } = separationBase;
+      if (hasFreshSession(designId, baseIdentity)) return;
+      assertPreservesGeometry(original, base);
+      getOrCreateSession(designId, original, base, baseIdentity);
+      return;
+    }
+
     const baseAssetId = preparation.preparedAssetId ?? preparation.originalAssetId;
     if (hasFreshSession(designId, baseAssetId)) return;
 

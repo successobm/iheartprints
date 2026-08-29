@@ -13,6 +13,7 @@ import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { createArtworkPreparationCapability } from "./artwork-preparation-capability";
 import { decodePngUpload } from "./image-decode";
 import { toPngBytes } from "./artwork-fixtures";
+import { buildIndependentSeparationMaster } from "./separation-master-test-support";
 
 /**
  * Phase 27K — WAND SELECTION / APPLY UX CLARITY.
@@ -84,7 +85,16 @@ describe("Phase 27K: Wand selection/apply UX clarity (server-side truth behind t
     await capability.prepareBackground(projectId);
     const preparation = await repo.getArtworkPreparation(projectId);
     const preparedBytes = (await assets.downloadAssetBytes(preparation!.preparedAssetId!))!.bytes;
-    return { capability, projectId, originalBytes, preparedBytes };
+    // This fixture's D/B squares leave an in-bounds background strip between
+    // them that automatic preparation already removed but Intelligent
+    // Separation review has not yet decided (`fullRemovalSafe: false` --
+    // proven by the diagnostic in
+    // `incredi-bowls-manual-fallback-acceptance.test.ts`'s sibling test) --
+    // so the correction workspace's actual base is the PENDING separation
+    // master (which retains that strip), never the automatic `preparedBytes`
+    // asset. See "Fix Separation Review -> Edit Artwork Authority Handoff".
+    const separationMaster = await buildIndependentSeparationMaster(repo, projectId, originalBytes);
+    return { capability, projectId, originalBytes, preparedBytes, separationMasterPixels: separationMaster };
   }
 
   async function decoded(bytes: Buffer) {
@@ -96,22 +106,20 @@ describe("Phase 27K: Wand selection/apply UX clarity (server-side truth behind t
 
   // §9.A: click D (preview only) -- pending, zero accepted operations.
   it("A: previewing D creates a pending selection but ZERO accepted operations, and does not change the result", async () => {
-    const { capability, projectId, preparedBytes } = await seeded();
-    const preparedPixels = await decoded(preparedBytes);
+    const { capability, projectId, separationMasterPixels } = await seeded();
 
     const preview = await capability.previewCorrectionSelection(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     assert.ok(preview.pixelCount > 0, "D must be found as a valid selection");
 
     assert.equal((await capability.getCorrectionSessionInfo(projectId)).operationCount, 0, "previewing must never itself create an operation");
     const result = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "the actual result must be untouched by a mere preview -- D is not really removed yet");
+    assert.equal(Buffer.compare(result.data, separationMasterPixels.data), 0, "the actual result must be untouched by a mere preview -- D is not really removed yet");
   });
 
   // §9.B: without applying D, preview R -- R becomes pending, D was never
   // secretly accepted, operation count stays 0.
   it("B: previewing R without applying D leaves accepted operations at ZERO -- no D operation was secretly created", async () => {
-    const { capability, projectId, preparedBytes } = await seeded();
-    const preparedPixels = await decoded(preparedBytes);
+    const { capability, projectId, separationMasterPixels } = await seeded();
 
     await capability.previewCorrectionSelection(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     // Operator clicks R instead of applying D (existing semantics: R simply
@@ -121,7 +129,7 @@ describe("Phase 27K: Wand selection/apply UX clarity (server-side truth behind t
 
     assert.equal((await capability.getCorrectionSessionInfo(projectId)).operationCount, 0, "still zero -- D was never committed, and R is only a preview too");
     const result = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "the result must still equal the prepared base -- nothing was ever actually removed");
+    assert.equal(Buffer.compare(result.data, separationMasterPixels.data), 0, "the result must still equal the separation-review base -- nothing was ever actually removed");
   });
 
   // §9.C: doing it correctly -- explicit apply for each.

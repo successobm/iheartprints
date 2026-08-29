@@ -13,6 +13,7 @@ import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { createArtworkPreparationCapability } from "./artwork-preparation-capability";
 import { decodePngUpload } from "./image-decode";
 import { toPngBytes, bowlingStyleArtwork } from "./artwork-fixtures";
+import { buildIndependentSeparationMaster } from "./separation-master-test-support";
 
 /**
  * Phase 27J — REGRESSION for the operation-composition/replay defect human
@@ -85,7 +86,14 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
     await capability.prepareBackground(projectId);
     const preparation = await repo.getArtworkPreparation(projectId);
     const preparedBytes = (await assets.downloadAssetBytes(preparation!.preparedAssetId!))!.bytes;
-    return { repo, assets, capability, projectId, originalBytes, preparedBytes };
+    // The D/B/R fixture's in-bounds gaps between the squares are not
+    // `fullRemovalSafe`, so this artwork requires Intelligent Separation
+    // review and the correction workspace's real base is the PENDING
+    // separation master (which retains those gaps), never the automatic
+    // `preparedBytes` asset -- see "Fix Separation Review -> Edit Artwork
+    // Authority Handoff".
+    const separationMaster = await buildIndependentSeparationMaster(repo, projectId, originalBytes);
+    return { repo, assets, capability, projectId, originalBytes, preparedBytes, separationMasterPixels: separationMaster };
   }
 
   async function decoded(bytes: Buffer) {
@@ -121,8 +129,7 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
   });
 
   it("§9: reverse composition -- Undo 1/2/3 in reverse order restores R, then B, then D, ending byte-identical to the prepared base", async () => {
-    const { capability, projectId, preparedBytes } = await seeded();
-    const preparedPixels = await decoded(preparedBytes);
+    const { capability, projectId, separationMasterPixels } = await seeded();
 
     await capability.acceptCorrectionOperation(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     await capability.acceptCorrectionOperation(projectId, { clicks: [B], mode: "remove", toleranceLevel: "default" });
@@ -145,12 +152,11 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
     await capability.undoCorrectionOperation(projectId);
     result = await decoded(await capability.getCorrectionResultPng(projectId));
     assert.equal(alphaAt(result, D), 255, "Undo 3: D must be restored");
-    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "Undo 3: result must equal the prepared base byte-for-byte");
+    assert.equal(Buffer.compare(result.data, separationMasterPixels.data), 0, "Undo 3: result must equal the separation-review base byte-for-byte");
   });
 
   it("§10: mixed-tool composition -- Wand remove D -> Brush restore unrelated pixels -> Eraser punch an enclosed pocket in R -> Fill restore it -> Wand remove B, every prior operation remains present, then reverse-Undo restores each in turn", async () => {
-    const { capability, projectId, preparedBytes } = await seeded();
-    const preparedPixels = await decoded(preparedBytes);
+    const { capability, projectId, separationMasterPixels } = await seeded();
 
     // Wand remove D.
     await capability.acceptCorrectionOperation(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
@@ -195,12 +201,11 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
       await capability.undoCorrectionOperation(projectId);
     }
     result = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "undoing all 5 mixed-tool operations must reproduce the prepared base exactly");
+    assert.equal(Buffer.compare(result.data, separationMasterPixels.data), 0, "undoing all 5 mixed-tool operations must reproduce the separation-review base exactly");
   });
 
   it("§13: Start Over after D+B+R reproduces the prepared base exactly, and a fresh D removal afterward has no ghost B/R state", async () => {
-    const { capability, projectId, preparedBytes } = await seeded();
-    const preparedPixels = await decoded(preparedBytes);
+    const { capability, projectId, separationMasterPixels } = await seeded();
 
     await capability.acceptCorrectionOperation(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     await capability.acceptCorrectionOperation(projectId, { clicks: [B], mode: "remove", toleranceLevel: "default" });
@@ -208,7 +213,7 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
 
     await capability.resetCorrectionSession(projectId);
     let result = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "Start Over must reproduce the prepared base exactly");
+    assert.equal(Buffer.compare(result.data, separationMasterPixels.data), 0, "Start Over must reproduce the separation-review base exactly");
     assert.equal((await capability.getCorrectionSessionInfo(projectId)).operationCount, 0, "Start Over must clear operation history to zero");
 
     // Fresh D removal after Start Over -- confirm no ghost B/R state.

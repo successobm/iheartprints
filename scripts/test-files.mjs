@@ -357,6 +357,7 @@ export const TEST_FILES = [
   // immediately per the established "never leave a new test file
   // unregistered" discipline from Phase 27H/27I/27J.
   "src/capabilities/artwork-preparation/wand-selection-apply-clarity.test.ts",
+  "src/capabilities/artwork-preparation/separation-correction-authority.test.ts",
   "src/components/chat/correction-workspace-shape.test.ts",
   "src/app/api/projects/[projectId]/artwork-preparation/correction/correction-routes-authorization.test.ts",
   "src/app/api/projects/[projectId]/artwork-upload/route.test.ts",
