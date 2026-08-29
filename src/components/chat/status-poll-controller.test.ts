@@ -7,6 +7,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Wait until `predicate` is true or fail — avoids fixed-sleep flakes under suite load. */
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`timed out waiting for ${label}`);
+    }
+    await sleep(5);
+  }
+}
+
+
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -59,7 +75,7 @@ describe("createStatusPollController (finalization / generation polling)", () =>
     });
 
     const stop = controller.start();
-    await sleep(80);
+    await waitUntil(() => refreshes === 1, 500, "print_ready refresh");
     const pollsAfterReady = polls;
     await sleep(50);
     stop();
@@ -84,7 +100,7 @@ describe("createStatusPollController (finalization / generation polling)", () =>
     });
 
     const stop = controller.start();
-    await sleep(80);
+    await waitUntil(() => refreshes === 1, 500, "retryable_failure refresh");
     const pollsAfterFailure = polls;
     await sleep(50);
     stop();
@@ -113,7 +129,7 @@ describe("createStatusPollController (finalization / generation polling)", () =>
     });
 
     const stop = controller.start();
-    await sleep(80);
+    await waitUntil(() => refreshes === 1, 500, "needs_review refresh");
     const pollsAfterReview = polls;
     await sleep(50);
     stop();
@@ -163,7 +179,7 @@ describe("createStatusPollController (finalization / generation polling)", () =>
     stop1();
 
     const stop2 = controller.start();
-    await sleep(100);
+    await waitUntil(() => refreshes === 1, 500, "strict-mode remount refresh");
     stop2();
 
     assert.ok(polls >= 1, "the kept mount must poll");

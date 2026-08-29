@@ -54,6 +54,9 @@ supabase/.temp/
 .tmp-audit-harley/
 .tmp-phase2c0-bakeoff/
 
+# DTF Physical Calibration Phase 2B generated sheets (regenerate via script)
+.tmp-dtf-physical-calibration/
+
 # Sprint 2M Phase 2D research bake-off artifacts (local only)
 research/phase-2d-bakeoff/outputs/
 research/phase-2d-bakeoff/reports/

@@ -9175,6 +9175,92 @@ on either.
 
 ---
 
+## 23m. DTF Physical Calibration (Phase 2B)
+
+**Status:** Active as a **developer-only harness**. Does not change production
+thresholds, PrintValidation readiness, FinalArtwork transformation behavior,
+or treatment defaults.
+
+### Why thresholds are still provisional
+
+Phase 1 and Phase 2A shipped measurable Feature Integrity and Coverage
+Intelligence, classified against
+`shared/dtf-feature-integrity-profile.ts`. Those profile numbers remain
+**engineering assumptions**. They are not yet derived from controlled DTF
+prints. Treating them as physical truth would invent a standard.
+
+### What this phase produces
+
+`final-artwork/dtf-physical-calibration/` generates deterministic transparent
+PNG calibration sheets at the apparel-raster **300 PPI** target, with:
+
+- known requested physical geometry (mm)
+- honest raster quantization (requested vs actual px / actual mm)
+- stable specimen IDs printed on-sheet and mirrored in JSON manifests
+- Feature Integrity + Coverage measurements of each sheet (diagnostic)
+- blank observation templates for post-print recording
+
+Sheets (practical multi-page layout):
+
+| Sheet | Purpose |
+|---|---|
+| SHEET_A | Positive / negative / isolated / typography / distress survival |
+| SHEET_B | Partial alpha, continuous coverage, existing-engine halftone patches |
+| SHEET_C | Raster-vs-halftone pairs + one experimental hybrid composition |
+
+Regenerate (gitignored output):
+
+```
+npx tsx scripts/generate-dtf-physical-calibration.ts
+npx tsx scripts/generate-dtf-physical-calibration.ts --out .tmp-dtf-physical-calibration
+```
+
+### Objective vs subjective observations
+
+Manifests record **objective** generated geometry and engine measurements.
+Observation documents record **physical** outcomes after print (survival,
+edge quality, negative-space open/partial/closed, text legibility) plus
+clearly labeled **SUBJECTIVE** hand/feel fields for raster-vs-halftone pairs
+(lighter/heavier, flexibility, breathability perception, vibrancy, garment
+integration). Subjective fields are not pixel measurements and must never be
+treated as PrintValidation inputs.
+
+Garment color is a first-class run metadata field — the same plate may be
+evaluated on black and light garments where the process permits.
+
+### Raster vs. halftone research objective
+
+Sheet C places identical visual sources as continuous raster and as the
+**existing** `applyHalftoneScreen` output side by side. The goal is later
+physical comparison of vibrancy, tonal smoothness, detail, garment
+visibility, apparent coverage, and hand — **not** an automatic claim that
+either representation is superior, and **not** a production treatment switch.
+
+### Experimental hybrid specimen
+
+`HYBRID-EXP-01` composes solid structure over a screened tonal field using
+existing draw + `applyHalftoneScreen` primitives only. It is labeled
+**EXPERIMENTAL — NOT PRODUCTION LOGIC**. It does not create a hybrid
+production treatment, does not alter FinalArtworkCapability, and must not be
+read as shipped product behavior.
+
+### One printer / one run is evidence, not universal DTF truth
+
+A single DTF system (printer, film, powder, RIP, press, garment) yields
+**calibration evidence for that process**, not a universal DTF law. Future
+profile edits must cite observation documents and remain process-scoped
+honestly. Profile values must not be changed until physical observations
+exist and a dedicated calibration phase reinterprets them.
+
+### Explicit non-goals
+
+Changing DTF positive/negative/isolated/structural thresholds; changing
+PrintValidation readiness semantics; changing FinalArtwork / Topaz /
+halftone production defaults; encoding expected physical pass/fail into the
+sheet; claiming white-underbase or hand from pixels alone.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:
