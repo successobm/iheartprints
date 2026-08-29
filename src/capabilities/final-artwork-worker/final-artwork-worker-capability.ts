@@ -1330,6 +1330,28 @@ export function createFinalArtworkWorkerCapability(
     const treatment = resolveProductionTreatment(snapshot.brief);
     const halftone = treatment.treatment === "halftone_dtf" ? treatment.halftone : null;
 
+    // Continuous-tone apparel raster requires real transparent pixels in the
+    // prepared source. Trust the asset's measured `hasTransparency` (set from
+    // actual pixels at preparation/finalize time). Without this fence, an
+    // opaque prepared asset that still needs more pixels would reach paid
+    // reconstruction before authoritative PrintValidation rejected the plate
+    // for missing transparency. Halftone is a different representation that
+    // generates its own transparent lattice, so it is not gated here.
+    //
+    // `null` is left to PrintValidation (legacy/unknown metadata) rather than
+    // inventing a second readiness system at this boundary.
+    if (
+      !halftone &&
+      requirements.transparencyRequired &&
+      sourceAsset.hasTransparency === false
+    ) {
+      await completeWithoutAsset(
+        job,
+        "The prepared artwork has no transparent pixels. Apparel production needs a transparent background before a print-ready file can be created.",
+      );
+      return;
+    }
+
     // Phase 28C: the artwork's OWN proportionally-contained target width —
     // never `sizing.targetWidthIn` (the box's raw nominal width) directly.
     // For a tall design whose HEIGHT controls (`resolveWidthConstrainedSizing`

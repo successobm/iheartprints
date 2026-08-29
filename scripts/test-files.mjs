@@ -334,6 +334,7 @@ export const TEST_FILES = [
   // exactly the same one-line fix used last time this happened.
   "src/experimental/magic-wand/magic-wand.test.ts",
   "src/capabilities/artwork-preparation/magic-wand-correction-capability.test.ts",
+  "src/capabilities/artwork-preparation/finalize-correction-transparency.test.ts",
   "src/capabilities/artwork-preparation/incredi-bowls-manual-fallback-acceptance.test.ts",
   // Phase 27I: TOOLBOX V1 (Restore Fill, Restore Brush, Eraser) -- new
   // files registered immediately, learning from Phase 27H's discovery that

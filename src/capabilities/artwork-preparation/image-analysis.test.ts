@@ -17,6 +17,7 @@ import {
 } from "./artwork-fixtures";
 import {
   analyzeArtwork,
+  artworkHasTransparency,
   measureEdgeStatistics,
   measurePixelSufficiency,
 } from "./image-analysis";
@@ -81,6 +82,15 @@ describe("analyzeArtwork", () => {
     assert.equal(opaque.hasTransparency, false);
     assert.equal(opaque.fullyOpaque, true);
     assert.equal(opaque.fullyTransparent, false);
+  });
+
+  it("artworkHasTransparency matches analyzeArtwork.hasTransparency (alpha < 255)", () => {
+    assert.equal(artworkHasTransparency(solidBlackExteriorArtwork()), false);
+    assert.equal(artworkHasTransparency(alreadyTransparentArtwork()), true);
+    const partial = createCanvas(20, 20, WHITE);
+    fillRect(partial, 0, 0, 1, 1, { r: 0, g: 0, b: 0, a: 128 });
+    assert.equal(artworkHasTransparency(partial), true);
+    assert.equal(analyze(partial).hasTransparency, true);
   });
 
   it("reports an empty canvas as fully transparent with no artwork bounds", () => {

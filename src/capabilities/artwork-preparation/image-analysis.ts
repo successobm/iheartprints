@@ -156,6 +156,21 @@ function measureAlpha(image: RgbaImage): AlphaMeasurement {
 }
 
 /**
+ * Whether the image contains at least one pixel with alpha < 255.
+ *
+ * This is the preparation-side reading of the same fact
+ * `hasAnyTransparentPixel` / `encodeProductionPng` record on production
+ * assets: actual transparent (or partial-alpha) content, never "PNG declares
+ * an alpha channel" and never "this workflow conceptually supports
+ * transparency." Callers that persist `AssetRecord.hasTransparency` for a
+ * derived preparation output must use this (or an equivalent pixel scan),
+ * not a hardcoded `true`.
+ */
+export function artworkHasTransparency(image: RgbaImage): boolean {
+  return measureAlpha(image).hasTransparency;
+}
+
+/**
  * Statistics over the outermost one-pixel ring. The ring — not a corner
  * sample, not a single edge — because a background that touches all four
  * edges is exactly the case this pipeline is built for, and a background that

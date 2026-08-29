@@ -336,4 +336,132 @@ describe("Phase 28 Checkpoint Audit Section 11 -- Topaz provider selection and i
     assert.equal(completed?.status, "completed");
     assert.equal(callCount(), 0, "a sufficient source must never reach the paid provider at all");
   });
+
+  it("E: opaque prepared source (hasTransparency false) never reaches paid reconstruction even when undersized", async () => {
+    // Same undersized geometry as test 1 (would otherwise require Topaz), but
+    // the prepared asset truthfully reports no transparent pixels — the
+    // continuous-tone apparel gate must refuse before any paid produce().
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo = new LocalProjectRepository();
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const { createAcquisitionCapability } = await import("@/capabilities/acquisition");
+    const acquisition = createAcquisitionCapability(repo);
+    const session = await acquisition.resolveOrCreateSession(null);
+    await acquisition.grantInternalEntitlement(session.id);
+    const projectId = (await repo.createProject(session.id)).project.id;
+
+    await repo.updateBrief(projectId, {
+      productSummary: "T-shirts",
+      shirtColor: "Black",
+      printPlacement: "sleeve",
+    });
+
+    // Fully opaque undersized square — visible pixels exist, transparency does not.
+    const opaquePng = (() => {
+      const artworkWidthPx = 400;
+      const png = new PNG({ width: CANVAS_PX, height: CANVAS_PX });
+      const inset = Math.floor((CANVAS_PX - artworkWidthPx) / 2);
+      for (let y = 0; y < CANVAS_PX; y += 1) {
+        for (let x = 0; x < CANVAS_PX; x += 1) {
+          const idx = (CANVAS_PX * y + x) << 2;
+          const inArtwork =
+            x >= inset && x < inset + artworkWidthPx && y >= inset && y < inset + artworkWidthPx;
+          png.data[idx] = inArtwork ? 10 : 240;
+          png.data[idx + 1] = inArtwork ? 90 : 240;
+          png.data[idx + 2] = inArtwork ? 200 : 240;
+          png.data[idx + 3] = 255;
+        }
+      }
+      return PNG.sync.write(png);
+    })();
+
+    const original = await assets.uploadCustomerArtwork(projectId, {
+      conceptId: "upload-original-opaque",
+      bytes: opaquePng,
+      contentType: "image/png",
+      widthPx: CANVAS_PX,
+      heightPx: CANVAS_PX,
+      hasTransparency: false,
+      kind: "customer_upload",
+      metadata: { originalFilename: "opaque.png" },
+    });
+    const preparation = await repo.createArtworkPreparation(projectId, {
+      originalAssetId: original.id,
+      originalFilename: "opaque.png",
+      analysis: { widthPx: CANVAS_PX, heightPx: CANVAS_PX },
+    });
+    const prepared = await assets.uploadCustomerArtwork(projectId, {
+      conceptId: `prepared-${preparation.id}`,
+      bytes: opaquePng,
+      contentType: "image/png",
+      widthPx: CANVAS_PX,
+      heightPx: CANVAS_PX,
+      hasTransparency: false,
+      kind: "png",
+      metadata: { derivedFromAssetId: original.id },
+    });
+    await repo.updateArtworkPreparation(preparation.id, {
+      status: "prepared",
+      preparedAssetId: prepared.id,
+      preparation: { backgroundRemoved: false },
+    });
+    const [artwork] = await repo.addArtworkVersions(projectId, [
+      {
+        versionNumber: 1,
+        kind: "prepared_upload",
+        title: "Your artwork, prepared",
+        summary: "Opaque prepared artwork.",
+        placeholderLabel: "Your artwork",
+        accentColor: "#173F35",
+        designBriefVersionId: null,
+        generationJobId: null,
+        providerKey: null,
+        primaryAssetId: prepared.id,
+        thumbnailAssetId: null,
+        sourceArtworkVersionId: null,
+        conceptDirectionKey: null,
+      },
+    ]);
+    await repo.updateArtworkPreparation(preparation.id, {
+      status: "approved",
+      preparedArtworkVersionId: artwork!.id,
+      approvedAt: new Date().toISOString(),
+    });
+    await repo.setProjectStatus(projectId, "approved");
+    await confirmProductionSizeForTests(repo, projectId, { widthIn: 3 });
+
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const printValidation = createPrintValidationCapability();
+    const resolved = resolveFinalArtworkProvider({ mode: "topaz", apiKey: "test-key-not-real" });
+    assert.ok(resolved instanceof TopazTransparencyUpscaleProvider);
+    const { wrapped, callCount } = countingProvider(resolved, { forbid: true });
+
+    const worker = createFinalArtworkWorkerCapability(repo, assets, wrapped, printValidation);
+    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await worker.processNextJob();
+
+    const completed = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(completed?.status, "completed");
+    assert.equal(callCount(), 0, "opaque continuous-tone source must never reach paid reconstruction");
+    assert.match(
+      completed?.lastError ?? "",
+      /transparent/i,
+      "job must complete with an honest transparency refusal, not print_ready",
+    );
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project?.project.status, "print_ready");
+    const validation = await repo.getLatestProductionAssetValidationForJob(
+      projectId,
+      completed!.id,
+    );
+    assert.equal(
+      validation,
+      null,
+      "no production asset / validation run — refused before plate production",
+    );
+  });
 });

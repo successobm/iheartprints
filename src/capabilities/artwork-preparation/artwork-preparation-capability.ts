@@ -96,7 +96,7 @@ import {
 import { measureExteriorRemovalEnclosure } from "./enclosure-evidence";
 import type { GuidedRemovalPoint } from "./guided-removal";
 import { decodePngUpload, encodeRgbaToPng } from "./image-decode";
-import { analyzeArtwork } from "./image-analysis";
+import { analyzeArtwork, artworkHasTransparency } from "./image-analysis";
 import {
   clampMagicSelectTolerance,
   MAGIC_SELECT_DEFAULT_TOLERANCE,
@@ -1812,6 +1812,10 @@ export function createArtworkPreparationCapability(
       // the SAME function `getCorrectionResultPng`/the workspace preview
       // already called, so what was reviewed is exactly what gets persisted.
       const corrected = computeCorrectionResult(designId);
+      // Persisted transparency must describe THESE pixels — never the
+      // correction workflow's conceptual support for transparency. A
+      // zero-operation finalize of an opaque original stays opaque.
+      const hasTransparency = artworkHasTransparency(corrected);
 
       const asset = await assets.uploadCustomerArtwork(designId, {
         conceptId: `correction-${preparation.id}-${randomUUID()}`,
@@ -1819,7 +1823,7 @@ export function createArtworkPreparationCapability(
         contentType: "image/png",
         widthPx: corrected.width,
         heightPx: corrected.height,
-        hasTransparency: true,
+        hasTransparency,
         kind: "png",
         metadata: {
           // Lineage mirrors `separationLineage` in `approveSeparationMaster`
