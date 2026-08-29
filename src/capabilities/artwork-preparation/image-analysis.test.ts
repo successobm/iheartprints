@@ -141,16 +141,22 @@ describe("measurePixelSufficiency", () => {
     assert.equal(sufficiency!.sufficient, true);
   });
 
-  it("Phase 28C: a tall/portrait artwork's required width is CONTAINED against the assumed Standard Adult box, not the placement's flat 10.5in default", () => {
-    // A 2:3 portrait (height = 1.5x width) inside the assumed adult_standard
-    // 10.5x10.5in box is height-controlled: widthIn = 10.5/1.5 = 7.0.
+  it("Phase 28C/28S: a tall/portrait artwork's required width is CONTAINED against the assumed Standard Adult box, not the placement's flat 10.5in default", () => {
+    // A 2:3 portrait (height = 1.5x width) is classified portrait (Phase
+    // 28S), so it is height-controlled against the PLACEMENT's own 14in
+    // technical ceiling, not the flat 10.5x10.5 recommendation box a
+    // square/landscape design would use: widthIn = 14/1.5 = 9.333...
+    // (Phase 28C originally asserted 10.5/1.5 = 7.0 here -- the flat-box
+    // number Phase 28S found was never meant to be a portrait ceiling; see
+    // `orientedProductionBox`'s doc comment in garment-production-sizing.ts.)
     const sufficiency = measurePixelSufficiency(2000, 3000, "full_front", null);
     assert.ok(sufficiency);
-    assert.equal(sufficiency!.targetWidthIn, 7);
-    assert.equal(sufficiency!.requiredWidthPx, Math.round(7 * 300));
-    // 2000px already exceeds the 2100px this artwork actually needs at its
-    // correctly-contained 7in width -- nowhere near the old 3150px (10.5in)
-    // requirement a flat width-only check would have wrongly demanded.
+    assert.equal(sufficiency!.targetWidthIn, 14 / 1.5);
+    assert.equal(sufficiency!.requiredWidthPx, Math.round((14 / 1.5) * 300));
+    // 2000px already exceeds the ~2800px this artwork actually needs at its
+    // correctly-contained ~9.33in width -- nowhere near the old 3150px
+    // (10.5in) requirement a flat width-only check would have wrongly
+    // demanded.
     assert.equal(sufficiency!.sufficient, false);
     assert.ok(
       sufficiency!.requiredWidthPx < 3150,

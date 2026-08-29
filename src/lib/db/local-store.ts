@@ -544,6 +544,11 @@ export class LocalProjectRepository implements ProjectRepository {
     return snapshot(db, projectId);
   }
 
+  async listProjects(): Promise<PrintProject[]> {
+    const db = await readDb();
+    return db.projects.map((project) => ({ ...project }));
+  }
+
   async updateProject(
     projectId: string,
     patch: Partial<

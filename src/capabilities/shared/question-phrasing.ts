@@ -224,6 +224,20 @@ export function revisionGeneratingMessage(): string {
 export function productionSizeAcknowledgement(
   resolved: { widthIn: number; clamped: boolean; minWidthIn: number; maxWidthIn: number },
   dpi: number | null,
+  /**
+   * Phase 28S: the artwork's ACTUAL resolved height at this width, when
+   * known — `null` when no artwork dimensions are available yet (e.g. a
+   * create_new project with no upload). Stating width alone is only
+   * truthful when height genuinely follows it unremarkably; once orientation-
+   * aware sizing can make height the dominant, binding axis (a portrait
+   * design), "I'll prepare your print at 10.5" wide" is false the moment the
+   * real plate is narrower because height controlled — see the Phase 28S
+   * mission's own example ("Your artwork will print at approximately
+   * 9.3" x 14"" rather than "10.5" wide"). Stating both dimensions whenever
+   * they're known is always true, for landscape/square too, so there is no
+   * branch here deciding which axis "really" controls.
+   */
+  actualHeightIn: number | null = null,
 ): string {
   const width = formatInchesForCustomer(resolved.widthIn);
   const quality = dpi ? ` It'll still be printed at full ${dpi} DPI quality.` : "";
@@ -232,6 +246,10 @@ export function productionSizeAcknowledgement(
     return `${formatInchesForCustomer(resolved.minWidthIn)}" to ${formatInchesForCustomer(
       resolved.maxWidthIn,
     )}" wide is what fits this print location, so I've set your print to ${width}" wide.${quality}`;
+  }
+  if (actualHeightIn !== null) {
+    const height = formatInchesForCustomer(actualHeightIn);
+    return `Got it — I'll prepare your print at approximately ${width}" × ${height}". The design itself stays exactly as you approved it.${quality}`;
   }
   return `Got it — I'll prepare your print at ${width}" wide. The design itself stays exactly as you approved it.${quality}`;
 }

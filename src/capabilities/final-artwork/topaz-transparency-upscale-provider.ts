@@ -47,7 +47,9 @@ import type { RgbaImage } from "./raster-transform";
 import type {
   FinalArtworkProvider,
   FinalArtworkProviderInput,
+  FinalArtworkProviderIntermediateReconstruction,
   FinalArtworkProviderOutput,
+  FinalArtworkProviderResumeContext,
 } from "./provider";
 
 const TOPAZ_API_BASE = "https://api.topazlabs.com/image/v1";
@@ -324,6 +326,236 @@ export function resolveReconstructionRequest(
   };
 }
 
+/**
+ * Phase 28V — the maximum TOTAL reconstruction scale (source canvas → final
+ * reconstructed raster, across up to two chained Topaz passes) V1 will
+ * attempt for a Standard Raster job whose single-pass need exceeds
+ * `PROVIDER_MAX_RECONSTRUCTION_SCALE`.
+ *
+ * NOT the theoretical 4x * 4x = 16x a naive two-pass ceiling might assume.
+ * Two independent reasons keep this conservative:
+ *
+ *   - QUALITY. Each Topaz pass is genuine provider super-resolution, not a
+ *     lossless operation — chaining two full 4x passes would mean roughly
+ *     15/16ths of the final pixel grid is provider-synthesized detail with
+ *     no real source pixel behind it. This ceiling only ever asks the
+ *     total chain for up to 2x MORE than a single pass already covers, so
+ *     pass 2's own required scale (computed fresh against pass 1's REAL
+ *     output — see `TopazTransparencyUpscaleProvider`'s two-pass path)
+ *     stays comfortably below its own 4x ceiling too, which is what keeps
+ *     a two-pass result reading as "one confident reconstruction" rather
+ *     than two compounded guesses.
+ *   - PROVEN NEED, NOT A ROUND NUMBER. The real production case this phase
+ *     exists for (a 562x486 visible source needing 3150x2736, ≈5.63x total)
+ *     needs less than 6x. 8x leaves comfortable headroom above that real,
+ *     evidenced number without reaching for the unproven 16x theoretical
+ *     maximum — and `MAX_RECONSTRUCTION_DIM_PX` (unchanged) still bounds
+ *     pass 2's absolute pixel count regardless of this nominal ceiling.
+ *
+ * A request whose single-pass need exceeds this is refused pre-dispatch —
+ * honest, zero-cost, and never silently escalated to a third pass (V1
+ * maximum: two Topaz submissions per job, full stop — Section 4).
+ */
+export const MAX_TWO_PASS_RECONSTRUCTION_SCALE = 8;
+
+/**
+ * Phase 28V — pass 1's request when a two-pass reconstruction is needed:
+ * simply "the most this provider will honestly deliver in one paid call",
+ * independent of the ultimate production target. Pass 2, run against pass
+ * 1's ACTUAL returned raster (never this function's prediction of it — see
+ * `planStandardRasterReconstruction`'s doc), is what closes the gap to the
+ * real target. Mirrors `resolveReconstructionRequest`'s own floor/ceiling
+ * clamp against `MIN_RECONSTRUCTION_DIM_PX`/`MAX_RECONSTRUCTION_DIM_PX`,
+ * minus the target-driven arithmetic that function layers on top — pass 1
+ * never "falls short" on its own terms, because it never claims to reach
+ * the final target by itself.
+ */
+export function resolveMaximalSinglePassRequest(source: {
+  width: number;
+  height: number;
+}): { widthPx: number; heightPx: number; scale: number } {
+  let scale = PROVIDER_MAX_RECONSTRUCTION_SCALE;
+  const floorFactor = Math.max(
+    MIN_RECONSTRUCTION_DIM_PX / (source.width * scale),
+    MIN_RECONSTRUCTION_DIM_PX / (source.height * scale),
+  );
+  if (floorFactor > 1) scale *= floorFactor;
+  const ceilingFactor = Math.max(
+    (source.width * scale) / MAX_RECONSTRUCTION_DIM_PX,
+    (source.height * scale) / MAX_RECONSTRUCTION_DIM_PX,
+  );
+  if (ceilingFactor > 1) scale /= ceilingFactor;
+  return {
+    widthPx: Math.max(1, Math.round(source.width * scale)),
+    heightPx: Math.max(1, Math.round(source.height * scale)),
+    scale,
+  };
+}
+
+export type StandardRasterReconstructionPlan =
+  /** Unchanged Phase 28R behavior — the caller runs `resolveReconstructionRequest` normally. */
+  | { kind: "single_pass" }
+  | { kind: "two_pass"; pass1: { widthPx: number; heightPx: number; scale: number } }
+  /** Even a bounded two-pass chain cannot honestly satisfy this request. Refused pre-dispatch, zero cost. */
+  | { kind: "insufficient"; reason: string }
+  | { kind: "no_visible_artwork"; reason: string };
+
+/**
+ * Phase 28V — THE ROUTING DECISION, extracted as a pure function so it is
+ * testable without a network, a provider, or a credit — mirrors
+ * `resolveReconstructionRequest`'s own reasoning exactly, deliberately
+ * duplicated rather than refactored out of it: `resolveReconstructionRequest`
+ * is Phase 28R's proven, unmodified contract, and this function exists
+ * purely to decide WHICH contract applies (single-pass, as before; two-pass,
+ * new; or an honest refusal) before any reconstruction actually runs. Never
+ * changes what a single-pass request looks like or how it is validated.
+ */
+export function planStandardRasterReconstruction(
+  source: RgbaImage,
+  sizing: ProductionSizingRequest,
+  options: AlphaTrimOptions = {},
+): StandardRasterReconstructionPlan {
+  const trim = trimToAlphaBounds(source, options);
+  if (trim.status === "no_visible_artwork") {
+    return { kind: "no_visible_artwork", reason: trim.reason };
+  }
+
+  const target = resolveWidthConstrainedSizing(
+    sizing,
+    trim.metadata.trimmedWidthPx,
+    trim.metadata.trimmedHeightPx,
+  );
+  const bbox = trim.metadata.alphaBBox;
+  const requiredScale = Math.max(
+    1,
+    Math.max(target.widthPx / bbox.width, target.heightPx / bbox.height) * RECONSTRUCTION_HEADROOM,
+  );
+
+  if (requiredScale <= PROVIDER_MAX_RECONSTRUCTION_SCALE) {
+    return { kind: "single_pass" };
+  }
+  if (requiredScale > MAX_TWO_PASS_RECONSTRUCTION_SCALE) {
+    return {
+      kind: "insufficient",
+      reason:
+        `This artwork cannot be reconstructed to the ${target.widthPx}x${target.heightPx}px this production size requires: ` +
+        `its visible artwork is ${bbox.width}x${bbox.height}px, which needs approximately ${requiredScale.toFixed(2)}x total ` +
+        `reconstruction — beyond the ${MAX_TWO_PASS_RECONSTRUCTION_SCALE}x maximum this reconstruction provider can safely ` +
+        `deliver across up to two chained reconstruction passes.`,
+    };
+  }
+  return { kind: "two_pass", pass1: resolveMaximalSinglePassRequest(source) };
+}
+
+/**
+ * Phase 28R — how far a genuinely proportional reconstruction may drift from
+ * the source canvas's own aspect ratio before it stops looking like one.
+ *
+ * `resolveReconstructionRequest` always derives its request from ONE uniform
+ * `scale` applied to both of the source canvas's axes (never per-axis), so
+ * the REQUESTED dimensions are always exactly proportional to the source —
+ * and the two REAL Topaz responses observed so far (the `36df2fa0-...`
+ * incident and the `01a049d2-...` Phase 28Q/R case) were too: both returned
+ * exactly 4.000x of the source canvas on both axes, preserving its aspect
+ * ratio exactly. 1% is generous room above the sub-pixel rounding
+ * `Math.round(source.width * scale)` / `Math.round(source.height * scale)`
+ * can introduce, while still rejecting a genuinely distorted or
+ * wrong-aspect response by a wide margin (see test F: a response that
+ * exceeds both requested axes but with the wrong aspect ratio entirely).
+ */
+const RECONSTRUCTION_ASPECT_TOLERANCE = 0.01;
+
+export interface ReconstructedGeometryCheckInput {
+  sourceWidthPx: number;
+  sourceHeightPx: number;
+  targetWidthPx: number;
+  targetHeightPx: number;
+  actualWidthPx: number;
+  actualHeightPx: number;
+}
+
+export type ReconstructedGeometryCheck =
+  | { valid: true }
+  | { valid: false; reason: string };
+
+/**
+ * Phase 28R — THE CORRECTED PROVIDER RESPONSE CONTRACT.
+ *
+ * Extracted as its own pure function (mirrors `resolveReconstructionRequest`)
+ * for the same reason: testable without a network, a provider, a PNG decode,
+ * or a credit.
+ *
+ * WHAT THIS REPLACES. `produce()` used to require
+ * `reconstructed.width === targetReconstructedWidth &&
+ * reconstructed.height === targetReconstructedHeight` — exact equality.
+ * Phase 28Q proved that requirement false on two REAL Topaz responses: both
+ * the historical `36df2fa0-...` incident and the real
+ * `01a049d2-90ea-7cfa-88b4-ad1067497820` car-show request returned exactly
+ * 4.000x of the SOURCE CANVAS rather than the requested dimensions — in the
+ * car-show case, MORE resolution than production needed (4096x6144 delivered
+ * against a 2192x3288 request, itself only 2.14x — well inside the 4x
+ * ceiling). Rejecting that as `malformed_response` discarded a real,
+ * structurally valid, already-paid-for reconstruction.
+ *
+ * THE PROVIDER'S JOB IS SUFFICIENCY, NOT EXACT SIZING. Precise production
+ * dimensions are `normalizeProductionRaster`'s job, downstream of this check
+ * — it downsamples whatever sufficient raster this function accepts to the
+ * exact confirmed physical size. This function's only job is deciding
+ * whether the raw provider response is honest, undistorted, and carries
+ * enough real reconstructed pixels to make that downsample legitimate.
+ *
+ * TWO INDEPENDENT FAILURE MODES, NOT ONE NUMERIC COMPARISON:
+ *
+ *   1. INSUFFICIENT — either axis falls short of what was requested. A
+ *      response smaller than what production asked for can never be trusted
+ *      to carry enough real detail, regardless of aspect ratio. Fails
+ *      closed, exactly as before.
+ *
+ *   2. WRONG GEOMETRY — both axes meet or exceed the request, but the
+ *      returned aspect ratio does not match the source canvas's own
+ *      (outside `RECONSTRUCTION_ASPECT_TOLERANCE`). A response that is
+ *      merely LARGE is not automatically a valid proportional
+ *      reconstruction — a distorted, stretched, or wrongly-cropped response
+ *      could technically exceed both requested dimensions while
+ *      misrepresenting the artwork's actual proportions, and must still be
+ *      rejected. This is the check Phase 28Q's own "naive >= only" caution
+ *      exists to prevent skipping.
+ *
+ * An oversized response that passes BOTH checks — meets or exceeds the
+ * request AND preserves the source's aspect ratio — is exactly what a
+ * uniform-scale provider honestly returning "more than you asked for" looks
+ * like, and is accepted.
+ */
+export function validateReconstructedGeometry(
+  input: ReconstructedGeometryCheckInput,
+): ReconstructedGeometryCheck {
+  const { sourceWidthPx, sourceHeightPx, targetWidthPx, targetHeightPx, actualWidthPx, actualHeightPx } = input;
+
+  if (actualWidthPx < targetWidthPx || actualHeightPx < targetHeightPx) {
+    return {
+      valid: false,
+      reason:
+        `The production reconstruction provider returned insufficient dimensions ` +
+        `(${actualWidthPx}x${actualHeightPx}, needed at least ${targetWidthPx}x${targetHeightPx}).`,
+    };
+  }
+
+  const sourceAspect = sourceWidthPx / sourceHeightPx;
+  const actualAspect = actualWidthPx / actualHeightPx;
+  const relativeAspectDifference = Math.abs(actualAspect - sourceAspect) / sourceAspect;
+  if (relativeAspectDifference > RECONSTRUCTION_ASPECT_TOLERANCE) {
+    return {
+      valid: false,
+      reason:
+        `The production reconstruction provider returned a raster (${actualWidthPx}x${actualHeightPx}) ` +
+        `whose proportions do not match the source artwork's (${sourceWidthPx}x${sourceHeightPx}) — ` +
+        `this is not a valid proportional reconstruction.`,
+    };
+  }
+
+  return { valid: true };
+}
+
 export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
   readonly providerKey = "topaz_transparency_upscale";
 
@@ -362,6 +594,38 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       );
     }
 
+    // Phase 28V: decide ROUTING before any reconstruction runs — an
+    // impossible or two-pass-eligible request costs nothing to detect. A
+    // job already mid-two-pass (an intermediate reconstruction exists from
+    // a prior attempt) always takes the two-pass path regardless of what
+    // this fresh plan would say, since pass 1 is already paid for and done.
+    const plan: StandardRasterReconstructionPlan = input.existingIntermediateReconstruction
+      ? { kind: "two_pass", pass1: resolveMaximalSinglePassRequest(source) }
+      : planStandardRasterReconstruction(
+          { width: source.width, height: source.height, data: source.data },
+          input.sizing,
+        );
+
+    if (plan.kind === "no_visible_artwork" || plan.kind === "insufficient") {
+      // `invalid_request` + `not_dispatched`: the platform asked for
+      // something this provider cannot honestly deliver, and nothing left
+      // this process. Never retried (`isRetryableProviderError` excludes
+      // it) because a retry of an impossible request is still impossible,
+      // and never billed.
+      throw new ProviderError("invalid_request", plan.reason, "not_dispatched");
+    }
+
+    if (plan.kind === "single_pass") {
+      return this.produceSinglePass(input, source);
+    }
+    return this.produceTwoPass(input, source, plan.pass1);
+  }
+
+  /** Phase 28R's exact, unmodified single-pass contract — see `resolveReconstructionRequest`. */
+  private async produceSinglePass(
+    input: FinalArtworkProviderInput,
+    source: PNG,
+  ): Promise<FinalArtworkProviderOutput> {
     // Print'em All Phase 0: sized from what production actually requires, not
     // from a constant. Resolved BEFORE the resume/submit branch below so an
     // impossible request costs nothing — see `resolveReconstructionRequest`.
@@ -370,56 +634,254 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       input.sizing,
     );
     if (resolved.status !== "resolved") {
-      // `invalid_request` + `not_dispatched`: the platform asked for something
-      // this provider cannot honestly deliver, and nothing left this process.
-      // Never retried (`isRetryableProviderError` excludes it) because a retry
-      // of an impossible request is still impossible, and never billed.
       throw new ProviderError("invalid_request", resolved.reason, "not_dispatched");
     }
     const targetReconstructedWidth = resolved.request.widthPx;
     const targetReconstructedHeight = resolved.request.heightPx;
 
-    // --- Goal 3: resume, never resubmit, when a matching in-flight/completed
-    // paid request already exists for this exact job.
-    const resumable =
-      input.existingProviderRequest?.providerKey === this.providerKey
-        ? input.existingProviderRequest
-        : null;
+    const { processId, png: reconstructed } = await this.runReconstructionPass(
+      input.sourceBytes,
+      { widthPx: targetReconstructedWidth, heightPx: targetReconstructedHeight },
+      source.width,
+      source.height,
+      input.existingProviderRequest ?? null,
+      input.onProviderRequestSubmitted,
+    );
 
-    let processId: string;
-    if (resumable) {
-      processId = resumable.providerRequestId;
-    } else {
-      // Print'em All Phase 0 (live acceptance): the last gate before money is
-      // spent. `resolveReconstructionRequest` already bounds the scale, so
-      // this can only fire if that function is later changed in a way that
-      // reintroduces the live billing defect — which is precisely why it
-      // guards the dispatch boundary rather than trusting a caller. Charging
-      // for a request the provider will silently clamp is the one failure
-      // mode this adapter must never repeat.
-      assertWithinProviderScaleCeiling(
-        source.width,
-        source.height,
-        targetReconstructedWidth,
-        targetReconstructedHeight,
-      );
-      processId = await this.submit(
-        input.sourceBytes,
-        targetReconstructedWidth,
-        targetReconstructedHeight,
-      );
-      // Persisted BEFORE polling begins — the entire point of this hook
-      // (Goal 3): a crash during the ~70-130s poll never causes a second
-      // paid submission on retry.
-      await input.onProviderRequestSubmitted?.(processId);
+    // Phase 28R: sufficiency + geometry, not exact equality — see
+    // `validateReconstructedGeometry`'s doc comment for the real Topaz
+    // responses that proved exact equality wrong. Still fails closed
+    // (`malformed_response`, same classification as before) for a
+    // genuinely undersized or wrongly-shaped response.
+    const geometryCheck = validateReconstructedGeometry({
+      sourceWidthPx: source.width,
+      sourceHeightPx: source.height,
+      targetWidthPx: targetReconstructedWidth,
+      targetHeightPx: targetReconstructedHeight,
+      actualWidthPx: reconstructed.width,
+      actualHeightPx: reconstructed.height,
+    });
+    if (!geometryCheck.valid) {
+      throw new ProviderError("malformed_response", geometryCheck.reason);
     }
 
-    await this.pollUntilDone(processId);
-    const reconstructedBytes = await this.download(processId);
+    return this.finalizeFromReconstructed(reconstructed, input.sizing, {
+      processId,
+      nativeWidthPx: source.width,
+      nativeHeightPx: source.height,
+    });
+  }
 
-    let reconstructed: PNG;
+  /**
+   * Phase 28V — a controlled, bounded two-pass reconstruction for a request
+   * whose total need exceeds `PROVIDER_MAX_RECONSTRUCTION_SCALE` but not
+   * `MAX_TWO_PASS_RECONSTRUCTION_SCALE`.
+   *
+   * PASS 1 asks for "the most this provider will honestly deliver" (never
+   * refused for being insufficient on its own — pass 2 exists to close the
+   * gap). Once pass 1's ACTUAL bytes are known (never a prediction of
+   * them), PASS 2 is nothing more than an ordinary, unmodified
+   * `resolveReconstructionRequest` call against THOSE bytes as the new
+   * "source" — the exact same Phase 28R contract a ≤4x job already uses,
+   * just run a second time against a different source. This is what lets
+   * pass 2 inherit every one of Phase 28R's protections (sufficiency +
+   * aspect-ratio tolerance) automatically, with zero new sizing arithmetic.
+   *
+   * Idempotency (Section 8): pass 1 is resumed/submitted using the SAME
+   * `existingProviderRequest`/`onProviderRequestSubmitted` contract a
+   * single-pass job uses. `existingIntermediateReconstruction`, when
+   * present, means pass 1 already durably completed on a prior attempt —
+   * it is never resubmitted, and any `existingProviderRequest` in that case
+   * is understood to belong to PASS 2 (the caller — the worker — guarantees
+   * this by construction: it only ever populates `existingProviderRequest`
+   * for pass 2 once pass 1's durable result already exists).
+   */
+  private async produceTwoPass(
+    input: FinalArtworkProviderInput,
+    source: PNG,
+    pass1Request: { widthPx: number; heightPx: number },
+  ): Promise<FinalArtworkProviderOutput> {
+    const existingIntermediate = input.existingIntermediateReconstruction ?? null;
+
+    let pass1Png: PNG;
+    let pass1ProcessId: string;
+
+    if (existingIntermediate) {
+      try {
+        pass1Png = PNG.sync.read(existingIntermediate.bytes);
+      } catch (error) {
+        throw new ProviderError(
+          "malformed_response",
+          `The persisted first-pass reconstruction could not be decoded as a PNG: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      pass1ProcessId = existingIntermediate.providerRequestId;
+    } else {
+      const { processId, png } = await this.runReconstructionPass(
+        input.sourceBytes,
+        pass1Request,
+        source.width,
+        source.height,
+        input.existingProviderRequest ?? null,
+        input.onProviderRequestSubmitted,
+      );
+
+      const pass1GeometryCheck = validateReconstructedGeometry({
+        sourceWidthPx: source.width,
+        sourceHeightPx: source.height,
+        targetWidthPx: pass1Request.widthPx,
+        targetHeightPx: pass1Request.heightPx,
+        actualWidthPx: png.width,
+        actualHeightPx: png.height,
+      });
+      if (!pass1GeometryCheck.valid) {
+        throw new ProviderError("malformed_response", `First reconstruction pass: ${pass1GeometryCheck.reason}`);
+      }
+
+      pass1Png = png;
+      pass1ProcessId = processId;
+    }
+
+    const pass1Image: RgbaImage = {
+      width: pass1Png.width,
+      height: pass1Png.height,
+      data: pass1Png.data,
+    };
+
+    // Section 3/19: pass 2's request is derived from pass 1's REAL output,
+    // reusing Phase 28R's own single-pass function unmodified. Computed
+    // BEFORE persisting an intermediate below so the "pass 1 alone already
+    // sufficient" case never pays for storing an intermediate nobody will
+    // ever read back.
+    const pass2Plan = resolveReconstructionRequest(pass1Image, input.sizing);
+    if (pass2Plan.status !== "resolved") {
+      // Section 4: no third pass — even a second pass cannot honestly
+      // satisfy this request. An honest terminal verdict, never billed
+      // again beyond the two calls already made/resumed.
+      throw new ProviderError(
+        "invalid_request",
+        `Even a second reconstruction pass is not enough: ${pass2Plan.reason}`,
+        "not_dispatched",
+      );
+    }
+
+    if (pass2Plan.request.scale <= 1) {
+      // Section 3/19: pass 1 alone already meets or exceeds the target —
+      // `resolveReconstructionRequest`'s own floor (`Math.max(1, ...)`)
+      // returning exactly 1 means zero further magnification is needed.
+      // Do not submit a pass 2 that would buy nothing, and do not persist
+      // an intermediate for a pass 1 that is itself becoming the final
+      // reconstruction stage.
+      return this.finalizeFromReconstructed(pass1Png, input.sizing, {
+        processId: pass1ProcessId,
+        nativeWidthPx: source.width,
+        nativeHeightPx: source.height,
+      });
+    }
+
+    // Section 8/9: pass 2 is genuinely going to be attempted — persist
+    // pass 1's validated output NOW, before pass 2 is submitted, unless it
+    // is already durably persisted from a prior attempt. Mirrors
+    // `onProviderRequestSubmitted`'s own persist-before-continuing
+    // ordering: a crash any time after this resolves never re-spends pass
+    // 1's paid credit.
+    if (!existingIntermediate) {
+      const intermediate: FinalArtworkProviderIntermediateReconstruction = {
+        bytes: PNG.sync.write(pass1Png),
+        widthPx: pass1Png.width,
+        heightPx: pass1Png.height,
+        providerRequestId: pass1ProcessId,
+      };
+      await input.onIntermediateReconstructionProduced?.(intermediate);
+    }
+
+    // Only when pass 1 already durably existed (this attempt never
+    // submitted it) can `existingProviderRequest` legitimately refer to
+    // pass 2 — see this method's doc comment.
+    const pass2ExistingProviderRequest: FinalArtworkProviderResumeContext | null =
+      existingIntermediate ? (input.existingProviderRequest ?? null) : null;
+
+    const { processId: pass2ProcessId, png: pass2Png } = await this.runReconstructionPass(
+      PNG.sync.write(pass1Png),
+      { widthPx: pass2Plan.request.widthPx, heightPx: pass2Plan.request.heightPx },
+      pass1Png.width,
+      pass1Png.height,
+      pass2ExistingProviderRequest,
+      input.onProviderRequestSubmitted,
+    );
+
+    const pass2GeometryCheck = validateReconstructedGeometry({
+      sourceWidthPx: pass1Png.width,
+      sourceHeightPx: pass1Png.height,
+      targetWidthPx: pass2Plan.request.widthPx,
+      targetHeightPx: pass2Plan.request.heightPx,
+      actualWidthPx: pass2Png.width,
+      actualHeightPx: pass2Png.height,
+    });
+    if (!pass2GeometryCheck.valid) {
+      throw new ProviderError("malformed_response", `Second reconstruction pass: ${pass2GeometryCheck.reason}`);
+    }
+
+    return this.finalizeFromReconstructed(pass2Png, input.sizing, {
+      processId: pass2ProcessId,
+      nativeWidthPx: source.width,
+      nativeHeightPx: source.height,
+    });
+  }
+
+  /** Goal 3: resume, never resubmit, when a matching in-flight/completed paid request already exists for this exact job. */
+  private async submitOrResumePass(
+    sourceBytes: Buffer,
+    request: { widthPx: number; heightPx: number },
+    sourceWidth: number,
+    sourceHeight: number,
+    existingProviderRequest: FinalArtworkProviderResumeContext | null,
+    onProviderRequestSubmitted: ((providerRequestId: string) => Promise<void>) | undefined,
+  ): Promise<string> {
+    const resumable =
+      existingProviderRequest?.providerKey === this.providerKey ? existingProviderRequest : null;
+    if (resumable) return resumable.providerRequestId;
+
+    // Print'em All Phase 0 (live acceptance): the last gate before money is
+    // spent. The caller's plan already bounds the scale, so this can only
+    // fire if that planning is later changed in a way that reintroduces the
+    // live billing defect — which is precisely why it guards the dispatch
+    // boundary rather than trusting a caller. Charging for a request the
+    // provider will silently clamp is the one failure mode this adapter
+    // must never repeat.
+    assertWithinProviderScaleCeiling(sourceWidth, sourceHeight, request.widthPx, request.heightPx);
+    const processId = await this.submit(sourceBytes, request.widthPx, request.heightPx);
+    // Persisted BEFORE polling begins — the entire point of this hook
+    // (Goal 3): a crash during the ~70-130s poll never causes a second
+    // paid submission on retry.
+    await onProviderRequestSubmitted?.(processId);
+    return processId;
+  }
+
+  /** Submit-or-resume, then poll to completion and download — one full reconstruction pass, decoded. */
+  private async runReconstructionPass(
+    sourceBytes: Buffer,
+    request: { widthPx: number; heightPx: number },
+    sourceWidth: number,
+    sourceHeight: number,
+    existingProviderRequest: FinalArtworkProviderResumeContext | null,
+    onProviderRequestSubmitted: ((providerRequestId: string) => Promise<void>) | undefined,
+  ): Promise<{ processId: string; png: PNG }> {
+    const processId = await this.submitOrResumePass(
+      sourceBytes,
+      request,
+      sourceWidth,
+      sourceHeight,
+      existingProviderRequest,
+      onProviderRequestSubmitted,
+    );
+    await this.pollUntilDone(processId);
+    const bytes = await this.download(processId);
+    let png: PNG;
     try {
-      reconstructed = PNG.sync.read(reconstructedBytes);
+      png = PNG.sync.read(bytes);
     } catch (error) {
       throw new ProviderError(
         "malformed_response",
@@ -428,30 +890,29 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
         }`,
       );
     }
+    return { processId, png };
+  }
 
-    if (
-      reconstructed.width !== targetReconstructedWidth ||
-      reconstructed.height !== targetReconstructedHeight
-    ) {
-      throw new ProviderError(
-        "malformed_response",
-        `The production reconstruction provider returned unexpected dimensions ` +
-          `(${reconstructed.width}x${reconstructed.height}, expected ${targetReconstructedWidth}x${targetReconstructedHeight}).`,
-      );
-    }
-
-    // Goal 5: reconstruction and deterministic production sizing are two
-    // distinct steps. The reconstructed bytes are never the print deliverable
-    // by themselves — Print-Ready Normalization Phase 1 runs them through the
-    // exact same shared local transform `LocalRasterInterpolationProvider`
-    // uses (alpha trim → safety margin → physical-width sizing →
-    // proportional resample), never a second Topaz call merely to reach the
-    // production size. Normalizing from THIS reconstructed raster (the
-    // highest-quality raster available in this finalization run) is what keeps
-    // the deliverable from being a crop of an already-padded plate.
+  /**
+   * Goal 5: reconstruction and deterministic production sizing are two
+   * distinct steps. The reconstructed bytes are never the print deliverable
+   * by themselves — Print-Ready Normalization Phase 1 runs them through the
+   * exact same shared local transform `LocalRasterInterpolationProvider`
+   * uses (alpha trim → safety margin → physical-width sizing →
+   * proportional resample), never a further Topaz call merely to reach the
+   * production size. Normalizing from THIS reconstructed raster (the
+   * highest-quality raster available in this finalization run — the last
+   * pass actually used, whether pass 1 or pass 2) is what keeps the
+   * deliverable from being a crop of an already-padded plate.
+   */
+  private finalizeFromReconstructed(
+    reconstructed: PNG,
+    sizing: FinalArtworkProviderInput["sizing"],
+    provenance: { processId: string; nativeWidthPx: number; nativeHeightPx: number },
+  ): FinalArtworkProviderOutput {
     const normalized = normalizeProductionRaster(
       { width: reconstructed.width, height: reconstructed.height, data: reconstructed.data },
-      input.sizing,
+      sizing,
     );
     if (normalized.status === "no_visible_artwork") {
       throw new ProviderError("malformed_response", normalized.reason);
@@ -464,8 +925,8 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       widthPx: normalized.result.image.width,
       heightPx: normalized.result.image.height,
       hasTransparency: encoded.hasTransparency,
-      nativeWidthPx: source.width,
-      nativeHeightPx: source.height,
+      nativeWidthPx: provenance.nativeWidthPx,
+      nativeHeightPx: provenance.nativeHeightPx,
       reconstructedWidthPx: reconstructed.width,
       reconstructedHeightPx: reconstructed.height,
       resolutionProvenance: "reconstructed",
@@ -473,7 +934,7 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       // Goal 7: never inherited — production verification always re-runs
       // independently against this reconstructed output.
       preservesApprovedContent: false,
-      providerRequestId: processId,
+      providerRequestId: provenance.processId,
       normalization: normalized.result.metadata,
     };
   }

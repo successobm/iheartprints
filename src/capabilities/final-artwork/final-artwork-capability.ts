@@ -60,6 +60,12 @@ import {
 } from "@/capabilities/shared/production-treatment";
 import { describeProductionVariantStatus } from "@/capabilities/shared/production-variant";
 import { ArtworkFinalizationRasterNotReadyError } from "./raster-not-ready-error";
+import {
+  isReconstructionIntermediateAsset,
+  productionAssetMatchesEffectiveTarget,
+  resolveEffectiveProductionTargetIn,
+  type EffectiveProductionTargetIn,
+} from "./production-request-identity";
 
 export interface RequestFinalArtworkResult {
   approval: FinalDirectionApproval;
@@ -260,6 +266,15 @@ export interface ProductionVariantJobState {
   asset: AssetRecord | null;
   validationStatus: string | null;
   validationReport: Record<string, unknown> | null;
+  /**
+   * Phase 28V: PASS 1's own paid request id, when this job's reconstruction
+   * needed (and durably persisted) a second Topaz pass — `null` for every
+   * job that never had one. Cost accounting (`describeProductionVariantCostSummary`)
+   * uses this to report 2 distinct external provider calls for a genuine
+   * two-pass job instead of 1, without inflating that count on a resumed
+   * or idempotently-reused retry.
+   */
+  intermediateReconstructionProviderRequestId: string | null;
 }
 
 /**
@@ -499,9 +514,18 @@ export function createFinalArtworkCapability(
       // `intendedPrintWidthIn = null`, fell back to the 10.5in placement
       // default, and enqueued a paid job for a physical size no human had
       // ever chosen or seen.
-      const productionWidthIn = requireConfirmedProductionSize(
-        snapshot.brief,
-      ).widthIn;
+      const confirmedProductionSize = requireConfirmedProductionSize(snapshot.brief);
+      const productionWidthIn = confirmedProductionSize.widthIn;
+      // Phase 28T: the SAME canonical sizing authority Phase 28S
+      // established — never a second calculation invented for job lookup
+      // (Section 5 of the Phase 28T mission). `printPlacement` is
+      // guaranteed non-null here: `requireConfirmedProductionSize` above
+      // already throws if it is not.
+      const effectiveTargetIn = resolveEffectiveProductionTargetIn(
+        snapshot.brief.printPlacement!,
+        confirmedProductionSize,
+        preparation,
+      );
 
       // Sprint A2 Correction 2 (Goal 3 / Goal 11): server-side current
       // authority, never anything the caller carried — see the create_new
@@ -557,6 +581,7 @@ export function createFinalArtworkCapability(
         productionWidthIn,
         normalizeProductionIntent(snapshot.brief.requestedProductionOutput),
         productionTreatmentKey,
+        effectiveTargetIn,
       );
 
       // Same rule as the create_new path (Sprint 2M Phase 2G Goal 8): only
@@ -607,6 +632,7 @@ export function createFinalArtworkCapability(
         asset: null,
         validationStatus: null,
         validationReport: null,
+        intermediateReconstructionProviderRequestId: null,
       };
 
       const snapshot = await repo.getProject(projectId);
@@ -631,6 +657,13 @@ export function createFinalArtworkCapability(
       if (currentWidthIn === null) return nothing;
 
       let job: FinalArtworkJob | null = null;
+      // Phase 28T: the artwork's EFFECTIVE resolved size for THIS request —
+      // `null` for the create_new/active-approval branch (that workflow's
+      // own artwork-bounds source is a separate, out-of-scope concern this
+      // phase; see the Phase 28T report) and for any prepared_upload
+      // project whose bounds cannot be read, in which case
+      // `completedJobIsStaleForTarget` correctly abstains.
+      let effectiveTargetIn: EffectiveProductionTargetIn | null = null;
       const activeApproval = await repo.getActiveFinalDirectionApproval(projectId);
       if (activeApproval) {
         job = findDeliverableJob(
@@ -638,24 +671,56 @@ export function createFinalArtworkCapability(
           currentWidthIn,
           currentIntent,
           treatmentKey,
+          activeApproval.artworkVersionId,
         );
       } else {
         const preparation = await repo.getArtworkPreparation(projectId);
-        if (preparation && preparation.status === "approved") {
+        if (
+          preparation &&
+          preparation.status === "approved" &&
+          preparation.preparedArtworkVersionId
+        ) {
           job = findDeliverableJob(
             await repo.listFinalArtworkJobsForPreparation(projectId, preparation.id),
             currentWidthIn,
             currentIntent,
             treatmentKey,
+            preparation.preparedArtworkVersionId,
           );
+          if (confirmation.confirmed && snapshot.brief.printPlacement) {
+            effectiveTargetIn = resolveEffectiveProductionTargetIn(
+              snapshot.brief.printPlacement,
+              confirmation.size,
+              preparation,
+            );
+          }
         }
       }
       if (!job) return nothing;
+      const intermediateReconstructionProviderRequestId =
+        await findIntermediateReconstructionProviderRequestId(repo, projectId, job.id);
       if (job.status !== "completed") {
-        return { job, asset: null, validationStatus: null, validationReport: null };
+        return {
+          job,
+          asset: null,
+          validationStatus: null,
+          validationReport: null,
+          intermediateReconstructionProviderRequestId,
+        };
       }
 
-      const assetId = await findProductionAssetIdForJob(repo, projectId, job.id);
+      // Phase 28T: a completed job whose OWN produced pixels no longer
+      // answer the current effective request (Section 15 — "no stale print
+      // ready") is not this project's current deliverable, even though its
+      // coarse (width/output/treatment/version) identity still matches.
+      // `resolvePreparedUploadJob` is what actually revives such a job when
+      // "Create Print-Ready Artwork" is next pressed; this read path simply
+      // must not present it as current in the meantime.
+      if (await completedJobIsStaleForTarget(repo, projectId, job.id, effectiveTargetIn)) {
+        return nothing;
+      }
+
+      const assetId = await findProductionAssetIdForJob(repo, projectId, job.id, effectiveTargetIn);
       const asset = assetId ? await repo.getAssetById(assetId) : null;
       const validation = await repo.getLatestProductionAssetValidationForJob(
         projectId,
@@ -666,9 +731,35 @@ export function createFinalArtworkCapability(
         asset: asset ?? null,
         validationStatus: validation?.status ?? null,
         validationReport: validation?.report ?? null,
+        intermediateReconstructionProviderRequestId,
       };
     },
   };
+}
+
+/**
+ * Phase 28V — PASS 1's own paid request id, when a two-pass reconstruction
+ * durably persisted one for this job (see `production-request-identity.ts`'s
+ * `isReconstructionIntermediateAsset`). `null` for every job that never
+ * needed a second pass. Read-only; never used to select "the" deliverable
+ * for a job (that remains `findProductionAssetIdForJob`, which explicitly
+ * excludes this same asset).
+ */
+async function findIntermediateReconstructionProviderRequestId(
+  repo: ProjectRepository,
+  projectId: string,
+  finalArtworkJobId: string,
+): Promise<string | null> {
+  const assets = await repo.listAssets(projectId);
+  const candidate = assets.find(
+    (asset) =>
+      asset.finalArtworkJobId === finalArtworkJobId &&
+      asset.productionRole === "production_png" &&
+      isReconstructionIntermediateAsset(asset),
+  );
+  if (!candidate) return null;
+  const meta = candidate.metadata as Record<string, unknown> | null | undefined;
+  return typeof meta?.providerRequestId === "string" ? meta.providerRequestId : null;
 }
 
 /**
@@ -724,7 +815,11 @@ async function resolveSatisfiedProductionDelivery(
   // (4) Completed, with a real asset.
   if (!job || job.status !== "completed") return null;
 
-  const assetId = await findProductionAssetIdForJob(repo, projectId, job.id);
+  // Phase 28T: no effective-size verification for the create_new path yet
+  // (its artwork-bounds source is a separate, out-of-scope concern this
+  // phase — see the Phase 28T report) — `null` preserves exactly this
+  // function's pre-Phase-28T behavior (the job's own single/first asset).
+  const assetId = await findProductionAssetIdForJob(repo, projectId, job.id, null);
   if (!assetId) return null;
 
   // (5) Authoritative validation, for this asset, saying ready.
@@ -824,18 +919,83 @@ async function resolveCurrentMatchingProductionJob(
       currentWidthIn,
       currentIntent,
       currentTreatmentKey,
+      activeApproval.artworkVersionId,
     );
   }
 
   const preparation = await repo.getArtworkPreparation(projectId);
-  if (!preparation || preparation.status !== "approved") return null;
+  if (!preparation || preparation.status !== "approved" || !preparation.preparedArtworkVersionId) {
+    return null;
+  }
 
   return findDeliverableJob(
     await repo.listFinalArtworkJobsForPreparation(projectId, preparation.id),
     currentWidthIn,
     currentIntent,
     currentTreatmentKey,
+    preparation.preparedArtworkVersionId,
   );
+}
+
+/**
+ * Phase 28T: the complete production request identity's pure arithmetic
+ * (`resolveEffectiveProductionTargetIn`, `productionAssetMatchesEffectiveTarget`,
+ * imported below) now lives in `./production-request-identity.ts` — shared
+ * verbatim with `final-artwork-worker-capability.ts`'s own crash-recovery
+ * short-circuit, which needed the exact same check (see that module's own
+ * doc comment for why: `resolveExistingProductionAsset`'s "an asset already
+ * exists for this job" idempotency guard predates Phase 28T and does not by
+ * itself know whether that asset still answers the CURRENT request). See
+ * `production-request-identity.ts`'s doc comment for the full rationale.
+ */
+
+/**
+ * Phase 28T: whether a COMPLETED job's own production output is STALE for
+ * the current effective request — the check `alreadyRequested`/deliverable
+ * resolution both need before trusting a completed job's coarse
+ * (width/output/treatment/version) match.
+ *
+ * Two DISTINCT reasons a completed job can have no asset matching the
+ * current target, and only one of them means "stale":
+ *
+ *   - it produced a real `production_png` asset, but that asset's actual
+ *     dimensions no longer answer today's effective size (Phase 28S changed
+ *     what a confirmed box resolves to, or a future size picker did) — THIS
+ *     is stale, and the caller should revive the job.
+ *   - it produced NO asset at all, because completion itself was an HONEST,
+ *     TERMINAL, non-retryable verdict that no plate could be produced at
+ *     all (e.g. `insufficient_reconstruction`/`invalid_request` — Phase 27M/
+ *     28N's own "needs_review, zero provider dispatch" case). This is NOT
+ *     stale — re-deriving the SAME effective target against the SAME
+ *     artwork would reach the exact same honest verdict, and revives here
+ *     would spuriously re-run (and potentially re-dispatch) a job whose
+ *     answer cannot change.
+ *
+ * `targetIn === null` means the effective size could not be verified (see
+ * `resolveEffectiveProductionTargetIn`), in which case this also reports
+ * "not stale" rather than second-guessing a coarse match with no evidence —
+ * exactly as `jobIntentIsCurrent`'s own legacy-width abstention already
+ * does.
+ */
+async function completedJobIsStaleForTarget(
+  repo: ProjectRepository,
+  projectId: string,
+  jobId: string,
+  targetIn: EffectiveProductionTargetIn | null,
+): Promise<boolean> {
+  if (!targetIn) return false;
+  const assets = await repo.listAssets(projectId);
+  const productionAssets = assets.filter(
+    (asset) =>
+      asset.finalArtworkJobId === jobId &&
+      asset.productionRole === "production_png" &&
+      // Phase 28V: a two-pass reconstruction's PASS 1 output is an
+      // internal reconstruction-stage artifact, never proof this job
+      // produced a (stale or current) customer deliverable.
+      !isReconstructionIntermediateAsset(asset),
+  );
+  if (productionAssets.length === 0) return false;
+  return !productionAssets.some((asset) => productionAssetMatchesEffectiveTarget(asset, targetIn));
 }
 
 /**
@@ -867,12 +1027,14 @@ function findDeliverableJob(
   currentWidthIn: number,
   requestedProductionOutput: StoredRequestedProductionOutput,
   productionTreatmentKey: string,
+  artworkVersionId: string,
 ): FinalArtworkJob | null {
   const boundToCurrentWidth = findJobForWidth(
     jobs,
     currentWidthIn,
     requestedProductionOutput,
     productionTreatmentKey,
+    artworkVersionId,
   );
   if (boundToCurrentWidth) return boundToCurrentWidth;
 
@@ -880,6 +1042,12 @@ function findDeliverableJob(
     jobs.find(
       (job) =>
         job.productionWidthIn === null &&
+        // Phase 28T: `artwork_version_id` has been `not null` on every job
+        // since the very first `final_artwork_jobs` migration — even a
+        // width-less legacy row always names a real artwork. A legacy plate
+        // for a DIFFERENT artwork than the one currently approved/selected
+        // is not this project's current deliverable either.
+        job.artworkVersionId === artworkVersionId &&
         (job.productionTreatmentKey ?? STANDARD_RASTER_TREATMENT_KEY) ===
           productionTreatmentKey &&
         productionIntentMatches(
@@ -890,18 +1058,44 @@ function findDeliverableJob(
   );
 }
 
+/**
+ * Phase 28T: a single job may now legitimately own MORE than one
+ * `production_png` asset over its life — e.g. a job revived (see
+ * `resolvePreparedUploadJob`) because its size stopped matching the current
+ * effective request produces a NEW additive asset alongside the historical
+ * one, exactly as Phase 28S's real car-show acceptance did by hand
+ * (`32b504f9-...` at 2088x3150, `180d9606-...` at 2785x4200, same job).
+ * `targetIn` (when resolvable) picks the one that actually answers TODAY's
+ * request; `null`/no match falls back to the most recently created
+ * candidate, which is both the pre-Phase-28T behavior for the common
+ * single-asset case and the least-surprising answer when the target cannot
+ * be verified at all.
+ */
 async function findProductionAssetIdForJob(
   repo: ProjectRepository,
   projectId: string,
   finalArtworkJobId: string,
+  targetIn: EffectiveProductionTargetIn | null,
 ): Promise<string | null> {
   const assets = await repo.listAssets(projectId);
-  const productionAsset = assets.find(
+  const candidates = assets.filter(
     (asset) =>
       asset.finalArtworkJobId === finalArtworkJobId &&
-      asset.productionRole === "production_png",
+      asset.productionRole === "production_png" &&
+      // Phase 28V: never present a two-pass reconstruction's internal
+      // PASS 1 artifact as this job's customer-facing deliverable.
+      !isReconstructionIntermediateAsset(asset),
   );
-  return productionAsset?.id ?? null;
+  if (candidates.length === 0) return null;
+
+  if (targetIn) {
+    const matching = candidates.find((asset) => productionAssetMatchesEffectiveTarget(asset, targetIn));
+    if (matching) return matching.id;
+  }
+
+  return candidates.reduce((newest, asset) =>
+    asset.createdAt > newest.createdAt ? asset : newest,
+  ).id;
 }
 
 /*
@@ -922,6 +1116,7 @@ function findJobForWidth(
   productionWidthIn: number,
   requestedProductionOutput: StoredRequestedProductionOutput,
   productionTreatmentKey: string,
+  artworkVersionId: string,
 ): FinalArtworkJob | null {
   // Print'em All Phase 1: serves BOTH workflows now. A create_new job is
   // bound to its confirmed width exactly as a prepared_upload job always was.
@@ -941,7 +1136,14 @@ function findJobForWidth(
         // them is a continuous-tone plate. Legacy rows collapse to the
         // standard-raster key, matching the migration's coalesce.
         (job.productionTreatmentKey ?? STANDARD_RASTER_TREATMENT_KEY) ===
-          productionTreatmentKey,
+          productionTreatmentKey &&
+        // Phase 28T: the fourth independent specification — WHICH approved
+        // pixels this job is for. A 10x12 result from Artwork A is not a
+        // 10x12 result from Artwork B just because the physical size and
+        // treatment happen to match (Section 8 of the Phase 28T mission).
+        // `artwork_version_id` is `not null` on every job ever written, so
+        // this is never a legacy-abstention case the way width is.
+        job.artworkVersionId === artworkVersionId,
     ) ?? null
   );
 }
@@ -969,6 +1171,13 @@ async function resolvePreparedUploadJob(
   productionWidthIn: number,
   requestedProductionOutput: StoredRequestedProductionOutput,
   productionTreatmentKey: string,
+  /**
+   * Phase 28T: the artwork's CURRENT effective resolved size — `null` when
+   * it cannot be verified (see `resolveEffectiveProductionTargetIn`), in
+   * which case a completed job's coarse match is trusted exactly as before
+   * this phase.
+   */
+  effectiveTargetIn: EffectiveProductionTargetIn | null,
 ): Promise<{ job: FinalArtworkJob; alreadyRequested: boolean }> {
   const existingJobs = await repo.listFinalArtworkJobsForPreparation(
     projectId,
@@ -979,20 +1188,46 @@ async function resolvePreparedUploadJob(
     productionWidthIn,
     requestedProductionOutput,
     productionTreatmentKey,
+    artworkVersionId,
   );
   if (existing) {
-    if (existing.status === "failed") {
-      const revived = await repo.updateFinalArtworkJob(existing.id, {
-        status: "queued",
-        lastError: null,
-      });
-      return { job: revived, alreadyRequested: false };
+    // Phase 28T: a completed job whose coarse identity (width/output/
+    // treatment/version) still matches, but whose OWN produced pixels no
+    // longer answer the CURRENT effective size (Phase 28S changed what this
+    // confirmed box resolves to, or a future size picker did) — the two DB-
+    // level unique indexes on `final_artwork_jobs` key on exactly this
+    // coarse identity, so this job's row is the only one that could EVER
+    // represent this (project, preparation, width, output, treatment)
+    // combination; a genuinely new row is not possible without a schema
+    // change (see the Phase 28T report's migration discussion). Reviving it
+    // — precedented below for `failed`/`cancelled` — is the correct action:
+    // `providerKey`/`providerRequestId` are untouched by revival, so the
+    // worker RESUMES the existing paid reconstruction (if one is still
+    // sufficient) rather than submitting a new one, and produces an
+    // ADDITIVE new production asset (never overwriting the historical one)
+    // at the corrected size — exactly what Phase 28S's real car-show
+    // acceptance did by hand.
+    if (existing.status === "completed") {
+      const isStale = await completedJobIsStaleForTarget(
+        repo,
+        projectId,
+        existing.id,
+        effectiveTargetIn,
+      );
+      if (isStale) {
+        const revived = await repo.updateFinalArtworkJob(existing.id, {
+          status: "queued",
+          lastError: null,
+        });
+        return { job: revived, alreadyRequested: false };
+      }
     }
-    // Sprint A2 Correction 2: a job fenced out as stale becomes live again
-    // when the customer's request comes back to what it was built for. The
-    // already-produced plate — and, for uploads, the paid reconstruction
-    // behind it — is reused rather than repeated.
-    if (existing.status === "cancelled") {
+    if (existing.status === "failed" || existing.status === "cancelled") {
+      // Sprint A2 Correction 2 (failed) / same reasoning (cancelled): a job
+      // fenced out as stale becomes live again when the customer's request
+      // comes back to what it was built for. The already-produced plate —
+      // and, for uploads, the paid reconstruction behind it — is reused
+      // rather than repeated.
       const revived = await repo.updateFinalArtworkJob(existing.id, {
         status: "queued",
         lastError: null,
@@ -1022,6 +1257,7 @@ async function resolvePreparedUploadJob(
         productionWidthIn,
         requestedProductionOutput,
         productionTreatmentKey,
+        artworkVersionId,
       );
       if (raced) return { job: raced, alreadyRequested: true };
     }
@@ -1094,6 +1330,9 @@ async function createJobToleratingRace(
     // See the insert below: the Create New workflow is standard raster,
     // always, so reuse is keyed on the same constant it writes.
     STANDARD_RASTER_TREATMENT_KEY,
+    // Phase 28T: this approval's own bound artwork — a job for a DIFFERENT
+    // artwork version must never be reused merely because the size matches.
+    approval.artworkVersionId,
   );
   if (existing) {
     if (existing.status === "failed") {
@@ -1144,6 +1383,7 @@ async function createJobToleratingRace(
         productionWidthIn,
         requestedProductionOutput,
         STANDARD_RASTER_TREATMENT_KEY,
+        approval.artworkVersionId,
       );
       if (raced) return raced;
     }

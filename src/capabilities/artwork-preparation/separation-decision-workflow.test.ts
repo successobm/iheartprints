@@ -251,7 +251,12 @@ describe("Intelligent Separation Phase 9 — operator decision workflow", () => 
     assert.equal(await acquisition.isInternalProject(projectId), false);
   });
 
-  it("U: every separation route source calls acquisition.isInternalProject before any capability read/write", () => {
+  it("U (Phase 28K CORRECTION): every separation route source calls isAuthorizedForArtworkCorrection before any capability read/write", () => {
+    // Phase 28K widened the gate from staff-only (`isInternalProject` alone)
+    // to "internal staff OR this project's own owner" -- see
+    // `isAuthorizedForArtworkCorrection`'s doc comment for the full audit.
+    // The routes no longer reference `isInternalProject` directly; that
+    // check now lives inside the shared predicate they all call first.
     const root = path.join(ROOT, "src", "app", "api", "projects", "[projectId]", "artwork-preparation", "separation");
     for (const file of [
       "route.ts",
@@ -260,13 +265,21 @@ describe("Intelligent Separation Phase 9 — operator decision workflow", () => 
       path.join("image", "route.ts"),
     ]) {
       const source = readFileSync(path.join(root, file), "utf8");
-      assert.match(source, /isInternalProject/, `${file} must gate via isInternalProject`);
-      const gateIndex = source.indexOf("isInternalProject");
+      assert.match(source, /isAuthorizedForArtworkCorrection/, `${file} must gate via isAuthorizedForArtworkCorrection`);
+      const gateIndex = source.indexOf("isAuthorizedForArtworkCorrection(graph");
       const firstCapabilityCall = source.indexOf("artworkPreparation.");
       if (firstCapabilityCall >= 0) {
         assert.ok(gateIndex < firstCapabilityCall, `${file} must check the gate before calling into the capability`);
       }
     }
+  });
+
+  it("U (Phase 28K): the shared predicate itself still checks isInternalProject as one of its two authorized paths", () => {
+    const source = readFileSync(
+      path.join(ROOT, "src", "capabilities", "artwork-preparation", "artwork-correction-authorization.ts"),
+      "utf8",
+    );
+    assert.match(source, /isInternalProject/, "internal staff access must remain one of the two authorized paths");
   });
 
   // -------------------------------------------------------------------

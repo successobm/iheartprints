@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
+import { getProjectRepository } from "@/lib/db";
 
 type RouteContext = { params: Promise<{ projectId: string }> };
 
 /**
  * Phase 27E — GRADUATED Magic Wand correction workspace, read-only
- * selection preview. INTERNAL ONLY, ENFORCED SERVER-SIDE, same pattern as
+ * selection preview. Phase 28K: internal staff OR this project's own owner, ENFORCED SERVER-SIDE, same pattern as
  * every `separation/*` route: bare 404 as the first statement, before any
  * body parsing.
  *
@@ -19,7 +21,7 @@ export async function POST(request: Request, context: RouteContext) {
   const { projectId } = await context.params;
   const graph = getCapabilityGraph();
 
-  if (!(await graph.acquisition.isInternalProject(projectId))) {
+  if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
     return new Response("Not found", { status: 404 });
   }
 

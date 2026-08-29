@@ -51,6 +51,20 @@ import type { FinalArtworkProviderInput } from "./provider";
  * it was. A need at or under 4x passes it on the merits; a need above 4x costs
  * zero credits and produces no plate at all.
  *
+ * PHASE 28V UPDATE. This exact live shape (562x486 visible, 10.5in @
+ * full_back, ≈5.6x) is precisely the real production case Phase 28V's
+ * controlled two-pass reconstruction exists to serve — see
+ * `topaz-transparency-upscale-provider.ts`'s `planStandardRasterReconstruction`
+ * and its own test suite for the full two-pass contract. "A need above 4x
+ * costs zero credits" is no longer true UNCONDITIONALLY: it is now true only
+ * above `MAX_TWO_PASS_RECONSTRUCTION_SCALE` (8x). Between 4x and 8x, a first
+ * pass now legitimately dispatches (test E2 below), and only a genuine
+ * second-pass shortfall or a need beyond 8x still refuses pre-dispatch (E2b).
+ * This does not weaken `reconstruction_sufficiency` — it is still the
+ * validator that would have caught the original incident had this file's
+ * fix not existed, and Phase 28V's own `validateReconstructedGeometry`
+ * checks apply identically to each pass.
+ *
  * ZERO REAL PROVIDER CALLS. Every reconstruction here is a local `pngjs`
  * nearest-neighbour blow-up standing in for Topaz at the exact dimensions the
  * adapter requested. That double is deliberately WORSE than Topaz — it invents
@@ -470,8 +484,13 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
     }
   });
 
-  it("E2: a >4x need never dispatches, never records a request id, never costs a credit", async () => {
-    // The exact live shape: 584x640 visible 562x486 at 10.5in.
+  it("E2: Phase 28V — this exact live >4x shape now correctly dispatches PASS 1 instead of refusing pre-dispatch", async () => {
+    // The exact live shape: 584x640 visible 562x486 at 10.5in — ≈5.6x, now
+    // WITHIN Phase 28V's bounded two-pass ceiling (8x). Confirmed via
+    // `planStandardRasterReconstruction` directly in
+    // `topaz-transparency-upscale-provider.test.ts`'s own "B" test; this
+    // test only proves `produce()` genuinely attempts dispatch for it
+    // rather than refusing the way it used to before Phase 28V.
     const sourceBytes = artworkPng(
       LIVE_CANVAS.width,
       LIVE_CANVAS.height,
@@ -485,7 +504,39 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
       apiKey: "test-key",
       fetchImpl: (async () => {
         fetched += 1;
-        throw new Error("no provider call may happen for a >4x need");
+        throw new Error("simulated network failure — proves pass 1 was genuinely attempted, not that it succeeded");
+      }) as typeof fetch,
+      sleepImpl: async () => {},
+    });
+
+    await assert.rejects(
+      () =>
+        provider.produce({
+          sourceBytes,
+          sourceContentType: "image/png",
+          sizing,
+          existingProviderRequest: null,
+          onProviderRequestSubmitted: async () => {},
+        }),
+      /could not be reached/i,
+    );
+    assert.ok(fetched > 0, "Phase 28V: a need within the two-pass ceiling must genuinely attempt dispatch");
+  });
+
+  it("E2b: a need BEYOND the two-pass ceiling (>8x) still never dispatches, never records a request id, never costs a credit", async () => {
+    // Same canvas and aspect family as the live shape, shrunk further so the
+    // required total scale exceeds MAX_TWO_PASS_RECONSTRUCTION_SCALE (8x) —
+    // this is the boundary Phase 28V's own pre-dispatch refusal now guards,
+    // in place of the old flat 4x boundary this test used to prove.
+    const sourceBytes = artworkPng(LIVE_CANVAS.width, LIVE_CANVAS.height, 200, 173);
+    const sizing = PRINT_PLACEMENT_SIZING_POLICY.full_back;
+
+    let fetched = 0;
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl: (async () => {
+        fetched += 1;
+        throw new Error("no provider call may happen beyond the two-pass ceiling");
       }) as typeof fetch,
       sleepImpl: async () => {},
     });
@@ -504,7 +555,7 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
         }),
       /cannot be reconstructed to the .* this production size requires/i,
     );
-    assert.equal(fetched, 0, "zero provider dispatches — this is the billing defect closed");
+    assert.equal(fetched, 0, "zero provider dispatches beyond the two-pass ceiling — the billing defect stays closed");
     assert.equal(submitted, 0, "no paid request identity was ever recorded");
   });
 

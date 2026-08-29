@@ -23,6 +23,23 @@ import type {
   ProductionSizingRequest,
 } from "./production-normalization";
 
+/**
+ * Phase 28V — a durably-persisted PASS 1 reconstruction from an earlier
+ * attempt at THIS exact job, when a controlled two-pass reconstruction
+ * (see `topaz-transparency-upscale-provider.ts`'s
+ * `planStandardRasterReconstruction`) already completed and validated its
+ * first pass before a crash interrupted pass 2. `providerRequestId` is
+ * pass 1's own paid request identity — carried along purely for audit/cost
+ * accounting; a provider recognizing this input MUST treat pass 1 as
+ * already done and never resubmit it.
+ */
+export interface FinalArtworkProviderIntermediateReconstruction {
+  bytes: Buffer;
+  widthPx: number;
+  heightPx: number;
+  providerRequestId: string;
+}
+
 export interface FinalArtworkProviderResumeContext {
   /**
    * Sprint 2M Phase 2E (Goal 3): must match the resuming provider's own
@@ -60,16 +77,49 @@ export interface FinalArtworkProviderInput {
    */
   existingProviderRequest?: FinalArtworkProviderResumeContext | null;
   /**
-   * Sprint 2M Phase 2E (Goal 3): called exactly once, synchronously, the
-   * instant a NEW paid request is actually submitted to an external
-   * provider — before any polling begins. The caller persists this
-   * durably (`FinalArtworkJob.providerRequestId`) so a worker crash between
-   * submission and completion is resumable on retry without a second paid
-   * call. Must never be called when resuming `existingProviderRequest`, and
-   * is safely optional/ignorable for a provider with no paid-request
+   * Sprint 2M Phase 2E (Goal 3): called once per NEW paid submission,
+   * synchronously, the instant that submission is actually accepted by an
+   * external provider — before any polling begins. The caller persists
+   * this durably (`FinalArtworkJob.providerRequestId`) so a worker crash
+   * between submission and completion is resumable on retry without a
+   * second paid call. Never called when resuming `existingProviderRequest`,
+   * and safely optional/ignorable for a provider with no paid-request
    * concept.
+   *
+   * Phase 28V: most providers submit at most once per `produce()` call, so
+   * "exactly once" was true for every provider until this phase. A
+   * provider that legitimately makes TWO sequential paid submissions
+   * within one `produce()` call (the two-pass Topaz provider, only when a
+   * single pass cannot satisfy the request) calls this once per
+   * submission, in order, each still strictly before that submission's own
+   * polling begins — never violating the "persist before continuing"
+   * guarantee this hook exists for.
    */
   onProviderRequestSubmitted?: (providerRequestId: string) => Promise<void>;
+  /**
+   * Phase 28V: a durably-persisted PASS 1 reconstruction from an earlier
+   * attempt at THIS exact job, if the worker already produced and stored
+   * one — present only when this job needed (and already paid for) a
+   * first Topaz pass whose validated output was saved before a crash
+   * interrupted pass 2. `null`/absent on a first attempt, for a job whose
+   * single-pass reconstruction sufficed, or for any provider with no
+   * multi-pass concept. A provider that recognizes this MUST use it as
+   * pass 2's source instead of resubmitting pass 1.
+   */
+  existingIntermediateReconstruction?: FinalArtworkProviderIntermediateReconstruction | null;
+  /**
+   * Phase 28V: called exactly once, the instant a provider's PASS 1 output
+   * has been produced and independently validated as geometrically valid,
+   * but BEFORE pass 2 is submitted — mirrors `onProviderRequestSubmitted`'s
+   * "persist before continuing" ordering. The caller durably stores these
+   * bytes as an internal reconstruction-stage asset (never the customer-
+   * facing production deliverable) so a crash during or after pass 2 never
+   * re-spends pass 1's paid credit. Safely optional/ignorable by a
+   * provider with no multi-pass concept.
+   */
+  onIntermediateReconstructionProduced?: (
+    result: FinalArtworkProviderIntermediateReconstruction,
+  ) => Promise<void>;
 }
 
 export interface FinalArtworkProviderOutput {

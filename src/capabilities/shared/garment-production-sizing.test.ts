@@ -735,20 +735,28 @@ describe("Print'em All Phase 1 — the size view says all three things", () => {
       artworkWidthPx: 2000,
       artworkHeightPx: 3000,
     })!;
-    assert.equal(asBox.recommendation!.isConfirmed, true);
-    // Contained within the recommended area: 7.0 x 10.5, aspect preserved.
+    // Phase 28S: a HISTORICAL confirmation against the old flat 10.5x10.5
+    // box is genuinely no longer the same decision as what this portrait
+    // artwork is recommended TODAY (10.5 wide x 14 tall, oriented — see
+    // `orientedProductionBox`). Reporting `isConfirmed: true` here would
+    // hide "Use recommended size" from someone whose stale confirmation
+    // predates this fix and who would very likely want the corrected,
+    // taller recommendation instead.
+    assert.equal(asBox.recommendation!.isConfirmed, false);
+    // The PRIMARY "Your artwork will print at" statement reflects the
+    // project's own PERSISTED confirmed authority (10.5 wide x 10.5 tall,
+    // exactly as historically confirmed) — untouched by Phase 28S, which
+    // only changes what gets freshly RECOMMENDED, never what a project's
+    // own past confirmation resolves to.
     assert.equal(asBox.heightIn, 10.5);
-    // Phase 28C (Bug B correction): the PRIMARY "Your artwork will print
-    // at" statement (`widthIn`/`heightIn`) must agree with the
-    // recommendation's own already-correct contained figures — before this
-    // fix, `asBox.widthIn` was silently left at the raw confirmed 10.5in
-    // box width (never asserted here, which is exactly how this
-    // inconsistency went unnoticed) while only `heightIn` was genuinely
-    // contained. Phase 28I: +0.03in vs. before this phase -- see the margin
-    // note above.
     assert.equal(asBox.widthIn, 7.03);
-    assert.equal(asBox.recommendation!.artworkWidthIn, 7.03);
-    assert.equal(asBox.recommendation!.artworkHeightIn, 10.5);
+    // The recommendation card's own contained figures, by contrast, DO
+    // reflect the Phase 28S fix — the same oriented 10.5x14 box (and the
+    // same resulting ~9.38x14 plate) as the `widthOnly` case above, because
+    // both describe "what does Standard Adult / Full Back recommend for
+    // THIS portrait artwork today", independent of what was confirmed.
+    assert.equal(asBox.recommendation!.artworkWidthIn, 9.38);
+    assert.equal(asBox.recommendation!.artworkHeightIn, 14);
   });
 
   it("E/Goal 7: a custom-size project has no recommendation and must be sized explicitly", () => {

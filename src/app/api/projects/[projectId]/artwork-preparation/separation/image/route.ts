@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { PNG } from "pngjs";
 
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
 import { getProjectRepository } from "@/lib/db";
 import { decodePngUpload } from "@/capabilities/artwork-preparation/image-decode";
@@ -25,12 +26,17 @@ type RouteContext = {
 };
 
 /**
- * Intelligent Separation Phase 9: renders the images the operator review UI
- * needs, server-side, from the SAME deterministic functions the capability
- * uses — never a second implementation of the highlight/composite logic.
+ * Intelligent Separation Phase 9 / Phase 28K: renders the images this
+ * project's own review UI needs, server-side, from the SAME deterministic
+ * functions the capability uses — never a second implementation of the
+ * highlight/composite logic. `SeparationReviewPanel` (mounted directly in
+ * the ordinary customer flow since Phase 28F) fetches every mode below,
+ * including `region-context`/`region-crop` — none of this is staff-only in
+ * practice, so none of it should be staff-only in authorization either.
  *
- * INTERNAL ONLY, ENFORCED SERVER-SIDE (Goal 21/22), same gate and same
- * uninformative 404 as the rest of this surface.
+ * ENFORCED SERVER-SIDE — Phase 28K's "internal staff OR this project's own
+ * owner" gate; see `isAuthorizedForArtworkCorrection`'s doc comment. Same
+ * deliberately uninformative 404 either way.
  *
  * `mode`:
  *   original         the immutable original, unmodified
@@ -61,7 +67,7 @@ export async function GET(request: Request, context: RouteContext) {
     const { projectId } = await context.params;
     const graph = getCapabilityGraph();
 
-    if (!(await graph.acquisition.isInternalProject(projectId))) {
+    if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
       return new Response("Not found", { status: 404 });
     }
 

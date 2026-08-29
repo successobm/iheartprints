@@ -1,5 +1,7 @@
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
+import { getProjectRepository } from "@/lib/db";
 
 type RouteContext = { params: Promise<{ projectId: string }> };
 
@@ -8,13 +10,13 @@ type RouteContext = { params: Promise<{ projectId: string }> };
  * baseline with every accepted correction operation replayed, recomputed
  * fresh on every call (never a cached mask). This is exactly what the
  * correction canvas and Final Review both render — see Phase 27E §9
- * result-consistency evidence. INTERNAL ONLY.
+ * result-consistency evidence. Phase 28K: internal staff OR this project's own owner (see `isAuthorizedForArtworkCorrection`).
  */
 export async function GET(_request: Request, context: RouteContext) {
   const { projectId } = await context.params;
   const graph = getCapabilityGraph();
 
-  if (!(await graph.acquisition.isInternalProject(projectId))) {
+  if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
     return new Response("Not found", { status: 404 });
   }
 

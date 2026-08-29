@@ -11,6 +11,7 @@ import {
 } from "./effective-resolution";
 import { classifyProduction, deriveProductionRequirements } from "./production-requirements";
 import { targetDimensionsForPlacement } from "@/capabilities/shared/print-placement-dimensions";
+import { assembleUploadedPreserveProductionPrintValidationInput } from "./assemble-input";
 import type {
   PrintValidationInput,
   ProductionNormalizationSummary,
@@ -883,5 +884,178 @@ describe("print placement target dimensions", () => {
 
   it("returns null for an unknown placement", () => {
     assert.equal(targetDimensionsForPlacement(null), null);
+  });
+});
+
+/**
+ * Phase 28V.1 — the real production incident (project
+ * 7bcc3e19-5617-4712-99ab-65f1667b5eda): an existing-artwork plate that
+ * exactly matched its own intended physical size (10.5in x 10.46in @ 300
+ * PPI, produced via `local_raster_interpolation` — no reconstruction, no
+ * Topaz, only a deterministic sub-1% downsample) was phantom-failed by
+ * `minimum_raster_dimensions` recomputing its own required threshold as
+ * 3139px via `Math.ceil(10.46 * 300)` — which floating-point representation
+ * error evaluates to `3138.0000000000005`, one pixel ABOVE the exact
+ * integer `Math.round` (matching the ACTUAL production code) correctly
+ * resolves to. `requiredWordingVerification`/`conceptEvaluationAlignment`
+ * were red herrings: proven, by direct inspection of the real persisted
+ * validation report, to be absent from `uploaded_preserve`'s own checks
+ * array entirely (never blocking) — this suite proves that absence is
+ * correct, alongside the actual rounding fix.
+ */
+describe("Phase 28V.1 — existing-artwork local-raster finalization is not phantom-blocked by rounding noise", () => {
+  const printValidation = createPrintValidationCapability();
+
+  /** Mirrors the real incident's exact numbers: 3169x3157 source, 3150x3138 output, 10.5x10.46in @ 300 PPI. */
+  function realBowlingShirtInput(
+    overrides: {
+      asset?: Partial<ReturnType<typeof baseInput>["primaryAsset"]>;
+      normalization?: Partial<ProductionNormalizationSummary>;
+    } = {},
+  ): PrintValidationInput {
+    return assembleUploadedPreserveProductionPrintValidationInput({
+      artworkVersionId: "artwork-bowling-1",
+      printPlacement: "full_back",
+      productSummary: "tshirts",
+      intendedPrintWidthIn: 10.5,
+      requestedProductionOutput: "production_png",
+      asset: {
+        contentType: "image/png",
+        widthPx: 3150,
+        heightPx: 3138,
+        hasTransparency: true,
+        resolutionProvenance: "native",
+        nativeWidthPx: 3169,
+        nativeHeightPx: 3157,
+        ...overrides.asset,
+      },
+      normalization: {
+        strategy: "width_constrained_preserve_aspect",
+        alphaBBoxWidthPx: 3169,
+        alphaBBoxHeightPx: 3157,
+        trimmedWidthPx: 3169,
+        trimmedHeightPx: 3157,
+        artworkOccupancy: 1,
+        targetWidthIn: 10.5,
+        widthToleranceIn: 0.05,
+        targetPpi: 300,
+        intendedWidthIn: 10.5,
+        intendedHeightIn: 10.46,
+        constrainedBy: "width",
+        densityPixelsPerMetre: 11811,
+        ...overrides.normalization,
+      },
+      uploadedPreserve: {
+        preparedArtworkVersionId: "artwork-bowling-1",
+        preparedAssetId: "prepared-asset-1",
+        originalAssetId: "original-asset-1",
+        sourceBytesSha256: "a".repeat(64), // realistic-shaped SHA-256 hex — source_lineage requires a usable-looking hash
+        sourceAlphaBBoxWidthPx: 3169,
+        sourceAlphaBBoxHeightPx: 3157,
+        // A: existing uploaded artwork. C: local deterministic interpolation
+        // only — never a generative/reconstructive path.
+        enhancement: "skipped",
+      },
+      productionTreatment: "standard_raster",
+    });
+  }
+
+  // A/B/C/D/E/F/H: existing uploaded artwork, source already sufficient,
+  // local raster only, transparent, canonical dimensions, no Topaz
+  // involved anywhere in this input's own shape, resolves print-ready.
+  it("A-H: the real 10.46in-tall plate exactly meeting its own target resolves ready, never phantom-failed by float round-trip noise", () => {
+    const report = printValidation.validateArtwork(realBowlingShirtInput());
+
+    assert.equal(
+      report.checks.find((c) => c.check === "minimum_raster_dimensions")?.status,
+      "pass",
+      "10.46in x 300 PPI must require exactly 3138px (Math.round), never a phantom 3139px from Math.ceil's floating-point sensitivity",
+    );
+    assert.equal(report.status, "ready");
+    assert.deepEqual(report.blockingIssues, []);
+    assert.equal(report.checks.find((c) => c.check === "transparency")?.status, "pass");
+  });
+
+  // G: irrelevant semantic validation cannot strand a valid production
+  // asset — concept-alignment/wording verification are correctly ABSENT
+  // (not merely passing, not "unknown") for uploaded existing artwork, and
+  // their absence never appears in blockingIssues.
+  it("G: concept-alignment and required-wording verification are correctly ABSENT (never blocking) for existing uploaded artwork", () => {
+    const report = printValidation.validateArtwork(realBowlingShirtInput());
+
+    assert.equal(report.checks.find((c) => c.check === "concept_evaluation_alignment"), undefined);
+    assert.equal(report.checks.find((c) => c.check === "required_wording_verification"), undefined);
+    for (const issue of report.blockingIssues) {
+      assert.doesNotMatch(issue, /concept evaluation|required wording/i);
+    }
+  });
+
+  it("a GENUINELY undersized existing-artwork plate (not a rounding artifact) still fails minimum_raster_dimensions", () => {
+    // Actually short by a real, meaningful 20px -- must still block.
+    const report = printValidation.validateArtwork(
+      realBowlingShirtInput({ asset: { widthPx: 3150, heightPx: 3118 } }),
+    );
+    assert.equal(
+      report.checks.find((c) => c.check === "minimum_raster_dimensions")?.status,
+      "fail",
+    );
+    assert.notEqual(report.status, "ready");
+  });
+
+  // Preserve: Create New still requires its own intended semantic checks --
+  // concept alignment and required wording remain real, evaluated,
+  // potentially-blocking checks for generated concepts (never globally
+  // disabled by this phase's fix).
+  it("preserved: Create New (generated_concept) still evaluates and can fail concept_evaluation_alignment", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({ conceptEvaluationStatus: "failed" }),
+    );
+    const check = report.checks.find((c) => c.check === "concept_evaluation_alignment");
+    assert.equal(check?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("preserved: Create New still evaluates and can fail required_wording_verification", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        conceptEvaluation: conceptEvaluation({
+          criteria: [{ key: "required_wording", score: 0, passed: false, confidence: 90, notes: null }],
+        }),
+      }),
+    );
+    const check = report.checks.find((c) => c.check === "required_wording_verification");
+    assert.equal(check?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("preserved: Create New still reports genuine unknown (never a silent pass) when Concept Evaluation has not completed", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({ conceptEvaluationStatus: "pending" }),
+    );
+    const check = report.checks.find((c) => c.check === "concept_evaluation_alignment");
+    assert.equal(check?.status, "unknown");
+    assert.notEqual(report.status, "ready", "a genuine unknown must still block where the check actually applies");
+  });
+
+  // Preserve: no global unknown -> pass shortcut exists anywhere in this fix.
+  it("preserved: minimum_raster_dimensions still reports genuine unknown (never a silent pass) when dimensions are not knowable", () => {
+    const report = printValidation.validateArtwork(
+      realBowlingShirtInput({ asset: { widthPx: null as unknown as number, heightPx: null as unknown as number } }),
+    );
+    const check = report.checks.find((c) => c.check === "minimum_raster_dimensions");
+    assert.equal(check?.status, "unknown");
+    assert.notEqual(report.status, "ready");
+  });
+});
+
+describe("Phase 28V.1 — minimumRasterDimensionsFor (pure)", () => {
+  it("uses Math.round, not Math.ceil -- a 10.46in target requires exactly 3138px, never a phantom 3139px", () => {
+    const result = minimumRasterDimensionsFor({ widthIn: 10.5, heightIn: 10.46 }, 300);
+    assert.deepEqual(result, { widthPx: 3150, heightPx: 3138 });
+  });
+
+  it("still correctly requires MORE pixels for a genuinely larger target", () => {
+    const result = minimumRasterDimensionsFor({ widthIn: 14, heightIn: 14 }, 300);
+    assert.deepEqual(result, { widthPx: 4200, heightPx: 4200 });
   });
 });

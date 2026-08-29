@@ -8459,6 +8459,243 @@ Signed cross-device recovery remains A5.7.
 
 ---
 
+## 23g. Internal Continuation Boundary (Phase 28P)
+
+Print'em All staff sometimes need to pick up an ordinary customer's
+already-approved, already-corrected uploaded artwork and carry it into
+production as an internal job — without repeating Magic Wand/background
+correction and without granting the customer's own project free production.
+`continueAsInternalJob` (`src/capabilities/artwork-preparation/
+continue-as-internal-job.ts`) is the narrow capability this boundary adds.
+
+**The rule this boundary enforces:** the source project is never mutated.
+`PrintProject.acquisitionSessionId` remains bound exactly as §23b documents
+— once at insert, never retroactively. There is no "make this project
+internal after the fact" operation anywhere in this codebase, and this
+boundary does not add one. Instead it creates a **second, brand-new**
+project bound to the ACTING internal session, via the exact same
+`repo.createProject(sessionId)` primitive `POST /api/projects` already uses
+— which is what makes the new project genuinely internal under §23b's
+existing `isInternalProject`/`authorizeFinalization` logic, with zero new
+bypass logic added to either.
+
+**Why a byte-identical copy, not a cross-project asset reference:**
+`AssetRecord.projectId` is real and every asset's storage object is keyed by
+the project it was uploaded under (`asset-capability.ts`). Rather than point
+a new project's preparation at another project's asset rows, the source's
+exact approved bytes (original + prepared) are downloaded and re-uploaded
+under the new project's own id — a true, project-scoped copy — with
+provenance recorded in `metadata.internalContinuation` on the copied asset,
+mirroring the existing `correctionLineage`/`derivedFromAssetId` provenance
+pattern rather than any new schema.
+
+**Eligibility:** only a source `ArtworkPreparation` with `status ===
+"approved"` and real `preparedAssetId`/`preparedArtworkVersionId`/
+`approvedAt`. `"approved"` is unreachable while a consequential separation
+decision is unresolved (Phase 23's `isReadyForFinalApproval`), so this
+predicate alone is sufficient — no separate separation re-check exists.
+
+**What carries forward:** the exact prepared/original pixels, `analysis`,
+`preparation` (the deterministic background-preparation record),
+`separation` (the resolved decision set), and `correctionLineage` — all
+copied verbatim, because they describe decisions already made about these
+exact pixels. What does **not** carry forward: production size confirmation,
+print placement, and garment size class — those live on `TShirtDesignBrief`
+(§ productionSizeConfirmedAt, `types.ts`) and are order-specific, not
+artwork-specific; the new project's brief starts exactly as any brand-new
+project's does, and an internal operator confirms size fresh in it.
+
+**Idempotency — an explicit V1 trade-off, not a unique constraint:** every
+other idempotent creation in this codebase (`createFinalDirectionApproval`,
+`createFinalArtworkJob`, free-concept consumption) is enforced by a real
+database UNIQUE constraint (§4's own rule: "call at-most-once needs a real
+UNIQUE constraint, so it needs a migration"). This boundary does not add
+that migration — this environment has no database connection string or
+linked Supabase CLI project available to apply new DDL to the real database
+the dev server targets, so a migration could not have been proven against
+the real acceptance test this phase required. Instead, `repo.listProjects()`
+(new, bare `PrintProject[]`, no relations) backs a real server-side scan for
+an existing continuation carrying a matching `internalContinuation` marker,
+performed before creating anything. This is honest about its own limit: it
+is not atomic under true concurrent double-submission, which is an accepted
+V1 exposure for a feature one internal operator drives by hand, not a
+security defect. **Recommended upgrade** once usage grows: a dedicated
+`internal_artwork_continuations` table with `unique (source_project_id,
+source_prepared_artwork_version_id)`.
+
+**Route:** `POST /api/internal/projects/[projectId]/continue-as-internal-job`
+checks the REQUESTER's own session (`entitlement === "internal"`, read from
+the same `ihp_as` cookie §23b already defines) — deliberately not
+`isInternalProject(projectId)`, which asks whether the TARGET project was
+created under an internal session and must be false for the exact ordinary
+customer projects this boundary exists to pick up. A session that is
+missing, unrecognized, or ordinary gets a flat 403 before `projectId` is
+ever read, so knowing a real project id grants nothing on its own.
+
+**Operator entry point:** `/internal/projects/[projectId]/continue` — a
+Server Component mirroring `/internal/access`'s own pattern exactly (§23b):
+reads the session cookie, decides a small render-state enum server-side,
+and never renders the action to a non-internal session. There is no
+project browser (this app has no `/projects/[id]` route at all — project
+selection is the SPA's own `localStorage` key,
+`chat-session.ts`'s `CHAT_PROJECT_STORAGE_KEY`), so an operator who knows
+which project they're picking up navigates here directly by id.
+
+**Bugfix discovered in the course of this work:** `/internal/access/page.tsx`'s
+"already granted" shortcut had been calling `repo.getAcquisitionSession(id)`
+(look-up by internal row id) with the cookie's raw session TOKEN — a
+different value entirely (`getAcquisitionSessionByToken` is the token-keyed
+lookup). The shortcut had been silently inert since Phase 28M.1: falling
+through to re-show the key form, never a security issue since the
+underlying grant/cookie/gate were untouched, but never actually doing what
+its own doc comment claimed either. Fixed to call
+`getAcquisitionSessionByToken`; no authorization semantics changed.
+
+---
+
+## 23h. Honest-Verdict Attention Reasons Without an Asset (Phase 28T.1)
+
+A production job that reaches a terminal "cannot auto-finalize" conclusion
+via `completeWithoutAsset` (`final-artwork-worker-capability.ts`) never
+produces a `ProductionAssetValidation` row — there is no asset to validate.
+`resolveOneProductionVariant`'s attention-reason/attention-kind derivation
+(§27O's per-variant status module, `production-variant.ts`) previously read
+ONLY from that validation report, so this entire class of honest, already-
+understood verdict rendered `attentionReason: null` / `attentionKind: null`
+in the customer-facing view — indistinguishable from a genuine stall, even
+though the job's own `lastError` already carried a precise explanation. A
+real production job (bowling-shirt artwork, refused pre-dispatch because the
+required Topaz reconstruction exceeded the 4x provider ceiling — the same
+shape as the historical INCREDI-BOWLS case) surfaced this: "Standard Raster:
+Needs Attention" with no reason shown anywhere in the UI.
+
+**Fix, no schema change.** `production-variant.ts` gained
+`attachAttentionCheckName`/`resolveAttentionCheckName`: the ONE worker call
+site that can identify its reason precisely (`ProviderError("invalid_request",
+..., "not_dispatched")` — the sole throw of this exact shape, raised only by
+`resolveReconstructionRequest`'s insufficiency refusal) tags its message with
+the SAME check-name vocabulary (`reconstruction_sufficiency`) the validation-
+report path already uses, via a short bracketed prefix on the persisted
+`lastError` (internal-only; never shown to a customer raw). The read side
+tries the validation report first (unchanged), then this marker, then falls
+back to a generic non-matching placeholder for any OTHER honest
+`completeWithoutAsset` reason (unsupported category, unknown print location,
+no visible pixels, or a job that completed before this fix existed) — which
+the existing `describeVariantAttentionReason`/`classifyVariantAttentionKind`
+already map to their safe generic "needs another look" sentence and `"other"`
+kind. No new message text, no new classification branch, no new persistence:
+a real, honest verdict now reads as one instead of `null`.
+
+---
+
+## 23i. Controlled Two-Pass Topaz Reconstruction (Phase 28V)
+
+`PROVIDER_MAX_RECONSTRUCTION_SCALE` (4x, Print'em All Phase 0's own live-
+proven ceiling — Topaz silently clamps and bills above it) previously meant
+ANY Standard Raster request needing more than 4x total reconstruction was
+refused pre-dispatch, honestly and at zero cost, but unconditionally. A real
+production job (562x486 visible artwork needing 3150x2736px, ≈5.63x) proved
+this too strict: the source had enough real detail for a bounded second
+pass to close the gap, and refusing it entirely left a viable order stuck.
+
+**The two-pass decision.** `planStandardRasterReconstruction` (new, pure,
+alongside the unchanged `resolveReconstructionRequest`) computes the total
+required scale and routes: `<=4x` unchanged single-pass (the existing,
+untouched Phase 28R contract); `4x`–`MAX_TWO_PASS_RECONSTRUCTION_SCALE` (8x)
+a bounded two-pass reconstruction; `>8x` still refused pre-dispatch, honestly,
+at zero cost — never a third pass. 8x is deliberately NOT the theoretical
+4×4=16x: each pass only ever needs to close a modest gap on top of the
+other's 4x, keeping quality headroom and comfortably covering the real,
+evidenced 5.63x need without promising unproven extreme reconstruction.
+
+**Pass 2 reuses Phase 28R unmodified.** Pass 1 asks for "the most the
+provider will honestly deliver" (`resolveMaximalSinglePassRequest`,
+independent of the target). Once pass 1's ACTUAL bytes are known, pass 2 is
+nothing more than an ordinary call to the SAME, untouched
+`resolveReconstructionRequest`/`validateReconstructedGeometry` functions a
+≤4x job already uses — just against pass 1's output as the new "source".
+This is what lets pass 2 inherit every Phase 28R protection (sufficiency +
+aspect-ratio tolerance) with zero new sizing arithmetic, and what lets an
+unexpectedly-sufficient pass 1 (`scale <= 1` from that same call) skip pass 2
+entirely, and what lets a genuinely insufficient pass 2 reach the same
+honest `insufficient_reconstruction` terminal verdict as a single-pass job —
+never a third pass.
+
+**Persistence, no migration.** `final_artwork_jobs.provider_key`/
+`provider_request_id`/`provider_status` remain the SAME singular columns —
+they represent whichever request is CURRENTLY outstanding: pass 1's, until
+it durably completes, then pass 2's. Pass 1's own output is persisted as an
+ordinary `production_png`-role asset (reusing the existing role rather than
+adding a 4th `ProductionAssetRole` — that enum carries a DB `CHECK`
+constraint, which WOULD need a migration) tagged via
+`metadata.reconstructionStage: "pass1_intermediate"`
+(`production-request-identity.ts`'s `isReconstructionIntermediateAsset`) —
+a metadata-only distinction, never a schema one. Every read path that
+selects "the" deliverable for a job (`resolveExistingProductionAsset`,
+`findProductionAssetIdForJob`, `completedJobIsStaleForTarget`) excludes it
+explicitly, so it can never be handed to a customer or mistaken for proof of
+a stale/current job.
+
+**Idempotency.** The worker retires pass 1's identity from the job's single
+outstanding-request slot (clears `provider_key`/`provider_request_id`/
+`provider_status`) the instant its intermediate asset is durably persisted —
+freeing that slot, unambiguously, for pass 2's own fresh submission. A
+self-heal check at the top of every attempt (`produceProductionAsset`)
+detects and repairs the one straggler window (a crash between persisting
+the intermediate and clearing the slot) by comparing the job's still-set
+request id against the intermediate's own recorded one. `FinalArtworkProvider`
+gained two new, additive, optional hooks
+(`existingIntermediateReconstruction`/`onIntermediateReconstructionProduced`)
+mirroring the existing `existingProviderRequest`/`onProviderRequestSubmitted`
+contract — safely ignorable by every other provider.
+
+**Cost accounting.** `describeProductionVariantCostSummary` now counts the
+DISTINCT non-null provider request ids evidenced across a job's asset
+history (the final asset's + any intermediate's), not a fixed 0-or-1 —
+reporting 2 for a genuine two-pass job while never inflating past however
+many paid submissions actually happened on a resumed/idempotent retry.
+
+---
+
+## 23j. Minimum Raster Dimensions: Match the Production Rounding Rule (Phase 28V.1)
+
+A real existing-artwork job (project 7bcc3e19-5617-4712-99ab-65f1667b5eda,
+local_raster_interpolation, no Topaz, no reconstruction) produced a valid
+3150x3138px plate exactly matching its own intended 10.5x10.46in @ 300 PPI
+size, yet `minimum_raster_dimensions` failed it as "below 3150x3139px" — one
+phantom pixel short. Root cause: `checkMinimumRasterDimensions` re-derived
+its own required threshold as `Math.ceil(intendedHeightIn * targetPpi)`,
+while the ACTUAL asset was produced via `resolveWidthConstrainedSizing`'s
+`Math.round` (`print-placement-dimensions.ts`). `intendedHeightIn` is
+itself a pixels-to-inches division; multiplying back by `targetPpi` is a
+floating-point round trip — for 10.46 (no exact binary representation),
+`10.46 * 300` evaluates to `3138.0000000000005`. `Math.ceil` has zero
+tolerance for that overshoot; `Math.round` (matching the production code)
+correctly absorbs it. Fixed in both `checkMinimumRasterDimensions` and the
+identical, currently-inert (shadowed whenever normalization metadata
+exists) pattern in `minimumRasterDimensionsFor` (`effective-resolution.ts`).
+
+This was investigated under the initial hypothesis that
+`requiredWordingVerification`/`conceptEvaluationAlignment` (both logged as
+`"unknown"` for this job) were an inappropriate Create-New-only semantic
+gate leaking into Existing Artwork production. That hypothesis was
+disproven by direct evidence: the persisted validation report never emits
+either check under the `uploaded_preserve` profile at all (confirmed by
+`assembleUploadedPreserveProductionPrintValidationInput`'s own doc comment
+and `checkConceptEvaluationAlignment`/`checkRequiredWordingVerification`'s
+structural dependence on Concept Evaluation state, which uploaded artwork
+never has) — an already-correct, pre-existing design, not a gap. The
+`"unknown"` label was a worker-log-only cosmetic artifact
+(`report.checks.find(...)?.status ?? "unknown"` always misses for this
+profile) with zero influence on `report.status`; it now logs
+`"not_applicable"` for `uploaded_preserve` specifically, so the next
+similar incident does not lead an investigation to the wrong suspect.
+Concept alignment / required-wording verification remain fully real,
+evaluated, blocking checks for `generated_concept` (Create New) —
+completely unchanged.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

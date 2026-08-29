@@ -12,7 +12,12 @@
  */
 
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
-import { recommendProductionBox, sizingPolicyForProductionBox } from "@/capabilities/shared/garment-production-sizing";
+import {
+  classifyArtworkOrientation,
+  orientedProductionBox,
+  recommendProductionBox,
+  sizingPolicyForProductionBox,
+} from "@/capabilities/shared/garment-production-sizing";
 import {
   resolveWidthConstrainedSizing,
   sizingPolicyForPlacement,
@@ -352,8 +357,19 @@ export function measurePixelSufficiency(
     intendedPrintWidthIn === null
       ? recommendProductionBox({ placement, garmentSizeClass: null })
       : null;
-  const containmentPolicy = recommendation?.box
-    ? sizingPolicyForProductionBox(policy, policy.targetWidthIn, recommendation.box.maxHeightIn)
+  // Phase 28S: orientation-aware, from these same visible bounds — a
+  // portrait design's sufficiency message must not be computed against a
+  // flat box height that was never meant to be its ceiling (see
+  // `orientedProductionBox`'s doc comment).
+  const orientedBox = recommendation?.box
+    ? orientedProductionBox(
+        recommendation.box,
+        classifyArtworkOrientation(artworkWidthPx, artworkHeightPx),
+        policy.maxHeightIn,
+      )
+    : null;
+  const containmentPolicy = orientedBox
+    ? sizingPolicyForProductionBox(policy, policy.targetWidthIn, orientedBox.maxHeightIn)
     : policy;
 
   const contained = resolveWidthConstrainedSizing(

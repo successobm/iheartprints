@@ -153,6 +153,67 @@ export function classifyVariantAttentionKind(
 }
 
 /**
+ * Phase 28T.1 — a job that reaches a terminal "cannot auto-finalize" verdict
+ * WITHOUT ever producing an asset (`completeWithoutAsset` in
+ * `final-artwork-worker-capability.ts`) has no `ProductionAssetValidation`
+ * row to derive a check name from — `firstBlockingFailedCheck` always saw
+ * `null` for this exact shape, which silently produced
+ * `attentionReason: null` / `attentionKind: null` even though the job's own
+ * `lastError` already carries an honest, specific conclusion (a real
+ * production job: 0807429d-22dc-4dfe-aa0f-51918cf04be1, refused pre-dispatch
+ * because required reconstruction exceeded the 4x provider ceiling — see
+ * the Phase 28T.1 report). This never affected a job that DID produce an
+ * asset and then failed validation; that path is unchanged.
+ *
+ * WRITE side: `attachAttentionCheckName` lets the one call site that knows
+ * PRECISELY why (the Topaz insufficient-reconstruction / no-visible-artwork
+ * refusal — the only `invalid_request` + `not_dispatched` throw in this
+ * codebase, see `topaz-transparency-upscale-provider.ts`) tag its message
+ * with the SAME check-name vocabulary `describeVariantAttentionReason` /
+ * `classifyVariantAttentionKind` already key their sentences off of. No new
+ * message text, no new classification branch — just a second, honest way to
+ * arrive at a check name besides a validation report. `lastError` is
+ * internal-only (never shown to a customer raw), so a short bracketed
+ * prefix ahead of the existing human sentence costs nothing.
+ *
+ * READ side: `resolveAttentionCheckName` tries the validation report first
+ * (unchanged), then a marker embedded in `lastError` (new jobs, going
+ * forward), and — for a completed-without-asset job whose `lastError`
+ * predates this marker, or that arose from a DIFFERENT honest verdict this
+ * module does not specifically name (unsupported category, unknown print
+ * location, no visible pixels, ...) — falls back to a generic non-matching
+ * placeholder. `describeVariantAttentionReason` / `classifyVariantAttentionKind`
+ * already treat any unrecognized check name as `"other"` with the existing
+ * safe generic sentence, so this never invents new customer-facing text: it
+ * only stops mapping a real, honest, already-known verdict to `null`.
+ * Deliberately scoped to `jobStatus === "completed"` — a `"failed"` job's
+ * `lastError` is a raw infrastructure error from a completely different
+ * code path (`describeFinalArtworkError`) and is out of scope here.
+ */
+const ATTENTION_CHECK_NAME_MARKER = /^\[\[check:([a-z_]+)\]\] /;
+
+export function attachAttentionCheckName(message: string, checkName: string): string {
+  return `[[check:${checkName}]] ${message}`;
+}
+
+export function resolveAttentionCheckName(
+  validationReport: Record<string, unknown> | null | undefined,
+  jobStatus: FinalArtworkJobStatus | null,
+  lastError: string | null,
+): string | null {
+  const fromReport = firstBlockingFailedCheck(validationReport);
+  if (fromReport !== null) return fromReport;
+  if (jobStatus !== "completed" || !lastError) return null;
+  const marker = ATTENTION_CHECK_NAME_MARKER.exec(lastError);
+  if (marker) return marker[1];
+  // Completed without an asset, without a recognized marker: still an
+  // honest verdict (some `completeWithoutAsset` reason), just not one this
+  // module names specifically. Any non-null, non-matching value routes both
+  // read functions to their existing safe generic branch.
+  return "unspecified_completion_reason";
+}
+
+/**
  * Non-monetary, structural cost facts derived from a job's own recorded
  * provider identity — never a dollar figure (Phase 27P Gate: no pricing data
  * exists anywhere in this repository; see the phase report). Safe to show
@@ -163,10 +224,15 @@ export interface ProductionVariantCostSummary {
   /** The provider that actually ran, or `null` when no job has ever run. */
   provider: string | null;
   /**
-   * Requests that left this process for a paid provider. Currently always 0
-   * or 1: every provider in this build makes at most one external request
-   * per completed job (Topaz's own internal poll loop is one logical
-   * request; the local providers never leave the process at all).
+   * Requests that left this process for a paid provider. 0 or 1 for every
+   * provider except Phase 28V's controlled two-pass Topaz reconstruction,
+   * which may legitimately make 2 (each pass's own poll loop is one
+   * logical request; the local providers never leave the process at all).
+   * Counted as the number of DISTINCT provider request ids evidenced
+   * across a job's asset history (final asset + any intermediate
+   * reconstruction-stage asset), never simply "how many passes a two-pass
+   * plan nominally has" — a resumed/idempotent retry must never inflate
+   * this past the number of paid submissions that actually happened.
    */
   externalProviderCalls: number;
   /** True only when the provider that ran is a metered, paid service (Topaz). */
@@ -203,14 +269,29 @@ const PAID_PROVIDER_KEYS = new Set(["topaz_transparency_upscale"]);
 export function describeProductionVariantCostSummary(
   job: { attempts: number; providerKey: string | null } | null,
   assetProviderRequestId: string | null,
+  /**
+   * Phase 28V: provider request ids evidenced by OTHER durable records tied
+   * to this job — currently just a two-pass reconstruction's persisted
+   * PASS 1 intermediate, when one exists. Omit/empty for every job that
+   * never had a second pass — the count then falls back to exactly the
+   * pre-Phase-28V 0-or-1 behavior.
+   */
+  additionalProviderRequestIds: Array<string | null | undefined> = [],
 ): ProductionVariantCostSummary {
   if (!job) {
     return { provider: null, externalProviderCalls: 0, paidProviderUsed: false, retryCount: 0 };
   }
   const paidProviderUsed = job.providerKey !== null && PAID_PROVIDER_KEYS.has(job.providerKey);
+  const distinctProviderRequestIds = paidProviderUsed
+    ? new Set(
+        [assetProviderRequestId, ...additionalProviderRequestIds].filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ),
+      )
+    : new Set<string>();
   return {
     provider: job.providerKey,
-    externalProviderCalls: paidProviderUsed && assetProviderRequestId ? 1 : 0,
+    externalProviderCalls: distinctProviderRequestIds.size,
     paidProviderUsed,
     retryCount: Math.max(0, job.attempts - 1),
   };

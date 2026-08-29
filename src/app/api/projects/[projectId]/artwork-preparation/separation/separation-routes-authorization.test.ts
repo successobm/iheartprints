@@ -4,24 +4,32 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { bowlingStyleArtwork, toPngBytes } from "@/capabilities/artwork-preparation/artwork-fixtures";
+import { bowlingStyleArtwork, enclosedBlackRegionArtwork, toPngBytes } from "@/capabilities/artwork-preparation/artwork-fixtures";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 /**
- * Intelligent Separation Phase 10, Goal 12: PUBLIC SECURITY, proven through
- * actual route behavior rather than the hidden React controls that gate
- * `SeparationReviewPanel`'s mount. Every route Phase 9 built calls
- * `graph.acquisition.isInternalProject` before touching the capability
- * (Phase 9's "U" test proved this by reading the route source); this file
- * proves the CONSEQUENCE of that gate by actually invoking the exported
- * route handlers against a real project, the way the repo's other
- * route-level tests do (see `production-artwork/image/route.test.ts`).
+ * Intelligent Separation Phase 10, Goal 12 / Phase 28K CORRECTION.
  *
- * No route in this codebase gated on `isInternalProject` had a behavioral
- * test before this file — including the precedent route this feature copies
- * its gate from (`production-treatment/preview/route.ts`). This is the first.
+ * This file originally proved these routes were internal-staff-only,
+ * denying every "public" (non-internal) caller. A real, top-to-bottom
+ * human acceptance run (Phase 28K) found that this made the flow
+ * IMPOSSIBLE for an ordinary project owner: `approvePreparedArtwork`
+ * (the real "Use This Artwork" handler) has no internal-only gate and
+ * correctly refuses approval until genuine consequential-region decisions
+ * are resolved, but every route capable of showing an ordinary owner that
+ * review or letting them resolve it was denied to them by the internal-only
+ * gate this file used to require. That combination is a real product bug,
+ * not a security feature — see `isAuthorizedForArtworkCorrection`'s doc
+ * comment for the full audit.
+ *
+ * Phase 28K widened the gate from "internal staff only" to "internal staff
+ * OR this exact project's own owner" — this file now proves BOTH halves of
+ * that: an ordinary owner succeeds on their OWN project (the fix), while a
+ * request naming a project id that resolves to nothing real is still
+ * denied (the boundary that remains). Proven through actual route
+ * invocation, not inferred from source reading, exactly as before.
  */
-describe("Separation routes — internal-only authorization (Phase 10 Goal 12)", () => {
+describe("Separation routes — internal-staff-or-owner authorization (Phase 10 Goal 12 / Phase 28K)", () => {
   let tempDir = "";
   let previousCwd = "";
 
@@ -35,7 +43,7 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
     await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
-  async function seededProject(options: { internal: boolean }) {
+  async function seededProject(options: { internal: boolean; fixture?: () => ReturnType<typeof bowlingStyleArtwork> }) {
     const { resetCapabilityGraphForTests, getCapabilityGraph } = await import("@/capabilities/composition");
     resetCapabilityGraphForTests();
     const graph = getCapabilityGraph();
@@ -50,7 +58,7 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
     const projectId = created.project.id;
 
     await graph.artworkPreparation.uploadOriginal(projectId, {
-      bytes: toPngBytes(bowlingStyleArtwork()),
+      bytes: toPngBytes((options.fixture ?? bowlingStyleArtwork)()),
       declaredContentType: "image/png",
       filename: "logo.png",
     });
@@ -143,47 +151,111 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
     return { getRes, decisionsRes, proposalRes, approveRes, imageRes };
   }
 
-  it("a public (non-internal) project: GET separation is denied with an uninformative 404", async () => {
+  it("Phase 28K FIX: an ordinary (non-internal) project's own owner reaches GET separation and sees real consequential regions", async () => {
     const { projectId } = await seededProject({ internal: false });
     const { getRes } = await callRoutes(projectId);
-    assert.equal(getRes.status, 404);
-    // Uninformative — never 403, which would confirm the endpoint exists for
-    // a tier the caller isn't in (Goal 21/22).
+    assert.equal(getRes.status, 200, "the impossible gate: an owner must be able to see WHY approval is blocked");
+    const body = (await getRes.json()) as { state: string; regionMap: { consequentialRegions: unknown[] } };
+    assert.notEqual(body.state, "review_not_required");
+    assert.ok(body.regionMap.consequentialRegions.length > 0);
+  });
+
+  it("Phase 28K FIX: an ordinary owner's decision write succeeds and persists", async () => {
+    const { graph, projectId } = await seededProject({ internal: false });
+    const { decisionsRes } = await callRoutes(projectId);
+    assert.equal(decisionsRes.status, 200);
+    const body = (await decisionsRes.json()) as { decisions: Array<{ regionId: number; intent: string; source: string }> };
+    assert.ok(body.decisions.length > 0);
+    assert.ok(body.decisions.every((d) => d.intent === "ink" && d.source === "operator"));
+
+    const reread = await graph.artworkPreparation.getSeparationReview(projectId);
+    assert.equal(reread.decisions.length, body.decisions.length);
+  });
+
+  it("Phase 28K FIX: an ordinary owner's proposal decision succeeds, approval succeeds once every region is decided, and image access succeeds -- THE EXACT IMPOSSIBLE-GATE SEQUENCE, now possible", async () => {
+    const { projectId } = await seededProject({ internal: false });
+    const { proposalRes, approveRes, imageRes } = await callRoutes(projectId);
+    assert.equal(proposalRes.status, 200);
+    assert.equal(approveRes.status, 200, "'Use This Artwork' for a genuinely-required review must succeed for the owner");
+    const body = (await approveRes.json()) as { state: string; isProductionAuthoritative: boolean };
+    assert.equal(body.state, "review_complete");
+    assert.equal(body.isProductionAuthoritative, true);
+    assert.equal(imageRes.status, 200);
+    assert.equal(imageRes.headers.get("Content-Type"), "image/png");
+  });
+
+  it("a project id that resolves to nothing real is still denied with an uninformative 404 -- the boundary that remains", async () => {
+    const nonexistentProjectId = "00000000-0000-0000-0000-000000000000";
+    const { getRes, decisionsRes, proposalRes, approveRes, imageRes } = await callRoutes(nonexistentProjectId);
+    for (const [name, res] of [
+      ["getRes", getRes],
+      ["decisionsRes", decisionsRes],
+      ["proposalRes", proposalRes],
+      ["approveRes", approveRes],
+      ["imageRes", imageRes],
+    ] as const) {
+      assert.equal(res.status, 404, `${name} must still deny a project id naming nothing real`);
+    }
+    // Uninformative — never 403 (Goal 21/22), preserved for this boundary too.
     assert.equal(await getRes.text(), "Not found");
   });
 
-  it("a public (non-internal) project: decision writes are denied", async () => {
-    const { projectId } = await seededProject({ internal: false });
-    const { decisionsRes } = await callRoutes(projectId);
-    assert.equal(decisionsRes.status, 404);
+  it("two ordinary owners' projects never cross-contaminate: each sees only its own consequential regions and decisions", async () => {
+    const { graph: graphA, projectId: projectA } = await seededProject({ internal: false });
+    const { projectId: projectB } = await seededProject({ internal: false });
+
+    const { decisionsRes: decisionsA } = await callRoutes(projectA);
+    assert.equal(decisionsA.status, 200);
+
+    // Project B's own state is untouched by A's decision write -- reading B
+    // through its OWN id never surfaces A's decisions or vice versa.
+    const reviewB = await graphA.artworkPreparation.getSeparationReview(projectB);
+    assert.equal(reviewB.decisions.length, 0, "project B must never see project A's decisions");
+
+    const getRouteRecheck = await import("./route");
+    const paramsA = { params: Promise.resolve({ projectId: projectA }) };
+    const recheckA = await getRouteRecheck.GET(new Request("http://localhost/x"), paramsA);
+    const bodyA = (await recheckA.json()) as { decisions: unknown[] };
+    assert.ok(bodyA.decisions.length > 0, "project A must still see its own decisions after B was created/read");
   });
 
-  it("a public (non-internal) project: proposal decision writes are denied", async () => {
-    const { projectId } = await seededProject({ internal: false });
-    const { proposalRes } = await callRoutes(projectId);
-    assert.equal(proposalRes.status, 404);
-  });
+  it("a forged decision body naming a DIFFERENT project's real hashes is rejected by fresh server-side validation, never silently applied", async () => {
+    // Deliberately different source artwork for B, so its region map and
+    // hashes genuinely differ from A's -- identical fixtures would make a
+    // "forged" cross-project body indistinguishable from a legitimate
+    // same-content resubmission (a test-design pitfall, not a real one:
+    // decisions still only ever get applied to the CALLING project's own
+    // data regardless).
+    const { graph: graphA, projectId: projectA } = await seededProject({ internal: false });
+    const { projectId: projectB } = await seededProject({ internal: false, fixture: enclosedBlackRegionArtwork });
 
-  it("a public (non-internal) project: approval is denied", async () => {
-    const { projectId } = await seededProject({ internal: false });
-    const { approveRes } = await callRoutes(projectId);
-    assert.equal(approveRes.status, 404);
-  });
+    const decisionsRouteA = await import("./decisions/route");
+    const getRouteB = await import("./route");
+    const paramsA = { params: Promise.resolve({ projectId: projectA }) };
+    const paramsB = { params: Promise.resolve({ projectId: projectB }) };
 
-  it("a public (non-internal) project: image access is denied", async () => {
-    const { projectId } = await seededProject({ internal: false });
-    const { imageRes } = await callRoutes(projectId);
-    assert.equal(imageRes.status, 404);
-  });
+    // Real hashes, but they belong to project B, not A.
+    const viewB = (await (await getRouteB.GET(new Request("http://localhost/x"), paramsB)).json()) as {
+      regionMap: { sourceAssetSha256: string; regionMapHash: string; consequentialRegions: Array<{ regionId: number }> };
+    };
+    const forgedBody = JSON.stringify({
+      sourceAssetSha256: viewB.regionMap.sourceAssetSha256,
+      regionMapHash: viewB.regionMap.regionMapHash,
+      decisions: viewB.regionMap.consequentialRegions.map((r) => ({ regionId: r.regionId, intent: "ink" })),
+    });
 
-  it("a public (non-internal) project's denial leaves NO separation state behind — a forged decision body never applied", async () => {
-    const { graph, projectId } = await seededProject({ internal: false });
-    await callRoutes(projectId);
-    // The gate refused the write before the capability ever ran; read the
-    // capability directly (no route, no gate) to confirm the forged body
-    // from `callRoutes` truly never persisted anything.
-    const review = await graph.artworkPreparation.getSeparationReview(projectId);
-    assert.equal(review.decisions.length, 0, "the forged public write must not have persisted any decision");
+    const res = await decisionsRouteA.POST(
+      new Request("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json" }, body: forgedBody }),
+      paramsA,
+    );
+    // The route is reachable (owner authorization passed); the capability's
+    // OWN fresh-region-map validation is what refuses a hash that does not
+    // match project A's actual current state -- authorization and pixel
+    // safety are two different, both-enforced layers.
+    assert.notEqual(res.status, 200, "project B's real hashes must not validate against project A's own region map");
+
+    const reviewA = await graphA.artworkPreparation.getSeparationReview(projectA);
+    assert.equal(reviewA.decisions.length, 0, "the forged cross-project body must not have persisted any decision on A");
   });
 
   it("an internal project: GET separation succeeds and surfaces consequential regions", async () => {
@@ -221,15 +293,29 @@ describe("Separation routes — internal-only authorization (Phase 10 Goal 12)",
   });
 
   // -------------------------------------------------------------------
-  // Phase 14: the two new preview modes get the SAME internal-only gate,
-  // proven the same way — actual route invocation, not inferred from the
-  // fact that they share a switch statement with the already-tested modes.
+  // Phase 14: the two zoom preview modes get the SAME internal-staff-or-owner
+  // gate as every other mode on this route, proven the same way — actual
+  // route invocation. `SeparationReviewPanel` fetches both of these directly
+  // for its own customer-facing region detail view (Phase 28K), so an owner
+  // reaching them is the fix, not a widening.
   // -------------------------------------------------------------------
 
-  it("Phase 14: a public project cannot reach region-context or region-crop", async () => {
-    const { projectId } = await seededProject({ internal: false });
+  it("Phase 14 / Phase 28K FIX: an ordinary owner reaches region-context and region-crop too", async () => {
+    const { graph, projectId } = await seededProject({ internal: false });
+    const review = await graph.artworkPreparation.getSeparationReview(projectId);
+    const regionId = review.regionMap.consequentialRegions[0]!.regionId;
     const imageRoute = await import("./image/route");
     const params = { params: Promise.resolve({ projectId }) };
+    const contextRes = await imageRoute.GET(new Request(`http://localhost/x?mode=region-context&region=${regionId}`), params);
+    const cropRes = await imageRoute.GET(new Request(`http://localhost/x?mode=region-crop&region=${regionId}`), params);
+    assert.equal(contextRes.status, 200);
+    assert.equal(cropRes.status, 200);
+  });
+
+  it("a project id naming nothing real cannot reach region-context or region-crop either", async () => {
+    const nonexistentProjectId = "00000000-0000-0000-0000-000000000000";
+    const imageRoute = await import("./image/route");
+    const params = { params: Promise.resolve({ projectId: nonexistentProjectId }) };
     const contextRes = await imageRoute.GET(new Request("http://localhost/x?mode=region-context&region=1"), params);
     const cropRes = await imageRoute.GET(new Request("http://localhost/x?mode=region-crop&region=1"), params);
     assert.equal(contextRes.status, 404);

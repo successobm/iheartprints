@@ -103,14 +103,19 @@ describe("Phase 16: complex-background artwork reaches separation review without
     assert.equal(body.regionMap.consequentialRegions.length, 2, "the disconnected ellipse and the enclosed hole");
   });
 
-  it("B: a PUBLIC (non-internal) project with the identical artwork gets the same uninformative 404 — existing conservative behavior is unchanged", async () => {
+  it("B (Phase 28K CORRECTION): an ordinary (non-internal) project's own owner with the identical artwork ALSO reaches this same review — this is exactly the impossible-gate scenario Phase 28K fixed: an ordinary owner stuck with a NEEDS_REVIEW background must be able to see and resolve it, not be denied", async () => {
     const { projectId } = await seededComplexBackgroundProject({ internal: false });
     const getRoute = await import("./route");
     const params = { params: Promise.resolve({ projectId }) };
 
     const res = await getRoute.GET(new Request("http://localhost/x"), params);
-    assert.equal(res.status, 404);
-    assert.equal(await res.text(), "Not found");
+    assert.equal(res.status, 200, "an ordinary owner stuck with a complex background must see the review, not a 404");
+    const body = (await res.json()) as {
+      state: string;
+      regionMap: { consequentialRegions: Array<{ regionId: number }> };
+    };
+    assert.equal(body.state, "review_required");
+    assert.equal(body.regionMap.consequentialRegions.length, 2, "the disconnected ellipse and the enclosed hole");
   });
 
   it("H: entering separation review never itself submits a decision or writes anything — repeated GETs return an identical, still-pristine view", async () => {

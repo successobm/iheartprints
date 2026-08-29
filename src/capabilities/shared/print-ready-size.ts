@@ -29,6 +29,8 @@ import {
 import {
   GARMENT_SIZE_CLASS_LABELS,
   GARMENT_SIZE_CLASSES,
+  classifyArtworkOrientation,
+  orientedProductionBox,
   recommendProductionBox,
   sizingPolicyForProductionBox,
   type ProductionBox,
@@ -334,13 +336,27 @@ function describeRecommendation(
   confirmedSize: ConfirmedProductionSize | null,
 ): PrintReadyRecommendationView {
   const placement = input.printPlacement!;
+  const placementPolicy = PRINT_PLACEMENT_SIZING_POLICY[placement];
+  // Phase 28S: the SAME single sizing authority `image-analysis.ts` and
+  // `conversation-capability.ts` use — orientation from the artwork's own
+  // visible bounds, box adjusted accordingly, never re-decided per call
+  // site. Unknown dimensions (no artwork known yet) fall back to the box
+  // exactly as before — there is nothing to classify an orientation from.
+  const effectiveBox =
+    input.artworkWidthPx && input.artworkHeightPx
+      ? orientedProductionBox(
+          box,
+          classifyArtworkOrientation(input.artworkWidthPx, input.artworkHeightPx),
+          placementPolicy.maxHeightIn,
+        )
+      : box;
   // Contained through the SAME geometry the production transform uses, so
   // "your artwork will print at 10.5 x 9.1" is arithmetic rather than a
   // second estimate that can drift from the plate.
   const boxPolicy = sizingPolicyForProductionBox(
-    PRINT_PLACEMENT_SIZING_POLICY[placement],
-    box.maxWidthIn,
-    box.maxHeightIn,
+    placementPolicy,
+    effectiveBox.maxWidthIn,
+    effectiveBox.maxHeightIn,
   );
   // Phase 28I: same artwork-edge safety margin as the main `contained`
   // computation above — see that call site's comment. This is the SECOND
@@ -356,16 +372,16 @@ function describeRecommendation(
 
   return {
     recommendedFor: `${GARMENT_SIZE_CLASS_LABELS[garmentSizeClass]} · ${PLACEMENT_LABELS[placement]}`,
-    boxWidthIn: box.maxWidthIn,
-    boxHeightIn: box.maxHeightIn,
+    boxWidthIn: effectiveBox.maxWidthIn,
+    boxHeightIn: effectiveBox.maxHeightIn,
     artworkWidthIn: contained ? roundInches(contained.widthIn) : null,
     artworkHeightIn: contained ? roundInches(contained.heightIn) : null,
     assumedGarmentSizeClass,
     isConfirmed:
       confirmedSize !== null &&
-      Math.abs(confirmedSize.widthIn - box.maxWidthIn) < 1e-9 &&
+      Math.abs(confirmedSize.widthIn - effectiveBox.maxWidthIn) < 1e-9 &&
       confirmedSize.boxMaxHeightIn !== null &&
-      Math.abs(confirmedSize.boxMaxHeightIn - box.maxHeightIn) < 1e-9,
+      Math.abs(confirmedSize.boxMaxHeightIn - effectiveBox.maxHeightIn) < 1e-9,
   };
 }
 

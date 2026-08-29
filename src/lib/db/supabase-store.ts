@@ -949,6 +949,12 @@ export class SupabaseProjectRepository implements ProjectRepository {
     };
   }
 
+  async listProjects(): Promise<PrintProject[]> {
+    const { data, error } = await this.client.from("print_projects").select("*");
+    if (error) throw error;
+    return ((data as DbProject[]) ?? []).map(mapProject);
+  }
+
   async updateProject(
     projectId: string,
     patch: Partial<

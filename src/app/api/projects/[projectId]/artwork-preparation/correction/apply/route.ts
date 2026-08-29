@@ -1,20 +1,22 @@
 import { NextResponse } from "next/server";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
+import { getProjectRepository } from "@/lib/db";
 
 type RouteContext = { params: Promise<{ projectId: string }> };
 
 /**
  * Phase 27E — accepts one correction operation into the IN-MEMORY session
  * (never the database — see Phase 27E §10, no hidden auto-save). Persists
- * only raw clicks + mode + tolerance, never a mask. INTERNAL ONLY.
+ * only raw clicks + mode + tolerance, never a mask. Phase 28K: internal staff OR this project's own owner (see `isAuthorizedForArtworkCorrection`).
  */
 export async function POST(request: Request, context: RouteContext) {
   const { projectId } = await context.params;
   const graph = getCapabilityGraph();
 
-  if (!(await graph.acquisition.isInternalProject(projectId))) {
+  if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
     return new Response("Not found", { status: 404 });
   }
 

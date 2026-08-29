@@ -69,13 +69,23 @@ import {
   resolveWidthConstrainedSizing,
   type PlacementSizingPolicy,
 } from "@/capabilities/shared/print-placement-dimensions";
-import type { FinalArtworkProvider, FinalArtworkProviderResumeContext } from "@/capabilities/final-artwork/provider";
+import type {
+  FinalArtworkProvider,
+  FinalArtworkProviderIntermediateReconstruction,
+  FinalArtworkProviderResumeContext,
+} from "@/capabilities/final-artwork/provider";
 import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwork/production-normalization";
 import { computeAlphaBounds, DEFAULT_ALPHA_THRESHOLD } from "@/capabilities/final-artwork/alpha-trim";
 import { decideEnhancement } from "@/capabilities/final-artwork/enhancement-decision";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
 import { HalftoneDtfProvider } from "@/capabilities/final-artwork/halftone-dtf-provider";
 import type { HalftoneScreenMetadata } from "@/capabilities/final-artwork/halftone-screen";
+import {
+  isReconstructionIntermediateAsset,
+  productionAssetMatchesEffectiveTarget,
+  RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER,
+  type EffectiveProductionTargetIn,
+} from "@/capabilities/final-artwork/production-request-identity";
 import {
   currentProductionTreatmentKey,
   resolveProductionTreatment,
@@ -87,6 +97,7 @@ import {
   type ConceptEvaluationCapability,
 } from "@/capabilities/concept-evaluation";
 import { ProviderError } from "@/capabilities/providers/provider-error";
+import { attachAttentionCheckName } from "@/capabilities/shared/production-variant";
 
 import { checkSourceEligibleForFinalization } from "./source-eligibility";
 import { verifyProductionArtwork } from "./production-verification";
@@ -412,17 +423,116 @@ export function createFinalArtworkWorkerCapability(
     return true;
   }
 
+  /**
+   * Phase 28T: this idempotency guard predates Phase 28T — its whole
+   * purpose is "a worker crash/retry after the asset was already produced
+   * must never reprocess" — but "an asset already exists for this job" and
+   * "that asset still answers the CURRENT effective request" are different
+   * facts. Without `targetIn`, reusing a job whose confirmed envelope
+   * changed (Phase 28S's own fix, or a future size picker) would silently
+   * re-serve the STALE plate forever, since this function runs BEFORE the
+   * provider is ever consulted — `resolvePreparedUploadJob`'s revival
+   * (`final-artwork-capability.ts`) would correctly set the job back to
+   * `queued`, only for THIS guard to immediately short-circuit it back to
+   * "ready" with the old asset, undoing the revival's entire intent.
+   *
+   * `targetIn === null` (the create_new path, which does not yet compute
+   * one — seePhase 28T's own report) preserves EXACTLY the pre-Phase-28T
+   * behavior: the first matching asset, trusted unconditionally.
+   */
   async function resolveExistingProductionAsset(
     job: FinalArtworkJob,
+    targetIn: EffectiveProductionTargetIn | null,
   ): Promise<AssetRecord | null> {
     const existingAssets = await repo.listAssets(job.projectId);
-    return (
-      existingAssets.find(
-        (asset) =>
-          asset.finalArtworkJobId === job.id &&
-          asset.productionRole === "production_png",
-      ) ?? null
+    const candidates = existingAssets.filter(
+      (asset) =>
+        asset.finalArtworkJobId === job.id &&
+        asset.productionRole === "production_png" &&
+        // Phase 28V: a two-pass reconstruction's PASS 1 output is an
+        // internal reconstruction-stage artifact, never a candidate
+        // final deliverable — see `resolveExistingIntermediateReconstruction`.
+        !isReconstructionIntermediateAsset(asset),
     );
+    if (candidates.length === 0) return null;
+    if (!targetIn) return candidates[0]!;
+    return candidates.find((asset) => productionAssetMatchesEffectiveTarget(asset, targetIn)) ?? null;
+  }
+
+  /**
+   * Phase 28V (Section 7/8) — the durable proof that a two-pass
+   * reconstruction's PASS 1 already completed for this exact job, if any.
+   * Reused across attempts so pass 1 is NEVER resubmitted once its output
+   * is durably stored: `produceProductionAsset` passes this to the active
+   * provider as `existingIntermediateReconstruction`, and a provider that
+   * recognizes it treats pass 1 as already done.
+   */
+  async function resolveExistingIntermediateReconstruction(
+    job: FinalArtworkJob,
+  ): Promise<{ asset: AssetRecord; providerRequestId: string } | null> {
+    const existingAssets = await repo.listAssets(job.projectId);
+    const candidate = existingAssets.find(
+      (asset) =>
+        asset.finalArtworkJobId === job.id &&
+        asset.productionRole === "production_png" &&
+        isReconstructionIntermediateAsset(asset),
+    );
+    if (!candidate) return null;
+    const meta = candidate.metadata as Record<string, unknown> | null | undefined;
+    const providerRequestId = typeof meta?.providerRequestId === "string" ? meta.providerRequestId : null;
+    // Defensive: a malformed/legacy row with the marker but no recorded
+    // request id carries no audit value and cannot be trusted as proof of
+    // a specific paid submission — treated as though it does not exist
+    // (never as license to resubmit pass 1 blindly; see the caller).
+    if (!providerRequestId) return null;
+    return { asset: candidate, providerRequestId };
+  }
+
+  /**
+   * Phase 28V (Section 8/9) — durably stores a validated PASS 1
+   * reconstruction as an internal, non-customer-facing asset, then retires
+   * pass 1's identity from the job's single outstanding-request slot so it
+   * is unambiguously free for pass 2's own fresh submission.
+   *
+   * Idempotent: re-running this for a pass whose intermediate was already
+   * persisted (a crash landed between the upload below and the column
+   * clear below) never uploads a second copy — it just (re-)clears the
+   * columns, which is itself a no-op once already cleared.
+   */
+  async function persistIntermediateReconstruction(
+    job: FinalArtworkJob,
+    activeProvider: FinalArtworkProvider,
+    storageGroupingId: string,
+    result: FinalArtworkProviderIntermediateReconstruction,
+  ): Promise<void> {
+    const existing = await resolveExistingIntermediateReconstruction(job);
+    if (!existing || existing.providerRequestId !== result.providerRequestId) {
+      await assets.uploadProductionAsset(job.projectId, {
+        conceptId: storageGroupingId,
+        bytes: result.bytes,
+        contentType: "image/png",
+        widthPx: result.widthPx,
+        heightPx: result.heightPx,
+        // Best-effort only — this is never the validated customer
+        // deliverable and never runs through print validation.
+        hasTransparency: true,
+        finalArtworkJobId: job.id,
+        productionRole: "production_png",
+        metadata: {
+          reconstructionStage: RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER,
+          providerKey: activeProvider.providerKey,
+          providerRequestId: result.providerRequestId,
+        },
+      });
+    }
+    // Section 8: pass 1's identity now lives durably on the intermediate
+    // asset's own metadata for audit — free the job's single
+    // outstanding-request slot for pass 2's fresh submission.
+    await repo.updateFinalArtworkJob(job.id, {
+      providerKey: null,
+      providerRequestId: null,
+      providerStatus: null,
+    });
   }
 
   function provenanceFromExistingAsset(
@@ -481,6 +591,13 @@ export function createFinalArtworkWorkerCapability(
     missingSourceBytesReason: string;
     /** Workflow-specific provenance persisted alongside the plate (e.g. uploaded-preserve lineage). */
     extraAssetMetadata: Record<string, unknown>;
+    /**
+     * Phase 28T: the artwork's CURRENT effective resolved size, when known
+     * — see `resolveExistingProductionAsset`'s doc comment. `null` for
+     * callers that do not yet compute one (preserves exactly the
+     * pre-Phase-28T "trust the first existing asset" behavior).
+     */
+    targetIn: EffectiveProductionTargetIn | null;
   }): Promise<
     | {
         status: "ready";
@@ -492,7 +609,7 @@ export function createFinalArtworkWorkerCapability(
   > {
     const { job, sourceAsset, sizing, activeProvider } = params;
 
-    const existing = await resolveExistingProductionAsset(job);
+    const existing = await resolveExistingProductionAsset(job, params.targetIn);
     if (existing) {
       return {
         status: "ready",
@@ -516,16 +633,65 @@ export function createFinalArtworkWorkerCapability(
       return { status: "handled" };
     }
 
+    // --- Phase 28V (Section 7/8): does a two-pass reconstruction's PASS 1
+    // already durably exist for this job? If so, it must never be
+    // resubmitted, and the job's single outstanding-request slot — if it
+    // still (harmlessly) points at pass 1's now-retired identity because a
+    // crash landed between persisting the intermediate and clearing this
+    // slot — is self-healed here, BEFORE it could be mistaken for an
+    // in-flight pass 2 request.
+    const existingIntermediate = await resolveExistingIntermediateReconstruction(job);
+    let effectiveJob = job;
+    if (
+      existingIntermediate &&
+      effectiveJob.providerRequestId !== null &&
+      effectiveJob.providerRequestId === existingIntermediate.providerRequestId
+    ) {
+      await repo.updateFinalArtworkJob(job.id, {
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+      });
+      effectiveJob = { ...effectiveJob, providerKey: null, providerRequestId: null, providerStatus: null };
+    }
+
+    let existingIntermediateReconstruction: FinalArtworkProviderIntermediateReconstruction | null = null;
+    if (existingIntermediate) {
+      const intermediateBytes = await assets.downloadAssetBytes(existingIntermediate.asset.id);
+      if (
+        !intermediateBytes ||
+        existingIntermediate.asset.widthPx === null ||
+        existingIntermediate.asset.heightPx === null
+      ) {
+        // Section 8: proof that pass 1 was paid for and completed exists,
+        // but its bytes cannot currently be read back — never silently
+        // resubmit pass 1 to paper over that (would duplicate a paid
+        // call). An honest infrastructure failure, retryable once storage
+        // is healthy again.
+        await failJob(
+          job,
+          "A previously completed first-pass reconstruction could not be read back from storage.",
+        );
+        return { status: "handled" };
+      }
+      existingIntermediateReconstruction = {
+        bytes: intermediateBytes.bytes,
+        widthPx: existingIntermediate.asset.widthPx,
+        heightPx: existingIntermediate.asset.heightPx,
+        providerRequestId: existingIntermediate.providerRequestId,
+      };
+    }
+
     // --- Sprint 2M Phase 2E (Goal 3): resume a prior paid request for
     // THIS exact job when one exists and belongs to THIS exact provider —
     // never resubmit while a paid reconstruction may still be in flight
     // or already complete server-side.
     const existingProviderRequest: FinalArtworkProviderResumeContext | null =
-      job.providerKey === activeProvider.providerKey && job.providerRequestId
+      effectiveJob.providerKey === activeProvider.providerKey && effectiveJob.providerRequestId
         ? {
-            providerKey: job.providerKey,
-            providerRequestId: job.providerRequestId,
-            providerStatus: job.providerStatus,
+            providerKey: effectiveJob.providerKey,
+            providerRequestId: effectiveJob.providerRequestId,
+            providerStatus: effectiveJob.providerStatus,
           }
         : null;
 
@@ -551,6 +717,9 @@ export function createFinalArtworkWorkerCapability(
               providerStatus: "submitted",
             });
           },
+          existingIntermediateReconstruction,
+          onIntermediateReconstructionProduced: (result) =>
+            persistIntermediateReconstruction(job, activeProvider, params.storageGroupingId, result),
         }),
       );
     } catch (error) {
@@ -592,7 +761,19 @@ export function createFinalArtworkWorkerCapability(
         error.classification === "invalid_request" &&
         error.dispatch === "not_dispatched"
       ) {
-        await completeWithoutAsset(job, error.message);
+        // Phase 28T.1: this is the ONE throw site in the codebase for this
+        // exact classification+dispatch shape — reached only when
+        // `resolveReconstructionRequest` refuses (`insufficient_reconstruction`
+        // / `no_visible_artwork`), i.e. exactly the case
+        // `describeVariantAttentionReason`/`classifyVariantAttentionKind`
+        // already call "deterministic_enhancement". Tagging the persisted
+        // message lets the read side (`resolveOneProductionVariant`) surface
+        // that existing, already-safe explanation instead of `null` — see
+        // `attachAttentionCheckName` in `production-variant.ts`.
+        await completeWithoutAsset(
+          job,
+          attachAttentionCheckName(error.message, "reconstruction_sufficiency"),
+        );
         return { status: "handled" };
       }
 
@@ -850,6 +1031,11 @@ export function createFinalArtworkWorkerCapability(
       missingSourceBytesReason:
         "Source concept asset bytes could not be retrieved from storage.",
       extraAssetMetadata: {},
+      // Phase 28T: the create_new path does not yet compute an effective
+      // target (its own artwork-bounds source is a separate, out-of-scope
+      // concern this phase — see the Phase 28T report) — `null` preserves
+      // this path's exact pre-Phase-28T behavior.
+      targetIn: null,
     });
     if (produced.status !== "ready") return;
     const { productionAsset, provenance, providerLatencyMs } = produced;
@@ -1236,6 +1422,14 @@ export function createFinalArtworkWorkerCapability(
         // geometry — so a plate can be matched to an intent without a join.
         productionWidthIn: intendedPrintWidthIn,
       },
+      // Phase 28T: `contained` above is already this exact request's
+      // effective resolved size, freshly measured from the REAL current
+      // source bytes (even more precise than `final-artwork-capability.ts`'s
+      // own cached-analysis-bounds version of the same computation) — reused
+      // here rather than re-derived, so the crash-recovery short-circuit
+      // above can tell a genuinely-current existing asset apart from a
+      // stale one left over from before the confirmed envelope changed.
+      targetIn: { widthIn: contained.widthIn, heightIn: contained.heightIn, targetPpi: sizing.targetPpi },
     });
     if (produced.status !== "ready") return;
     const { productionAsset, provenance, providerLatencyMs } = produced;
@@ -1408,13 +1602,26 @@ export function createFinalArtworkWorkerCapability(
       reconstructedHeightPx: provenance.reconstructedHeightPx,
       finalCanvasWidthPx: productionAsset.widthPx ?? 0,
       finalCanvasHeightPx: productionAsset.heightPx ?? 0,
-      // Both resolve to "unknown" under the uploaded-preserve profile, which
-      // does not emit them — honestly recorded as not-asked rather than
-      // reported as if they had passed.
+      // Phase 28V.1: neither check is EMITTED at all under the
+      // uploaded_preserve profile ("the customer's own approved artwork is
+      // the specification" — see `assembleUploadedPreserveProductionPrintValidationInput`'s
+      // doc comment) — a deliberate, already-correct design, not a gap.
+      // Logging that absence as "unknown" reads as an unresolved question
+      // mark and is exactly what led a real investigation (project
+      // 7bcc3e19-5617-4712-99ab-65f1667b5eda) to suspect these checks were
+      // blocking finalization when the real, unrelated cause was
+      // `checkMinimumRasterDimensions`'s own rounding bug (see that
+      // function's own Phase 28V.1 fix). `not_applicable` for this profile
+      // is honest instead: the question was never relevant, not merely
+      // unanswered. `generated_concept` still logs a genuine `"unknown"`
+      // when these checks are unexpectedly absent there — that WOULD be a
+      // real anomaly worth investigating for that profile.
       requiredWordingVerification:
-        report.checks.find((c) => c.check === "required_wording_verification")?.status ?? "unknown",
+        report.checks.find((c) => c.check === "required_wording_verification")?.status ??
+        (report.profile === "uploaded_preserve" ? "not_applicable" : "unknown"),
       conceptEvaluationAlignment:
-        report.checks.find((c) => c.check === "concept_evaluation_alignment")?.status ?? "unknown",
+        report.checks.find((c) => c.check === "concept_evaluation_alignment")?.status ??
+        (report.profile === "uploaded_preserve" ? "not_applicable" : "unknown"),
       transparencyCheck: report.checks.find((c) => c.check === "transparency")?.status ?? "unknown",
       finalValidationStatus: report.status,
       providerLatencyMs: params.providerLatencyMs,

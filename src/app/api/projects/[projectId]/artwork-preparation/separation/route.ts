@@ -1,28 +1,33 @@
 import { NextResponse } from "next/server";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
-import { getPersistenceMode } from "@/lib/db";
+import { getPersistenceMode, getProjectRepository } from "@/lib/db";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
 };
 
 /**
- * Intelligent Separation Phase 9: the operator's consequential-region review
- * state. GET only — reading this never mutates anything.
+ * Intelligent Separation Phase 9 / Phase 28K: this project's own
+ * consequential-region review state. GET only — reading this never mutates
+ * anything.
  *
- * INTERNAL ONLY, ENFORCED SERVER-SIDE, the same gate and the same
- * deliberately uninformative 404 the production-treatment preview route
- * already uses (Goal 21/22). This route does not itself know what "safe" or
- * "consequential" mean — it only decides who may ask.
+ * ENFORCED SERVER-SIDE. Phase 28K widened this from "internal staff only"
+ * to "internal staff OR this project's own owner" — see
+ * `isAuthorizedForArtworkCorrection`'s doc comment for the full audit: a
+ * customer whose OWN artwork genuinely needs a consequential-region
+ * decision has no other route capable of showing it to them, which was an
+ * impossible gate, not a security feature. Still a deliberately
+ * uninformative 404, never a 403 (Goal 21/22).
  */
 export async function GET(_request: Request, context: RouteContext) {
   try {
     const { projectId } = await context.params;
     const graph = getCapabilityGraph();
 
-    if (!(await graph.acquisition.isInternalProject(projectId))) {
+    if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
       return new Response("Not found", { status: 404 });
     }
 

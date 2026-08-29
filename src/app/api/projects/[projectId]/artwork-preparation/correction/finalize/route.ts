@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
+import { getProjectRepository } from "@/lib/db";
 
 type RouteContext = { params: Promise<{ projectId: string }> };
 
@@ -9,13 +11,13 @@ type RouteContext = { params: Promise<{ projectId: string }> };
  * Phase 27E — "Use This Artwork": THE authoritative handoff. Takes no
  * body — like `separation/approve`, this authorizes exactly the operations
  * already accepted into the session, never a payload the client could
- * substitute at the last moment. INTERNAL ONLY, ENFORCED SERVER-SIDE.
+ * substitute at the last moment. Phase 28K: internal staff OR this project's own owner, ENFORCED SERVER-SIDE.
  */
 export async function POST(_request: Request, context: RouteContext) {
   const { projectId } = await context.params;
   const graph = getCapabilityGraph();
 
-  if (!(await graph.acquisition.isInternalProject(projectId))) {
+  if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
     return new Response("Not found", { status: 404 });
   }
 

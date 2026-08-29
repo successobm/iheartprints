@@ -9,6 +9,8 @@ import {
   describeProductionVariantStatus,
   describeVariantAttentionReason,
   firstBlockingFailedCheck,
+  attachAttentionCheckName,
+  resolveAttentionCheckName,
   productionVariantDescription,
   productionVariantLabel,
   type ProductionVariantView,
@@ -147,6 +149,73 @@ describe("firstBlockingFailedCheck", () => {
   });
 });
 
+describe("resolveAttentionCheckName", () => {
+  // Phase 28T.1 regression: a real production job (0807429d-22dc-4dfe-aa0f-
+  // 51918cf04be1) completed via `completeWithoutAsset` (an honest,
+  // pre-dispatch "reconstruction exceeds the 4x provider ceiling" refusal)
+  // and left `attentionReason`/`attentionKind` reading `null` in the
+  // customer-facing view, because no `ProductionAssetValidation` report
+  // ever existed to derive a check name from. This suite proves the fix
+  // without any job/repository/worker plumbing -- purely against the
+  // shapes `resolveOneProductionVariant` actually passes in.
+
+  it("a validation report still wins, exactly like firstBlockingFailedCheck alone", () => {
+    const report = {
+      checks: [{ check: "aspect_ratio_preserved", status: "fail", severity: "blocking", reason: "" }],
+    };
+    assert.equal(resolveAttentionCheckName(report, "completed", "irrelevant lastError"), "aspect_ratio_preserved");
+  });
+
+  it("no report, completed job, lastError tagged via attachAttentionCheckName -> the tagged check name", () => {
+    const message = attachAttentionCheckName(
+      "This artwork cannot be reconstructed to the 3150x2736px this production size requires...",
+      "reconstruction_sufficiency",
+    );
+    assert.equal(resolveAttentionCheckName(null, "completed", message), "reconstruction_sufficiency");
+    // ...and that check name is exactly what already renders the existing,
+    // customer-safe "needs additional image enhancement" sentence/kind --
+    // no new message text, no new classification branch.
+    assert.equal(
+      describeVariantAttentionReason("standard_raster", "reconstruction_sufficiency"),
+      "Standard Raster needs additional image enhancement at this print size.",
+    );
+    assert.equal(classifyVariantAttentionKind("reconstruction_sufficiency"), "deterministic_enhancement");
+  });
+
+  it("no report, completed job, untagged lastError (a pre-fix job, or a different honest verdict) -> a non-null placeholder, never null", () => {
+    const checkName = resolveAttentionCheckName(
+      null,
+      "completed",
+      "Print location is not yet known; target production dimensions could not be determined.",
+    );
+    assert.notEqual(checkName, null);
+    // Routes to the existing generic-but-honest fallback, not a fabricated
+    // specific claim this module cannot actually back up.
+    assert.equal(
+      describeVariantAttentionReason("standard_raster", checkName),
+      "Standard Raster needs another look before it can be finished.",
+    );
+    assert.equal(classifyVariantAttentionKind(checkName), "other");
+  });
+
+  it("no report, completed job, null lastError -> null (nothing honest to say)", () => {
+    assert.equal(resolveAttentionCheckName(null, "completed", null), null);
+  });
+
+  it("job not completed (queued/running/failed/cancelled) -> null, regardless of lastError text", () => {
+    assert.equal(resolveAttentionCheckName(null, "failed", "some infrastructure error"), null);
+    assert.equal(resolveAttentionCheckName(null, "queued", null), null);
+    assert.equal(resolveAttentionCheckName(null, null, null), null);
+  });
+
+  it("attachAttentionCheckName preserves the original human-readable message verbatim after its marker", () => {
+    const original = "This artwork cannot be reconstructed to the 3150x2736px this production size requires.";
+    const tagged = attachAttentionCheckName(original, "reconstruction_sufficiency");
+    assert.ok(tagged.includes(original));
+    assert.equal(resolveAttentionCheckName(null, "completed", tagged), "reconstruction_sufficiency");
+  });
+});
+
 describe("describeProductionVariantCostSummary", () => {
   it("no job -> empty, zero-cost facts", () => {
     const summary = describeProductionVariantCostSummary(null, null);
@@ -184,6 +253,46 @@ describe("describeProductionVariantCostSummary", () => {
     );
     assert.equal(summary.paidProviderUsed, true);
     assert.equal(summary.externalProviderCalls, 0);
+  });
+
+  // --- Phase 28V: a genuine two-pass reconstruction reports 2 distinct
+  // external calls, never 1 -- and a resumed/idempotent retry never
+  // inflates that count past however many DISTINCT paid submissions
+  // actually happened.
+  it("N: a two-pass job's pass-1 and pass-2 request ids are both real and distinct -> 2 external calls", () => {
+    const summary = describeProductionVariantCostSummary(
+      { attempts: 1, providerKey: "topaz_transparency_upscale" },
+      "pass2-req-id",
+      ["pass1-req-id"],
+    );
+    assert.equal(summary.paidProviderUsed, true);
+    assert.equal(summary.externalProviderCalls, 2);
+  });
+
+  it("N: omitting additionalProviderRequestIds preserves the exact pre-Phase-28V 0-or-1 behavior", () => {
+    const summary = describeProductionVariantCostSummary(
+      { attempts: 1, providerKey: "topaz_transparency_upscale" },
+      "req-123",
+    );
+    assert.equal(summary.externalProviderCalls, 1);
+  });
+
+  it("N: a null/absent intermediate id never inflates the count for an ordinary single-pass job", () => {
+    const summary = describeProductionVariantCostSummary(
+      { attempts: 1, providerKey: "topaz_transparency_upscale" },
+      "req-123",
+      [null],
+    );
+    assert.equal(summary.externalProviderCalls, 1);
+  });
+
+  it("N: the SAME request id appearing twice (a resumed/idempotent retry) is counted once, never twice", () => {
+    const summary = describeProductionVariantCostSummary(
+      { attempts: 3, providerKey: "topaz_transparency_upscale" },
+      "same-req-id",
+      ["same-req-id"],
+    );
+    assert.equal(summary.externalProviderCalls, 1, "resuming the same request across retries must never inflate the call count");
   });
 
   it("retryCount is attempts - 1, floored at 0", () => {

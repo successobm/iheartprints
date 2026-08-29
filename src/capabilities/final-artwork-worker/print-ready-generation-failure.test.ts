@@ -22,6 +22,7 @@ import { ProviderError } from "@/capabilities/providers/provider-error";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import { toCustomerFinalizationView } from "@/lib/services/conversation-service";
 import { assessHalftoneEligibility } from "@/capabilities/shared/production-treatment";
+import { resolveAttentionCheckName, describeVariantAttentionReason, classifyVariantAttentionKind } from "@/capabilities/shared/production-variant";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capability";
@@ -233,6 +234,19 @@ describe("Phase 27M — the real final-generation failure (INCREDI-BOWLS, Standa
     assert.equal(job.status, "completed", "a provably pre-dispatch, unfixable-by-retry refusal must not read as an infrastructure failure");
     assert.match(job.lastError ?? "", /cannot be reconstructed|4x maximum/);
     assert.equal(projectAfter!.project.status, "finalization_required");
+
+    // --- Phase 28T.1 regression: this exact honest, pre-dispatch, no-asset
+    // completion must no longer surface as attentionReason/attentionKind
+    // `null` in the customer-facing view (the real defect found on project
+    // 0807429d-22dc-4dfe-aa0f-51918cf04be1 — no validation report ever
+    // exists here, because no asset was ever produced) ---
+    const checkName = resolveAttentionCheckName(null, job.status, job.lastError);
+    assert.equal(checkName, "reconstruction_sufficiency");
+    assert.equal(
+      describeVariantAttentionReason("standard_raster", checkName),
+      "Standard Raster needs additional image enhancement at this print size.",
+    );
+    assert.equal(classifyVariantAttentionKind(checkName), "deterministic_enhancement");
 
     const customerView = toCustomerFinalizationView(
       projectAfter!.project.status,

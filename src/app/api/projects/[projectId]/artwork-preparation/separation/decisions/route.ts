@@ -1,18 +1,20 @@
 import { NextResponse } from "next/server";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
-import { getPersistenceMode } from "@/lib/db";
+import { getPersistenceMode, getProjectRepository } from "@/lib/db";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
 };
 
 /**
- * Intelligent Separation Phase 9: the operator's region-intent decisions.
+ * Intelligent Separation Phase 9 / Phase 28K: this project's own
+ * region-intent decisions.
  *
- * INTERNAL ONLY, ENFORCED SERVER-SIDE (Goal 21/22) — same gate, same
- * uninformative 404 as every other internal-only surface in this codebase.
+ * ENFORCED SERVER-SIDE — Phase 28K's "internal staff OR this project's own
+ * owner" gate; see `isAuthorizedForArtworkCorrection`'s doc comment.
  *
  * THE CLIENT SENDS INTENT, NEVER PIXELS. The request body is exactly
  * `{ sourceAssetSha256, regionMapHash, decisions: [{ regionId, intent }] }`
@@ -28,7 +30,7 @@ export async function POST(request: Request, context: RouteContext) {
     const { projectId } = await context.params;
     const graph = getCapabilityGraph();
 
-    if (!(await graph.acquisition.isInternalProject(projectId))) {
+    if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
       return new Response("Not found", { status: 404 });
     }
 

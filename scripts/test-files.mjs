@@ -146,6 +146,7 @@ export const TEST_FILES = [
   "src/capabilities/print-validation/assemble-input.test.ts",
   "src/capabilities/generation-worker/generation-worker-print-validation.test.ts",
   "src/capabilities/final-artwork/final-artwork-capability.test.ts",
+  "src/capabilities/final-artwork/production-request-identity.test.ts",
   "src/lib/services/final-artwork-service.test.ts",
   "src/app/api/projects/[projectId]/finalize/route.test.ts",
   "src/lib/db/supabase-store.final-artwork.test.ts",
@@ -158,6 +159,7 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork/production-normalization.test.ts",
   "src/capabilities/final-artwork/local-raster-provider.test.ts",
   "src/capabilities/final-artwork-worker/final-artwork-worker-capability.test.ts",
+  "src/capabilities/final-artwork-worker/two-pass-reconstruction.test.ts",
   "src/lib/config/final-artwork-provider-config.test.ts",
   "src/capabilities/final-artwork/resolve-final-artwork-provider.test.ts",
   "src/capabilities/final-artwork/topaz-transparency-upscale-provider.test.ts",
@@ -211,6 +213,26 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/separation-decision-workflow.test.ts",
   "src/capabilities/artwork-preparation/complex-background-operator-routing.test.ts",
   "src/app/api/projects/[projectId]/artwork-preparation/separation/separation-routes-authorization.test.ts",
+  // Phase 28K: the narrow authorization predicate itself, and the
+  // end-to-end proof that a genuinely non-internal project owner can now
+  // see and resolve required separation review, with no false blocker for
+  // the no-review-needed/partial/reload/manual-correction cases either --
+  // registered immediately per the established discipline.
+  "src/capabilities/artwork-preparation/artwork-correction-authorization.test.ts",
+  "src/capabilities/artwork-preparation/impossible-separation-gate-regression.test.ts",
+  "src/capabilities/artwork-preparation/continue-as-internal-job.test.ts",
+  "src/app/api/internal/projects/[projectId]/continue-as-internal-job/continue-as-internal-job-route.test.ts",
+  "src/app/internal/projects/[projectId]/continue/continue-page-state.test.ts",
+  // Phase 28M: proves the already-existing internal/system-admin access
+  // mechanism (POST /api/internal/acquisition-access) grants finalization
+  // authority with no production_unlocks row, isolated to legitimate
+  // internal sessions/projects, without weakening the ordinary commercial
+  // gate -- registered immediately per the established discipline.
+  "src/app/api/internal/acquisition-access/acquisition-access-route.test.ts",
+  // Phase 28M.1: the operator-facing /internal/access bootstrap page's own
+  // render-branch logic and the raw-key handling properties Section 8
+  // requires -- registered immediately per the established discipline.
+  "src/app/internal/access/internal-access-page.test.ts",
   "src/app/api/projects/[projectId]/artwork-preparation/separation/phase16-complex-background-routing.test.ts",
   "src/components/chat/uploaded-artwork-separation-mount.test.tsx",
   "src/capabilities/artwork-preparation/bowling-live-shape-ui-acceptance.test.ts",
@@ -218,12 +240,19 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/separation-reload-restart.test.ts",
   "src/capabilities/final-artwork/halftone-screen.test.ts",
   "src/capabilities/final-artwork-worker/halftone-production.test.ts",
+  // Phase 28 Checkpoint Audit Section 11: proves, without any real network
+  // call, that FINAL_ARTWORK_PROVIDER=topaz resolves and the real worker
+  // pipeline actually invokes the REAL TopazTransparencyUpscaleProvider
+  // class exactly once for a genuinely undersized source, and never at all
+  // for a source that already satisfies the production target.
+  "src/capabilities/final-artwork-worker/topaz-provider-selection-and-invocation.test.ts",
   "src/capabilities/conversation/production-treatment-authorization.test.ts",
   "src/components/chat/production-treatment-dead-end.test.tsx",
   "src/capabilities/conversation/operator-recovery-flow.test.ts",
   "src/capabilities/shared/waiting-copy.test.ts",
   "src/capabilities/shared/production-print-size.test.ts",
   "src/capabilities/shared/garment-production-sizing.test.ts",
+  "src/capabilities/shared/orientation-aware-production-sizing.test.ts",
   "src/capabilities/conversation/concept-selection-lifecycle.test.ts",
   "src/capabilities/conversation/production-size-lifecycle.test.ts",
   // Phase 27L: garment-class selection now confirms print size in the same

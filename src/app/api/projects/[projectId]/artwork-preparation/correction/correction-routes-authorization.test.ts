@@ -8,14 +8,20 @@ import { solidBlackExteriorArtwork, toPngBytes } from "@/capabilities/artwork-pr
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 /**
- * Phase 27E, item 11: the graduated correction workspace must preserve the
- * SAME internal-only entitlement the separation routes already prove
- * (`separation-routes-authorization.test.ts`) — this phase must not
- * accidentally widen who can reach manual correction. Same harness, same
- * behavioral proof style: invoke the real exported route handlers, not the
- * hidden React controls.
+ * Phase 27E, item 11 / Phase 28K CORRECTION.
+ *
+ * This file originally proved manual correction ("Edit Artwork") was
+ * internal-staff-only, mirroring the separation routes' own (then-)identical
+ * gate. Phase 28K's real acceptance-run audit found the same impossible
+ * gate here: "Edit Artwork" is mounted directly in the ordinary customer
+ * flow (`UploadedArtworkPanel.tsx`), unconditionally, as a customer action —
+ * but every route behind it was denied to any non-internal owner. Phase 28K
+ * widened the gate to "internal staff OR this exact project's own owner" —
+ * see `isAuthorizedForArtworkCorrection`'s doc comment. This file now
+ * proves both halves: an ordinary owner succeeds on their OWN project,
+ * while a project id naming nothing real is still denied.
  */
-describe("Correction routes — internal-only authorization (Phase 27E)", () => {
+describe("Correction routes — internal-staff-or-owner authorization (Phase 27E / Phase 28K)", () => {
   let tempDir = "";
   let previousCwd = "";
 
@@ -87,22 +93,41 @@ describe("Correction routes — internal-only authorization (Phase 27E)", () => 
     return { selectRes, applyRes, undoRes, resetRes, originalRes, resultRes, finalizeRes };
   }
 
-  it("a public (non-internal) project is denied on every correction route with an uninformative 404", async () => {
-    const { projectId } = await seededProject({ internal: false });
-    const results = await callRoutes(projectId);
+  it("a project id naming nothing real is denied on every correction route with an uninformative 404", async () => {
+    const nonexistentProjectId = "00000000-0000-0000-0000-000000000000";
+    const results = await callRoutes(nonexistentProjectId);
     for (const [name, res] of Object.entries(results)) {
-      assert.equal(res.status, 404, `${name} must be 404 for a public project`);
+      assert.equal(res.status, 404, `${name} must be 404 for a project id naming nothing real`);
       assert.equal(await res.text(), "Not found", `${name} must not reveal any detail beyond 'Not found'`);
     }
   });
 
-  it("a public project's forged apply/finalize calls persist NOTHING", async () => {
-    const { repo, projectId } = await seededProject({ internal: false });
-    const before = await repo.getArtworkPreparation(projectId);
-    await callRoutes(projectId);
-    const after = await repo.getArtworkPreparation(projectId);
-    assert.equal(after!.preparedAssetId, before!.preparedAssetId, "a denied apply/finalize must never repoint preparedAssetId");
-    assert.equal(after!.status, before!.status);
+  it("Phase 28K FIX: an ordinary (non-internal) project's own owner reaches every correction route and 'Edit Artwork' functions -- the impossible gate, resolved", async () => {
+    const { projectId } = await seededProject({ internal: false });
+    const results = await callRoutes(projectId);
+    assert.equal(results.selectRes.status, 200, "'Edit Artwork' must be usable by the owner of the artwork being edited");
+    assert.equal(results.applyRes.status, 200);
+    assert.equal(results.undoRes.status, 200);
+    assert.equal(results.resetRes.status, 200);
+    assert.equal(results.originalRes.status, 200);
+    assert.equal(results.resultRes.status, 200);
+    assert.equal(results.finalizeRes.status, 200);
+  });
+
+  it("two ordinary owners' correction sessions never cross-contaminate", async () => {
+    const { repo: repoA, projectId: projectA } = await seededProject({ internal: false });
+    const { projectId: projectB } = await seededProject({ internal: false });
+
+    await callRoutes(projectA);
+
+    // B's own preparation is untouched by A's correction session.
+    const preparationB = await repoA.getArtworkPreparation(projectB);
+    const preparationA = await repoA.getArtworkPreparation(projectA);
+    assert.notEqual(preparationB!.id, preparationA!.id);
+    assert.notEqual(preparationB!.preparedAssetId, null);
+    // A's finalize (from callRoutes) actually repointed A's own preparedAssetId;
+    // B's remains whatever its own automatic preparation produced, never A's.
+    assert.notEqual(preparationB!.preparedAssetId, preparationA!.preparedAssetId);
   });
 
   it("an internal project: every correction route is reachable and functions", async () => {

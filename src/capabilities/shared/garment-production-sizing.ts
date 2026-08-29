@@ -318,3 +318,133 @@ export function sizingPolicyForProductionBox(
     maxHeightIn: boxHeightIn ?? base.maxHeightIn,
   };
 }
+
+/**
+ * Phase 28S — ORIENTATION-AWARE PRODUCTION SIZING.
+ *
+ * THE REGRESSION THIS RESTORES/COMPLETES. Every recommendation box above is
+ * a fixed rectangle keyed only by (garment class, placement) — it has never
+ * once looked at the artwork's own shape. For a LANDSCAPE design that is
+ * harmless: `resolveWidthConstrainedSizing` sizes to the box's WIDTH and the
+ * proportional height always lands under the box's own height (a 3:2
+ * landscape in a 10.5x10.5 box lands at 10.5x7.0 — see this module's own
+ * doc comment above). For a PORTRAIT design it is not harmless: the SAME
+ * 10.5x10.5 box for a 2:3 portrait contains it to 7.0x10.5 — correctly
+ * proportional, but capped at a height (10.5) that was only ever meant to
+ * describe a SQUARE recommendation area, not a technical ceiling. The real
+ * `adult_standard` car-show job (Phase 28Q/28R/28S) is exactly this: a
+ * portrait design constrained to 6.96x10.5 when the placement's own
+ * TECHNICAL limit (`PRINT_PLACEMENT_SIZING_POLICY.full_front.maxHeightIn`,
+ * 14in) has real room the flat box never offered it.
+ *
+ * `adult_plus` already carries a partial, deliberate version of this fix
+ * (Phase 28I: `{maxWidthIn: 10.5, maxHeightIn: 12}`, wider than a square but
+ * still short of the 14in technical ceiling, "for a portrait design [to]
+ * still make good use of") — proof this problem was recognized once before,
+ * for one class, and never generalized. This phase generalizes the
+ * MECHANISM without touching `adult_plus`'s own already-considered 12in
+ * choice, or `youth`/`womens_small`'s boxes, which this phase does not
+ * audit with enough evidence to change (see the Phase 28S report).
+ *
+ * THE FIX IS NOT A NEW GEOMETRY ENGINE. `orientedProductionBox` below
+ * changes WHICH NUMBER gets used as `boxHeightIn` in
+ * `sizingPolicyForProductionBox` — nothing about containment, aspect-ratio
+ * preservation, or the width/height trade-off in `resolveWidthConstrainedSizing`
+ * changes at all. For landscape and square/near-square artwork the box is
+ * returned completely unchanged (byte-identical to today's behavior). For
+ * portrait artwork, the box's height ceiling is raised to the PLACEMENT's
+ * own existing technical limit (`placementMaxHeightIn` — already a real,
+ * long-established number, never invented here) — letting height become the
+ * genuinely dominant axis and width fall out proportionally, exactly as
+ * Section 6 of the Phase 28S mission describes.
+ *
+ * WHY NO SEPARATE "~1 SQUARE FOOT" CLAMP. A portrait design's width falls
+ * as its height rises (fixed aspect ratio), so raising only the height
+ * ceiling self-limits area for any real portrait shape — the real car-show
+ * case lands at 9.28x14 ≈ 130 sq in, comfortably under the ~144 sq in (1 sq
+ * ft) guardrail Eric describes as a sanity principle, not a command. A
+ * design just barely classified portait (see `NEAR_SQUARE_ASPECT_TOLERANCE`)
+ * could land somewhat over 144 sq in — an accepted, disclosed edge case
+ * (see the Phase 28S report) rather than something a second clamp should
+ * paper over: any clamp tight enough to force every portrait under exactly
+ * 144 sq in would have to shrink BOTH axes and abandon "use the appropriate
+ * full-front portrait height", which Section 7 explicitly forbids
+ * ("Do NOT force every artwork to exactly 144 sq in").
+ */
+export type ArtworkOrientation = "portrait" | "landscape" | "square";
+
+/**
+ * Phase 28S: how close to 1:1 an aspect ratio must be to count as
+ * "square/near-square" rather than a (weak) portrait or landscape. No prior
+ * tolerance existed anywhere in this codebase to restore — orientation was
+ * never classified before this phase (`recommendProductionBox` never took
+ * artwork dimensions as an input at all). 10% is a smallest-defensible,
+ * documented choice: wide enough that a slightly-rectangular badge or logo
+ * (a very common real design shape) reads as "square" and keeps today's
+ * exact behavior, tight enough that a genuine 2:3 or 3:2 design (ratio
+ * 0.667 / 1.5, far outside 0.9-1.111) is unambiguously portrait/landscape.
+ */
+export const NEAR_SQUARE_ASPECT_TOLERANCE = 0.1;
+
+/**
+ * Classifies orientation from the artwork's own VISIBLE bounds — never the
+ * transparent canvas. Callers are responsible for supplying visible/alpha
+ * bounds (this module stays pure: no repository, no capability, no I/O —
+ * see the module doc comment above); passing raw canvas dimensions when
+ * transparent padding is not negligible would misclassify a padded portrait
+ * canvas as square, which is exactly the failure Section 4 of the Phase 28S
+ * mission calls out.
+ */
+export function classifyArtworkOrientation(
+  visibleWidthPx: number,
+  visibleHeightPx: number,
+): ArtworkOrientation {
+  if (visibleWidthPx <= 0 || visibleHeightPx <= 0) {
+    throw new Error("Artwork dimensions must be positive to classify orientation.");
+  }
+  const ratio = visibleWidthPx / visibleHeightPx;
+  if (ratio > 1 + NEAR_SQUARE_ASPECT_TOLERANCE) return "landscape";
+  if (ratio < 1 - NEAR_SQUARE_ASPECT_TOLERANCE) return "portrait";
+  return "square";
+}
+
+/**
+ * THE SINGLE SIZING AUTHORITY for orientation. Every caller that resolves a
+ * recommendation or confirmation box — the customer-facing preview
+ * (`print-ready-size.ts`), pixel-sufficiency analysis (`image-analysis.ts`),
+ * and recommended-size confirmation (`conversation-capability.ts`) — calls
+ * THIS function rather than re-deciding a height ceiling of its own, which
+ * is what keeps them from ever independently inventing different
+ * dimensions (Phase 28S mission Section 3).
+ *
+ * Landscape and square/near-square: returned unchanged — today's exact
+ * behavior. Portrait: `maxHeightIn` raised to `placementMaxHeightIn` (never
+ * lowered — `Math.max` guards against a future box whose height already
+ * exceeds the placement limit, which should not be possible today but must
+ * never SHRINK a box if it somehow were).
+ */
+export function orientedProductionBox(
+  box: ProductionBox,
+  orientation: ArtworkOrientation,
+  placementMaxHeightIn: number,
+): ProductionBox {
+  if (orientation !== "portrait") return box;
+  // Phase 28T correction: only a genuinely SQUARE box (width === height) is
+  // an undifferentiated "area" recommendation that was never meant to be a
+  // portrait ceiling — see this module's own "Height equals width here...
+  // because a recommendation is an AREA" doc comment for `adult_standard`/
+  // `youth`/`womens_small`. `adult_plus`'s box (10.5x12) is NOT that: Phase
+  // 28I already made a deliberate, considered, ASYMMETRIC choice for it
+  // ("it can never again recommend MORE width than adult_standard, only
+  // proportionally more height... for a portrait design"). Widening it
+  // further to the placement's full 14in ceiling — which the original
+  // Phase 28S implementation did unconditionally, a real bug this
+  // correction fixes — would silently override that already-oriented
+  // choice, exactly the "expand adult_plus/youth/womens_small without
+  // evidence" the Phase 28T mission explicitly forbids.
+  if (box.maxWidthIn !== box.maxHeightIn) return box;
+  return {
+    maxWidthIn: box.maxWidthIn,
+    maxHeightIn: Math.max(box.maxHeightIn, placementMaxHeightIn),
+  };
+}

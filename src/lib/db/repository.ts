@@ -512,6 +512,18 @@ export interface ProjectRepository {
    */
   createProject(acquisitionSessionId?: string | null): Promise<ProjectSnapshot>;
   getProject(projectId: string): Promise<ProjectSnapshot | null>;
+  /**
+   * Phase 28P: every project's bare row (never the full `ProjectSnapshot`
+   * — no brief, conversation, messages, or artwork versions). Internal-only
+   * caller today: `continue-as-internal-job.ts`'s idempotency check, which
+   * must answer "has this exact source artwork already been continued into
+   * an internal project?" without a dedicated indexed table (see that
+   * file's doc comment for why a full scan is an acceptable V1 trade-off
+   * here). Never exposed through a customer-facing route — nothing about
+   * this method scopes by session or ownership, so a caller that is not
+   * already internally-authorized must never reach it.
+   */
+  listProjects(): Promise<PrintProject[]>;
   updateProject(
     projectId: string,
     patch: Partial<

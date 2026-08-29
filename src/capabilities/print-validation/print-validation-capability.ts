@@ -772,10 +772,26 @@ function checkMinimumRasterDimensions(
   // comparing it against the envelope would fail correct artwork purely for
   // not being envelope-shaped. The real bar is the plate's own intended
   // physical size at the target PPI.
+  //
+  // Phase 28V.1: MUST use the SAME rounding rule
+  // `resolveWidthConstrainedSizing` used to derive the plate's own actual
+  // pixel dimensions from that same physical size (Math.round throughout —
+  // see `print-placement-dimensions.ts`), never `Math.ceil`. `intendedWidthIn`/
+  // `intendedHeightIn` are themselves already a pixels-to-inches division
+  // (`outputPx / targetPpi`), so multiplying back by `targetPpi` here is a
+  // round trip through floating point — for an inches value with no exact
+  // binary representation (10.46, matching a real production incident:
+  // project 7bcc3e19-5617-4712-99ab-65f1667b5eda), `10.46 * 300` evaluates
+  // to `3138.0000000000005`, a hair ABOVE the true integer. `Math.ceil`
+  // has zero tolerance for that overshoot and rounds up to 3139 — one
+  // phantom pixel more than the asset's own real, correct, intentionally-
+  // produced height of 3138 — failing a plate that exactly matches its own
+  // target. `Math.round` (like the production code it must mirror)
+  // correctly absorbs that same float error back down to 3138.
   if (normalization) {
     const required = {
-      widthPx: Math.ceil(normalization.intendedWidthIn * normalization.targetPpi),
-      heightPx: Math.ceil(normalization.intendedHeightIn * normalization.targetPpi),
+      widthPx: Math.round(normalization.intendedWidthIn * normalization.targetPpi),
+      heightPx: Math.round(normalization.intendedHeightIn * normalization.targetPpi),
     };
     const honest = honestDimensionsFor(asset);
     if (honest.widthPx === null || honest.heightPx === null) {

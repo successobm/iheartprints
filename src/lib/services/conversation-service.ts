@@ -39,7 +39,7 @@ import {
   describeProductionVariantCostSummary,
   describeProductionVariantStatus,
   describeVariantAttentionReason,
-  firstBlockingFailedCheck,
+  resolveAttentionCheckName,
   productionVariantDescription,
   productionVariantLabel,
   type PrintReadyPackageView,
@@ -666,7 +666,11 @@ async function resolveOneProductionVariant(
     state.job?.status ?? null,
     state.validationStatus,
   );
-  const firstBlockingFailedCheckName = firstBlockingFailedCheck(state.validationReport);
+  const firstBlockingFailedCheckName = resolveAttentionCheckName(
+    state.validationReport,
+    state.job?.status ?? null,
+    state.job?.lastError ?? null,
+  );
   const attentionReason =
     status === "needs_attention" || status === "retryable_failure"
       ? describeVariantAttentionReason(treatment, firstBlockingFailedCheckName)
@@ -717,6 +721,10 @@ async function resolveOneProductionVariant(
       ? describeProductionVariantCostSummary(
           { attempts: state.job.attempts, providerKey: state.job.providerKey },
           providerRequestId,
+          // Phase 28V: a two-pass reconstruction's own pass-1 request id,
+          // when one was durably persisted for this job — counted as a
+          // second distinct external provider call.
+          [state.intermediateReconstructionProviderRequestId],
         )
       : emptyCostSummary,
   };

@@ -36,7 +36,10 @@ import {
 } from "@/capabilities/shared/chat-input-policy";
 import { ALL_SECTIONS_IN_POLICY_ORDER } from "@/capabilities/shared/interview-coverage-policy";
 import { diffEstablishedBriefSections } from "@/capabilities/shared/brief-diff";
-import { resolveProductionWidth } from "@/capabilities/shared/print-placement-dimensions";
+import {
+  PRINT_PLACEMENT_SIZING_POLICY,
+  resolveProductionWidth,
+} from "@/capabilities/shared/print-placement-dimensions";
 import { describePrintReadySize } from "@/capabilities/shared/print-ready-size";
 import {
   confirmableSizeFromBox,
@@ -55,7 +58,11 @@ import {
   type HalftoneIneligibilityReason,
   type HalftoneSettingsRequest,
 } from "@/capabilities/shared/production-treatment";
-import { recommendProductionBox } from "@/capabilities/shared/garment-production-sizing";
+import {
+  classifyArtworkOrientation,
+  orientedProductionBox,
+  recommendProductionBox,
+} from "@/capabilities/shared/garment-production-sizing";
 import {
   detectProductionSizeIntent,
   RELATIVE_SIZE_STEP_IN,
@@ -928,6 +935,27 @@ export function createConversationCapability(
    * `finalDirectionConfirmed` is likewise untouched — the customer confirmed
    * the DESIGN, and resizing the print does not un-confirm it.
    */
+  /**
+   * Phase 28S: the artwork's own VISIBLE bounds, read from the already-
+   * persisted preparation analysis — never the transparent canvas (Section
+   * 4 of the Phase 28S mission). No new I/O: `analysis.artworkBounds` is
+   * computed once at upload/analysis time and already the same figure
+   * `ArtworkPreparationView.visibleArtworkWidthPx/HeightPx` surfaces
+   * elsewhere (`artwork-preparation-capability.ts`). `null` for a
+   * create_new project (no preparation at all) or one with no artwork
+   * analyzed yet — callers fall back to today's orientation-blind behavior
+   * in that case, exactly as before this phase.
+   */
+  function visibleArtworkBoundsFromPreparation(
+    preparation: { analysis: Record<string, unknown> } | null,
+  ): { widthPx: number; heightPx: number } | null {
+    if (!preparation) return null;
+    const bounds = (preparation.analysis as { artworkBounds?: { width?: number; height?: number } })
+      ?.artworkBounds;
+    if (!bounds?.width || !bounds?.height) return null;
+    return { widthPx: bounds.width, heightPx: bounds.height };
+  }
+
   async function applyProductionPrintWidth(
     designId: string,
     current: ProjectSnapshot,
@@ -1027,16 +1055,24 @@ export function createConversationCapability(
     }
 
     const updated = await designBrief.getWorkingBrief(designId);
+    // Phase 28S: real visible bounds when this project has an uploaded
+    // artwork, so both the size view AND the acknowledgement below state
+    // the artwork's ACTUAL resolved dimensions rather than always falling
+    // back to "width only" (which is silently false once height is the
+    // dominant, binding axis — a portrait design).
+    const artworkBounds = visibleArtworkBoundsFromPreparation(
+      await repo.getArtworkPreparation(designId),
+    );
     const size = describePrintReadySize({
       printPlacement: updated.printPlacement,
       intendedPrintWidthIn: updated.intendedPrintWidthIn,
-      artworkWidthPx: null,
-      artworkHeightPx: null,
+      artworkWidthPx: artworkBounds?.widthPx ?? null,
+      artworkHeightPx: artworkBounds?.heightPx ?? null,
     });
 
     await repo.addMessage(designId, {
       role: "assistant",
-      content: productionSizeAcknowledgement(resolved, size?.dpi ?? null),
+      content: productionSizeAcknowledgement(resolved, size?.dpi ?? null, size?.heightIn ?? null),
       metadata: {
         phase: current.conversation.phase,
         act: "production_size_set",
@@ -1076,9 +1112,27 @@ export function createConversationCapability(
       );
     }
 
+    // Phase 28S: orientation-aware — the SAME single sizing authority
+    // `print-ready-size.ts`'s preview and `image-analysis.ts`'s sufficiency
+    // check use, so confirming "the recommendation" persists the box the
+    // customer actually SAW, never a flatter one. A project with no
+    // artwork analyzed yet (should not happen on this path, but see
+    // `visibleArtworkBoundsFromPreparation`'s doc) falls back to the box
+    // exactly as before.
+    const bounds = visibleArtworkBoundsFromPreparation(
+      await repo.getArtworkPreparation(designId),
+    );
+    const orientedBox = recommendation.box && bounds
+      ? orientedProductionBox(
+          recommendation.box,
+          classifyArtworkOrientation(bounds.widthPx, bounds.heightPx),
+          PRINT_PLACEMENT_SIZING_POLICY[current.brief.printPlacement!].maxHeightIn,
+        )
+      : recommendation.box;
+
     const confirmable = confirmableSizeFromBox(
       current.brief.printPlacement,
-      recommendation.box,
+      orientedBox,
     );
     if (!confirmable) {
       // Youth, ladies, plus, and custom garments have no authoritative

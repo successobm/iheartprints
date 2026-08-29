@@ -1,26 +1,27 @@
 import { NextResponse } from "next/server";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
-import { getPersistenceMode } from "@/lib/db";
+import { getPersistenceMode, getProjectRepository } from "@/lib/db";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
 };
 
 /**
- * Phase 23: the operator's decision about the UNIFIED in-bounds removal
- * proposal — `"pending"` | `"remove_with_exceptions"` | `"preserve_all"` —
- * plus any preserve taps to add or remove this call.
+ * Phase 23 / Phase 28K: this project's own decision about the UNIFIED
+ * in-bounds removal proposal — `"pending"` | `"remove_with_exceptions"` |
+ * `"preserve_all"` — plus any preserve taps to add or remove this call.
  *
- * INTERNAL ONLY, ENFORCED SERVER-SIDE (Goal 21/22) — same gate, same
- * uninformative 404 as every other internal-only surface in this codebase,
- * including the sibling `decisions/route.ts` this route deliberately does
- * NOT merge into: the two request shapes (`regionMapHash` + region-keyed
- * decisions vs. `proposalHash` + a single decision + raw tap coordinates)
- * are different enough that combining them would need a discriminator field
- * and awkward branching for no real benefit — a sibling route matches the
- * existing `approve/route.ts` / `image/route.ts` convention instead.
+ * ENFORCED SERVER-SIDE — Phase 28K's "internal staff OR this project's own
+ * owner" gate; see `isAuthorizedForArtworkCorrection`'s doc comment. Still
+ * deliberately does NOT merge into the sibling `decisions/route.ts`: the
+ * two request shapes (`regionMapHash` + region-keyed decisions vs.
+ * `proposalHash` + a single decision + raw tap coordinates) are different
+ * enough that combining them would need a discriminator field and awkward
+ * branching for no real benefit — a sibling route matches the existing
+ * `approve/route.ts` / `image/route.ts` convention instead.
  *
  * THE CLIENT SENDS RAW TAP COORDINATES, NEVER PIXELS. `addPreserveTaps` is
  * exactly `{ rawTapX, rawTapY }` pairs — no mask, no selected-pixel list, no
@@ -34,7 +35,7 @@ export async function POST(request: Request, context: RouteContext) {
     const { projectId } = await context.params;
     const graph = getCapabilityGraph();
 
-    if (!(await graph.acquisition.isInternalProject(projectId))) {
+    if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
       return new Response("Not found", { status: 404 });
     }
 

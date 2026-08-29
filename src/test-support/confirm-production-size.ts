@@ -39,6 +39,16 @@ export async function confirmProductionSizeForTests(
      * oversize and custom-size scenarios.
      */
     widthIn?: number;
+    /**
+     * Phase 28T: confirm a specific box max-height alongside `widthIn`,
+     * instead of the `null` ("height follows aspect ratio, bounded only by
+     * the placement's technical limit") a bare typed-in width normally
+     * carries. Lets a test construct an exact effective production
+     * ENVELOPE (width + height) directly — e.g. the two Phase 28T
+     * regression envelopes, 10.5x10.5 vs 10.5x14 — without going through
+     * `recommendProductionBox`. Ignored unless `widthIn` is also given.
+     */
+    boxMaxHeightIn?: number | null;
     /** Timestamp of the confirmation. Fixed by default so tests stay deterministic. */
     confirmedAt?: string;
   } = {},
@@ -62,13 +72,14 @@ export async function confirmProductionSizeForTests(
         `${options.widthIn}in is outside what ${placement} can produce`,
       );
     }
-    // A stated WIDTH carries no box height — height follows the artwork's own
-    // aspect ratio, bounded by the placement's technical limit. Exactly what
-    // `applyProductionPrintWidth` records for a typed-in size.
+    // A stated WIDTH carries no box height by default — height follows the
+    // artwork's own aspect ratio, bounded by the placement's technical
+    // limit. Exactly what `applyProductionPrintWidth` records for a typed-in
+    // size, unless the caller explicitly asked for a specific box height too.
     await repo.updateBrief(projectId, {
       intendedPrintWidthIn: widthIn,
       productionSizeConfirmedWidthIn: widthIn,
-      productionSizeConfirmedMaxHeightIn: null,
+      productionSizeConfirmedMaxHeightIn: options.boxMaxHeightIn ?? null,
       productionSizeConfirmedAt: confirmedAt,
     });
     return;

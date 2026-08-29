@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
+import { isAuthorizedForArtworkCorrection } from "@/capabilities/artwork-preparation/artwork-correction-authorization";
 import { getCapabilityGraph } from "@/capabilities/composition";
+import { getProjectRepository } from "@/lib/db";
 
 type RouteContext = { params: Promise<{ projectId: string }> };
 
@@ -11,13 +13,13 @@ type RouteContext = { params: Promise<{ projectId: string }> };
  * "Corrections applied" counter from server truth when it mounts (e.g.
  * after "Back to Editing"), instead of a client-only counter that would
  * reset to 0 on remount despite the session itself being intact.
- * INTERNAL ONLY.
+ * Phase 28K: internal staff OR this project's own owner (see `isAuthorizedForArtworkCorrection`).
  */
 export async function GET(_request: Request, context: RouteContext) {
   const { projectId } = await context.params;
   const graph = getCapabilityGraph();
 
-  if (!(await graph.acquisition.isInternalProject(projectId))) {
+  if (!(await isAuthorizedForArtworkCorrection(graph.acquisition, getProjectRepository(), projectId))) {
     return new Response("Not found", { status: 404 });
   }
 
