@@ -50,7 +50,9 @@ describe("Phase 27I: correction toolbox (Fill, Brush, Eraser)", () => {
     await capability.setProductionContext(projectId, { productSummary: "T-shirts", productColor: "Black", printPlacement: "full_front" });
     await capability.prepareBackground(projectId);
     const preparation = await repo.getArtworkPreparation(projectId);
-    return { repo, assets, capability, projectId, originalBytes, preparedAssetId: preparation!.preparedAssetId! };
+    const preparedAssetId = preparation!.preparedAssetId!;
+    const preparedBytes = (await assets.downloadAssetBytes(preparedAssetId))!.bytes;
+    return { repo, assets, capability, projectId, originalBytes, preparedBytes, preparedAssetId };
   }
 
   async function decodedPixels(bytes: Buffer) {
@@ -68,10 +70,14 @@ describe("Phase 27I: correction toolbox (Fill, Brush, Eraser)", () => {
     const { capability, projectId, originalBytes } = await seeded();
     const originalPixels = await decodedPixels(originalBytes);
 
-    // Remove a small enclosed patch inside the artwork with Wand first, so
-    // there is something for Fill to find. (40,40) sits on the white square
-    // fixture -- see `solidBlackExteriorArtwork`'s own doc comment.
-    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 40, y: 40 }], mode: "remove", toleranceLevel: "default" });
+    // Punch a small, radius-bounded hole inside the artwork with Eraser
+    // first, so there is something for Fill to find -- deliberately NOT a
+    // Wand remove, which would flood-fill the ENTIRE uniformly-coloured
+    // white square (this fixture's only foreground content) and merge it
+    // with the already-removed background, leaving no enclosed pocket at
+    // all. (40,40) sits on the white square -- see
+    // `solidBlackExteriorArtwork`'s own doc comment.
+    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 40, y: 40 }], radius: 4 });
     const afterRemove = await decodedPixels(await capability.getCorrectionResultPng(projectId));
     const idx = (40 * afterRemove.width + 40) * 4;
     assert.equal(afterRemove.data[idx + 3], 0, "sanity: the area must actually be missing before Fill runs");
@@ -177,16 +183,19 @@ describe("Phase 27I: correction toolbox (Fill, Brush, Eraser)", () => {
   it("K/L: Eraser lowers alpha only within the stroke footprint, never touching RGB or unrelated pixels", async () => {
     const { capability, projectId } = await seeded();
     const before = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    const strokeIdx = (5 * before.width + 5) * 4;
+    // (50,50) sits on the white square, which starts opaque in the prepared
+    // base -- (5,5)'s background is already removed by automatic
+    // preparation before this session even starts.
+    const strokeIdx = (50 * before.width + 50) * 4;
     const rgbBefore = [before.data[strokeIdx], before.data[strokeIdx + 1], before.data[strokeIdx + 2]];
-    assert.equal(before.data[strokeIdx + 3], 255, "background starts opaque");
+    assert.equal(before.data[strokeIdx + 3], 255, "artwork starts opaque in the prepared base");
 
-    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 5, y: 5 }], radius: 3 });
+    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 50, y: 50 }], radius: 3 });
     const after = await decodedPixels(await capability.getCorrectionResultPng(projectId));
     assert.equal(after.data[strokeIdx + 3], 0, "erased pixel must become transparent");
     assert.deepEqual([after.data[strokeIdx], after.data[strokeIdx + 1], after.data[strokeIdx + 2]], rgbBefore, "erase must only ever change alpha, never RGB");
 
-    // L: an unrelated far-away pixel must be completely unchanged.
+    // L: an unrelated far-away pixel (still on the square, outside the stroke radius) must be completely unchanged.
     const farIdx = (60 * after.width + 60) * 4;
     assert.deepEqual(
       [after.data[farIdx], after.data[farIdx + 1], after.data[farIdx + 2], after.data[farIdx + 3]],
@@ -213,23 +222,26 @@ describe("Phase 27I: correction toolbox (Fill, Brush, Eraser)", () => {
   // Session-wide invariants: P, Q, R, S, T
   // ---------------------------------------------------------------------
 
-  it("P: Start Over reproduces the ORIGINAL exactly, even after a mix of every new tool", async () => {
-    const { capability, projectId, originalBytes } = await seeded();
-    const originalPixels = await decodedPixels(originalBytes);
+  it("P: Start Over reproduces the PREPARED base exactly, even after a mix of every new tool", async () => {
+    const { capability, projectId, preparedBytes } = await seeded();
+    const preparedPixels = await decodedPixels(preparedBytes);
 
-    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 40, y: 40 }], mode: "remove", toleranceLevel: "default" });
+    // Eraser (not Wand remove) punches the hole Fill then restores -- a Wand
+    // remove would flood-fill the entire uniformly-coloured square and merge
+    // it with the already-removed background, leaving no enclosed pocket.
+    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 40, y: 40 }], radius: 4 });
     await capability.acceptCorrectionOperation(projectId, { tool: "restore_fill", click: { x: 40, y: 40 } });
     await capability.acceptCorrectionOperation(projectId, { tool: "restore_brush", points: [{ x: 41, y: 41 }], radius: 4 });
     await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 5, y: 5 }], radius: 3 });
 
     await capability.resetCorrectionSession(projectId);
     const afterReset = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    assert.ok(pixelsEqual(originalPixels, afterReset), "Start Over must reproduce the original exactly regardless of which tools were used");
+    assert.ok(pixelsEqual(preparedPixels, afterReset), "Start Over must reproduce the PREPARED base exactly regardless of which tools were used");
   });
 
-  it("Q: undoing every operation one at a time (undo-to-zero) reproduces the ORIGINAL exactly", async () => {
-    const { capability, projectId, originalBytes } = await seeded();
-    const originalPixels = await decodedPixels(originalBytes);
+  it("Q: undoing every operation one at a time (undo-to-zero) reproduces the PREPARED base exactly", async () => {
+    const { capability, projectId, preparedBytes } = await seeded();
+    const preparedPixels = await decodedPixels(preparedBytes);
 
     await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 40, y: 40 }], mode: "remove", toleranceLevel: "default" });
     await capability.acceptCorrectionOperation(projectId, { tool: "restore_brush", points: [{ x: 40, y: 40 }], radius: 4 });
@@ -239,7 +251,7 @@ describe("Phase 27I: correction toolbox (Fill, Brush, Eraser)", () => {
     await capability.undoCorrectionOperation(projectId);
     await capability.undoCorrectionOperation(projectId);
     const afterUndoToZero = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    assert.ok(pixelsEqual(originalPixels, afterUndoToZero), "undo-to-zero must reproduce the original exactly across mixed tools");
+    assert.ok(pixelsEqual(preparedPixels, afterUndoToZero), "undo-to-zero must reproduce the PREPARED base exactly across mixed tools");
   });
 
   it("R: mixed-tool replay is deterministic -- Wand -> Brush -> Eraser -> Fill recomputes to the same bytes every time", async () => {
@@ -267,7 +279,9 @@ describe("Phase 27I: correction toolbox (Fill, Brush, Eraser)", () => {
 
   it("T: Final Review (getCorrectionResultPng) equals the persisted asset after Use This Artwork, for a mixed-tool session", async () => {
     const { repo, assets, capability, projectId } = await seeded();
-    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 40, y: 40 }], mode: "remove", toleranceLevel: "default" });
+    // Eraser (not Wand remove) so the hole Fill restores stays enclosed --
+    // see "P"'s comment above.
+    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 40, y: 40 }], radius: 4 });
     await capability.acceptCorrectionOperation(projectId, { tool: "restore_fill", click: { x: 40, y: 40 } });
     await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 5, y: 5 }], radius: 3 });
 

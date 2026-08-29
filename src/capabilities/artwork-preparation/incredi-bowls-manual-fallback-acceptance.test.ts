@@ -14,19 +14,27 @@ import { createArtworkPreparationCapability } from "./artwork-preparation-capabi
 import { decodePngUpload } from "./image-decode";
 
 /**
- * Phase 27G/27H — REAL-ASSET ACCEPTANCE for the manual background-removal
- * fallback, using the actual INCREDI-BOWLS upload the customer used during
- * production human-testing that revealed the original (backwards) fallback
- * UX. Read-only on the customer's file: only ever `readFileSync`d, never
- * written to. Everything else here runs in an isolated temp workspace with
- * its own throwaway local repository -- no live production project is ever
- * touched (Phase 27G's own instruction: use isolated/local acceptance, not
- * the final production-authority action against a real project).
+ * Phase 27G/27H/28-correction-base — REAL-ASSET ACCEPTANCE for the manual
+ * correction workspace, using the actual INCREDI-BOWLS upload the customer
+ * used during production human-testing. Read-only on the customer's file:
+ * only ever `readFileSync`d, never written to. Everything else here runs in
+ * an isolated temp workspace with its own throwaway local repository -- no
+ * live production project is ever touched.
  *
- * This is also the exact real asset that surfaced the Phase 27G dead end
- * (finalize refusing because this artwork independently requires
- * separation review) and now proves Phase 27H's fix: an explicitly
- * finalized manual correction is authoritative and completes end to end.
+ * This is also the exact real asset that surfaced two defects in sequence:
+ *
+ *   - Phase 27G/27H: `finalizeCorrection` refusing because this artwork
+ *     independently requires separation review -- fixed by making an
+ *     explicitly finalized manual correction authoritative regardless.
+ *   - The correction-base defect this revision fixes: opening Edit Artwork
+ *     re-initialized the correction session from the immutable ORIGINAL
+ *     upload (Phase 27G's own choice, made for a different reason -- see
+ *     `ensureCorrectionSession`'s doc comment) rather than from what
+ *     automatic preparation had already produced, forcing the operator to
+ *     redo cleanup automatic preparation already completed. The tests below
+ *     now assert the FIXED behavior: opening the workspace shows the
+ *     CURRENT PREPARED ARTWORK, and Undo/Start Over return to it, never to
+ *     the original.
  *
  * Skips entirely if the file isn't present on this machine, exactly like
  * every other real-asset acceptance test in this repo.
@@ -52,7 +60,7 @@ function countChangedPixels(a: { data: Buffer; width: number; height: number }, 
   return changed;
 }
 
-describe("INCREDI-BOWLS real-asset acceptance — Phase 27G manual fallback from original", { skip: !hasAsset }, () => {
+describe("INCREDI-BOWLS real-asset acceptance — manual correction workspace starts from prepared artwork", { skip: !hasAsset }, () => {
   let tempDir = "";
   let previousCwd = "";
   let originalBytes: Buffer;
@@ -102,7 +110,7 @@ describe("INCREDI-BOWLS real-asset acceptance — Phase 27G manual fallback from
     assert.ok(changed > 0, "sanity: automatic preparation must have changed at least some pixels for this real asset");
   });
 
-  it("2/C: immediately after opening the manual workspace, the canvas shows the ORIGINAL (not the automatic result), with correction count 0", async () => {
+  it("2/C: immediately after opening the manual workspace, the canvas shows the CURRENT PREPARED ARTWORK (not the original), with correction count 0", async () => {
     const { assets, capability, projectId } = await seed();
     const { LocalProjectRepository } = await import("@/lib/db/local-store");
     const repo = new LocalProjectRepository();
@@ -117,45 +125,55 @@ describe("INCREDI-BOWLS real-asset acceptance — Phase 27G manual fallback from
     const info = await capability.getCorrectionSessionInfo(projectId);
     assert.equal(info.operationCount, 0, "opening the manual workspace must start with zero corrections");
 
+    // THE FIX under acceptance test here: opening Edit Artwork must show
+    // exactly what automatic preparation already produced -- never the
+    // large original black background again, and never forcing the
+    // operator to redo cleanup automatic preparation already completed.
     const shownOnOpen = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(countChangedPixels(originalPixels, shownOnOpen), 0, "the manual workspace must show the ORIGINAL exactly on open");
-    assert.ok(countChangedPixels(preparedPixels, shownOnOpen) > 0, "the manual workspace must NOT show the automatic (damaged) result on open");
+    assert.equal(countChangedPixels(preparedPixels, shownOnOpen), 0, "the manual workspace must show the CURRENT PREPARED ARTWORK exactly on open");
+    assert.ok(countChangedPixels(originalPixels, shownOnOpen) > 0, "the manual workspace must NOT revert to the original upload on open");
   });
 
-  it("3-8: manual remove on an obvious background area, verify preview leaves the result untouched until applied, Delete removes, legitimate artwork remains, Undo restores, Start Over returns exactly to the original", async () => {
-    const { capability, projectId } = await seed();
-    const originalPixels = await decoded(originalBytes);
+  it("3-8: manual remove on the artwork, verify preview leaves the result untouched until applied, Delete removes, legitimate artwork remains, Undo restores, Start Over returns exactly to the prepared base", async () => {
+    const { assets, capability, projectId } = await seed();
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo = new LocalProjectRepository();
+    const prep = await repo.getArtworkPreparation(projectId);
+    const preparedPixels = await decoded((await assets.downloadAssetBytes(prep!.preparedAssetId!))!.bytes);
 
-    // Sample a corner pixel as "obvious background" -- true for essentially
-    // every real photographed/scanned upload, INCREDI-BOWLS included.
-    const bgX = 2;
-    const bgY = 2;
+    // A point solidly inside the bowling ball's own dark fill (per
+    // `incredi-bowls-toolbox-acceptance.test.ts`'s header comment) -- the
+    // exterior background is already removed by automatic preparation
+    // before this session starts (base = prepared), so a click there would
+    // be a pixel no-op and prove nothing about "manual remove still works".
+    const artX = 270;
+    const artY = 230;
 
     const beforePreview = await decoded(await capability.getCorrectionResultPng(projectId));
 
     // Preview must not mutate the session -- reading the result again before
     // any operation is accepted must be unchanged.
-    await capability.previewCorrectionSelection(projectId, { clicks: [{ x: bgX, y: bgY }], mode: "remove", toleranceLevel: "default" });
+    await capability.previewCorrectionSelection(projectId, { clicks: [{ x: artX, y: artY }], mode: "remove", toleranceLevel: "default" });
     const afterPreviewOnly = await decoded(await capability.getCorrectionResultPng(projectId));
     assert.equal(countChangedPixels(beforePreview, afterPreviewOnly), 0, "previewing a selection must not itself change the result");
 
     // Apply (Delete): now it actually removes.
-    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: bgX, y: bgY }], mode: "remove", toleranceLevel: "default" });
+    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: artX, y: artY }], mode: "remove", toleranceLevel: "default" });
     const afterApply = await decoded(await capability.getCorrectionResultPng(projectId));
-    const bgIdx = (bgY * afterApply.width + bgX) * 4;
-    assert.equal(afterApply.data[bgIdx + 3], 0, "the clicked background pixel must be transparent after apply");
-    assert.ok(countChangedPixels(originalPixels, afterApply) > 0, "sanity: applying actually changed something");
+    const artIdx = (artY * afterApply.width + artX) * 4;
+    assert.equal(afterApply.data[artIdx + 3], 0, "the clicked artwork pixel must be transparent after apply");
+    assert.ok(countChangedPixels(preparedPixels, afterApply) > 0, "sanity: applying actually changed something relative to the prepared base");
 
-    // Undo restores exactly.
+    // Undo restores exactly to the prepared base.
     await capability.undoCorrectionOperation(projectId);
     const afterUndo = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(countChangedPixels(originalPixels, afterUndo), 0, "undo-to-zero must reproduce the original exactly");
+    assert.equal(countChangedPixels(preparedPixels, afterUndo), 0, "undo-to-zero must reproduce the prepared base exactly");
 
-    // Re-apply, then Start Over -- must also return exactly to the original.
-    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: bgX, y: bgY }], mode: "remove", toleranceLevel: "default" });
+    // Re-apply, then Start Over -- must also return exactly to the prepared base.
+    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: artX, y: artY }], mode: "remove", toleranceLevel: "default" });
     await capability.resetCorrectionSession(projectId);
     const afterStartOver = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(countChangedPixels(originalPixels, afterStartOver), 0, "Start Over must reproduce the original exactly");
+    assert.equal(countChangedPixels(preparedPixels, afterStartOver), 0, "Start Over must reproduce the prepared base exactly");
   });
 
   it("DIAGNOSTIC: does the real INCREDI-BOWLS asset itself trigger mandatory separation review?", async () => {
@@ -178,7 +196,12 @@ describe("INCREDI-BOWLS real-asset acceptance — Phase 27G manual fallback from
     const automaticBytes = (await assets.downloadAssetBytes(automaticAssetId))!.bytes;
     const automaticPixels = await decoded(automaticBytes);
 
-    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 2, y: 2 }], mode: "remove", toleranceLevel: "default" });
+    // A point solidly inside the bowling ball's own dark fill -- the
+    // exterior background is already removed by automatic preparation
+    // before this session starts (base = prepared), so a click there would
+    // be a pixel no-op and could never demonstrate "the manual result
+    // differs from the automatic result".
+    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 270, y: 230 }], mode: "remove", toleranceLevel: "default" });
     const manualResult = await decoded(await capability.getCorrectionResultPng(projectId));
     assert.ok(countChangedPixels(automaticPixels, manualResult) > 0, "the manual result must differ from the automatic result");
 

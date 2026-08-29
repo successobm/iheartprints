@@ -7,12 +7,16 @@
  * (the project's CURRENT prepared asset, not a freshly recomputed
  * separation baseline) differ.
  *
- * CRITICAL INVARIANT (Phase 27E §2): the session's "base" image is exactly
- * the bytes of whatever `preparedAssetId` pointed to when the session
- * started — this module never calls `computeRegionMap`/
- * `buildSeparationMaster` or any other automatic-removal logic. Restoring
- * still reads from the immutable original; removing still reads from the
- * evolving current result — nothing here re-derives a removal decision.
+ * CRITICAL INVARIANT (Phase 27E §2, restored): the session's "base" image is
+ * exactly the bytes of whatever `preparedAssetId` pointed to when the
+ * session started — falling back to the immutable original only when no
+ * prepared asset exists yet (see `ensureCorrectionSession`'s doc comment in
+ * `artwork-preparation-capability.ts`, the caller responsible for resolving
+ * both images). This module never calls `computeRegionMap`/
+ * `buildSeparationMaster` or any other automatic-removal logic itself — it
+ * only holds whatever `base` it was given. Restoring still reads from the
+ * immutable original; removing still reads from the evolving current
+ * result — nothing here re-derives a removal decision.
  *
  * Sessions are held ONLY in server memory, keyed by projectId, and are
  * never persisted to the database. This is deliberate (Phase 27E §10): an

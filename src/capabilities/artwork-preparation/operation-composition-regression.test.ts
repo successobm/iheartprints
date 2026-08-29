@@ -83,7 +83,9 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
     await capability.uploadOriginal(projectId, { bytes: originalBytes, declaredContentType: "image/png", filename: "dbr.png" });
     await capability.setProductionContext(projectId, { productSummary: "T-shirts", productColor: "Black", printPlacement: "full_front" });
     await capability.prepareBackground(projectId);
-    return { repo, assets, capability, projectId, originalBytes };
+    const preparation = await repo.getArtworkPreparation(projectId);
+    const preparedBytes = (await assets.downloadAssetBytes(preparation!.preparedAssetId!))!.bytes;
+    return { repo, assets, capability, projectId, originalBytes, preparedBytes };
   }
 
   async function decoded(bytes: Buffer) {
@@ -118,9 +120,9 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
     assert.equal(alphaAt(result, R), 0, "G: R must be transparent after removing R");
   });
 
-  it("§9: reverse composition -- Undo 1/2/3 in reverse order restores R, then B, then D, ending byte-identical to the original", async () => {
-    const { capability, projectId, originalBytes } = await seeded();
-    const originalPixels = await decoded(originalBytes);
+  it("§9: reverse composition -- Undo 1/2/3 in reverse order restores R, then B, then D, ending byte-identical to the prepared base", async () => {
+    const { capability, projectId, preparedBytes } = await seeded();
+    const preparedPixels = await decoded(preparedBytes);
 
     await capability.acceptCorrectionOperation(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     await capability.acceptCorrectionOperation(projectId, { clicks: [B], mode: "remove", toleranceLevel: "default" });
@@ -143,30 +145,37 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
     await capability.undoCorrectionOperation(projectId);
     result = await decoded(await capability.getCorrectionResultPng(projectId));
     assert.equal(alphaAt(result, D), 255, "Undo 3: D must be restored");
-    assert.equal(Buffer.compare(result.data, originalPixels.data), 0, "Undo 3: result must equal the original byte-for-byte");
+    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "Undo 3: result must equal the prepared base byte-for-byte");
   });
 
-  it("§10: mixed-tool composition -- Wand remove D -> Brush restore unrelated pixels -> Eraser remove elsewhere -> Fill restore an enclosed pocket -> Wand remove B, every prior operation remains present, then reverse-Undo restores each in turn", async () => {
-    const { capability, projectId, originalBytes } = await seeded();
-    const originalPixels = await decoded(originalBytes);
+  it("§10: mixed-tool composition -- Wand remove D -> Brush restore unrelated pixels -> Eraser punch an enclosed pocket in R -> Fill restore it -> Wand remove B, every prior operation remains present, then reverse-Undo restores each in turn", async () => {
+    const { capability, projectId, preparedBytes } = await seeded();
+    const preparedPixels = await decoded(preparedBytes);
 
     // Wand remove D.
     await capability.acceptCorrectionOperation(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     let result = await decoded(await capability.getCorrectionResultPng(projectId));
     assert.equal(alphaAt(result, D), 0, "D removed");
 
-    // Brush restore some unrelated pixels (a background point far from any square -- restoring already-original pixels is a legitimate no-op-on-bytes operation, still its own history entry).
+    // Brush restore some background pixels -- already removed by automatic
+    // preparation (base = prepared), so this is a legitimate no-op-on-bytes
+    // operation, still its own history entry.
     const brushPoint = { x: 5, y: 5 };
     await capability.acceptCorrectionOperation(projectId, { tool: "restore_brush", points: [brushPoint], radius: 3 });
 
-    // Eraser remove another area (a background point unrelated to D/B/R).
-    const eraserPoint = { x: 30, y: 5 };
+    // Eraser punches a small hole INSIDE the still-fully-opaque R square
+    // (not a background point -- the exterior background is already one
+    // huge border-connected transparent region by the time this session
+    // starts, so a hole punched there would never be enclosed). R is
+    // otherwise untouched throughout this test, so an eraser hole here
+    // stays genuinely enclosed for Fill to find.
+    const eraserPoint = { x: 94, y: 19 };
     await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [eraserPoint], radius: 3 });
     result = await decoded(await capability.getCorrectionResultPng(projectId));
     assert.equal(alphaAt(result, eraserPoint), 0, "eraser point removed");
     assert.equal(alphaAt(result, D), 0, "D remains removed after Brush+Eraser");
 
-    // Fill restore an enclosed pocket -- reuse the eraser's own removed spot (isolated, non-border-connected).
+    // Fill restore the enclosed pocket just punched in R.
     const fillPreview = await capability.previewCorrectionSelection(projectId, { tool: "restore_fill", click: eraserPoint });
     assert.ok(!fillPreview.refused, "sanity: the eraser-created hole must be enclosed and fillable");
     await capability.acceptCorrectionOperation(projectId, { tool: "restore_fill", click: eraserPoint });
@@ -181,17 +190,17 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
     assert.equal(alphaAt(result, B), 0, "B removed");
     assert.equal((await capability.getCorrectionSessionInfo(projectId)).operationCount, 5, "all five mixed-tool operations must be present in history");
 
-    // Reverse: Undo each of the 5 operations in turn, ending at the original.
+    // Reverse: Undo each of the 5 operations in turn, ending at the prepared base.
     for (let i = 0; i < 5; i += 1) {
       await capability.undoCorrectionOperation(projectId);
     }
     result = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(Buffer.compare(result.data, originalPixels.data), 0, "undoing all 5 mixed-tool operations must reproduce the original exactly");
+    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "undoing all 5 mixed-tool operations must reproduce the prepared base exactly");
   });
 
-  it("§13: Start Over after D+B+R reproduces the original exactly, and a fresh D removal afterward has no ghost B/R state", async () => {
-    const { capability, projectId, originalBytes } = await seeded();
-    const originalPixels = await decoded(originalBytes);
+  it("§13: Start Over after D+B+R reproduces the prepared base exactly, and a fresh D removal afterward has no ghost B/R state", async () => {
+    const { capability, projectId, preparedBytes } = await seeded();
+    const preparedPixels = await decoded(preparedBytes);
 
     await capability.acceptCorrectionOperation(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     await capability.acceptCorrectionOperation(projectId, { clicks: [B], mode: "remove", toleranceLevel: "default" });
@@ -199,7 +208,7 @@ describe("Phase 27J: operation-composition/replay regression (D/B/R fixture)", (
 
     await capability.resetCorrectionSession(projectId);
     let result = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(Buffer.compare(result.data, originalPixels.data), 0, "Start Over must reproduce the original exactly");
+    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "Start Over must reproduce the prepared base exactly");
     assert.equal((await capability.getCorrectionSessionInfo(projectId)).operationCount, 0, "Start Over must clear operation history to zero");
 
     // Fresh D removal after Start Over -- confirm no ghost B/R state.

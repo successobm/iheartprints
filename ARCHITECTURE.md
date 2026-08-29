@@ -6076,6 +6076,100 @@ more common well-formed case.
 
 ---
 
+## 13k. Manual Correction Session Base (Prepared Artwork, Not the Original)
+
+The manual Magic Wand correction workspace ("Edit Artwork") has FOUR
+distinct authorities, and confusing any two of them reproduces a real,
+customer-reported defect:
+
+- **Immutable original** (`ArtworkPreparation.originalAssetId`) — the
+  customer's uploaded bytes, exactly as received. Never repointed, never
+  used as a correction starting point when a better one exists.
+- **Prepared base** (`ArtworkPreparation.preparedAssetId`, when non-null) —
+  whatever automatic (or guided) preparation most recently produced. This
+  is what the customer was actually reviewing immediately before clicking
+  Edit Artwork.
+- **Current corrected result** — the prepared base with every accepted
+  correction operation replayed on top, recomputed fresh on every read
+  (`computeCurrentResult`/`getCorrectionResultPng`), never cached.
+- **Restore authority** — always the immutable original, regardless of what
+  the base is. Restore Missing Artwork exists to recover pixels a manual
+  Remove/Eraser operation took away in error; it has never meant "revert to
+  what automatic preparation had before it ran."
+
+**The invariant:**
+
+    currentCorrectionResult = preparedBase + acceptedCorrectionOperations
+
+**never**
+
+    currentCorrectionResult = originalUpload + acceptedCorrectionOperations
+
+### The defect and its history
+
+`ensureCorrectionSession` (`artwork-preparation-capability.ts`) originally
+initialized the session's `base` from the immutable original — a deliberate
+Phase 27G decision, made on the theory that automatic preparation might
+have damaged the artwork and the operator should repair the untouched
+original by hand rather than repair automatic preparation's own mistakes.
+In practice this meant the workspace discarded automatic preparation's
+(usually correct) work every time it was opened: at zero accepted
+corrections, the canvas showed the large original background again, and
+the operator was forced to redo cleanup automatic preparation had already
+completed. `original`/`base` were also keyed to the SAME (permanently
+fixed) `originalAssetId` for session-freshness purposes, which — as a
+side effect — meant a stale session could never be detected at all.
+
+The fix: `base` now comes from the CURRENT `preparedAssetId` when one
+exists, falling back to the original only when automatic preparation has
+never produced one (a `NEEDS_REVIEW`-classified upload, or "Clean Up
+Manually" reached before any automatic attempt — Phase 28A's entry point,
+where there is genuinely nothing else to start from). `original` is
+unchanged — still always the immutable upload.
+
+### Geometry alignment — proven, not assumed
+
+Restore Missing Artwork reads recoverable pixels from the immutable
+original at the SAME (x, y) coordinates the current corrected canvas uses.
+This is only safe because original and prepared/corrected canvases are
+GUARANTEED to share identical pixel dimensions — background isolation only
+ever rewrites alpha (and, at the boundary, RGB fringe cleanup) in place; it
+never crops, resizes, reframes, or reorients. This is enforced, not merely
+assumed: `assertPreservesGeometry` throws if a derived prepared asset's
+dimensions ever diverge from the original's, and `ensureCorrectionSession`
+calls it defensively before starting a session, so a hypothetical future
+violation fails loudly rather than silently misaligning Restore. No
+coordinate mapping exists anywhere in this workflow because none is needed.
+
+### Stale-session protection
+
+A correction session is valid only for the prepared base it was created
+from. `ensureCorrectionSession` keys the session's freshness check
+(`hasFreshSession`/`getOrCreateSession`'s `baseAssetId`) on
+`preparedAssetId ?? originalAssetId` — the SAME id that decided what `base`
+actually is. If automatic (or guided) preparation produces a NEW prepared
+asset while a correction session for the OLD one is still open in another
+tab, the next call here sees a different key and starts a fresh session
+from the new base — never silently reusing a session built on a prepared
+asset that is no longer current. Reopening the SAME session (unchanged
+base) is unaffected: accepted operations survive across preview/result
+reads and are never dropped by a mere reopen. A session is otherwise only
+discarded by `finalizeCorrection` clearing it after an explicit "Use This
+Artwork."
+
+### What did not change
+
+- `finalizeCorrection` needed no change — it already persists whatever
+  `computeCorrectionResult` (base + operations) produces, generically.
+- Remove/Wand/Brush/Eraser operations are unaffected — they operate on the
+  evolving `current` result exactly as before.
+- Restore Missing Artwork's semantics are unaffected — it still reads only
+  from the immutable original, per this section's invariant above.
+- "Compare against the original upload" (`getCorrectionOriginalPng`) reads
+  `originalAssetId` directly, bypassing the session entirely — unaffected.
+
+---
+
 ## 14. Background Worker Architecture
 
 Two independent job queues, two independent workers — deliberately never

@@ -632,6 +632,21 @@ export function createArtworkPreparationCapability(
   }
 
   /**
+   * The CURRENT prepared artwork, decoded — whatever `preparedAssetId`
+   * points at right now. Caller's responsibility to only call this when
+   * `preparedAssetId` is non-null (see `ensureCorrectionSession`).
+   */
+  async function loadPreparedImage(preparation: ArtworkPreparation) {
+    const downloaded = await assets.downloadAssetBytes(preparation.preparedAssetId!);
+    if (!downloaded) {
+      throw new ArtworkPreparationStateError(
+        "We couldn't find your prepared artwork. Please try again.",
+      );
+    }
+    return decodePngUpload(downloaded.bytes).image;
+  }
+
+  /**
    * Intelligent Separation Phase 9: the original's bytes AND decoded image —
    * the region map's stable identity is pinned against the byte hash, never
    * the decoded pixels, so it agrees with every prior phase's
@@ -659,43 +674,49 @@ export function createArtworkPreparationCapability(
    * on every click, and never by recomputing a removal.
    */
   /**
-   * Phase 27G: the manual correction workspace ALWAYS initializes from the
-   * immutable ORIGINAL upload — never from `preparedAssetId`, a separation
-   * candidate, or any other automatically-derived master. This is the
-   * central acceptance criterion of Phase 27G: automatic preparation may
-   * have damaged legitimate artwork, and the manual fallback exists
-   * precisely so the operator repairs the ORIGINAL by hand rather than
-   * repairing the damage automatic preparation caused. The automatic
-   * `preparedAssetId` is read nowhere in this function and is left
-   * completely untouched — it remains exactly what it was until (and
-   * unless) `finalizeCorrection` repoints it.
+   * The manual correction workspace initializes from whatever the customer
+   * was actually reviewing immediately before opening it: the CURRENT
+   * `preparedAssetId` when one exists, falling back to the immutable
+   * ORIGINAL only when automatic preparation has never produced one (a
+   * `NEEDS_REVIEW`-classified upload, or "Clean Up Manually" reached before
+   * any automatic attempt — Phase 28A's entry point). This is the fix for
+   * the reported "corrections=0 shows the large original background again"
+   * defect: automatic preparation's own work is never silently discarded
+   * merely because the operator opened Edit Artwork.
    *
-   * `originalAssetId` never changes for a project, so keying the session's
-   * freshness check on it (instead of the old, mutable `preparedAssetId`)
-   * means a session is always considered fresh for as long as it exists —
-   * exactly right, since its base can never legitimately go stale under
-   * it. A session only ever gets recreated after `finalizeCorrection`
-   * clears it, at which point a fresh one is correctly rebuilt from the
-   * same immutable original again.
+   * `original` is ALWAYS the immutable original upload, never the prepared
+   * asset — Restore Missing Artwork's recovery authority and "compare
+   * against the original" both depend on this remaining the true original
+   * regardless of what `base` is. Geometry between the two is guaranteed
+   * identical (never a crop/resize/reframe) by `assertPreservesGeometry`,
+   * enforced wherever a prepared asset is derived — see that function's own
+   * doc comment — so no coordinate mapping is needed between them.
+   *
+   * `baseAssetId` is keyed on the SAME id that decided `base`
+   * (`preparedAssetId ?? originalAssetId`), which is what makes
+   * `getOrCreateSession`'s existing `baseAssetId` comparison correctly
+   * detect a stale session: if automatic (or guided) preparation produces a
+   * NEW `preparedAssetId` while a correction session for the OLD one is
+   * still open (e.g. another tab), the next call here sees a different key
+   * and starts a fresh session from the new base — never silently reusing
+   * a session built on a prepared asset that no longer exists as "current."
+   * A session only ever gets discarded this way or by `finalizeCorrection`
+   * clearing it; accepted operations are never dropped by a mere reopen.
    */
   async function ensureCorrectionSession(designId: string): Promise<void> {
     const { preparation } = await loadOwned(designId);
-    // Phase 27G §0 originally assumed automatic preparation always runs
-    // first, so this guard checked `preparedAssetId` as a proxy for "there
-    // is an upload to correct." Phase 28A: a NEEDS_REVIEW-classified upload
-    // never gets a `preparedAssetId` from `prepareBackground` (it refuses to
-    // run automatically at all), so that proxy no longer holds -- the
-    // actual precondition, `originalAssetId`, is guaranteed by `loadOwned`
-    // succeeding at all (every preparation row gets one at upload time; see
-    // `uploadOriginal`), so no separate check is needed here.
-    if (hasFreshSession(designId, preparation.originalAssetId)) return;
+    const baseAssetId = preparation.preparedAssetId ?? preparation.originalAssetId;
+    if (hasFreshSession(designId, baseAssetId)) return;
 
     const { image: original } = await loadOriginalImageWithHash(preparation);
-    // An independent buffer copy, not a shared reference -- the session's
-    // `base` and `original` must never alias the same underlying memory,
-    // even though they start byte-identical.
-    const base: RgbaImage = { width: original.width, height: original.height, data: Buffer.from(original.data) };
-    getOrCreateSession(designId, original, base, preparation.originalAssetId);
+    const base: RgbaImage = preparation.preparedAssetId
+      ? await loadPreparedImage(preparation)
+      : // No prepared asset exists yet — an independent buffer copy, not a
+        // shared reference, so `base`/`original` never alias the same
+        // memory even though they start byte-identical.
+        { width: original.width, height: original.height, data: Buffer.from(original.data) };
+    assertPreservesGeometry(original, base);
+    getOrCreateSession(designId, original, base, baseAssetId);
   }
 
   function validateCorrectionRequest(request: { clicks: Point[]; mode: CorrectionAction; toleranceLevel: ToleranceLevel; removeAt?: Point }): void {

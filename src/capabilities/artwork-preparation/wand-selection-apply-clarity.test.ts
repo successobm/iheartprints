@@ -82,7 +82,9 @@ describe("Phase 27K: Wand selection/apply UX clarity (server-side truth behind t
     await capability.uploadOriginal(projectId, { bytes: originalBytes, declaredContentType: "image/png", filename: "dr.png" });
     await capability.setProductionContext(projectId, { productSummary: "T-shirts", productColor: "Black", printPlacement: "full_front" });
     await capability.prepareBackground(projectId);
-    return { capability, projectId, originalBytes };
+    const preparation = await repo.getArtworkPreparation(projectId);
+    const preparedBytes = (await assets.downloadAssetBytes(preparation!.preparedAssetId!))!.bytes;
+    return { capability, projectId, originalBytes, preparedBytes };
   }
 
   async function decoded(bytes: Buffer) {
@@ -94,22 +96,22 @@ describe("Phase 27K: Wand selection/apply UX clarity (server-side truth behind t
 
   // §9.A: click D (preview only) -- pending, zero accepted operations.
   it("A: previewing D creates a pending selection but ZERO accepted operations, and does not change the result", async () => {
-    const { capability, projectId, originalBytes } = await seeded();
-    const originalPixels = await decoded(originalBytes);
+    const { capability, projectId, preparedBytes } = await seeded();
+    const preparedPixels = await decoded(preparedBytes);
 
     const preview = await capability.previewCorrectionSelection(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     assert.ok(preview.pixelCount > 0, "D must be found as a valid selection");
 
     assert.equal((await capability.getCorrectionSessionInfo(projectId)).operationCount, 0, "previewing must never itself create an operation");
     const result = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(Buffer.compare(result.data, originalPixels.data), 0, "the actual result must be untouched by a mere preview -- D is not really removed yet");
+    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "the actual result must be untouched by a mere preview -- D is not really removed yet");
   });
 
   // §9.B: without applying D, preview R -- R becomes pending, D was never
   // secretly accepted, operation count stays 0.
   it("B: previewing R without applying D leaves accepted operations at ZERO -- no D operation was secretly created", async () => {
-    const { capability, projectId, originalBytes } = await seeded();
-    const originalPixels = await decoded(originalBytes);
+    const { capability, projectId, preparedBytes } = await seeded();
+    const preparedPixels = await decoded(preparedBytes);
 
     await capability.previewCorrectionSelection(projectId, { clicks: [D], mode: "remove", toleranceLevel: "default" });
     // Operator clicks R instead of applying D (existing semantics: R simply
@@ -119,7 +121,7 @@ describe("Phase 27K: Wand selection/apply UX clarity (server-side truth behind t
 
     assert.equal((await capability.getCorrectionSessionInfo(projectId)).operationCount, 0, "still zero -- D was never committed, and R is only a preview too");
     const result = await decoded(await capability.getCorrectionResultPng(projectId));
-    assert.equal(Buffer.compare(result.data, originalPixels.data), 0, "the result must still equal the original -- nothing was ever actually removed");
+    assert.equal(Buffer.compare(result.data, preparedPixels.data), 0, "the result must still equal the prepared base -- nothing was ever actually removed");
   });
 
   // §9.C: doing it correctly -- explicit apply for each.

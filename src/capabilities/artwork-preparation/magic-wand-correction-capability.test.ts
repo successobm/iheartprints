@@ -15,21 +15,31 @@ import { decodePngUpload } from "./image-decode";
 import { bowlingStyleArtwork, solidBlackExteriorArtwork, toPngBytes } from "./artwork-fixtures";
 
 /**
- * Phase 27E/27G — focused regression tests for the graduated Magic Wand
- * correction workspace. Deliberately does NOT re-test flood-fill
- * correctness, connectivity, or the tolerance ladder — that surface is
- * frozen and already exhaustively covered by
+ * Phase 27E/27G/28-correction-base — focused regression tests for the
+ * graduated Magic Wand correction workspace. Deliberately does NOT re-test
+ * flood-fill correctness, connectivity, or the tolerance ladder — that
+ * surface is frozen and already exhaustively covered by
  * `src/experimental/magic-wand/magic-wand.test.ts`. These tests cover the
  * INTEGRATION plumbing: session lifecycle, authoritative persistence,
  * original immutability, and pixel consistency across edit -> review ->
  * handoff.
  *
- * Phase 27G changed ONE thing at this layer: the manual correction
- * session's "base" is now the IMMUTABLE ORIGINAL, never `preparedAssetId`
- * (see `ensureCorrectionSession`'s doc comment for why). Every test below
- * that asserts what "Start Over" / zero-operations / the initial workspace
- * state should equal was updated to assert against the ORIGINAL, not the
- * old automatic prepared asset.
+ * Phase 27G had made the session's "base" the IMMUTABLE ORIGINAL, never
+ * `preparedAssetId`, on the theory that automatic preparation might have
+ * damaged the artwork and the operator should repair the original by hand.
+ * In practice this meant the correction workspace discarded automatic
+ * preparation's own (usually correct) work every time it was opened,
+ * forcing the operator to redo cleanup that already happened — the exact
+ * customer-reported defect this revision fixes. `ensureCorrectionSession`
+ * now initializes `base` from the CURRENT `preparedAssetId` when one
+ * exists, falling back to the original only when automatic preparation
+ * never ran (Phase 28A's entry point, still covered below and in
+ * `manual-cleanup-from-automatic-review.test.ts`). `original` is always
+ * still the immutable original — Restore Missing Artwork's recovery
+ * authority and "compare against the original" both still depend on that.
+ * Every test below that asserts what "Start Over" / zero-operations / the
+ * initial workspace state should equal now asserts against the PREPARED
+ * asset (when one exists), not the original.
  */
 
 describe("Phase 27E/27G: Magic Wand correction workspace", () => {
@@ -54,7 +64,7 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
     return { repo, assets, capability };
   }
 
-  /** Seeds a project through upload -> context -> prepareBackground (the "automatic attempt"), exactly like the easy-artwork path elsewhere. Returns with a real `preparedAssetId` set -- but per Phase 27G, correction sessions now build their base from `originalBytes`, not from this prepared asset. */
+  /** Seeds a project through upload -> context -> prepareBackground (the "automatic attempt"), exactly like the easy-artwork path elsewhere. Returns with a real `preparedAssetId` set -- correction sessions now build their base from THIS prepared asset's bytes, not the original. */
   async function seededWithPreparedArtwork() {
     const { repo, assets, capability } = await harness();
     const projectId = (await repo.createProject()).project.id;
@@ -63,7 +73,9 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
     await capability.setProductionContext(projectId, { productSummary: "T-shirts", productColor: "Black", printPlacement: "full_front" });
     await capability.prepareBackground(projectId);
     const preparation = await repo.getArtworkPreparation(projectId);
-    return { repo, assets, capability, projectId, originalBytes, preparedAssetId: preparation!.preparedAssetId! };
+    const preparedAssetId = preparation!.preparedAssetId!;
+    const preparedBytes = (await assets.downloadAssetBytes(preparedAssetId))!.bytes;
+    return { repo, assets, capability, projectId, originalBytes, preparedBytes, preparedAssetId };
   }
 
   async function decodedPixels(bytes: Buffer) {
@@ -91,7 +103,12 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
   it("3/Q: the session's accepted operations survive across repeated preview/result reads, and merely reading the result applies no operation of its own", async () => {
     const { capability, projectId } = await seededWithPreparedArtwork();
     const beforeAnyOp = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 5, y: 5 }], mode: "remove", toleranceLevel: "default" });
+    // (40,40) sits on the white square, which automatic preparation never
+    // touches -- (5,5)'s background is already removed by the time this
+    // session starts (base = prepared), so a remove click there would be a
+    // pixel no-op and defeat this test's own "actually changed something"
+    // sanity check.
+    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 40, y: 40 }], mode: "remove", toleranceLevel: "default" });
     const afterFirstOp = await capability.getCorrectionResultPng(projectId);
     assert.notEqual(Buffer.compare((await decodedPixels(afterFirstOp)).data, beforeAnyOp.data), 0, "sanity: the accepted op actually changed something");
     // Simulate "Done Editing" (read) then "Back to Editing" (read again) --
@@ -202,10 +219,11 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
   });
 
   // 8/25/I: Undo remains correct, and undoing back to zero operations
-  // reproduces the ORIGINAL exactly (not the old automatic prepared asset).
-  it("8/25/I: Undo removes exactly the most recently accepted operation; undo-to-zero reproduces the original exactly", async () => {
-    const { capability, projectId, originalBytes } = await seededWithPreparedArtwork();
-    const originalPixels = await decodedPixels(originalBytes);
+  // reproduces the PREPARED base exactly (not the immutable original --
+  // that would resurrect background automatic preparation already removed).
+  it("8/25/I: Undo removes exactly the most recently accepted operation; undo-to-zero reproduces the prepared base exactly", async () => {
+    const { capability, projectId, preparedBytes } = await seededWithPreparedArtwork();
+    const preparedPixels = await decodedPixels(preparedBytes);
 
     await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 40, y: 40 }], mode: "remove", toleranceLevel: "default" });
     const afterOp1 = await decodedPixels(await capability.getCorrectionResultPng(projectId));
@@ -217,20 +235,20 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
 
     await capability.undoCorrectionOperation(projectId);
     const afterUndoToZero = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    assert.ok(pixelsEqual(originalPixels, afterUndoToZero), "undo-to-zero must reproduce the ORIGINAL exactly -- never falling back into the automatic prepared result");
+    assert.ok(pixelsEqual(preparedPixels, afterUndoToZero), "undo-to-zero must reproduce the PREPARED base exactly -- never falling back into the immutable original");
   });
 
-  // 9/26/H: Start Over returns to the ORIGINAL, never the automatic prepared result.
-  it("9/26/H: Start Over resets to the ORIGINAL upload exactly -- never the automatic prepared asset -- without mutating anything", async () => {
-    const { repo, capability, projectId, originalBytes, preparedAssetId } = await seededWithPreparedArtwork();
-    const originalPixels = await decodedPixels(originalBytes);
+  // 9/26/H: Start Over returns to the PREPARED base, never the immutable original.
+  it("9/26/H: Start Over resets to the PREPARED base exactly -- never the immutable original -- without mutating anything", async () => {
+    const { repo, capability, projectId, preparedBytes, preparedAssetId } = await seededWithPreparedArtwork();
+    const preparedPixels = await decodedPixels(preparedBytes);
 
     await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 40, y: 40 }], mode: "remove", toleranceLevel: "default" });
     await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 5, y: 5 }], mode: "remove", toleranceLevel: "default" });
     await capability.resetCorrectionSession(projectId);
 
     const afterReset = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    assert.ok(pixelsEqual(originalPixels, afterReset), "Start Over must reproduce the ORIGINAL exactly");
+    assert.ok(pixelsEqual(preparedPixels, afterReset), "Start Over must reproduce the PREPARED base exactly");
 
     const preparation = await repo.getArtworkPreparation(projectId);
     assert.equal(preparation!.preparedAssetId, preparedAssetId, "Start Over must not touch preparedAssetId");
@@ -238,22 +256,27 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
   });
 
   // 10/F/G: with zero accepted operations, the manual workspace shows the
-  // ORIGINAL exactly -- proving the session initializes from original, not
-  // from a freshly (or previously) computed automatic removal.
-  it("10/F/G: with zero accepted operations, the correction result is pixel-identical to the ORIGINAL -- proving the session starts from original, not the automatic prepared asset", async () => {
-    const { capability, projectId, originalBytes } = await seededWithPreparedArtwork();
+  // CURRENT PREPARED ARTWORK exactly -- this is the fix for the reported
+  // defect ("corrections=0 shows the large original background again").
+  it("10/F/G: with zero accepted operations, the correction result is pixel-identical to the PREPARED base -- and NOT the original, proving automatic preparation's own work is preserved", async () => {
+    const { capability, projectId, preparedBytes, originalBytes } = await seededWithPreparedArtwork();
+    const preparedPixels = await decodedPixels(preparedBytes);
     const originalPixels = await decodedPixels(originalBytes);
+    // Sanity: for this fixture, automatic prep DID change the bytes --
+    // otherwise this test could not distinguish the two possible bases.
+    assert.notEqual(Buffer.compare(preparedPixels.data, originalPixels.data), 0, "sanity: automatic preparation must have actually changed something for this fixture");
+
     const resultPixels = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    assert.ok(pixelsEqual(originalPixels, resultPixels), "zero operations must reproduce the ORIGINAL exactly");
+    assert.ok(pixelsEqual(preparedPixels, resultPixels), "zero operations must reproduce the PREPARED base exactly");
+    assert.ok(!pixelsEqual(originalPixels, resultPixels), "zero operations must NOT revert to the original upload");
 
     const info = await capability.getCorrectionSessionInfo(projectId);
     assert.equal(info.operationCount, 0, "opening the workspace must not itself create any operation");
   });
 
-  // C: explicit proof the session base is keyed to originalAssetId, not preparedAssetId.
-  it("C: the correction session initializes from originalAssetId's bytes, not preparedAssetId's bytes", async () => {
-    const { assets, capability, projectId, preparedAssetId, originalBytes } = await seededWithPreparedArtwork();
-    const preparedBytes = (await assets.downloadAssetBytes(preparedAssetId))!.bytes;
+  // C: explicit proof the session base is keyed to preparedAssetId when one exists.
+  it("C: the correction session initializes from preparedAssetId's bytes, not originalAssetId's bytes, when a prepared asset exists", async () => {
+    const { capability, projectId, preparedBytes, originalBytes } = await seededWithPreparedArtwork();
     const preparedPixels = await decodedPixels(preparedBytes);
     const originalPixels = await decodedPixels(originalBytes);
     // Sanity: for this fixture, automatic prep DID change the bytes (background removed) --
@@ -261,8 +284,8 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
     assert.notEqual(Buffer.compare(preparedPixels.data, originalPixels.data), 0, "sanity: automatic preparation must have actually changed something for this fixture");
 
     const resultPixels = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    assert.ok(pixelsEqual(originalPixels, resultPixels), "session base must be the ORIGINAL");
-    assert.ok(!pixelsEqual(preparedPixels, resultPixels), "session base must NOT be the automatic prepared asset");
+    assert.ok(pixelsEqual(preparedPixels, resultPixels), "session base must be the PREPARED artwork");
+    assert.ok(!pixelsEqual(originalPixels, resultPixels), "session base must NOT be the immutable original");
   });
 
   // 12/O: low-resolution/enhancement requirement and garment color stay independent
@@ -341,17 +364,21 @@ describe("Phase 27E/27G: Magic Wand correction workspace", () => {
   });
 
   // J: manual Delete/apply still performs the existing deterministic remove behavior unchanged.
-  it("J: manual Remove Background apply performs the existing deterministic alpha-only removal, unchanged", async () => {
+  it("J: manual Remove apply performs the existing deterministic alpha-only removal, unchanged", async () => {
     const { capability, projectId } = await seededWithPreparedArtwork();
     const before = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    const bgIdx = (5 * before.width + 5) * 4;
-    assert.equal(before.data[bgIdx + 3], 255, "background starts opaque (from the original)");
-    const rgbBefore = [before.data[bgIdx], before.data[bgIdx + 1], before.data[bgIdx + 2]];
+    // (40,40) sits on the white square -- automatic preparation never
+    // removes foreground artwork, so this point starts opaque in the
+    // PREPARED base too (unlike (5,5)'s background, already removed by the
+    // time this session starts).
+    const idx = (40 * before.width + 40) * 4;
+    assert.equal(before.data[idx + 3], 255, "artwork starts opaque in the prepared base");
+    const rgbBefore = [before.data[idx], before.data[idx + 1], before.data[idx + 2]];
 
-    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 5, y: 5 }], mode: "remove", toleranceLevel: "default" });
+    await capability.acceptCorrectionOperation(projectId, { clicks: [{ x: 40, y: 40 }], mode: "remove", toleranceLevel: "default" });
     const after = await decodedPixels(await capability.getCorrectionResultPng(projectId));
-    assert.equal(after.data[bgIdx + 3], 0, "removed pixel must become transparent");
-    assert.deepEqual([after.data[bgIdx], after.data[bgIdx + 1], after.data[bgIdx + 2]], rgbBefore, "remove must only ever change alpha, never RGB");
+    assert.equal(after.data[idx + 3], 0, "removed pixel must become transparent");
+    assert.deepEqual([after.data[idx], after.data[idx + 1], after.data[idx + 2]], rgbBefore, "remove must only ever change alpha, never RGB");
   });
 
   // Phase 27G §15: `approvePreparedArtwork` already refuses to approve while

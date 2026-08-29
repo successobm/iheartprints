@@ -179,21 +179,24 @@ describe("INCREDI-BOWLS real-asset acceptance — Phase 27I toolbox (Fill, Brush
     );
   });
 
-  it("6/ERASER: removes a small remaining unwanted artifact; neighbouring desired artwork is untouched; Undo restores exactly", async () => {
+  it("6/ERASER: removes a small area of the artwork (stand-in for a remaining unwanted artifact); neighbouring desired artwork is untouched; Undo restores exactly", async () => {
     const { capability, projectId } = await seed();
     const before = await decoded(await capability.getCorrectionResultPng(projectId));
-    // A point on the pure-black exterior, far from any artwork -- stand-in
-    // for "a small remaining unwanted background artifact".
-    const artifactIdx = (20 * before.width + 20) * 4;
+    // A point solidly inside the bowling ball's own dark fill (per this
+    // file's own header comment) -- NOT the pure-black exterior, which
+    // automatic preparation has already removed by the time this session
+    // starts (base = prepared), so it is no longer available as a "still
+    // opaque, removable artifact" stand-in.
+    const artifactIdx = (230 * before.width + 270) * 4;
     assert.equal(before.data[artifactIdx + 3], 255, "sanity: still opaque before erasing");
 
-    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 20, y: 20 }], radius: 5 });
+    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 270, y: 230 }], radius: 5 });
     const afterErase = await decoded(await capability.getCorrectionResultPng(projectId));
     assert.equal(afterErase.data[artifactIdx + 3], 0, "artifact removed");
 
-    // Neighbouring desired artwork (the ball, far away) is unchanged.
+    // Neighbouring desired artwork (elsewhere on the ball) is unchanged.
     const ballIdx = (250 * afterErase.width + 292) * 4;
-    assert.equal(afterErase.data[ballIdx + 3], 255, "the ball must be completely unaffected by an unrelated eraser stroke");
+    assert.equal(afterErase.data[ballIdx + 3], 255, "the rest of the ball must be completely unaffected by an unrelated eraser stroke");
 
     await capability.undoCorrectionOperation(projectId);
     const afterUndo = await decoded(await capability.getCorrectionResultPng(projectId));
@@ -209,11 +212,16 @@ describe("INCREDI-BOWLS real-asset acceptance — Phase 27I toolbox (Fill, Brush
 
     // First correction, then "Done Editing" (a pure client-side navigation
     // -- the closest server equivalent is the read-only Final Review fetch).
-    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 20, y: 20 }], radius: 5 });
+    // Both points sit solidly inside the ball's own fill (per this file's
+    // header comment) -- the exterior background is already removed by
+    // automatic preparation before this session starts, so an erase there
+    // would be a pixel no-op and defeat this test's own "actually changed
+    // something" sanity check.
+    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 270, y: 230 }], radius: 5 });
     const finalReview1 = await decoded(await capability.getCorrectionResultPng(projectId));
 
     // "Back to Editing" -> one more correction.
-    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 30, y: 30 }], radius: 5 });
+    await capability.acceptCorrectionOperation(projectId, { tool: "erase_brush", points: [{ x: 280, y: 240 }], radius: 5 });
     const finalReview2 = await decoded(await capability.getCorrectionResultPng(projectId));
     assert.notEqual(countChangedPixels(finalReview1, finalReview2), 0, "sanity: the second correction actually changed something");
 
