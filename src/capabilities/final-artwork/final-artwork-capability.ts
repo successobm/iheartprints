@@ -1158,10 +1158,30 @@ function findJobForWidth(
  *   - a `"failed"` job (an infrastructure problem — storage, decode,
  *     provider outage) is revived to `"queued"`, because the customer's retry
  *     path is the same button that got them here;
- *   - a `"completed"` job is returned as-is even when it landed on
- *     `finalization_required`: that is a real verdict about this artwork at
- *     this size, not a hiccup, and re-running it unchanged would recompute
- *     the same answer at the same cost.
+ *   - a `"completed"` job is returned as-is when it is genuinely settled:
+ *     re-running it unchanged would recompute the same answer at the same
+ *     cost.
+ *
+ * "Restore Completed Print-Ready Download Flow" revises the LAST bullet's
+ * premise for exactly one case: a completed job's own PRODUCTION PNG can be
+ * genuinely unchanged while the VALIDATION POLICY governing it legitimately
+ * changes (e.g. DTF Feature Integrity's explicitly provisional/uncalibrated
+ * thresholds moving from blocking to diagnostic-only, per
+ * `dtf-feature-integrity-profile.ts`'s own calibration-authority gate) — in
+ * that case "recompute the same answer" is no longer a safe assumption, and
+ * a customer whose artwork was correctly produced has no other path back to
+ * `print_ready`. A completed job whose LATEST validation is not `"ready"` is
+ * therefore ALSO revived to `"queued"`, exactly like the `"failed"` case
+ * above — never a Topaz/provider call: `resolveExistingProductionAsset`
+ * (the FIRST thing `produceProductionAsset` checks, unconditionally, before
+ * any provider/attempt-budget logic runs at all) finds the SAME still-
+ * matching production asset and short-circuits straight to re-running
+ * PrintValidation against it. If the underlying issue is still genuinely
+ * blocking (missing transparency, wrong geometry, etc.), revalidation
+ * deterministically reproduces the SAME `finalization_required` verdict —
+ * this is safe to attempt unconditionally, not merely when a policy change
+ * is suspected. A job that IS still stale for the current target (the
+ * pre-existing `isStale` branch) is unaffected by this addition.
  */
 async function resolvePreparedUploadJob(
   repo: ProjectRepository,
@@ -1214,7 +1234,16 @@ async function resolvePreparedUploadJob(
         existing.id,
         effectiveTargetIn,
       );
-      if (isStale) {
+      // "Restore Completed Print-Ready Download Flow": narrowly scoped to
+      // a job that WAS actually validated and did not come back "ready" —
+      // a job whose validation row is missing entirely (e.g. the legacy
+      // pre-print-ready-normalization path) is a different, out-of-scope
+      // situation and is left exactly as before (returned as-is below).
+      const latestValidation = isStale
+        ? null // already reviving below; no need to also check this.
+        : await repo.getLatestProductionAssetValidationForJob(projectId, existing.id);
+      const revalidationWorthwhile = latestValidation !== null && latestValidation.status !== "ready";
+      if (isStale || revalidationWorthwhile) {
         const revived = await repo.updateFinalArtworkJob(existing.id, {
           status: "queued",
           lastError: null,

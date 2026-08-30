@@ -17,6 +17,10 @@ import type {
   PrintValidationInput,
   ProductionNormalizationSummary,
 } from "./contracts";
+import {
+  DTF_FEATURE_INTEGRITY_CALIBRATION_STATUS,
+  effectiveDtfFeatureIntegrityTier,
+} from "@/capabilities/shared/dtf-feature-integrity-profile";
 
 function conceptEvaluation(
   overrides: Partial<ConceptEvaluation> = {},
@@ -438,18 +442,21 @@ describe("PrintValidationCapability — DTF Feature Integrity (Phase 1)", () => 
     assert.equal(report.status, "ready");
   });
 
-  it("blocks on a critically thin positive feature whose fragility is STRUCTURAL (a majority of its own geometry)", () => {
+  it("'Restore Completed Print-Ready Download Flow': a critically thin STRUCTURAL positive feature is a WARNING, not a blocker, under the current provisional/uncalibrated DTF profile", () => {
     const report = printValidation.validateArtwork(
       normalizedFullBackInput({
         input: { dtfFeatureIntegrity: dtfSummary({ positive: { worstStructuralComponent: positiveWorst(0.1, 0.9) } }) },
       }),
     );
     const check = report.checks.find((c) => c.check === "dtf_positive_feature_integrity");
-    assert.equal(check?.status, "fail");
-    assert.equal(check?.severity, "blocking");
+    // The raw geometry classification is still STRUCTURAL/blocking-tier —
+    // only the calibration-gated severity actually assigned changes.
     assert.match(check!.reason, /SUBSTANTIAL PORTION/);
-    assert.notEqual(report.status, "ready");
-    assert.ok(report.requiredTransformations.includes("require_human_review"));
+    assert.equal(check?.status, "warning");
+    assert.equal(check?.severity, "warning");
+    assert.match(check!.reason, /uncalibrated/i);
+    assert.match(check!.reason, /not a print refusal/i);
+    assert.equal(report.status, "ready", "a provisional-profile finding must never by itself withhold print_ready");
   });
 
   it("Section 9: never blocks on a critically thin MINIMUM alone when it is only an INCIDENTAL dip in an otherwise robust component", () => {
@@ -479,14 +486,17 @@ describe("PrintValidationCapability — DTF Feature Integrity (Phase 1)", () => 
     assert.equal(report.status, "ready", "a warning-severity check never blocks print_ready");
   });
 
-  it("blocks on a critically narrow negative space whose fragility is STRUCTURAL", () => {
+  it("'Restore Completed Print-Ready Download Flow': a critically narrow STRUCTURAL negative space is a WARNING, not a blocker, under the current provisional/uncalibrated DTF profile", () => {
     const report = printValidation.validateArtwork(
       normalizedFullBackInput({
         input: { dtfFeatureIntegrity: dtfSummary({ negative: { worstStructuralComponent: negativeWorst(0.1, 0.9) } }) },
       }),
     );
-    assert.equal(report.checks.find((c) => c.check === "dtf_negative_space_integrity")?.status, "fail");
-    assert.notEqual(report.status, "ready");
+    const check = report.checks.find((c) => c.check === "dtf_negative_space_integrity");
+    assert.equal(check?.status, "warning");
+    assert.equal(check?.severity, "warning");
+    assert.match(check!.reason, /uncalibrated/i);
+    assert.equal(report.status, "ready");
   });
 
   it("never blocks a negative space whose critically narrow minimum is only an INCIDENTAL pinch point", () => {
@@ -500,14 +510,92 @@ describe("PrintValidationCapability — DTF Feature Integrity (Phase 1)", () => 
     assert.equal(report.status, "ready");
   });
 
-  it("blocks on a critically small isolated component", () => {
+  it("'Restore Completed Print-Ready Download Flow': a critically small isolated component is a WARNING, not a blocker, under the current provisional/uncalibrated DTF profile", () => {
     const report = printValidation.validateArtwork(
       normalizedFullBackInput({
         input: { dtfFeatureIntegrity: dtfSummary({ isolated: { smallestEquivalentDiameterMm: 0.1 } }) },
       }),
     );
-    assert.equal(report.checks.find((c) => c.check === "dtf_isolated_feature_integrity")?.status, "fail");
-    assert.notEqual(report.status, "ready");
+    const check = report.checks.find((c) => c.check === "dtf_isolated_feature_integrity");
+    assert.equal(check?.status, "warning");
+    assert.equal(check?.severity, "warning");
+    assert.equal(report.status, "ready");
+  });
+
+  it("INCREDI-BOWLS regression: the live case's exact measurements (positive 0.24mm, negative space 0.17mm, isolated 0.14mm) are warnings, not blockers, under the current provisional profile", () => {
+    // The exact measurements PrintValidation reported for the real,
+    // already-physically-DTF-printed INCREDI-BOWLS artwork (FinalArtworkJob
+    // 8a86b089-c456-4db3-b8f8-f8d3f6ad71c4) -- calibration EVIDENCE (a real
+    // print succeeded despite crossing these provisional floors), not
+    // encoded here as its own executable rule. This proves the GENERAL
+    // provisional-calibration policy handles that evidence correctly; it
+    // does not special-case this artwork, this project, or this job in any
+    // way -- the policy change lives entirely in
+    // `dtf-feature-integrity-profile.ts`'s calibration gate.
+    const report = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: {
+          dtfFeatureIntegrity: dtfSummary({
+            positive: { worstStructuralComponent: positiveWorst(0.24, 0.9) },
+            negative: { worstStructuralComponent: negativeWorst(0.17, 0.9) },
+            isolated: { smallestEquivalentDiameterMm: 0.14 },
+          }),
+        },
+      }),
+    );
+    for (const check of [
+      "dtf_positive_feature_integrity",
+      "dtf_negative_space_integrity",
+      "dtf_isolated_feature_integrity",
+    ]) {
+      const found = report.checks.find((c) => c.check === check);
+      assert.equal(found?.status, "warning", check);
+      assert.equal(found?.severity, "warning", check);
+    }
+    assert.equal(
+      report.status,
+      "ready",
+      "an otherwise-conforming production PNG must reach print_ready despite these provisional findings",
+    );
+  });
+
+  it("Requirement D: the provisional profile cannot emit a blocking DTF Feature Integrity verdict, no matter how extreme the measurement", () => {
+    const extreme = printValidation.validateArtwork(
+      normalizedFullBackInput({
+        input: {
+          dtfFeatureIntegrity: dtfSummary({
+            positive: { worstStructuralComponent: positiveWorst(0.001, 1) },
+            negative: { worstStructuralComponent: negativeWorst(0.001, 1) },
+            isolated: { smallestEquivalentDiameterMm: 0.001 },
+          }),
+        },
+      }),
+    );
+    for (const check of [
+      "dtf_positive_feature_integrity",
+      "dtf_negative_space_integrity",
+      "dtf_isolated_feature_integrity",
+      "dtf_partial_alpha_feature_integrity",
+    ]) {
+      assert.notEqual(extreme.checks.find((c) => c.check === check)?.severity, "blocking", check);
+    }
+    assert.equal(extreme.status, "ready", "no DTF Feature Integrity measurement can withhold print_ready under the provisional profile");
+  });
+
+  it("Requirement E: a hypothetical calibrated profile has an explicit extension point that DOES restore blocking -- Feature Integrity is not silently permanent-warning-only", () => {
+    assert.equal(effectiveDtfFeatureIntegrityTier("blocking", "provisional"), "warning");
+    assert.equal(
+      effectiveDtfFeatureIntegrityTier("blocking", "calibrated"),
+      "blocking",
+      "a calibrated profile must be able to block again -- this is the extension point, not an invented future threshold",
+    );
+    assert.equal(effectiveDtfFeatureIntegrityTier("warning", "calibrated"), "warning");
+    assert.equal(effectiveDtfFeatureIntegrityTier("pass", "calibrated"), "pass");
+    assert.equal(
+      DTF_FEATURE_INTEGRITY_CALIBRATION_STATUS,
+      "provisional",
+      "sanity: today's actual, real profile status is still provisional -- this test does not flip it",
+    );
   });
 
   it("Section 7: mentions the micro-component population in the isolated-feature check's reason", () => {

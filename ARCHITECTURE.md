@@ -9474,6 +9474,79 @@ sheet; claiming white-underbase or hand from pixels alone.
 
 ---
 
+## 23n. Provisional DTF Feature Integrity Findings Are Non-Blocking (Restore Completed Print-Ready Download Flow)
+
+A live production run (FinalArtworkJob `8a86b089-...`, the INCREDI-BOWLS
+upload) produced a fully-conforming production PNG — correct geometry,
+aspect ratio, physical size, lineage, transparency, reconstruction
+sufficiency — that `finalization_required` stranded anyway, solely because
+three §23k/§23l DTF Feature Integrity checks crossed their §23m-acknowledged
+**provisional, uncalibrated** floors (positive feature 0.24mm, negative
+space 0.17mm, isolated feature 0.14mm — all below their respective
+provisional blocking floors). The artwork had already been physically
+DTF-printed successfully by the production provider. §23m's own "Explicit
+non-goals" already forbade changing the THRESHOLD NUMBERS from this kind of
+single-run evidence — this section changes something narrower and
+different: what a still-provisional profile is **authorized to do** with a
+blocking verdict, not what its numbers are.
+
+### The calibration-authority gate
+
+`shared/dtf-feature-integrity-profile.ts` now carries an explicit
+`DtfCalibrationStatus` (`"provisional" | "calibrated"`) alongside its
+existing thresholds, plus `effectiveDtfFeatureIntegrityTier(rawTier,
+calibrationStatus)` — the ONE function that decides whether a raw
+`"blocking"` tier (from `classifyDtfFeatureWidth`/
+`classifyStructuralFragility`, both otherwise UNCHANGED) is actually allowed
+to become a blocking PrintValidation verdict. Today's status is
+`"provisional"`, so raw `"blocking"` downgrades to `"warning"` for all
+three checks that can produce it
+(`dtf_positive_feature_integrity`/`dtf_negative_space_integrity`/`dtf_isolated_feature_integrity`
+in `print-validation-capability.ts`); `dtf_partial_alpha_feature_integrity`
+was already diagnostic-only and is unaffected. The measurement, the exact
+mm/diameter value, and the structural-vs-incidental classification are
+NEVER altered or hidden — only the resulting `severity`, and each check's
+`reason` gains an explicit sentence stating the calibration status and that
+this is "a warning, not a print refusal," never a "guaranteed printable"
+claim. Flipping the ONE `DTF_FEATURE_INTEGRITY_CALIBRATION_STATUS` constant
+to `"calibrated"` (only once §23m's physical evidence actually warrants it)
+restores blocking for every check simultaneously — this file invents no
+future threshold or fraction ahead of that evidence.
+
+Every OTHER PrintValidation blocking check (transparency, source lineage,
+geometry, physical size, reconstruction sufficiency, halftone geometry,
+production/asset/job correspondence, etc.) is completely untouched — this
+gate exists ONLY inside the three DTF Feature Integrity check functions.
+
+### Revalidation without a second paid reconstruction
+
+A validation POLICY change (like this one) can make a job's own,
+already-correct production PNG newly eligible for `print_ready` without
+anything about the artwork or the customer's settings changing — but the
+pre-existing `resolvePreparedUploadJob` (`final-artwork-capability.ts`) only
+revived a `"completed"` job when it was stale for the current production
+target, never merely because a NEWER validation policy might now agree with
+it. It now ALSO revives (`status: "queued"`, identical to the existing
+`"failed"`/stale-`"completed"` revival) whenever a completed job's LATEST
+persisted validation is not `"ready"` — the same "Retry Preparation" action
+that already recovers a failed job.
+
+This never risks a second paid reconstruction: `produceProductionAsset`'s
+FIRST action, unconditionally, before any provider or attempt-budget logic
+runs at all, is `resolveExistingProductionAsset` — the pre-existing (Phase
+28T) short-circuit that finds a still-matching production asset and skips
+straight to re-running PrintValidation against it. If the underlying issue
+is still genuinely blocking (missing transparency, wrong geometry, etc.),
+revalidation deterministically reproduces the SAME `finalization_required`
+verdict — safe to attempt unconditionally, never only when a policy change
+is suspected. The customer-facing download gate
+(`resolveSatisfiedProductionDelivery`) is unchanged and untouched; it
+already keys off the LATEST validation's `status`/`assetId`, so a genuinely
+`"ready"` re-validation is what makes the SAME asset downloadable again —
+never a bypass.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

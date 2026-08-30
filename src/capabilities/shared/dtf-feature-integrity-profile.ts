@@ -35,6 +35,76 @@ export const DTF_FEATURE_INTEGRITY_PROFILE_VERSION = "dtf_feature_integrity_prov
 export type DtfFeatureIntegrityTier = "pass" | "warning" | "blocking";
 
 // ---------------------------------------------------------------------------
+// "Restore Completed Print-Ready Download Flow While Preserving Feature
+// Integrity Diagnostics" — THE CALIBRATION-AUTHORITY GATE
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether THIS profile's numbers come from physical DTF calibration yet.
+ *
+ * `"provisional"` — every value in this file today. A conservative
+ * engineering starting point, explicitly NOT validated DTF physics (see this
+ * file's own top-of-file doc comment). A provisional profile's raw
+ * "blocking" tier is NOT allowed to make PrintValidation refuse an otherwise
+ * fully-conforming production PNG — see `effectiveDtfFeatureIntegrityTier`
+ * below. The live INCREDI-BOWLS case that motivated this (positive feature
+ * 0.24mm, negative space 0.17mm, isolated feature 0.14mm — all measured
+ * BELOW this file's provisional blocking floors, on artwork the production
+ * DTF provider physically printed and reported as fine) is exactly why: a
+ * provisional floor being crossed is evidence worth surfacing, never proof
+ * the floor is correct.
+ *
+ * `"calibrated"` — not reached by this file today, and this file does not
+ * invent what a calibrated profile's numbers or fractions should be (see
+ * this task's own explicit instruction: "Do not invent future thresholds").
+ * It exists purely as the OTHER value this type can hold, so that the day
+ * physical DTF calibration replaces these numbers, flipping this ONE
+ * constant is what re-enables blocking — not a rewrite of every DTF check in
+ * `print-validation-capability.ts`.
+ */
+export type DtfCalibrationStatus = "provisional" | "calibrated";
+
+/** THE single source of calibration truth every DTF Feature Integrity check reads — see `DtfCalibrationStatus`'s own doc comment. */
+export const DTF_FEATURE_INTEGRITY_CALIBRATION_STATUS: DtfCalibrationStatus = "provisional";
+
+/**
+ * THE calibration-authority gate. Takes a RAW tier — the geometry
+ * classification alone, exactly what `classifyDtfFeatureWidth`/
+ * `classifyStructuralFragility` already computed, unmodified — and decides
+ * whether the CURRENT calibration status actually permits it to become a
+ * blocking PrintValidation verdict.
+ *
+ * Deliberately the ONLY place this decision is made: every DTF Feature
+ * Integrity check in `print-validation-capability.ts` that can otherwise
+ * produce `severity: "blocking"` calls this before deciding its own
+ * `status`/`severity`, rather than each check separately hardcoding "am I
+ * provisional" logic. A future calibrated profile changes ONE constant
+ * (`DTF_FEATURE_INTEGRITY_CALIBRATION_STATUS`) and every check's blocking
+ * behavior updates together, by construction — never per-check drift.
+ *
+ * This is a POLICY decision, not a retraction of the measurement: the raw
+ * tier, the measured mm/diameter value, the structural/incidental
+ * classification, and every micro-component finding all remain exactly as
+ * measured and are still surfaced — see each check's own `reason` text,
+ * which explicitly states when a would-be-blocking finding was downgraded
+ * for this reason. Nothing here claims the artwork is "guaranteed
+ * printable" — it says only that an UNCALIBRATED floor being crossed is not,
+ * by itself, grounds to withhold an otherwise valid production file.
+ *
+ * `"calibrated"` passes every tier through completely unchanged — a
+ * calibrated policy's own blocking/warning boundaries (whatever physical
+ * testing eventually establishes) are what govern at that point, not this
+ * gate silently softening them too.
+ */
+export function effectiveDtfFeatureIntegrityTier(
+  rawTier: DtfFeatureIntegrityTier,
+  calibrationStatus: DtfCalibrationStatus = DTF_FEATURE_INTEGRITY_CALIBRATION_STATUS,
+): DtfFeatureIntegrityTier {
+  if (calibrationStatus === "provisional" && rawTier === "blocking") return "warning";
+  return rawTier;
+}
+
+// ---------------------------------------------------------------------------
 // Positive feature (ink stroke) width
 // ---------------------------------------------------------------------------
 

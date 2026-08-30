@@ -43,12 +43,15 @@ import {
   classifyDtfFeatureWidth,
   classifyDtfPartialAlphaFeature,
   classifyStructuralFragility,
+  DTF_FEATURE_INTEGRITY_PROFILE_VERSION,
   DTF_ISOLATED_COMPONENT_BLOCKING_DIAMETER_MM,
   DTF_ISOLATED_COMPONENT_WARNING_DIAMETER_MM,
   DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM,
   DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM,
   DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM,
   DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM,
+  effectiveDtfFeatureIntegrityTier,
+  type DtfFeatureIntegrityTier,
   type StructuralFragilityResult,
 } from "@/capabilities/shared/dtf-feature-integrity-profile";
 
@@ -1609,6 +1612,32 @@ function formatMm(value: number): string {
 }
 
 /**
+ * "Restore Completed Print-Ready Download Flow": the honest, explicit
+ * disclosure a `reason` string carries whenever
+ * `effectiveDtfFeatureIntegrityTier` actually downgraded a raw "blocking"
+ * verdict to "warning" for calibration reasons — never a silent severity
+ * change. Empty string when no downgrade occurred (raw and gated tiers
+ * agree), so a genuinely calibrated-blocking future verdict's reason text
+ * is unaffected.
+ *
+ * Deliberately makes no safety claim ("guaranteed printable", "confirmed
+ * fine") — only states the POLICY fact: an uncalibrated floor was crossed,
+ * and this profile's current calibration status does not yet treat that as
+ * grounds to withhold the file.
+ */
+function describeCalibrationDowngrade(
+  rawTier: DtfFeatureIntegrityTier,
+  gatedTier: DtfFeatureIntegrityTier,
+): string {
+  if (rawTier !== "blocking" || gatedTier === "blocking") return "";
+  return (
+    ` This crosses the current provisional BLOCKING floor, but the DTF Feature Integrity profile ` +
+    `(${DTF_FEATURE_INTEGRITY_PROFILE_VERSION}) is explicitly uncalibrated — physical DTF testing has not yet established an ` +
+    `authoritative floor — so this is reported as a warning, not a print refusal, until calibration does.`
+  );
+}
+
+/**
  * Phase 2A: renders one `classifyStructuralFragility` result into the
  * `kind`-appropriate clause of a check's `reason` string. Shared between the
  * positive-feature and negative-space checks, which differ only in
@@ -1669,14 +1698,16 @@ function checkDtfPositiveFeatureIntegrity(
     result.minimumTier === "blocking"
       ? DTF_POSITIVE_FEATURE_BLOCKING_WIDTH_MM
       : DTF_POSITIVE_FEATURE_WARNING_WIDTH_MM;
+  const gatedTier = effectiveDtfFeatureIntegrityTier(result.effectiveTier);
   const reason =
     `The thinnest measured positive ink feature is ${formatMm(widthMm!)} wide at this artwork's confirmed print size — below the provisional ` +
-    `${formatMm(floorMm)} DTF floor (uncalibrated; see the DTF Feature Integrity profile) — and ${describeStructuralFragility(result, "thin")}`;
+    `${formatMm(floorMm)} DTF floor (uncalibrated; see the DTF Feature Integrity profile) — and ${describeStructuralFragility(result, "thin")}` +
+    describeCalibrationDowngrade(result.effectiveTier, gatedTier);
 
   return {
     check: "dtf_positive_feature_integrity",
-    status: result.effectiveTier === "blocking" ? "fail" : "warning",
-    severity: result.effectiveTier === "blocking" ? "blocking" : "warning",
+    status: gatedTier === "blocking" ? "fail" : "warning",
+    severity: gatedTier === "blocking" ? "blocking" : "warning",
     reason,
   };
 }
@@ -1719,14 +1750,16 @@ function checkDtfNegativeSpaceIntegrity(
     result.minimumTier === "blocking"
       ? DTF_NEGATIVE_SPACE_BLOCKING_WIDTH_MM
       : DTF_NEGATIVE_SPACE_WARNING_WIDTH_MM;
+  const gatedTier = effectiveDtfFeatureIntegrityTier(result.effectiveTier);
   const reason =
     `The narrowest measured negative space (a letter counter or gap between shapes) is ${formatMm(widthMm!)} wide at this artwork's confirmed print size — below the provisional ` +
-    `${formatMm(floorMm)} DTF floor (uncalibrated) — and ${describeStructuralFragility(result, "narrow")}`;
+    `${formatMm(floorMm)} DTF floor (uncalibrated) — and ${describeStructuralFragility(result, "narrow")}` +
+    describeCalibrationDowngrade(result.effectiveTier, gatedTier);
 
   return {
     check: "dtf_negative_space_integrity",
-    status: result.effectiveTier === "blocking" ? "fail" : "warning",
-    severity: result.effectiveTier === "blocking" ? "blocking" : "warning",
+    status: gatedTier === "blocking" ? "fail" : "warning",
+    severity: gatedTier === "blocking" ? "blocking" : "warning",
     reason,
   };
 }
@@ -1761,15 +1794,17 @@ function checkDtfIsolatedFeatureIntegrity(
       reason: `No isolated printable component was measured; there is nothing small to flag.${microNote}`,
     };
   }
+  const gatedTier = effectiveDtfFeatureIntegrityTier(tier);
   if (tier === "blocking") {
     return {
       check: "dtf_isolated_feature_integrity",
-      status: "fail",
-      severity: "blocking",
+      status: gatedTier === "blocking" ? "fail" : "warning",
+      severity: gatedTier === "blocking" ? "blocking" : "warning",
       reason:
         `The smallest isolated printable component measures ${formatMm(diameterMm)} equivalent diameter at this artwork's confirmed print size — below the provisional ` +
         `${formatMm(DTF_ISOLATED_COMPONENT_BLOCKING_DIAMETER_MM)} DTF floor (uncalibrated). This describes measured geometry, not creative intent — a genuinely intentional tiny distressed fragment ` +
-        `can still measure this small; a human reviewer, not this check, is the one who knows which.${microNote}`,
+        `can still measure this small; a human reviewer, not this check, is the one who knows which.${microNote}` +
+        describeCalibrationDowngrade(tier, gatedTier),
     };
   }
   if (tier === "warning") {

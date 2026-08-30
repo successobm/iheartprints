@@ -146,6 +146,7 @@ export const TEST_FILES = [
   "src/capabilities/print-validation/assemble-input.test.ts",
   "src/capabilities/generation-worker/generation-worker-print-validation.test.ts",
   "src/capabilities/final-artwork/final-artwork-capability.test.ts",
+  "src/capabilities/final-artwork/dtf-provisional-revalidation.test.ts",
   "src/capabilities/final-artwork/production-request-identity.test.ts",
   "src/lib/services/final-artwork-service.test.ts",
   "src/app/api/projects/[projectId]/finalize/route.test.ts",
