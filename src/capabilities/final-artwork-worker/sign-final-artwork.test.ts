@@ -22,14 +22,22 @@ import {
 import type { ProjectRepository } from "@/lib/db/repository";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
+import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
+
 import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capability";
+import { FakeSignReconstructionProvider } from "./fake-sign-reconstruction-provider";
 
 /**
- * Signs Phase S2 acceptance coverage. S2 makes ZERO provider calls, for any
- * plan: `ThrowingProvider` below is the apparel `FinalArtworkProvider` this
- * worker still requires structurally, and it throws the instant `produce()`
- * is ever invoked. Every scenario that must refuse reconstruction proves it
- * by never triggering that throw.
+ * Signs Phase S2 (deterministic-only) regression coverage: for any plan
+ * that does NOT require bounded provider reconstruction (Signs Phase S3A),
+ * ZERO provider calls are made. `ThrowingProvider` below is the apparel
+ * `FinalArtworkProvider` this worker still requires structurally, and it
+ * throws the instant `produce()` is ever invoked — and it implements no
+ * `SignReconstructionProvider` capability at all, so a plan that DID need
+ * reconstruction would fail closed (infrastructure failure, zero dispatch)
+ * rather than silently proceeding. Every deterministic-only scenario below
+ * proves zero provider calls by never triggering that throw or that
+ * failure.
  */
 class ThrowingProvider implements FinalArtworkProvider {
   readonly providerKey = "must_never_be_called";
@@ -52,7 +60,7 @@ describe("Signs Phase S2: rigid-sign finalization", () => {
     await cleanupTempWorkspace(tempDir, previousCwd);
   });
 
-  async function build() {
+  async function build(provider: FinalArtworkProvider = new ThrowingProvider()) {
     const { LocalProjectRepository } = await import("@/lib/db/local-store");
     const repo: ProjectRepository = new LocalProjectRepository();
     const assets = createAssetCapability(
@@ -62,7 +70,7 @@ describe("Signs Phase S2: rigid-sign finalization", () => {
     );
     const signPreparation = createSignPreparationCapability(repo, assets);
     const finalArtwork = createFinalArtworkCapability(repo);
-    const worker = createFinalArtworkWorkerCapability(repo, assets, new ThrowingProvider());
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider);
     const project = await repo.createProject();
     return { repo, assets, signPreparation, finalArtwork, worker, projectId: project.project.id };
   }
@@ -144,9 +152,11 @@ describe("Signs Phase S2: rigid-sign finalization", () => {
     assert.equal(produced!.hasTransparency, false);
   });
 
-  it("3/23: low-resolution exact-aspect — refuses before reconstruction, zero provider calls, no print_ready", async () => {
-    const { repo, signPreparation, finalArtwork, worker, projectId } = await build();
-    // 900x1200 @ 18x24in = 50 PPI — needs reconstruction.
+  it("3/23: low-resolution exact-aspect — Signs Phase S3A bounded reconstruction, one mocked dispatch, no print_ready", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
+    // 900x1200 @ 18x24in = 50 PPI — needs reconstruction, no aspect repair
+    // (900:1200 already matches 18:24 exactly).
     const outcome = await uploadConfirmPlan(
       signPreparation,
       projectId,
@@ -155,46 +165,96 @@ describe("Signs Phase S2: rigid-sign finalization", () => {
       24,
     );
     assert.equal(outcome.result.status, "planned");
-    assert.equal(outcome.result.plan!.steps[0]!.kind, "reconstruct_resolution");
+    const plan = outcome.result.plan!;
+    assert.deepEqual(plan.steps.map((s) => s.kind), ["reconstruct_resolution"]);
+    assert.equal(plan.overallRisk, "auto_safe");
 
     const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
-    // ThrowingProvider would throw and fail the test process if ever
-    // dispatched — reaching this line at all is part of the proof.
     await worker.processNextJob();
+
+    assert.equal(provider.dispatchCount, 1, "exactly one mocked paid dispatch");
+    assert.equal(provider.resumeCount, 0);
 
     const completed = await repo.getFinalArtworkJob(job.id);
     assert.equal(completed!.status, "completed");
-    assert.match(completed!.lastError ?? "", /reconstruction/i);
 
     const project = await repo.getProject(projectId);
-    assert.notEqual(project!.project.status, "print_ready");
-
-    const assets = await repo.listAssets(projectId);
-    assert.equal(
-      assets.some((a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png"),
-      false,
+    assert.notEqual(
+      project!.project.status,
+      "print_ready",
+      "reconstructed provenance must block print_ready pending S4 preservation verification",
     );
+
+    const produced = (await repo.listAssets(projectId)).find(
+      (a) =>
+        a.finalArtworkJobId === job.id &&
+        a.productionRole === "production_png" &&
+        !isReconstructionIntermediateAsset(a),
+    );
+    assert.ok(produced, "the deterministic plate completes despite print_ready being blocked");
+    assert.equal(produced!.widthPx, plan.expectedOutputWidthPx);
+    assert.equal(produced!.heightPx, plan.expectedOutputHeightPx);
+    const rigidSignMeta = (produced!.metadata as { rigidSign: Record<string, unknown> }).rigidSign;
+    assert.equal(rigidSignMeta.resolutionProvenance, "reconstructed");
+    assert.equal(rigidSignMeta.providerKey, provider.providerKey);
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.notEqual(validation!.status, "ready");
   });
 
-  it("4/22: Ruth-shaped fixture — reconstruction step encountered first, execution stops honestly, review requirement intact", async () => {
-    const { repo, signPreparation, finalArtwork, worker, projectId } = await build();
+  it("4/22: Ruth-shaped fixture — Signs Phase S3A bounded reconstruction + deterministic pad, exact math, review requirement intact, no print_ready", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
     const outcome = await uploadConfirmPlan(signPreparation, projectId, ruthLikeSignArtwork(), 18, 24);
     assert.equal(outcome.result.status, "planned");
     const plan = outcome.result.plan!;
     assert.deepEqual(plan.steps.map((s) => s.kind), ["reconstruct_resolution", "pad_uniform_background"]);
     assert.equal(plan.overallRisk, "review_required");
     assert.ok(plan.defects.includes("foreground_reaches_extension_edge"));
+    // Exact S0 audit math: 1024x1536 @ 64 native PPI -> 150 PPI target ->
+    // 2.390625x -> 2448x3672 reconstructed -> 153px/side pad -> 2754x3672.
+    const reconstructStep = plan.steps[0]!;
+    assert.equal(reconstructStep.params.requestedWidthPx, 2448);
+    assert.equal(reconstructStep.params.requestedHeightPx, 3672);
+    assert.equal(plan.expectedOutputWidthPx, 2754);
+    assert.equal(plan.expectedOutputHeightPx, 3672);
 
     const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
-    await worker.processNextJob(); // ThrowingProvider proves zero dispatch by not throwing.
+    await worker.processNextJob();
+
+    assert.equal(provider.dispatchCount, 1, "exactly one mocked paid dispatch");
+    assert.equal(provider.resumeCount, 0);
 
     const completed = await repo.getFinalArtworkJob(job.id);
     assert.equal(completed!.status, "completed");
     const project = await repo.getProject(projectId);
     assert.notEqual(project!.project.status, "print_ready");
 
-    // The review requirement is still on record, unaffected by execution
-    // never reaching that far.
+    const produced = (await repo.listAssets(projectId)).find(
+      (a) =>
+        a.finalArtworkJobId === job.id &&
+        a.productionRole === "production_png" &&
+        !isReconstructionIntermediateAsset(a),
+    );
+    assert.ok(produced, "the deterministic pad step still completes the plate");
+    assert.equal(produced!.widthPx, 2754);
+    assert.equal(produced!.heightPx, 3672);
+    assert.equal(produced!.hasTransparency, false);
+    const rigidSignMeta = (produced!.metadata as { rigidSign: Record<string, unknown> }).rigidSign;
+    assert.equal(rigidSignMeta.resolutionProvenance, "reconstructed");
+    assert.equal(rigidSignMeta.reconstructedWidthPx, 2448);
+    assert.equal(rigidSignMeta.reconstructedHeightPx, 3672);
+    assert.equal(rigidSignMeta.nativeWidthPx, 1024);
+    assert.equal(rigidSignMeta.nativeHeightPx, 1536);
+
+    // print_ready remains blocked — the rigid-sign validation gate
+    // (`resolutionProvenance === "reconstructed"`) refuses readiness
+    // unconditionally, independent of the review requirement below.
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.notEqual(validation!.status, "ready");
+
+    // The review requirement is still on record, unaffected by the fact
+    // that execution now proceeds past it.
     const persistedPrep = await repo.getSignPreparation(projectId);
     assert.ok((persistedPrep!.plan as { defects: string[] }).defects.includes("foreground_reaches_extension_edge"));
   });

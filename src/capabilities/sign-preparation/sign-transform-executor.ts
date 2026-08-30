@@ -66,6 +66,107 @@ export function planContainsOnlyAdmittedSteps(plan: SignRepairPlan): boolean {
 }
 
 /**
+ * Signs Phase S3A: true iff `plan` contains exactly one `reconstruct_resolution`
+ * step and every OTHER step (before or after it — `rotate_90`, when present,
+ * always precedes it; `extend_uniform_background`/`pad_uniform_background`/
+ * `downsample`/`proportional_resample` always follow it, per the planner's
+ * own "reconstruct FIRST [among resolution/geometry steps], extend SECOND"
+ * ordering) is one of S2's admitted deterministic kinds. Distinct from
+ * `planContainsOnlyAdmittedSteps` (which is false for any such plan, since
+ * `reconstruct_resolution` itself is never S2-admitted): this predicate
+ * identifies the plan shape S3A's bounded-provider-reconstruction dispatch
+ * exists for, as opposed to a plan that is genuinely unsupported (e.g. one
+ * containing `approved_crop`, or a plan with `reconstruct_resolution`
+ * appearing more than once — never produced by the current planner, but not
+ * trusted here either).
+ */
+export function planRequiresBoundedReconstruction(plan: SignRepairPlan): boolean {
+  const reconstructCount = plan.steps.filter((step) => step.kind === "reconstruct_resolution").length;
+  if (reconstructCount !== 1) return false;
+  return plan.steps.every(
+    (step) => step.kind === "reconstruct_resolution" || ADMITTED_STEP_KINDS.has(step.kind),
+  );
+}
+
+/**
+ * Signs Phase S3A: splits a plan satisfying `planRequiresBoundedReconstruction`
+ * into the steps to execute locally BEFORE the provider reconstruction (e.g.
+ * a review-gated `rotate_90`), the reconstruction step itself, and the steps
+ * to execute locally AFTER it (e.g. `pad_uniform_background`). `null` when
+ * the plan does not have exactly that shape — callers must check
+ * `planRequiresBoundedReconstruction` first.
+ */
+export function splitPlanAroundReconstruction(
+  plan: SignRepairPlan,
+): { before: SignRepairStep[]; reconstruct: SignRepairStep; after: SignRepairStep[] } | null {
+  if (!planRequiresBoundedReconstruction(plan)) return null;
+  const index = plan.steps.findIndex((step) => step.kind === "reconstruct_resolution");
+  return {
+    before: plan.steps.slice(0, index),
+    reconstruct: plan.steps[index]!,
+    after: plan.steps.slice(index + 1),
+  };
+}
+
+/**
+ * Executes an ORDERED SUBSET of S2-admitted steps (never
+ * `reconstruct_resolution`/`approved_crop`) against `image`/`bounds`,
+ * refusing immediately on the first step this executor cannot honor.
+ * Exported (Signs Phase S3A) so a caller that needs to run part of a plan
+ * around an out-of-band operation — S3A's provider reconstruction sits
+ * between `before` and `after` — can do so without duplicating the
+ * step-dispatch switch `executeSignRepairPlan` itself uses for the ordinary,
+ * fully-local case.
+ */
+export function executeAdmittedSignSteps(
+  image: RgbaImage,
+  bounds: SignExecutionBounds,
+  steps: SignRepairStep[],
+): SignExecutionResult {
+  let currentImage = image;
+  let currentBounds = bounds;
+  for (const step of steps) {
+    const result = executeStep(currentImage, currentBounds, step);
+    if (result.status === "refused") return result;
+    currentImage = result.image;
+    currentBounds = result.contentBounds;
+  }
+  return { status: "executed", image: currentImage, contentBounds: currentBounds };
+}
+
+/**
+ * The tail of every execution, local-only or S3A-continued alike: the
+ * executed output's geometry and opacity must match what the plan itself
+ * declared before it is ever persisted. Exported (Signs Phase S3A) so the
+ * worker's post-reconstruction continuation applies the exact same final
+ * checks `executeSignRepairPlan` applies to a fully-local execution.
+ */
+export function finalizeSignExecution(
+  image: RgbaImage,
+  bounds: SignExecutionBounds,
+  plan: SignRepairPlan,
+): SignExecutionResult {
+  if (image.width !== plan.expectedOutputWidthPx || image.height !== plan.expectedOutputHeightPx) {
+    return {
+      status: "refused",
+      reason: "output_geometry_mismatch",
+      detail:
+        `Executed output is ${image.width}x${image.height}px, but the recorded plan expected ` +
+        `${plan.expectedOutputWidthPx}x${plan.expectedOutputHeightPx}px. Refusing rather than persisting a plate the plan does not describe.`,
+    };
+  }
+  if (hasAnyTransparentPixel(image)) {
+    return {
+      status: "refused",
+      reason: "output_not_opaque",
+      detail:
+        "Executed output carries transparency despite an opaque, verified-opaque source and fill colours with full alpha. Refusing rather than persisting an unexpectedly non-opaque plate.",
+    };
+  }
+  return { status: "executed", image, contentBounds: bounds };
+}
+
+/**
  * Replays `plan.steps`, in order, against `source`. `source` must already be
  * verified (by the caller) to be the exact bytes `plan.sourceSha256`
  * describes — this function performs no lineage check of its own; it only
@@ -102,39 +203,14 @@ export function executeSignRepairPlan(
     };
   }
 
-  let image: RgbaImage = source;
   // The original content's own bounds, tracked through every transform in
   // OUTPUT coordinates. Starts as the whole source frame; extension/padding
   // offsets it, resample/downsample/rotation scale or reorient it, but no
   // step ever shrinks it to exclude a real source pixel.
-  let bounds: SignExecutionBounds = { x: 0, y: 0, width: source.width, height: source.height };
-
-  for (const step of plan.steps) {
-    const result = executeStep(image, bounds, step);
-    if (result.status === "refused") return result;
-    image = result.image;
-    bounds = result.contentBounds;
-  }
-
-  if (image.width !== plan.expectedOutputWidthPx || image.height !== plan.expectedOutputHeightPx) {
-    return {
-      status: "refused",
-      reason: "output_geometry_mismatch",
-      detail:
-        `Executed output is ${image.width}x${image.height}px, but the recorded plan expected ` +
-        `${plan.expectedOutputWidthPx}x${plan.expectedOutputHeightPx}px. Refusing rather than persisting a plate the plan does not describe.`,
-    };
-  }
-  if (hasAnyTransparentPixel(image)) {
-    return {
-      status: "refused",
-      reason: "output_not_opaque",
-      detail:
-        "Executed output carries transparency despite an opaque, verified-opaque source and fill colours with full alpha. Refusing rather than persisting an unexpectedly non-opaque plate.",
-    };
-  }
-
-  return { status: "executed", image, contentBounds: bounds };
+  const initialBounds: SignExecutionBounds = { x: 0, y: 0, width: source.width, height: source.height };
+  const executed = executeAdmittedSignSteps(source, initialBounds, plan.steps);
+  if (executed.status === "refused") return executed;
+  return finalizeSignExecution(executed.image, executed.contentBounds, plan);
 }
 
 function executeStep(

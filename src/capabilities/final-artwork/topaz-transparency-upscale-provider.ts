@@ -36,6 +36,7 @@ import { withRetry } from "@/capabilities/shared/retry";
 import { ProviderError, isRetryableProviderError } from "@/capabilities/providers/provider-error";
 
 import { resolveWidthConstrainedSizing } from "@/capabilities/shared/print-placement-dimensions";
+import { MAX_UPLOAD_BYTES } from "@/capabilities/artwork-preparation/upload-limits";
 
 import { trimToAlphaBounds, type AlphaTrimOptions } from "./alpha-trim";
 import {
@@ -51,6 +52,11 @@ import type {
   FinalArtworkProviderOutput,
   FinalArtworkProviderResumeContext,
 } from "./provider";
+import type {
+  SignReconstructionProvider,
+  SignReconstructionProviderInput,
+  SignReconstructionProviderOutput,
+} from "./sign-reconstruction-provider";
 
 const TOPAZ_API_BASE = "https://api.topazlabs.com/image/v1";
 const TOPAZ_MODEL = "Transparency Upscale";
@@ -81,9 +87,17 @@ const TRANSFORMATION_METHOD = "topaz_transparency_upscale_v1";
  * throws away.
  */
 export const RECONSTRUCTION_HEADROOM = 1.02;
-/** Defensive bounds around the reconstruction request — never a real limit observed from Topaz, just a sane guard against a corrupt/huge source producing a runaway request. */
-const MIN_RECONSTRUCTION_DIM_PX = 256;
-const MAX_RECONSTRUCTION_DIM_PX = 8192;
+/**
+ * Defensive bounds around the reconstruction request — never a real limit
+ * observed from Topaz, just a sane guard against a corrupt/huge source
+ * producing a runaway request. Exported (Signs Phase S3A): a rigid-sign
+ * reconstruction dispatches an exact, already-computed pixel target rather
+ * than routing through `resolveReconstructionRequest`'s own floor/ceiling
+ * arithmetic, so the caller re-applies these same absolute bounds itself
+ * before ever calling `produceSignReconstruction`.
+ */
+export const MIN_RECONSTRUCTION_DIM_PX = 256;
+export const MAX_RECONSTRUCTION_DIM_PX = 8192;
 
 /**
  * Print'em All Phase 0 (live acceptance) — Topaz Transparency Upscale's REAL
@@ -136,6 +150,69 @@ const DEFAULT_DOWNLOAD_TIMEOUT_MS = 2 * 60 * 1000;
  * unchanged.
  */
 const DEFAULT_DOWNLOAD_ATTEMPTS = 3;
+
+/**
+ * S3A security patch — the provider-result download boundary. The provider
+ * returns a URL for the reconstructed raster in its own JSON response; that
+ * URL is fetched with no host this codebase has ever had a basis to pin
+ * down (see `download()`'s own doc comment), so the response body is
+ * capped rather than trusted-then-checked. Reuses the repository's own
+ * existing customer-upload byte limit
+ * (`artwork-preparation/upload-limits.ts`) instead of inventing an
+ * independent allowance — the same order of magnitude already governs
+ * every raster this platform accepts, and a reconstructed sign/apparel
+ * plate is bounded well under it by `MAX_RECONSTRUCTION_DIM_PX`.
+ */
+const MAX_DOWNLOAD_RESPONSE_BYTES = MAX_UPLOAD_BYTES;
+
+/** The 8-byte PNG signature (RFC 2083 §3.1) — the unconditional decision of whether downloaded bytes are an admitted raster, independent of any Content-Type header. */
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function bufferStartsWithPngSignature(buffer: Buffer): boolean {
+  return buffer.length >= PNG_SIGNATURE.length && buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
+}
+
+/**
+ * Reads `response`'s body incrementally, aborting via `onExceeded` (which
+ * MUST abort the same `AbortSignal` the fetch itself was issued with) the
+ * instant the running total exceeds `maxBytes` — an oversized response is
+ * never fully buffered into memory first. Falls back to a single bounded
+ * `arrayBuffer()` read only when the runtime does not expose a streamable
+ * body (a rare `fetch` implementation detail this codebase has already
+ * seen matter for test doubles), re-checking the cap immediately after.
+ */
+async function readResponseBodyWithSizeCap(
+  response: Response,
+  maxBytes: number,
+  onExceeded: () => void,
+): Promise<Buffer> {
+  if (!response.body || typeof response.body.getReader !== "function") {
+    const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > maxBytes) {
+      onExceeded();
+      throw new Error(`response body of ${arrayBuffer.byteLength} bytes exceeds the ${maxBytes}-byte cap`);
+    }
+    return Buffer.from(arrayBuffer);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      onExceeded();
+      await reader.cancel().catch(() => {
+        /* best-effort — the response is being rejected regardless */
+      });
+      throw new Error(`response body exceeded the ${maxBytes}-byte cap`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
 
 export interface TopazTransparencyUpscaleProviderConfig {
   apiKey: string;
@@ -577,7 +654,9 @@ export function validateReconstructedGeometry(
   return { valid: true };
 }
 
-export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
+export class TopazTransparencyUpscaleProvider
+  implements FinalArtworkProvider, SignReconstructionProvider
+{
   readonly providerKey = "topaz_transparency_upscale";
 
   private readonly apiKey: string;
@@ -644,6 +723,74 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       return this.produceSinglePass(input, source);
     }
     return this.produceTwoPass(input, source, plan.pass1);
+  }
+
+  /**
+   * Signs Phase S3A: a single, bounded reconstruction pass to an exact,
+   * already-computed pixel target — no alpha-trim, no `PlacementSizingPolicy`
+   * arithmetic, no post-reconstruction normalization/encode, and no two-pass
+   * chaining (a sign's ceiling is the single-pass 4x ceiling, full stop; see
+   * `SIGN_RECONSTRUCTION_SCALE_CEILING`).
+   *
+   * Reuses `runReconstructionPass` UNMODIFIED — the exact same submit/
+   * resume, persist-before-poll, poll, download, and pre-dispatch
+   * `assertWithinProviderScaleCeiling` guard the apparel path relies on for
+   * paid-call idempotency and cost control. This is the ONLY new dispatch
+   * surface S3A adds; nothing here opens a second HTTP polling loop or a
+   * second billing decision.
+   */
+  async produceSignReconstruction(
+    input: SignReconstructionProviderInput,
+  ): Promise<SignReconstructionProviderOutput> {
+    if (input.sourceContentType !== "image/png") {
+      throw new Error(
+        `TopazTransparencyUpscaleProvider only supports image/png source assets for sign reconstruction (got "${input.sourceContentType}").`,
+      );
+    }
+    let source: PNG;
+    try {
+      source = PNG.sync.read(input.sourceBytes);
+    } catch (error) {
+      throw new Error(
+        `Sign reconstruction source bytes could not be decoded as a PNG: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    const { processId, png: reconstructed } = await this.runReconstructionPass(
+      input.sourceBytes,
+      { widthPx: input.requestedWidthPx, heightPx: input.requestedHeightPx },
+      source.width,
+      source.height,
+      input.existingProviderRequest ?? null,
+      input.onProviderRequestSubmitted,
+    );
+
+    // Same sufficiency + proportional-geometry contract the apparel path
+    // uses (Phase 28R) — a sign reconstruction has no downstream
+    // `normalizeProductionRaster` downsample to absorb an oversized-but-
+    // proportional response, so S2's deterministic continuation instead
+    // relies on the plan's own `output_geometry_mismatch` check to catch
+    // anything this does not.
+    const geometryCheck = validateReconstructedGeometry({
+      sourceWidthPx: source.width,
+      sourceHeightPx: source.height,
+      targetWidthPx: input.requestedWidthPx,
+      targetHeightPx: input.requestedHeightPx,
+      actualWidthPx: reconstructed.width,
+      actualHeightPx: reconstructed.height,
+    });
+    if (!geometryCheck.valid) {
+      throw new ProviderError("malformed_response", geometryCheck.reason);
+    }
+
+    return {
+      bytes: PNG.sync.write(reconstructed),
+      widthPx: reconstructed.width,
+      heightPx: reconstructed.height,
+      providerRequestId: processId,
+    };
   }
 
   /** Phase 28R's exact, unmodified single-pass contract — see `resolveReconstructionRequest`. */
@@ -1144,6 +1291,19 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
    * returned by a prior call (Goal: a caller retrying this — see
    * `runReconstructionPass`'s bounded `withRetry` wrapper — never risks
    * reusing an expired signed URL, because it never reuses one at all).
+   *
+   * S3A security patch: the SECOND fetch below — to `url`, a value taken
+   * directly from the provider's own JSON response, never a value this
+   * process chose — is the actual untrusted-destination boundary. Every
+   * check from here to the end of this method exists because a paid
+   * reconstruction may already have happened by the time this runs (Goal
+   * G below), so a rejection here must NEVER look like "the request never
+   * happened": it stays classified exactly as the pre-existing content-type
+   * mismatch check always was (`malformed_response`, which
+   * `ProviderError`'s own `defaultDispatchState` reads as
+   * `dispatched_billed`) — never `provider_job_failed`, the one
+   * classification that clears a job's persisted `providerRequestId` and
+   * permits a fresh paid resubmission.
    */
   private async download(processId: string): Promise<Buffer> {
     let metaResponse: Response;
@@ -1185,6 +1345,37 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       );
     }
 
+    // --- A. URL SCHEME ---------------------------------------------------
+    // No documented, fixture-established, or previously-observed Topaz
+    // result-download HOST exists anywhere in this repository (checked:
+    // API docs excerpts, the Phase 2D bake-off report/script, both live
+    // incident write-ups) — `url`/`download_url` is a signed, provider-
+    // generated link whose host this codebase has never had a basis to
+    // pin down, so no host allowlist is asserted here (inventing one would
+    // be a guess, not a control). Scheme is not a guess: every legitimate
+    // provider result link is HTTPS, and requiring it closes off
+    // `http:`/`file:`/`data:`/`ftp:`/every other scheme outright, before
+    // this process ever dispatches a second network request.
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      throw new ProviderError(
+        "malformed_response",
+        "The production reconstruction provider's download URL could not be parsed.",
+        undefined,
+        "download",
+      );
+    }
+    if (parsedUrl.protocol !== "https:") {
+      throw new ProviderError(
+        "malformed_response",
+        `The production reconstruction provider's download URL used a disallowed scheme ("${parsedUrl.protocol}") — only https is accepted.`,
+        undefined,
+        "download",
+      );
+    }
+
     // "Fix Topaz Resume/Download Failure": `submit()` bounds its own
     // request with a timeout; this fetch — which can transfer a large PNG
     // — previously had none at all, so a genuine hang surfaced (after
@@ -1192,12 +1383,22 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
     // as the same generic, undiagnosable "could not be fetched" as every
     // other transport failure. An explicit, bounded, DISTINCTLY classified
     // timeout makes a hang legible without changing what a fast failure
-    // (DNS, refused connection, reset) reports.
+    // (DNS, refused connection, reset) reports. Unchanged/unweakened by
+    // the S3A security patch — the same controller now also bounds the
+    // size-capped body read below, never just the header fetch.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.downloadTimeoutMs);
+    let abortedForSize = false;
     let imageResponse: Response;
     try {
-      imageResponse = await this.fetchImpl(url, { signal: controller.signal });
+      // --- C. REDIRECTS ---------------------------------------------------
+      // No allowlisted host exists to validate a redirect DESTINATION
+      // against (see the scheme note above), so the only honest policy is
+      // to never follow one at all: `redirect: "manual"` returns the raw
+      // 3xx response (verified against this runtime's actual `fetch`
+      // behavior) rather than transparently chasing it to an
+      // attacker-influenceable destination.
+      imageResponse = await this.fetchImpl(url, { signal: controller.signal, redirect: "manual" });
     } catch (error) {
       if (isAbortError(error)) {
         throw new ProviderError(
@@ -1220,6 +1421,14 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
     } finally {
       clearTimeout(timeout);
     }
+    if (imageResponse.status >= 300 && imageResponse.status < 400) {
+      throw new ProviderError(
+        "malformed_response",
+        `The production reconstruction provider's downloaded artwork redirected (${imageResponse.status}) — redirects are not followed.`,
+        undefined,
+        "download",
+      );
+    }
     if (!imageResponse.ok) {
       throw new ProviderError(
         "network",
@@ -1228,6 +1437,11 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
         "download",
       );
     }
+    // --- E. CONTENT TYPE --------------------------------------------------
+    // A missing header never by itself establishes trust — it only skips
+    // THIS check; the magic-byte check a few lines below is unconditional
+    // and is what actually decides whether the bytes are an admitted
+    // raster, regardless of what (if anything) this header claims.
     const contentType = imageResponse.headers.get("content-type") ?? "";
     if (contentType && !contentType.includes("png") && !contentType.includes("octet-stream")) {
       throw new ProviderError(
@@ -1238,12 +1452,75 @@ export class TopazTransparencyUpscaleProvider implements FinalArtworkProvider {
       );
     }
 
-    const arrayBuffer = await imageResponse.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    // --- D. RESPONSE SIZE ---------------------------------------------------
+    // Reuses the repository's own existing customer-upload byte cap
+    // (`artwork-preparation/upload-limits.ts`) rather than inventing an
+    // independent allowance — the same order of magnitude already governs
+    // every raster this platform accepts. Enforced while READING the
+    // response, not after a full `arrayBuffer()` — an oversized body is
+    // never fully buffered into memory first.
+    const declaredLength = imageResponse.headers.get("content-length");
+    if (declaredLength) {
+      const declared = Number(declaredLength);
+      if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_RESPONSE_BYTES) {
+        throw new ProviderError(
+          "malformed_response",
+          `The production reconstruction provider's downloaded artwork declared ${declared} bytes, exceeding the ${MAX_DOWNLOAD_RESPONSE_BYTES}-byte limit.`,
+          undefined,
+          "download",
+        );
+      }
+    }
+    let buffer: Buffer;
+    try {
+      buffer = await readResponseBodyWithSizeCap(
+        imageResponse,
+        MAX_DOWNLOAD_RESPONSE_BYTES,
+        () => {
+          abortedForSize = true;
+          controller.abort();
+        },
+      );
+    } catch (error) {
+      if (abortedForSize) {
+        throw new ProviderError(
+          "malformed_response",
+          `The production reconstruction provider's downloaded artwork exceeded the ${MAX_DOWNLOAD_RESPONSE_BYTES}-byte limit.`,
+          undefined,
+          "download",
+        );
+      }
+      if (isAbortError(error)) {
+        throw new ProviderError(
+          "timeout",
+          "The production reconstruction provider's downloaded artwork did not finish transferring in time.",
+          "not_dispatched",
+          "download",
+        );
+      }
+      throw new ProviderError(
+        "network",
+        `The production reconstruction provider's downloaded artwork could not be read (${describeFetchFailure(error)}).`,
+        "not_dispatched",
+        "download",
+      );
+    }
     if (buffer.length === 0) {
       throw new ProviderError(
         "malformed_response",
         "The production reconstruction provider's downloaded artwork was empty.",
+        undefined,
+        "download",
+      );
+    }
+    // --- E (continued). MAGIC-BYTE VALIDATION ------------------------------
+    // Unconditional — runs regardless of what the content-type header
+    // said or omitted. This is the actual trust decision; the header
+    // above is only ever a fast-path hint.
+    if (!bufferStartsWithPngSignature(buffer)) {
+      throw new ProviderError(
+        "malformed_response",
+        "The production reconstruction provider's downloaded artwork is not a valid PNG image.",
         undefined,
         "download",
       );

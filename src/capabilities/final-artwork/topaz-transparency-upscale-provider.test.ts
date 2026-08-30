@@ -418,7 +418,14 @@ describe("TopazTransparencyUpscaleProvider (Sprint 2M Phase 2E)", () => {
       pollIntervalMs: 1,
     });
 
-    await assert.rejects(() => provider.produce(baseInput()), /could not be decoded as a PNG/i);
+    // S3A security patch: `download()`'s own unconditional magic-byte check
+    // now catches this before `runReconstructionPass`'s `PNG.sync.read`
+    // ever runs — either message is an honest `malformed_response` refusal
+    // of the same underlying fact (the bytes are not a PNG).
+    await assert.rejects(
+      () => provider.produce(baseInput()),
+      /not a valid PNG image|could not be decoded as a PNG/i,
+    );
   });
 
   // --- Phase 28R: sufficiency + geometry replaces exact-equality ----------

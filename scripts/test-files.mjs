@@ -305,6 +305,8 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-transform-executor.test.ts",
   "src/capabilities/print-validation/rigid-sign-print-validation.test.ts",
   "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
+  "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",
+  "src/capabilities/final-artwork/topaz-download-security.test.ts",
   // Garment colour is production context, never authority over customer
   // pixels: preparation must be byte-identical on a white and a black shirt.
   "src/capabilities/artwork-preparation/garment-color-preparation-isolation.test.ts",

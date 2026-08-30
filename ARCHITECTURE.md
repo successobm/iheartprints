@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.5
+Version 1.6
 August 2026
 
 ## Document Position
@@ -43,7 +43,7 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S2 implemented.** Inspection, diagnosis, and repair PLANNING (S1) plus deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. Bounded provider reconstruction (S3) and preservation verification for reconstructed output (S4) are **not implemented** — a plan requiring reconstruction refuses honestly, produces no asset, and cannot reach `print_ready`. No customer-facing production surface exists at any phase so far (operator/internal only) |
+| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3A implemented.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); and BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it. Live/real provider dispatch, customer-facing routes, and S4/S5 remain **not implemented** — S3A used a mocked provider only (no Topaz credit spent); operator/internal only |
 | All other categories | Not admitted | Dormant seams only |
 
 **Signs phase boundary** (Constitution §16A/§16B — admission is not implementation, and each phase's own scope is the honest limit of what "implemented" means until the next one lands):
@@ -52,7 +52,8 @@ dormant seams authorize nothing. The registry:
 |---|---|---|
 | S1 | Inspect artwork, diagnose defects, formulate a repair plan | Implemented |
 | S2 | Execute deterministic plan steps; authoritative rigid-sign validation; `print_ready` for non-reconstructed `auto_safe` plans | Implemented |
-| S3 | Bounded provider reconstruction (Topaz) for `reconstruct_resolution` steps | Not implemented |
+| S3A | Bounded provider reconstruction (Topaz) dispatch for `reconstruct_resolution` steps, mocked verification only | Implemented (mocked provider only — no real Topaz dispatch has occurred) |
+| S3B | Live/real bounded provider reconstruction acceptance | Not implemented |
 | S4 | Preservation verification for reconstructed/review-required output | Not implemented |
 | S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
 
@@ -1860,6 +1861,195 @@ so a future phase cannot accidentally certify reconstructed output before
 S4 preservation verification exists to justify it. This is the concrete
 form Constitution §16A.3's "provider operations must be … preservation
 verified before `print_ready`" takes today.
+
+### Signs Phase S3A: bounded provider reconstruction
+
+Adds the ability to EXECUTE a persisted `reconstruct_resolution` step —
+S2 could only ever refuse it. Mocked-provider verification only: no real
+Topaz call has been made for a sign; nothing here begins live acceptance
+(S3B) or preservation verification (S4).
+
+**Provider boundary, not a second provider.** Reconstruction dispatch is a
+new PUBLIC method, `TopazTransparencyUpscaleProvider.produceSignReconstruction`
+(`final-artwork/topaz-transparency-upscale-provider.ts`), on the SAME
+class/instance/HTTP-polling machinery `produce()` already uses for apparel —
+never a second Topaz client, a second billing subsystem, or a second polling
+loop. It reuses `runReconstructionPass` (submit-or-resume, persist-before-
+poll, poll, download, pre-dispatch `assertWithinProviderScaleCeiling`)
+UNMODIFIED, and reuses `validateReconstructedGeometry`'s sufficiency +
+proportional-aspect tolerance (Phase 28R) unmodified. What it deliberately
+does NOT reuse is `produce()`'s apparel-shaped remainder — alpha-trim,
+`PlacementSizingPolicy` width-in/PPI arithmetic, safety margin, and
+`normalizeProductionRaster`/`encodeProductionPng` — because none of that
+applies to a rigid sign: the sign plan already computed its own exact
+`requestedWidthPx`/`requestedHeightPx` (S1), the source carries no alpha to
+trim, and the S2 deterministic remainder — not a provider — owns what
+happens to the reconstructed raster next. The interface this method
+satisfies, `SignReconstructionProvider`
+(`final-artwork/sign-reconstruction-provider.ts`), is intentionally narrow:
+"Signs own reconstruction intent (required geometry, sign PPI policy, plan
+parameters); a provider owns only bounded execution of that intent." A
+`hasSignReconstructionCapability()` type guard lets the worker detect
+whether the currently CONFIGURED `FinalArtworkProvider` (injected once, at
+composition, exactly as before) also implements this — Topaz does; a
+local-only/dev provider does not, and a sign job that needs reconstruction
+against one fails closed (an infrastructure failure, zero pixels touched)
+rather than silently doing something apparel-shaped.
+
+**Reconstruction intent comes from the persisted plan, never recomputed.**
+`runSignReconstructionAndContinue`
+(`final-artwork-worker/final-artwork-worker-capability.ts`) dispatches
+exactly the `requestedScale`/`requestedWidthPx`/`requestedHeightPx` S1's
+planner already computed and persisted. Before ever calling the provider it
+re-verifies (in addition to every S2 plan-replay check, unchanged and run
+first): the step's own parameters are well-formed; the requested dimensions
+sit within the defensive `MAX_RECONSTRUCTION_DIM_PX` bound; and — mirroring
+`assertWithinProviderScaleCeiling`'s own formula — the requested scale is
+within `SIGN_RECONSTRUCTION_SCALE_CEILING` (imported from the SAME
+`PROVIDER_MAX_RECONSTRUCTION_SCALE` = 4× apparel uses, so the planner, the
+worker, and the provider can never quietly disagree). A tampered or
+otherwise-out-of-bounds request refuses BEFORE any provider is consulted —
+zero cost. The provider re-asserts the identical ceiling internally too
+(belt and suspenders, never a second, possibly-disagreeing tolerance).
+
+**Reuses apparel's exact paid-call idempotency machinery, not a new one.**
+`FinalArtworkJob.providerKey`/`providerRequestId`/`providerStatus`/
+`providerRecoveryAttempts` are schema-generic columns (already reused
+verbatim, no migration); `resolveExistingIntermediateReconstruction`/
+`persistIntermediateReconstruction` (Phase 28V's two-pass apparel
+machinery) are already job-generic and reused verbatim; and
+`MAX_FINAL_ARTWORK_ATTEMPTS`/`MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS`'s
+fresh-execution/resume classification is reused with identical semantics. A
+sign reconstruction is a SINGLE bounded pass — there is no two-pass concept
+for signs — so once the provider's output is durably persisted as an
+intermediate asset (tagged with the same `RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER`
+apparel's pass-1 uses, and excluded from final-asset candidacy by the same
+`resolveExistingProductionAsset`), nothing further ever calls the provider
+again for that job. `resolveExistingProductionAsset` is now called directly
+by the sign path too (previously it duplicated an inline, intermediate-
+unaware lookup — a latent bug this phase's own intermediate assets would
+otherwise have tripped).
+
+**Result validation, never blind trust.** The provider's raw output is
+decoded and geometry-checked (`validateReconstructedGeometry`) BEFORE it is
+persisted as an intermediate or replayed further — an invalid response is
+never written down as though it were a good reconstruction. A malformed,
+undersized, or wrong-aspect result fails the job without a second paid
+dispatch; recovering afterward RESUMES the same paid request rather than
+resubmitting.
+
+**Intermediate raster + deterministic continuation.** `SignRepairPlan`'s
+steps are split around the (at most one) `reconstruct_resolution` step —
+`splitPlanAroundReconstruction`
+(`sign-preparation/sign-transform-executor.ts`) — into `before` (e.g. a
+review-gated `rotate_90`, which the planner always places before
+reconstruction so the provider only ever sees the customer's own pixels),
+the reconstruction step itself, and `after` (the geometry-stage
+extend/pad/downsample steps). A new exported primitive,
+`executeAdmittedSignSteps`, runs an arbitrary ordered subset of S2's
+admitted step kinds against a starting image/bounds — `before` runs locally
+first (on the untouched source), the provider replaces the reconstruction
+step, and `after` runs locally against the provider's raster. A second new
+primitive, `finalizeSignExecution`, is the shared tail (output-geometry +
+opacity check against the plan's own `expectedOutputWidthPx/HeightPx`) both
+a fully-local execution and an S3A-continued one must satisfy before a
+plate is ever persisted. `executeSignRepairPlan` itself (the S2-only,
+fully-local entry point) is unchanged in signature and behavior — refactored
+internally to call these same two primitives, never duplicated.
+
+**Resolution provenance / pHYs.** The production asset's `rigidSign`
+metadata now also carries `resolutionProvenance` (`"native"` for a
+deterministic-only plan, unchanged; `"reconstructed"` when a provider
+supplied the production detail), `providerKey`, `providerRequestId`,
+`nativeWidthPx`/`nativeHeightPx` (the pre-reconstruction, post-any-`before`-
+step source dimensions), and `reconstructedWidthPx`/`reconstructedHeightPx`
+(the provider's own raw output, before the deterministic tail). The final
+plate's pHYs chunk still encodes the ACHIEVED PPI
+(`finalPlate.width / plan.orderedWidthIn`) exactly as S2 always did — never
+a nominal target — so metadata never implies reconstructed detail existed
+natively in the customer's source.
+
+**The S4 gate is unweakened, and did not need to be touched.** S2 already
+wrote `executed_plan_matches_recorded_plan`'s unconditional refusal on
+`resolutionProvenance === "reconstructed"` as defense in depth, for exactly
+this day. S3A is the first phase that can actually produce a
+`"reconstructed"` asset, and that existing check — untouched by this
+phase — is what keeps it out of `print_ready`: a reconstructed sign
+completes (`FinalArtworkJob.status === "completed"`), its plate exists and
+is downloadable internally, and `PrintProject.status` stays
+`"finalization_required"` until S4 adds genuine preservation verification.
+`AUTO_SAFE` plan risk authorizes EXECUTING a reconstruction step; it never
+implies the reconstructed RESULT is production-trusted — that is S4's
+independent job.
+
+**No customer-facing surface, no live provider dispatch.** No new route.
+No schema change (the existing generic provider-state columns already
+represented sign paid-call identity honestly). Every S3A test uses
+`FakeSignReconstructionProvider` — a mocked, no-network `SignReconstructionProvider`
+double exposing explicit `dispatchCount`/`resumeCount` counters
+(`final-artwork-worker/fake-sign-reconstruction-provider.ts`) — never the
+real `TopazTransparencyUpscaleProvider` configured against a live API key.
+
+**Topaz result-download trust boundary — hardened before live S3B
+acceptance** (§23.2 item 6; a follow-up patch to this phase, before S3A's
+own commit). `download()` (shared, unchanged call site, both apparel
+`produce()` and sign `produceSignReconstruction()`) now enforces, on the
+SECOND fetch — to `url`/`download_url`, a value taken from the provider's
+own JSON response, never a value this process chose:
+
+- **HTTPS only.** `http:`/`file:`/`data:`/`ftp:`/every other scheme is
+  rejected before that fetch ever dispatches.
+- **No host allowlist.** STEP 1 of this patch could not establish a
+  stable, documented, or fixture-proven Topaz result-download HOST
+  anywhere in this repository (API docs excerpts, the Phase 2D bake-off
+  report/script, both live-incident write-ups all record only the fixed
+  `api.topazlabs.com` API base, never the signed result link's own host)
+  — inventing an allowlist would have been a guess, not a control, and
+  this patch's own instructions explicitly forbade that. This is a
+  **documented, deliberate scope limitation**, not an oversight: a test
+  (`topaz-download-security.test.ts`, case 4/5) proves an HTTPS URL on an
+  unrelated host is still accepted today, and calls out that S3B's real
+  acceptance run should record the actually-observed host so a real
+  allowlist can be added afterward.
+- **No redirects, ever.** `redirect: "manual"`; any 3xx response is
+  rejected outright — the safe default given no allowlisted destination
+  exists to validate a redirect target against.
+- **Response size capped while reading, not after buffering.** Enforced
+  via a streaming reader (falls back to a bounded `arrayBuffer()` only
+  when the runtime exposes no streamable body) plus a `Content-Length`
+  pre-check, reusing the repository's own existing customer-upload byte
+  limit (`artwork-preparation/upload-limits.ts`, `MAX_UPLOAD_BYTES`)
+  rather than inventing an independent allowance.
+- **Content-Type is a hint, never trust.** The existing header check is
+  unchanged; a NEW, unconditional PNG magic-byte check
+  (`bufferStartsWithPngSignature`) runs regardless of what the header
+  said or omitted — a missing header no longer matters on its own, and a
+  present-but-wrong header is still caught, but the actual admission
+  decision is always the bytes themselves.
+
+**Billing/recovery semantics are unaffected, by construction, not by new
+logic.** Every new rejection above reuses the pre-existing
+`malformed_response` classification the old content-type check already
+used — `ProviderError`'s own `defaultDispatchState` reads that as
+`dispatched_billed`, and only `provider_job_failed` (a provably-dead
+provider-side request) ever clears a job's persisted `providerRequestId`.
+A download-security rejection therefore behaves exactly like the
+pre-existing malformed-response case always did: the paid request survives,
+a recovery/retry RESUMES it (never resubmits), and
+`SignReconstructionProvider`'s `dispatchCount` stays at exactly 1 — proven
+directly by test (`topaz-download-security.test.ts`, case 14).
+
+New dependency edge: `final-artwork/topaz-transparency-upscale-provider.ts`
+now imports `MAX_UPLOAD_BYTES` from
+`artwork-preparation/upload-limits.ts` — the same "pure ingress module,
+safely reusable across capabilities" precedent `sign-preparation` and
+`final-artwork-worker` already established for that file.
+
+This hardening applies to BOTH profiles (the same `download()` method), so
+apparel's own live Topaz calls are protected identically — not a
+sign-specific patch. It is narrowly scoped to the download boundary only;
+it is not a general SSRF-remediation program, and no other network call
+in this codebase was touched.
 
 ### PrintVaultCapability — Reserved
 
@@ -7250,13 +7440,23 @@ iHeartPrints is exposed beyond trusted operators.
    valid project UUID, so this per-request CPU burn is reachable by the
    same bearer-UUID population as item 1. Belongs on the existing
    authenticated worker queue.
-6. **Topaz result-download trust gap.** The download step now has a
-   dedicated timeout and a separate retry budget, but the URL from the
-   provider's JSON response is still fetched with no scheme/host
-   allowlist, no response-size cap before `arrayBuffer()`, default
-   redirect-following, and a content-type check that is skipped when the
-   header is absent (`topaz-transparency-upscale-provider.ts`, download
-   step).
+6. **Topaz result-download trust gap — HARDENED (Signs Phase S3A follow-up
+   patch, before commit).** The download step already had a dedicated
+   timeout and a separate retry budget; it now also enforces HTTPS-only on
+   the provider-returned URL, `redirect: "manual"` (zero redirects
+   followed), a response-size cap enforced while reading (never a full
+   `arrayBuffer()` first) reusing the repository's own
+   `MAX_UPLOAD_BYTES`, and an unconditional PNG magic-byte check
+   independent of the Content-Type header
+   (`topaz-transparency-upscale-provider.ts`, `download()`). **Remaining,
+   deliberate, documented gap: no destination-host allowlist** — no
+   Topaz result-download host is established anywhere in this repository
+   (checked: API docs excerpts, the Phase 2D bake-off materials, both live
+   incident write-ups), so none was invented; an HTTPS URL on any host
+   with a genuine PNG payload is still accepted. Add a real host allowlist
+   once S3B's live acceptance run records the actually-observed result
+   host. See "Signs Phase S3A: bounded provider reconstruction" above for
+   the full change and its tests.
 
 ---
 

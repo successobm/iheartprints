@@ -34,8 +34,12 @@ export {
 } from "./sign-preparation-capability";
 export {
   encodeSignPlate,
+  executeAdmittedSignSteps,
   executeSignRepairPlan,
+  finalizeSignExecution,
   planContainsOnlyAdmittedSteps,
+  planRequiresBoundedReconstruction,
+  splitPlanAroundReconstruction,
   type SignExecutionBounds,
   type SignExecutionRefusalReason,
   type SignExecutionResult,

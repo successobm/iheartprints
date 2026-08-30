@@ -89,6 +89,7 @@ import type {
 import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwork/production-normalization";
 import { computeAlphaBounds, DEFAULT_ALPHA_THRESHOLD } from "@/capabilities/final-artwork/alpha-trim";
 import { hasAnyTransparentPixel } from "@/capabilities/final-artwork/raster-transform";
+import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { decideEnhancement } from "@/capabilities/final-artwork/enhancement-decision";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
 import { HalftoneDtfProvider } from "@/capabilities/final-artwork/halftone-dtf-provider";
@@ -122,12 +123,27 @@ import {
   computeSignPlanKey,
   deriveRigidSignProductionRequirements,
   encodeSignPlate,
+  executeAdmittedSignSteps,
   executeSignRepairPlan,
+  finalizeSignExecution,
   getSignResolutionPolicyById,
   planContainsOnlyAdmittedSteps,
+  planRequiresBoundedReconstruction,
+  SIGN_RECONSTRUCTION_SCALE_CEILING,
   SIGN_REPAIR_PLAN_SCHEMA_VERSION,
+  splitPlanAroundReconstruction,
+  type SignExecutionBounds,
   type SignRepairPlan,
+  type SignRepairStep,
 } from "@/capabilities/sign-preparation";
+import {
+  hasSignReconstructionCapability,
+  type SignReconstructionProviderOutput,
+} from "@/capabilities/final-artwork/sign-reconstruction-provider";
+import {
+  MAX_RECONSTRUCTION_DIM_PX,
+  validateReconstructedGeometry,
+} from "@/capabilities/final-artwork/topaz-transparency-upscale-provider";
 
 import { checkSourceEligibleForFinalization } from "./source-eligibility";
 import { verifyProductionArtwork } from "./production-verification";
@@ -1147,12 +1163,14 @@ export function createFinalArtworkWorkerCapability(
    * Print Validation, the print_ready decision — is one shared path.
    */
   async function runClaimedJob(job: FinalArtworkJob): Promise<void> {
-    // Signs Phase S2: an entirely separate run path, reusing only the
+    // Signs Phase S2/S3A: an entirely separate run path, reusing only the
     // generic worker infrastructure (claim/heartbeat/recovery,
-    // `AssetCapability`, `PrintValidationCapability`) — never
-    // `produceProductionAsset`/`decideEnhancement`/the apparel providers,
-    // which are shaped around alpha-trim, transparency, and DTF-specific
-    // concerns a rigid sign does not have.
+    // `AssetCapability`, `PrintValidationCapability`) and — for a plan
+    // requiring bounded reconstruction (S3A) — the injected provider's own
+    // `produceSignReconstruction` — never `produceProductionAsset`/
+    // `decideEnhancement`/`FinalArtworkProvider.produce()`, which are shaped
+    // around alpha-trim, `PlacementSizingPolicy`, and DTF-specific concerns
+    // a rigid sign does not have.
     if (job.sourceKind === "sign_preparation") {
       await runSignPreparationJob(job);
       return;
@@ -1162,6 +1180,356 @@ export function createFinalArtworkWorkerCapability(
       return;
     }
     await runGeneratedConceptJob(job);
+  }
+
+  function requireStepPixelParam(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0
+      ? value
+      : null;
+  }
+
+  /**
+   * Signs Phase S3A: dispatches the persisted `reconstruct_resolution` step
+   * against the CONFIGURED provider, then replays the plan's remaining
+   * deterministic steps against the provider's output.
+   *
+   * Reuses the EXACT apparel paid-call idempotency machinery — the same
+   * `resolveExistingIntermediateReconstruction`/`persistIntermediateReconstruction`
+   * pair Phase 28V's two-pass apparel reconstruction uses (both already
+   * job-generic, never apparel-specific), and the same
+   * `MAX_FINAL_ARTWORK_ATTEMPTS`/`MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS`
+   * fresh-execution/resume attempt classification `produceProductionAsset`
+   * enforces for apparel. A sign job has no two-pass concept — the provider
+   * call here is a single bounded pass, full stop — so once its output is
+   * durably persisted as an intermediate asset, nothing further ever calls
+   * the provider again for this job; the "free the outstanding-request
+   * slot" step still runs (via `persistIntermediateReconstruction`) purely
+   * for consistency with the apparel pattern this mirrors.
+   *
+   * Returns `{ outcome: "handled" }` once it has already written a terminal
+   * job state (a zero-cost pre-dispatch refusal, an attempt-budget
+   * exhaustion, or an infrastructure failure) — the caller simply returns.
+   */
+  async function runSignReconstructionAndContinue(
+    job: FinalArtworkJob,
+    plan: SignRepairPlan,
+    split: { before: SignRepairStep[]; reconstruct: SignRepairStep; after: SignRepairStep[] },
+    sourceImage: RgbaImage,
+  ): Promise<
+    | { outcome: "handled" }
+    | {
+        outcome: "executed";
+        image: RgbaImage;
+        contentBounds: SignExecutionBounds;
+        resolutionProvenance: "reconstructed";
+        providerKey: string;
+        providerRequestId: string;
+        nativeWidthPx: number;
+        nativeHeightPx: number;
+        reconstructedWidthPx: number;
+        reconstructedHeightPx: number;
+      }
+  > {
+    // --- Verify the persisted step's own parameters before anything else
+    // touches a pixel or a network call (S3A: "Before dispatch verify...
+    // reconstruct step parameters, requested scale, expected reconstruction
+    // geometry"). A malformed/missing param can only mean tampering or a
+    // planner/schema mismatch this build does not recognize — refused,
+    // zero provider calls, exactly like every other plan-identity mismatch
+    // this job already fails closed on above.
+    const requestedScale = split.reconstruct.params.requestedScale;
+    const requestedWidthPx = requireStepPixelParam(split.reconstruct.params.requestedWidthPx);
+    const requestedHeightPx = requireStepPixelParam(split.reconstruct.params.requestedHeightPx);
+    if (
+      typeof requestedScale !== "number" ||
+      !Number.isFinite(requestedScale) ||
+      requestedScale < 1 ||
+      requestedWidthPx === null ||
+      requestedHeightPx === null
+    ) {
+      await completeWithoutAsset(
+        job,
+        "The recorded reconstruction step's parameters are missing or malformed — refused before any provider dispatch.",
+      );
+      return { outcome: "handled" };
+    }
+    if (requestedWidthPx > MAX_RECONSTRUCTION_DIM_PX || requestedHeightPx > MAX_RECONSTRUCTION_DIM_PX) {
+      await completeWithoutAsset(
+        job,
+        `The recorded reconstruction step requests ${requestedWidthPx}x${requestedHeightPx}px, beyond the ` +
+          `${MAX_RECONSTRUCTION_DIM_PX}px defensive dimension bound — refused before any provider dispatch.`,
+      );
+      return { outcome: "handled" };
+    }
+
+    // --- Local steps preceding reconstruction (e.g. a review-gated
+    // `rotate_90`) run FIRST, on the untouched source — the provider must
+    // see exactly the geometry the planner's own srcW/srcH assumed.
+    const preReconstruct = executeAdmittedSignSteps(
+      sourceImage,
+      { x: 0, y: 0, width: sourceImage.width, height: sourceImage.height },
+      split.before,
+    );
+    if (preReconstruct.status === "refused") {
+      await completeWithoutAsset(job, preReconstruct.detail);
+      return { outcome: "handled" };
+    }
+    const preImage = preReconstruct.image;
+
+    // --- Pre-dispatch provider-ceiling re-check, before the provider is
+    // ever consulted (S3A: "requestedScale <= provider maximum ... A
+    // rejected reconstruction MUST cost zero provider calls"). Mirrors
+    // `assertWithinProviderScaleCeiling`'s own formula exactly — the
+    // provider re-asserts this too, but this layer refuses without ever
+    // constructing a provider request at all.
+    const maxWidth = preImage.width * SIGN_RECONSTRUCTION_SCALE_CEILING;
+    const maxHeight = preImage.height * SIGN_RECONSTRUCTION_SCALE_CEILING;
+    if (requestedWidthPx > maxWidth + 1 || requestedHeightPx > maxHeight + 1) {
+      await completeWithoutAsset(
+        job,
+        `The recorded reconstruction step requests ${requestedWidthPx}x${requestedHeightPx}px, beyond the ` +
+          `${SIGN_RECONSTRUCTION_SCALE_CEILING}x maximum this reconstruction provider can deliver for a ` +
+          `${preImage.width}x${preImage.height}px source — refused before any provider dispatch.`,
+      );
+      return { outcome: "handled" };
+    }
+
+    if (!hasSignReconstructionCapability(provider)) {
+      await failJob(job, "The configured final-artwork provider does not support sign reconstruction.");
+      return { outcome: "handled" };
+    }
+    const signProvider = provider;
+
+    // --- Self-heal: a two-pass-style intermediate already durably exists
+    // from a prior attempt at THIS exact job (a crash landed between
+    // persisting it and clearing the job's outstanding-request slot) —
+    // mirrors `produceProductionAsset`'s own Section 7/8 self-heal exactly.
+    const existingIntermediate = await resolveExistingIntermediateReconstruction(job);
+    let effectiveJob = job;
+    if (
+      existingIntermediate &&
+      effectiveJob.providerRequestId !== null &&
+      effectiveJob.providerRequestId === existingIntermediate.providerRequestId
+    ) {
+      await repo.updateFinalArtworkJob(job.id, {
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      });
+      effectiveJob = {
+        ...effectiveJob,
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      };
+    }
+
+    let reconstructedBytes: Buffer;
+    let reconstructedWidthPx: number;
+    let reconstructedHeightPx: number;
+    let providerRequestId: string;
+
+    if (existingIntermediate) {
+      // Durable proof this exact job's single reconstruction pass already
+      // completed and was paid for — never resubmitted.
+      const bytesRead = await assets.downloadAssetBytes(existingIntermediate.asset.id);
+      if (
+        !bytesRead ||
+        existingIntermediate.asset.widthPx === null ||
+        existingIntermediate.asset.heightPx === null
+      ) {
+        await failJob(
+          job,
+          "A previously completed sign reconstruction could not be read back from storage.",
+        );
+        return { outcome: "handled" };
+      }
+      reconstructedBytes = bytesRead.bytes;
+      reconstructedWidthPx = existingIntermediate.asset.widthPx;
+      reconstructedHeightPx = existingIntermediate.asset.heightPx;
+      providerRequestId = existingIntermediate.providerRequestId;
+    } else {
+      // "Separate Provider Recovery Attempt Budget" — classify THIS claim
+      // exactly as `produceProductionAsset` does for apparel, reusing the
+      // identical two ceilings so a sign reconstruction can never become an
+      // unbounded retry loop, paid or unpaid.
+      const existingProviderRequest: FinalArtworkProviderResumeContext | null =
+        effectiveJob.providerKey === signProvider.providerKey && effectiveJob.providerRequestId
+          ? {
+              providerKey: effectiveJob.providerKey,
+              providerRequestId: effectiveJob.providerRequestId,
+              providerStatus: effectiveJob.providerStatus,
+            }
+          : null;
+      const attemptClassification: FinalArtworkAttemptClassification = existingProviderRequest
+        ? "resume"
+        : "fresh_execution";
+
+      if (attemptClassification === "fresh_execution") {
+        if (job.attempts > MAX_FINAL_ARTWORK_ATTEMPTS) {
+          await failJob(
+            job,
+            `Exceeded maximum finalization attempts (${MAX_FINAL_ARTWORK_ATTEMPTS}) after repeated recovery.`,
+          );
+          return { outcome: "handled" };
+        }
+      } else {
+        if (effectiveJob.providerRecoveryAttempts >= MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS) {
+          await failJob(
+            job,
+            `This reconstruction's existing paid provider request could not be recovered after ${MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS} attempts. ` +
+              "It was never resubmitted -- the paid request itself may need manual attention.",
+          );
+          return { outcome: "handled" };
+        }
+        const nextRecoveryAttempts = effectiveJob.providerRecoveryAttempts + 1;
+        await repo.updateFinalArtworkJob(job.id, { providerRecoveryAttempts: nextRecoveryAttempts });
+        effectiveJob = { ...effectiveJob, providerRecoveryAttempts: nextRecoveryAttempts };
+      }
+
+      let output: SignReconstructionProviderOutput;
+      try {
+        output = await signProvider.produceSignReconstruction({
+          sourceBytes: encodeSignPlate(preImage),
+          sourceContentType: "image/png",
+          requestedWidthPx,
+          requestedHeightPx,
+          existingProviderRequest,
+          onProviderRequestSubmitted: async (submittedProviderRequestId) => {
+            // Persisted BEFORE polling begins — a crash any time after this
+            // write is resumable without a second paid submission.
+            await repo.updateFinalArtworkJob(job.id, {
+              providerKey: signProvider.providerKey,
+              providerRequestId: submittedProviderRequestId,
+              providerStatus: "submitted",
+              providerRecoveryAttempts: 0,
+            });
+          },
+        });
+      } catch (error) {
+        if (error instanceof ProviderError && error.classification === "provider_job_failed") {
+          await repo.updateFinalArtworkJob(job.id, {
+            providerKey: null,
+            providerRequestId: null,
+            providerStatus: null,
+            providerRecoveryAttempts: 0,
+          });
+        }
+        if (
+          error instanceof ProviderError &&
+          error.classification === "invalid_request" &&
+          error.dispatch === "not_dispatched"
+        ) {
+          await completeWithoutAsset(job, error.message);
+          return { outcome: "handled" };
+        }
+        await failJob(job, describeFinalArtworkError(error));
+        return { outcome: "handled" };
+      }
+
+      // --- RESULT DIMENSION VALIDATION (S3A): the provider's paid output is
+      // never blindly trusted. Decoded and geometry-checked BEFORE it is
+      // persisted as an intermediate or replayed further — an invalid
+      // response must never be written down as though it were a good
+      // reconstruction (a future recovery attempt trusts a persisted
+      // intermediate unconditionally, so poisoning it here would be
+      // permanent). Reuses `validateReconstructedGeometry` UNCHANGED — the
+      // exact sufficiency + proportional-aspect contract (Phase 28R) the
+      // apparel path already relies on, never a second, possibly-disagreeing
+      // tolerance.
+      let decodedOutput: PNG;
+      try {
+        decodedOutput = PNG.sync.read(output.bytes);
+      } catch (error) {
+        await failJob(
+          job,
+          `The production reconstruction provider returned bytes that could not be decoded as a PNG: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return { outcome: "handled" };
+      }
+      const geometryCheck = validateReconstructedGeometry({
+        sourceWidthPx: preImage.width,
+        sourceHeightPx: preImage.height,
+        targetWidthPx: requestedWidthPx,
+        targetHeightPx: requestedHeightPx,
+        actualWidthPx: decodedOutput.width,
+        actualHeightPx: decodedOutput.height,
+      });
+      if (!geometryCheck.valid) {
+        await failJob(job, geometryCheck.reason);
+        return { outcome: "handled" };
+      }
+
+      reconstructedBytes = output.bytes;
+      // The DECODED raster's own dimensions, never a provider-claimed
+      // `widthPx`/`heightPx` that might disagree with the bytes actually
+      // returned — mirrors the geometry check just above, which validates
+      // the same decoded dimensions.
+      reconstructedWidthPx = decodedOutput.width;
+      reconstructedHeightPx = decodedOutput.height;
+      providerRequestId = output.providerRequestId;
+
+      // Persisted BEFORE deterministic continuation — mirrors
+      // `onIntermediateReconstructionProduced`'s own "persist before
+      // continuing" ordering: a crash any time after this write never
+      // re-spends this paid credit.
+      await persistIntermediateReconstruction(job, signProvider, `sign-${job.id}`, {
+        bytes: reconstructedBytes,
+        widthPx: reconstructedWidthPx,
+        heightPx: reconstructedHeightPx,
+        providerRequestId,
+      });
+    }
+
+    let reconstructedPng: PNG;
+    try {
+      reconstructedPng = PNG.sync.read(reconstructedBytes);
+    } catch (error) {
+      await failJob(
+        job,
+        `The reconstructed sign raster could not be decoded: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { outcome: "handled" };
+    }
+    const reconstructedImage: RgbaImage = {
+      width: reconstructedPng.width,
+      height: reconstructedPng.height,
+      data: reconstructedPng.data,
+    };
+
+    const continued = executeAdmittedSignSteps(
+      reconstructedImage,
+      { x: 0, y: 0, width: reconstructedImage.width, height: reconstructedImage.height },
+      split.after,
+    );
+    if (continued.status === "refused") {
+      await completeWithoutAsset(job, continued.detail);
+      return { outcome: "handled" };
+    }
+    const finalized = finalizeSignExecution(continued.image, continued.contentBounds, plan);
+    if (finalized.status === "refused") {
+      await completeWithoutAsset(job, finalized.detail);
+      return { outcome: "handled" };
+    }
+
+    return {
+      outcome: "executed",
+      image: finalized.image,
+      contentBounds: finalized.contentBounds,
+      resolutionProvenance: "reconstructed",
+      providerKey: signProvider.providerKey,
+      providerRequestId,
+      nativeWidthPx: preImage.width,
+      nativeHeightPx: preImage.height,
+      reconstructedWidthPx,
+      reconstructedHeightPx,
+    };
   }
 
   /**
@@ -1189,9 +1557,19 @@ export function createFinalArtworkWorkerCapability(
    * `finalization_required` — never a fabricated result and never a crash.
    *
    * S2 executes only S2-admitted deterministic steps
-   * (`sign-preparation/sign-transform-executor.ts`) and NEVER dispatches a
-   * provider: a plan containing `reconstruct_resolution` or `approved_crop`
-   * is refused before any pixel is touched (Constitution §16A.3).
+   * (`sign-preparation/sign-transform-executor.ts`). A plan containing
+   * `approved_crop` remains refused before any pixel is touched —
+   * `approved_crop` stays approval-gated, with no approval mechanism yet
+   * (Constitution §16A.3). Signs Phase S3A: a plan whose ONLY non-admitted
+   * step is exactly one `reconstruct_resolution` is no longer refused —
+   * `runSignReconstructionAndContinue` dispatches it against the bounded
+   * production provider (reusing the apparel paid-call idempotency
+   * machinery unmodified) and replays the plan's remaining S2-admitted
+   * steps against the provider's output. The resulting asset's
+   * `resolutionProvenance` is honestly `"reconstructed"`, which
+   * `validateRigidSign`'s print_ready gate independently and unconditionally
+   * refuses — no reconstructed sign becomes `print_ready` until a future
+   * phase (S4) adds preservation verification to justify it.
    */
   async function runSignPreparationJob(job: FinalArtworkJob): Promise<void> {
     if (!job.signPreparationId || !job.signPlanKey) {
@@ -1254,21 +1632,47 @@ export function createFinalArtworkWorkerCapability(
     }
 
     const containsOnlyAdmittedSteps = planContainsOnlyAdmittedSteps(plan);
+    const needsReconstruction = planRequiresBoundedReconstruction(plan);
+    const reconstructionSplit = needsReconstruction ? splitPlanAroundReconstruction(plan) : null;
 
     // Idempotent asset reuse — mirrors the apparel paths' own idempotency
     // guarantee (Goal 16): a worker crash/retry after the asset was already
-    // produced must never reprocess.
-    const assetsForJob = await repo.listAssets(job.projectId);
-    let productionAsset: AssetRecord | null =
-      assetsForJob.find(
-        (asset) => asset.finalArtworkJobId === job.id && asset.productionRole === "production_png",
-      ) ?? null;
+    // produced must never reprocess. Reuses the shared, generic resolver
+    // (Signs Phase S3A) so a sign job's own reconstruction-stage
+    // intermediate asset (see `resolveExistingIntermediateReconstruction`)
+    // is never mistaken for the final deliverable — exactly the same
+    // exclusion the apparel two-pass path already depends on.
+    let productionAsset: AssetRecord | null = await resolveExistingProductionAsset(job, null);
 
     let sourceSha256 = "";
     let contentBoundsWithinOutput = false;
     let contentBoundsReason = "";
+    let resolutionProvenance: "native" | "reconstructed" = "native";
+    let signProviderKey: string | null = null;
+    let signProviderRequestId: string | null = null;
+    let signNativeWidthPx: number | null = null;
+    let signNativeHeightPx: number | null = null;
+    let signReconstructedWidthPx: number | null = null;
+    let signReconstructedHeightPx: number | null = null;
 
     if (!productionAsset) {
+      if (!needsReconstruction && !containsOnlyAdmittedSteps) {
+        // A genuinely unsupported plan shape (e.g. `approved_crop`, which
+        // remains approval-gated with no approval mechanism yet) — refused
+        // before any pixel is touched, before the source is even
+        // downloaded, and before any provider could be dispatched.
+        const forbidden = plan.steps.find(
+          (step) => step.kind === "reconstruct_resolution" || step.kind === "approved_crop",
+        );
+        await completeWithoutAsset(
+          job,
+          forbidden
+            ? "Plan requires an approved crop. approved_crop remains approval-gated and is not part of automatic execution."
+            : "Plan contains a step kind outside the admitted execution vocabulary.",
+        );
+        return;
+      }
+
       const result = await withPeriodicHeartbeat(job.id, async () => {
         const downloaded = await assets.downloadAssetBytes(preparation.originalAssetId);
         if (!downloaded) {
@@ -1292,17 +1696,28 @@ export function createFinalArtworkWorkerCapability(
           return { outcome: "source_mismatch" as const };
         }
 
-        if (!containsOnlyAdmittedSteps) {
-          const forbidden = plan.steps.find(
-            (step) => step.kind === "reconstruct_resolution" || step.kind === "approved_crop",
+        if (needsReconstruction && reconstructionSplit) {
+          const reconstruction = await runSignReconstructionAndContinue(
+            job,
+            plan,
+            reconstructionSplit,
+            decoded.image,
           );
+          if (reconstruction.outcome === "handled") {
+            return { outcome: "handled" as const };
+          }
           return {
-            outcome: "unsupported_step" as const,
-            detail: forbidden
-              ? forbidden.kind === "reconstruct_resolution"
-                ? "Plan requires provider reconstruction. S2 performs zero provider reconstruction — refusing before any pixel is touched, and no provider was dispatched."
-                : "Plan requires an approved crop. approved_crop remains approval-gated and is not part of S2 automatic execution."
-              : "Plan contains a step kind outside S2's admitted execution vocabulary.",
+            outcome: "executed" as const,
+            sha256,
+            image: reconstruction.image,
+            contentBounds: reconstruction.contentBounds,
+            resolutionProvenance: reconstruction.resolutionProvenance,
+            providerKey: reconstruction.providerKey,
+            providerRequestId: reconstruction.providerRequestId,
+            nativeWidthPx: reconstruction.nativeWidthPx,
+            nativeHeightPx: reconstruction.nativeHeightPx,
+            reconstructedWidthPx: reconstruction.reconstructedWidthPx,
+            reconstructedHeightPx: reconstruction.reconstructedHeightPx,
           };
         }
 
@@ -1316,8 +1731,22 @@ export function createFinalArtworkWorkerCapability(
           sha256,
           image: execution.image,
           contentBounds: execution.contentBounds,
+          resolutionProvenance: "native" as const,
+          providerKey: null,
+          providerRequestId: null,
+          nativeWidthPx: null,
+          nativeHeightPx: null,
+          reconstructedWidthPx: null,
+          reconstructedHeightPx: null,
         };
       });
+
+      if (result.outcome === "handled") {
+        // `runSignReconstructionAndContinue` already wrote a terminal job
+        // state (a zero-cost pre-dispatch refusal, an attempt-budget
+        // exhaustion, or an infrastructure failure) — nothing left to do.
+        return;
+      }
 
       if (result.outcome !== "executed") {
         const reason =
@@ -1343,6 +1772,13 @@ export function createFinalArtworkWorkerCapability(
       contentBoundsReason = contentBoundsWithinOutput
         ? `Original content occupies [${bounds.x},${bounds.y},${bounds.width}x${bounds.height}] within a ${image.width}x${image.height}px plate — fully inside bounds, with every added region outside it.`
         : `Original content bounds [${bounds.x},${bounds.y},${bounds.width}x${bounds.height}] do not lie fully within the ${image.width}x${image.height}px plate.`;
+      resolutionProvenance = result.resolutionProvenance;
+      signProviderKey = result.providerKey;
+      signProviderRequestId = result.providerRequestId;
+      signNativeWidthPx = result.nativeWidthPx;
+      signNativeHeightPx = result.nativeHeightPx;
+      signReconstructedWidthPx = result.reconstructedWidthPx;
+      signReconstructedHeightPx = result.reconstructedHeightPx;
 
       const achievedPpi = image.width / plan.orderedWidthIn;
       const pngBytes = withPhysicalPixelDensity(
@@ -1372,6 +1808,16 @@ export function createFinalArtworkWorkerCapability(
             orderedHeightIn: plan.orderedHeightIn,
             contentBoundsWithinOutput,
             contentBoundsReason,
+            // Signs Phase S3A: truthful reconstruction lineage — `"native"`/
+            // `null` for every plan S2 alone can satisfy, unchanged from
+            // before this phase.
+            resolutionProvenance,
+            providerKey: signProviderKey,
+            providerRequestId: signProviderRequestId,
+            nativeWidthPx: signNativeWidthPx,
+            nativeHeightPx: signNativeHeightPx,
+            reconstructedWidthPx: signReconstructedWidthPx,
+            reconstructedHeightPx: signReconstructedHeightPx,
           },
         },
       });
@@ -1387,6 +1833,15 @@ export function createFinalArtworkWorkerCapability(
         typeof recorded?.contentBoundsReason === "string"
           ? recorded.contentBoundsReason
           : "Recovered from a prior attempt's recorded evidence.";
+      resolutionProvenance = recorded?.resolutionProvenance === "reconstructed" ? "reconstructed" : "native";
+      signProviderKey = typeof recorded?.providerKey === "string" ? recorded.providerKey : null;
+      signProviderRequestId = typeof recorded?.providerRequestId === "string" ? recorded.providerRequestId : null;
+      signNativeWidthPx = typeof recorded?.nativeWidthPx === "number" ? recorded.nativeWidthPx : null;
+      signNativeHeightPx = typeof recorded?.nativeHeightPx === "number" ? recorded.nativeHeightPx : null;
+      signReconstructedWidthPx =
+        typeof recorded?.reconstructedWidthPx === "number" ? recorded.reconstructedWidthPx : null;
+      signReconstructedHeightPx =
+        typeof recorded?.reconstructedHeightPx === "number" ? recorded.reconstructedHeightPx : null;
     }
 
     const policy = getSignResolutionPolicyById(plan.policyId);
@@ -1443,9 +1898,14 @@ export function createFinalArtworkWorkerCapability(
         heightPx: productionAsset.heightPx,
         hasTransparency: productionAsset.hasTransparency,
         vectorAssetId: null,
-        resolutionProvenance: "native",
-        nativeWidthPx: null,
-        nativeHeightPx: null,
+        // Signs Phase S3A: truthful per Constitution §16A.3 — `"reconstructed"`
+        // only when this exact asset's pixels genuinely came from a bounded
+        // provider reconstruction; the rigid-sign print_ready gate
+        // (`validateRigidSign`) independently refuses readiness whenever this
+        // is `"reconstructed"`, unchanged and unweakened by this phase.
+        resolutionProvenance,
+        nativeWidthPx: signNativeWidthPx,
+        nativeHeightPx: signNativeHeightPx,
       },
       rigidSignRequirements: requirements,
       rigidSign,
