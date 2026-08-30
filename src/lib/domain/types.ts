@@ -2208,7 +2208,17 @@ export function isActiveFinalArtworkJobStatus(
  *     and ARCHITECTURE.md §13i for why fabricating one would be a second,
  *     competing production-approval authority.
  */
-export type FinalArtworkSourceKind = "generated_concept" | "prepared_upload";
+/**
+ * Signs Phase S2: the third authority. `"sign_preparation"` exactly when
+ * `signPreparationId` is set — see `SignPreparation` (S1) and the
+ * `20260830130000_sign_final_artwork_authority.sql` migration's own audit
+ * for why the FK-based "exactly one" model required a third column rather
+ * than being expressed inside either existing one.
+ */
+export type FinalArtworkSourceKind =
+  | "generated_concept"
+  | "prepared_upload"
+  | "sign_preparation";
 
 export interface FinalArtworkJob {
   id: string;
@@ -2223,6 +2233,20 @@ export interface FinalArtworkJob {
    * this finalization. `null` for a `"generated_concept"` job.
    */
   artworkPreparationId: string | null;
+  /**
+   * Signs Phase S2: the rigid-sign production authority — the
+   * `SignPreparation` whose persisted, planned repair authorized this job.
+   * `null` for every other `sourceKind`.
+   */
+  signPreparationId: string | null;
+  /**
+   * Signs Phase S2: the canonical `SignRepairPlan` identity this job was
+   * enqueued to execute — frozen at enqueue, immutable, and half of the sign
+   * workflow's idempotency key (mirrors `productionTreatmentKey`: a re-plan
+   * supersedes a queued job rather than re-aiming it). `null` for every
+   * `sourceKind` other than `"sign_preparation"`.
+   */
+  signPlanKey: string | null;
   /**
    * Existing Artwork → Print Ready Phase 2: the production print WIDTH, in
    * inches, this job was enqueued for — frozen at enqueue rather than re-read
@@ -2282,7 +2306,15 @@ export interface FinalArtworkJob {
    * "unspecified" a second time.
    */
   requestedProductionOutput: StoredRequestedProductionOutput | null;
-  /** Denormalized for convenient querying — always the same artwork the authorizing record references. */
+  /**
+   * Denormalized for convenient querying — always the same artwork the
+   * authorizing record references. Signs Phase S2: for a `"sign_preparation"`
+   * job, no `ArtworkVersion` exists (Constitution §16A) — this holds the
+   * authorizing `SignPreparation.id` instead, filling the same structural
+   * role ("which creative-source record this job describes") honestly,
+   * without a fabricated `ArtworkVersion` row. See the S2 authority
+   * migration's own audit for why this was the narrower choice.
+   */
   artworkVersionId: string;
   status: FinalArtworkJobStatus;
   /**

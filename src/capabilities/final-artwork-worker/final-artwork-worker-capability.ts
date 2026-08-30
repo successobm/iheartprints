@@ -88,6 +88,7 @@ import type {
 } from "@/capabilities/final-artwork/provider";
 import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwork/production-normalization";
 import { computeAlphaBounds, DEFAULT_ALPHA_THRESHOLD } from "@/capabilities/final-artwork/alpha-trim";
+import { hasAnyTransparentPixel } from "@/capabilities/final-artwork/raster-transform";
 import { decideEnhancement } from "@/capabilities/final-artwork/enhancement-decision";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
 import { HalftoneDtfProvider } from "@/capabilities/final-artwork/halftone-dtf-provider";
@@ -110,6 +111,23 @@ import {
 } from "@/capabilities/concept-evaluation";
 import { ProviderError } from "@/capabilities/providers/provider-error";
 import { attachAttentionCheckName } from "@/capabilities/shared/production-variant";
+
+import { decodePngUpload } from "@/capabilities/artwork-preparation/image-decode";
+import {
+  pixelsPerMetreForPpi,
+  withPhysicalPixelDensity,
+} from "@/capabilities/final-artwork/production-png";
+import type { RigidSignPlanEvidence } from "@/capabilities/print-validation/contracts";
+import {
+  computeSignPlanKey,
+  deriveRigidSignProductionRequirements,
+  encodeSignPlate,
+  executeSignRepairPlan,
+  getSignResolutionPolicyById,
+  planContainsOnlyAdmittedSteps,
+  SIGN_REPAIR_PLAN_SCHEMA_VERSION,
+  type SignRepairPlan,
+} from "@/capabilities/sign-preparation";
 
 import { checkSourceEligibleForFinalization } from "./source-eligibility";
 import { verifyProductionArtwork } from "./production-verification";
@@ -355,6 +373,13 @@ export function createFinalArtworkWorkerCapability(
    * of a paid provider call.
    */
   async function jobIntentIsCurrent(job: FinalArtworkJob): Promise<boolean> {
+    // Signs Phase S2: a sign job's intent is entirely captured by its
+    // (sign preparation, plan key) binding — none of the apparel checks
+    // below (requested output, production width, treatment) have any
+    // meaning for it, and every field they read is null on a sign job.
+    if (job.sourceKind === "sign_preparation") {
+      return isSignPreparationJobStillCurrent(job);
+    }
     const snapshot = await repo.getProject(job.projectId);
     if (!snapshot) return false;
     if (
@@ -441,6 +466,10 @@ export function createFinalArtworkWorkerCapability(
     status: "print_ready" | "finalization_required",
   ): Promise<void> {
     if (!(await jobIntentIsCurrent(job))) return;
+    if (job.sourceKind === "sign_preparation") {
+      await repo.setProjectStatus(job.projectId, status);
+      return;
+    }
     if (job.sourceKind === "prepared_upload") {
       if (!(await isPreparedUploadJobStillCurrent(job))) return;
       await repo.setProjectStatus(job.projectId, status);
@@ -484,6 +513,29 @@ export function createFinalArtworkWorkerCapability(
     // brief's resolved default. Keeping a second, differently-sourced copy
     // here is how the two would eventually disagree.
     return true;
+  }
+
+  /**
+   * Signs Phase S2: the sign workflow's equivalent of
+   * `isPreparedUploadJobStillCurrent`. A sign job stops being current when
+   * its preparation is gone, or — the sign-specific case — when it was
+   * RE-PLANNED: `SignPreparation.planKey` no longer equals the plan key
+   * this job was enqueued for. A re-plan is a different deliverable, and
+   * the newer plan's own job (if any) owns the project status from that
+   * point on; this job's already-produced plate, if any, remains valid
+   * evidence for the plan it was actually made under.
+   */
+  async function isSignPreparationJobStillCurrent(
+    job: FinalArtworkJob,
+  ): Promise<boolean> {
+    if (!job.signPreparationId || !job.signPlanKey) return false;
+    const preparation = await repo.getSignPreparationById(job.signPreparationId);
+    return (
+      !!preparation &&
+      preparation.projectId === job.projectId &&
+      preparation.status === "planned" &&
+      preparation.planKey === job.signPlanKey
+    );
   }
 
   /**
@@ -1095,11 +1147,327 @@ export function createFinalArtworkWorkerCapability(
    * Print Validation, the print_ready decision — is one shared path.
    */
   async function runClaimedJob(job: FinalArtworkJob): Promise<void> {
+    // Signs Phase S2: an entirely separate run path, reusing only the
+    // generic worker infrastructure (claim/heartbeat/recovery,
+    // `AssetCapability`, `PrintValidationCapability`) — never
+    // `produceProductionAsset`/`decideEnhancement`/the apparel providers,
+    // which are shaped around alpha-trim, transparency, and DTF-specific
+    // concerns a rigid sign does not have.
+    if (job.sourceKind === "sign_preparation") {
+      await runSignPreparationJob(job);
+      return;
+    }
     if (job.sourceKind === "prepared_upload") {
       await runPreparedUploadJob(job);
       return;
     }
     await runGeneratedConceptJob(job);
+  }
+
+  /**
+   * Signs Phase S2: claims and runs one `sign_preparation` job. Entirely
+   * self-contained — reuses only the generic worker infrastructure the
+   * function signature already closes over (`repo`, `assets`,
+   * `printValidation`, `withPeriodicHeartbeat`, `failJob`,
+   * `completeWithoutAsset`, `maybeTransitionProjectStatus`).
+   *
+   * PLAN REPLAY DISCIPLINE, in order, every one fail-closed:
+   *   1. the preparation exists, is project-scoped, and is `"planned"`
+   *   2. the stale-intent fence: the preparation's CURRENT plan key still
+   *      equals this job's bound plan key (else superseded — cancelled,
+   *      never failed)
+   *   3. the plan's canonical key is RECOMPUTED from the currently
+   *      persisted plan fields and matches both the preparation's own
+   *      `planKey` and the job's bound `signPlanKey`
+   *   4. the original asset's downloaded bytes hash to `plan.sourceSha256`
+   *      and decode to `plan.sourceWidthPx`/`plan.sourceHeightPx`
+   *   5. `plan.orderedWidthIn`/`orderedHeightIn`/`policyId` match the
+   *      preparation's own current confirmed spec
+   *   6. the plan's schema version is one this build supports
+   *
+   * Any mismatch anywhere above completes the job honestly, with no asset,
+   * `finalization_required` — never a fabricated result and never a crash.
+   *
+   * S2 executes only S2-admitted deterministic steps
+   * (`sign-preparation/sign-transform-executor.ts`) and NEVER dispatches a
+   * provider: a plan containing `reconstruct_resolution` or `approved_crop`
+   * is refused before any pixel is touched (Constitution §16A.3).
+   */
+  async function runSignPreparationJob(job: FinalArtworkJob): Promise<void> {
+    if (!job.signPreparationId || !job.signPlanKey) {
+      await failJob(job, "This sign finalization job records no sign preparation.");
+      return;
+    }
+    const preparation = await repo.getSignPreparationById(job.signPreparationId);
+    if (!preparation || preparation.projectId !== job.projectId) {
+      await failJob(job, "Referenced sign preparation no longer exists.");
+      return;
+    }
+    if (preparation.status !== "planned" || !preparation.plan || !preparation.planKey) {
+      await failJob(job, "Referenced sign preparation has no persisted plan.");
+      return;
+    }
+
+    // Stale-intent fence, before anything else: the preparation may have
+    // been re-planned since this job was enqueued.
+    if (preparation.planKey !== job.signPlanKey) {
+      await supersedeStaleJob(job);
+      return;
+    }
+
+    const plan = preparation.plan as unknown as SignRepairPlan;
+    if (plan.schemaVersion !== SIGN_REPAIR_PLAN_SCHEMA_VERSION) {
+      await completeWithoutAsset(
+        job,
+        `Recorded plan schema "${plan.schemaVersion}" is not supported by this build.`,
+      );
+      return;
+    }
+
+    // RECOMPUTE the canonical plan key from the currently persisted plan
+    // fields — never trust the stored `plan.planKey` string alone. This is
+    // the authoritative check; `requestSignFinalArtwork`'s own recompute is
+    // the earlier, non-authoritative belt.
+    const recomputedPlanKey = computeSignPlanKey(plan);
+    const planKeyVerified =
+      recomputedPlanKey === preparation.planKey &&
+      recomputedPlanKey === job.signPlanKey &&
+      recomputedPlanKey === plan.planKey;
+    if (!planKeyVerified) {
+      await completeWithoutAsset(
+        job,
+        "The recorded repair plan failed identity verification and was not executed.",
+      );
+      return;
+    }
+
+    if (
+      plan.orderedWidthIn !== preparation.orderedWidthIn ||
+      plan.orderedHeightIn !== preparation.orderedHeightIn ||
+      plan.policyId !== preparation.resolutionPolicyId
+    ) {
+      await completeWithoutAsset(
+        job,
+        "The recorded plan's ordered size or policy no longer matches the preparation's confirmed spec.",
+      );
+      return;
+    }
+
+    const containsOnlyAdmittedSteps = planContainsOnlyAdmittedSteps(plan);
+
+    // Idempotent asset reuse — mirrors the apparel paths' own idempotency
+    // guarantee (Goal 16): a worker crash/retry after the asset was already
+    // produced must never reprocess.
+    const assetsForJob = await repo.listAssets(job.projectId);
+    let productionAsset: AssetRecord | null =
+      assetsForJob.find(
+        (asset) => asset.finalArtworkJobId === job.id && asset.productionRole === "production_png",
+      ) ?? null;
+
+    let sourceSha256 = "";
+    let contentBoundsWithinOutput = false;
+    let contentBoundsReason = "";
+
+    if (!productionAsset) {
+      const result = await withPeriodicHeartbeat(job.id, async () => {
+        const downloaded = await assets.downloadAssetBytes(preparation.originalAssetId);
+        if (!downloaded) {
+          return { outcome: "no_source" as const };
+        }
+        let decoded: ReturnType<typeof decodePngUpload>;
+        try {
+          decoded = decodePngUpload(downloaded.bytes);
+        } catch {
+          return { outcome: "undecodable" as const };
+        }
+        const sha256 = createHash("sha256").update(downloaded.bytes).digest("hex");
+
+        // Source lineage: the exact bytes this plan was formulated against,
+        // never assumed.
+        if (
+          sha256 !== plan.sourceSha256 ||
+          decoded.image.width !== plan.sourceWidthPx ||
+          decoded.image.height !== plan.sourceHeightPx
+        ) {
+          return { outcome: "source_mismatch" as const };
+        }
+
+        if (!containsOnlyAdmittedSteps) {
+          const forbidden = plan.steps.find(
+            (step) => step.kind === "reconstruct_resolution" || step.kind === "approved_crop",
+          );
+          return {
+            outcome: "unsupported_step" as const,
+            detail: forbidden
+              ? forbidden.kind === "reconstruct_resolution"
+                ? "Plan requires provider reconstruction. S2 performs zero provider reconstruction — refusing before any pixel is touched, and no provider was dispatched."
+                : "Plan requires an approved crop. approved_crop remains approval-gated and is not part of S2 automatic execution."
+              : "Plan contains a step kind outside S2's admitted execution vocabulary.",
+          };
+        }
+
+        const execution = executeSignRepairPlan(decoded.image, plan);
+        if (execution.status === "refused") {
+          return { outcome: "refused" as const, detail: execution.detail };
+        }
+
+        return {
+          outcome: "executed" as const,
+          sha256,
+          image: execution.image,
+          contentBounds: execution.contentBounds,
+        };
+      });
+
+      if (result.outcome !== "executed") {
+        const reason =
+          result.outcome === "no_source"
+            ? "The original artwork file could not be loaded."
+            : result.outcome === "undecodable"
+              ? "The original artwork file could not be decoded."
+              : result.outcome === "source_mismatch"
+                ? "The original artwork no longer matches the bytes this plan was formulated against."
+                : result.detail;
+        await completeWithoutAsset(job, reason);
+        return;
+      }
+
+      sourceSha256 = result.sha256;
+      const image = result.image;
+      const bounds = result.contentBounds;
+      contentBoundsWithinOutput =
+        bounds.x >= 0 &&
+        bounds.y >= 0 &&
+        bounds.x + bounds.width <= image.width &&
+        bounds.y + bounds.height <= image.height;
+      contentBoundsReason = contentBoundsWithinOutput
+        ? `Original content occupies [${bounds.x},${bounds.y},${bounds.width}x${bounds.height}] within a ${image.width}x${image.height}px plate — fully inside bounds, with every added region outside it.`
+        : `Original content bounds [${bounds.x},${bounds.y},${bounds.width}x${bounds.height}] do not lie fully within the ${image.width}x${image.height}px plate.`;
+
+      const achievedPpi = image.width / plan.orderedWidthIn;
+      const pngBytes = withPhysicalPixelDensity(
+        encodeSignPlate(image),
+        pixelsPerMetreForPpi(achievedPpi),
+      );
+
+      productionAsset = await assets.uploadProductionAsset(job.projectId, {
+        conceptId: `sign-${job.id}`,
+        bytes: pngBytes,
+        contentType: "image/png",
+        widthPx: image.width,
+        heightPx: image.height,
+        hasTransparency: hasAnyTransparentPixel(image),
+        finalArtworkJobId: job.id,
+        productionRole: "production_png",
+        metadata: {
+          rigidSign: {
+            sourceAssetId: preparation.originalAssetId,
+            sourceSha256,
+            planKey: plan.planKey,
+            planSchemaVersion: plan.schemaVersion,
+            policyId: plan.policyId,
+            planOverallRisk: plan.overallRisk,
+            containsOnlyAdmittedSteps,
+            orderedWidthIn: plan.orderedWidthIn,
+            orderedHeightIn: plan.orderedHeightIn,
+            contentBoundsWithinOutput,
+            contentBoundsReason,
+          },
+        },
+      });
+    } else {
+      // Recovered/retried job with an asset already on file — recompute
+      // the same evidence from the recorded metadata rather than
+      // re-executing (Goal 16's idempotency guarantee).
+      const recorded = (productionAsset.metadata as Record<string, unknown> | null)
+        ?.rigidSign as Record<string, unknown> | undefined;
+      sourceSha256 = typeof recorded?.sourceSha256 === "string" ? recorded.sourceSha256 : plan.sourceSha256;
+      contentBoundsWithinOutput = recorded?.contentBoundsWithinOutput === true;
+      contentBoundsReason =
+        typeof recorded?.contentBoundsReason === "string"
+          ? recorded.contentBoundsReason
+          : "Recovered from a prior attempt's recorded evidence.";
+    }
+
+    const policy = getSignResolutionPolicyById(plan.policyId);
+    if (!policy) {
+      await completeWithoutAsset(
+        job,
+        `Resolution policy "${plan.policyId}" is not supported by this build.`,
+      );
+      return;
+    }
+
+    const requirements = deriveRigidSignProductionRequirements(
+      {
+        category: "rigid_sign_raster",
+        orderedWidthIn: plan.orderedWidthIn,
+        orderedHeightIn: plan.orderedHeightIn,
+        confirmedAt: preparation.specConfirmedAt ?? new Date(0).toISOString(),
+        resolutionPolicyId: plan.policyId,
+      },
+      policy,
+    );
+
+    const rigidSign: RigidSignPlanEvidence = {
+      sourceAssetId: preparation.originalAssetId,
+      sourceSha256,
+      planKey: plan.planKey,
+      planSchemaVersion: plan.schemaVersion,
+      policyId: plan.policyId,
+      planKeyVerified,
+      executedStepsMatchPlan: true,
+      planOverallRisk: plan.overallRisk,
+      containsOnlyAdmittedSteps,
+      orderedWidthIn: plan.orderedWidthIn,
+      orderedHeightIn: plan.orderedHeightIn,
+      targetPpi: policy.targetPpi,
+      minPpi: policy.minPpi,
+      contentBoundsWithinOutput,
+      contentBoundsReason,
+    };
+
+    const validationInput: PrintValidationInput = {
+      artworkVersionId: preparation.id,
+      validationProfile: "rigid_sign_raster",
+      designBriefVersionId: null,
+      currentApprovedDesignBriefVersionId: null,
+      printPlacement: null,
+      productSummary: null,
+      designDescription: null,
+      conceptEvaluationStatus: null,
+      conceptEvaluation: null,
+      primaryAsset: {
+        contentType: productionAsset.contentType,
+        widthPx: productionAsset.widthPx,
+        heightPx: productionAsset.heightPx,
+        hasTransparency: productionAsset.hasTransparency,
+        vectorAssetId: null,
+        resolutionProvenance: "native",
+        nativeWidthPx: null,
+        nativeHeightPx: null,
+      },
+      rigidSignRequirements: requirements,
+      rigidSign,
+    };
+
+    const report = printValidation.validateArtwork(validationInput);
+    await repo.createProductionAssetValidation(job.projectId, {
+      finalArtworkJobId: job.id,
+      assetId: productionAsset.id,
+      status: report.status,
+      report: report as unknown as Record<string, unknown>,
+    });
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "completed",
+      lastError: report.status === "ready" ? null : summarizeReportForInternalLog(report),
+      completedAt: new Date().toISOString(),
+    });
+
+    await maybeTransitionProjectStatus(
+      job,
+      report.status === "ready" ? "print_ready" : "finalization_required",
+    );
   }
 
   async function runGeneratedConceptJob(job: FinalArtworkJob): Promise<void> {

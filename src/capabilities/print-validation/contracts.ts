@@ -381,6 +381,24 @@ export const PRINT_VALIDATION_CHECK_CODES = [
   "dtf_isolated_feature_integrity",
   /** Diagnostic-only (never blocking — see the profile module): faint/partial-alpha fine features whose printed behavior this framework cannot observe. */
   "dtf_partial_alpha_feature_integrity",
+  // --- Signs Phase S2: rigid_sign_raster profile ---------------------------
+  // Emitted only under `validationProfile: "rigid_sign_raster"`. "Substrate
+  // defines canvas" (Constitution §16A) — the opposite of every apparel
+  // alpha-trim assumption above, which is why this profile does not reuse
+  // `alpha_bound_artwork`/`transparent_dead_canvas`/`physical_width_policy`:
+  // those ask "did the artwork's own bounds survive trim", and a sign has no
+  // alpha trim to survive. See `validateRigidSign` in
+  // `print-validation-capability.ts`.
+  /** Both ordered axes (width AND height — never width-only apparel semantics) reconcile with the produced plate's own pixel geometry, within tolerance. */
+  "exact_physical_dimensions",
+  /** The plate is fully opaque. Rigid-sign production intent is opaque by construction (§16A.2); any alpha < 255 blocks, and nothing here invents a flattening colour. */
+  "no_unintended_transparency",
+  /** Every original source pixel remains inside the plate's bounds, and every added (extended/padded) region lies outside the original content region. */
+  "content_within_bounds",
+  /** A repair plan was actually persisted and recorded for this preparation — the plan the executed job claims to have replayed. */
+  "repair_plan_recorded",
+  /** The plan actually executed is provably the plan that was recorded: its canonical key recomputes identically and only S2-admitted, content-preserving steps were replayed. Also where the print-ready risk boundary is enforced — see this check's own reason text on a `review_required`/`blocked` plan. */
+  "executed_plan_matches_recorded_plan",
 ] as const;
 
 export type PrintValidationCheckCode =
@@ -614,7 +632,17 @@ export interface ProductionNormalizationSummary {
  *     profile is not a weaker one — it is a different, and in places
  *     stricter, set.
  */
-export type PrintValidationProfile = "generated_concept" | "uploaded_preserve";
+/**
+ * Signs Phase S2: `"rigid_sign_raster"` — the admitted rigid-sign profile
+ * (Constitution §16A). The customer's supplied artwork, deterministically
+ * repaired to an exact ordered substrate size, is the specification; there
+ * is no Design Brief, no Concept Evaluation, and no apparel transparency
+ * requirement. See `RigidSignPlanEvidence` and `validateRigidSign`.
+ */
+export type PrintValidationProfile =
+  | "generated_concept"
+  | "uploaded_preserve"
+  | "rigid_sign_raster";
 
 /**
  * Existing Artwork → Print Ready Phase 2 (Goal 8): the deterministic
@@ -824,6 +852,57 @@ export interface DtfFeatureIntegritySummary {
  * the caller (a future Final Artwork orchestrator, a route, or a test) does
  * the I/O; this capability only decides.
  */
+/**
+ * Signs Phase S2: the deterministic plan-lineage and print-ready-risk
+ * evidence for one rigid-sign production plate. Present only under the
+ * `rigid_sign_raster` profile.
+ *
+ * Print Validation must never depend on `capabilities/sign-preparation`
+ * (the same dependency-direction rule that keeps this module from importing
+ * `final-artwork` or the halftone engine — `capability-boundaries.ts`).
+ * This is this module's OWN, independent copy of the facts it needs,
+ * mirroring `UploadedPreserveEvidence`'s/`HalftoneProductionEvidence`'s
+ * relationship to their real engines: `FinalArtworkWorkerCapability`, which
+ * legitimately depends on both `sign-preparation` and `print-validation`, is
+ * the one place a real `SignRepairPlan` is reduced onto this shape.
+ *
+ * HONESTY BOUNDARY: `planKeyVerified`/`executedStepsMatchPlan` prove the
+ * worker replayed the EXACT plan it was bound to, byte-for-byte — they do
+ * not prove the plan was a good idea. `planOverallRisk` carries the
+ * planner's own risk classification through so this profile can enforce
+ * the print-ready boundary (Constitution §16A.3 / S0.5 Rule 1: no
+ * unapproved review-class action, and no provider reconstruction, may ever
+ * reach `print_ready`) without re-deriving it.
+ */
+export interface RigidSignPlanEvidence {
+  /** The immutable original asset the plan was formulated against. */
+  sourceAssetId: string;
+  /** SHA-256 of the exact source bytes the worker actually read before executing. */
+  sourceSha256: string;
+  /** The plan's own canonical identity, as persisted. */
+  planKey: string;
+  planSchemaVersion: string;
+  policyId: string;
+  /** True only when the worker independently recomputed the plan key from the CURRENTLY PERSISTED plan fields, immediately before executing, and it matched `planKey`. */
+  planKeyVerified: boolean;
+  /** True only when every step actually executed, in order, has the exact kind+params the persisted plan recorded — a full, unmodified replay. */
+  executedStepsMatchPlan: boolean;
+  /** The plan's own risk classification (`sign-preparation/contracts.ts`'s `SignRiskClass`, carried as a string so this module never imports that type). */
+  planOverallRisk: "auto_safe" | "review_required" | "blocked";
+  /** True when every executed step's kind is one of S2's admitted deterministic operations — never `reconstruct_resolution` or `approved_crop`. */
+  containsOnlyAdmittedSteps: boolean;
+  /** The exact ordered physical size the plate was produced for. Both axes — never width-only apparel semantics. */
+  orderedWidthIn: number;
+  orderedHeightIn: number;
+  /** The governing resolution policy's own target/minimum PPI (Constitution §16A.4) — a policy value, never a constant. */
+  targetPpi: number;
+  minPpi: number;
+  /** Worker-measured geometric fact: every original source pixel remains inside the plate, and every added region lies outside the original content region. */
+  contentBoundsWithinOutput: boolean;
+  /** Internal rationale for `contentBoundsWithinOutput` — never customer-facing copy. */
+  contentBoundsReason: string;
+}
+
 export interface PrintValidationInput {
   artworkVersionId: string;
   /**
@@ -908,4 +987,16 @@ export interface PrintValidationInput {
    * outside their own applicable profile.
    */
   dtfFeatureIntegrity?: DtfFeatureIntegritySummary | null;
+  /**
+   * Signs Phase S2: pre-classified `ProductionRequirements` for the
+   * `rigid_sign_raster` profile, built by
+   * `deriveRigidSignProductionRequirements` from a confirmed
+   * `SignProductionSpec` — REQUIRED under this profile, and never derived
+   * from brief text (`printPlacement`/`productSummary`/`designDescription`
+   * above are ignored entirely when this profile is active; a sign has no
+   * brief). Absence under this profile is itself a hard block.
+   */
+  rigidSignRequirements?: ProductionRequirements | null;
+  /** Signs Phase S2: REQUIRED under the `rigid_sign_raster` profile. Absence is itself a hard block — a plate with no recorded plan lineage is not one to certify. */
+  rigidSign?: RigidSignPlanEvidence | null;
 }

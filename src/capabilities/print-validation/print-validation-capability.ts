@@ -29,6 +29,7 @@ import type {
   PrintValidationStatus,
   ProductionNormalizationSummary,
   ProductionRequirements,
+  RigidSignPlanEvidence,
   UploadedPreserveEvidence,
 } from "./contracts";
 import type { HalftoneProductionEvidence } from "./contracts";
@@ -143,6 +144,16 @@ export function createPrintValidationCapability(): PrintValidationCapability {
 }
 
 function validate(input: PrintValidationInput): PrintValidationReport {
+  // Signs Phase S2: the rigid_sign_raster profile is entirely self-contained
+  // — its requirements are never brief-derived (Sprint A2's lesson: a
+  // structured, human-confirmed authority in, never prose classification),
+  // so it branches before `deriveProductionRequirements` is ever called.
+  // Every apparel line below this branch is unreached and unchanged for a
+  // sign validation run.
+  if ((input.validationProfile ?? "generated_concept") === "rigid_sign_raster") {
+    return validateRigidSign(input);
+  }
+
   const requirements = deriveProductionRequirements({
     printPlacement: input.printPlacement,
     productSummary: input.productSummary,
@@ -537,9 +548,242 @@ function describeValidationProfile(
     reason:
       profile === "uploaded_preserve"
         ? "Applied the uploaded-preserve profile: the customer's own approved artwork is the specification, so brief provenance, Concept Evaluation alignment, and typed required-wording verification are inapplicable and were not evaluated; source-lineage and geometry-preservation checks were evaluated in their place."
-        : "Applied the generated-concept profile: this artwork was produced from an approved Design Brief, so brief provenance, Concept Evaluation alignment, and required-wording verification all apply.",
+        : profile === "rigid_sign_raster"
+          ? "Applied the rigid_sign_raster profile: the customer's supplied artwork, deterministically repaired to the exact ordered substrate size, is the specification. No Design Brief, Concept Evaluation, apparel transparency requirement, or apparel placement sizing applies; plan lineage, executed-plan integrity, exact physical dimensions, opacity, and content-bounds checks apply in their place."
+          : "Applied the generated-concept profile: this artwork was produced from an approved Design Brief, so brief provenance, Concept Evaluation alignment, and required-wording verification all apply.",
   };
 }
+
+// ---------------------------------------------------------------------------
+// Signs Phase S2: rigid_sign_raster profile
+// ---------------------------------------------------------------------------
+
+/** Relative aspect tolerance for "do both ordered axes independently reconcile" — the same figure `sign-preparation`'s own inspection uses. */
+const RIGID_SIGN_ASPECT_TOLERANCE = 0.01;
+/** PPI comparison tolerance, mirroring `EFFECTIVE_PPI_TOLERANCE`. */
+const RIGID_SIGN_PPI_TOLERANCE = 0.5;
+
+function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
+  const profile: PrintValidationProfile = "rigid_sign_raster";
+  const productionTreatment: ProductionTreatment = DEFAULT_PRODUCTION_TREATMENT;
+  const checks: PrintValidationCheck[] = [];
+  const requiredTransformations = new Set<FinalizationTransformation>();
+
+  checks.push(describeValidationProfile(profile));
+
+  if (!input.rigidSignRequirements) {
+    checks.push({
+      check: "exact_physical_dimensions",
+      status: "unknown",
+      severity: "blocking",
+      reason: "No rigid-sign production requirements were provided for this run.",
+    });
+    requiredTransformations.add("require_human_review");
+    return buildReport(
+      input,
+      EMPTY_RIGID_SIGN_REQUIREMENTS,
+      checks,
+      requiredTransformations,
+      profile,
+      productionTreatment,
+      "blocked",
+    );
+  }
+  const requirements = input.rigidSignRequirements;
+
+  if (!input.primaryAsset) {
+    checks.push({
+      check: "asset_exists",
+      status: "fail",
+      severity: "blocking",
+      reason: "No production asset exists for this rigid-sign preparation.",
+    });
+    return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
+  }
+  const asset = input.primaryAsset;
+  checks.push({
+    check: "asset_exists",
+    status: "pass",
+    severity: "blocking",
+    reason: "A production asset exists for this rigid-sign preparation.",
+  });
+
+  checks.push(checkContentType(asset));
+
+  const dimensionsKnown = asset.widthPx !== null && asset.heightPx !== null;
+  checks.push({
+    check: "raster_dimensions_known",
+    status: dimensionsKnown ? "pass" : "unknown",
+    severity: "blocking",
+    reason: dimensionsKnown
+      ? `Asset is ${asset.widthPx}x${asset.heightPx}px.`
+      : "Asset pixel dimensions are not recorded.",
+  });
+
+  if (!input.rigidSign) {
+    checks.push({
+      check: "repair_plan_recorded",
+      status: "fail",
+      severity: "blocking",
+      reason: "No repair plan evidence was recorded for this production asset.",
+    });
+    requiredTransformations.add("require_human_review");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
+  }
+  const sign: RigidSignPlanEvidence = input.rigidSign;
+
+  const planRecorded =
+    sign.planKey.length > 0 && sign.policyId.length > 0 && sign.planSchemaVersion.length > 0;
+  checks.push({
+    check: "repair_plan_recorded",
+    status: planRecorded ? "pass" : "fail",
+    severity: "blocking",
+    reason: planRecorded
+      ? `A repair plan (${sign.planSchemaVersion}, policy ${sign.policyId}) was recorded for this production asset.`
+      : "The recorded repair plan is missing its schema version, policy id, or plan key.",
+  });
+  if (!planRecorded) {
+    requiredTransformations.add("require_human_review");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
+  }
+
+  const lineageValid =
+    sign.sourceAssetId.length > 0 && /^[0-9a-f]{64}$/.test(sign.sourceSha256);
+  checks.push({
+    check: "source_lineage",
+    status: lineageValid ? "pass" : "fail",
+    severity: "blocking",
+    reason: lineageValid
+      ? `Production artwork derives from immutable source asset ${sign.sourceAssetId} (content hash ${sign.sourceSha256.slice(0, 12)}…).`
+      : "This production artwork carries no usable source asset id or content hash.",
+  });
+  if (!lineageValid) {
+    requiredTransformations.add("require_human_review");
+    return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, "blocked");
+  }
+
+  // The plan-integrity / print-ready risk boundary — the single most
+  // important check in this profile. Constitution §16A.3 / S0.5 Rule 1: a
+  // plan whose executed steps do not provably match what was recorded, that
+  // reached here via anything but S2's admitted deterministic steps, that
+  // classified as anything but `auto_safe`, or whose asset carries
+  // provider-reconstructed pixels (S4 preservation verification does not
+  // exist yet — absence of that evidence fails closed, never passes) must
+  // never certify as `"ready"`.
+  const reconstructed = asset.resolutionProvenance === "reconstructed";
+  const planIntegrityOk =
+    sign.planKeyVerified && sign.executedStepsMatchPlan && sign.containsOnlyAdmittedSteps;
+  const riskAuthorized = sign.planOverallRisk === "auto_safe";
+  const executedPlanOk = planIntegrityOk && riskAuthorized && !reconstructed;
+  checks.push({
+    check: "executed_plan_matches_recorded_plan",
+    status: executedPlanOk ? "pass" : "fail",
+    severity: "blocking",
+    reason: !planIntegrityOk
+      ? "The executed steps could not be verified as an exact, unmodified replay of the recorded plan."
+      : reconstructed
+        ? "This asset carries provider-reconstructed pixels; preservation verification (Constitution §16A.3 / Phase S4) does not exist yet, so it cannot certify as ready."
+        : !riskAuthorized
+          ? `This plan's overall risk classification is "${sign.planOverallRisk}", which requires human review before it may be treated as ready; no unapproved review-class action may reach print_ready.`
+          : "The executed plan is a verified, unmodified replay of the recorded plan, contains only S2-admitted deterministic steps, and was classified auto_safe.",
+  });
+  if (!executedPlanOk) {
+    requiredTransformations.add("require_human_review");
+  }
+
+  const widthPpi =
+    dimensionsKnown && asset.widthPx ? asset.widthPx / sign.orderedWidthIn : null;
+  const heightPpi =
+    dimensionsKnown && asset.heightPx ? asset.heightPx / sign.orderedHeightIn : null;
+  const dimensionsExact =
+    widthPpi !== null &&
+    heightPpi !== null &&
+    Math.abs(widthPpi - heightPpi) / Math.max(widthPpi, heightPpi) <=
+      RIGID_SIGN_ASPECT_TOLERANCE;
+  checks.push({
+    check: "exact_physical_dimensions",
+    status: !dimensionsKnown ? "unknown" : dimensionsExact ? "pass" : "fail",
+    severity: "blocking",
+    reason: !dimensionsKnown
+      ? "Cannot verify exact physical dimensions without known production pixel dimensions."
+      : dimensionsExact
+        ? `Production plate is ${asset.widthPx}x${asset.heightPx}px, matching the ordered ${formatIn(sign.orderedWidthIn)}x${formatIn(sign.orderedHeightIn)}in size on both axes.`
+        : `Production plate's pixel geometry (${asset.widthPx}x${asset.heightPx}px) does not independently reconcile with the ordered ${formatIn(sign.orderedWidthIn)}x${formatIn(sign.orderedHeightIn)}in size on both axes.`,
+  });
+
+  const effectivePpi =
+    widthPpi !== null && heightPpi !== null ? Math.min(widthPpi, heightPpi) : null;
+  let resolutionStatus: PrintValidationCheck["status"] = "unknown";
+  let resolutionSeverity: PrintValidationCheck["severity"] = "blocking";
+  let resolutionReason = "Cannot compute effective resolution without known production pixel dimensions.";
+  if (effectivePpi !== null) {
+    if (effectivePpi + RIGID_SIGN_PPI_TOLERANCE >= sign.targetPpi) {
+      resolutionStatus = "pass";
+      resolutionSeverity = "blocking";
+      resolutionReason = `Production plate prints at ~${Math.round(effectivePpi)} PPI, meeting the ${sign.targetPpi} PPI target.`;
+    } else if (effectivePpi + RIGID_SIGN_PPI_TOLERANCE >= sign.minPpi) {
+      resolutionStatus = "warning";
+      resolutionSeverity = "warning";
+      resolutionReason = `Production plate prints at ~${Math.round(effectivePpi)} PPI — below the ${sign.targetPpi} PPI target, but at or above the ${sign.minPpi} PPI minimum.`;
+    } else {
+      resolutionStatus = "fail";
+      resolutionSeverity = "blocking";
+      resolutionReason = `Production plate prints at only ~${Math.round(effectivePpi)} PPI, below the ${sign.minPpi} PPI blocking minimum.`;
+      requiredTransformations.add("upscale_raster_artwork");
+    }
+  }
+  checks.push({
+    check: "effective_resolution",
+    status: resolutionStatus,
+    severity: resolutionSeverity,
+    reason: resolutionReason,
+  });
+
+  checks.push(checkResolutionProvenance(asset));
+
+  const opaque = asset.hasTransparency === false;
+  checks.push({
+    check: "no_unintended_transparency",
+    status: asset.hasTransparency === null ? "unknown" : opaque ? "pass" : "fail",
+    severity: "blocking",
+    reason:
+      asset.hasTransparency === null
+        ? "Transparency metadata is not recorded for this asset."
+        : opaque
+          ? "Production plate is fully opaque, as rigid-sign production requires."
+          : "Production plate carries transparency; rigid-sign production intent is opaque and no flattening colour was ever invented for it.",
+  });
+
+  checks.push({
+    check: "content_within_bounds",
+    status: sign.contentBoundsWithinOutput ? "pass" : "fail",
+    severity: "blocking",
+    reason: sign.contentBoundsReason,
+  });
+
+  const status = aggregateStatus(checks);
+  return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, status);
+}
+
+/** Placeholder requirements object for the hard-block case where none were provided — never returned as `"ready"`. */
+const EMPTY_RIGID_SIGN_REQUIREMENTS: ProductionRequirements = {
+  category: "rigid_sign_raster",
+  printMethod: "unknown",
+  printMethodConfidence: "unknown",
+  requestedUnsupportedOutput: null,
+  printLocation: null,
+  targetDimensions: null,
+  sizing: null,
+  requiredOutputType: "raster",
+  targetPpi: null,
+  minRasterDimensionsPx: null,
+  transparencyRequired: false,
+  colorMode: "rgb",
+  allowedFileFormats: [],
+  artworkBoundaryMarginPercent: 0,
+  requiredWordingVerificationRequired: false,
+  notes: ["No rigid-sign production requirements were provided for this run."],
+};
 
 function checkBriefProvenance(input: PrintValidationInput): PrintValidationCheck {
   if (!input.designBriefVersionId) {

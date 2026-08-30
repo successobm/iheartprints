@@ -50,4 +50,5 @@ export {
   type DtfFeatureRiskKind,
   type DtfFeatureRiskRegion,
   type DtfFeatureRiskBoundingBox,
+  type RigidSignPlanEvidence,
 } from "./contracts";

@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.4
+Version 1.5
 August 2026
 
 ## Document Position
@@ -43,8 +43,18 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Phase S1 only: inspection, diagnosis, and repair PLANNING** (`SignPreparationCapability`, `sign_preparations`). No repair is executed, no pixel is changed, nothing produces or validates a sign deliverable, and no sign can reach `print_ready`. Later phases (S2+) are each separately approved |
+| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S2 implemented.** Inspection, diagnosis, and repair PLANNING (S1) plus deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. Bounded provider reconstruction (S3) and preservation verification for reconstructed output (S4) are **not implemented** — a plan requiring reconstruction refuses honestly, produces no asset, and cannot reach `print_ready`. No customer-facing production surface exists at any phase so far (operator/internal only) |
 | All other categories | Not admitted | Dormant seams only |
+
+**Signs phase boundary** (Constitution §16A/§16B — admission is not implementation, and each phase's own scope is the honest limit of what "implemented" means until the next one lands):
+
+| Phase | Scope | Status |
+|---|---|---|
+| S1 | Inspect artwork, diagnose defects, formulate a repair plan | Implemented |
+| S2 | Execute deterministic plan steps; authoritative rigid-sign validation; `print_ready` for non-reconstructed `auto_safe` plans | Implemented |
+| S3 | Bounded provider reconstruction (Topaz) for `reconstruct_resolution` steps | Not implemented |
+| S4 | Preservation verification for reconstructed/review-required output | Not implemented |
+| S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
 
 ### Apparel raster profile (implemented)
 
@@ -1169,6 +1179,10 @@ still routes sign prose to `out_of_scope_product`, and
 real sign requirements come only from
 `deriveRigidSignProductionRequirements(spec, policy)`.
 
+`SignPreparationCapability` never executes a plan it formulates — see
+"Signs Phase S2: rigid-sign repair execution + validation" below
+`FinalArtworkWorkerCapability` for the capability that replays it.
+
 ### AssetStorageProvider — Partial
 
 Port + implementations:
@@ -1747,6 +1761,105 @@ mechanism, and §13d for Sprint 2M Phase 2E's Topaz reconstruction
 integration — provider resolution, paid-call idempotency, source
 eligibility, independent production verification, and reconstruction
 provenance.
+
+### Signs Phase S2: rigid-sign repair execution + validation
+
+`FinalArtworkCapability`/`FinalArtworkWorkerCapability` now also serve the
+`rigid_sign_raster` profile — the SAME orchestration boundary the two
+apparel workflows already share, routed by a third `sourceKind` rather than
+a second pipeline (Constitution §16A; the smallest-extension rule §7.14
+governs).
+
+**The third authority.** `final_artwork_jobs` carries **exactly one** of
+`final_direction_approval_id`, `artwork_preparation_id`, or
+`sign_preparation_id`, widened from the prior "either/or" CHECK to
+"exactly one of three" — see
+`supabase/migrations/20260830130000_sign_final_artwork_authority.sql`,
+whose header repeats "The authority model (why no synthetic approval)"'s
+own audit for the sign case: `SignPreparation.status === "planned"` already
+records the durable decision ("this exact plan is what I want produced"),
+so fabricating a `FinalDirectionApproval` or routing through
+`ArtworkPreparation` would create a second, competing authority for the
+same fact — exactly the pattern the upload authority's own migration
+rejected. For a `sign_preparation` job, `sign_plan_key` is additionally
+frozen at enqueue and immutable — the plan identity this job was created to
+execute, and (together with `sign_preparation_id`) the sign workflow's
+complete idempotency key; unlike the upload workflow it needs no separate
+bound production width, because the plan key already encodes both ordered
+dimensions, the resolution policy, and every step. A re-plan (different
+size, different policy, different steps) is a different plan key and gets
+its own job — the queued job bound to the old key is superseded, never
+re-aimed. Apparel authority semantics (the first two CHECK arms, their own
+idempotency keys, `jobIntentIsCurrent`, `maybeTransitionProjectStatus`) are
+unchanged in substance; both gained one additional `sourceKind` branch each
+rather than any rewritten logic.
+
+**Execution boundary.** `runSignPreparationJob` REPLAYS a persisted
+`SignRepairPlan` — it never recomputes or reinterprets one. Before touching
+any pixel it re-verifies, independently of the earlier enqueue-time check:
+the plan's own canonical key recomputes identically from its currently
+persisted fields; the freshly downloaded, freshly hashed original bytes
+match the plan's recorded source SHA-256 and pixel dimensions; and the
+plan's ordered size and policy id still match the preparation's own current
+confirmed spec (catching the case where the preparation was re-confirmed to
+a new size without a fresh plan — a mismatch the plan-key recompute alone
+cannot see, since the plan's own fields stay self-consistent). Any
+mismatch completes the job honestly with no asset, never a crash and never
+a fabricated result.
+
+Execution supports exactly five deterministic step kinds —
+`extend_uniform_background`, `pad_uniform_background`, `downsample`,
+`proportional_resample`, `rotate_90` (`sign-preparation/sign-transform-executor.ts`)
+— each a pure, content-preserving pixel operation: original content pixels
+are copied verbatim (never resampled, redrawn, or recolored) except when a
+step is itself a resample/downsample, in which case the WHOLE frame scales
+uniformly with no crop. **`reconstruct_resolution` and `approved_crop`
+refuse immediately, before any pixel is touched, with zero provider
+dispatch** — S2 performs no provider reconstruction (S3), and no approval
+mechanism for a content-affecting crop exists yet. **Substrate defines
+canvas**: unlike the apparel path, there is no alpha-trim step and no
+"artwork defines the canvas" — the plan's `expectedOutputWidthPx/HeightPx`
+(derived from the ordered physical size) is the canvas, and execution
+verifies its own output against that expectation before returning. The
+uploaded original remains immutable throughout — every execution reads it
+fresh and derives a new asset; nothing is ever overwritten. The resulting
+production asset's metadata records `rigidSign` lineage (source asset id +
+SHA-256, plan key, schema version, policy id, overall risk, measured
+content-bounds fact) — the print-validation-local evidence a later
+authoritative run consumes.
+
+**Rigid-sign Print Validation.** A third `PrintValidationProfile`,
+`"rigid_sign_raster"`, alongside `generated_concept`/`uploaded_preserve` —
+the SAME `PrintValidationCapability.validateArtwork`, branching before any
+apparel-specific derivation runs, so apparel behavior below that branch is
+unreached for a sign run. Five check codes are genuinely new
+(`exact_physical_dimensions`, `no_unintended_transparency`,
+`content_within_bounds`, `repair_plan_recorded`,
+`executed_plan_matches_recorded_plan`); seven are reused with their
+existing meaning (`asset_exists`, `content_type`, `raster_dimensions_known`,
+`effective_resolution`, `resolution_provenance`, `source_lineage`,
+`validation_profile`). No apparel-only check
+(`transparency`/`alpha_bound_artwork`/`transparent_dead_canvas`/
+`physical_width_policy`/halftone/brief/wording checks) is ever emitted
+under this profile — asserted directly by test, mirroring how
+`uploaded_preserve` keeps its own apparel-inapplicable checks unemitted
+rather than relaxed.
+
+**The S2 `print_ready` boundary.** A rigid-sign job may reach `print_ready`
+only when ALL of: the executed plan requires no provider reconstruction (a
+reconstruction-requiring plan never produces an asset to validate at all);
+the plan's own risk classification is `auto_safe` — no
+review-required/approval-gated operation was needed; the executed plan
+verifiably replays the recorded one (`executed_plan_matches_recorded_plan`
+passes); and every other rigid-sign blocking check passes. **A
+provider-reconstructed asset remains blocked from `print_ready` even
+though S2 cannot currently produce one** —
+`executed_plan_matches_recorded_plan` also fails whenever
+`resolutionProvenance === "reconstructed"`, written now as defense in depth
+so a future phase cannot accidentally certify reconstructed output before
+S4 preservation verification exists to justify it. This is the concrete
+form Constitution §16A.3's "provider operations must be … preservation
+verified before `print_ready`" takes today.
 
 ### PrintVaultCapability — Reserved
 
@@ -5837,6 +5950,11 @@ the second customer the first question has no meaning.
 job's `sourceKind` is *derived* from which one is set, never stored, so there
 is no third fact that could disagree with the two keys.
 
+Signs Phase S2 extended this CHECK to a THIRD arm, `sign_preparation_id`,
+by the identical reasoning below — see "Signs Phase S2: rigid-sign repair
+execution + validation" (§5) for the sign-specific audit; the two apparel
+arms and this section's own reasoning are otherwise unchanged.
+
 Three options were audited:
 
 | Option | Verdict |
@@ -6000,6 +6118,14 @@ different and in places stricter:
 
 Every report also carries a `validation_profile` info check and a `profile`
 field, so **"not asked" is never indistinguishable from "passed"**.
+
+A third profile, `rigid_sign_raster`, exists for the admitted Signs
+production profile (Constitution §16A) — see "Signs Phase S2: rigid-sign
+repair execution + validation" (§5) for its own check list and readiness
+boundary; it shares this same applicability-profile mechanism and pattern
+but applies to a structurally different deliverable (opaque, exact-size,
+substrate-defined) and emits none of `uploaded_preserve`'s or
+`generated_concept`'s apparel-specific checks either.
 
 ### Preservation honesty boundary
 
@@ -6617,6 +6743,12 @@ Other notes:
   `inspection`/`plan` are loosely-typed jsonb narrowed at the
   `SignPreparationCapability` boundary and recomputed rather than trusted
   as authority
+- Signs Phase S2: `final_artwork_jobs` gained `sign_preparation_id` +
+  `sign_plan_key`, and its "exactly one authority" CHECK widened from two
+  arms to three — see
+  `supabase/migrations/20260830130000_sign_final_artwork_authority.sql`.
+  Alters an existing, already-locked-down table, so no new RLS/revoke was
+  needed (only a new table requires one)
 - Correction A: the Create New side likewise adds **no** column and **no**
   migration. `ConversationCapability.beginCreateNewWorkflow` stamps
   `metadata.workflow = "create_new"` (`lib/domain/conversation.ts`) on the

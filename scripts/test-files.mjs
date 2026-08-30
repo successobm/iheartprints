@@ -300,6 +300,11 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-repair-planner.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-capability.test.ts",
   "src/capabilities/sign-preparation/rigid-sign-category.test.ts",
+  // Signs Phase S2 (Constitution §16A): deterministic repair execution +
+  // authoritative rigid_sign_raster validation. Zero provider dispatch.
+  "src/capabilities/sign-preparation/sign-transform-executor.test.ts",
+  "src/capabilities/print-validation/rigid-sign-print-validation.test.ts",
+  "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
   // Garment colour is production context, never authority over customer
   // pixels: preparation must be byte-identical on a white and a black shirt.
   "src/capabilities/artwork-preparation/garment-color-preparation-isolation.test.ts",

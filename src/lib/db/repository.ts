@@ -293,7 +293,15 @@ export type CreateFinalArtworkJobInput =
       /** The production print width, in inches, this job is enqueued for — part of its idempotency key. */
       productionWidthIn: number;
     } & FinalArtworkJobProductionIntent &
-      FinalArtworkJobTreatmentIntent);
+      FinalArtworkJobTreatmentIntent)
+  | {
+      sourceKind: "sign_preparation";
+      signPreparationId: string;
+      /** The canonical `SignRepairPlan` identity this job is enqueued to execute — the full idempotency key alongside the preparation id. */
+      signPlanKey: string;
+      /** No `ArtworkVersion` exists for a sign job — see `FinalArtworkJob.artworkVersionId`'s doc. Always the authorizing `SignPreparation.id`. */
+      artworkVersionId: string;
+    };
 
 /**
  * Sprint 2M Phase 2C: mirrors `UpdateGenerationJobInput`. Sprint 2M Phase 2E
@@ -1184,6 +1192,11 @@ export interface ProjectRepository {
   listFinalArtworkJobsForPreparation(
     projectId: string,
     artworkPreparationId: string,
+  ): Promise<FinalArtworkJob[]>;
+  /** Signs Phase S2: mirrors `listFinalArtworkJobsForPreparation` for the sign-preparation authority. */
+  listFinalArtworkJobsForSignPreparation(
+    projectId: string,
+    signPreparationId: string,
   ): Promise<FinalArtworkJob[]>;
   /** Sprint 2M Phase 2C. Also needed to re-resolve `designBriefVersionId` (via the approval, not denormalized on the job) once the worker claims a job. */
   getFinalDirectionApprovalById(

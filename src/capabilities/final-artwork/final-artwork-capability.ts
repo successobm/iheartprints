@@ -39,9 +39,12 @@ import type {
   AssetRecord,
   FinalArtworkJob,
   FinalDirectionApproval,
+  SignPreparation,
   StoredRequestedProductionOutput,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
+import { computeSignPlanKey } from "@/capabilities/sign-preparation";
+import type { SignRepairPlan } from "@/capabilities/sign-preparation";
 import {
   createAcquisitionCapability,
   type AcquisitionCapability,
@@ -66,6 +69,20 @@ import {
   resolveEffectiveProductionTargetIn,
   type EffectiveProductionTargetIn,
 } from "./production-request-identity";
+
+/**
+ * Signs Phase S2: `requestSignFinalArtwork`'s result. There is no
+ * `approval` field for the same reason `RequestPreparedUploadFinalArtworkResult`
+ * has none — the `SignPreparation` itself (`status: "planned"`, a persisted,
+ * canonically-keyed plan) IS the authority; inventing a second record for
+ * the same decision would be exactly the duplicate-authority pattern both
+ * prior workflows already rejected.
+ */
+export interface RequestSignFinalArtworkResult {
+  preparation: SignPreparation;
+  job: FinalArtworkJob;
+  alreadyRequested: boolean;
+}
 
 export interface RequestFinalArtworkResult {
   approval: FinalDirectionApproval;
@@ -169,6 +186,37 @@ export interface FinalArtworkCapability {
   requestPreparedUploadFinalArtwork(
     projectId: string,
   ): Promise<RequestPreparedUploadFinalArtworkResult>;
+  /**
+   * Signs Phase S2: the operator's "execute this repair plan" action for a
+   * rigid-sign preparation (Constitution §16A). A THIRD parallel
+   * customer/operator-authority boundary, deliberately not routed through
+   * either apparel path above:
+   *
+   *   - No acquisition/entitlement fence. Rigid signs are operator-only in
+   *     V1 (Constitution §16A.1) with no commercial concept yet
+   *     (`GRANTABLE_PRODUCTION_PROFILES` stays apparel-only) — gating on an
+   *     apparel-shaped acquisition session would force sign work through
+   *     semantics that do not apply to it.
+   *   - No garment size, production treatment, or requested-output
+   *     resolution. `SignPreparation` already carries its own confirmed
+   *     ordered width AND height (§16A.2), and none of DTF halftone,
+   *     apparel decoration-output vocabulary, or garment-box confirmation
+   *     has any meaning for a sign.
+   *
+   * The authority is the preparation's own `status === "planned"` plan,
+   * recomputed and verified here (never trusted from a stale read) — the
+   * same "the row already records exactly this decision" reasoning the
+   * upload workflow's `ArtworkPreparation.status === "approved"` uses.
+   *
+   * Idempotent on (sign preparation, plan key): a double click, a reload,
+   * two tabs, or a retry all return the same job. A RE-PLAN (different
+   * ordered size, different policy, different steps) is not a repeat
+   * request — it produces its own job, never silently reusing evidence for
+   * a plan that is no longer the one recorded.
+   */
+  requestSignFinalArtwork(
+    projectId: string,
+  ): Promise<RequestSignFinalArtworkResult>;
   /**
    * Sprint 2M Phase 2C (Goal 14): resolves the project's current
    * print-ready production PNG asset id, if any — the one piece of
@@ -610,6 +658,57 @@ export function createFinalArtworkCapability(
       }
 
       return { preparation, job, productionWidthIn, alreadyRequested };
+    },
+
+    async requestSignFinalArtwork(projectId) {
+      const snapshot = await repo.getProject(projectId);
+      if (!snapshot) throw new Error("Project not found");
+
+      const preparation = await repo.getSignPreparation(projectId);
+      if (!preparation || preparation.projectId !== projectId) {
+        throw new Error(
+          "This project has no rigid-sign artwork prepared for production",
+        );
+      }
+      if (
+        preparation.status !== "planned" ||
+        !preparation.plan ||
+        !preparation.planKey
+      ) {
+        throw new Error(
+          "A repair plan must be formulated before production can be requested",
+        );
+      }
+
+      // Plan-replay discipline: never trust a stored key without
+      // recomputing it. This is the belt; `FinalArtworkWorkerCapability`
+      // re-verifies again (the suspenders) immediately before executing —
+      // the two checks intentionally overlap rather than trusting either
+      // alone.
+      const plan = preparation.plan as unknown as SignRepairPlan;
+      const recomputedKey = computeSignPlanKey(plan);
+      if (recomputedKey !== preparation.planKey || recomputedKey !== plan.planKey) {
+        throw new Error(
+          "The recorded repair plan could not be verified. Please re-plan this artwork.",
+        );
+      }
+
+      const { job, alreadyRequested } = await resolveSignJob(
+        repo,
+        projectId,
+        preparation.id,
+        preparation.planKey,
+      );
+
+      if (
+        job.status === "queued" ||
+        job.status === "running" ||
+        job.status === "recoverable"
+      ) {
+        await repo.setProjectStatus(projectId, "finalizing");
+      }
+
+      return { preparation, job, alreadyRequested };
     },
 
     async isFinalizationInFlight(projectId) {
@@ -1183,6 +1282,73 @@ function findJobForWidth(
  * is suspected. A job that IS still stale for the current target (the
  * pre-existing `isStale` branch) is unaffected by this addition.
  */
+/**
+ * Signs Phase S2: idempotent enqueue/reuse, keyed on (project, sign
+ * preparation, plan key) — the sign workflow's own idempotency key, which
+ * already encodes both ordered dimensions, the policy, and every step (see
+ * the S2 authority migration's own doc). Deliberately simpler than
+ * `resolvePreparedUploadJob`: no two-pass-reconstruction bookkeeping, no
+ * effective-target staleness recheck — S2 makes zero provider calls, so
+ * none of that apparatus has anything to apply to yet.
+ *
+ * A `"cancelled"` job matching the CURRENT plan key is returned as-is
+ * rather than revived — a deliberately narrower simplification than the
+ * apparel paths' cancelled-job revival, reasonable because reaching that
+ * state requires the operator's own preparation to have been superseded
+ * and then reverted back to byte-identical terms, a genuinely rare
+ * operator-only edge case; an operator can always trigger a fresh plan.
+ */
+async function resolveSignJob(
+  repo: ProjectRepository,
+  projectId: string,
+  signPreparationId: string,
+  signPlanKey: string,
+): Promise<{ job: FinalArtworkJob; alreadyRequested: boolean }> {
+  const existingJobs = await repo.listFinalArtworkJobsForSignPreparation(
+    projectId,
+    signPreparationId,
+  );
+  const existing = existingJobs.find((job) => job.signPlanKey === signPlanKey);
+  if (existing) {
+    if (existing.status === "failed") {
+      const revived = await repo.updateFinalArtworkJob(existing.id, {
+        status: "queued",
+        lastError: null,
+        attempts: 0,
+        startedAt: null,
+        completedAt: null,
+        heartbeatAt: null,
+      });
+      return { job: revived, alreadyRequested: true };
+    }
+    return { job: existing, alreadyRequested: true };
+  }
+
+  try {
+    const job = await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "sign_preparation",
+      signPreparationId,
+      signPlanKey,
+      // No `ArtworkVersion` exists for a sign job — see
+      // `FinalArtworkJob.artworkVersionId`'s domain doc.
+      artworkVersionId: signPreparationId,
+    });
+    return { job, alreadyRequested: false };
+  } catch (error) {
+    if (error instanceof UniqueConstraintViolationError) {
+      // Lost a race to a concurrent request for the exact same plan — the
+      // winning row now exists.
+      const jobs = await repo.listFinalArtworkJobsForSignPreparation(
+        projectId,
+        signPreparationId,
+      );
+      const won = jobs.find((job) => job.signPlanKey === signPlanKey);
+      if (won) return { job: won, alreadyRequested: true };
+    }
+    throw error;
+  }
+}
+
 async function resolvePreparedUploadJob(
   repo: ProjectRepository,
   projectId: string,

@@ -356,6 +356,10 @@ type DbFinalArtworkJob = {
   /** Existing Artwork → Print Ready Phase 2: nullable — a prepared-upload job's authority is `artwork_preparation_id` instead. */
   final_direction_approval_id: string | null;
   artwork_preparation_id: string | null;
+  /** Signs Phase S2: the rigid-sign production authority. */
+  sign_preparation_id: string | null;
+  /** Signs Phase S2: the canonical plan identity this job was enqueued to execute. */
+  sign_plan_key: string | null;
   /** Postgres `numeric` arrives as a number or a string depending on driver/precision — normalized in `mapFinalArtworkJob`. */
   production_width_in: number | string | null;
   /** Sprint A2 Correction 2: raw column; narrowed fail-closed in `mapFinalArtworkJob`. */
@@ -729,13 +733,20 @@ function mapFinalDirectionApproval(
 
 function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
   const artworkPreparationId = row.artwork_preparation_id ?? null;
+  const signPreparationId = row.sign_preparation_id ?? null;
   return {
     id: row.id,
     projectId: row.project_id,
     // Derived, never a stored column — see `FinalArtworkSourceKind`.
-    sourceKind: artworkPreparationId ? "prepared_upload" : "generated_concept",
+    sourceKind: signPreparationId
+      ? "sign_preparation"
+      : artworkPreparationId
+        ? "prepared_upload"
+        : "generated_concept",
     finalDirectionApprovalId: row.final_direction_approval_id ?? null,
     artworkPreparationId,
+    signPreparationId,
+    signPlanKey: row.sign_plan_key ?? null,
     productionWidthIn: readNumericColumn(row.production_width_in),
     // Sprint A2 Correction 2: the immutable intent this job was created to
     // satisfy. Fail-closed like the brief column — a value this build cannot
@@ -2379,15 +2390,24 @@ export class SupabaseProjectRepository implements ProjectRepository {
               production_treatment_key: input.productionTreatmentKey,
               status: "queued",
             }
-          : {
-              project_id: projectId,
-              artwork_preparation_id: input.artworkPreparationId,
-              production_width_in: input.productionWidthIn,
-              artwork_version_id: input.artworkVersionId,
-              requested_production_output: input.requestedProductionOutput,
-              production_treatment_key: input.productionTreatmentKey,
-              status: "queued",
-            },
+          : input.sourceKind === "prepared_upload"
+            ? {
+                project_id: projectId,
+                artwork_preparation_id: input.artworkPreparationId,
+                production_width_in: input.productionWidthIn,
+                artwork_version_id: input.artworkVersionId,
+                requested_production_output: input.requestedProductionOutput,
+                production_treatment_key: input.productionTreatmentKey,
+                status: "queued",
+              }
+            : {
+                // Signs Phase S2.
+                project_id: projectId,
+                sign_preparation_id: input.signPreparationId,
+                sign_plan_key: input.signPlanKey,
+                artwork_version_id: input.artworkVersionId,
+                status: "queued",
+              },
       )
       .select("*")
       .single();
@@ -2397,7 +2417,9 @@ export class SupabaseProjectRepository implements ProjectRepository {
         throw new UniqueConstraintViolationError(
           input.sourceKind === "generated_concept"
             ? "final_artwork_jobs_project_id_final_direction_approval_id"
-            : "final_artwork_jobs_project_id_artwork_preparation_id_width",
+            : input.sourceKind === "prepared_upload"
+              ? "final_artwork_jobs_project_id_artwork_preparation_id_width"
+              : "final_artwork_jobs_sign_preparation_plan_idx",
         );
       }
       throw error;
@@ -2415,6 +2437,20 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .select("*")
       .eq("project_id", projectId)
       .eq("artwork_preparation_id", artworkPreparationId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbFinalArtworkJob[]) ?? []).map(mapFinalArtworkJob);
+  }
+
+  async listFinalArtworkJobsForSignPreparation(
+    projectId: string,
+    signPreparationId: string,
+  ): Promise<FinalArtworkJob[]> {
+    const { data, error } = await this.client
+      .from("final_artwork_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("sign_preparation_id", signPreparationId)
       .order("created_at", { ascending: true });
     if (error) throw error;
     return ((data as DbFinalArtworkJob[]) ?? []).map(mapFinalArtworkJob);

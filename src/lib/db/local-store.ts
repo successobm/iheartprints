@@ -344,8 +344,15 @@ async function readDb(): Promise<LocalDatabase> {
         finalDirectionApprovalId: job.finalDirectionApprovalId ?? null,
         artworkPreparationId: job.artworkPreparationId ?? null,
         productionWidthIn: job.productionWidthIn ?? null,
+        // Signs Phase S2: absent in every store written before it existed.
+        signPreparationId: job.signPreparationId ?? null,
+        signPlanKey: job.signPlanKey ?? null,
         sourceKind:
-          job.artworkPreparationId != null ? "prepared_upload" : "generated_concept",
+          job.signPreparationId != null
+            ? "sign_preparation"
+            : job.artworkPreparationId != null
+              ? "prepared_upload"
+              : "generated_concept",
       })),
       productionAssetValidations: parsed.productionAssetValidations ?? [],
       // Existing Artwork → Print Ready Phase 1: absent in every store
@@ -1863,7 +1870,7 @@ export class LocalProjectRepository implements ProjectRepository {
           "final_artwork_jobs_project_id_final_direction_approval_id",
         );
       }
-    } else {
+    } else if (input.sourceKind === "prepared_upload") {
       // Existing Artwork → Print Ready Phase 2: the upload workflow's
       // idempotency key is (project, preparation, production width) — the
       // local-store equivalent of the partial unique index the migration
@@ -1889,6 +1896,21 @@ export class LocalProjectRepository implements ProjectRepository {
           "final_artwork_jobs_project_id_artwork_preparation_id_width",
         );
       }
+    } else {
+      // Signs Phase S2: the sign workflow's idempotency key is (project,
+      // sign preparation, plan key) — the local-store equivalent of
+      // `final_artwork_jobs_sign_preparation_plan_idx`.
+      const duplicate = db.finalArtworkJobs.find(
+        (item) =>
+          item.projectId === projectId &&
+          item.signPreparationId === input.signPreparationId &&
+          item.signPlanKey === input.signPlanKey,
+      );
+      if (duplicate) {
+        throw new UniqueConstraintViolationError(
+          "final_artwork_jobs_sign_preparation_plan_idx",
+        );
+      }
     }
 
     const timestamp = nowIso();
@@ -1902,14 +1924,25 @@ export class LocalProjectRepository implements ProjectRepository {
           : null,
       artworkPreparationId:
         input.sourceKind === "prepared_upload" ? input.artworkPreparationId : null,
-      // Print'em All Phase 1: written for BOTH workflows now — a create_new
-      // job is bound to the confirmed size it was enqueued for, exactly as a
-      // prepared_upload job already was.
-      productionWidthIn: input.productionWidthIn,
+      // Signs Phase S2.
+      signPreparationId:
+        input.sourceKind === "sign_preparation" ? input.signPreparationId : null,
+      signPlanKey: input.sourceKind === "sign_preparation" ? input.signPlanKey : null,
+      // Print'em All Phase 1: written for BOTH apparel workflows — a
+      // create_new job is bound to the confirmed size it was enqueued for,
+      // exactly as a prepared_upload job already was. `null` for a sign job
+      // (the S2 authority migration's own idempotency key is the plan, which
+      // already encodes both ordered dimensions — see its own doc).
+      productionWidthIn:
+        input.sourceKind === "sign_preparation" ? null : input.productionWidthIn,
       // Print'em All Phase 2: frozen at enqueue and never re-read, exactly
-      // like the width above.
-      productionTreatmentKey: input.productionTreatmentKey,
-      requestedProductionOutput: input.requestedProductionOutput,
+      // like the width above. `null` for a sign job — production treatment
+      // (halftone vs standard raster) is an apparel-DTF axis with no meaning
+      // for a rigid sign.
+      productionTreatmentKey:
+        input.sourceKind === "sign_preparation" ? null : input.productionTreatmentKey,
+      requestedProductionOutput:
+        input.sourceKind === "sign_preparation" ? null : input.requestedProductionOutput,
       artworkVersionId: input.artworkVersionId,
       status: "queued",
       attempts: 0,
@@ -1973,6 +2006,20 @@ export class LocalProjectRepository implements ProjectRepository {
         (item) =>
           item.projectId === projectId &&
           item.artworkPreparationId === artworkPreparationId,
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async listFinalArtworkJobsForSignPreparation(
+    projectId: string,
+    signPreparationId: string,
+  ): Promise<FinalArtworkJob[]> {
+    const db = await readDb();
+    return db.finalArtworkJobs
+      .filter(
+        (item) =>
+          item.projectId === projectId &&
+          item.signPreparationId === signPreparationId,
       )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }

@@ -32,3 +32,11 @@ export {
   type SignPreparationCapability,
   type UploadSignArtworkInput,
 } from "./sign-preparation-capability";
+export {
+  encodeSignPlate,
+  executeSignRepairPlan,
+  planContainsOnlyAdmittedSteps,
+  type SignExecutionBounds,
+  type SignExecutionRefusalReason,
+  type SignExecutionResult,
+} from "./sign-transform-executor";
