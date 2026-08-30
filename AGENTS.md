@@ -16,33 +16,55 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 current domain boundaries, capability responsibilities, dependency direction,
 persistence, generation runtime, and security architecture.
 
-iHeartPrints is an independent **apparel-design** product. The customer uses
-or buys the **artwork**. It does not sell physical garments, is not a
+iHeartPrints is an independent **production-artwork** platform: the core
+product is production-artwork intelligence and the production-ready artwork
+it produces. The customer uses or buys the **artwork**. It does not
+manufacture, print, ship, mount, or install physical products, is not a
 Print'em All feature, and is not a general print-shop operating system.
+Print'em All is a separate fulfillment business that consumes iHeartPrints
+output; it owns no production profile.
 
-Product scope is not current production capability. The product serves the
-apparel-design market; V1 implements one production profile inside it —
-raster garment decoration, focused initially on DTF and DTG workflows.
+Production scope is governed by the Constitution's profile registry (§16B).
+Two profiles are constitutionally admitted: **apparel raster** (activated,
+implemented, live — the DTF/DTG-oriented pipeline; deliverable: validated
+transparent PNG at the selected physical print size, 300 PPI target judged
+from pixel geometry) and **rigid sign raster** (admitted, NOT implemented —
+deliverable when built: opaque exact-size PNG at human-confirmed ordered
+dimensions under §16A's preservation and resolution rules).
 
-The current V1 deliverable is a validated transparent PNG at the selected
-physical print dimensions, targeted at 300 PPI. `print_ready` is scoped to
-that supported raster profile; never write copy or comments implying a file
-is ready for every apparel-decoration method, and never claim control over
-downstream production variables (printer, ink, film, powder, pretreatment,
-RIP, ICC profiles, press settings, garment compatibility).
+**Signs guardrail.** Work on rigid sign raster is permitted ONLY inside
+explicitly approved Signs phases (S1 and later, each approved by the
+product owner). Outside an approved Signs phase, do not add sign behavior,
+copy, or claims. This admission authorizes nothing else: no banners,
+vehicle wraps, multi-panel murals, contour cutting, dimensional letters,
+installation, vector ingestion (SVG/EPS/AI/PDF), generative redesign or
+outpainting, CMYK/ICC workflows, imposition, sign pricing/catalogs/
+fulfillment, or customer-facing sign storefront — and no embroidery,
+engraving, paper, or 3D engines. Never treat the dormant `signage`
+placeholder arm in `production-requirements.ts` (36×72 in guess,
+`targetPpi: null`, vector-flavored) as approved policy: the rigid-sign
+profile will be built to Constitution §16A and the Phase S0 audit, not to
+that placeholder. Never write copy implying sign support exists before the
+sign pipeline actually produces and validates a deliverable.
 
-Do not expand into signs, banners, large-format, promotional products,
-general commercial printing, or physical-product commerce — those are
-outside the product. Do not implement embroidery digitization, screen-print
-separations, sublimation-specific preparation, or vector/SVG/PDF production
-either: they are apparel capabilities for a later, explicit production
-profile, not V1 work. Either kind of expansion needs an explicit
-Constitution amendment.
+**Apparel baseline protection.** The DTF Raster + Halftone V1 apparel
+pipeline is proven and must not be weakened, generalized away, or regressed
+by Signs work. `print_ready` is profile-scoped: an apparel print_ready
+claims nothing about signs, and vice versa. Never write copy or comments
+implying a file is ready for every production method, and never claim
+control over downstream production variables in any profile (printer, ink,
+film, powder, pretreatment, RIP, ICC profiles, press settings, garment
+compatibility, substrate, mounting, installation, longevity).
 
-Reusable architecture may remain broader than active product scope. Dormant
-hooks (reserved vector/PDF roles, Print Vault and Ownership stubs, broader
-validation categories) are not unfinished V1 requirements and must not be
-deleted merely to narrow the product.
+Do not expand into any production category outside the §16B registry —
+that needs a Constitution amendment. Embroidery digitization, screen-print
+separations, sublimation-specific preparation, and vector/SVG/PDF
+production remain apparel capabilities for a later, explicit production
+profile — not current work. Reusable architecture may remain broader than
+activated scope: dormant hooks (reserved vector/PDF roles, Print Vault and
+Ownership stubs, broader validation categories) are not unfinished
+requirements and must not be deleted merely to narrow the product — and
+must not be treated as authorization either.
 
 Before proposing significant product, UX, domain-model, or architecture changes:
 

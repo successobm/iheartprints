@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.2
+Version 1.3
 August 2026
 
 ## Document Position
@@ -27,37 +27,53 @@ behavior is organized to uphold the Constitution.
 
 ## Product Scope
 
-iHeartPrints is an independent **apparel-design** product. The customer
-uses or buys the **artwork**. iHeartPrints does not sell physical garments
-and is not a Print'em All feature, print-shop operating system, or
-physical-product retailer.
+iHeartPrints is an independent **production-artwork platform**. The core
+product is production-artwork intelligence and the production-ready artwork
+it produces; the customer uses or buys the **artwork**. iHeartPrints does
+not manufacture, print, ship, mount, or install physical products and is
+not a Print'em All feature, print-shop operating system, or
+physical-product retailer. Print'em All is a separate physical printing and
+fulfillment business that consumes iHeartPrints output and serves as its
+real-world proving ground; it owns no production profile.
+
+**Production profiles are governed by admission** (Constitution §7.14,
+§16B). Product vision may be broader than activated scope; enum values and
+dormant seams authorize nothing. The registry:
+
+| Profile | Constitutional status | Implementation status |
+|---|---|---|
+| Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
+| Rigid sign raster | Admitted (Constitution §16A) | **Not implemented.** Phase S0 audit complete; implementation proceeds through explicitly approved Signs phases (S1+). Nothing in this repository currently produces or validates a sign deliverable |
+| All other categories | Not admitted | Dormant seams only |
+
+### Apparel raster profile (implemented)
 
 **Product scope is not current production capability** (Constitution
-§7.13). The product serves the apparel-design market. V1 implements one
-production profile within that market: **raster garment decoration**,
-focused initially on **DTF** and **DTG** workflows, because those consume
-exactly what this engine produces — a transparent RGB raster file at a
-known physical size. Additional apparel production profiles may be added
-deliberately later; the current profile is a capability boundary, not the
-permanent product boundary. Non-apparel print categories are different:
-they are excluded by scope and adding capability would not admit them.
+§7.13). Within the apparel profile, V1 implements one production path:
+**raster garment decoration**, focused initially on **DTF** and **DTG**
+workflows, because those consume exactly what this engine produces — a
+transparent RGB raster file at a known physical size. Additional apparel
+production profiles may be added deliberately later; the current profile is
+a capability boundary, not the permanent product boundary. Non-apparel
+categories are governed by the admission registry above — capability never
+admits one (Constitution §7.14).
 
-The current product deliverable is the **iHeartPrints Production PNG** for
+The current apparel deliverable is the **iHeartPrints Production PNG** for
 that supported raster profile: a validated transparent RGB PNG sized to the
 selected apparel print dimensions and targeted at **300 PPI**, where pixel
 geometry (`production pixels ÷ intended physical inches`) is authoritative.
 Embedded PNG density metadata is a hint, never the readiness proof.
 
-`print_ready` means that production validation passed on the production
-asset for the current approved apparel production intent within the
-supported raster profile, and the customer may download that PNG. It is
+Apparel `print_ready` means that production validation passed on the
+production asset for the current approved apparel production intent within
+the supported raster profile, and the customer may download that PNG. It is
 **not** a claim of readiness for every apparel-decoration method. It does
 **not** mean embroidery digitization, screen-print separations,
 sublimation-specific preparation, SVG/vector/PDF production, CMYK, ICC
 profiles, a RIP preset, a specific decorator's press/ink/film/powder/
-pretreatment settings, garment compatibility, signs/banners/large-format
-readiness, promotional-product readiness, or universal print-method
-compatibility.
+pretreatment settings, garment compatibility, readiness for any other
+production profile (including rigid sign raster), promotional-product
+readiness, or universal print-method compatibility.
 
 What the system controls is the file: format, transparency, pixel
 dimensions, intended physical dimensions, pixel-density target, and the
@@ -65,14 +81,32 @@ validation it performs itself. Everything downstream of the file belongs to
 the decorator. Decoration-method vocabulary (including "DTF" and "DTG") is
 internal — it is a production-profile fact, never customer-facing copy.
 
+### Rigid sign raster profile (admitted, unimplemented)
+
+The constitutional contract is §16A: an operator-oriented workflow
+producing an opaque, exact-size, aspect-preserving, preservation-verified
+production PNG at human-confirmed ordered width and height, under a
+viewing-distance-based resolution policy (initial V1 for rigid rectangles
+≤ 24×36 in: 150 PPI target, 100 PPI blocking minimum, revisable
+operationally within the profile — never universal signage policy).
+Architecturally it will be a new `ProductionCategory` arm and validation
+profile behind the existing FinalArtwork orchestration — shared job
+lifecycle, shared provider boundary, shared authoritative-validation
+authority — with profile-specific requirements, repair planning, and
+validation. It enters via structured order facts, never brief-prose
+classification. Provider reconstruction remains bounded, authorized,
+cost-controlled, and idempotent; the current
+one-paid-reconstruction-per-job policy and the Topaz 4× ceiling (§13d,
+§13i) are the present implementation of that rule. The existing dormant
+`signage` placeholder arm in `production-requirements.ts` (vector-flavored,
+36×72 in guess, `targetPpi: null`) is **not** this profile and must not
+become policy by adoption; see the Phase S0 audit.
+
 Reusable architectural seams (reserved `production_svg` /
 `production_pdf` roles, `vectorAssetId`, Print Vault and Ownership stubs,
 broader validation categories) may remain in the codebase. They are
-**dormant hooks**, not unfinished iHeartPrints V1 requirements. Broader
-architecture must not broaden the product.
-
-Print'em All may separately use iHeartPrints technology. That relationship
-does not define this product.
+**dormant hooks**, not unfinished requirements. Broader architecture must
+not broaden the product; only admission does (Constitution §7.14).
 
 ---
 
@@ -3821,9 +3855,13 @@ storage, or validation rule ever reaches this view.
 Current V1 production is the **raster apparel PNG profile only** (DTF/DTG
 focus). Two different reasons put everything else outside it:
 
-- **Outside product scope**: banner/sign production, large format,
+- **Outside activated scope**: banner production, non-rigid large format,
   promotional products, general commercial printing, and universal
-  vector-production. These stay out permanently.
+  vector-production. These stay out unless deliberately admitted
+  (Constitution §7.14). Rectangular rigid sign raster production is now a
+  separately *admitted* profile (Constitution §16A) — but it is not
+  implemented, and nothing on the apparel pipeline may claim readiness for
+  it; the apparel worker's `apparel_raster`-only gate is unchanged.
 - **Outside current production capability**: embroidery digitization,
   screen-print separations, sublimation-specific preparation, and
   SVG/PDF/CMYK production for apparel. These are apparel-decoration
@@ -7011,6 +7049,53 @@ Summarized:
 - Hard process crash after upload can leave storage orphans
 - No live Supabase integration tests in CI (unit/fakes cover contracts)
 
+### 23.2 Pre-external-release security ledger (Phase S0 audit, re-verified on 7dab624)
+
+Recorded during the Signs Phase S0 audit, re-verified against current main
+during S0.5b, and deliberately **not** fixed in the governance phase. None
+of these blocks internal/operator use; ALL of them block external customer
+release. Each must be closed or explicitly risk-accepted before
+iHeartPrints is exposed beyond trusted operators.
+
+1. **Project UUID acts as bearer capability.** No user authentication on
+   `/api/projects/[projectId]/*` routes; anyone holding a project URL has
+   full read/write on that project's artwork. The `ihp_as` acquisition
+   session is read only at project creation, the internal-access routes,
+   and the internal continue pages — no per-project route checks session
+   ownership, and `isAuthorizedForArtworkCorrection` resolves to
+   "project exists".
+2. **Upload Content-Length / body-buffering bypass.**
+   `artwork-upload/route.ts` rejects an oversized declared length but then
+   buffers the entire body via `request.formData()` before the
+   authoritative size check — a lying or chunked `Content-Length` defeats
+   the early bound (memory-exhaustion DoS). No platform body cap is
+   configured.
+3. **Production signing-secret fallback.** `ASSET_SIGNING_SECRET`
+   (`signed-url-token.ts`) and the guided-cleanup candidate-token secret
+   (`guided-cleanup-candidate.ts`) fall back to hardcoded constants in
+   every environment, unlike `WORKER_SECRET`'s production fail-closed
+   behavior. Unset env in production means forgeable tokens.
+4. **Production `data_uri` storage fallback.** The default
+   `ASSET_STORAGE_MODE` is `data_uri` (and unrecognized values fall back to
+   it), and `isProductionSafeAssetStorageMode` is consulted only on the
+   concept-generation path — the upload/asset-write path is ungated, so a
+   misconfigured deploy base64-inlines uploads into Postgres and responses.
+5. **Synchronous heavy image processing in request handlers.** Upload
+   decode/analysis runs inline, and the separation/correction image routes
+   re-run the full decode → analyze → region-map → rebuild → encode
+   pipeline on every GET with no cache, timeout, or worker offload. Phase
+   28K widened these routes from internal-only to any caller holding a
+   valid project UUID, so this per-request CPU burn is reachable by the
+   same bearer-UUID population as item 1. Belongs on the existing
+   authenticated worker queue.
+6. **Topaz result-download trust gap.** The download step now has a
+   dedicated timeout and a separate retry budget, but the URL from the
+   provider's JSON response is still fetched with no scheme/host
+   allowlist, no response-size cap before `arrayBuffer()`, default
+   redirect-following, and a content-type check that is skipped when the
+   header is absent (`topaz-transparency-upscale-provider.ts`, download
+   step).
+
 ---
 
 ## 23a. IP / Trademark Safety Boundary (Sprint A3)
@@ -9957,8 +10042,9 @@ Do not treat future work as completed architecture.
 
 ## 25. Current V1 vs reusable extension points
 
-This section is **not** an iHeartPrints delivery plan for signs, vector,
-embroidery, or physical-product commerce. It records (a) what is already
+This section is **not** a delivery plan for vector, embroidery, or
+physical-product commerce, and records the rigid-sign profile only as
+admitted-but-unimplemented (Constitution §16B). It records (a) what is already
 current V1 architecture and (b) dormant seams that may serve iHeartPrints
 later or other systems later. Broader architecture is not permission to
 broaden the product — and equally, a dormant seam is not evidence that the
@@ -10030,9 +10116,9 @@ Before implementing a change, check:
 11. Does environment selection stay in composition/config (not UI/conversation)?
 12. Does it require updating this architecture document?
 13. Does it remain consistent with the Constitution?
-14. Does it keep iHeartPrints an independent apparel-design product (artwork, not physical goods; not signs/banners/large-format/general commercial printing at all; not embroidery digitization, screen-print separations, sublimation-specific preparation, or vector production in V1)?
-15. If it touches a broader architectural hook, does it leave that hook dormant rather than turning it into an iHeartPrints V1 requirement?
-16. Does any wording it introduces claim readiness beyond the supported apparel raster production profile?
+14. Does it keep iHeartPrints an independent production-artwork product (artwork, never physical goods or fulfillment; production categories only within the activated profiles of Constitution §16B; not embroidery digitization, screen-print separations, sublimation-specific preparation, or vector production in the apparel V1)?
+15. If it touches a broader architectural hook, does it leave that hook dormant rather than turning it into a current requirement — and never treat an unadmitted or admitted-but-unimplemented profile as supported?
+16. Does any wording it introduces claim readiness beyond the production profile (and implementation state) it actually belongs to?
 
 ---
 

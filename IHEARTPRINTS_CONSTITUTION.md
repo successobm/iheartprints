@@ -1,6 +1,6 @@
 # iHeartPrints Constitution
 
-**Version 2.3**
+**Version 3.0**
 
 ## 1. Purpose of the Constitution
 
@@ -20,25 +20,34 @@ iHeartPrints exists to close that gap for **apparel design**.
 
 It helps people move from an idea or an existing file to professional, print-ready apparel artwork through guided conversation, structured design understanding, and production-aware preparation.
 
+The same gap exists beyond apparel. Customers hold artwork for signs, print, and other manufacturing processes that they cannot make production-ready without a designer. iHeartPrints closes that gap one deliberately activated production profile at a time (§7.14); apparel was the first, and remains governed by its own contract.
+
 ## 3. Vision
 
-Anyone with an idea for apparel artwork should be able to create or prepare something a professional apparel decorator would be proud to print—without learning design software, print engineering, or image-generation mechanics.
+Anyone with an idea or an existing file should be able to turn it into artwork a professional producer would be proud to print—without learning design software, print engineering, or image-generation mechanics.
+
+iHeartPrints pursues that vision one production profile at a time. Apparel came first. Other production categories—signs and large format, paper and commercial print, embroidery, engraving, and other manufacturing processes—are directional possibilities for this same product, not present commitments, and none of them is supported until deliberately activated (§7.14, §16B).
 
 ## 4. Mission
 
-iHeartPrints is an independent conversational apparel-design product. It helps people create or prepare artwork and produce a validated transparent PNG for the apparel raster decoration workflows iHeartPrints currently supports.
+iHeartPrints is an independent production-artwork platform. It helps people create or prepare artwork and produce validated, production-ready files for the production profiles iHeartPrints has deliberately activated.
 
-Unlike traditional AI image generators that begin with a prompt, iHeartPrints begins with a Design Interview when the customer is creating new artwork.
+Two production profiles are constitutionally admitted today:
 
-The goal is not merely to generate images.
+- **Apparel raster decoration** (§16) — the original product: conversational apparel design and artwork preparation delivering a validated transparent PNG for the supported raster garment-decoration workflows.
+- **Rigid sign raster production** (§16A) — admitted by amendment 3.0: an operator-oriented workflow that turns customer-supplied raster artwork into a validated, opaque, exact-size production PNG for rectangular rigid signs. Admission is not implementation; §16B records the difference.
 
-The goal is to produce apparel artwork that is ready to print.
+Unlike traditional AI image generators that begin with a prompt, iHeartPrints begins with the customer's intent—a Design Interview when creating new artwork, and the customer's own pixels when preparing artwork they already have.
+
+The goal is not merely to generate or process images.
+
+The goal is artwork that is genuinely ready for the production process it is being prepared for.
 
 ## 5. Product Identity
 
-iHeartPrints is an independent product. Print'em All is the parent company and may separately use, embed, or extend iHeartPrints technology. That relationship must not define iHeartPrints product architecture, roadmap, or customer experience.
+iHeartPrints is an independent product. Print'em All is a separate physical printing and fulfillment business that may consume, embed, or extend iHeartPrints technology and serves as a real-world proving ground for iHeartPrints output. That relationship must not define iHeartPrints product architecture, roadmap, or customer experience, and no production profile is owned by or embedded in Print'em All.
 
-The primary product is **design**. The customer uses or buys the **artwork**. iHeartPrints does not sell the physical garment.
+The core product is **production-artwork intelligence and the production-ready artwork it produces**. The customer uses or buys the **artwork**. iHeartPrints does not manufacture, print, ship, mount, install, or otherwise fulfill any physical product—garment, sign, or otherwise.
 
 The core journey is:
 
@@ -50,6 +59,8 @@ Two creation paths are first-class:
 - **Existing Artwork** — upload, preparation, transparency as needed, size, then print-ready PNG.
 
 A future “Need a printer?” directory or referral experience is allowed. It is not part of the current product and does not make iHeartPrints a retailer.
+
+The journey above describes the apparel design experience. Each activated production profile defines its own workflow shape within this identity (§7.3): the rigid sign profile, for example, is an operator-oriented preparation workflow rather than a conversational design interview. That production-artwork intelligence may eventually power workflows operated by Print'em All or by independent producers; any such “powered by iHeartPrints” relationship is an architectural possibility, not a current product feature, and never brings physical fulfillment into iHeartPrints.
 
 ## 6. Product Philosophy
 
@@ -82,6 +93,8 @@ The product should not feel like operating design software or prompting an image
 Prefer natural conversation and one question at a time over complicated forms.
 
 Forms may support the experience when they reduce friction—especially for upload details, placement, and print size—but they must not replace the Design Interview as the primary way customers creating new artwork express intent.
+
+Conversation-first governs the customer design experience. An operator-oriented production workflow inside an activated profile—such as rigid-sign production repair—may be surface-appropriate instead: forms, previews, and explicit approvals. It must still prefer plain language, preview-then-confirm, and meaningful decisions over technical controls.
 
 ### 7.4 Understand Before Generating
 
@@ -138,6 +151,8 @@ The customer should not need to understand decoration-method internals, and deco
 
 iHeartPrints is responsible for the artwork file. It is not responsible for, and must not claim authority over, downstream production variables it does not operate: printer hardware, ink systems, film, powder, pretreatment, RIP configuration, printer-specific color management, ICC profiles, transfer temperature/time/pressure, garment compatibility, or a specific shop's production settings.
 
+Production awareness is profile-specific. The facts above are the apparel profile's. For rigid signs, production awareness centers on ordered physical size, substrate-defined geometry, viewing-distance-appropriate resolution, and preservation of the customer's supplied artwork (§16A).
+
 ### 7.10 Concepts Must Respect the Brief
 
 Generated concepts must not randomly change the approved style.
@@ -156,18 +171,19 @@ Artwork may only be treated as print-ready after authoritative production valida
 
 No concept should be described as print-ready merely because an image model generated it. No uploaded file should be described as print-ready merely because it was uploaded or had its background removed.
 
-### 7.13 Product Scope Is Not Current Production Capability
+### 7.13 Vision, Activated Scope, and Dormant Architecture
 
-Two things must never be confused:
+Three things must never be confused:
 
-- **Product scope** — the market iHeartPrints serves: apparel design and artwork preparation.
-- **Production capability** — the apparel production profiles the system can actually produce and validate today.
+- **Product vision** — the markets iHeartPrints may ultimately serve: production-ready artwork for multiple manufacturing and printing processes. Vision language authorizes nothing.
+- **Activated production scope** — the production profiles this Constitution has deliberately admitted (§16, §16A, and the registry in §16B). Only activated scope may shape product claims, implementation work, or `print_ready`.
+- **Dormant architecture** — enum values, reserved roles, placeholder code paths, and roadmap notes. A category appearing in an enum, an architecture document, or this Constitution's vision language is not supported and must never be described as supported.
 
-The current production capability is narrower than the product scope, and deliberately so. A present production limitation is a capability statement, not a permanent product boundary. New apparel production profiles may be added intentionally as decoration technology and customer demand evolve.
+Within an activated profile, capability may still be narrower than scope: a present production limitation is a capability statement, not a product boundary. The reverse also holds: nothing may be described as supported, ready, or validated for anything the system does not actually produce and validate.
 
-The reverse also holds: capability may not be assumed from scope. Nothing may be described as supported, ready, or validated for an apparel production profile the system does not actually produce and validate.
+### 7.14 Engines Are Admitted, Never Drifted Into
 
-Non-apparel print categories are a different matter entirely. They are excluded by product scope (§20), not by current capability, and adding capability would not bring them in.
+Product vision may be broader than activated production scope. A production profile becomes activated only through a deliberate Constitution amendment that names the profile, defines its deliverable, defines what its `print_ready` means and does not mean, and records the decision in version history. Implementation convenience, enum values, keyword lists, dormant code, or accumulated capability never activate a profile — and an activated profile still supports nothing until its implementation actually produces and validates the deliverable (§16B).
 
 ## 8. The Role of the Design Assistant
 
@@ -298,7 +314,9 @@ Every meaningful change to the Design Brief, every generated concept, every revi
 
 Prior versions remain available. The system must not silently overwrite history. Customers should be able to return to earlier decisions with confidence.
 
-## 16. V1 Production Contract
+## 16. Production Contracts — Apparel Raster
+
+Each activated production profile has its own production contract: what it delivers, what it controls, and what its `print_ready` means and does not mean. §16.1–§16.6 are the apparel raster contract, unchanged in substance by amendment 3.0. §16A is the rigid sign raster contract. §16B is the profile registry. "V1" in this section refers to the apparel profile's own versioning.
 
 ### 16.1 The supported production profile
 
@@ -366,7 +384,7 @@ For iHeartPrints V1, `print_ready` means:
 - a particular RIP preset
 - a particular decorator's press, ink, film, powder, pretreatment, or heat-press settings
 - garment or fabric compatibility
-- signs, banners, or large-format readiness
+- readiness for any other production profile, activated or not — an apparel `print_ready` says nothing about rigid-sign production (§16A) or any other process
 - promotional-product readiness
 - universal compatibility with every printing method
 - perfect OCR or spelling verification
@@ -387,9 +405,62 @@ The product must not claim that generated artwork is print-ready without validat
 | Screen printing | Apparel decoration | Future production capability. V1 produces no separations or screens and claims no complete screen-print package. The PNG may be useful as design artwork; `print_ready` never implies separation-ready. |
 | Embroidery | Apparel decoration | Future production capability. V1 produces no digitized stitch files; `print_ready` never implies embroidery-ready. |
 | Other apparel-decoration methods | Apparel decoration | May be added later as explicit production profiles. Not enumerated exhaustively, and not V1 commitments. |
-| Signs, banners, large format, promotional products, general commercial printing | Not apparel | Outside the product entirely (§20). Excluded by scope, not by capability. |
+| Rectangular rigid sign raster | Not apparel — separate activated profile | Admitted by amendment 3.0 as its own production profile with its own contract (§16A). Never reachable through the apparel contract. |
+| Banners, other large format, promotional products, general commercial printing | Not apparel | Not admitted (§7.14, §16B, §20). Excluded until deliberately admitted. |
 
 Naming a method as a future capability is a scope statement, never a schedule and never a claim of present support.
+
+## 16A. Rigid Sign Raster Production Contract
+
+### 16A.1 The profile
+
+Rigid Sign Raster is the second activated iHeartPrints production profile: an **operator-oriented** production-artwork workflow that turns customer-supplied raster artwork into a validated production file for **exact-size rectangular rigid signs**. Its V1 is operated by trained operators; it has no customer-facing self-service surface, and this admission creates no obligation to build one.
+
+### 16A.2 The deliverable
+
+The rigid sign deliverable is a **production PNG** that is:
+
+- opaque — no transparency anywhere in the plate
+- RGB raster
+- sized to the exact ordered physical dimensions, width and height, taken from structured order facts a human explicitly confirmed — never inferred from artwork, prose, or defaults
+- aspect-exact: the plate's pixel geometry matches the ordered dimensions, and the customer's artwork within it is never stretched, squashed, or non-uniformly scaled
+- validated by authoritative sign production validation before any `print_ready` claim
+- downloadable only after that validation permits it
+
+Pixel geometry (production pixels ÷ ordered physical inches) is the authority for effective resolution. Embedded density metadata is a hint to graphics software, never proof.
+
+### 16A.3 Preservation and repair
+
+Customer artwork prepared under this profile is **pixel-authoritative**. Production repair exists to make the customer's artwork correctly printable at the ordered size while changing as little as possible. Therefore:
+
+- The uploaded original is immutable; every transformation derives a new asset with recorded lineage back to the exact uploaded bytes.
+- Repair prefers deterministic, content-preserving operations — proportional resampling, and extension or padding of affirmatively confirmed uniform background — over any provider transformation.
+- Resolution reconstruction may use a bounded production provider. Provider operations must be authorized, cost-controlled, idempotent where applicable, and preservation-verified before `print_ready`.
+- No repair may stretch artwork; crop meaningful content without explicit approval of an exact preview; invent content; alter wording, prices, faces, logos, colors, or the proportions of meaningful elements; or replace customer artwork with a generated substitute.
+- After repair, the output must be verified against the original: deterministically where arithmetic can prove preservation, conservatively where it cannot. A verification that fails — or cannot reach a verdict — blocks `print_ready`.
+- When satisfying an order requires aesthetic or creative judgment — a visible extension seam, an unavoidable crop of meaningful content, severely degraded source quality — the system escalates to a human rather than deciding.
+
+### 16A.4 Resolution policy
+
+Sign resolution requirements are a **profile policy derived from product class, physical dimensions, viewing distance, print process, and downstream production requirements** — never a universal constant, and never copied from another profile. The initial V1 policy for rectangular rigid signs up to 24×36 inches is a **150 PPI effective-resolution target with a 100 PPI blocking minimum**, judged from pixel geometry with resolution-provenance honesty: enlarged pixels are judged by their true source detail. These figures are initial production policy, expected to evolve from production evidence; revising them within this profile is an operational decision recorded in the architecture, not a Constitution amendment. Extending them to other sign classes, sizes, or processes is not authorized by this section.
+
+### 16A.5 What rigid sign `print_ready` does not mean
+
+`print_ready` under this profile is a statement about the artwork file only. It does not guarantee: substrate quality or suitability, printer calibration, RIP behavior, ICC or color-management accuracy, exact physical color reproduction, mounting, finishing, installation, outdoor longevity, weather resistance, or structural suitability. iHeartPrints does not manufacture, print, ship, mount, or install signs. Print'em All may consume iHeartPrints output and physically fulfill an order; fulfillment remains outside the iHeartPrints product boundary for every profile.
+
+### 16A.6 What this admission does not activate
+
+This profile covers rectangular rigid signs from raster input only. It does not admit: banners or flexible substrates; vehicle wraps; multi-panel murals; contour or cut paths; dimensional letters; installation; bleed or template systems beyond an explicit per-order bleed parameter; SVG/EPS/AI/PDF ingestion; arbitrary vector recreation; generative redesign or outpainting; automatic layout redesign; font replacement; CMYK/ICC production workflows; imposition; sign pricing or catalogs; sign fulfillment; or a customer-facing self-service sign storefront. Each requires its own deliberate admission (§7.14). Nor does it activate embroidery, engraving, paper-production, or 3D engines — those remain product vision only.
+
+## 16B. Production Profile Registry
+
+| Profile | Constitutional status | Meaning |
+|---|---|---|
+| Apparel raster (DTF/DTG-oriented; includes the internal DTF halftone treatment) | **Activated** | Admitted, implemented, and live (§16) |
+| Rigid sign raster | **Admitted** | Admitted by amendment 3.0. Implementation proceeds through explicitly approved phases; nothing under this profile is supported, ready, or validated until built and passing its own authoritative validation (§16A) |
+| Everything else — banners, embroidery deliverables, engraving, vector production, paper/commercial print, 3D, and any category not named above | **Not admitted** | May appear in vision language or dormant architecture; supports nothing; requires its own amendment |
+
+Four distinct states, in order: **constitutionally admitted → architecturally reserved → implemented → production-live**. Being admitted is not being implemented; being implemented is not being live. No customer-facing, operator-facing, or documentation claim may run ahead of the rightmost state that is actually true.
 
 ## 17. Artwork Ownership and Licensing
 
@@ -473,8 +544,8 @@ iHeartPrints is not intended to become:
 - a physical-product retailer
 - a garment catalog, inventory, pricing, cart, checkout, shipping, or fulfillment system
 - a SanMar or supplier-catalog shopping experience
-- a signs, banners, large-format, or promotional-products design product
-- a general commercial-printing platform
+- a manufacturer, printer, or fulfiller of physical products in any category — no printing, shipping, mounting, or installation, ever, for any profile
+- an "everything printable" platform — production categories outside the activated profiles (§16B) remain outside the product until deliberately admitted (§7.14), and no accumulation of capability admits one
 - a universal vector-production product
 - a general-purpose AI image generator
 - a prompt-engineering interface
@@ -489,7 +560,7 @@ iHeartPrints is not intended to become:
 
 These are scope exclusions: they stay out regardless of what the system becomes technically capable of.
 
-Embroidery digitization, screen-print separations, and sublimation-specific preparation are **not** on this list. They are apparel-decoration methods governed by §16.6 — outside current production capability, potentially inside the product later. Absence of capability is not permission to claim support for them today.
+Embroidery digitization, screen-print separations, and sublimation-specific preparation are **not** on this list. They are apparel-decoration methods governed by §16.6 — outside current production capability, potentially inside the product later. Absence of capability is not permission to claim support for them today. Rectangular rigid sign raster production is likewise no longer on this list: it is an activated profile governed by §16A. Banners, other large-format categories, and promotional products remain unadmitted.
 
 Reusable technical architecture may remain broader than the active product. Broader architecture is not permission to broaden the product.
 
@@ -507,6 +578,7 @@ A successful iHeartPrints experience should allow a customer to:
 - request revisions conversationally
 - choose apparel placement and production dimensions
 - reach approved artwork without learning design software
+- have artwork they already own made production-ready for an activated production profile without it being redesigned
 - download a validated production PNG for the supported apparel raster profile
 - feel as though they worked with an experienced apparel designer
 
@@ -539,6 +611,7 @@ Temporary tactics, vendor changes, framework migrations, and sprint scope do not
 
 | Version | Summary |
 |---|---|
+| 3.0 | Multi-engine product identity and Rigid Sign Raster admission (sections affected: §2, §3, §4, §5, §7.3, §7.9, §7.13, new §7.14, §16 retitled, §16.5, §16.6, new §16A, new §16B, §20, §21, §24). Reason: the deliberate product decision to expand iHeartPrints beyond its original apparel-only definition into a governed multi-production-engine platform, with Print'em All as a separate fulfillment business and real-world proving ground rather than an owner of any profile. Establishes the three-tier scope model (product vision / activated production scope / dormant architecture) and the admission rule that a production profile is activated only by deliberate amendment (§7.14); names the core product as production-artwork intelligence and the production-ready artwork it produces. Admits **Rigid Sign Raster** as the second production profile with its own contract (§16A): operator-oriented; opaque, exact-size production PNG at human-confirmed ordered width and height; aspect preservation with no stretching; no unapproved meaningful-content cropping; immutable-source lineage; deterministic-repair preference; authorized, cost-controlled, idempotent-where-applicable, preservation-verified provider reconstruction; authoritative sign validation; human escalation for aesthetic or creative judgment; and a viewing-distance-based resolution policy (initial V1 for rigid rectangles ≤ 24×36 in: 150 PPI target / 100 PPI blocking minimum, revisable operationally within the profile, never universal signage policy). Fulfillment of physical products becomes a permanent, profile-independent non-goal. Admission is explicitly not implementation: nothing under the sign profile is supported until built and passing its own authoritative validation (§16B). The apparel raster contract (§16.1–§16.6) is unchanged in substance. |
 | 2.3 | Customer-information and terms-of-access boundary (sections affected: new §17.2, §20). Reason: the product began asking customers for information as a condition of continuing, and needed a durable statement of what that does and does not entitle iHeartPrints to — the existing text covered artwork rights but said nothing about the customer's own data or about how access limits may be presented. States that information asked for in order to continue is used only for that; that marketing consent is a separate explicit decision and may never be inferred from it; that no account, membership, or verified identity may be described unless it genuinely exists; that information is collected only after value has been given and only where the product needs it; that access limits are enforced by the product but never explained in the language of internal accounting; and that limits are never enforced by IP-address identity or device fingerprinting, with the resulting gap stated honestly rather than closed by those means. Adds marketing automation, mailing lists, and customer tracking to the explicit non-goals. **The commercial arrangement itself — what is free, what is paid, how much, in what order — is explicitly named as business strategy rather than constitutional identity, and may change without amendment.** No change to the V1 deliverable, the production contract, or the two creation paths. |
 | 2.2 | Third-party intellectual-property boundary (sections affected: new §17.1, §20). Reason: the product needed a durable statement of what it will and will not create with respect to other people's branding, and the existing text covered only what `print_ready` does not verify. States that iHeartPrints will not knowingly reproduce or deliberately imitate recognizable third-party protected branding and will not help circumvent those protections; that it provides no legal clearance, makes no accusation, and never states a threshold of change; that themes, styles, colors, places, and a customer's own branding remain allowed; that ownership classification and this use-policy boundary stay separate; that preparing supplied artwork is a technical operation rather than an ownership determination; and that provider safety remains independent and additive. Adds trademark clearance / rights verification / legal advice to the explicit non-goals. No change to the V1 deliverable, the production contract, or the two creation paths. |
 | 2.1 | Production-authority clarification (sections affected: §4, §7.1, §7.9, new §7.13, §12, §16 restructured as §16.1–§16.6, §20, §21). Separates product scope (apparel design and artwork preparation) from current production capability (§7.13). Names DTF and DTG as the initial supported raster garment-decoration workflows, scopes `print_ready` to the supported raster production profile rather than to apparel generally, states what iHeartPrints controls versus downstream decorator variables, and classifies embroidery, screen printing, and sublimation as apparel methods outside current capability rather than permanent non-goals. Non-apparel categories remain excluded by scope. No change to the V1 deliverable or to product behavior. |
@@ -549,7 +622,7 @@ Temporary tactics, vendor changes, framework migrations, and sprint scope do not
 
 Every proposed feature should be evaluated against these questions:
 
-1. Does this make it easier to create or prepare professional apparel artwork?
+1. Does this make it easier to create or prepare professional, production-ready artwork within an activated production profile?
 2. Does it reduce customer complexity?
 3. Does it reinforce conversation where conversation is the right interaction?
 4. Does it strengthen the Design Brief on the Create New path, or honestly preserve uploaded artwork on the Existing Artwork path?
@@ -557,8 +630,9 @@ Every proposed feature should be evaluated against these questions:
 6. Would an experienced apparel designer naturally do this?
 7. Does it help customers describe what they want rather than how to create it?
 8. Does it preserve clear ownership, privacy, and version history?
-9. Does it stay inside iHeartPrints as an independent apparel-design product, rather than becoming a retailer, a print-shop operating system, or a general print platform?
+9. Does it stay inside iHeartPrints as an independent production-artwork product — artwork, never physical goods, fulfillment, a print-shop operating system, or a retail platform?
 10. Is this genuinely part of iHeartPrints, or is it product drift?
+11. If it touches a production category: is that category **activated** in §16B, and is the claim it makes consistent with that category's actual implementation state — or is this drift toward an unadmitted engine?
 
 Print Vault strength is not a requirement for current V1 work.
 

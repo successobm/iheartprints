@@ -1,16 +1,18 @@
 # iHeartPrints
 
-iHeartPrints is an apparel-design application. It helps people create new
-artwork through conversation, or prepare artwork they already have, and
-produce a **validated transparent PNG** for apparel raster production.
+iHeartPrints is a production-artwork application. It helps people create
+new artwork through conversation, or prepare artwork they already have, and
+produce validated production-ready files for its activated production
+profiles — today, a **validated transparent PNG** for apparel raster
+production.
 
 The customer uses the artwork. iHeartPrints does not sell physical garments,
 garment catalogs, or print-shop fulfillment.
 
 ## Product scope vs. current production capability
 
-iHeartPrints serves the **apparel-design** market. V1 implements one
-production profile inside that market: raster garment decoration, focused
+iHeartPrints's first market is **apparel design**, and apparel raster is
+its first activated production profile: raster garment decoration, focused
 initially on **DTF** and **DTG** workflows, because those consume exactly
 what this engine produces.
 
@@ -29,9 +31,14 @@ compatibility; those are the decorator's.
 V1 does not produce embroidery digitization, screen-print separations,
 sublimation-specific preparation, or vector/SVG/PDF output. Those are
 apparel-decoration capabilities the platform may add later as explicit
-production profiles — not present support. Signs, banners, large format,
-promotional products, and general commercial printing are outside the
-product entirely.
+production profiles — not present support.
+
+Production scope beyond apparel is governed by the Constitution's profile
+registry (§16B). **Rigid sign raster** production is constitutionally
+admitted but not yet implemented: nothing in this repository currently
+produces or validates a sign deliverable. Banners, other large-format
+categories, promotional products, and general commercial printing are not
+admitted. iHeartPrints never fulfills physical products in any category.
 
 Current V1 production capability is not the permanent limit of the product.
 See [Constitution §7.13 and §16](./IHEARTPRINTS_CONSTITUTION.md).
