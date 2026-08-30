@@ -2450,6 +2450,95 @@ export interface ArtworkPreparation {
 }
 
 /**
+ * Signs Phase S1: lifecycle of one rigid-sign preparation.
+ *
+ *   'inspected' → immutable original stored, deterministic inspection done.
+ *                 The ordered physical size may or may not be confirmed yet.
+ *   'planned'   → a repair PLAN exists for the confirmed ordered size.
+ *                 NOT executed, NOT approved for production, NOT a
+ *                 print-readiness claim of any kind (Constitution §16A/§16B —
+ *                 the profile is admitted; nothing is produced or validated
+ *                 in S1).
+ *
+ * Mirrors `ArtworkPreparationStatus`'s honesty rule: there is no
+ * "rejected"/"failed" status — a sign the planner refuses stays at its last
+ * truthful stage carrying explicit defects.
+ */
+export type SignPreparationStatus = "inspected" | "planned";
+
+/**
+ * Signs Phase S1: the durable record of one rigid-sign order's artwork —
+ * "understand this sign order before changing any pixels."
+ *
+ * Its own record, not fields on `ArtworkPreparation`, for the same
+ * schema-discipline reasons that record exists at all:
+ *
+ *   1. It is the SIGN-WORKFLOW IDENTITY. "Is this project a rigid-sign
+ *      preparation?" is answered by whether a row exists here — the same
+ *      no-workflow-enum rule the apparel upload workflow established.
+ *   2. `ArtworkPreparation`'s lifecycle ('analyzed'/'prepared'/'approved'),
+ *      its background-isolation diagnostics, and its transparent prepared
+ *      asset are apparel-DTF facts. A sign preparation has none of them and
+ *      has facts of its own (ordered width AND height, a resolution policy,
+ *      a repair plan) that would make the apparel record lie.
+ *   3. Ordered sign dimensions must not flow through the apparel
+ *      width-only placement model (`intendedPrintWidthIn` /
+ *      `PrintPlacement`) — Constitution §16A: width AND height are
+ *      authoritative, human-confirmed, and never inferred.
+ *
+ * `inspection` / `plan` are loosely typed plain objects for the same
+ * domain-layer-independence reason `ArtworkPreparation.analysis` is — they
+ * are narrowed at the `SignPreparationCapability` boundary that writes and
+ * reads them, recomputed rather than trusted as authority, and are INTERNAL
+ * diagnostics never rendered raw to a customer.
+ */
+export interface SignPreparation {
+  id: string;
+  projectId: string;
+  status: SignPreparationStatus;
+  /**
+   * The customer's uploaded bytes, exactly as received. Immutable — every
+   * later transformation (S2+) derives a NEW asset; this id never changes.
+   */
+  originalAssetId: string;
+  /** Sanitized customer filename. Display only — never a storage path. */
+  originalFilename: string | null;
+  /**
+   * The human-confirmed ordered physical size (Constitution §16A.2):
+   * BOTH dimensions authoritative, never defaulted, never inferred from
+   * artwork, filename, prose, or the dormant `signage` placeholder.
+   * `null` until explicitly confirmed; planning fails closed without them.
+   */
+  orderedWidthIn: number | null;
+  orderedHeightIn: number | null;
+  /**
+   * When a human explicitly confirmed the ordered size. The consent
+   * provenance — mirrors `productionSizeConfirmedAt`'s "a default is not a
+   * decision" rule. `null` means never confirmed.
+   */
+  specConfirmedAt: string | null;
+  /**
+   * Which sign resolution policy governed the confirmation (e.g. the V1
+   * rigid-rectangle 150-target/100-minimum policy), stamped at confirm time
+   * so a later policy revision cannot silently re-govern an old order.
+   */
+  resolutionPolicyId: string | null;
+  /** Deterministic `SignInspectionReport`. Internal diagnostics; never rendered raw. */
+  inspection: Record<string, unknown> | null;
+  /** Persisted `SignRepairPlan`. `null` until planning succeeds. Never executed in S1. */
+  plan: Record<string, unknown> | null;
+  /**
+   * Canonical, order-insensitive identity of `plan` — the future
+   * `FinalArtworkJob` binding key (the `production_treatment_key`
+   * precedent). Changes whenever any production-significant plan input
+   * changes; never changes on cosmetic serialization differences.
+   */
+  planKey: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * Sprint 2M Phase 2C (Goal 12): authoritative Print Validation's persisted
  * home. Deliberately its own record — never a single status column on
  * `ArtworkVersion` (Phase 2A/2B both audited and rejected that; see

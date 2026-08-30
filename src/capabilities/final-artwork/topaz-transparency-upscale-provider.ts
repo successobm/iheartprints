@@ -80,7 +80,7 @@ const TRANSFORMATION_METHOD = "topaz_transparency_upscale_v1";
  * over-requesting costs provider time and produces pixels production then
  * throws away.
  */
-const RECONSTRUCTION_HEADROOM = 1.02;
+export const RECONSTRUCTION_HEADROOM = 1.02;
 /** Defensive bounds around the reconstruction request — never a real limit observed from Topaz, just a sane guard against a corrupt/huge source producing a runaway request. */
 const MIN_RECONSTRUCTION_DIM_PX = 256;
 const MAX_RECONSTRUCTION_DIM_PX = 8192;
@@ -110,7 +110,7 @@ const MAX_RECONSTRUCTION_DIM_PX = 8192;
  * A need above this ceiling is not "ask anyway and see": it resolves to
  * `insufficient_reconstruction` and never leaves this process.
  */
-const PROVIDER_MAX_RECONSTRUCTION_SCALE = 4;
+export const PROVIDER_MAX_RECONSTRUCTION_SCALE = 4;
 
 const DEFAULT_SUBMIT_TIMEOUT_MS = 30_000;
 /** Phase 2D observed 69.5s–128.0s for Transparency Upscale; generous margin above the worst case. */

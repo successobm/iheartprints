@@ -3,6 +3,7 @@ import type { ProjectRepository } from "@/lib/db/repository";
 
 import { createAcquisitionCapability } from "@/capabilities/acquisition";
 import { createArtworkPreparationCapability } from "@/capabilities/artwork-preparation";
+import { createSignPreparationCapability } from "@/capabilities/sign-preparation";
 import { resolveAssetStorageProvider } from "@/capabilities/asset-storage";
 import {
   createAssetCapability,
@@ -118,6 +119,14 @@ export interface CapabilityGraph {
    * operation is local, deterministic pixel math.
    */
   artworkPreparation: ReturnType<typeof createArtworkPreparationCapability>;
+  /**
+   * Signs Phase S1: rigid-sign inspection/diagnosis/planning
+   * (Constitution §16A). Operator/internal only — no route exposes it —
+   * and like artworkPreparation it has NO provider dependency: every
+   * operation is local, deterministic measurement and planning. It never
+   * executes a repair or changes a pixel.
+   */
+  signPreparation: ReturnType<typeof createSignPreparationCapability>;
 }
 
 let graph: CapabilityGraph | null = null;
@@ -283,6 +292,10 @@ export function createCapabilityGraph(
       assets,
       designBrief,
     ),
+    // Signs Phase S1: repository + assets only. No provider is resolved
+    // here, and none exists to resolve — sign inspection and planning are
+    // local and deterministic by construction.
+    signPreparation: createSignPreparationCapability(repo, assets),
   };
 }
 

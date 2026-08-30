@@ -70,9 +70,28 @@ export type ProductionCategory =
   /**
    * Reserved, dormant. No classification produces this today — non-apparel
    * print products resolve to `out_of_scope_product`. Retained as an
-   * architectural role, not an unfinished V1 requirement (AGENTS.md).
+   * architectural role only. NOT the admitted rigid-sign profile: its old
+   * placeholder arm (36×72in guess, `targetPpi: null`, vector/spot-color
+   * assumptions) is explicitly not rigid-sign policy (Constitution §16A,
+   * Phase S0 audit) and must never be adopted for it.
    */
   | "signage"
+  /**
+   * Signs Phase S1: the constitutionally ADMITTED rigid-sign profile
+   * (Constitution §16A / §16B) — an opaque, exact-size production PNG at
+   * human-confirmed ordered width AND height. Deliberately distinct from
+   * the dormant `signage` placeholder above.
+   *
+   * Brief-text classification NEVER produces this value: a sign order
+   * enters through a structured, human-confirmed `SignProductionSpec`
+   * (`capabilities/sign-preparation`), never through prose keywords — the
+   * Sprint A2 lesson. Requirements for it are built by
+   * `deriveRigidSignProductionRequirements`, never by
+   * `deriveProductionRequirements`'s brief-derived path. As of S1 nothing
+   * produces or validates a sign deliverable; inspection/diagnosis/planning
+   * only.
+   */
+  | "rigid_sign_raster"
   /**
    * Reserved, dormant. See `signage` — retained for a future explicit
    * vector production profile, produced by nothing today.

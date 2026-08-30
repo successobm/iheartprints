@@ -23,6 +23,8 @@ import type {
   ArtworkPreparation,
   ArtworkPreparationStatus,
   ArtworkVersion,
+  SignPreparation,
+  SignPreparationStatus,
   AssetKind,
   AssetRecord,
   ConceptDirectionKey,
@@ -61,6 +63,7 @@ import type {
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
+  CreateSignPreparationInput,
   CreateFinalArtworkJobInput,
   CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
@@ -82,6 +85,7 @@ import type {
   UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
+  UpdateSignPreparationInput,
 } from "./repository";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -402,6 +406,24 @@ type DbArtworkPreparation = {
   /** Intelligent Separation Phase 9. Absent on rows written before the column existed. */
   separation?: Record<string, unknown> | null;
   approved_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Signs Phase S1. */
+type DbSignPreparation = {
+  id: string;
+  project_id: string;
+  status: SignPreparationStatus;
+  original_asset_id: string;
+  original_filename: string | null;
+  ordered_width_in: number | null;
+  ordered_height_in: number | null;
+  spec_confirmed_at: string | null;
+  resolution_policy_id: string | null;
+  inspection: Record<string, unknown> | null;
+  plan: Record<string, unknown> | null;
+  plan_key: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -784,6 +806,25 @@ function mapArtworkPreparation(row: DbArtworkPreparation): ArtworkPreparation {
     guidedCleanup: row.guided_cleanup ?? null,
     separation: row.separation ?? null,
     approvedAt: row.approved_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapSignPreparation(row: DbSignPreparation): SignPreparation {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    status: row.status,
+    originalAssetId: row.original_asset_id,
+    originalFilename: row.original_filename,
+    orderedWidthIn: row.ordered_width_in,
+    orderedHeightIn: row.ordered_height_in,
+    specConfirmedAt: row.spec_confirmed_at,
+    resolutionPolicyId: row.resolution_policy_id,
+    inspection: row.inspection ?? null,
+    plan: row.plan ?? null,
+    planKey: row.plan_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2659,5 +2700,76 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .single();
     if (error) throw error;
     return mapArtworkPreparation(data as DbArtworkPreparation);
+  }
+
+  async createSignPreparation(
+    projectId: string,
+    input: CreateSignPreparationInput,
+  ): Promise<SignPreparation> {
+    const { data, error } = await this.client
+      .from("sign_preparations")
+      .insert({
+        project_id: projectId,
+        status: "inspected",
+        original_asset_id: input.originalAssetId,
+        original_filename: input.originalFilename,
+        inspection: input.inspection,
+      })
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapSignPreparation(data as DbSignPreparation);
+  }
+
+  async getSignPreparation(projectId: string): Promise<SignPreparation | null> {
+    const { data, error } = await this.client
+      .from("sign_preparations")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapSignPreparation(data as DbSignPreparation) : null;
+  }
+
+  async getSignPreparationById(id: string): Promise<SignPreparation | null> {
+    const { data, error } = await this.client
+      .from("sign_preparations")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapSignPreparation(data as DbSignPreparation) : null;
+  }
+
+  async updateSignPreparation(
+    id: string,
+    patch: UpdateSignPreparationInput,
+  ): Promise<SignPreparation> {
+    const update: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+    if (patch.status !== undefined) update.status = patch.status;
+    if (patch.orderedWidthIn !== undefined)
+      update.ordered_width_in = patch.orderedWidthIn;
+    if (patch.orderedHeightIn !== undefined)
+      update.ordered_height_in = patch.orderedHeightIn;
+    if (patch.specConfirmedAt !== undefined)
+      update.spec_confirmed_at = patch.specConfirmedAt;
+    if (patch.resolutionPolicyId !== undefined)
+      update.resolution_policy_id = patch.resolutionPolicyId;
+    if (patch.inspection !== undefined) update.inspection = patch.inspection;
+    if (patch.plan !== undefined) update.plan = patch.plan;
+    if (patch.planKey !== undefined) update.plan_key = patch.planKey;
+
+    const { data, error } = await this.client
+      .from("sign_preparations")
+      .update(update)
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapSignPreparation(data as DbSignPreparation);
   }
 }

@@ -539,6 +539,38 @@ export function deriveProductionRequirements(
       };
     }
 
+    // Signs Phase S1: the ADMITTED rigid-sign profile (Constitution §16A).
+    // Deliberately fail-closed here: rigid-sign requirements derive from a
+    // structured, human-confirmed SignProductionSpec via
+    // `deriveRigidSignProductionRequirements`
+    // (`capabilities/sign-preparation`), NEVER from brief text — the Sprint
+    // A2 lesson. Brief classification never produces this value; if this
+    // arm is ever reached, something routed a sign through the apparel
+    // brief path, and nothing here may size, format, or validate it.
+    case "rigid_sign_raster": {
+      notes.push(
+        "Rigid-sign production requirements derive from a confirmed SignProductionSpec, never from brief text; this path cannot produce them.",
+      );
+      return {
+        category: classification.category,
+        printMethod: classification.printMethod,
+        printMethodConfidence: classification.printMethodConfidence,
+        requestedUnsupportedOutput: null,
+        printLocation: null,
+        targetDimensions: null,
+        sizing: null,
+        requiredOutputType: "raster",
+        targetPpi: null,
+        minRasterDimensionsPx: null,
+        transparencyRequired: false,
+        colorMode: "rgb",
+        allowedFileFormats: [],
+        artworkBoundaryMarginPercent: 0,
+        requiredWordingVerificationRequired: false,
+        notes,
+      };
+    }
+
     case "unknown":
     default: {
       notes.push(

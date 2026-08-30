@@ -45,6 +45,7 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  SignPreparation,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 import type {
@@ -52,6 +53,7 @@ import type {
   CaptureAcquisitionEmailInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
+  CreateSignPreparationInput,
   CreateAssetInput,
   CreateFinalArtworkJobInput,
   CreateFinalDirectionApprovalInput,
@@ -74,6 +76,7 @@ import type {
   UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
+  UpdateSignPreparationInput,
 } from "./repository";
 import {
   FreeConceptAlreadyConsumedError,
@@ -109,6 +112,8 @@ interface LocalDatabase {
   productionAssetValidations: ProductionAssetValidation[];
   /** Existing Artwork → Print Ready Phase 1. */
   artworkPreparations: ArtworkPreparation[];
+  /** Signs Phase S1. */
+  signPreparations: SignPreparation[];
 }
 
 /**
@@ -165,6 +170,7 @@ function emptyDb(): LocalDatabase {
     finalArtworkJobs: [],
     productionAssetValidations: [],
     artworkPreparations: [],
+    signPreparations: [],
   };
 }
 
@@ -345,6 +351,8 @@ async function readDb(): Promise<LocalDatabase> {
       // Existing Artwork → Print Ready Phase 1: absent in every store
       // written before uploaded-artwork preparation existed.
       artworkPreparations: parsed.artworkPreparations ?? [],
+      // Signs Phase S1: absent in every store written before it existed.
+      signPreparations: parsed.signPreparations ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -2135,6 +2143,59 @@ export class LocalProjectRepository implements ProjectRepository {
     const db = await readDb();
     const preparation = db.artworkPreparations.find((item) => item.id === id);
     if (!preparation) throw new Error("Artwork preparation not found");
+
+    Object.assign(preparation, patch, { updatedAt: nowIso() });
+    await writeDb(db);
+    return preparation;
+  }
+
+  async createSignPreparation(
+    projectId: string,
+    input: CreateSignPreparationInput,
+  ): Promise<SignPreparation> {
+    const db = await readDb();
+    const timestamp = nowIso();
+    const preparation: SignPreparation = {
+      id: randomUUID(),
+      projectId,
+      status: "inspected",
+      originalAssetId: input.originalAssetId,
+      originalFilename: input.originalFilename,
+      orderedWidthIn: null,
+      orderedHeightIn: null,
+      specConfirmedAt: null,
+      resolutionPolicyId: null,
+      inspection: input.inspection,
+      plan: null,
+      planKey: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.signPreparations.push(preparation);
+    await writeDb(db);
+    return preparation;
+  }
+
+  async getSignPreparation(projectId: string): Promise<SignPreparation | null> {
+    const db = await readDb();
+    const matches = db.signPreparations
+      .filter((item) => item.projectId === projectId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return matches.at(-1) ?? null;
+  }
+
+  async getSignPreparationById(id: string): Promise<SignPreparation | null> {
+    const db = await readDb();
+    return db.signPreparations.find((item) => item.id === id) ?? null;
+  }
+
+  async updateSignPreparation(
+    id: string,
+    patch: UpdateSignPreparationInput,
+  ): Promise<SignPreparation> {
+    const db = await readDb();
+    const preparation = db.signPreparations.find((item) => item.id === id);
+    if (!preparation) throw new Error("Sign preparation not found");
 
     Object.assign(preparation, patch, { updatedAt: nowIso() });
     await writeDb(db);

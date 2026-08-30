@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.3
+Version 1.4
 August 2026
 
 ## Document Position
@@ -43,7 +43,7 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Not implemented.** Phase S0 audit complete; implementation proceeds through explicitly approved Signs phases (S1+). Nothing in this repository currently produces or validates a sign deliverable |
+| Rigid sign raster | Admitted (Constitution §16A) | **Phase S1 only: inspection, diagnosis, and repair PLANNING** (`SignPreparationCapability`, `sign_preparations`). No repair is executed, no pixel is changed, nothing produces or validates a sign deliverable, and no sign can reach `print_ready`. Later phases (S2+) are each separately approved |
 | All other categories | Not admitted | Dormant seams only |
 
 ### Apparel raster profile (implemented)
@@ -1147,6 +1147,27 @@ ambiguous provenance would add nothing.
 
 See §13h. Every operation is local and deterministic — there is no provider
 to configure, disable, or accidentally call.
+
+### SignPreparationCapability — Active (Signs Phase S1: inspection/diagnosis/planning ONLY)
+
+| | |
+|---|---|
+| **Responsibility** | The rigid_sign_raster profile's understanding stage (Constitution §16A): ingest a sign customer's raster artwork (immutable original), record the HUMAN-confirmed ordered width AND height under a versioned sign resolution policy, deterministically inspect (geometry, truthful proportional placements, effective resolution, per-edge band classification, transparency), diagnose explicit bounded-vocabulary defects, and formulate — never execute — a persisted, ordered, closed-vocabulary `SignRepairPlan` with a canonical `planKey` (the future FinalArtworkJob binding key, per the `production_treatment_key` precedent) |
+| **Inputs** | Uploaded PNG bytes + declared content type + filename; explicit operator-confirmed ordered dimensions |
+| **Outputs** | `SignPreparation` lifecycle record (`inspected` → `planned`); immutable `customer_upload` asset; persisted `SignInspectionReport`, `SignDefect[]`, `SignRepairPlan` + `planKey` |
+| **Dependencies** | ProjectRepository, AssetCapability; pure ingress modules reused from artwork-preparation (`upload-limits.ts`, `image-decode.ts`); pure vocabulary/math from print-validation (`contracts.ts`, `effective-resolution.ts`); the live provider reconstruction bounds (4× ceiling, 1.02 headroom) imported as constants so planner and executor can never quietly disagree |
+| **Owns** | Sign ordered-size authority (fail-closed: width AND height, never defaulted or inferred — §16A.2); the sign resolution-policy table (V1: rigid rectangles ≤ 24×36in, 150 PPI target / 100 PPI blocking minimum, policy-versioned, never universal); edge-evidence classification (`uniform_background` / `foreground_bleed` / `mixed_or_uncertain` — unknown never becomes safe); the repair decision hierarchy and risk classes (`auto_safe` / `review_required` / `blocked`); canonical plan identity |
+| **Must never own** | Any provider port (it has none — structurally no network); repair EXECUTION of any kind (no upscale, extension, crop, resample, flatten, or generation); Print Validation's rules; FinalArtwork orchestration; apparel placement sizing; the dormant `signage` placeholder's assumptions; any `print_ready` claim |
+
+Operator/internal only: **no HTTP route exposes it in S1** — it is reached by
+tests and by later explicitly-approved Signs phases, so it adds no new
+unauthenticated endpoint and does not widen the project-UUID bearer surface
+(§23.2). A sign order enters through structured, human-confirmed facts —
+never brief-prose classification (the Sprint A2 lesson): the classifier
+still routes sign prose to `out_of_scope_product`, and
+`deriveProductionRequirements`'s new `rigid_sign_raster` arm fails closed;
+real sign requirements come only from
+`deriveRigidSignProductionRequirements(spec, policy)`.
 
 ### AssetStorageProvider — Partial
 
@@ -6587,6 +6608,15 @@ Other notes:
   why existing tables cannot represent it honestly, why this is the smallest
   additive change). Notably there is **no** workflow-kind column: the
   preparation row's existence is the workflow identity
+- Signs Phase S1: one new table, `sign_preparations` — see
+  `supabase/migrations/20260830120000_sign_preparation.sql`, whose header
+  carries the schema-discipline audit (why `artwork_preparations` cannot
+  represent a sign preparation honestly, and why the row's existence IS the
+  sign-workflow identity — the same no-workflow-enum rule). Locked down
+  (RLS + revokes) in the same migration per the §23.1 convention.
+  `inspection`/`plan` are loosely-typed jsonb narrowed at the
+  `SignPreparationCapability` boundary and recomputed rather than trusted
+  as authority
 - Correction A: the Create New side likewise adds **no** column and **no**
   migration. `ConversationCapability.beginCreateNewWorkflow` stamps
   `metadata.workflow = "create_new"` (`lib/domain/conversation.ts`) on the

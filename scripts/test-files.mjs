@@ -293,6 +293,13 @@ export const TEST_FILES = [
   "src/capabilities/artwork-preparation/artwork-preparation-capability.test.ts",
   "src/capabilities/artwork-preparation/bowling-upload-regression.test.ts",
   "src/capabilities/artwork-preparation/no-paid-provider.test.ts",
+  // Signs Phase S1 (Constitution §16A): rigid-sign inspection, diagnosis,
+  // and repair PLANNING — deterministic, provider-free, executes nothing.
+  // Includes the Ruth-shaped synthetic acceptance fixture (1024×1536 → 18×24).
+  "src/capabilities/sign-preparation/sign-inspection.test.ts",
+  "src/capabilities/sign-preparation/sign-repair-planner.test.ts",
+  "src/capabilities/sign-preparation/sign-preparation-capability.test.ts",
+  "src/capabilities/sign-preparation/rigid-sign-category.test.ts",
   // Garment colour is production context, never authority over customer
   // pixels: preparation must be byte-identical on a white and a black shirt.
   "src/capabilities/artwork-preparation/garment-color-preparation-isolation.test.ts",

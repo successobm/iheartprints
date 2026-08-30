@@ -30,6 +30,8 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  SignPreparation,
+  SignPreparationStatus,
   StoredRequestedProductionOutput,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
@@ -349,6 +351,34 @@ export type UpdateArtworkPreparationInput = Partial<{
   /** Intelligent Separation Phase 9: the operator-confirmed region decision set. */
   separation: Record<string, unknown> | null;
   approvedAt: string | null;
+}>;
+
+/**
+ * Signs Phase S1: creating the durable record of one rigid-sign artwork, at
+ * the moment its immutable original has landed in storage and deterministic
+ * inspection has run. Mirrors `CreateArtworkPreparationInput`'s shape and
+ * discipline.
+ */
+export interface CreateSignPreparationInput {
+  originalAssetId: string;
+  originalFilename: string | null;
+  inspection: Record<string, unknown> | null;
+}
+
+/**
+ * Signs Phase S1. Deliberately narrow: `originalAssetId` is NOT patchable —
+ * the customer's upload is immutable, and the only way to work from
+ * different source bytes is a new preparation.
+ */
+export type UpdateSignPreparationInput = Partial<{
+  status: SignPreparationStatus;
+  orderedWidthIn: number | null;
+  orderedHeightIn: number | null;
+  specConfirmedAt: string | null;
+  resolutionPolicyId: string | null;
+  inspection: Record<string, unknown> | null;
+  plan: Record<string, unknown> | null;
+  planKey: string | null;
 }>;
 
 /**
@@ -1220,4 +1250,21 @@ export interface ProjectRepository {
     id: string,
     patch: UpdateArtworkPreparationInput,
   ): Promise<ArtworkPreparation>;
+
+  /**
+   * Signs Phase S1: persist the rigid-sign preparation record for one
+   * project. A row's existence IS the sign-workflow identity for that
+   * project — mirroring `ArtworkPreparation`'s no-workflow-enum rule.
+   */
+  createSignPreparation(
+    projectId: string,
+    input: CreateSignPreparationInput,
+  ): Promise<SignPreparation>;
+  /** Latest sign preparation for the project, or `null`. */
+  getSignPreparation(projectId: string): Promise<SignPreparation | null>;
+  getSignPreparationById(id: string): Promise<SignPreparation | null>;
+  updateSignPreparation(
+    id: string,
+    patch: UpdateSignPreparationInput,
+  ): Promise<SignPreparation>;
 }

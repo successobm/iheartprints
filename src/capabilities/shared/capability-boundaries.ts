@@ -1965,4 +1965,54 @@
  * output. A settings change supersedes a queued job; it never re-aims one.
  */
 
+/**
+ * ============================================================================
+ * SIGNS PHASE S1 — RIGID SIGN INSPECTION / DIAGNOSIS / PLANNING (§16A)
+ * ============================================================================
+ *
+ * `sign-preparation` is the admitted rigid_sign_raster profile's
+ * UNDERSTANDING stage: it measures, diagnoses, and PLANS. It never executes
+ * a repair, never changes a pixel, and can never claim `print_ready`.
+ *
+ * ALLOWED dependencies:
+ *   - ProjectRepository + AssetCapability (persistence and the immutable
+ *     original's bytes) — NO provider port of any kind exists in the module;
+ *   - artwork-preparation's PURE ingress modules (`upload-limits.ts`,
+ *     `image-decode.ts`) — the single audited byte→pixel path is reused,
+ *     never duplicated;
+ *   - print-validation's pure vocabulary (`contracts.ts`,
+ *     `effective-resolution.ts`) — same direction final-artwork already uses;
+ *   - the provider reconstruction bounds (`PROVIDER_MAX_RECONSTRUCTION_SCALE`,
+ *     `RECONSTRUCTION_HEADROOM`) imported as CONSTANTS from the topaz module
+ *     so the planner and the executor can never quietly disagree. Importing
+ *     the constants is not permission to call the provider: nothing in
+ *     sign-preparation may dispatch, poll, or download anything.
+ *
+ * FORBIDDEN:
+ *   - executing any repair step (upscale, extend, pad, crop, resample,
+ *     rotate, flatten, generate) — S2+ territory, each phase separately
+ *     approved;
+ *   - deriving an ordered dimension from anything but explicit human
+ *     confirmation (never artwork pixels, aspect, filename, prose, keywords,
+ *     or the dormant `signage` placeholder — §16A.2);
+ *   - routing sign orders through brief-text classification (Sprint A2:
+ *     prose keywords still resolve sign nouns to `out_of_scope_product`;
+ *     `deriveProductionRequirements`'s `rigid_sign_raster` arm fails closed);
+ *   - adopting the dormant `signage` arm's placeholder figures as policy;
+ *   - reusing apparel placement sizing (`PrintPlacement`,
+ *     `intendedPrintWidthIn`) for sign dimensions;
+ *   - downgrading an unproven edge to `uniform_background`, or any
+ *     uncertainty to `auto_safe` — unknown never becomes safe;
+ *   - duplicating Print Validation's rules or FinalArtwork orchestration;
+ *   - exposing any HTTP route in S1 (operator/internal only; §23.2 — no new
+ *     bearer-UUID surface).
+ *
+ * PLAN IDENTITY (`planKey`) covers production-significant inputs only
+ * (schema version, policy id, source bytes' sha256 + dimensions, ordered
+ * size, ordered steps' kind+params, expected output) with canonical
+ * serialization — never rationale text or risk classes, and never sensitive
+ * to cosmetic JSON ordering. It is the future FinalArtworkJob binding key,
+ * mirroring `production_treatment_key`.
+ */
+
 export const CAPABILITY_BOUNDARY_VERSION = "PEA2" as const;
