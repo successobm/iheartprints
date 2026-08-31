@@ -2363,6 +2363,9 @@ export class LocalProjectRepository implements ProjectRepository {
       inspection: input.inspection,
       plan: null,
       planKey: null,
+      authorizedPlanKey: null,
+      authorizedAt: null,
+      authorizedBy: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };

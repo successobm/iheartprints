@@ -666,8 +666,8 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
   // important check in this profile. Constitution §16A.3 / S0.5 Rule 1: a
   // plan whose executed steps do not provably match what was recorded, that
   // reached here via anything but S2's admitted deterministic steps, or
-  // that classified as anything but `auto_safe`, must never certify as
-  // `"ready"`.
+  // that lacks a sufficient production-risk authorization, must never
+  // certify as `"ready"`.
   //
   // Signs Phase S4→PrintValidation integration: reconstruction itself is no
   // longer an automatic block. A reconstructed plate may still certify
@@ -690,7 +690,23 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
       pv.verificationAlgorithmVersion === sign.expectedPreservationAlgorithmVersion);
   const planIntegrityOk =
     sign.planKeyVerified && sign.executedStepsMatchPlan && sign.containsOnlyAdmittedSteps;
-  const riskAuthorized = sign.planOverallRisk === "auto_safe";
+  // LIVE PRODUCT BLOCKER #4: production-risk authorization, identity-bound
+  // to THIS plan — never `planOverallRisk === "auto_safe"` alone anymore.
+  // The one rule this profile enforces ("who may authorize which risk
+  // class") is deliberately re-stated here rather than imported from
+  // `sign-preparation/sign-plan-authorization.ts` — this module must never
+  // depend on that capability (the same rule that keeps `planOverallRisk`
+  // itself a plain string here). Both copies encode the identical rule;
+  // any future change to one must be mirrored in the other by inspection.
+  const auth = sign.authorization;
+  const authorizationBindsToCurrentPlan = auth !== null && auth.planKey === sign.planKey;
+  const riskAuthorized =
+    authorizationBindsToCurrentPlan &&
+    (sign.planOverallRisk === "auto_safe"
+      ? auth!.authorizedBy === "customer" || auth!.authorizedBy === "operator"
+      : sign.planOverallRisk === "review_required"
+        ? auth!.authorizedBy === "operator"
+        : false);
   const executedPlanOk = planIntegrityOk && riskAuthorized && preservationAuthorized;
   checks.push({
     check: "executed_plan_matches_recorded_plan",
@@ -699,14 +715,18 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
     reason: !planIntegrityOk
       ? "The executed steps could not be verified as an exact, unmodified replay of the recorded plan."
       : !riskAuthorized
-        ? `This plan's overall risk classification is "${sign.planOverallRisk}", which requires human review before it may be treated as ready; no unapproved review-class action may reach print_ready.`
+        ? auth === null
+          ? "No production-risk authorization was found for this plan — it cannot certify as ready until it is explicitly authorized."
+          : !authorizationBindsToCurrentPlan
+            ? "The recorded authorization does not match this exact plan — a stale or superseded authorization can never authorize a different plan."
+            : `This plan's overall risk classification is "${sign.planOverallRisk}", which requires operator authorization; the recorded authorization is not sufficient.`
         : !preservationAuthorized
           ? pv === null
             ? "This asset carries provider-reconstructed pixels, and no authoritative preservation verification could be resolved for it — it cannot certify as ready until verification proves the reconstruction preserved the artwork."
             : pv.status !== "preserved"
               ? `This asset carries provider-reconstructed pixels, and its preservation verification concluded "${pv.status}" rather than "preserved" — it cannot certify as ready.`
               : "This asset carries provider-reconstructed pixels, but its preservation verification does not match this exact asset, source, plan, or verification-algorithm identity — a stale or mismatched verification can never authorize a different output."
-          : "The executed plan is a verified, unmodified replay of the recorded plan, contains only S2-admitted deterministic steps, was classified auto_safe, and — where reconstruction occurred — is backed by a matching, authoritative preservation verification proving the reconstruction preserved the artwork.",
+          : `The executed plan is a verified, unmodified replay of the recorded plan, contains only S2-admitted deterministic steps, and carries a sufficient production-risk authorization for its "${sign.planOverallRisk}" classification${reconstructed ? " and a matching, authoritative preservation verification proving the reconstruction preserved the artwork" : ""}.`,
   });
   if (!executedPlanOk) {
     requiredTransformations.add("require_human_review");

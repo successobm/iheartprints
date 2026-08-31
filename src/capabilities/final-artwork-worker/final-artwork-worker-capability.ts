@@ -2126,6 +2126,16 @@ export function createFinalArtworkWorkerCapability(
           }
         : null,
       expectedPreservationAlgorithmVersion,
+      // LIVE PRODUCT BLOCKER #4: the durable authorization for THIS
+      // preparation, exactly as `requestSignFinalArtwork` already required
+      // to exist (and bind to this exact plan) before it would ever
+      // enqueue the job being executed right now — re-asserted here so
+      // PrintValidation independently reaches the identical conclusion
+      // rather than trusting that the enqueue gate was never bypassed.
+      authorization:
+        preparation.authorizedPlanKey && preparation.authorizedBy
+          ? { planKey: preparation.authorizedPlanKey, authorizedBy: preparation.authorizedBy }
+          : null,
     };
 
     const validationInput: PrintValidationInput = {

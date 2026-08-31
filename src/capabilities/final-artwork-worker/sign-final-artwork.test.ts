@@ -88,7 +88,16 @@ describe("Signs Phase S2: rigid-sign finalization", () => {
       filename: "sign.png",
     });
     await signPreparation.confirmSignProductionSpec(projectId, orderedWidthIn, orderedHeightIn);
-    return signPreparation.planSignRepair(projectId);
+    const outcome = await signPreparation.planSignRepair(projectId);
+    // LIVE PRODUCT BLOCKER #4: `requestSignFinalArtwork` now refuses an
+    // unauthorized plan. Every test in this file exercises DOWNSTREAM
+    // execution behavior, never authorization itself (that has its own
+    // dedicated suite) — "operator" is sufficient for every risk class,
+    // so authorizing here keeps every existing call site unchanged.
+    if (outcome.result.status === "planned") {
+      await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    }
+    return outcome;
   }
 
   it("1/21: exact-aspect, sufficient resolution — no unnecessary repair, reaches print_ready", async () => {
@@ -425,5 +434,195 @@ describe("Signs Phase S2: rigid-sign finalization", () => {
     )!.report as { requirements: { category: string } };
     assert.equal(report.requirements.category, "rigid_sign_raster");
     assert.notEqual(report.requirements.category, "signage");
+  });
+});
+
+/**
+ * LIVE PRODUCT BLOCKER #4: `requestSignFinalArtwork`'s enqueue gate.
+ * Deliberately its OWN describe block, using `build()`/`uploadConfirmPlan`
+ * WITHOUT their normal auto-authorization (calling the two lower-level
+ * steps directly instead) so every case can control authorization
+ * precisely — the exact opposite of every other test in this file, which
+ * treats authorization as a fixture concern already handled.
+ */
+describe("requestSignFinalArtwork enqueue gate (LIVE PRODUCT BLOCKER #4)", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-authorize-gate-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function build(provider: FinalArtworkProvider = new ThrowingProvider()) {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const assets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const signPreparation = createSignPreparationCapability(repo, assets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider);
+    const project = await repo.createProject();
+    return { repo, assets, signPreparation, finalArtwork, worker, projectId: project.project.id };
+  }
+
+  /** auto_safe: exact aspect, sufficient resolution — no repair steps at all. */
+  async function planAutoSafe(
+    signPreparation: ReturnType<typeof createSignPreparationCapability>,
+    projectId: string,
+  ) {
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    const outcome = await signPreparation.planSignRepair(projectId);
+    assert.equal(outcome.result.plan!.overallRisk, "auto_safe");
+    return outcome;
+  }
+
+  /** review_required: the Ruth-shaped case — foreground reaches the extension edge. */
+  async function planReviewRequired(
+    signPreparation: ReturnType<typeof createSignPreparationCapability>,
+    projectId: string,
+  ) {
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(ruthLikeSignArtwork()),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 18, 24);
+    const outcome = await signPreparation.planSignRepair(projectId);
+    assert.equal(outcome.result.plan!.overallRisk, "review_required");
+    return outcome;
+  }
+
+  it("1: auto_safe + permitted valid authorization (customer) can enqueue", async () => {
+    const { signPreparation, finalArtwork, projectId } = await build();
+    await planAutoSafe(signPreparation, projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "customer" });
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    assert.equal(job.sourceKind, "sign_preparation");
+  });
+
+  it("2: review_required + no authorization cannot enqueue", async () => {
+    const { signPreparation, finalArtwork, projectId } = await build();
+    await planReviewRequired(signPreparation, projectId);
+    await assert.rejects(() => finalArtwork.requestSignFinalArtwork(projectId));
+  });
+
+  it("3: review_required + customer-only authorization cannot enqueue — refused even earlier, at the authorization attempt itself", async () => {
+    const { signPreparation, finalArtwork, projectId } = await build();
+    await planReviewRequired(signPreparation, projectId);
+    // `authorizeSignRepairPlan` itself refuses a customer actor for a
+    // review_required plan — the earliest possible fail-closed point, so
+    // no insufficient authorization record is ever even written.
+    await assert.rejects(() =>
+      signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "customer" }),
+    );
+    await assert.rejects(() => finalArtwork.requestSignFinalArtwork(projectId));
+  });
+
+  it("4: review_required + operator authorization for the current plan can enqueue", async () => {
+    const { signPreparation, finalArtwork, projectId } = await build();
+    await planReviewRequired(signPreparation, projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    assert.equal(job.sourceKind, "sign_preparation");
+  });
+
+  it("5: blocked cannot authorize/enqueue at all — no plan exists to authorize", async () => {
+    const { signPreparation, finalArtwork, projectId } = await build();
+    // 300x400 at 18x24in: even the 4x ceiling cannot reach the blocking minimum.
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(300, 400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 18, 24);
+    const outcome = await signPreparation.planSignRepair(projectId);
+    assert.equal(outcome.result.status, "blocked");
+
+    await assert.rejects(() =>
+      signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" }),
+    );
+    await assert.rejects(() => finalArtwork.requestSignFinalArtwork(projectId));
+  });
+
+  it("6: stale authorization for an old planKey cannot enqueue after a re-plan", async () => {
+    const { repo, signPreparation, finalArtwork, projectId } = await build();
+    await planAutoSafe(signPreparation, projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "customer" });
+    const firstPlanKey = (await repo.getSignPreparation(projectId))!.planKey;
+
+    // Re-plan under a DIFFERENT ordered size — a genuinely different plan,
+    // a different planKey, by construction.
+    await signPreparation.confirmSignProductionSpec(projectId, 18, 24);
+    const replanned = await signPreparation.planSignRepair(projectId);
+    const secondPlanKey = replanned.preparation.planKey;
+    assert.notEqual(secondPlanKey, firstPlanKey, "sanity: the re-plan really did change the plan key");
+
+    // The OLD authorization (bound to firstPlanKey) must not cover the NEW plan.
+    await assert.rejects(() => finalArtwork.requestSignFinalArtwork(projectId));
+  });
+
+  it("7: an authorization on a DIFFERENT project never authorizes this project's plan", async () => {
+    const { signPreparation: signA, finalArtwork: finalArtworkA, projectId: projectA } =
+      await build();
+    const { signPreparation: signB, projectId: projectB } = await build();
+
+    await planAutoSafe(signA, projectA);
+    await planAutoSafe(signB, projectB);
+    // Authorize B, never A.
+    await signB.authorizeSignRepairPlan(projectB, { authorizedBy: "customer" });
+
+    await assert.rejects(() => finalArtworkA.requestSignFinalArtwork(projectA));
+  });
+
+  it("8: double authorization is idempotent — repeated calls for the same plan never mutate an already-authorized record", async () => {
+    const { repo, signPreparation, projectId } = await build();
+    await planAutoSafe(signPreparation, projectId);
+    const first = await signPreparation.authorizeSignRepairPlan(projectId, {
+      authorizedBy: "customer",
+    });
+    const second = await signPreparation.authorizeSignRepairPlan(projectId, {
+      authorizedBy: "customer",
+    });
+    assert.equal(second.authorizedAt, first.authorizedAt);
+    assert.equal(second.authorizedBy, first.authorizedBy);
+    assert.equal(second.authorizedPlanKey, first.authorizedPlanKey);
+    void repo;
+  });
+
+  it("9: double enqueue reuses the SAME FinalArtworkJob, never creates a second one", async () => {
+    const { finalArtwork, signPreparation, projectId } = await build();
+    await planAutoSafe(signPreparation, projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "customer" });
+
+    const first = await finalArtwork.requestSignFinalArtwork(projectId);
+    const second = await finalArtwork.requestSignFinalArtwork(projectId);
+    assert.equal(second.job.id, first.job.id);
+    assert.equal(second.alreadyRequested, true);
+  });
+
+  it("10: authorization is checked and refuses BEFORE any job exists — zero FinalArtworkJob rows for an unauthorized plan", async () => {
+    const { repo, signPreparation, finalArtwork, projectId } = await build();
+    await planReviewRequired(signPreparation, projectId);
+    await assert.rejects(() => finalArtwork.requestSignFinalArtwork(projectId));
+
+    const jobs = await repo.listFinalArtworkJobsForSignPreparation(
+      projectId,
+      (await repo.getSignPreparation(projectId))!.id,
+    );
+    assert.equal(jobs.length, 0, "no job — queued, running, or otherwise — may exist for an unauthorized plan");
   });
 });

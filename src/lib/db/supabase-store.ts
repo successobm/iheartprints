@@ -23,6 +23,7 @@ import type {
   ArtworkPreparation,
   ArtworkPreparationStatus,
   ArtworkVersion,
+  SignPlanAuthorizationActor,
   SignPreparation,
   SignPreparationStatus,
   AssetKind,
@@ -470,6 +471,9 @@ type DbSignPreparation = {
   inspection: Record<string, unknown> | null;
   plan: Record<string, unknown> | null;
   plan_key: string | null;
+  authorized_plan_key: string | null;
+  authorized_at: string | null;
+  authorized_by: SignPlanAuthorizationActor | null;
   created_at: string;
   updated_at: string;
 };
@@ -921,6 +925,9 @@ function mapSignPreparation(row: DbSignPreparation): SignPreparation {
     inspection: row.inspection ?? null,
     plan: row.plan ?? null,
     planKey: row.plan_key,
+    authorizedPlanKey: row.authorized_plan_key,
+    authorizedAt: row.authorized_at,
+    authorizedBy: row.authorized_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3000,6 +3007,10 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.inspection !== undefined) update.inspection = patch.inspection;
     if (patch.plan !== undefined) update.plan = patch.plan;
     if (patch.planKey !== undefined) update.plan_key = patch.planKey;
+    if (patch.authorizedPlanKey !== undefined)
+      update.authorized_plan_key = patch.authorizedPlanKey;
+    if (patch.authorizedAt !== undefined) update.authorized_at = patch.authorizedAt;
+    if (patch.authorizedBy !== undefined) update.authorized_by = patch.authorizedBy;
 
     const { data, error } = await this.client
       .from("sign_preparations")

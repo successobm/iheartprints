@@ -63,3 +63,4 @@ export {
   type SignPlanCustomerStatus,
   type SignPlanCustomerView,
 } from "./sign-preparation-copy";
+export { isAuthorizationSufficientForRisk } from "./sign-plan-authorization";

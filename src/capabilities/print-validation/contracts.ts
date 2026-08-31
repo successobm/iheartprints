@@ -935,6 +935,30 @@ export interface RigidSignPlanEvidence {
    * authorize a newer plate.
    */
   expectedPreservationAlgorithmVersion: string;
+  /**
+   * LIVE PRODUCT BLOCKER #4: the resolved production-risk authorization
+   * for this plan — `null` when none exists. `"customer"`/`"operator"` are
+   * carried as plain strings for the same reason `planOverallRisk` is (this
+   * module must never import `sign-preparation`'s
+   * `SignPlanAuthorizationActor` type). Compared against `planKey` (never
+   * trusted merely for existing) and combined with `planOverallRisk` to
+   * decide `riskAuthorized` — an `auto_safe` plan accepts either actor; a
+   * `review_required` plan accepts only `"operator"`.
+   */
+  authorization: RigidSignPlanAuthorizationEvidence | null;
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #4: the narrow, identity-bound facts this profile
+ * needs from one durable plan authorization — mirrors
+ * `RigidSignPreservationVerificationEvidence`'s own shape and reasoning
+ * exactly. Never a bare `authorized: true`.
+ */
+export interface RigidSignPlanAuthorizationEvidence {
+  /** Compared against `RigidSignPlanEvidence.planKey` — an authorization for a superseded plan must never authorize the current one. */
+  planKey: string;
+  /** WHO authorized it. Only `"operator"` is sufficient for a `review_required` plan. */
+  authorizedBy: "customer" | "operator";
 }
 
 /**

@@ -91,6 +91,14 @@ describe("Signs Phase S4.1: deterministic preservation verification", () => {
     });
     await built.signPreparation.confirmSignProductionSpec(built.projectId, 18, 24);
     await built.signPreparation.planSignRepair(built.projectId);
+    // LIVE PRODUCT BLOCKER #4: this fixture's plan is `review_required` —
+    // `requestSignFinalArtwork` now refuses to enqueue without a
+    // sufficient authorization. This suite exists to test preservation
+    // verification itself, not authorization (that has its own dedicated
+    // suite) — "operator" is sufficient for every risk class.
+    await built.signPreparation.authorizeSignRepairPlan(built.projectId, {
+      authorizedBy: "operator",
+    });
     const { job } = await built.finalArtwork.requestSignFinalArtwork(built.projectId);
     provider.behavior = { kind: "oversized_but_valid", widthPx: 4096, heightPx: 6144 };
     await built.worker.processNextJob();
@@ -210,6 +218,8 @@ describe("Signs Phase S4.1: deterministic preservation verification", () => {
     });
     await signPreparation.confirmSignProductionSpec(projectId, 18, 24);
     await signPreparation.planSignRepair(projectId);
+    // LIVE PRODUCT BLOCKER #4: see the identical note in `ruthShapedFinalAsset`.
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
     const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
     await worker.processNextJob();
     const finalAsset = (await repo.listAssets(projectId)).find(
@@ -302,6 +312,14 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
     });
     await built.signPreparation.confirmSignProductionSpec(built.projectId, 18, 24);
     await built.signPreparation.planSignRepair(built.projectId);
+    // LIVE PRODUCT BLOCKER #4: this fixture's plan is `review_required` —
+    // `requestSignFinalArtwork` now refuses to enqueue without a
+    // sufficient authorization. This suite exists to test preservation
+    // verification itself, not authorization (that has its own dedicated
+    // suite) — "operator" is sufficient for every risk class.
+    await built.signPreparation.authorizeSignRepairPlan(built.projectId, {
+      authorizedBy: "operator",
+    });
     const { job } = await built.finalArtwork.requestSignFinalArtwork(built.projectId);
     provider.behavior = { kind: "oversized_but_valid", widthPx: 4096, heightPx: 6144 };
     await built.worker.processNextJob();

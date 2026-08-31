@@ -32,11 +32,12 @@ import {
   validateUploadBytes,
 } from "@/capabilities/artwork-preparation/upload-limits";
 import type { ProjectRepository } from "@/lib/db/repository";
-import type { SignPreparation } from "@/lib/domain/types";
+import type { SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/types";
 
 import type {
   SignInspectionReport,
   SignPlanningResult,
+  SignRepairPlan,
 } from "./contracts";
 import {
   resolveSignResolutionPolicy,
@@ -45,6 +46,8 @@ import {
 import { isValidOrderedDimensionIn, resolveSignProductionSpec } from "./sign-spec";
 import { diagnoseSpecResolution } from "./sign-diagnosis";
 import { inspectSignArtwork } from "./sign-inspection";
+import { computeSignPlanKey } from "./sign-plan-identity";
+import { isAuthorizationSufficientForRisk } from "./sign-plan-authorization";
 import { planSignRepair } from "./sign-repair-planner";
 
 /** Operator-facing state errors. Messages are safe, non-technical sentences. */
@@ -99,6 +102,22 @@ export interface SignPreparationCapability {
    * persists the plan and its canonical key and moves status to `planned`.
    */
   planSignRepair(designId: string): Promise<SignPlanningOutcome>;
+  /**
+   * LIVE PRODUCT BLOCKER #4: the durable production-risk authorization for
+   * the CURRENT plan (Constitution §16A.3-adjacent — a genuinely separate
+   * decision from planning itself, which only formulates). Refuses fail-
+   * closed when: no plan exists; the plan's own recomputed key does not
+   * match what is persisted (never trust a stored key — the same
+   * plan-replay discipline `planSignRepair`/`FinalArtworkCapability`
+   * already apply); or `authorizedBy` is not sufficient for the plan's own
+   * `overallRisk` (`isAuthorizationSufficientForRisk` — a customer action
+   * alone is never sufficient for a `review_required` plan). Idempotent:
+   * a second call for the SAME already-authorized plan is a no-op.
+   */
+  authorizeSignRepairPlan(
+    designId: string,
+    input: { authorizedBy: SignPlanAuthorizationActor },
+  ): Promise<SignPreparation>;
 }
 
 export function createSignPreparationCapability(
@@ -289,6 +308,53 @@ export function createSignPreparationCapability(
             });
 
       return { preparation: updated, inspection, result };
+    },
+
+    async authorizeSignRepairPlan(designId, input) {
+      const preparation = await loadOwned(designId);
+
+      if (preparation.status !== "planned" || !preparation.plan || !preparation.planKey) {
+        throw new SignPreparationStateError(
+          "A repair plan must be formulated before it can be authorized.",
+        );
+      }
+
+      // Never trust the stored key alone — recompute from the currently
+      // persisted plan fields, the identical discipline `planSignRepair`'s
+      // own callers (`FinalArtworkCapability.requestSignFinalArtwork`,
+      // `FinalArtworkWorkerCapability`) already apply.
+      const plan = preparation.plan as unknown as SignRepairPlan;
+      const recomputedKey = computeSignPlanKey(plan);
+      if (recomputedKey !== preparation.planKey || recomputedKey !== plan.planKey) {
+        throw new SignPreparationStateError(
+          "The recorded repair plan could not be verified. Please re-plan this artwork.",
+        );
+      }
+
+      // Idempotent: already authorized for this EXACT plan — a double
+      // click, a page reload, or a retried request all land here rather
+      // than re-stamping a new timestamp/actor over an existing decision.
+      if (preparation.authorizedPlanKey === recomputedKey) {
+        return preparation;
+      }
+
+      // The one rule this method exists to enforce, checked at the
+      // earliest possible point — BEFORE any durable authorization is
+      // ever written, long before `FinalArtworkCapability` or the worker
+      // are ever reached.
+      if (!isAuthorizationSufficientForRisk(plan.overallRisk, input.authorizedBy)) {
+        throw new SignPreparationStateError(
+          plan.overallRisk === "review_required"
+            ? "This plan requires operator review before it may be authorized for production."
+            : "This plan cannot be authorized for production.",
+        );
+      }
+
+      return repo.updateSignPreparation(preparation.id, {
+        authorizedPlanKey: recomputedKey,
+        authorizedAt: new Date().toISOString(),
+        authorizedBy: input.authorizedBy,
+      });
     },
   };
 }

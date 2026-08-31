@@ -77,7 +77,16 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
       filename: "sign.png",
     });
     await signPreparation.confirmSignProductionSpec(projectId, orderedWidthIn, orderedHeightIn);
-    return signPreparation.planSignRepair(projectId);
+    const outcome = await signPreparation.planSignRepair(projectId);
+    // LIVE PRODUCT BLOCKER #4: `requestSignFinalArtwork` now refuses an
+    // unauthorized plan. Every test in this file exercises DOWNSTREAM
+    // execution behavior, never authorization itself (that has its own
+    // dedicated suite) — "operator" is sufficient for every risk class,
+    // so authorizing here keeps every existing call site unchanged.
+    if (outcome.result.status === "planned") {
+      await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    }
+    return outcome;
   }
 
   /** 900x1200 @ 18x24in = 50 PPI, exact aspect: a single auto_safe `reconstruct_resolution` step, no geometry stage. */
@@ -165,6 +174,14 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
       plan: finalPlan,
       planKey: tamperedPlanKey,
     });
+    // LIVE PRODUCT BLOCKER #4: the ORIGINAL plan's authorization does not
+    // carry over to this tampered plan's own NEW key (correct — see the
+    // dedicated stale-authorization suite). This test targets the
+    // WORKER's pre-dispatch ceiling refusal specifically, so re-authorize
+    // under the tampered key to reach that check rather than being
+    // pre-empted by the (also-correct, but not what this test is about)
+    // authorization gate.
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
 
     const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
     await worker.processNextJob();

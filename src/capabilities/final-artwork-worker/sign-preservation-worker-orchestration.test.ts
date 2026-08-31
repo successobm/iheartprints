@@ -87,6 +87,15 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     });
     await built.signPreparation.confirmSignProductionSpec(built.projectId, 18, 24);
     await built.signPreparation.planSignRepair(built.projectId);
+    // LIVE PRODUCT BLOCKER #4: this fixture's plan is `review_required`
+    // (test 7, below) — `requestSignFinalArtwork` now refuses to enqueue
+    // without a sufficient authorization. "operator" is the ONLY actor
+    // sufficient for `review_required`, and this suite exists to test
+    // preservation-verification orchestration, not authorization itself
+    // (that has its own dedicated suite) — authorize unconditionally here.
+    await built.signPreparation.authorizeSignRepairPlan(built.projectId, {
+      authorizedBy: "operator",
+    });
     const { job } = await built.finalArtwork.requestSignFinalArtwork(built.projectId);
     reconstructionProvider.behavior = { kind: "oversized_but_valid", widthPx: 4096, heightPx: 6144 };
     await built.worker.processNextJob();
@@ -229,6 +238,10 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     });
     await built.signPreparation.confirmSignProductionSpec(built.projectId, 18, 24);
     await built.signPreparation.planSignRepair(built.projectId);
+    // LIVE PRODUCT BLOCKER #4: see the identical note in `ruthShapedFinalAsset`.
+    await built.signPreparation.authorizeSignRepairPlan(built.projectId, {
+      authorizedBy: "operator",
+    });
     const { job } = await built.finalArtwork.requestSignFinalArtwork(built.projectId);
     reconstructionProvider.behavior = { kind: "oversized_but_valid", widthPx: 4096, heightPx: 6144 };
     await built.worker.processNextJob();
@@ -260,25 +273,73 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     assert.equal(retriedJob!.status, "completed");
   });
 
-  it("6: a 'preserved' preservation record does NOT make the project print_ready — S4.4 has not occurred", async () => {
+  it("6: an OPERATOR-AUTHORIZED review_required plan with a 'preserved' record still does not reach print_ready HERE — for a reason unrelated to Blocker #4", async () => {
+    // This fixture's plan is `review_required`, and `ruthShapedFinalAsset`
+    // now authorizes it as "operator" (the only actor sufficient for that
+    // risk class) BEFORE enqueueing — Blocker #4's own gates (risk
+    // authorization) and Blocker #3B's own gate (preservation) both PASS
+    // here (confirmed directly below). This fixture still lands on
+    // `finalization_required`, but for a THIRD, independent, pre-existing
+    // reason this suite is not about: the fake reconstruction provider's
+    // `oversized_but_valid` behavior returns a genuinely different size
+    // than the plan's own recorded step requested, so S3C's adaptive-
+    // geometry honesty correctly reports `executedStepsMatchPlan: false`
+    // — `planIntegrityOk` fails before risk/preservation are even
+    // consulted. The positive "everything aligned" path is proven at the
+    // pure PrintValidation level instead (`rigid-sign-print-validation
+    // .test.ts`'s "Signs authorization → print_ready" suite, test 12) —
+    // reconstructing a worker fixture where the fake provider returns the
+    // EXACT requested size would duplicate that proof for no new coverage.
     const reconstructionProvider = new FakeSignReconstructionProvider();
     const semanticProvider = new FakeSignPreservationSemanticProvider();
     semanticProvider.behavior = { kind: "all_same" };
 
-    const { repo, projectId } = await ruthShapedFinalAsset(reconstructionProvider, semanticProvider);
+    const { repo, projectId, job } = await ruthShapedFinalAsset(reconstructionProvider, semanticProvider);
     const project = await repo.getProject(projectId);
     assert.notEqual(project!.project.status, "print_ready");
     assert.equal(project!.project.status, "finalization_required");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    const executedPlanCheck = (
+      validation!.report as { checks: Array<{ check: string; status: string; reason: string }> }
+    ).checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
+    // Proves this is the geometry-adaptation reason, NOT an authorization
+    // or preservation refusal — those have their own dedicated messages
+    // (see the print-validation suite) and this is neither of them.
+    assert.match(executedPlanCheck!.reason, /exact, unmodified replay/i);
   });
 
-  it("7: review_required plan risk remains unresolved after a 'preserved' preservation record — this phase never approves it", async () => {
+  it("7: review_required plan risk is a static planning fact, unaffected by authorization or preservation status", async () => {
     const reconstructionProvider = new FakeSignReconstructionProvider();
     const semanticProvider = new FakeSignPreservationSemanticProvider();
     semanticProvider.behavior = { kind: "all_same" };
 
     const { repo, projectId } = await ruthShapedFinalAsset(reconstructionProvider, semanticProvider);
     const preparation = await repo.getSignPreparation(projectId);
+    // The PLAN's own risk classification never changes — authorization is
+    // a separate, additional fact (`authorizedPlanKey`/`authorizedBy`),
+    // never a rewrite of what the planner itself concluded.
     assert.equal(preparation!.plan!.overallRisk, "review_required");
+    assert.equal(preparation!.authorizedBy, "operator");
+    assert.equal(preparation!.authorizedPlanKey, preparation!.planKey);
+  });
+
+  it("6b: the SAME review_required plan WITHOUT authorization is refused before any job can even be enqueued", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new FakeSignPreservationSemanticProvider();
+    const built = await build(reconstructionProvider, semanticProvider);
+    await built.signPreparation.uploadSignArtwork(built.projectId, {
+      bytes: toPngBytes(ruthLikeSignArtwork()),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await built.signPreparation.confirmSignProductionSpec(built.projectId, 18, 24);
+    await built.signPreparation.planSignRepair(built.projectId);
+
+    // No authorization call — this is the REAL customer's exact situation.
+    await assert.rejects(() => built.finalArtwork.requestSignFinalArtwork(built.projectId));
+    assert.equal(reconstructionProvider.dispatchCount, 0, "unauthorized: zero Topaz calls");
+    assert.equal(semanticProvider.dispatchCount, 0, "unauthorized: zero semantic calls");
   });
 
   it("9: a non-reconstructed (native-resolution) rigid sign never dispatches semantic preservation", async () => {
@@ -296,6 +357,8 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     });
     await signPreparation.confirmSignProductionSpec(projectId, 18, 24);
     await signPreparation.planSignRepair(projectId);
+    // LIVE PRODUCT BLOCKER #4: see the identical note in `ruthShapedFinalAsset`.
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
     await finalArtwork.requestSignFinalArtwork(projectId);
     await worker.processNextJob();
 

@@ -30,6 +30,7 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  SignPlanAuthorizationActor,
   SignPreparation,
   SignPreparationStatus,
   SignPreservationStatus,
@@ -427,6 +428,10 @@ export type UpdateSignPreparationInput = Partial<{
   inspection: Record<string, unknown> | null;
   plan: Record<string, unknown> | null;
   planKey: string | null;
+  /** LIVE PRODUCT BLOCKER #4: see `SignPreparation.authorizedPlanKey`'s own doc. */
+  authorizedPlanKey: string | null;
+  authorizedAt: string | null;
+  authorizedBy: SignPlanAuthorizationActor | null;
 }>;
 
 /**

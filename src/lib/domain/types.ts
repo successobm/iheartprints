@@ -2499,6 +2499,25 @@ export interface ArtworkPreparation {
 export type SignPreparationStatus = "inspected" | "planned";
 
 /**
+ * LIVE PRODUCT BLOCKER #4: WHO authorized a rigid-sign plan for production.
+ * Never a personal identity (this codebase has no user-authentication
+ * layer at all — ARCHITECTURE.md §23) — a narrow actor TYPE, exactly wide
+ * enough to answer the one question the risk rules need: was this the
+ * customer themselves, or an internal operator?
+ *
+ *   "customer" — the customer's own self-service action. Sufficient ONLY
+ *                for an `auto_safe` plan.
+ *   "operator" — an internal, `isInternalProject`-gated action. Required
+ *                for a `review_required` plan; also sufficient for
+ *                `auto_safe`.
+ *
+ * `"blocked"` deliberately has no corresponding actor — a blocked planning
+ * outcome persists no plan at all, so there is nothing to authorize.
+ */
+export const SIGN_PLAN_AUTHORIZATION_ACTORS = ["customer", "operator"] as const;
+export type SignPlanAuthorizationActor = (typeof SIGN_PLAN_AUTHORIZATION_ACTORS)[number];
+
+/**
  * Signs Phase S1: the durable record of one rigid-sign order's artwork —
  * "understand this sign order before changing any pixels."
  *
@@ -2566,6 +2585,25 @@ export interface SignPreparation {
    * changes; never changes on cosmetic serialization differences.
    */
   planKey: string | null;
+  /**
+   * LIVE PRODUCT BLOCKER #4: the durable production-risk authorization for
+   * THIS plan — a genuinely separate decision from `specConfirmedAt`
+   * (which authorizes an ordered SIZE) and from planning itself (which
+   * only FORMULATES a plan, never authorizes running it). `null` means
+   * never authorized.
+   *
+   * Binds to `planKey` explicitly, exactly like `production_size_confirmed
+   * _at`'s precedent — a default is not a decision, and a re-plan (a
+   * changed `planKey`) must never be silently covered by an authorization
+   * that was granted for a DIFFERENT plan. `requestSignFinalArtwork`
+   * refuses unless `authorizedPlanKey === ` the current, recomputed
+   * `planKey`.
+   */
+  authorizedPlanKey: string | null;
+  /** When authorization was granted. `null` means never — mirrors `specConfirmedAt`'s consent-provenance discipline. */
+  authorizedAt: string | null;
+  /** WHO authorized it — see `SignPlanAuthorizationActor`. `null` means never authorized. */
+  authorizedBy: SignPlanAuthorizationActor | null;
   createdAt: string;
   updatedAt: string;
 }

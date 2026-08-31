@@ -67,6 +67,13 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
     // explicitly (see the "Signs preservation → print_ready" suite below).
     preservationVerification: null,
     expectedPreservationAlgorithmVersion: EXPECTED_ALGORITHM_VERSION,
+    // LIVE PRODUCT BLOCKER #4: matches the default `planKey`/`auto_safe`
+    // above with a sufficient actor, so every PRE-EXISTING test in this
+    // file (written before authorization existed) keeps meaning what it
+    // always meant. Tests that specifically exercise authorization
+    // override this explicitly (see the "Signs authorization → print_ready"
+    // suite below).
+    authorization: { planKey: "sign-repair-plan:v1:abc", authorizedBy: "customer" },
     ...overrides,
   };
 }
@@ -498,7 +505,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       }),
     );
     assert.equal(checkOf(report)?.status, "fail");
-    assert.match(checkOf(report)!.reason, /requires human review/i);
+    assert.match(checkOf(report)!.reason, /requires operator authorization/i);
     assert.notEqual(report.status, "ready");
     // This is the exact real-customer situation this phase must NOT change:
     // review_required stays refused regardless of how good the preservation
@@ -530,5 +537,126 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
     );
     assert.equal(checkOf(report)?.status, "pass");
     assert.equal(report.status, "ready");
+  });
+});
+
+/**
+ * LIVE PRODUCT BLOCKER #4: production-risk authorization → print_ready.
+ * The counterpart to the preservation suite above — `riskAuthorized` is no
+ * longer `planOverallRisk === "auto_safe"` alone; it requires an
+ * identity-bound authorization whose actor is sufficient for the plan's
+ * own risk class. Uses only NATIVE (non-reconstructed) assets throughout,
+ * so preservation evidence never enters into these results — isolating
+ * exactly what this phase changed.
+ */
+describe("Signs authorization → print_ready (LIVE PRODUCT BLOCKER #4)", () => {
+  function checkOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
+  }
+
+  it("11: auto_safe + valid authorization (customer) → riskAuthorized", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          planOverallRisk: "auto_safe",
+          authorization: { planKey: "sign-repair-plan:v1:abc", authorizedBy: "customer" },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("11b: auto_safe + valid authorization (operator) → riskAuthorized — operator is sufficient for every risk class", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          planOverallRisk: "auto_safe",
+          authorization: { planKey: "sign-repair-plan:v1:abc", authorizedBy: "operator" },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("12: review_required + valid operator authorization → riskAuthorized", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          planOverallRisk: "review_required",
+          authorization: { planKey: "sign-repair-plan:v1:abc", authorizedBy: "operator" },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("13: review_required + customer authorization → fails — a customer action alone is never sufficient for a review-class plan", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          planOverallRisk: "review_required",
+          authorization: { planKey: "sign-repair-plan:v1:abc", authorizedBy: "customer" },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /not sufficient/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("14a: missing authorization → fails", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({ rigidSign: evidence({ authorization: null }) }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /no production-risk authorization was found/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("14b: stale/wrong-plan authorization → fails, even though the actor type alone would have been sufficient", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          planOverallRisk: "auto_safe",
+          authorization: { planKey: "sign-repair-plan:v1:SUPERSEDED", authorizedBy: "operator" },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /does not match this exact plan/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("blocked risk can never be authorized by any actor", () => {
+    for (const authorizedBy of ["customer", "operator"] as const) {
+      const report = printValidation.validateArtwork(
+        baseInput({
+          rigidSign: evidence({
+            planOverallRisk: "blocked",
+            authorization: { planKey: "sign-repair-plan:v1:abc", authorizedBy },
+          }),
+        }),
+      );
+      assert.equal(checkOf(report)?.status, "fail", `authorizedBy=${authorizedBy} must not pass`);
+      assert.notEqual(report.status, "ready");
+    }
+  });
+
+  it("THIS REAL CUSTOMER's exact situation: reconstructed + review_required + no authorization + no preservation evidence — refused on every independent ground at once", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          planOverallRisk: "review_required",
+          authorization: null,
+          preservationVerification: null,
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
   });
 });

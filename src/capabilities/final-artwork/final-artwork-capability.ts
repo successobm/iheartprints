@@ -43,7 +43,7 @@ import type {
   StoredRequestedProductionOutput,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
-import { computeSignPlanKey } from "@/capabilities/sign-preparation";
+import { computeSignPlanKey, isAuthorizationSufficientForRisk } from "@/capabilities/sign-preparation";
 import type { SignRepairPlan } from "@/capabilities/sign-preparation";
 import {
   createAcquisitionCapability,
@@ -690,6 +690,29 @@ export function createFinalArtworkCapability(
       if (recomputedKey !== preparation.planKey || recomputedKey !== plan.planKey) {
         throw new Error(
           "The recorded repair plan could not be verified. Please re-plan this artwork.",
+        );
+      }
+
+      // LIVE PRODUCT BLOCKER #4: production-risk authorization — a
+      // genuinely separate decision from planning itself, and from
+      // `specConfirmedAt`'s ordered-size consent. Stopped HERE, before any
+      // `FinalArtworkJob` exists, any provider could be dispatched, or any
+      // pixel is touched — never left for PrintValidation to catch after
+      // the fact. Binds to the CURRENT, just-recomputed plan key (never
+      // the stored one alone) so a re-plan can never be silently covered
+      // by an authorization granted for a superseded plan, and requires
+      // an authorizing actor sufficient for THIS plan's own risk
+      // classification — a customer action alone is never sufficient for
+      // a `review_required` plan.
+      if (
+        preparation.authorizedPlanKey !== recomputedKey ||
+        !preparation.authorizedBy ||
+        !isAuthorizationSufficientForRisk(plan.overallRisk, preparation.authorizedBy)
+      ) {
+        throw new Error(
+          plan.overallRisk === "review_required"
+            ? "This plan requires operator authorization before production may be requested."
+            : "This plan has not been authorized for production.",
         );
       }
 

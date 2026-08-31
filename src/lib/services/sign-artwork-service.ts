@@ -132,3 +132,34 @@ export async function planSignArtwork(projectId: string): Promise<ApiProjectSnap
     },
   };
 }
+
+/**
+ * LIVE PRODUCT BLOCKER #4: the durable production-risk authorization for
+ * the CURRENT plan. This function does no risk judgment of its own — it
+ * calls the authoritative capability
+ * (`SignPreparationCapability.authorizeSignRepairPlan`), which is the ONE
+ * place `isAuthorizationSufficientForRisk` is enforced (a `review_required`
+ * plan refuses a `"customer"` actor outright, regardless of which route
+ * called this). Two callers, both server-stamping the actor rather than
+ * ever accepting it from a request body:
+ *
+ *   - `POST /api/projects/[projectId]/sign-artwork/authorize` —
+ *     `authorizedBy: "customer"`, the customer's own self-service action.
+ *   - `POST /api/internal/projects/[projectId]/sign-artwork/authorize` —
+ *     `authorizedBy: "operator"`, gated on the REQUESTER'S OWN session
+ *     being verified internal (mirrors `continue-as-internal-job`'s own
+ *     reasoning) before this function is ever reached.
+ */
+export async function authorizeSignArtwork(
+  projectId: string,
+  authorizedBy: "customer" | "operator",
+): Promise<ApiProjectSnapshot> {
+  const graph = getCapabilityGraph();
+  await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy });
+
+  const snapshot = await getConversation(projectId);
+  if (!snapshot) {
+    throw new SignArtworkBridgeError("Project not found");
+  }
+  return snapshot;
+}
