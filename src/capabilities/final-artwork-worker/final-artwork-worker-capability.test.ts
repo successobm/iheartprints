@@ -33,6 +33,8 @@ import {
   type ConceptEvaluationResult,
 } from "@/capabilities/concept-evaluation";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
+import { createSignPreservationCapability } from "@/capabilities/sign-preservation";
+import { FakeSignPreservationSemanticProvider } from "@/capabilities/sign-preservation/fake-sign-preservation-semantic-provider";
 import type { ConceptEvaluation, PrintPlacement } from "@/lib/domain/types";
 
 import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capability";
@@ -468,6 +470,35 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
 
     const completed = await repo.getFinalArtworkJob(job.id);
     assert.equal(completed?.status, "completed");
+  });
+
+  it("A2 (Signs Phase S4.2A.1): an apparel/generated_concept job never dispatches sign preservation verification", async () => {
+    const repo = await freshRepo();
+    const assets = createAssetCapability(repo, new DataUriAssetStorageProvider(), new PngThumbnailGenerator());
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const semanticProvider = new FakeSignPreservationSemanticProvider();
+    const signPreservation = createSignPreservationCapability(repo, assets, semanticProvider);
+    const worker = createFinalArtworkWorkerCapability(
+      repo,
+      assets,
+      new LocalRasterInterpolationProvider(),
+      undefined,
+      undefined,
+      undefined,
+      signPreservation,
+    );
+    const { projectId, artworkId } = await setupProjectWithConcept(repo, assets);
+
+    const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed?.status, "completed");
+    assert.equal(
+      semanticProvider.dispatchCount,
+      0,
+      "the sign-preservation seam lives entirely inside runSignPreparationJob — an apparel/generated_concept job never reaches it",
+    );
   });
 
   // --- B: double worker claim does not duplicate ------------------------

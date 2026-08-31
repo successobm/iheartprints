@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.11
+Version 1.13
 August 2026
 
 ## Document Position
@@ -43,7 +43,7 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3D implemented; S4.1 implemented, not yet wired into readiness.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); provider-output-ADAPTIVE deterministic geometry (S3C); bounded, alpha-only provider-introduced-transparency canonicalization on a verified-opaque source (S3D); and DETERMINISTIC (never semantic) preservation-verification evidence, its own append-only table, capable ONLY of `"changed"`/`"unknown"` — never `"preserved"` (S4.1) — are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned, restoring full opacity if the provider introduced any) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it; S4.1's evidence capability is NOT yet consulted by Print Validation at all (Signs Phase S4.2/S4.4). Customer-facing routes and S4.2–S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing three real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`); S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions; and S3D corrected for real provider-introduced alpha (Topaz's own reconstruction carrying non-255 alpha on a verified-opaque source) via bounded, RGB-preserving canonicalization. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only |
+| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3D implemented; S4.1/S4.2A/S4.2A.1 implemented, still not wired into READINESS.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); provider-output-ADAPTIVE deterministic geometry (S3C); bounded, alpha-only provider-introduced-transparency canonicalization on a verified-opaque source (S3D); DETERMINISTIC preservation-verification evidence, its own append-only table (S4.1); SEMANTIC (multimodal) preservation verification against a fake provider only — no real model call yet — the first S4 layer capable of `"preserved"`, gated behind deterministic structural authority (S4.2A); and the actual `FinalArtworkWorkerCapability` orchestration seam that now calls it automatically for every reconstructed sign (S4.2A.1) — are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned, restoring full opacity if the provider introduced any, and now automatically preservation-verified — deterministically always, semantically whenever structural authority is valid) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it; the persisted preservation record is NOT yet consulted by Print Validation at all (that remains Signs Phase S4.4). Customer-facing routes and S4.2B–S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing three real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`); S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions; and S3D corrected for real provider-introduced alpha (Topaz's own reconstruction carrying non-255 alpha on a verified-opaque source) via bounded, RGB-preserving canonicalization. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only |
 | All other categories | Not admitted | Dormant seams only |
 
 **Signs phase boundary** (Constitution §16A/§16B — admission is not implementation, and each phase's own scope is the honest limit of what "implemented" means until the next one lands):
@@ -57,6 +57,9 @@ dormant seams authorize nothing. The registry:
 | S3C | Provider-output-adaptive deterministic geometry (plan's baked-in pad amounts assumed the requested reconstruction size; executor now re-derives them from the actual admitted reconstruction when it proportionally diverges, without mutating the persisted plan/`planKey`), plus the review follow-up's explicit APPROVED PLAN vs DERIVED EXECUTION GEOMETRY evidence split (`rigidSign.executionGeometry`, truthful `executedStepsMatchPlan`) | Implemented |
 | S3D | Bounded, alpha-only canonicalization of provider-introduced transparency on a verified-opaque source (`rigidSign.providerAlphaNormalization`); RGB never modified; strict opacity validation unchanged/unweakened | Implemented |
 | S4.1 | DETERMINISTIC (never semantic) preservation-verification evidence — lineage, region mapping, reconstruction↔final RGB integrity, extension-region verification, source↔reconstruction similarity (advisory only); own append-only table (`rigid_sign_preservation_verifications`); `status` capable ONLY of `"changed"`/`"unknown"`, never `"preserved"`; NOT wired into `FinalArtworkWorkerCapability` or Print Validation yet | Implemented |
+| S4.2A | Semantic (multimodal) preservation verification — closed seven-category question contract, combined verification identity, deterministic structural-authority gating, bounded 14-image derivation, OpenAI Responses API adapter — proven ONLY against `FakeSignPreservationSemanticProvider`; no real model call, no migration | Implemented |
+| S4.2A.1 | Worker orchestration seam — `FinalArtworkWorkerCapability` now actually calls `SignPreservationCapability.verifyPreservation` for a reconstructed rigid sign, under its own heartbeat, with retryable-failure semantics on an incomplete provider attempt; `PrintValidation`'s own readiness formula still completely untouched (that remains S4.4) | Implemented |
+| S4.2B | First separately-authorized, explicitly pinned, real semantic call against the real Ruth artifacts | Not yet performed |
 | S3B | Live/real bounded provider reconstruction acceptance | One real dispatch attempted (real Ruth artwork); reconstruction succeeded provider-side at 4096×6144 (Topaz's 4× ceiling). Exposed and motivated both S3B.1 and S3C. A deterministic recovery of the existing paid intermediate, using the corrected code, has not yet been separately authorized/performed |
 | S4 | Preservation verification for reconstructed/review-required output | Not implemented |
 | S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
@@ -2468,16 +2471,243 @@ imports — mirrors `sign-geometry.ts`'s own discipline):
 **Deliberately NOT wired into `FinalArtworkWorkerCapability`'s worker
 orchestration this phase.** `SignPreservationCapability` is independently
 constructible (`createSignPreservationCapability(repo, assets)`) and fully
-testable on its own — production worker wiring is Signs Phase S4.2's job,
-once semantic verification exists to actually reach `"preserved"` and
-there is a real end-to-end reason to run this automatically after every
-reconstruction.
+testable on its own — production worker wiring did not yet have a real
+end-to-end reason to exist while `verifyPreservation` could not yet be
+reached from anywhere (see "Signs Phase S4.2A" and "Signs Phase S4.2A.1"
+below for the semantic layer that made worker wiring worth doing, and the
+narrow follow-up pass that actually did it).
 
 **No real Topaz call was made or required.** Every test uses the existing
 `FakeSignReconstructionProvider` and the established `ruthLikeSignArtwork`
 synthetic fixture (same geometry class as the real Ruth acceptance case —
 never the real customer file). The real, already-persisted, already-paid-
 for Ruth acceptance state was not read or touched by this phase.
+
+### Signs Phase S4.2A: semantic preservation verification (contract + fake provider)
+
+Adds the fourth deterministic-check-adjacent piece: SEMANTIC preservation
+verification, the layer that makes `preservationStatus = "preserved"`
+reachable for the first time. Everything in this phase is proven against
+`FakeSignPreservationSemanticProvider` — no real model call exists yet
+(that is Signs Phase S4.2B's own, separately-authorized live dispatch).
+
+**Two additive methods on the same capability, never one replacing the
+other.** `SignPreservationCapability.verifyDeterministicPreservation`
+(Signs Phase S4.1) is byte-for-byte unchanged — same persisted identity
+(`SIGN_PRESERVATION_ALGORITHM_VERSION`), same inability to ever produce
+`"preserved"`, same tests still passing unmodified. A new sibling method,
+`verifyPreservation`, reuses the IDENTICAL input-resolution and
+deterministic-check logic internally (extracted into a private
+`resolvePreservationContext` helper both methods call — never duplicated)
+but persists under a separate, COMBINED verification identity and can
+reach `"preserved"`.
+
+**The combined identity is encoded directly in the version STRING, never
+trusted from `semantic_evidence`'s own recorded fields.**
+`buildCombinedVerificationAlgorithmVersion(providerKey, modelIdentity)`
+concatenates the deterministic algorithm version, the semantic provider's
+own `providerKey`/`modelIdentity`, the prompt version, the schema version,
+and the image-derivation (grid) version into one string — a provider,
+model/snapshot, prompt, schema, or grid change is a DIFFERENT string,
+which the existing `unique(final_asset_id, verification_algorithm_version)`
+constraint (Signs Phase S4.1's own table, unmodified — **no migration was
+needed or added this phase**) already refuses to conflate with anything
+older. `SignPreservationSemanticProvider.modelIdentity` is a real,
+authoritative field on the injected provider itself (not a config value
+read separately), so switching providers/models always changes the
+persisted identity by construction.
+
+**Dispatch discipline — deterministic structural authority gates every
+semantic call.** `verifyPreservation` never consults the semantic provider
+unless `lineage`, `regionMapping`, `reconstructionToFinalRgb`, and
+`extensionRegions` are ALL `"pass"` AND no catastrophic anomaly was
+already proven (`structuralAuthorityValid`, private to the capability —
+proven both as a pure gate and, end-to-end, by two tests that corrupt a
+TEST-HARNESS copy of the final asset's bytes — via `downloadAssetBytes`
+override, never the real persisted asset — to force an unreadable-bytes
+case and a genuine RGB-mismatch case respectively; the real, self-
+correcting production pipeline can never actually produce either
+condition, since every upstream S2/S3A/S3C/S3D check already refuses to
+persist a defective final asset in the first place). A catastrophic
+anomaly is `"changed"` immediately and CANNOT be overridden by a
+`"preserved"` semantic answer — proven directly: the fake provider is
+configured to certify everything `"same"` and is never even called.
+
+**Preserved requires both halves, never either alone**
+(`verifyPreservation`'s own composition): deterministic structural
+authority already valid (the gate above) AND a well-formed semantic
+verdict of `"preserved"` — the composed status is exactly the semantic
+verdict, because reaching that code path already proves the deterministic
+half.
+
+**Closed-question contract** (`contracts.ts`): seven fixed categories
+(`wording`, `numerals_prices`, `people_faces`, `logos_marks`,
+`meaningful_objects`, `added_removed_invented`, `meaningful_crop_loss`),
+answer vocabulary `same | changed | cannot_determine | not_applicable`.
+`deriveSemanticVerdict` — any `changed` wins; else any `cannot_determine`
+→ `unknown`; else every category `same`/`not_applicable` with at least one
+actual `same` → `preserved`; all-`not_applicable` is itself treated as
+`unknown` (never certifies an apparently content-free sign).
+`validateSemanticAnswers` independently re-validates the exact category
+set and enum values — never trusts a provider's own claim of a
+well-formed response. Never customer-specific: Ruth is the acceptance
+example these categories were checked against, never a template baked
+into the categories, the prompt, or any production code path.
+
+**"Completed" vs "incomplete" is the load-bearing distinction for
+persistence.** A well-formed response — even an all-`cannot_determine`
+one — is a COMPLETED verification and DOES persist (`status: "unknown"`,
+reused on a repeat call, never re-dispatched). A malformed/schema-invalid
+response (caught by `validateSemanticAnswers`, whether or not the provider
+itself threw) or any provider error (timeout/network/5xx/rate-limit/auth)
+is an INCOMPLETE attempt: nothing is persisted, the error propagates, and
+a later call is free to dispatch again — deliberately NOT the heavyweight
+Topaz poll/resume machinery (this call is synchronous and comparatively
+cheap; re-paying cents on a crash-after-dispatch is an accepted cost, not
+a resumable multi-minute job).
+
+**Bounded, deterministic, non-AI-selected image input**
+(`sign-preservation-image-derivation.ts`, pure, no I/O): exactly
+`SIGN_PRESERVATION_MAX_IMAGE_COUNT` (14) images always — one same-
+dimensioned overview pair (source native, reconstruction downsampled to
+match, reusing `resampleExact` — no new image dependency) plus a fixed
+2×3 grid of geometrically-corresponding crop pairs covering the WHOLE
+source frame. Crop pairs are deliberately NOT resized to match each
+other — the source crop stays native, the reconstruction crop stays
+native (never downsampled a second time) — so small text/price legibility
+is never sacrificed for a tidy comparison. Never the padded final plate
+(the deterministic black extension is already exactly verified by S4.1 —
+sending it would only invite false "cropped" alarms). Returns `null`
+(unavailable, never guessed) when source↔reconstruction dimensions are
+not an exact integer multiple.
+
+**Provider dialect: OpenAI Responses API, not a Chat Completions clone.**
+Audited first (no `openai` SDK package is installed; every existing
+adapter — `OpenAIConceptEvaluationProvider`,
+`OpenAIConversationUnderstandingProvider` — already talks to OpenAI via
+raw `fetch`, unchanged by this phase). `OpenAISignPreservationSemanticProvider`
+uses `POST /v1/responses` specifically because this gate needs, natively,
+in one endpoint: strict `json_schema` structured output (a deliberate
+upgrade over the repo's existing `json_object`-only precedent — never
+appropriate for a print-readiness-blocking contract), multiple image
+inputs in one request, and a first-class response identifier. The system
+prompt explicitly instructs the model that any text visible inside either
+artwork image is DATA TO COMPARE, never an instruction to follow —
+image-text prompt-injection safety, verified directly by a request-
+building test.
+
+**Model configuration is env-driven and fails closed, never open**
+(`lib/config/sign-preservation-semantic-provider-config.ts`,
+`resolve-sign-preservation-semantic-provider.ts`, mirroring the
+concept-evaluation pair exactly). `PlaceholderSignPreservationSemanticProvider`
+— the production-safe default whenever `SIGN_PRESERVATION_SEMANTIC_PROVIDER`
+isn't `openai` or `OPENAI_API_KEY` is absent — answers every category
+`cannot_determine`, so it can never produce `"preserved"` by construction.
+A misconfigured provider in production means rigid signs needing
+reconstruction simply stay `finalization_required` forever, never that one
+is wrongly certified ready. `isAutomatedTestEnvironment()` unconditionally
+forces this placeholder regardless of ambient configuration, exactly like
+every other resolver in this codebase — proven directly by test. The
+`DEFAULT_OPENAI_SIGN_PRESERVATION_MODEL` constant (`"gpt-5.6-sol"`) is a
+DOCUMENTED PLACEHOLDER — the real pinned model/snapshot is chosen only at
+Signs Phase S4.2B's own explicit live-call authorization; no
+`OPENAI_API_KEY`-dependent code path runs in any test, build, or lint step
+this phase.
+
+**Worker seam — audited, not yet built this phase.** The narrowest
+insertion point, confirmed by reading (not modifying) `runSignPreparationJob`:
+after the final production asset is persisted and before
+`printValidation.validateArtwork` is invoked, gated on
+`resolutionProvenance === "reconstructed"`. `FinalArtworkWorkerCapability`
+has zero diff this phase — Signs Phase S4.2A.1 (immediately below) is the
+narrow follow-up pass that actually wires it. `PrintValidation` remains a
+pure reader — it has no path to `verifyPreservation`, initiates no paid
+call, and its readiness formula is completely unchanged, both here and
+after S4.2A.1.
+
+**No real Topaz calls. No real semantic/multimodal calls.** Every test in
+this phase uses `FakeSignReconstructionProvider` and
+`FakeSignPreservationSemanticProvider`. The real, already-persisted,
+already-paid-for Ruth acceptance state was not read or touched.
+
+### Signs Phase S4.2A.1: worker orchestration seam
+
+A narrow completion pass — wires the seam Signs Phase S4.2A audited but
+did not build, with no redesign of the semantic contract, no provider
+change, and no real provider call.
+
+**Exactly the audited seam, exactly where it was found.** Inside
+`runSignPreparationJob`, right after `productionAsset` is stable (true in
+BOTH the fresh-upload and recovered-from-existing-attempt branches) and
+`resolutionProvenance` is known, and before the plan/policy/`rigidSign`
+evidence construction that feeds `printValidation.validateArtwork` begins.
+Gated on `resolutionProvenance === "reconstructed"` — a native-resolution
+sign, or any non-sign `FinalArtworkJob` (apparel/DTF, generated-concept,
+prepared-upload), never reaches this code at all, proven directly by test
+(zero `FakeSignPreservationSemanticProvider` dispatches in both cases).
+
+**One new, LAST, optional constructor parameter.**
+`createFinalArtworkWorkerCapability`'s new `signPreservation` parameter
+defaults to a real `SignPreservationCapability` wired to
+`resolveSignPreservationSemanticProvider()` (which
+`isAutomatedTestEnvironment()` still unconditionally forces to the safe
+placeholder). Deliberately placed AFTER the existing
+`localNormalizationProvider` parameter, not before it — an earlier attempt
+placed it immediately after `conceptEvaluation` and broke
+`scripts/smoke-operator-recovery.ts`'s own existing 6-positional-argument
+call (its `LocalRasterInterpolationProvider` argument silently would have
+landed in the new slot); moving the new parameter to the very end restores
+every existing positional call's exact original meaning, caught by
+`npm run typecheck` before it ever reached a test.
+
+**Own heartbeat, not a second job system.** The preservation call runs
+inside its own `await withPeriodicHeartbeat(job.id, () => signPreservation
+.verifyPreservation(productionAsset.id))` — a second, sequential use of
+the SAME mechanism the reconstruction pass already uses earlier in the
+same function, never a new one — because the deterministic checks alone
+decode and pixel-compare full-resolution rasters and can take several
+seconds at real sign scale.
+
+**A thrown error means an incomplete attempt, and `failJob` is the
+correct existing primitive — not `completeWithoutAsset`.** Timeout,
+network, rate-limit, or malformed/schema-invalid semantic responses (or
+an unresolvable preservation identity) propagate out of
+`verifyPreservation` un-swallowed; the worker marks the job `"failed"`
+(retryable via `FinalArtworkCapability`'s own existing revive-to-`"queued"`
+path) and returns without ever calling `printValidation.validateArtwork`
+for that attempt — `completeWithoutAsset` would be wrong here, since it
+claims a terminal, non-retryable outcome for something a later attempt
+may well succeed at. Because nothing was persisted under that
+verification identity, the retried attempt is free to dispatch a fresh
+semantic request — proven directly by test (one failed dispatch, one
+later successful dispatch, `dispatchCount` reaching exactly two).
+
+**Whatever the COMPLETED preservation status is, execution simply
+continues to `PrintValidation`, unconditionally.** `"preserved"`,
+`"changed"`, and `"unknown"` all fall through identically to the existing
+validation/persistence code, unmodified — S4.2A.1 persists preservation
+evidence only. `PrintValidation`'s readiness formula,
+`executed_plan_matches_recorded_plan`, and the unconditional
+`resolutionProvenance === "reconstructed"` print-readiness block are all
+byte-for-byte unchanged; a `"preserved"` preservation record does not, and
+structurally cannot, make a project `print_ready` — proven directly by
+test. Review-risk approval (Signs Phase S4.3) remains equally untouched —
+a `review_required` plan's risk stays unresolved regardless of preservation
+status.
+
+**Idempotent through real worker recovery, not just the capability in
+isolation.** A recovered/re-processed job (status flipped `"recoverable"`,
+reclaimed and reprocessed exactly like every other Signs S1-S3D recovery
+test in this codebase) reuses an already-completed preservation record
+without a second semantic dispatch — proven directly by test, including
+the `cannot_determine`-driven `"unknown"` case (a genuinely COMPLETED
+record, correctly distinct from an incomplete/failed attempt, and
+correctly reused on retry).
+
+**No real Topaz calls. No real semantic/multimodal calls.** Every test in
+this phase uses `FakeSignReconstructionProvider` and
+`FakeSignPreservationSemanticProvider`. The real, already-persisted,
+already-paid-for Ruth acceptance state was not read or touched.
 
 ### PrintVaultCapability — Reserved
 

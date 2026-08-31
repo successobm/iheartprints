@@ -307,9 +307,13 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-provider-alpha-normalization.test.ts",
   "src/capabilities/sign-preservation/sign-preservation-deterministic-checks.test.ts",
   "src/capabilities/sign-preservation/sign-preservation-capability.test.ts",
+  "src/capabilities/sign-preservation/sign-preservation-semantic-contract.test.ts",
+  "src/capabilities/sign-preservation/sign-preservation-image-derivation.test.ts",
+  "src/capabilities/sign-preservation/openai-sign-preservation-semantic-provider.test.ts",
   "src/capabilities/print-validation/rigid-sign-print-validation.test.ts",
   "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",
+  "src/capabilities/final-artwork-worker/sign-preservation-worker-orchestration.test.ts",
   "src/capabilities/final-artwork/topaz-download-security.test.ts",
   // Garment colour is production context, never authority over customer
   // pixels: preparation must be byte-identical on a white and a black shirt.

@@ -110,6 +110,11 @@ import {
   resolveConceptEvaluationProvider,
   type ConceptEvaluationCapability,
 } from "@/capabilities/concept-evaluation";
+import {
+  createSignPreservationCapability,
+  resolveSignPreservationSemanticProvider,
+  type SignPreservationCapability,
+} from "@/capabilities/sign-preservation";
 import { ProviderError } from "@/capabilities/providers/provider-error";
 import { attachAttentionCheckName } from "@/capabilities/shared/production-variant";
 
@@ -292,6 +297,26 @@ export function createFinalArtworkWorkerCapability(
    * unchanged.
    */
   localNormalizationProvider: FinalArtworkProvider = new LocalRasterInterpolationProvider(),
+  /**
+   * Signs Phase S4.2A.1: the deterministic + semantic preservation-
+   * verification boundary. Defaults to a real capability wired to
+   * `resolveSignPreservationSemanticProvider()` — which
+   * `isAutomatedTestEnvironment()` unconditionally forces to the safe,
+   * network-free `PlaceholderSignPreservationSemanticProvider` regardless
+   * of ambient configuration, exactly like every other resolver in this
+   * codebase. Injected (not merely constructed inline where it's used) so
+   * a test can supply a `FakeSignPreservationSemanticProvider`-backed
+   * capability and observe its dispatch count. Deliberately the LAST
+   * parameter — every existing positional caller (up to and including
+   * `localNormalizationProvider`) keeps its exact same argument meaning;
+   * only a caller that already passed a 7th argument would collide, and
+   * none does.
+   */
+  signPreservation: SignPreservationCapability = createSignPreservationCapability(
+    repo,
+    assets,
+    resolveSignPreservationSemanticProvider(),
+  ),
 ): FinalArtworkWorkerCapability {
   async function withPeriodicHeartbeat<T>(
     jobId: string,
@@ -1975,6 +2000,60 @@ export function createFinalArtworkWorkerCapability(
         recorded?.providerAlphaNormalization && typeof recorded.providerAlphaNormalization === "object"
           ? (recorded.providerAlphaNormalization as ProviderAlphaNormalizationEvidence)
           : null;
+    }
+
+    // --- Signs Phase S4.2A.1: deterministic + semantic preservation
+    // verification — ONLY for a reconstructed asset (Constitution §16A.3
+    // has no preservation question to ask about a deterministic-only,
+    // native-resolution plate). `productionAsset` is stable and persisted
+    // by this point in BOTH branches above (freshly uploaded or recovered
+    // from an existing attempt), so its id is a valid, immutable binding
+    // target. Runs under its own heartbeat (mirrors the reconstruction
+    // pass's own `withPeriodicHeartbeat` above — a second, sequential use
+    // of the SAME mechanism, never a second job system) because the
+    // deterministic checks alone decode/compare full-resolution rasters
+    // and can take several seconds at real sign scale.
+    //
+    // `verifyPreservation` is internally idempotent (Signs Phase S4.2A) —
+    // a completed record already on file for this exact
+    // (finalAssetId, combined verification identity) is reused, never
+    // re-dispatched, so calling this unconditionally on every retry/
+    // recovery of this job is always safe and cheap.
+    //
+    // A THROWN error means an INCOMPLETE provider attempt (timeout,
+    // network, rate limit, malformed/schema-invalid response) or an
+    // unresolvable identity — never silently swallowed, and never turned
+    // into a fabricated "completed" verification. `failJob` is the correct
+    // existing primitive (not `completeWithoutAsset`): this is a retryable
+    // infrastructure failure, not a deterministic-forever refusal —
+    // `FinalArtworkCapability`'s own existing revive-a-failed-job-to-queued
+    // path lets a later invocation safely retry, and because nothing was
+    // persisted under this identity, that retry may dispatch a fresh
+    // semantic request. PrintValidation is never reached this attempt —
+    // it must not certify readiness for an asset preservation verification
+    // never actually completed.
+    //
+    // Whatever the COMPLETED preservation status is (`preserved`,
+    // `changed`, or `unknown`) execution simply continues to
+    // PrintValidation below, unconditionally — S4.2A.1 persists preservation
+    // evidence only; PrintValidation remains a pure reader and is not
+    // taught S4.4 readiness semantics by this phase. The existing
+    // `resolutionProvenance === "reconstructed"` unconditional block inside
+    // `validateRigidSign` is completely unaffected either way.
+    if (resolutionProvenance === "reconstructed") {
+      try {
+        await withPeriodicHeartbeat(job.id, () =>
+          signPreservation.verifyPreservation(productionAsset.id),
+        );
+      } catch (error) {
+        await failJob(
+          job,
+          `Preservation verification could not complete: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return;
+      }
     }
 
     const policy = getSignResolutionPolicyById(plan.policyId);
