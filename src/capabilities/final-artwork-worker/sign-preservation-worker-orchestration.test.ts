@@ -115,6 +115,7 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     const combinedVersion = buildCombinedVerificationAlgorithmVersion(
       semanticProvider.providerKey,
       semanticProvider.modelIdentity,
+      semanticProvider.transportVersion,
     );
     const stored = await repo.getSignPreservationVerification(finalAsset.id, combinedVersion);
     assert.ok(stored, "the worker actually persisted a preservation record, not just called the capability");
@@ -186,6 +187,7 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     const combinedVersion = buildCombinedVerificationAlgorithmVersion(
       brokenSemantic.providerKey,
       brokenSemantic.modelIdentity,
+      brokenSemantic.transportVersion,
     );
     const stored = await repo.getSignPreservationVerification(finalAsset.id, combinedVersion);
     assert.ok(stored);
@@ -203,6 +205,7 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     const combinedVersion = buildCombinedVerificationAlgorithmVersion(
       semanticProvider.providerKey,
       semanticProvider.modelIdentity,
+      semanticProvider.transportVersion,
     );
     const stored = await repo.getSignPreservationVerification(finalAsset.id, combinedVersion);
     assert.ok(stored, "a completed (cannot_determine-driven unknown) record IS persisted through the worker");
@@ -242,6 +245,7 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     const combinedVersion = buildCombinedVerificationAlgorithmVersion(
       semanticProvider.providerKey,
       semanticProvider.modelIdentity,
+      semanticProvider.transportVersion,
     );
     const stored = await built.repo.getSignPreservationVerification(finalAsset!.id, combinedVersion);
     assert.equal(stored, null, "the transient failure persisted nothing");

@@ -107,30 +107,62 @@ describe("validateSemanticAnswers (Signs Phase S4.2A)", () => {
 
 describe("buildCombinedVerificationAlgorithmVersion (Signs Phase S4.2A)", () => {
   it("is deterministic — the same inputs always produce the same identity", () => {
-    const a = buildCombinedVerificationAlgorithmVersion("openai_sign_preservation_semantic", "gpt-5.6-sol");
-    const b = buildCombinedVerificationAlgorithmVersion("openai_sign_preservation_semantic", "gpt-5.6-sol");
+    const a = buildCombinedVerificationAlgorithmVersion(
+      "openai_sign_preservation_semantic",
+      "gpt-5.6-sol",
+      "sign-preservation-transport:file-id-v1",
+    );
+    const b = buildCombinedVerificationAlgorithmVersion(
+      "openai_sign_preservation_semantic",
+      "gpt-5.6-sol",
+      "sign-preservation-transport:file-id-v1",
+    );
     assert.equal(a, b);
   });
 
   it("a different provider key changes the identity", () => {
-    const a = buildCombinedVerificationAlgorithmVersion("openai_sign_preservation_semantic", "gpt-5.6-sol");
-    const b = buildCombinedVerificationAlgorithmVersion("fake_sign_preservation_semantic_v1", "gpt-5.6-sol");
+    const a = buildCombinedVerificationAlgorithmVersion(
+      "openai_sign_preservation_semantic",
+      "gpt-5.6-sol",
+      "sign-preservation-transport:file-id-v1",
+    );
+    const b = buildCombinedVerificationAlgorithmVersion(
+      "fake_sign_preservation_semantic_v1",
+      "gpt-5.6-sol",
+      "sign-preservation-transport:file-id-v1",
+    );
     assert.notEqual(a, b);
   });
 
   it("a different model identity (a model/snapshot bump) changes the identity", () => {
-    const a = buildCombinedVerificationAlgorithmVersion("openai_sign_preservation_semantic", "gpt-5.6-sol");
-    const b = buildCombinedVerificationAlgorithmVersion("openai_sign_preservation_semantic", "gpt-5.7-sol");
+    const a = buildCombinedVerificationAlgorithmVersion(
+      "openai_sign_preservation_semantic",
+      "gpt-5.6-sol",
+      "sign-preservation-transport:file-id-v1",
+    );
+    const b = buildCombinedVerificationAlgorithmVersion(
+      "openai_sign_preservation_semantic",
+      "gpt-5.7-sol",
+      "sign-preservation-transport:file-id-v1",
+    );
     assert.notEqual(a, b);
   });
 
   it("never equals the deterministic-only S4.1 identity", () => {
-    const combined = buildCombinedVerificationAlgorithmVersion("fake_sign_preservation_semantic_v1", "fake-model-v1");
+    const combined = buildCombinedVerificationAlgorithmVersion(
+      "fake_sign_preservation_semantic_v1",
+      "fake-model-v1",
+      "sign-preservation-transport:none",
+    );
     assert.notEqual(combined, "sign-preservation-deterministic:v1");
   });
 
   it("Signs Phase S4.2B.2: the combined identity now encodes the bumped image-derivation version — old (v1) evidence can never be matched/reused under the new (v2) derivation behavior", () => {
-    const combined = buildCombinedVerificationAlgorithmVersion("openai_sign_preservation_semantic", "gpt-5.6-sol");
+    const combined = buildCombinedVerificationAlgorithmVersion(
+      "openai_sign_preservation_semantic",
+      "gpt-5.6-sol",
+      "sign-preservation-transport:file-id-v1",
+    );
     assert.ok(
       combined.includes("grid=sign-preservation-image-derivation:v2"),
       `expected the combined identity to include the bumped v2 grid component, got: ${combined}`,
@@ -139,5 +171,21 @@ describe("buildCombinedVerificationAlgorithmVersion (Signs Phase S4.2A)", () => 
       !combined.includes("grid=sign-preservation-image-derivation:v1"),
       `combined identity must never carry the stale v1 grid component, got: ${combined}`,
     );
+  });
+
+  it("Signs Phase S4.2C.1: a different transport version alone changes the identity, even with identical provider/model", () => {
+    const inline = buildCombinedVerificationAlgorithmVersion(
+      "openai_sign_preservation_semantic",
+      "gpt-5.6-sol",
+      "sign-preservation-transport:inline-v1",
+    );
+    const fileId = buildCombinedVerificationAlgorithmVersion(
+      "openai_sign_preservation_semantic",
+      "gpt-5.6-sol",
+      "sign-preservation-transport:file-id-v1",
+    );
+    assert.notEqual(inline, fileId);
+    assert.ok(inline.includes("transport=sign-preservation-transport:inline-v1"));
+    assert.ok(fileId.includes("transport=sign-preservation-transport:file-id-v1"));
   });
 });

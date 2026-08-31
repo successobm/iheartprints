@@ -46,6 +46,7 @@ import type {
   ProjectSnapshot,
   ProjectStatus,
   SignPreparation,
+  SignPreservationTransportAttempt,
   SignPreservationVerification,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
@@ -62,7 +63,9 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  CreateSignPreservationTransportAttemptInput,
   CreateSignPreservationVerificationInput,
+  UpdateSignPreservationTransportAttemptInput,
   ApplyPaymentEventInput,
   BindProviderCheckoutSessionInput,
   CreateProductionUnlockInput,
@@ -118,6 +121,8 @@ interface LocalDatabase {
   signPreparations: SignPreparation[];
   /** Signs Phase S4.1. */
   signPreservationVerifications: SignPreservationVerification[];
+  /** Signs Phase S4.2C.1. */
+  signPreservationTransportAttempts: SignPreservationTransportAttempt[];
 }
 
 /**
@@ -176,6 +181,7 @@ function emptyDb(): LocalDatabase {
     artworkPreparations: [],
     signPreparations: [],
     signPreservationVerifications: [],
+    signPreservationTransportAttempts: [],
   };
 }
 
@@ -367,6 +373,8 @@ async function readDb(): Promise<LocalDatabase> {
       signPreparations: parsed.signPreparations ?? [],
       // Signs Phase S4.1: absent in every store written before it existed.
       signPreservationVerifications: parsed.signPreservationVerifications ?? [],
+      // Signs Phase S4.2C.1: absent in every store written before it existed.
+      signPreservationTransportAttempts: parsed.signPreservationTransportAttempts ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -2200,6 +2208,83 @@ export class LocalProjectRepository implements ProjectRepository {
           item.verificationAlgorithmVersion === verificationAlgorithmVersion,
       ) ?? null
     );
+  }
+
+  async createSignPreservationTransportAttempt(
+    projectId: string,
+    input: CreateSignPreservationTransportAttemptInput,
+  ): Promise<SignPreservationTransportAttempt> {
+    const db = await readDb();
+    // Mirrors the DB unique index this table's migration declares — see
+    // `createSignPreservationVerification`'s identical comment.
+    const duplicate = db.signPreservationTransportAttempts.some(
+      (item) =>
+        item.finalAssetId === input.finalAssetId &&
+        item.combinedVerificationAlgorithmVersion === input.combinedVerificationAlgorithmVersion,
+    );
+    if (duplicate) {
+      throw new UniqueConstraintViolationError(
+        "rigid_sign_preservation_transport_attempts_identity_idx",
+      );
+    }
+    const timestamp = nowIso();
+    const attempt: SignPreservationTransportAttempt = {
+      id: randomUUID(),
+      projectId,
+      finalAssetId: input.finalAssetId,
+      sourceAssetId: input.sourceAssetId,
+      intermediateAssetId: input.intermediateAssetId,
+      planKey: input.planKey,
+      combinedVerificationAlgorithmVersion: input.combinedVerificationAlgorithmVersion,
+      transportVersion: input.transportVersion,
+      status: "in_progress",
+      files: [],
+      inferenceDispatchedAt: null,
+      inferenceOutcome: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.signPreservationTransportAttempts.push(attempt);
+    await writeDb(db);
+    return attempt;
+  }
+
+  async getSignPreservationTransportAttempt(
+    finalAssetId: string,
+    combinedVerificationAlgorithmVersion: string,
+  ): Promise<SignPreservationTransportAttempt | null> {
+    const db = await readDb();
+    return (
+      db.signPreservationTransportAttempts.find(
+        (item) =>
+          item.finalAssetId === finalAssetId &&
+          item.combinedVerificationAlgorithmVersion === combinedVerificationAlgorithmVersion,
+      ) ?? null
+    );
+  }
+
+  async updateSignPreservationTransportAttempt(
+    id: string,
+    input: UpdateSignPreservationTransportAttemptInput,
+  ): Promise<SignPreservationTransportAttempt> {
+    const db = await readDb();
+    const index = db.signPreservationTransportAttempts.findIndex((item) => item.id === id);
+    if (index === -1) {
+      throw new Error(`No sign preservation transport attempt exists with id ${id}.`);
+    }
+    const current = db.signPreservationTransportAttempts[index];
+    const updated: SignPreservationTransportAttempt = {
+      ...current,
+      status: input.status ?? current.status,
+      files: input.files ?? current.files,
+      inferenceDispatchedAt:
+        input.inferenceDispatchedAt !== undefined ? input.inferenceDispatchedAt : current.inferenceDispatchedAt,
+      inferenceOutcome: input.inferenceOutcome !== undefined ? input.inferenceOutcome : current.inferenceOutcome,
+      updatedAt: nowIso(),
+    };
+    db.signPreservationTransportAttempts[index] = updated;
+    await writeDb(db);
+    return updated;
   }
 
   async createArtworkPreparation(

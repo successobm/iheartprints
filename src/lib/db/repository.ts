@@ -33,6 +33,10 @@ import type {
   SignPreparation,
   SignPreparationStatus,
   SignPreservationStatus,
+  SignPreservationTransportAttempt,
+  SignPreservationTransportAttemptStatus,
+  SignPreservationTransportFileRecord,
+  SignPreservationTransportInferenceOutcome,
   SignPreservationVerification,
   StoredRequestedProductionOutput,
   TShirtDesignBrief,
@@ -348,6 +352,24 @@ export interface CreateSignPreservationVerificationInput {
   semanticEvidence: Record<string, unknown> | null;
   status: SignPreservationStatus;
   reasons: string[];
+}
+
+/** Signs Phase S4.2C.1: input for the ONE creation of a transport attempt's identity row — files/status are populated afterward via `updateSignPreservationTransportAttempt`. */
+export interface CreateSignPreservationTransportAttemptInput {
+  finalAssetId: string;
+  sourceAssetId: string;
+  intermediateAssetId: string;
+  planKey: string;
+  combinedVerificationAlgorithmVersion: string;
+  transportVersion: string;
+}
+
+/** Signs Phase S4.2C.1: mutable fields a transport-attempt update may change — the caller reads the current row, mutates in memory (e.g. one entry in `files`), and writes the whole resulting shape back. */
+export interface UpdateSignPreservationTransportAttemptInput {
+  status?: SignPreservationTransportAttemptStatus;
+  files?: SignPreservationTransportFileRecord[];
+  inferenceDispatchedAt?: string | null;
+  inferenceOutcome?: SignPreservationTransportInferenceOutcome | null;
 }
 
 /**
@@ -1282,6 +1304,31 @@ export interface ProjectRepository {
     finalAssetId: string,
     verificationAlgorithmVersion: string,
   ): Promise<SignPreservationVerification | null>;
+
+  /**
+   * Signs Phase S4.2C.1: durable, recoverable bookkeeping for one in-flight
+   * OpenAI Files-transport semantic-preservation attempt — see
+   * `SignPreservationTransportAttempt`'s own doc comment for the full
+   * recovery model. Deliberately MUTABLE (unlike
+   * `createSignPreservationVerification`'s append-only discipline): this is
+   * transient transport-lifecycle state, never permanent semantic evidence.
+   * Implementations must enforce at most one row per exact
+   * `(finalAssetId, combinedVerificationAlgorithmVersion)` pair.
+   */
+  createSignPreservationTransportAttempt(
+    projectId: string,
+    input: CreateSignPreservationTransportAttemptInput,
+  ): Promise<SignPreservationTransportAttempt>;
+  /** The idempotent lookup key — identical shape to `getSignPreservationVerification`'s own identity, one layer earlier in the pipeline. */
+  getSignPreservationTransportAttempt(
+    finalAssetId: string,
+    combinedVerificationAlgorithmVersion: string,
+  ): Promise<SignPreservationTransportAttempt | null>;
+  /** Partial update — only the fields present in `input` are changed; `updatedAt` always advances. */
+  updateSignPreservationTransportAttempt(
+    id: string,
+    input: UpdateSignPreservationTransportAttemptInput,
+  ): Promise<SignPreservationTransportAttempt>;
 
   // --- Existing Artwork → Print Ready Phase 1: uploaded-artwork preparation ---
 

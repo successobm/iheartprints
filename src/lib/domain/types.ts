@@ -2690,3 +2690,68 @@ export interface SignPreservationVerification {
   reasons: string[];
   createdAt: string;
 }
+
+/**
+ * Signs Phase S4.2C.1: durable, RECOVERABLE bookkeeping for one in-flight
+ * OpenAI Files-transport semantic-preservation attempt — deliberately NOT
+ * permanent semantic evidence (that remains
+ * `SignPreservationVerification.semanticEvidence`, above). This record
+ * exists solely so a crash mid-attempt (after some uploads, after all
+ * uploads but before inference, or after inference but before cleanup) can
+ * be recovered without a duplicate paid model-inference dispatch and
+ * without silently losing track of files uploaded to OpenAI that still
+ * need deleting.
+ *
+ * Bound to the EXACT semantic verification identity it is transporting for
+ * — `finalAssetId` + `combinedVerificationAlgorithmVersion` — mirroring
+ * `SignPreservationVerification`'s own idempotency key exactly, so a
+ * transport attempt can never be mistaken for a different verification
+ * identity's in-flight work.
+ *
+ * Mutable (unlike the append-only `SignPreservationVerification`) —
+ * deliberately so: this is transient recovery state, not durable audit
+ * history. Never contains image bytes/base64 (`files[].contentHash` is a
+ * SHA-256 of the derived PNG bytes, never the bytes themselves).
+ */
+export type SignPreservationTransportAttemptStatus =
+  | "in_progress"
+  | "uploads_complete"
+  | "inference_dispatched_ambiguous"
+  | "inference_completed"
+  | "cleanup_complete";
+
+export type SignPreservationTransportInferenceOutcome =
+  | "dispatched_ambiguous"
+  | "completed"
+  | "failed_pre_dispatch";
+
+export interface SignPreservationTransportFileRecord {
+  /** One of the 14 fixed, deterministic image roles (e.g. "source_overview", "reconstruction_crop_0_1") — never customer-identifying text. */
+  role: string;
+  /** SHA-256 of the derived PNG bytes for this role, in THIS attempt — the recovery-time proof that a reused file id still corresponds to the currently-derived image, not a stale one from a prior derivation. */
+  contentHash: string;
+  /** `null` until this role's upload completes. Redacted (set back to `null`) once cleanup for this file succeeds — Signs Phase S4.2C.1 §11: prefer retaining upload count/timestamps over a now-deleted provider identifier. */
+  providerFileId: string | null;
+  uploadCompletedAt: string | null;
+  cleanupCompletedAt: string | null;
+}
+
+export interface SignPreservationTransportAttempt {
+  id: string;
+  projectId: string;
+  finalAssetId: string;
+  sourceAssetId: string;
+  intermediateAssetId: string;
+  planKey: string;
+  /** The exact `SignPreservationVerification.verificationAlgorithmVersion` this transport attempt is working toward — the binding identity, alongside `finalAssetId`. */
+  combinedVerificationAlgorithmVersion: string;
+  /** Explicit staleness lever for TRANSPORT MECHANISM behavior, independent of `imageDerivationVersion`/model/prompt/schema — see `SIGN_PRESERVATION_TRANSPORT_VERSION_FILE_ID` in `sign-preservation/contracts.ts`. */
+  transportVersion: string;
+  status: SignPreservationTransportAttemptStatus;
+  /** Exactly `SIGN_PRESERVATION_MAX_IMAGE_COUNT` (14) entries once uploads are underway — never fewer once `status !== "in_progress"` with any file recorded. */
+  files: SignPreservationTransportFileRecord[];
+  inferenceDispatchedAt: string | null;
+  inferenceOutcome: SignPreservationTransportInferenceOutcome | null;
+  createdAt: string;
+  updatedAt: string;
+}

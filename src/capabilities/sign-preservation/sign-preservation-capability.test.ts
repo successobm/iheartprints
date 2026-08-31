@@ -354,7 +354,7 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
     assert.equal(semantic.dispatchCount, 1);
     assert.equal(
       result.verificationAlgorithmVersion,
-      buildCombinedVerificationAlgorithmVersion(semantic.providerKey, semantic.modelIdentity),
+      buildCombinedVerificationAlgorithmVersion(semantic.providerKey, semantic.modelIdentity, semantic.transportVersion),
     );
     const semanticEvidence = result.semanticEvidence as Record<string, unknown>;
     assert.ok(semanticEvidence, "semantic evidence is persisted");
@@ -393,7 +393,7 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
     // yet — proving the version bump did not silently reuse semanticA's row.
     const underB = await repo.getSignPreservationVerification(
       finalAsset.id,
-      buildCombinedVerificationAlgorithmVersion(semanticB.providerKey, semanticB.modelIdentity),
+      buildCombinedVerificationAlgorithmVersion(semanticB.providerKey, semanticB.modelIdentity, semanticB.transportVersion),
     );
     assert.equal(underB, null);
 
@@ -401,7 +401,7 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
     assert.equal(semanticB.dispatchCount, 1, "a fresh dispatch occurred under the new identity");
     assert.notEqual(
       resultB.verificationAlgorithmVersion,
-      buildCombinedVerificationAlgorithmVersion(semanticA.providerKey, semanticA.modelIdentity),
+      buildCombinedVerificationAlgorithmVersion(semanticA.providerKey, semanticA.modelIdentity, semanticA.transportVersion),
     );
   });
 
@@ -480,7 +480,7 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
 
     const stored = await repo.getSignPreservationVerification(
       finalAsset.id,
-      buildCombinedVerificationAlgorithmVersion(semantic.providerKey, semantic.modelIdentity),
+      buildCombinedVerificationAlgorithmVersion(semantic.providerKey, semantic.modelIdentity, semantic.transportVersion),
     );
     assert.ok(stored, "a completed (cannot_determine-driven unknown) verification IS persisted");
     assert.equal(stored!.id, result.id);
@@ -497,7 +497,7 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
 
     const stored = await repo.getSignPreservationVerification(
       finalAsset.id,
-      buildCombinedVerificationAlgorithmVersion(semantic.providerKey, semantic.modelIdentity),
+      buildCombinedVerificationAlgorithmVersion(semantic.providerKey, semantic.modelIdentity, semantic.transportVersion),
     );
     assert.equal(stored, null, "no completed verification was persisted for a malformed attempt");
   });
@@ -514,6 +514,7 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
     const combinedVersion = buildCombinedVerificationAlgorithmVersion(
       semantic.providerKey,
       semantic.modelIdentity,
+      semantic.transportVersion,
     );
     const storedAfterFailure = await repo.getSignPreservationVerification(finalAsset.id, combinedVersion);
     assert.equal(storedAfterFailure, null, "the transient failure persisted nothing");
@@ -590,7 +591,9 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
     const { PlaceholderSignPreservationSemanticProvider } = await import(
       "./placeholder-sign-preservation-semantic-provider"
     );
-    const resolved = resolveSignPreservationSemanticProvider();
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const resolved = resolveSignPreservationSemanticProvider(undefined, repo);
     assert.ok(resolved instanceof PlaceholderSignPreservationSemanticProvider);
     // The placeholder can never certify preserved — every category comes
     // back cannot_determine.
@@ -600,6 +603,14 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
       sourceCrops: [],
       reconstructionCrops: [],
       idempotencyKey: "k",
+      verificationIdentity: {
+        projectId: "project",
+        finalAssetId: "final",
+        sourceAssetId: "source",
+        intermediateAssetId: "intermediate",
+        planKey: "plan",
+        combinedVerificationAlgorithmVersion: "irrelevant-for-placeholder",
+      },
     });
     assert.ok(result.answers.every((a) => a.answer === "cannot_determine"));
   });

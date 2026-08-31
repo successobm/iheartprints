@@ -315,7 +315,7 @@ export function createFinalArtworkWorkerCapability(
   signPreservation: SignPreservationCapability = createSignPreservationCapability(
     repo,
     assets,
-    resolveSignPreservationSemanticProvider(),
+    resolveSignPreservationSemanticProvider(undefined, repo),
   ),
 ): FinalArtworkWorkerCapability {
   async function withPeriodicHeartbeat<T>(

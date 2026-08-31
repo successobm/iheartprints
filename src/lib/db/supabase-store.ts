@@ -55,6 +55,7 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  SignPreservationTransportAttempt,
   SignPreservationVerification,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
@@ -65,7 +66,9 @@ import type {
   CreateArtworkVersionInput,
   CreateAssetInput,
   CreateSignPreparationInput,
+  CreateSignPreservationTransportAttemptInput,
   CreateSignPreservationVerificationInput,
+  UpdateSignPreservationTransportAttemptInput,
   CreateFinalArtworkJobInput,
   CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
@@ -413,6 +416,24 @@ type DbSignPreservationVerification = {
   status: string;
   reasons: unknown;
   created_at: string;
+};
+
+/** Signs Phase S4.2C.1. */
+type DbSignPreservationTransportAttempt = {
+  id: string;
+  project_id: string;
+  final_asset_id: string;
+  source_asset_id: string;
+  intermediate_asset_id: string;
+  plan_key: string;
+  combined_verification_algorithm_version: string;
+  transport_version: string;
+  status: string;
+  files: unknown;
+  inference_dispatched_at: string | null;
+  inference_outcome: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 /** Existing Artwork → Print Ready Phase 1. */
@@ -843,6 +864,27 @@ function mapSignPreservationVerification(
     status: row.status as SignPreservationVerification["status"],
     reasons: Array.isArray(row.reasons) ? (row.reasons as string[]) : [],
     createdAt: row.created_at,
+  };
+}
+
+function mapSignPreservationTransportAttempt(
+  row: DbSignPreservationTransportAttempt,
+): SignPreservationTransportAttempt {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    finalAssetId: row.final_asset_id,
+    sourceAssetId: row.source_asset_id,
+    intermediateAssetId: row.intermediate_asset_id,
+    planKey: row.plan_key,
+    combinedVerificationAlgorithmVersion: row.combined_verification_algorithm_version,
+    transportVersion: row.transport_version,
+    status: row.status as SignPreservationTransportAttempt["status"],
+    files: Array.isArray(row.files) ? (row.files as SignPreservationTransportAttempt["files"]) : [],
+    inferenceDispatchedAt: row.inference_dispatched_at,
+    inferenceOutcome: row.inference_outcome as SignPreservationTransportAttempt["inferenceOutcome"],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -2754,6 +2796,73 @@ export class SupabaseProjectRepository implements ProjectRepository {
     return data
       ? mapSignPreservationVerification(data as DbSignPreservationVerification)
       : null;
+  }
+
+  async createSignPreservationTransportAttempt(
+    projectId: string,
+    input: CreateSignPreservationTransportAttemptInput,
+  ): Promise<SignPreservationTransportAttempt> {
+    const { data, error } = await this.client
+      .from("rigid_sign_preservation_transport_attempts")
+      .insert({
+        project_id: projectId,
+        final_asset_id: input.finalAssetId,
+        source_asset_id: input.sourceAssetId,
+        intermediate_asset_id: input.intermediateAssetId,
+        plan_key: input.planKey,
+        combined_verification_algorithm_version: input.combinedVerificationAlgorithmVersion,
+        transport_version: input.transportVersion,
+        status: "in_progress",
+        files: [],
+      })
+      .select("*")
+      .single();
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "rigid_sign_preservation_transport_attempts_identity_idx",
+        );
+      }
+      throw error;
+    }
+    return mapSignPreservationTransportAttempt(data as DbSignPreservationTransportAttempt);
+  }
+
+  async getSignPreservationTransportAttempt(
+    finalAssetId: string,
+    combinedVerificationAlgorithmVersion: string,
+  ): Promise<SignPreservationTransportAttempt | null> {
+    const { data, error } = await this.client
+      .from("rigid_sign_preservation_transport_attempts")
+      .select("*")
+      .eq("final_asset_id", finalAssetId)
+      .eq("combined_verification_algorithm_version", combinedVerificationAlgorithmVersion)
+      .maybeSingle();
+    if (error) throw error;
+    return data
+      ? mapSignPreservationTransportAttempt(data as DbSignPreservationTransportAttempt)
+      : null;
+  }
+
+  async updateSignPreservationTransportAttempt(
+    id: string,
+    input: UpdateSignPreservationTransportAttemptInput,
+  ): Promise<SignPreservationTransportAttempt> {
+    const patch: Record<string, unknown> = {};
+    if (input.status !== undefined) patch.status = input.status;
+    if (input.files !== undefined) patch.files = input.files;
+    if (input.inferenceDispatchedAt !== undefined) patch.inference_dispatched_at = input.inferenceDispatchedAt;
+    if (input.inferenceOutcome !== undefined) patch.inference_outcome = input.inferenceOutcome;
+    patch.updated_at = new Date().toISOString();
+
+    const { data, error } = await this.client
+      .from("rigid_sign_preservation_transport_attempts")
+      .update(patch)
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapSignPreservationTransportAttempt(data as DbSignPreservationTransportAttempt);
   }
 
   async createArtworkPreparation(

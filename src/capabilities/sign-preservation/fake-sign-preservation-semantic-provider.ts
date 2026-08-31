@@ -9,7 +9,11 @@
 
 import { ProviderError } from "@/capabilities/providers/provider-error";
 
-import { SIGN_PRESERVATION_SEMANTIC_CATEGORIES, type SignPreservationSemanticAnswer } from "./contracts";
+import {
+  SIGN_PRESERVATION_SEMANTIC_CATEGORIES,
+  SIGN_PRESERVATION_TRANSPORT_VERSION_NONE,
+  type SignPreservationSemanticAnswer,
+} from "./contracts";
 import type {
   SignPreservationSemanticProvider,
   SignPreservationSemanticProviderResult,
@@ -47,6 +51,8 @@ export class FakeSignPreservationSemanticProvider implements SignPreservationSem
   readonly providerKey = "fake_sign_preservation_semantic_v1";
   /** Overridable only via the constructor — a test proving identity changes across model versions constructs a second instance with a different value, never a subclass. */
   readonly modelIdentity: string;
+  /** Never real network transport — see `SIGN_PRESERVATION_TRANSPORT_VERSION_NONE`'s own doc comment. */
+  readonly transportVersion = SIGN_PRESERVATION_TRANSPORT_VERSION_NONE;
 
   /** Number of `compare()` invocations this instance has actually made — mirrors `FakeSignReconstructionProvider.dispatchCount` exactly. */
   dispatchCount = 0;

@@ -1,8 +1,10 @@
 import { getSignPreservationSemanticProviderConfig } from "@/lib/config/sign-preservation-semantic-provider-config";
 import { isAutomatedTestEnvironment } from "@/lib/config/automated-test-safety";
+import type { ProjectRepository } from "@/lib/db/repository";
 
 import { PlaceholderSignPreservationSemanticProvider } from "./placeholder-sign-preservation-semantic-provider";
 import { OpenAISignPreservationSemanticProvider } from "./openai-sign-preservation-semantic-provider";
+import { createRepositoryBackedTransportAttemptStore } from "./sign-preservation-transport-attempt-store";
 import type { SignPreservationSemanticProvider } from "./sign-preservation-semantic-provider";
 import type { SignPreservationSemanticProviderConfig } from "@/lib/config/sign-preservation-semantic-provider-config";
 
@@ -21,9 +23,14 @@ import type { SignPreservationSemanticProviderConfig } from "@/lib/config/sign-p
  * Phase S4.2A's OWN forcing, structurally identical to but independent of
  * `resolveConceptEvaluationProvider`'s and `resolveSignReconstructionProvider`-
  * equivalent forcing elsewhere.
+ *
+ * `repo` (Signs Phase S4.2C.1): required so the real OpenAI Files-transport
+ * provider can be given its durable, crash-recoverable attempt store — the
+ * placeholder path never touches it.
  */
 export function resolveSignPreservationSemanticProvider(
-  config?: SignPreservationSemanticProviderConfig,
+  config: SignPreservationSemanticProviderConfig | undefined,
+  repo: ProjectRepository,
 ): SignPreservationSemanticProvider {
   if (config === undefined && isAutomatedTestEnvironment()) {
     return new PlaceholderSignPreservationSemanticProvider();
@@ -35,6 +42,7 @@ export function resolveSignPreservationSemanticProvider(
       return new OpenAISignPreservationSemanticProvider({
         apiKey: resolvedConfig.apiKey,
         model: resolvedConfig.model,
+        transportAttemptStore: createRepositoryBackedTransportAttemptStore(repo),
       });
     case "placeholder":
       return new PlaceholderSignPreservationSemanticProvider();

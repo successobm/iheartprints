@@ -216,6 +216,28 @@ export const SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE = 2;
 export const SIGN_PRESERVATION_MAX_IMAGE_COUNT = 14;
 
 /**
+ * Signs Phase S4.2C.1: explicit staleness lever for the TRANSPORT
+ * MECHANISM alone — how the 14 comparison images physically reach the
+ * semantic provider — independent of every other combined-identity
+ * component (deterministic/provider/model/prompt/schema/image-derivation).
+ * A transport change alone (e.g. inline base64 → OpenAI file_id) never
+ * changes what is compared or how, but DOES materially change audit/
+ * recovery behavior (Signs Phase S4.2C's architecture audit §L), so it
+ * must be able to force fresh evidence independently, exactly like every
+ * other component here already can.
+ */
+export const SIGN_PRESERVATION_TRANSPORT_VERSION_INLINE = "sign-preservation-transport:inline-v1";
+/**
+ * Signs Phase S4.2C.1: each of the 14 comparison images is uploaded to
+ * OpenAI Files first (never image bytes/data URIs on the Responses API
+ * request itself), then the Responses API request references them by
+ * `file_id` — see `openai-sign-preservation-semantic-provider.ts`.
+ */
+export const SIGN_PRESERVATION_TRANSPORT_VERSION_FILE_ID = "sign-preservation-transport:file-id-v1";
+/** Used only by the fake/placeholder test-and-fallback providers, which never perform any real network transport at all — distinct from both real transport values above so neither is ever implied. */
+export const SIGN_PRESERVATION_TRANSPORT_VERSION_NONE = "sign-preservation-transport:none";
+
+/**
  * The combined, behavior-versioned verification identity S4.2A persists
  * under — deliberately NOT `SIGN_PRESERVATION_ALGORITHM_VERSION` alone
  * (that constant remains reserved for `verifyDeterministicPreservation`'s
@@ -230,6 +252,7 @@ export const SIGN_PRESERVATION_MAX_IMAGE_COUNT = 14;
 export function buildCombinedVerificationAlgorithmVersion(
   semanticProviderKey: string,
   semanticModelIdentity: string,
+  transportVersion: string,
 ): string {
   return [
     "sign-preservation:v1",
@@ -238,6 +261,7 @@ export function buildCombinedVerificationAlgorithmVersion(
     `prompt=${SIGN_PRESERVATION_PROMPT_VERSION}`,
     `schema=${SIGN_PRESERVATION_SEMANTIC_SCHEMA_VERSION}`,
     `grid=${SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION}`,
+    `transport=${transportVersion}`,
   ].join("|");
 }
 

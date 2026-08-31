@@ -504,6 +504,7 @@ export function createSignPreservationCapability(
       const combinedVersion = buildCombinedVerificationAlgorithmVersion(
         semanticProvider.providerKey,
         semanticProvider.modelIdentity,
+        semanticProvider.transportVersion,
       );
 
       // --- Idempotent reuse under the COMBINED identity. ---
@@ -568,6 +569,14 @@ export function createSignPreservationCapability(
         sourceCrops: imageSet.sourceCrops,
         reconstructionCrops: imageSet.reconstructionCrops,
         idempotencyKey,
+        verificationIdentity: {
+          projectId: ctx.projectId,
+          finalAssetId,
+          sourceAssetId: ctx.sourceAsset.id,
+          intermediateAssetId: ctx.intermediateAsset.id,
+          planKey: ctx.planKey,
+          combinedVerificationAlgorithmVersion: combinedVersion,
+        },
       });
 
       // --- Structural answer-shape validation is ALSO the orchestrator's

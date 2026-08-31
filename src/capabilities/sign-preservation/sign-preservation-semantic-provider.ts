@@ -32,6 +32,24 @@ export interface SignPreservationSemanticRequest {
    * actually guards duplicate persistence.
    */
   idempotencyKey: string;
+  /**
+   * Signs Phase S4.2C.1: the exact semantic-verification identity this
+   * request is FOR — additive, caller-resolved (never provider-guessed).
+   * A transport implementation with durable, crash-recoverable state (see
+   * `SignPreservationTransportAttempt`) binds its bookkeeping to these
+   * fields plus `combinedVerificationAlgorithmVersion` exactly like
+   * `SignPreservationVerification`'s own identity. A provider without
+   * durable state (fake/placeholder/inline) may simply ignore this field.
+   */
+  verificationIdentity: {
+    projectId: string;
+    finalAssetId: string;
+    sourceAssetId: string;
+    intermediateAssetId: string;
+    planKey: string;
+    /** The FULL combined identity string, including this provider's own `transportVersion` — see `buildCombinedVerificationAlgorithmVersion`. */
+    combinedVerificationAlgorithmVersion: string;
+  };
 }
 
 export interface SignPreservationSemanticProviderResult {
@@ -61,6 +79,15 @@ export interface SignPreservationSemanticProvider {
    * change whenever the underlying model or its behavior changes.
    */
   readonly modelIdentity: string;
+  /**
+   * Signs Phase S4.2C.1: explicit staleness lever for HOW images physically
+   * reach this provider (inline base64 vs. OpenAI `file_id`, etc.) —
+   * independent of `modelIdentity`. MUST change whenever the transport
+   * mechanism materially changes audit/recovery behavior. See
+   * `SIGN_PRESERVATION_TRANSPORT_VERSION_INLINE` /
+   * `SIGN_PRESERVATION_TRANSPORT_VERSION_FILE_ID` in `contracts.ts`.
+   */
+  readonly transportVersion: string;
   compare(
     request: SignPreservationSemanticRequest,
   ): Promise<SignPreservationSemanticProviderResult>;

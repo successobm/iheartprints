@@ -14,7 +14,10 @@
  * fallback the resolver reaches for.
  */
 
-import { SIGN_PRESERVATION_SEMANTIC_CATEGORIES } from "./contracts";
+import {
+  SIGN_PRESERVATION_SEMANTIC_CATEGORIES,
+  SIGN_PRESERVATION_TRANSPORT_VERSION_NONE,
+} from "./contracts";
 import type {
   SignPreservationSemanticProvider,
   SignPreservationSemanticProviderResult,
@@ -24,6 +27,7 @@ import type {
 export class PlaceholderSignPreservationSemanticProvider implements SignPreservationSemanticProvider {
   readonly providerKey = "placeholder_sign_preservation_semantic";
   readonly modelIdentity = "none";
+  readonly transportVersion = SIGN_PRESERVATION_TRANSPORT_VERSION_NONE;
 
   async compare(
     _request: SignPreservationSemanticRequest,
