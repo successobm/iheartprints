@@ -244,16 +244,28 @@ describe("OpenAISignPreservationSemanticProvider — file upload transport", () 
     }
   });
 
-  it("every upload includes an explicit expires_after", async () => {
+  it("every upload includes an explicit expires_after using OpenAI's documented bracket-notation multipart fields (Signs Phase S4.2C.3 fix)", async () => {
     const { fetchImpl, log } = createRoutedFetch();
     const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
     await provider.compare(sampleRequest());
     for (const call of log.uploadCalls) {
-      const raw = call.form.get("expires_after");
-      assert.ok(raw, "expires_after must be present");
-      const parsed = JSON.parse(String(raw));
-      assert.equal(parsed.anchor, "created_at");
-      assert.ok(typeof parsed.seconds === "number" && parsed.seconds > 0);
+      // The real S4.2C.2 smoke test's HTTP 400 root cause — a single
+      // JSON-stringified `expires_after` field — must never reappear.
+      assert.equal(call.form.get("expires_after"), null, "no plain JSON-stringified expires_after field may exist");
+      assert.equal(call.form.get("expires_after[anchor]"), "created_at");
+      assert.equal(call.form.get("expires_after[seconds]"), "3600");
+    }
+  });
+
+  it("every upload has a real file field alongside purpose and expires_after", async () => {
+    const { fetchImpl, log } = createRoutedFetch();
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await provider.compare(sampleRequest());
+    for (const call of log.uploadCalls) {
+      assert.equal(call.form.get("purpose"), "user_data");
+      assert.ok(call.form.get("file") instanceof File, "a file field must be present");
+      assert.ok(call.form.get("expires_after[anchor]"));
+      assert.ok(call.form.get("expires_after[seconds]"));
     }
   });
 
@@ -282,6 +294,49 @@ describe("OpenAISignPreservationSemanticProvider — file upload transport", () 
       return true;
     });
     assert.equal(log.responsesCalls.length, 0, "inference must never be reached when an upload is invalid");
+  });
+
+  it("Signs Phase S4.2C.3: a non-2xx upload response's error body/request-id are surfaced (bounded), reproducing the real S4.2C.2 HTTP 400 as an actionable message", async () => {
+    const { fetchImpl } = createRoutedFetch({
+      respondToUpload: () =>
+        new Response(JSON.stringify({ error: { message: "Invalid value for 'expires_after'.", type: "invalid_request_error" } }), {
+          status: 400,
+          headers: { "content-type": "application/json", "x-request-id": "req_smoke_test_123" },
+        }),
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.equal(err.classification, "malformed_response");
+      assert.match(err.message, /req_smoke_test_123/, "the provider request id must be surfaced");
+      assert.match(err.message, /Invalid value for 'expires_after'/, "the provider's own error detail must be surfaced");
+      return true;
+    });
+  });
+
+  it("Signs Phase S4.2C.3: a very long error body is truncated to a bounded length, never logged in full", async () => {
+    const hugeBody = JSON.stringify({ error: { message: "x".repeat(5000) } });
+    const { fetchImpl } = createRoutedFetch({
+      respondToUpload: () => new Response(hugeBody, { status: 400, headers: { "content-type": "application/json" } }),
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.ok(err.message.length < hugeBody.length, "the full 5000-char body must never appear verbatim in the error message");
+      return true;
+    });
+  });
+
+  it("Signs Phase S4.2C.3: an upload error message never contains the Authorization header, the bearer token, or any multipart content", async () => {
+    const { fetchImpl } = createRoutedFetch({ respondToUpload: () => new Response("plain text failure, no json", { status: 400 }) });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.doesNotMatch(err.message, /sk-test/);
+      assert.doesNotMatch(err.message, /Bearer/i);
+      assert.doesNotMatch(err.message, /authorization/i);
+      return true;
+    });
   });
 
   it("an upload transport failure aborts before any Responses call", async () => {

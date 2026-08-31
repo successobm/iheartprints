@@ -21,6 +21,17 @@
  * consistent with explicit deletion remaining the PRIMARY cleanup
  * mechanism and this expiry existing purely as crash/leak defense in depth
  * (Signs Phase S4.2C.1 §9).
+ *
+ * Signs Phase S4.2C.3: the real S4.2C.2 smoke test's ONE authorized live
+ * upload returned HTTP 400 — root-caused to `expires_after` being sent as
+ * a single JSON-stringified multipart field
+ * (`form.append("expires_after", JSON.stringify({...}))`), which does not
+ * match OpenAI's documented multipart shape. The Files API expects
+ * bracket-notation multipart fields instead:
+ * `expires_after[anchor]` / `expires_after[seconds]` (each its own plain
+ * string field) — fixed below. Narrow request-encoding correction only;
+ * `purpose`, the expiration duration, and every other behavior are
+ * unchanged.
  */
 
 import { ProviderError } from "@/capabilities/providers/provider-error";
@@ -78,17 +89,54 @@ async function withTimeout<T>(
   }
 }
 
-function classifyNonOkResponse(status: number): ProviderError {
+/** Signs Phase S4.2C.3: how much of a non-2xx error body to surface — enough to be actionable, bounded enough to never risk leaking something unbounded (never the request itself, never a secret). */
+const MAX_ERROR_DETAIL_LENGTH = 500;
+
+/**
+ * Signs Phase S4.2C.3: classifies a non-2xx RESPONSE (never the request) —
+ * reads the error body/response headers ONLY, bounded and truncated,
+ * appended to the existing classification message so a future rejection
+ * (like the real HTTP 400 this phase root-caused) is actionable without a
+ * second live call. Never reads/logs the `Authorization` header, the
+ * request body, image bytes, or multipart content — none of those are
+ * even in scope here (this function only ever sees `response`, not the
+ * request that produced it). Classification semantics (which status maps
+ * to which `ProviderErrorClassification`) are unchanged from before this
+ * phase.
+ */
+async function classifyNonOkResponse(response: Response): Promise<ProviderError> {
+  const status = response.status;
+  const requestId =
+    response.headers.get("x-request-id") ?? response.headers.get("openai-request-id") ?? null;
+
+  let detail = "";
+  try {
+    const text = await response.text();
+    detail = text.slice(0, MAX_ERROR_DETAIL_LENGTH);
+  } catch {
+    detail = "";
+  }
+  const diagnostics = [
+    requestId ? `request_id=${requestId}` : null,
+    detail ? `detail=${detail}` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const suffix = diagnostics ? ` (${diagnostics})` : "";
+
   if (status === 429) {
-    return new ProviderError("rate_limited", "OpenAI Files rate-limited this transport request.");
+    return new ProviderError("rate_limited", `OpenAI Files rate-limited this transport request.${suffix}`);
   }
   if (status === 401 || status === 403) {
-    return new ProviderError("auth", "OpenAI Files rejected the configured credentials.");
+    return new ProviderError("auth", `OpenAI Files rejected the configured credentials.${suffix}`);
   }
   if (status >= 500) {
-    return new ProviderError("unavailable", "OpenAI Files is temporarily unavailable.");
+    return new ProviderError("unavailable", `OpenAI Files is temporarily unavailable.${suffix}`);
   }
-  return new ProviderError("malformed_response", `OpenAI Files returned an unexpected status (${status}).`);
+  return new ProviderError(
+    "malformed_response",
+    `OpenAI Files returned an unexpected status (${status}).${suffix}`,
+  );
 }
 
 /**
@@ -107,10 +155,12 @@ export async function uploadOpenAIFile(
 
   const form = new FormData();
   form.append("purpose", "user_data");
-  form.append(
-    "expires_after",
-    JSON.stringify({ anchor: "created_at", seconds: input.expiresAfterSeconds }),
-  );
+  // Signs Phase S4.2C.3: OpenAI's documented multipart shape for
+  // `expires_after` is bracket-notation, each its own plain string field —
+  // NOT a single JSON-stringified field (that was the real S4.2C.2 smoke
+  // test's HTTP 400 root cause).
+  form.append("expires_after[anchor]", "created_at");
+  form.append("expires_after[seconds]", String(input.expiresAfterSeconds));
   form.append(
     "file",
     new Blob([new Uint8Array(input.bytes)], { type: input.contentType }),
@@ -127,7 +177,7 @@ export async function uploadOpenAIFile(
   );
 
   if (!response.ok) {
-    throw classifyNonOkResponse(response.status);
+    throw await classifyNonOkResponse(response);
   }
 
   let payload: unknown;
@@ -180,7 +230,7 @@ export async function deleteOpenAIFile(
     return { deleted: true };
   }
   if (!response.ok) {
-    throw classifyNonOkResponse(response.status);
+    throw await classifyNonOkResponse(response);
   }
   return { deleted: true };
 }
