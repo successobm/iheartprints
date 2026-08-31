@@ -304,6 +304,7 @@ export const TEST_FILES = [
   // authoritative rigid_sign_raster validation. Zero provider dispatch.
   "src/capabilities/sign-preparation/sign-transform-executor.test.ts",
   "src/capabilities/sign-preparation/sign-geometry.test.ts",
+  "src/capabilities/sign-preparation/sign-provider-alpha-normalization.test.ts",
   "src/capabilities/print-validation/rigid-sign-print-validation.test.ts",
   "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",

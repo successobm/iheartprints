@@ -42,6 +42,16 @@ export type FakeSignReconstructionBehavior =
    * producing a plate the plan does not describe.
    */
   | { kind: "oversized_but_valid"; widthPx: number; heightPx: number }
+  /**
+   * Signs Phase S3D: reproduces the REAL Ruth acceptance run's own
+   * forensically-audited defect — otherwise identical to
+   * `oversized_but_valid` (sufficient + proportional), but with the 1px
+   * border ring alternating alpha 0/254 instead of 255, exactly like the
+   * real Topaz response's own border-ring pattern (never an interior
+   * pixel — this fake never simulates the invalid "garbage RGB" case
+   * S3D's own audit ruled out).
+   */
+  | { kind: "oversized_with_border_alpha_defect"; widthPx: number; heightPx: number }
   /** Returns bytes that do not decode as a PNG at all. */
   | { kind: "malformed_bytes" }
   /** Throws the given `ProviderError` (or a default terminal failure) instead of returning. */
@@ -56,6 +66,28 @@ function makeSolidPng(width: number, height: number): Buffer {
     png.data[i * 4 + 1] = NEAR_BLACK.g;
     png.data[i * 4 + 2] = NEAR_BLACK.b;
     png.data[i * 4 + 3] = 255;
+  }
+  return PNG.sync.write(png);
+}
+
+/** Signs Phase S3D fixture: identical to `makeSolidPng`, except the 1px border ring alternates alpha 0/254 — RGB is untouched everywhere, including on the ring. */
+function makeSolidPngWithBorderAlphaDefect(width: number, height: number): Buffer {
+  const png = new PNG({ width, height });
+  let onBorderIndex = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      png.data[i] = NEAR_BLACK.r;
+      png.data[i + 1] = NEAR_BLACK.g;
+      png.data[i + 2] = NEAR_BLACK.b;
+      const onBorder = x === 0 || x === width - 1 || y === 0 || y === height - 1;
+      if (onBorder) {
+        png.data[i + 3] = onBorderIndex % 2 === 0 ? 0 : 254;
+        onBorderIndex += 1;
+      } else {
+        png.data[i + 3] = 255;
+      }
+    }
   }
   return PNG.sync.write(png);
 }
@@ -125,6 +157,14 @@ export class FakeSignReconstructionProvider
     ) {
       return {
         bytes: makeSolidPng(behavior.widthPx, behavior.heightPx),
+        widthPx: behavior.widthPx,
+        heightPx: behavior.heightPx,
+        providerRequestId,
+      };
+    }
+    if (behavior.kind === "oversized_with_border_alpha_defect") {
+      return {
+        bytes: makeSolidPngWithBorderAlphaDefect(behavior.widthPx, behavior.heightPx),
         widthPx: behavior.widthPx,
         heightPx: behavior.heightPx,
         providerRequestId,

@@ -52,3 +52,8 @@ export {
   deriveUniformBackgroundExtension,
   type UniformBackgroundExtensionGeometry,
 } from "./sign-geometry";
+export {
+  normalizeProviderAlphaOnVerifiedOpaqueSource,
+  type ProviderAlphaNormalizationEvidence,
+  type ProviderAlphaNormalizationOutcome,
+} from "./sign-provider-alpha-normalization";

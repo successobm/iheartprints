@@ -733,6 +733,87 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     assert.notEqual(validation!.status, "ready");
   });
 
+  it("S3D: the real Ruth alpha defect — a border-ring alpha artifact on an oversized-but-proportional reconstruction is transparently normalized, adaptive geometry still reaches 4608x6144, and the strict opacity gate passes because the bytes are actually opaque", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
+    const outcome = await uploadConfirmPlan(signPreparation, projectId, ruthLikeSignArtwork(), 18, 24);
+    const plan = outcome.result.plan!;
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    // Reproduces the real Ruth response: sufficient + proportional (4096x6144,
+    // same as the real S3B acceptance run), but with the border ring
+    // carrying alpha 0/254 instead of 255 — the exact defect this phase's
+    // forensic audit characterized. Before S3D, this scenario failed at
+    // `finalizeSignExecution`'s strict opacity gate with no asset produced.
+    provider.behavior = { kind: "oversized_with_border_alpha_defect", widthPx: 4096, heightPx: 6144 };
+    await worker.processNextJob();
+
+    assert.equal(provider.dispatchCount, 1, "exactly one paid dispatch");
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed!.status, "completed", "S3D: the opacity gate now naturally passes — no asset was refused");
+
+    const finalAsset = (await repo.listAssets(projectId)).find(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
+    );
+    assert.ok(finalAsset, "the plate is produced — this exact scenario failed before S3D");
+    assert.equal(finalAsset!.widthPx, 4608, "S3C's own adaptive geometry math, unaffected by S3D");
+    assert.equal(finalAsset!.heightPx, 6144);
+    assert.equal(finalAsset!.hasTransparency, false, "measured false because every alpha byte is actually 255");
+
+    const rigidSignMeta = (finalAsset!.metadata as { rigidSign: Record<string, unknown> }).rigidSign;
+    assert.equal(rigidSignMeta.geometryAdapted, true);
+
+    // --- The normalization evidence itself ---
+    const normalization = rigidSignMeta.providerAlphaNormalization as Record<string, unknown>;
+    assert.ok(normalization, "explicit provider-alpha-normalization evidence is persisted");
+    assert.equal(normalization.reason, "provider_introduced_alpha_on_verified_opaque_source");
+    assert.equal(normalization.strategy, "force_opaque_preserve_rgb");
+    assert.ok((normalization.affectedPixelCount as number) > 0, "the border-ring defect pixels were actually counted");
+    assert.equal(normalization.minAlphaBefore, 0, "the fixture's own zero-alpha border pixels were seen");
+    // maxAlphaBefore is legitimately 255 — the vast interior of the plate was
+    // already opaque; only the border ring carried the defect, exactly like
+    // the real Ruth response (83.9% of pixels already at 254, a smaller
+    // fraction at 0, both confined to the border ring in that real audit).
+    assert.equal(normalization.maxAlphaBefore, 255);
+    assert.equal(normalization.minAlphaAfter, 255);
+    assert.equal(normalization.maxAlphaAfter, 255);
+    assert.equal(normalization.rgbModified, false);
+    assert.equal(normalization.widthPx, 4096, "recorded against the RECONSTRUCTED dimensions, before geometry adaptation");
+    assert.equal(normalization.heightPx, 6144);
+
+    // --- Approved plan/planKey integrity — untouched by normalization,
+    // exactly as S3C's own review follow-up already established for
+    // geometry adaptation. ---
+    const preparationAfter = await repo.getSignPreparation(projectId);
+    assert.deepEqual(preparationAfter!.plan, plan);
+    assert.equal(preparationAfter!.planKey, plan.planKey);
+
+    // --- Validation: strict opacity/geometry checks pass on their own
+    // merits (never loosened); S4's reconstructed-provenance gate still
+    // unconditionally blocks print_ready. ---
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string; reason: string }> }).checks;
+    assert.equal(checks.find((c) => c.check === "effective_resolution")?.status, "pass");
+    assert.equal(checks.find((c) => c.check === "exact_physical_dimensions")?.status, "pass");
+    assert.notEqual(validation!.status, "ready", "reconstructed provenance still blocks print_ready — S4 gate unaffected by S3D");
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+
+    // --- Recovery preserves the normalization evidence and never
+    // redispatches — same discipline as every other reconstruction path. ---
+    await repo.updateFinalArtworkJob(job.id, { status: "recoverable", completedAt: null });
+    await worker.processNextJob();
+    assert.equal(provider.dispatchCount, 1, "recovery of an already-normalized, already-completed plate never redispatches");
+    const assetAfterRecovery = (await repo.listAssets(projectId)).find(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
+    );
+    assert.equal(assetAfterRecovery!.id, finalAsset!.id, "the same asset is reused, not recreated");
+    const recoveredNormalization = (
+      (assetAfterRecovery!.metadata as { rigidSign: Record<string, unknown> }).rigidSign as Record<string, unknown>
+    ).providerAlphaNormalization;
+    assert.deepEqual(recoveredNormalization, normalization, "normalization evidence survives recovery unchanged");
+  });
+
   // ---------------------------------------------------------------------
   // No-reconstruction regression, proven positively against a provider
   // that WOULD dispatch if ever asked to.

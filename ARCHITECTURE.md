@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.9
+Version 1.10
 August 2026
 
 ## Document Position
@@ -43,7 +43,7 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3C implemented.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); and provider-output-ADAPTIVE deterministic geometry (S3C) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it. Customer-facing routes and S4/S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing two real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`), and S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only |
+| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3D implemented.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); provider-output-ADAPTIVE deterministic geometry (S3C); and bounded, alpha-only provider-introduced-transparency canonicalization on a verified-opaque source (S3D) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned, restoring full opacity if the provider introduced any) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it. Customer-facing routes and S4/S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing three real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`); S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions; and S3D corrected for real provider-introduced alpha (Topaz's own reconstruction carrying non-255 alpha on a verified-opaque source) via bounded, RGB-preserving canonicalization. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only |
 | All other categories | Not admitted | Dormant seams only |
 
 **Signs phase boundary** (Constitution §16A/§16B — admission is not implementation, and each phase's own scope is the honest limit of what "implemented" means until the next one lands):
@@ -55,6 +55,7 @@ dormant seams authorize nothing. The registry:
 | S3A | Bounded provider reconstruction (Topaz) dispatch for `reconstruct_resolution` steps, mocked verification only | Implemented |
 | S3B.1 | Provider-result download cap correction (25 MB customer-upload cap wrongly reused for provider reconstruction output; corrected to a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`) | Implemented |
 | S3C | Provider-output-adaptive deterministic geometry (plan's baked-in pad amounts assumed the requested reconstruction size; executor now re-derives them from the actual admitted reconstruction when it proportionally diverges, without mutating the persisted plan/`planKey`), plus the review follow-up's explicit APPROVED PLAN vs DERIVED EXECUTION GEOMETRY evidence split (`rigidSign.executionGeometry`, truthful `executedStepsMatchPlan`) | Implemented |
+| S3D | Bounded, alpha-only canonicalization of provider-introduced transparency on a verified-opaque source (`rigidSign.providerAlphaNormalization`); RGB never modified; strict opacity validation unchanged/unweakened | Implemented |
 | S3B | Live/real bounded provider reconstruction acceptance | One real dispatch attempted (real Ruth artwork); reconstruction succeeded provider-side at 4096×6144 (Topaz's 4× ceiling). Exposed and motivated both S3B.1 and S3C. A deterministic recovery of the existing paid intermediate, using the corrected code, has not yet been separately authorized/performed |
 | S4 | Preservation verification for reconstructed/review-required output | Not implemented |
 | S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
@@ -2313,6 +2314,77 @@ direct reproduction of the real S3B Ruth acceptance geometry (4096×6144 →
 already-paid-for Ruth intermediate reconstruction was not touched, consumed,
 or mutated by this phase — a separately-authorized deterministic recovery
 of it, using this corrected code, remains a future step.
+
+### Signs Phase S3D: provider-introduced alpha canonicalization
+
+A separately-authorized deterministic recovery of the real, already-paid-for
+Ruth intermediate (using S3C's corrected adaptive geometry) reached a NEW
+real-world provider gap: the real Topaz sign reconstruction introduced
+alpha into a source the S1 inspection and S2 execution path had already
+proven fully opaque. Pixel-level forensic audit of the actual 4096×6144
+reconstruction (outside any production code path — no code was changed
+until the audit was complete) found 83.9% of all 25,165,824 pixels at
+alpha=254 spread near-uniformly across the whole canvas (a global
+encode-time alpha quantization), plus 10,239 pixels (0.04%) at alpha=0,
+every single one confined to the exact 1px border ring, ramping smoothly
+inward before plateauing — a classic provider edge-padding/feather
+artifact, never random data loss. RGB beneath every audited low-alpha
+pixel, including every alpha=0 sample, closely matched the
+proportionally-corresponding SOURCE pixel's own colour. The existing
+strict `finalizeSignExecution` opacity check (`hasAnyTransparentPixel`,
+`alpha < 255` on any single pixel) correctly caught this and refused
+rather than persisting a plate with undocumented, provider-introduced
+transparency — exactly its job.
+
+**Provider alpha restoration is deterministic canonicalization, never
+creative repair.** It restores a SOURCE INVARIANT the reconstruction
+provider itself broke ("this source was proven opaque; its reconstruction
+must stay opaque"), never something a `SignRepairPlan` step approved or
+requested — no repair-plan schema change was needed or made for it.
+`sign-preparation/sign-provider-alpha-normalization.ts`'s
+`normalizeProviderAlphaOnVerifiedOpaqueSource` is admitted ONLY when the
+exact bytes fed to the provider (`preImage`, the same value
+`encodeSignPlate(preImage)` sends as `sourceBytes`) are, right now, proven
+fully opaque by the identical strict test the final opacity gate uses —
+never a persisted/stale diagnostic. **RGB is never changed** — every R/G/B
+byte is copied unchanged; only a non-255 alpha byte becomes exactly 255,
+uniformly, whether it was 254 or 0 (the invariant being restored is
+"opaque," not "almost opaque," so there is no per-pixel threshold and no
+special-casing by alpha level). No compositing against black or white, no
+interpolation, no neighbor-fill, no resampling, no dimension change. A
+source that itself legitimately carries transparency is never
+auto-normalized — the existing strict opacity gate governs it exactly as
+it did before this phase.
+
+Called once, from `runSignReconstructionAndContinue`, immediately after
+decoding the reconstructed raster and before geometry adaptation — the
+single choke point both a fresh provider dispatch and an existing
+persisted intermediate already converge through, so no separate logic
+path was needed for the two cases. Actual normalization is persisted as
+explicit PRODUCTION PROVENANCE, `rigidSign.providerAlphaNormalization` on
+the final asset's metadata (mirroring `executionGeometry`'s own
+convention) — `null` whenever nothing was admitted or nothing needed
+correcting. It records the reason, strategy, affected pixel count, and the
+alpha range before/after, and explicitly claims `rgbModified: false`. This
+is never consulted by `validateRigidSign`/`RigidSignPlanEvidence` (which
+has no field for it) — it is audit evidence, not an authorization channel.
+
+**Strict opacity validation remains strict — no threshold relaxation.**
+`hasAnyTransparentPixel`'s `alpha < 255` test was not touched. After
+normalization, it naturally passes because the bytes it inspects are
+actually alpha=255 everywhere; if a source ever fails admission (its own
+transparency is real), the exact same check refuses exactly as before this
+phase existed. **S4 remains required** — reconstructed provenance still
+unconditionally blocks `print_ready`, unaffected by this phase.
+
+**No real Topaz call was made or required.** A new
+`FakeSignReconstructionProvider` behavior,
+`oversized_with_border_alpha_defect`, reproduces the real response's own
+border-ring 0/254 alpha pattern (RGB untouched) for full end-to-end
+coverage. The actual, already-persisted, already-paid-for Ruth intermediate
+reconstruction was not touched, consumed, or mutated by this phase — a
+separately-authorized recovery using this corrected code remains a future
+step.
 
 ### PrintVaultCapability — Reserved
 

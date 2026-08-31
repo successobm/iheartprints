@@ -129,11 +129,13 @@ import {
   executeSignRepairPlan,
   finalizeSignExecution,
   getSignResolutionPolicyById,
+  normalizeProviderAlphaOnVerifiedOpaqueSource,
   planContainsOnlyAdmittedSteps,
   planRequiresBoundedReconstruction,
   SIGN_RECONSTRUCTION_SCALE_CEILING,
   SIGN_REPAIR_PLAN_SCHEMA_VERSION,
   splitPlanAroundReconstruction,
+  type ProviderAlphaNormalizationEvidence,
   type SignExecutionBounds,
   type SignExecutionGeometryEvidence,
   type SignRepairPlan,
@@ -1247,6 +1249,17 @@ export function createFinalArtworkWorkerCapability(
          * authorizes anything; see `SignExecutionGeometryEvidence`'s own doc.
          */
         executionGeometry: SignExecutionGeometryEvidence | null;
+        /**
+         * Signs Phase S3D: the explicit, self-contained audit record of a
+         * bounded alpha-only canonicalization applied to the reconstructed
+         * raster BEFORE any geometry adaptation or opacity check ran —
+         * `null` unless the admission conditions were met AND at least one
+         * pixel actually needed correcting (`normalizeProviderAlphaOnVerifiedOpaqueSource`).
+         * Never authorizes anything a plan didn't already require (an
+         * opaque rigid-sign deliverable) — it only restores the source's
+         * own proven invariant after the reconstruction provider broke it.
+         */
+        providerAlphaNormalization: ProviderAlphaNormalizationEvidence | null;
       }
   > {
     // --- Verify the persisted step's own parameters before anything else
@@ -1516,11 +1529,25 @@ export function createFinalArtworkWorkerCapability(
       );
       return { outcome: "handled" };
     }
-    const reconstructedImage: RgbaImage = {
+    let reconstructedImage: RgbaImage = {
       width: reconstructedPng.width,
       height: reconstructedPng.height,
       data: reconstructedPng.data,
     };
+
+    // --- S3D: a real Topaz reconstruction can come back with an alpha
+    // channel that is not uniformly 255 even when the exact bytes fed to
+    // it (`preImage`) were just proven fully opaque — the real S3B Ruth
+    // acceptance run's forensic audit found this is a genuine provider
+    // encode/edge-padding artifact (RGB intact, alpha off), never a sign of
+    // missing/garbage colour data. Bounded, alpha-only, dimension-preserving
+    // canonicalization — restores the SOURCE's own proven invariant, never
+    // customer-approved creative geometry, so it runs before geometry
+    // adaptation and needs no repair-plan involvement at all. A source that
+    // itself carries transparency is never touched here — see the module's
+    // own admission-condition doc.
+    const alphaNormalization = normalizeProviderAlphaOnVerifiedOpaqueSource(preImage, reconstructedImage);
+    reconstructedImage = alphaNormalization.image;
 
     // --- S3C: the plan's OWN geometry-stage step(s) assumed the
     // reconstruction would return exactly `requestedWidthPx`x`requestedHeightPx`
@@ -1585,6 +1612,7 @@ export function createFinalArtworkWorkerCapability(
         reconstructedImage.width,
         reconstructedImage.height,
       ),
+      providerAlphaNormalization: alphaNormalization.evidence,
     };
   }
 
@@ -1712,6 +1740,7 @@ export function createFinalArtworkWorkerCapability(
     let signReconstructedHeightPx: number | null = null;
     let signGeometryAdapted = false;
     let signExecutionGeometry: SignExecutionGeometryEvidence | null = null;
+    let signProviderAlphaNormalization: ProviderAlphaNormalizationEvidence | null = null;
 
     if (!productionAsset) {
       if (!needsReconstruction && !containsOnlyAdmittedSteps) {
@@ -1778,6 +1807,7 @@ export function createFinalArtworkWorkerCapability(
             reconstructedHeightPx: reconstruction.reconstructedHeightPx,
             geometryAdapted: reconstruction.geometryAdapted,
             executionGeometry: reconstruction.executionGeometry,
+            providerAlphaNormalization: reconstruction.providerAlphaNormalization,
           };
         }
 
@@ -1800,6 +1830,7 @@ export function createFinalArtworkWorkerCapability(
           reconstructedHeightPx: null,
           geometryAdapted: false,
           executionGeometry: null,
+          providerAlphaNormalization: null,
         };
       });
 
@@ -1843,6 +1874,7 @@ export function createFinalArtworkWorkerCapability(
       signReconstructedHeightPx = result.reconstructedHeightPx;
       signGeometryAdapted = result.geometryAdapted;
       signExecutionGeometry = result.executionGeometry;
+      signProviderAlphaNormalization = result.providerAlphaNormalization;
 
       const achievedPpi = image.width / plan.orderedWidthIn;
       const pngBytes = withPhysicalPixelDensity(
@@ -1900,6 +1932,16 @@ export function createFinalArtworkWorkerCapability(
             // the plan's own recorded step already is the complete record
             // in that case.
             executionGeometry: signExecutionGeometry,
+            // Signs Phase S3D: PRODUCTION PROVENANCE for a bounded,
+            // alpha-only canonicalization applied to the reconstructed
+            // raster when a real provider (Topaz) returned alpha bytes
+            // that were not uniformly 255 despite a verified-fully-opaque
+            // source — `null` whenever nothing needed correcting or the
+            // source itself was never proven opaque. RGB is never
+            // recorded as modified because it never is; this never
+            // authorizes anything the plan's own opaque-output
+            // requirement did not already require.
+            providerAlphaNormalization: signProviderAlphaNormalization,
           },
         },
       });
@@ -1928,6 +1970,10 @@ export function createFinalArtworkWorkerCapability(
       signExecutionGeometry =
         recorded?.executionGeometry && typeof recorded.executionGeometry === "object"
           ? (recorded.executionGeometry as SignExecutionGeometryEvidence)
+          : null;
+      signProviderAlphaNormalization =
+        recorded?.providerAlphaNormalization && typeof recorded.providerAlphaNormalization === "object"
+          ? (recorded.providerAlphaNormalization as ProviderAlphaNormalizationEvidence)
           : null;
     }
 
