@@ -2604,3 +2604,89 @@ export interface ProductionAssetValidation {
   validatedAt: string;
   createdAt: string;
 }
+
+/**
+ * Signs Phase S4.1: the durable, append-only result of one preservation-
+ * verification pass against one immutable final rigid-sign production
+ * asset — "did the reconstruction stay semantically faithful to the
+ * customer's artwork?"
+ *
+ * Constitution §16A.3 recognizes four SEPARATE S4 authorities, and this
+ * record is exactly one of them, never all of them:
+ *
+ *   1. APPROVED REPAIR PLAN   — `SignPreparation.plan`/`planKey`. What was
+ *      authorized. Immutable; this record never rewrites it.
+ *   2. EXECUTION EVIDENCE     — the final asset's own `rigidSign.
+ *      executionGeometry`/`providerAlphaNormalization` metadata. What
+ *      actually happened.
+ *   3. PRESERVATION EVIDENCE  — THIS record. Whether the reconstructed
+ *      customer content remained faithful.
+ *   4. REVIEW-RISK APPROVAL   — Signs Phase S4.3 (not yet implemented).
+ *      Whether an operator accepted a known, faithful-but-risky result.
+ *      This record's `status` can never imply that approval, and that
+ *      approval can never imply this record's `status`.
+ *
+ * ITS OWN TABLE, never a column on `assets`: assets are append-only
+ * (Constitution §6.11, "Version Everything" — `ProjectRepository` exposes
+ * no method to update an already-created asset's metadata, confirmed
+ * across Signs Phases S3C/S3D). Verification is a genuinely separate,
+ * independently-idempotent, potentially-paid (from S4.2 onward) step that
+ * must be able to run and be re-verified AFTER the final asset already
+ * exists, without ever rewriting it — the identical reasoning
+ * `ProductionAssetValidation` above is already its own append-only table
+ * rather than a column on `assets`.
+ *
+ * Signs Phase S4.1 establishes ONLY deterministic evidence.
+ * `status` may be `"changed"` (a proven structural impossibility) or
+ * `"unknown"` (the fail-closed default whenever evidence is missing,
+ * inconsistent, or merely inconclusive) — it can NEVER be `"preserved"`
+ * until Signs Phase S4.2's semantic verification exists; enforced as an
+ * explicit invariant in `sign-preservation-capability.ts`, not merely a
+ * convention.
+ */
+export type SignPreservationStatus = "preserved" | "changed" | "unknown";
+
+export interface SignPreservationVerification {
+  id: string;
+  projectId: string;
+  signPreparationId: string;
+  /** The customer's immutable original upload this verification traces its lineage to. */
+  sourceAssetId: string;
+  sourceSha256: string;
+  /**
+   * The persisted reconstruction-intermediate asset (`pass1_intermediate`,
+   * Signs Phase S3A/28V) this verification compares the final content
+   * region against. A preservation verification only ever runs against a
+   * `resolutionProvenance: "reconstructed"` final asset, which always has
+   * exactly one of these — never null.
+   */
+  intermediateAssetId: string;
+  /**
+   * The exact, immutable final production asset this verification is FOR —
+   * THE binding identity (Constitution §6.11: assets never change once
+   * created, so this is a permanent, unambiguous reference). A verification
+   * for one asset must never be read as authorizing a different one.
+   */
+  finalAssetId: string;
+  /** Independently re-hashed at verification time — evidence, not identity (the asset id above is already immutable/unique on its own). */
+  finalAssetSha256: string;
+  /** The approved plan's own canonical identity, re-verified at read time — a redundant, fail-closed cross-check alongside `finalAssetId`. */
+  planKey: string;
+  /** Explicit staleness lever: bumping this forces re-verification even against an otherwise-unchanged final asset. */
+  verificationAlgorithmVersion: string;
+  /**
+   * Structured, versioned, bounded deterministic evidence (lineage, region
+   * mapping, reconstruction↔final RGB integrity, extension-region
+   * verification, source↔reconstruction similarity) — see
+   * `sign-preservation/contracts.ts`. Deliberately never enormous per-pixel
+   * arrays; bounded summaries sufficient for audit/reproducibility.
+   * Serialized as a plain object for the same domain-layer-independence
+   * reason `ProductionAssetValidation.report` is.
+   */
+  deterministicEvidence: Record<string, unknown>;
+  /** Reserved for Signs Phase S4.2's semantic/multimodal verification. Always `null` until then. */
+  semanticEvidence: Record<string, unknown> | null;
+  status: SignPreservationStatus;
+  reasons: string[];
+  createdAt: string;
+}

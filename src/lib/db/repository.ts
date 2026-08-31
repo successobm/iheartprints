@@ -32,6 +32,8 @@ import type {
   ProjectStatus,
   SignPreparation,
   SignPreparationStatus,
+  SignPreservationStatus,
+  SignPreservationVerification,
   StoredRequestedProductionOutput,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
@@ -330,6 +332,22 @@ export interface CreateProductionAssetValidationInput {
   assetId: string;
   status: string;
   report: Record<string, unknown>;
+}
+
+/** Signs Phase S4.1: input for persisting one deterministic (and, from S4.2, semantic) preservation-verification pass. See `SignPreservationVerification`'s own doc comment for the four-authority model this is one part of. */
+export interface CreateSignPreservationVerificationInput {
+  signPreparationId: string;
+  sourceAssetId: string;
+  sourceSha256: string;
+  intermediateAssetId: string;
+  finalAssetId: string;
+  finalAssetSha256: string;
+  planKey: string;
+  verificationAlgorithmVersion: string;
+  deterministicEvidence: Record<string, unknown>;
+  semanticEvidence: Record<string, unknown> | null;
+  status: SignPreservationStatus;
+  reasons: string[];
 }
 
 /**
@@ -1237,6 +1255,33 @@ export interface ProjectRepository {
     projectId: string,
     finalArtworkJobId: string,
   ): Promise<ProductionAssetValidation | null>;
+
+  /**
+   * Signs Phase S4.1: persists one deterministic (and, from S4.2, semantic)
+   * preservation-verification pass. Append-only, mirroring
+   * `createProductionAssetValidation` exactly — a re-verification always
+   * inserts a new row, never overwrites the last one, so verification
+   * history stays auditable (Constitution §6.11). Implementations must
+   * enforce the `(finalAssetId, verificationAlgorithmVersion)` uniqueness
+   * this identity depends on (a DB unique constraint for Supabase; an
+   * equivalent guard for the local store).
+   */
+  createSignPreservationVerification(
+    projectId: string,
+    input: CreateSignPreservationVerificationInput,
+  ): Promise<SignPreservationVerification>;
+  /**
+   * The idempotent lookup key: a verification already on file for this
+   * EXACT `(finalAssetId, verificationAlgorithmVersion)` pair is reused
+   * rather than re-verified — Signs Phase S4.2 will use this same identity
+   * to guarantee at-most-one paid semantic call. A different
+   * `finalAssetId` or a bumped `verificationAlgorithmVersion` never
+   * matches an existing row (explicit staleness, never implicit reuse).
+   */
+  getSignPreservationVerification(
+    finalAssetId: string,
+    verificationAlgorithmVersion: string,
+  ): Promise<SignPreservationVerification | null>;
 
   // --- Existing Artwork → Print Ready Phase 1: uploaded-artwork preparation ---
 

@@ -46,6 +46,7 @@ import type {
   ProjectSnapshot,
   ProjectStatus,
   SignPreparation,
+  SignPreservationVerification,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 import type {
@@ -61,6 +62,7 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  CreateSignPreservationVerificationInput,
   ApplyPaymentEventInput,
   BindProviderCheckoutSessionInput,
   CreateProductionUnlockInput,
@@ -114,6 +116,8 @@ interface LocalDatabase {
   artworkPreparations: ArtworkPreparation[];
   /** Signs Phase S1. */
   signPreparations: SignPreparation[];
+  /** Signs Phase S4.1. */
+  signPreservationVerifications: SignPreservationVerification[];
 }
 
 /**
@@ -171,6 +175,7 @@ function emptyDb(): LocalDatabase {
     productionAssetValidations: [],
     artworkPreparations: [],
     signPreparations: [],
+    signPreservationVerifications: [],
   };
 }
 
@@ -360,6 +365,8 @@ async function readDb(): Promise<LocalDatabase> {
       artworkPreparations: parsed.artworkPreparations ?? [],
       // Signs Phase S1: absent in every store written before it existed.
       signPreparations: parsed.signPreparations ?? [],
+      // Signs Phase S4.1: absent in every store written before it existed.
+      signPreservationVerifications: parsed.signPreservationVerifications ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -2137,6 +2144,62 @@ export class LocalProjectRepository implements ProjectRepository {
       )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     return matches.at(-1) ?? null;
+  }
+
+  async createSignPreservationVerification(
+    projectId: string,
+    input: CreateSignPreservationVerificationInput,
+  ): Promise<SignPreservationVerification> {
+    const db = await readDb();
+    // Mirrors the DB unique index this table's migration declares — the
+    // capability layer is expected to check `getSignPreservationVerification`
+    // first (the primary idempotency path); this is the same last-line-of-
+    // defense the real Supabase unique constraint provides.
+    const duplicate = db.signPreservationVerifications.some(
+      (item) =>
+        item.finalAssetId === input.finalAssetId &&
+        item.verificationAlgorithmVersion === input.verificationAlgorithmVersion,
+    );
+    if (duplicate) {
+      throw new UniqueConstraintViolationError(
+        "rigid_sign_preservation_verifications_identity_idx",
+      );
+    }
+    const timestamp = nowIso();
+    const verification: SignPreservationVerification = {
+      id: randomUUID(),
+      projectId,
+      signPreparationId: input.signPreparationId,
+      sourceAssetId: input.sourceAssetId,
+      sourceSha256: input.sourceSha256,
+      intermediateAssetId: input.intermediateAssetId,
+      finalAssetId: input.finalAssetId,
+      finalAssetSha256: input.finalAssetSha256,
+      planKey: input.planKey,
+      verificationAlgorithmVersion: input.verificationAlgorithmVersion,
+      deterministicEvidence: input.deterministicEvidence,
+      semanticEvidence: input.semanticEvidence,
+      status: input.status,
+      reasons: input.reasons,
+      createdAt: timestamp,
+    };
+    db.signPreservationVerifications.push(verification);
+    await writeDb(db);
+    return verification;
+  }
+
+  async getSignPreservationVerification(
+    finalAssetId: string,
+    verificationAlgorithmVersion: string,
+  ): Promise<SignPreservationVerification | null> {
+    const db = await readDb();
+    return (
+      db.signPreservationVerifications.find(
+        (item) =>
+          item.finalAssetId === finalAssetId &&
+          item.verificationAlgorithmVersion === verificationAlgorithmVersion,
+      ) ?? null
+    );
   }
 
   async createArtworkPreparation(

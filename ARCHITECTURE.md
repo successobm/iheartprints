@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.10
+Version 1.11
 August 2026
 
 ## Document Position
@@ -43,7 +43,7 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3D implemented.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); provider-output-ADAPTIVE deterministic geometry (S3C); and bounded, alpha-only provider-introduced-transparency canonicalization on a verified-opaque source (S3D) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned, restoring full opacity if the provider introduced any) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it. Customer-facing routes and S4/S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing three real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`); S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions; and S3D corrected for real provider-introduced alpha (Topaz's own reconstruction carrying non-255 alpha on a verified-opaque source) via bounded, RGB-preserving canonicalization. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only |
+| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3D implemented; S4.1 implemented, not yet wired into readiness.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); provider-output-ADAPTIVE deterministic geometry (S3C); bounded, alpha-only provider-introduced-transparency canonicalization on a verified-opaque source (S3D); and DETERMINISTIC (never semantic) preservation-verification evidence, its own append-only table, capable ONLY of `"changed"`/`"unknown"` — never `"preserved"` (S4.1) — are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned, restoring full opacity if the provider introduced any) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it; S4.1's evidence capability is NOT yet consulted by Print Validation at all (Signs Phase S4.2/S4.4). Customer-facing routes and S4.2–S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing three real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`); S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions; and S3D corrected for real provider-introduced alpha (Topaz's own reconstruction carrying non-255 alpha on a verified-opaque source) via bounded, RGB-preserving canonicalization. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only |
 | All other categories | Not admitted | Dormant seams only |
 
 **Signs phase boundary** (Constitution §16A/§16B — admission is not implementation, and each phase's own scope is the honest limit of what "implemented" means until the next one lands):
@@ -56,6 +56,7 @@ dormant seams authorize nothing. The registry:
 | S3B.1 | Provider-result download cap correction (25 MB customer-upload cap wrongly reused for provider reconstruction output; corrected to a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`) | Implemented |
 | S3C | Provider-output-adaptive deterministic geometry (plan's baked-in pad amounts assumed the requested reconstruction size; executor now re-derives them from the actual admitted reconstruction when it proportionally diverges, without mutating the persisted plan/`planKey`), plus the review follow-up's explicit APPROVED PLAN vs DERIVED EXECUTION GEOMETRY evidence split (`rigidSign.executionGeometry`, truthful `executedStepsMatchPlan`) | Implemented |
 | S3D | Bounded, alpha-only canonicalization of provider-introduced transparency on a verified-opaque source (`rigidSign.providerAlphaNormalization`); RGB never modified; strict opacity validation unchanged/unweakened | Implemented |
+| S4.1 | DETERMINISTIC (never semantic) preservation-verification evidence — lineage, region mapping, reconstruction↔final RGB integrity, extension-region verification, source↔reconstruction similarity (advisory only); own append-only table (`rigid_sign_preservation_verifications`); `status` capable ONLY of `"changed"`/`"unknown"`, never `"preserved"`; NOT wired into `FinalArtworkWorkerCapability` or Print Validation yet | Implemented |
 | S3B | Live/real bounded provider reconstruction acceptance | One real dispatch attempted (real Ruth artwork); reconstruction succeeded provider-side at 4096×6144 (Topaz's 4× ceiling). Exposed and motivated both S3B.1 and S3C. A deterministic recovery of the existing paid intermediate, using the corrected code, has not yet been separately authorized/performed |
 | S4 | Preservation verification for reconstructed/review-required output | Not implemented |
 | S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
@@ -2385,6 +2386,98 @@ coverage. The actual, already-persisted, already-paid-for Ruth intermediate
 reconstruction was not touched, consumed, or mutated by this phase — a
 separately-authorized recovery using this corrected code remains a future
 step.
+
+### Signs Phase S4.1: deterministic preservation-verification evidence
+
+Rigid-sign readiness (Constitution §16A.3) recognizes **four separate S4
+authorities**, deliberately never merged:
+
+1. **APPROVED REPAIR PLAN** — `SignPreparation.plan`/`planKey`. What was
+   authorized. Immutable.
+2. **EXECUTION EVIDENCE** — the final asset's own `rigidSign.
+   executionGeometry`/`providerAlphaNormalization` metadata (Signs Phases
+   S3C/S3D). What actually happened.
+3. **PRESERVATION EVIDENCE** — `src/capabilities/sign-preservation/`, this
+   phase. Whether reconstructed customer content remained faithful.
+4. **REVIEW-RISK APPROVAL** — Signs Phase S4.3, **not yet implemented**.
+   Whether an operator accepted a known, faithful-but-risky result.
+
+**S4.1 establishes ONLY deterministic preservation evidence.** No semantic/
+multimodal call exists yet (Signs Phase S4.2). Because of that,
+`SignPreservationVerification.status` can be `"changed"` (a deterministically
+*proven* structural impossibility) or `"unknown"` (the fail-closed default)
+— it can **never** be `"preserved"` this phase.
+`overallStatusFromDeterministicEvidence` (`sign-preservation-deterministic-
+checks.ts`) enforces this as a hard return-type invariant (its return type
+is literally `"changed" | "unknown"`, not the full `SignPreservationStatus`
+union), not merely a convention a caller could accidentally violate.
+
+**Its own table, never a column on `assets`.** Assets are append-only
+(Constitution §6.11) — confirmed exhaustively across Signs Phases S3C/S3D
+that no method exists to update an already-created asset's metadata.
+Preservation verification is a genuinely separate, potentially paid (from
+S4.2 onward) step that must be able to run and be re-verified (via
+`verification_algorithm_version`) *after* the final asset already exists,
+without ever rewriting it — the identical reasoning
+`production_asset_validations` is already its own append-only table rather
+than a column on `assets`. `rigid_sign_preservation_verifications`
+(migration `20260831090000`) mirrors that table's own shape: fixed
+identity/staleness columns (`final_asset_id` — the binding identity —
+`source_asset_id`, `intermediate_asset_id`, `plan_key`,
+`verification_algorithm_version`) plus a bounded, versioned JSONB
+evidence payload (`deterministic_evidence`; `semantic_evidence` reserved,
+always `null` until S4.2). A unique index on `(final_asset_id,
+verification_algorithm_version)` is both the idempotency guarantee and the
+only lookup query this phase performs — Signs Phase S4.2 will lean on the
+same identity to guarantee at-most-one paid semantic call.
+
+**Five deterministic checks**, each a pure function
+(`sign-preservation-deterministic-checks.ts`, no I/O, no capability
+imports — mirrors `sign-geometry.ts`'s own discipline):
+
+- **Lineage** — independently re-verifies source SHA-256, plan-key
+  currency, `resolutionProvenance`, and (when `geometryAdapted`)
+  execution-evidence presence — never trusts a caller's claim, always
+  rehashes/rereads.
+- **Region mapping** — the customer-content region is **fully re-derived
+  from already-persisted evidence** (execution geometry when adapted, the
+  plan's own pad step when not, or the whole canvas when no extension step
+  exists) — no new persisted field was needed for this.
+- **Reconstruction→final RGB integrity** — diffs the persisted
+  reconstruction-intermediate's own RGB bytes (never rewritten by Signs
+  Phase S3D) against the final asset's content region, RGB channels only
+  (alpha deliberately ignored — this is what independently *proves*
+  `providerAlphaNormalization`'s own `rgbModified: false` claim rather than
+  trusting it). Zero tolerance: any mismatch is catastrophic evidence,
+  since padding never resamples content.
+- **Extension-region verification** — checks **every** added pixel (never
+  a sample) against the approved fill colour, exact RGB + alpha=255. Never
+  judges a seam aesthetically (Signs Phase S4.3's concern) — only proves
+  the authorized deterministic background was produced correctly.
+- **Source↔reconstruction similarity** — ADVISORY ONLY. Downsamples the
+  reconstruction's content region back to the source's own dimensions
+  (reusing `resampleExact`, no new image dependency) and computes a
+  bounded, tile-level mean-absolute-colour-error summary — never
+  per-pixel arrays. A conservative, deliberately extreme-tail catastrophic
+  floor (calibrated against exactly one real case, Ruth — provisional
+  until a larger corpus exists) is the ONLY way this check can move the
+  overall verdict; ordinary similarity, including a small localized
+  difference (e.g. one changed price), never independently authorizes or
+  rejects anything.
+
+**Deliberately NOT wired into `FinalArtworkWorkerCapability`'s worker
+orchestration this phase.** `SignPreservationCapability` is independently
+constructible (`createSignPreservationCapability(repo, assets)`) and fully
+testable on its own — production worker wiring is Signs Phase S4.2's job,
+once semantic verification exists to actually reach `"preserved"` and
+there is a real end-to-end reason to run this automatically after every
+reconstruction.
+
+**No real Topaz call was made or required.** Every test uses the existing
+`FakeSignReconstructionProvider` and the established `ruthLikeSignArtwork`
+synthetic fixture (same geometry class as the real Ruth acceptance case —
+never the real customer file). The real, already-persisted, already-paid-
+for Ruth acceptance state was not read or touched by this phase.
 
 ### PrintVaultCapability — Reserved
 

@@ -55,6 +55,7 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  SignPreservationVerification,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
 import type {
@@ -64,6 +65,7 @@ import type {
   CreateArtworkVersionInput,
   CreateAssetInput,
   CreateSignPreparationInput,
+  CreateSignPreservationVerificationInput,
   CreateFinalArtworkJobInput,
   CreateFinalDirectionApprovalInput,
   CreateGenerationJobInput,
@@ -391,6 +393,25 @@ type DbProductionAssetValidation = {
   status: string;
   report: Record<string, unknown>;
   validated_at: string;
+  created_at: string;
+};
+
+/** Signs Phase S4.1. */
+type DbSignPreservationVerification = {
+  id: string;
+  project_id: string;
+  sign_preparation_id: string;
+  source_asset_id: string;
+  source_sha256: string;
+  intermediate_asset_id: string;
+  final_asset_id: string;
+  final_asset_sha256: string;
+  plan_key: string;
+  verification_algorithm_version: string;
+  deterministic_evidence: Record<string, unknown>;
+  semantic_evidence: Record<string, unknown> | null;
+  status: string;
+  reasons: unknown;
   created_at: string;
 };
 
@@ -799,6 +820,28 @@ function mapProductionAssetValidation(
     status: row.status,
     report: row.report ?? {},
     validatedAt: row.validated_at,
+    createdAt: row.created_at,
+  };
+}
+
+function mapSignPreservationVerification(
+  row: DbSignPreservationVerification,
+): SignPreservationVerification {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    signPreparationId: row.sign_preparation_id,
+    sourceAssetId: row.source_asset_id,
+    sourceSha256: row.source_sha256,
+    intermediateAssetId: row.intermediate_asset_id,
+    finalAssetId: row.final_asset_id,
+    finalAssetSha256: row.final_asset_sha256,
+    planKey: row.plan_key,
+    verificationAlgorithmVersion: row.verification_algorithm_version,
+    deterministicEvidence: row.deterministic_evidence ?? {},
+    semanticEvidence: row.semantic_evidence,
+    status: row.status as SignPreservationVerification["status"],
+    reasons: Array.isArray(row.reasons) ? (row.reasons as string[]) : [],
     createdAt: row.created_at,
   };
 }
@@ -2660,6 +2703,56 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (error) throw error;
     return data
       ? mapProductionAssetValidation(data as DbProductionAssetValidation)
+      : null;
+  }
+
+  async createSignPreservationVerification(
+    projectId: string,
+    input: CreateSignPreservationVerificationInput,
+  ): Promise<SignPreservationVerification> {
+    const { data, error } = await this.client
+      .from("rigid_sign_preservation_verifications")
+      .insert({
+        project_id: projectId,
+        sign_preparation_id: input.signPreparationId,
+        source_asset_id: input.sourceAssetId,
+        source_sha256: input.sourceSha256,
+        intermediate_asset_id: input.intermediateAssetId,
+        final_asset_id: input.finalAssetId,
+        final_asset_sha256: input.finalAssetSha256,
+        plan_key: input.planKey,
+        verification_algorithm_version: input.verificationAlgorithmVersion,
+        deterministic_evidence: input.deterministicEvidence,
+        semantic_evidence: input.semanticEvidence,
+        status: input.status,
+        reasons: input.reasons,
+      })
+      .select("*")
+      .single();
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "rigid_sign_preservation_verifications_identity_idx",
+        );
+      }
+      throw error;
+    }
+    return mapSignPreservationVerification(data as DbSignPreservationVerification);
+  }
+
+  async getSignPreservationVerification(
+    finalAssetId: string,
+    verificationAlgorithmVersion: string,
+  ): Promise<SignPreservationVerification | null> {
+    const { data, error } = await this.client
+      .from("rigid_sign_preservation_verifications")
+      .select("*")
+      .eq("final_asset_id", finalAssetId)
+      .eq("verification_algorithm_version", verificationAlgorithmVersion)
+      .maybeSingle();
+    if (error) throw error;
+    return data
+      ? mapSignPreservationVerification(data as DbSignPreservationVerification)
       : null;
   }
 
