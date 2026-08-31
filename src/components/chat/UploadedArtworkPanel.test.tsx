@@ -202,6 +202,109 @@ describe("WorkflowChoiceCard", () => {
   });
 });
 
+/**
+ * LIVE PRODUCT BLOCKER #1: the routing question and the Sign path's own
+ * two steps. A dedicated helper rather than reusing `render()` above — the
+ * two new callbacks (`onChooseArtworkType`, `onConfirmSignSize`) and
+ * `signArtwork` are specific to these three steps and every existing
+ * `render()` call site would otherwise need to pass throw-on-call stubs
+ * for callbacks that step never uses.
+ */
+function renderSignStep(
+  step: Extract<
+    UploadedArtworkStep,
+    "choose_artwork_type" | "confirm_sign_size" | "sign_context_saved"
+  >,
+  signArtwork: { orderedWidthIn: number | null; orderedHeightIn: number | null; specConfirmed: boolean } | null = null,
+) {
+  return renderToString(
+    createElement(UploadedArtworkPanel, {
+      projectId: "test-project-id",
+      step,
+      preparation: preparation({ printPlacement: null }),
+      busy: false,
+      originalImageUrl: null,
+      preparedImageUrl: null,
+      signArtwork,
+      onUpload: () => {
+        throw new Error("onUpload must never fire from rendering");
+      },
+      onSaveDetails: () => {
+        throw new Error("onSaveDetails must never fire from rendering");
+      },
+      onPrepare: () => {
+        throw new Error("onPrepare must never fire from rendering");
+      },
+      onApprove: () => {
+        throw new Error("onApprove must never fire from rendering");
+      },
+      onReconsider: () => {
+        throw new Error("onReconsider must never fire from rendering");
+      },
+      onChooseArtworkType: () => {
+        throw new Error("onChooseArtworkType must never fire from rendering");
+      },
+      onConfirmSignSize: () => {
+        throw new Error("onConfirmSignSize must never fire from rendering");
+      },
+    }),
+  );
+}
+
+describe("Sign artwork type routing (LIVE PRODUCT BLOCKER #1)", () => {
+  it("the routing question stands alone — no apparel field anywhere near it", () => {
+    const html = renderSignStep("choose_artwork_type");
+    const text = visibleText(html);
+
+    assert.match(text, /What are we printing today\?/);
+    assert.match(html, /DTF \/ Apparel/);
+    assert.match(html, /Sign/);
+    assert.doesNotMatch(html, /Garment colour/i);
+    assert.doesNotMatch(html, /Full Front|Full Back|Left Chest|Sleeve/);
+    // No internal engine vocabulary, and no substrate question — that
+    // belongs to physical ordering, not artwork preparation.
+    assert.doesNotMatch(
+      text,
+      /rigid_sign_raster|banner|coroplast|aluminum|PVC|substrate/i,
+    );
+  });
+
+  it("the sign-size step asks only width and height — never garment colour or placement", () => {
+    const html = renderSignStep("confirm_sign_size");
+
+    assert.match(html, /Width/i);
+    assert.match(html, /Height/i);
+    assert.match(html, /inches/i);
+    assert.doesNotMatch(html, /Garment colour/i);
+    assert.doesNotMatch(html, /Where should this print/i);
+    assert.doesNotMatch(html, /Full Front|Full Back|Left Chest|Sleeve/);
+    assert.doesNotMatch(html, /rigid_sign_raster|banner|coroplast|aluminum|PVC/i);
+  });
+
+  it("the sign-size step re-populates a previously entered size on reload", () => {
+    const html = renderSignStep("confirm_sign_size", {
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      specConfirmed: false,
+    });
+    assert.match(html, /value="24"/);
+    assert.match(html, /value="36"/);
+  });
+
+  it("the saved step echoes the confirmed size and claims nothing about print readiness", () => {
+    const html = renderSignStep("sign_context_saved", {
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      specConfirmed: true,
+    });
+    const text = visibleText(html);
+
+    assert.match(text, /24" × 36"/);
+    assert.doesNotMatch(text, /print[- ]ready/i);
+    assert.doesNotMatch(text, /approve|finalize|download/i);
+  });
+});
+
 describe("UploadedArtworkPanel", () => {
   it("upload step accepts only what the pipeline can actually decode", () => {
     const html = render("upload");
@@ -249,7 +352,9 @@ describe("UploadedArtworkPanel", () => {
   it("renders that guidance through the Existing Artwork upload step only", () => {
     const step = deriveUploadedArtworkStep({
       preparation: null,
+      signArtwork: null,
       choice: "upload_existing",
+      artworkTypeChoice: "undecided",
       atProjectStart: true,
     });
     assert.equal(step, "upload");
@@ -374,7 +479,9 @@ describe("UploadedArtworkPanel", () => {
         status: "approved",
         hasPreparedArtwork: true,
       }),
+      signArtwork: null,
       choice: "undecided",
+      artworkTypeChoice: "undecided",
       atProjectStart: false,
     });
     assert.equal(step, "approved");

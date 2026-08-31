@@ -16,9 +16,13 @@ import {
   PRINT_READY_RETRY_SUPPORTING_MESSAGE,
   PRINT_READY_WAITING_MESSAGE,
 } from "@/capabilities/shared/waiting-copy";
+import { OPENING_PROMPT } from "@/lib/domain/conversation";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
 import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
-import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
+import type {
+  CustomerFinalizationStatus,
+  SignArtworkView,
+} from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { ArtworkComparison } from "./ArtworkComparison";
 import CorrectionFinalReview from "./CorrectionFinalReview";
@@ -77,6 +81,18 @@ export interface UploadedArtworkPanelProps {
    */
   preparedRevision?: string | null;
   onUpload: (file: File) => void;
+  /**
+   * LIVE PRODUCT BLOCKER #1: the routing answer at `choose_artwork_type`.
+   * Client-only — see `ArtworkTypeChoice`'s doc in `uploaded-artwork-flow.ts`.
+   */
+  onChooseArtworkType?: (choice: "dtf" | "sign") => void;
+  /** Sign path: the human-confirmed ordered width/height (Constitution §16A.2). */
+  onConfirmSignSize?: (input: {
+    orderedWidthIn: number;
+    orderedHeightIn: number;
+  }) => void;
+  /** The Signs authority's own state, once a Sign artwork type is chosen. */
+  signArtwork?: SignArtworkView | null;
   onSaveDetails: (input: {
     productSummary: string | null;
     productColor: string | null;
@@ -182,6 +198,22 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
       className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm"
     >
       {step === "upload" ? <UploadStep busy={busy} onUpload={props.onUpload} /> : null}
+
+      {step === "choose_artwork_type" ? (
+        <ArtworkTypeStep busy={busy} onChoose={props.onChooseArtworkType} />
+      ) : null}
+
+      {step === "confirm_sign_size" ? (
+        <SignSizeStep
+          busy={busy}
+          signArtwork={props.signArtwork ?? null}
+          onConfirm={props.onConfirmSignSize}
+        />
+      ) : null}
+
+      {step === "sign_context_saved" ? (
+        <SignContextSavedStep signArtwork={props.signArtwork ?? null} />
+      ) : null}
 
       {step === "confirm_details" && preparation ? (
         <DetailsStep
@@ -313,6 +345,168 @@ function UploadStep({
           {UPLOAD_QUALITY_GUIDANCE_COPY.bestPractices}
         </p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #1: the routing question, reused verbatim from the
+ * Create New Artwork flow's opening line (`OPENING_PROMPT`) rather than a
+ * second, independently-worded copy of the same question. Deliberately
+ * asks only "DTF/Apparel" or "Sign" — never the physical substrate (rigid
+ * sign, banner, coroplast, aluminum…), which belongs to physical ordering,
+ * not artwork preparation, and never an internal engine name.
+ */
+function ArtworkTypeStep({
+  busy,
+  onChoose,
+}: {
+  busy: boolean;
+  onChoose?: (choice: "dtf" | "sign") => void;
+}) {
+  return (
+    <div>
+      <p className="text-sm font-semibold text-ink">{OPENING_PROMPT}</p>
+      <p className="mt-1 text-sm text-muted">
+        Just one question so we ask only what we need next.
+      </p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onChoose?.("dtf")}
+          className="rounded-xl border border-black/8 p-3 text-left transition enabled:hover:border-ink/30 enabled:hover:bg-black/[0.02] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span className="block text-sm font-medium text-ink">DTF / Apparel</span>
+          <span className="mt-1 block text-xs text-muted">
+            A design that prints onto a garment — a shirt, hoodie, tote, or similar.
+          </span>
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onChoose?.("sign")}
+          className="rounded-xl border border-black/8 p-3 text-left transition enabled:hover:border-ink/30 enabled:hover:bg-black/[0.02] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span className="block text-sm font-medium text-ink">Sign</span>
+          <span className="mt-1 block text-xs text-muted">
+            Artwork for a physical sign, at a specific width and height.
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #1: the Sign path's only production-context
+ * question — the human-confirmed ordered physical size (Constitution
+ * §16A.2). Deliberately never asks substrate/product type (rigid sign,
+ * banner, coroplast, aluminum…) — that belongs to physical ordering, not
+ * artwork preparation.
+ */
+function SignSizeStep({
+  busy,
+  signArtwork,
+  onConfirm,
+}: {
+  busy: boolean;
+  signArtwork: SignArtworkView | null;
+  onConfirm?: (input: { orderedWidthIn: number; orderedHeightIn: number }) => void;
+}) {
+  const [widthIn, setWidthIn] = useState(
+    signArtwork?.orderedWidthIn != null ? String(signArtwork.orderedWidthIn) : "",
+  );
+  const [heightIn, setHeightIn] = useState(
+    signArtwork?.orderedHeightIn != null ? String(signArtwork.orderedHeightIn) : "",
+  );
+
+  const parsedWidth = Number(widthIn);
+  const parsedHeight = Number(heightIn);
+  const canContinue =
+    widthIn.trim() !== "" &&
+    heightIn.trim() !== "" &&
+    Number.isFinite(parsedWidth) &&
+    Number.isFinite(parsedHeight) &&
+    parsedWidth > 0 &&
+    parsedHeight > 0;
+
+  return (
+    <div>
+      <p className="text-sm font-semibold text-ink">What size is this sign?</p>
+      <p className="mt-1 text-sm text-muted">
+        The ordered physical dimensions — we&apos;ll use these to check your
+        artwork and prepare it correctly.
+      </p>
+
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="text-xs font-medium text-ink">Width (inches)</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            min={0}
+            step="0.01"
+            value={widthIn}
+            disabled={busy}
+            onChange={(event) => setWidthIn(event.target.value)}
+            className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm text-ink outline-none focus:border-ink/40 disabled:opacity-50"
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs font-medium text-ink">Height (inches)</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            min={0}
+            step="0.01"
+            value={heightIn}
+            disabled={busy}
+            onChange={(event) => setHeightIn(event.target.value)}
+            className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm text-ink outline-none focus:border-ink/40 disabled:opacity-50"
+          />
+        </label>
+      </div>
+
+      <button
+        type="button"
+        disabled={busy || !canContinue}
+        onClick={() =>
+          onConfirm?.({ orderedWidthIn: parsedWidth, orderedHeightIn: parsedHeight })
+        }
+        className="mt-4 rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        Continue
+      </button>
+    </div>
+  );
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #1: the Sign path's terminal step for THIS phase.
+ * Deliberately offers no further action — inspection/diagnosis/repair
+ * review is a later, separately-approved Signs phase (`AGENTS.md`'s Signs
+ * guardrail) — and deliberately never implies anything is print-ready
+ * (Constitution: no print-ready claim without authoritative validation).
+ */
+function SignContextSavedStep({
+  signArtwork,
+}: {
+  signArtwork: SignArtworkView | null;
+}) {
+  const hasSize =
+    signArtwork?.orderedWidthIn != null && signArtwork?.orderedHeightIn != null;
+  return (
+    <div>
+      <p className="text-sm font-semibold text-ink">Got it — sign details saved</p>
+      <p className="mt-1 text-sm text-muted">
+        {hasSize
+          ? `We'll prepare your artwork for a ${signArtwork!.orderedWidthIn}" × ${signArtwork!.orderedHeightIn}" sign.`
+          : "We've saved your sign details."}
+      </p>
+      <p className="mt-2 text-xs text-muted">
+        We&apos;re not able to continue past this step yet — check back soon.
+      </p>
     </div>
   );
 }

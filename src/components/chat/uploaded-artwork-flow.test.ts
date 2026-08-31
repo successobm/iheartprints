@@ -46,7 +46,9 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: null,
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "undecided",
         atProjectStart: true,
       }),
       "choose_workflow",
@@ -54,7 +56,9 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: null,
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "undecided",
         atProjectStart: false,
       }),
       null,
@@ -74,18 +78,22 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: null,
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "undecided",
         atProjectStart: false,
       }),
       null,
     );
   });
 
-  it("walks upload → details → analysis → compare → approved", () => {
+  it("walks upload → artwork type → details → analysis → compare → approved (DTF path)", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: null,
+        signArtwork: null,
         choice: "upload_existing",
+        artworkTypeChoice: "undecided",
         atProjectStart: true,
       }),
       "upload",
@@ -94,7 +102,21 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "choose_artwork_type",
+      "LIVE PRODUCT BLOCKER #1: the artwork-type question comes before any apparel-only field",
+    );
+
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: null,
+        choice: "undecided",
+        artworkTypeChoice: "dtf",
         atProjectStart: false,
       }),
       "confirm_details",
@@ -104,7 +126,9 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation({ printPlacement: "full_front" }),
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "dtf",
         atProjectStart: false,
       }),
       "review_analysis",
@@ -117,7 +141,9 @@ describe("deriveUploadedArtworkStep", () => {
           hasPreparedArtwork: true,
           status: "prepared",
         }),
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "dtf",
         atProjectStart: false,
       }),
       "compare",
@@ -131,10 +157,49 @@ describe("deriveUploadedArtworkStep", () => {
           status: "approved",
           approved: true,
         }),
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "dtf",
         atProjectStart: false,
       }),
       "approved",
+    );
+  });
+
+  it("walks upload → artwork type → sign size → saved (Sign path)", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: null,
+        choice: "undecided",
+        artworkTypeChoice: "sign",
+        atProjectStart: false,
+      }),
+      "confirm_sign_size",
+      "choosing Sign goes straight to width/height — never garment colour or placement",
+    );
+
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: { specConfirmed: false },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "confirm_sign_size",
+      "once the bridge has created a SignPreparation, that durable signal governs — the transient choice no longer matters",
+    );
+
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: { specConfirmed: true },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_context_saved",
     );
   });
 
@@ -144,10 +209,25 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation({ printPlacement: "sleeve" }),
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "undecided",
         atProjectStart: false,
       }),
       "review_analysis",
+    );
+  });
+
+  it("a durable SignPreparation is the Sign path's workflow identity, independent of printPlacement", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation({ printPlacement: null }),
+        signArtwork: { specConfirmed: true },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_context_saved",
     );
   });
 });
@@ -161,7 +241,10 @@ describe("uploadedArtworkOwnsSurface", () => {
   it("claims the surface for every real step of the upload workflow", () => {
     for (const step of [
       "upload",
+      "choose_artwork_type",
       "confirm_details",
+      "confirm_sign_size",
+      "sign_context_saved",
       "review_analysis",
       "compare",
       "approved",

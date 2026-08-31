@@ -288,6 +288,18 @@ export interface ArtworkPreparationCapability {
   /** The project's current preparation, already phrased. `null` for a Create New Artwork project. */
   getPreparation(designId: string): Promise<ArtworkPreparationView | null>;
   /**
+   * LIVE PRODUCT BLOCKER #1: the immutable original asset backing this
+   * preparation — for another production profile's capability to adopt as
+   * ITS OWN immutable original when the customer's single Existing Artwork
+   * upload turns out to belong to that profile (the artwork-type routing
+   * question is asked AFTER upload, so no second customer upload exists to
+   * draw from). Internal/server-side only — never exposed on
+   * `ArtworkPreparationView` (Goal 18: no asset id ever reaches the client).
+   */
+  getOriginalAssetReference(
+    designId: string,
+  ): Promise<{ assetId: string; filename: string | null } | null>;
+  /**
    * Records the production context (what we're printing, garment colour,
    * print location) through `DesignBriefCapability`, then re-analyzes — the
    * placement is what makes a print-size statement possible at all, so the
@@ -1124,6 +1136,15 @@ export function createArtworkPreparationCapability(
       if (!preparation || preparation.projectId !== designId) return null;
 
       return toView(preparation, snapshot.brief);
+    },
+
+    async getOriginalAssetReference(designId) {
+      const preparation = await repo.getArtworkPreparation(designId);
+      if (!preparation || preparation.projectId !== designId) return null;
+      return {
+        assetId: preparation.originalAssetId,
+        filename: preparation.originalFilename,
+      };
     },
 
     async setProductionContext(designId, input) {

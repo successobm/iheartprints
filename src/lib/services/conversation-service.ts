@@ -333,6 +333,17 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    */
   artworkPreparation: ArtworkPreparationView | null;
   /**
+   * LIVE PRODUCT BLOCKER #1: the rigid-sign authority's own customer-safe
+   * state — whether a `SignPreparation` exists for this project and its
+   * human-confirmed ordered size. `null` for every project that has not
+   * been identified as a Sign, exactly mirroring how `artworkPreparation`
+   * is `null` for every Create New Artwork project. Deliberately narrow:
+   * inspection, defects, and repair-plan detail belong to a later,
+   * separately-approved Signs phase (`AGENTS.md`'s Signs guardrail) and
+   * are never phrased for a customer here.
+   */
+  signArtwork: SignArtworkView | null;
+  /**
    * Sprint A4: where this session stands in the acquisition funnel, already
    * phrased for the customer. Never the persisted entitlement value, never
    * the acquisition session id, never the captured email ADDRESS — the UI
@@ -751,6 +762,7 @@ async function withConceptStatus(
     ),
     printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
     artworkPreparation,
+    signArtwork: await resolveSignArtworkView(snapshot.project.id),
     acquisition: await resolveAcquisitionView(snapshot),
     payment: await resolvePaymentView(snapshot.project.id),
     productionTreatment: await resolveProductionTreatmentView(
@@ -848,6 +860,41 @@ async function resolveArtworkPreparation(
 ): Promise<ArtworkPreparationView | null> {
   try {
     return await getCapabilityGraph().artworkPreparation.getPreparation(projectId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #1: the rigid-sign authority's customer-safe view.
+ * Deliberately as narrow as `ArtworkPreparationView` is broad — this phase
+ * needs only "does a Sign preparation exist" and "what ordered size was
+ * confirmed", never inspection, defects, or plan detail (a later,
+ * separately-approved Signs phase).
+ */
+export interface SignArtworkView {
+  orderedWidthIn: number | null;
+  orderedHeightIn: number | null;
+  specConfirmed: boolean;
+}
+
+/**
+ * Same advisory-not-a-gate rule as `resolveArtworkPreparation`: a lookup
+ * failure degrades to "no sign artwork" rather than taking down the
+ * snapshot the customer is waiting on.
+ */
+async function resolveSignArtworkView(
+  projectId: string,
+): Promise<SignArtworkView | null> {
+  try {
+    const preparation =
+      await getCapabilityGraph().signPreparation.getSignPreparation(projectId);
+    if (!preparation) return null;
+    return {
+      orderedWidthIn: preparation.orderedWidthIn,
+      orderedHeightIn: preparation.orderedHeightIn,
+      specConfirmed: preparation.specConfirmedAt !== null,
+    };
   } catch {
     return null;
   }

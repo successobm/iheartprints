@@ -18,6 +18,7 @@ import {
   deriveUploadedArtworkStep,
   isAtProjectStart,
   uploadedArtworkOwnsSurface,
+  type ArtworkTypeChoice,
   type WorkflowChoice,
 } from "./uploaded-artwork-flow";
 import { UploadedArtworkPanel } from "./UploadedArtworkPanel";
@@ -86,6 +87,15 @@ export function ChatApp() {
    * see `uploaded-artwork-flow.ts`.
    */
   const [workflowChoice, setWorkflowChoice] = useState<WorkflowChoice>("undecided");
+  /**
+   * LIVE PRODUCT BLOCKER #1: which artwork path (DTF/apparel or Sign) the
+   * customer identified, in the window before either path's own durable
+   * signal exists (`printPlacement`, or a `SignPreparation`). Same
+   * transient/client-only discipline as `workflowChoice` — see
+   * `ArtworkTypeChoice`'s doc in `uploaded-artwork-flow.ts`.
+   */
+  const [artworkTypeChoice, setArtworkTypeChoice] =
+    useState<ArtworkTypeChoice>("undecided");
   /** Client-only "take me back a step" from the comparison/analysis surface. */
   const [reconsideringUpload, setReconsideringUpload] = useState(false);
   /**
@@ -992,6 +1002,38 @@ export function ChatApp() {
     );
   }
 
+  /**
+   * LIVE PRODUCT BLOCKER #1: the routing answer at `choose_artwork_type`.
+   * Client-only, exactly like `onUploadExisting` — nothing durable exists
+   * yet to remember this against, so a reload correctly re-asks rather
+   * than trapping the customer in a path they never confirmed.
+   */
+  function chooseArtworkType(choice: "dtf" | "sign") {
+    setArtworkTypeChoice(choice);
+  }
+
+  /**
+   * LIVE PRODUCT BLOCKER #1: the Sign path's one production-context
+   * action — bridges the already-uploaded original into the Signs
+   * authority (first call only) and records the confirmed ordered size.
+   * See `sign-artwork-service.ts`.
+   */
+  async function confirmSignArtworkSize(input: {
+    orderedWidthIn: number;
+    orderedHeightIn: number;
+  }) {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/sign-artwork`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        }),
+      "Failed to save your sign size",
+    );
+  }
+
   async function saveUploadedArtworkDetails(input: {
     productSummary: string | null;
     productColor: string | null;
@@ -1253,7 +1295,11 @@ export function ChatApp() {
     });
   const derivedUploadStep = deriveUploadedArtworkStep({
     preparation,
+    signArtwork: snapshot?.signArtwork
+      ? { specConfirmed: snapshot.signArtwork.specConfirmed }
+      : null,
     choice: workflowChoice,
+    artworkTypeChoice,
     atProjectStart,
   });
   // "Change these details" / "Keep my original for now" step back without
@@ -1622,6 +1668,9 @@ export function ChatApp() {
                   currentPreparationImages.preparedRevision ?? preparedRevision
                 }
                 onUpload={(file) => void uploadExistingArtwork(file)}
+                onChooseArtworkType={(choice) => chooseArtworkType(choice)}
+                onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
+                signArtwork={snapshot?.signArtwork ?? null}
                 onSaveDetails={(input) => void saveUploadedArtworkDetails(input)}
                 onPrepare={() => void prepareUploadedArtwork()}
                 onApprove={() => void approvePreparedArtwork()}

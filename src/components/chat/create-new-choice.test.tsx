@@ -109,7 +109,9 @@ describe("Create New Artwork choice (Correction A)", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: null,
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "undecided",
         atProjectStart: atStart,
       }),
       "choose_workflow",
@@ -213,7 +215,9 @@ describe("Create New Artwork choice (Correction A)", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: null,
+        signArtwork: null,
         choice: "undecided",
+        artworkTypeChoice: "undecided",
         atProjectStart: atStart,
       }),
       null,
@@ -271,7 +275,9 @@ describe("Create New Artwork choice (Correction A)", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: null,
+        signArtwork: null,
         choice: "upload_existing",
+        artworkTypeChoice: "undecided",
         atProjectStart: true,
       }),
       "upload",

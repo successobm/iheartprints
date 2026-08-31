@@ -34,13 +34,34 @@ import type { SeparationCheckStatus } from "./SeparationReviewPanel";
  */
 export type WorkflowChoice = "undecided" | "upload_existing";
 
+/**
+ * LIVE PRODUCT BLOCKER #1: which customer-facing artwork path the upload
+ * belongs to. Transient and client-only, mirroring `WorkflowChoice` exactly
+ * — it matters only in the window before the answer becomes durable server
+ * state (a `SignPreparation` existing, or `printPlacement` being set), and
+ * forgetting it on reload correctly returns the customer to the question
+ * rather than trapping them in a path they never confirmed.
+ */
+export type ArtworkTypeChoice = "undecided" | "dtf" | "sign";
+
 export type UploadedArtworkStep =
   /** Offer both workflows. The only step that is ever shown before a choice. */
   | "choose_workflow"
   /** Waiting for the customer to pick a file. */
   | "upload"
+  /** We have their artwork; ask what kind it is before asking anything specific to either path. */
+  | "choose_artwork_type"
   /** We have their artwork; we still need to know what and where we're printing. */
   | "confirm_details"
+  /** Sign path: the human-confirmed ordered width and height (Constitution §16A.2). */
+  | "confirm_sign_size"
+  /**
+   * Sign path terminal for this phase: the ordered size is durably recorded
+   * against the Signs authority. Inspection/diagnosis/repair review is a
+   * later, separately-approved Signs phase — see `AGENTS.md`'s Signs
+   * guardrail.
+   */
+  | "sign_context_saved"
   /** Analysis is done and has something to say before we touch a pixel. */
   | "review_analysis"
   /** Original vs Prepared, awaiting an explicit approval. */
@@ -48,10 +69,24 @@ export type UploadedArtworkStep =
   /** The customer approved the prepared artwork. */
   | "approved";
 
+/**
+ * The Signs authority's OWN durable signal, exactly mirroring how
+ * `preparation.printPlacement` durably identifies the apparel path — never
+ * a second, weaker copy of that fact. `null` means no `SignPreparation`
+ * exists yet for this project.
+ */
+export interface SignArtworkFlowState {
+  specConfirmed: boolean;
+}
+
 export interface UploadedArtworkFlowInput {
   /** `null` for every Create New Artwork project. */
   preparation: ArtworkPreparationView | null;
+  /** `null` until a Sign artwork type is chosen and the bridge into the Signs authority has completed. */
+  signArtwork: SignArtworkFlowState | null;
   choice: WorkflowChoice;
+  /** The transient artwork-type answer — read only before either durable signal above exists. */
+  artworkTypeChoice: ArtworkTypeChoice;
   /**
    * True only at the very start of a project — no customer message, no
    * artwork. Offering the workflow choice later would interrupt an interview
@@ -162,7 +197,7 @@ export function isRoutedToOperatorSeparationReview(
 export function deriveUploadedArtworkStep(
   input: UploadedArtworkFlowInput,
 ): UploadedArtworkStep | null {
-  const { preparation } = input;
+  const { preparation, signArtwork } = input;
 
   if (!preparation) {
     if (input.choice === "upload_existing") return "upload";
@@ -174,11 +209,27 @@ export function deriveUploadedArtworkStep(
 
   if (preparation.approved) return "approved";
   if (preparation.hasPreparedArtwork) return "compare";
+
+  // LIVE PRODUCT BLOCKER #1: a `SignPreparation` existing is the Sign
+  // path's own durable signal, exactly like `printPlacement` is the DTF
+  // path's — checked FIRST and independent of the transient
+  // `artworkTypeChoice`, so a reload after the bridge has run never
+  // re-asks "what are we printing" for a job already identified as a sign.
+  if (signArtwork) {
+    return signArtwork.specConfirmed ? "sign_context_saved" : "confirm_sign_size";
+  }
+
   // Print location is what makes a print-size statement possible at all —
   // without it, the analysis has nothing honest to say about whether the
   // artwork is big enough (`preparation-copy.ts` stays silent rather than
-  // guessing a placement).
-  if (!preparation.printPlacement) return "confirm_details";
+  // guessing a placement). Before either durable signal exists, the
+  // transient artwork-type choice decides which question comes next; no
+  // choice yet means the routing question itself is the next step.
+  if (!preparation.printPlacement) {
+    if (input.artworkTypeChoice === "dtf") return "confirm_details";
+    if (input.artworkTypeChoice === "sign") return "confirm_sign_size";
+    return "choose_artwork_type";
+  }
   return "review_analysis";
 }
 
