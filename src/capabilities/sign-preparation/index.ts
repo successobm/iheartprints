@@ -64,3 +64,13 @@ export {
   type SignPlanCustomerView,
 } from "./sign-preparation-copy";
 export { isAuthorizationSufficientForRisk } from "./sign-plan-authorization";
+export {
+  describeSignPlanForOperator,
+  type DescribeSignPlanForOperatorInput,
+  type SignPlanOperatorStepView,
+  type SignPlanOperatorView,
+} from "./sign-preparation-operator-copy";
+export {
+  loadSignPlanOperatorReview,
+  type SignPlanOperatorReview,
+} from "./sign-plan-operator-review";
