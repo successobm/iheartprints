@@ -32,9 +32,27 @@
  * string field) — fixed below. Narrow request-encoding correction only;
  * `purpose`, the expiration duration, and every other behavior are
  * unchanged.
+ *
+ * Signs Phase S4.2C.6: the real S4.2C.5 Ruth attempt's first upload
+ * (~1.93 MB) failed with a bare "could not be reached" — `withTimeout`'s
+ * catch block was discarding the original `fetch` rejection entirely
+ * (everything Node's Undici-backed `fetch` attaches to a connection-level
+ * failure). Fixed below: a bounded, STRUCTURED-SCALAR-ONLY network-cause
+ * description (`name`/`code`/`errno`/`syscall`, top-level and nested
+ * `cause` — never `message`, see `describeNetworkCause`'s own doc comment
+ * and Signs Phase S4.2C.6A) is folded into the `ProviderError` message,
+ * and the dispatch state is now classified via the EXISTING,
+ * already-reviewed `classifyFetchRejectionDispatch` (Phase 2C0.5 — already
+ * used by `openai-concept-provider.ts`/`stripe-checkout-provider.ts`)
+ * instead of always defaulting to `dispatched_ambiguous` — a DNS/connect
+ * failure that provably never reached OpenAI is now correctly
+ * `not_dispatched`; every other network failure remains
+ * `dispatched_ambiguous`, unchanged. Purely additive observability — no
+ * retry behavior changes (this file never retried internally before, and
+ * still doesn't).
  */
 
-import { ProviderError } from "@/capabilities/providers/provider-error";
+import { ProviderError, classifyFetchRejectionDispatch } from "@/capabilities/providers/provider-error";
 
 const OPENAI_FILES_ENDPOINT = "https://api.openai.com/v1/files";
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -71,6 +89,78 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
 
+/** Signs Phase S4.2C.6A: bound on any single extracted scalar field (`name`/`code`/`errno`/`syscall` are always short by construction, but this is defense-in-depth regardless — never trust a third-party-populated field's length). */
+const MAX_NETWORK_CAUSE_FIELD_LENGTH = 64;
+
+/**
+ * Signs Phase S4.2C.6A: normalizes one scalar diagnostic field — string or
+ * number only, bounded, trimmed. Never an object, never `message`.
+ */
+function normalizeScalarField(value: unknown): string | null {
+  if (typeof value === "string" && value.length > 0) {
+    return value.slice(0, MAX_NETWORK_CAUSE_FIELD_LENGTH);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+}
+
+/**
+ * Signs Phase S4.2C.6 (network-cause surfacing), amended S4.2C.6A
+ * (STRUCTURED SCALAR FIELDS ONLY — no free-form message): extracts a
+ * bounded, sanitized description of the underlying network failure from a
+ * raw `fetch` rejection. Reads ONLY `name`/`code`/`errno`/`syscall` —
+ * top-level on the thrown `Error`, and the same four fields on
+ * `error.cause` (Node's Undici-backed `fetch` attaches these to
+ * connection-level failures, e.g. a `SocketError` with
+ * `cause.code = "UND_ERR_SOCKET"`, `cause.errno = "ECONNRESET"`,
+ * `cause.syscall = "read"`). Read-only observability only — never used for
+ * classification (see `classifyFetchRejectionDispatch`, unchanged,
+ * imported from the existing Phase 2C0.5 module).
+ *
+ * ARBITRARY ERROR.MESSAGE IS NOT INCLUDED. ARBITRARY ERROR.CAUSE.MESSAGE IS
+ * NOT INCLUDED. Neither `error.message` nor `error.cause.message` is ever
+ * read by this function — a prior version of this diagnostic (Signs Phase
+ * S4.2C.6, before this amendment) did surface a bounded `cause.message`
+ * excerpt; that was withdrawn because a free-form message field is not a
+ * structured, enumerable value this code controls the shape of, unlike
+ * `name`/`code`/`errno`/`syscall` — Node/Undici's OWN low-level error
+ * vocabulary. Never serializes `error.stack`, the whole `Error`/`cause`
+ * object, headers, the request, a response body, multipart contents, a URL
+ * query string, or any socket object — none of those are ever read here in
+ * the first place (this function's only inputs are the four named scalar
+ * fields, checked by name, nothing else).
+ */
+function describeNetworkCause(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  const parts: string[] = [];
+
+  const name = normalizeScalarField(error.name);
+  if (name) parts.push(`network_cause_name=${name}`);
+  const code = normalizeScalarField((error as { code?: unknown }).code);
+  if (code) parts.push(`network_cause_code=${code}`);
+  const errno = normalizeScalarField((error as { errno?: unknown }).errno);
+  if (errno) parts.push(`network_cause_errno=${errno}`);
+  const syscall = normalizeScalarField((error as { syscall?: unknown }).syscall);
+  if (syscall) parts.push(`network_cause_syscall=${syscall}`);
+
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause && typeof cause === "object") {
+    const causeRecord = cause as Record<string, unknown>;
+    const underlyingName = normalizeScalarField(causeRecord.name);
+    if (underlyingName) parts.push(`network_cause_underlying_name=${underlyingName}`);
+    const underlyingCode = normalizeScalarField(causeRecord.code);
+    if (underlyingCode) parts.push(`network_cause_underlying_code=${underlyingCode}`);
+    const underlyingErrno = normalizeScalarField(causeRecord.errno);
+    if (underlyingErrno) parts.push(`network_cause_underlying_errno=${underlyingErrno}`);
+    const underlyingSyscall = normalizeScalarField(causeRecord.syscall);
+    if (underlyingSyscall) parts.push(`network_cause_underlying_syscall=${underlyingSyscall}`);
+  }
+
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 async function withTimeout<T>(
   timeoutMs: number,
   run: (signal: AbortSignal) => Promise<T>,
@@ -83,7 +173,19 @@ async function withTimeout<T>(
     if (isAbortError(error)) {
       throw new ProviderError("unavailable", "The OpenAI Files transport timed out.");
     }
-    throw new ProviderError("network", "The OpenAI Files transport could not be reached.");
+    const cause = describeNetworkCause(error);
+    throw new ProviderError(
+      "network",
+      cause
+        ? `The OpenAI Files transport could not be reached. (${cause})`
+        : "The OpenAI Files transport could not be reached.",
+      // Signs Phase S4.2C.6: existing dispatch evidence, not a new rule —
+      // a DNS/connect failure that provably never reached OpenAI is
+      // `not_dispatched`; every other network failure (a reset, a timeout,
+      // an unrecognized cause) stays `dispatched_ambiguous`, exactly as
+      // before this phase.
+      classifyFetchRejectionDispatch(error),
+    );
   } finally {
     clearTimeout(timeout);
   }
