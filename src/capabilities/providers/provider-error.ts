@@ -201,6 +201,34 @@ export function isPossiblyBilledProviderError(error: unknown): boolean {
  * timeout, or aborted socket can all happen after the request was fully
  * sent (and after the provider began billable work), so they stay
  * ambiguous, as does anything unrecognized.
+ *
+ * ADMISSION CRITERION for `PROVABLY_PRE_DISPATCH_CODES` (read this before
+ * adding a code): `not_dispatched` is NOT a property that follows from a
+ * failure merely being classified `"network"`, nor from a code simply
+ * being unrecognized/rare — it is a per-code claim that must be
+ * independently justified. A code belongs in this set ONLY when its own
+ * documented/authoritative semantics establish that the specific failure
+ * it names could not have reached the remote service at all (a connection
+ * that never resolved, was refused, or never finished establishing). If a
+ * code CAN occur after the request was transmitted — even rarely, even
+ * only under some conditions — it must stay out of this set and fall
+ * through to `dispatched_ambiguous`, regardless of how safe it looks.
+ *
+ * Signs Phase S4.2C.8: added `UND_ERR_CONNECT_TIMEOUT` — Undici's own
+ * `ConnectTimeoutError`, thrown when the TCP connection itself fails to
+ * establish within Undici's connect-phase timeout. This is the same
+ * category as `ECONNREFUSED`/`ENOTFOUND` above: by definition, no HTTP
+ * request can be transmitted over a socket that never finished
+ * connecting, so this code provably never reached the remote peer either
+ * — confirmed both by Undici's own naming (`ConnectTimeoutError`, not a
+ * request/response-phase error) and by direct empirical evidence (Signs
+ * Phase S4.2C.7's real failure: zero HTTP status ever received). Distinct
+ * from a request/response-phase timeout (an `AbortError` from this
+ * repository's own `AbortController`-based timeouts, which is handled
+ * separately and never reaches this classifier at all) and from a
+ * post-connect socket error (`ECONNRESET` etc., which remains
+ * `dispatched_ambiguous` — a reset can happen after bytes were already
+ * sent).
  */
 const PROVABLY_PRE_DISPATCH_CODES = new Set([
   "ENOTFOUND",
@@ -209,6 +237,7 @@ const PROVABLY_PRE_DISPATCH_CODES = new Set([
   "ENETUNREACH",
   "EHOSTUNREACH",
   "ERR_INVALID_URL",
+  "UND_ERR_CONNECT_TIMEOUT",
 ]);
 
 export function classifyFetchRejectionDispatch(

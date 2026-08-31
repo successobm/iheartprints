@@ -62,6 +62,18 @@ import type {
 const OPENAI_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_TIMEOUT_MS = 60_000;
+/**
+ * Signs Phase S4.2C.8: at most ONE bounded retry per file upload (initial
+ * attempt + 1 retry = 2 total), and ONLY when `isRetryableProviderError`
+ * proves the failure is `not_dispatched` (provably never reached OpenAI —
+ * e.g. `UND_ERR_CONNECT_TIMEOUT`, now correctly classified alongside
+ * `ENOTFOUND`/`ECONNREFUSED` in the shared `classifyFetchRejectionDispatch`
+ * — never an ambiguous/possibly-billed failure). Deliberately smaller than
+ * `DEFAULT_MAX_ATTEMPTS` (the inference-call bound): a single safe
+ * reconnect attempt closes the S4.2C.7 connect-timeout gap without
+ * broadening retry policy any further than what's provably safe.
+ */
+const DEFAULT_MAX_UPLOAD_ATTEMPTS = 2;
 
 /**
  * Explicit, image-text-safety system instruction (Signs Phase S4.2A §8):
@@ -119,6 +131,8 @@ export interface OpenAISignPreservationSemanticProviderConfig {
   fetchImpl?: typeof fetch;
   sleepImpl?: (ms: number) => Promise<void>;
   maxAttempts?: number;
+  /** Signs Phase S4.2C.8: at most one bounded retry per file upload, only for a provably not_dispatched failure — see `DEFAULT_MAX_UPLOAD_ATTEMPTS`'s own doc comment. */
+  maxUploadAttempts?: number;
   timeoutMs?: number;
   /** Defaults to the confirmed minimum (3600s) — see `OPENAI_FILES_EXPIRES_AFTER_SECONDS` in `openai-files-transport-client.ts`. */
   filesExpiresAfterSeconds?: number;
@@ -187,6 +201,7 @@ export class OpenAISignPreservationSemanticProvider implements SignPreservationS
   private readonly fetchImpl: typeof fetch;
   private readonly sleepImpl: (ms: number) => Promise<void>;
   private readonly maxAttempts: number;
+  private readonly maxUploadAttempts: number;
   private readonly timeoutMs: number;
   private readonly filesExpiresAfterSeconds: number;
 
@@ -200,6 +215,7 @@ export class OpenAISignPreservationSemanticProvider implements SignPreservationS
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.sleepImpl = config.sleepImpl ?? defaultSleep;
     this.maxAttempts = config.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.maxUploadAttempts = config.maxUploadAttempts ?? DEFAULT_MAX_UPLOAD_ATTEMPTS;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.filesExpiresAfterSeconds = config.filesExpiresAfterSeconds ?? OPENAI_FILES_EXPIRES_AFTER_SECONDS;
   }
@@ -261,13 +277,26 @@ export class OpenAISignPreservationSemanticProvider implements SignPreservationS
         continue; // already uploaded in a prior (crashed/resumed) attempt at this exact content.
       }
 
-      const { fileId } = await uploadOpenAIFile(
-        { apiKey: this.apiKey, fetchImpl: this.fetchImpl, timeoutMs: this.timeoutMs },
+      // Signs Phase S4.2C.8: at most one bounded retry, only for a
+      // provably not_dispatched failure (e.g. a connect-timeout that never
+      // reached OpenAI) — never for an ambiguous/possibly-billed one. See
+      // `DEFAULT_MAX_UPLOAD_ATTEMPTS`'s own doc comment.
+      const { fileId } = await withRetry(
+        () =>
+          uploadOpenAIFile(
+            { apiKey: this.apiKey, fetchImpl: this.fetchImpl, timeoutMs: this.timeoutMs },
+            {
+              filename: entry.filename,
+              bytes,
+              contentType: "image/png",
+              expiresAfterSeconds: this.filesExpiresAfterSeconds,
+            },
+          ),
         {
-          filename: entry.filename,
-          bytes,
-          contentType: "image/png",
-          expiresAfterSeconds: this.filesExpiresAfterSeconds,
+          attempts: this.maxUploadAttempts,
+          isRetryable: isRetryableProviderError,
+          delayMs: (attempt) => 250 * attempt,
+          sleep: this.sleepImpl,
         },
       );
 

@@ -355,6 +355,130 @@ describe("OpenAISignPreservationSemanticProvider — file upload transport", () 
   });
 });
 
+describe("OpenAISignPreservationSemanticProvider — upload retry (Signs Phase S4.2C.8)", () => {
+  it("a successful first attempt makes exactly one fetch call per upload", async () => {
+    const { fetchImpl, log } = createRoutedFetch();
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await provider.compare(sampleRequest());
+    assert.equal(log.uploadCalls.length, 14, "one upload attempt per role — no retries on the happy path");
+  });
+
+  it("a provably not_dispatched connect-timeout on one upload receives exactly one bounded retry, then succeeds — two total attempts for that role", async () => {
+    // Track attempts PER ROLE (by filename) — a retry is itself a new
+    // global fetch call, so a raw call-index check would misattribute it
+    // to a different role.
+    const attemptsByFilename: Record<string, number> = {};
+    const { fetchImpl, log } = createRoutedFetch({
+      respondToUpload: (form) => {
+        const filename = (form.get("file") as File).name;
+        attemptsByFilename[filename] = (attemptsByFilename[filename] ?? 0) + 1;
+        if (filename === "sign-preservation-source-overview.png" && attemptsByFilename[filename] === 1) {
+          throw new TypeError("fetch failed", { cause: { name: "ConnectTimeoutError", code: "UND_ERR_CONNECT_TIMEOUT" } });
+        }
+        return new Response(JSON.stringify({ id: `file-for-${filename}` }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    const result = await provider.compare(sampleRequest());
+    assert.equal(
+      attemptsByFilename["sign-preservation-source-overview.png"],
+      2,
+      "one initial attempt + exactly one retry",
+    );
+    assert.equal(log.uploadCalls.length, 15, "14 roles, but the first role took 2 fetch calls = 15 total upload fetches");
+    assert.ok(result.answers.length > 0, "the overall compare() call still succeeds");
+  });
+
+  it("a second consecutive not_dispatched failure stops after exactly two total attempts — never a third", async () => {
+    let attempts = 0;
+    const { fetchImpl } = createRoutedFetch({
+      respondToUpload: () => {
+        attempts += 1;
+        throw new TypeError("fetch failed", { cause: { code: "ENOTFOUND" } });
+      },
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await assert.rejects(() => provider.compare(sampleRequest()));
+    assert.equal(attempts, 2, "initial attempt + one retry, then give up — never a third attempt");
+  });
+
+  it("an ambiguous (dispatched_ambiguous) upload failure is never retried — exactly one attempt", async () => {
+    let attempts = 0;
+    const { fetchImpl } = createRoutedFetch({
+      respondToUpload: () => {
+        attempts += 1;
+        // ECONNRESET stays dispatched_ambiguous — may have already reached OpenAI.
+        throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
+      },
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await assert.rejects(() => provider.compare(sampleRequest()));
+    assert.equal(attempts, 1, "an ambiguous failure must never be auto-retried");
+  });
+
+  it("an HTTP 4xx upload rejection never enters the network retry path, even though it may be classified not_dispatched", async () => {
+    let attempts = 0;
+    const { fetchImpl } = createRoutedFetch({
+      respondToUpload: () => {
+        attempts += 1;
+        return new Response(JSON.stringify({ error: "bad request" }), { status: 400 });
+      },
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.equal(err.classification, "malformed_response");
+      return true;
+    });
+    assert.equal(attempts, 1, "a malformed_response classification is never retried, regardless of dispatch state");
+  });
+
+  it("an HTTP 401 auth failure never enters the network retry path", async () => {
+    let attempts = 0;
+    const { fetchImpl } = createRoutedFetch({
+      respondToUpload: () => {
+        attempts += 1;
+        return new Response("", { status: 401 });
+      },
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.equal(err.classification, "auth");
+      return true;
+    });
+    assert.equal(attempts, 1, "auth failures are not_dispatched but never retryable — credentials will not fix themselves");
+  });
+
+  it("no duplicate file record/upload results from a retried role — exactly one file id is recorded per role even after a retry", async () => {
+    const attemptsByFilename: Record<string, number> = {};
+    const store = createInMemoryTransportAttemptStore();
+    const { fetchImpl } = createRoutedFetch({
+      respondToUpload: (form) => {
+        const filename = (form.get("file") as File).name;
+        attemptsByFilename[filename] = (attemptsByFilename[filename] ?? 0) + 1;
+        if (filename === "sign-preservation-source-overview.png" && attemptsByFilename[filename] === 1) {
+          throw new TypeError("fetch failed", { cause: { code: "UND_ERR_CONNECT_TIMEOUT" } });
+        }
+        return new Response(JSON.stringify({ id: `file-for-${filename}` }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const provider = makeProvider(fetchImpl, store);
+    await provider.compare(sampleRequest());
+
+    assert.equal(attemptsByFilename["sign-preservation-source-overview.png"], 2, "the retry actually happened");
+    const attempt = store.rows.find((r) => r.finalAssetId === "final-asset-1");
+    const sourceOverviewRecords = attempt!.files.filter((f) => f.role === "source_overview");
+    assert.equal(sourceOverviewRecords.length, 1, "exactly one file record for the retried role — no duplicate");
+  });
+});
+
 describe("OpenAISignPreservationSemanticProvider — upload idempotency / crash recovery", () => {
   it("a crash after some uploads resumes only the remaining images on the next attempt — never re-uploads a completed role", async () => {
     const store = createInMemoryTransportAttemptStore();

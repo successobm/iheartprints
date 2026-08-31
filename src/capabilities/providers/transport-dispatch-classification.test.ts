@@ -95,6 +95,13 @@ describe("provider dispatch classification", () => {
     );
   });
 
+  it("Signs Phase S4.2C.8: treats a TCP connect-timeout (Undici's ConnectTimeoutError) as provably never dispatched — the real S4.2C.7 failure mode", () => {
+    const connectTimeout = new TypeError("fetch failed", {
+      cause: { name: "ConnectTimeoutError", code: "UND_ERR_CONNECT_TIMEOUT" },
+    });
+    assert.equal(classifyFetchRejectionDispatch(connectTimeout), "not_dispatched");
+  });
+
   it("treats a reset, a timeout, and anything unrecognized as ambiguous, never as safe", () => {
     for (const code of ["ECONNRESET", "UND_ERR_SOCKET", "ETIMEDOUT", "WAT"]) {
       assert.equal(
