@@ -25,7 +25,8 @@ import { PNG } from "pngjs";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { hasAnyTransparentPixel, resampleExact } from "@/capabilities/final-artwork/raster-transform";
 
-import type { SignRepairPlan, SignRepairStep } from "./contracts";
+import type { SignRepairPlan, SignRepairStep, SignRepairStepKind } from "./contracts";
+import { deriveUniformBackgroundExtension } from "./sign-geometry";
 
 export interface SignExecutionBounds {
   x: number;
@@ -136,23 +137,36 @@ export function executeAdmittedSignSteps(
 
 /**
  * The tail of every execution, local-only or S3A-continued alike: the
- * executed output's geometry and opacity must match what the plan itself
- * declared before it is ever persisted. Exported (Signs Phase S3A) so the
- * worker's post-reconstruction continuation applies the exact same final
- * checks `executeSignRepairPlan` applies to a fully-local execution.
+ * executed output's geometry and opacity must match what the caller
+ * declares as expected before it is ever persisted. Exported (Signs Phase
+ * S3A) so the worker's post-reconstruction continuation applies the exact
+ * same final checks `executeSignRepairPlan` applies to a fully-local
+ * execution.
+ *
+ * Signs Phase S3C: takes `expectedWidthPx`/`expectedHeightPx` explicitly
+ * rather than a whole `SignRepairPlan` — for a fully-local execution these
+ * are always `plan.expectedOutputWidthPx`/`expectedOutputHeightPx`
+ * (unchanged, see `executeSignRepairPlan` below), but a reconstruction-
+ * continued execution may need to check against ACTUAL-reconstruction-
+ * derived dimensions instead (see
+ * `adaptGeometryStepsToActualReconstruction`) when the provider's admitted
+ * output diverged from what the plan predicted — the plan's own persisted
+ * `expectedOutputWidthPx`/`expectedOutputHeightPx` stay untouched either
+ * way; only what THIS check validates against can differ.
  */
 export function finalizeSignExecution(
   image: RgbaImage,
   bounds: SignExecutionBounds,
-  plan: SignRepairPlan,
+  expectedWidthPx: number,
+  expectedHeightPx: number,
 ): SignExecutionResult {
-  if (image.width !== plan.expectedOutputWidthPx || image.height !== plan.expectedOutputHeightPx) {
+  if (image.width !== expectedWidthPx || image.height !== expectedHeightPx) {
     return {
       status: "refused",
       reason: "output_geometry_mismatch",
       detail:
-        `Executed output is ${image.width}x${image.height}px, but the recorded plan expected ` +
-        `${plan.expectedOutputWidthPx}x${plan.expectedOutputHeightPx}px. Refusing rather than persisting a plate the plan does not describe.`,
+        `Executed output is ${image.width}x${image.height}px, but the expected output is ` +
+        `${expectedWidthPx}x${expectedHeightPx}px. Refusing rather than persisting a plate the plan does not describe.`,
     };
   }
   if (hasAnyTransparentPixel(image)) {
@@ -210,7 +224,239 @@ export function executeSignRepairPlan(
   const initialBounds: SignExecutionBounds = { x: 0, y: 0, width: source.width, height: source.height };
   const executed = executeAdmittedSignSteps(source, initialBounds, plan.steps);
   if (executed.status === "refused") return executed;
-  return finalizeSignExecution(executed.image, executed.contentBounds, plan);
+  return finalizeSignExecution(executed.image, executed.contentBounds, plan.expectedOutputWidthPx, plan.expectedOutputHeightPx);
+}
+
+// ---------------------------------------------------------------------------
+// Signs Phase S3C: adaptive post-reconstruction geometry.
+// ---------------------------------------------------------------------------
+
+export type AdaptGeometryStepsOutcome =
+  | {
+      status: "unchanged" | "adapted";
+      steps: SignRepairStep[];
+      /** What to validate the final executed output against — see `finalizeSignExecution`'s own doc comment. */
+      expectedOutputWidthPx: number;
+      expectedOutputHeightPx: number;
+    }
+  | { status: "refused"; reason: string; detail: string };
+
+/**
+ * Signs Phase S3C: re-derives the geometry-stage step(s) that follow a
+ * `reconstruct_resolution` step (`extend_uniform_background`/
+ * `pad_uniform_background`) from the ACTUAL admitted reconstruction
+ * dimensions, when they diverge from what the plan's `reconstruct_resolution`
+ * step requested — the real S3B Ruth acceptance run proved a real provider
+ * (Topaz) can honestly return more than requested (its own proven 4x
+ * ceiling, proportionally, `validateReconstructedGeometry`'s "sufficiency,
+ * not exact sizing" contract) while the plan's baked-in pad amounts assumed
+ * the exact requested size.
+ *
+ * NEVER mutates the persisted plan, never changes plan identity/`planKey`,
+ * never re-plans, never invents an operation the plan did not already
+ * approve. It only recomputes the NUMBER OF PIXELS the plan's own approved
+ * semantic operation ("extend axis X, centered, in colour C, to reach the
+ * ordered aspect") requires for the actual input — axis, alignment
+ * convention, and fill colour are carried over from the persisted step
+ * UNCHANGED; only `leadingPx`/`trailingPx` (and, only in the returned
+ * result, the expected final canvas) are recomputed.
+ *
+ * Refuses — never silently reinterprets — the instant the actual input
+ * would require a DIFFERENT axis than the plan approved, or a geometry
+ * step the plan never included at all. Both are defensive: proportional
+ * reconstruction (already enforced by `validateReconstructedGeometry`
+ * before this ever runs) preserves aspect ratio exactly, so the axis
+ * decision is invariant under it — these branches exist to fail closed on
+ * an assumption violation, not because either is expected to fire.
+ */
+export function adaptGeometryStepsToActualReconstruction(
+  afterSteps: SignRepairStep[],
+  actualReconstructedWidthPx: number,
+  actualReconstructedHeightPx: number,
+  requestedReconstructionWidthPx: number,
+  requestedReconstructionHeightPx: number,
+  orderedWidthIn: number,
+  orderedHeightIn: number,
+  plannedExpectedOutputWidthPx: number,
+  plannedExpectedOutputHeightPx: number,
+): AdaptGeometryStepsOutcome {
+  if (
+    actualReconstructedWidthPx === requestedReconstructionWidthPx &&
+    actualReconstructedHeightPx === requestedReconstructionHeightPx
+  ) {
+    // The provider returned EXACTLY what was requested — the plan's own
+    // steps and expected dimensions already apply verbatim. Zero behavior
+    // change from before S3C for this (the previously only-tested) case.
+    return {
+      status: "unchanged",
+      steps: afterSteps,
+      expectedOutputWidthPx: plannedExpectedOutputWidthPx,
+      expectedOutputHeightPx: plannedExpectedOutputHeightPx,
+    };
+  }
+
+  const geometryStepIndex = afterSteps.findIndex(
+    (step) => step.kind === "extend_uniform_background" || step.kind === "pad_uniform_background",
+  );
+
+  if (geometryStepIndex === -1) {
+    // The plan expected reconstruction ALONE to already land on the
+    // ordered aspect — no geometry step to adapt. Proportionality
+    // (enforced upstream) means the actual output is still exact-aspect
+    // too, so its own dimensions are simply the expected output. If that
+    // assumption is ever wrong, refuse rather than invent an extension
+    // step the plan never approved.
+    const geometry = deriveUniformBackgroundExtension(
+      actualReconstructedWidthPx,
+      actualReconstructedHeightPx,
+      orderedWidthIn,
+      orderedHeightIn,
+    );
+    if (geometry.needsExtension) {
+      return {
+        status: "refused",
+        reason: "unapproved_geometry_step_required",
+        detail:
+          `The actual reconstruction (${actualReconstructedWidthPx}x${actualReconstructedHeightPx}px) requires a background ` +
+          "extension the approved plan never included — refusing rather than inventing an unapproved operation.",
+      };
+    }
+    return {
+      status: "adapted",
+      steps: afterSteps,
+      expectedOutputWidthPx: actualReconstructedWidthPx,
+      expectedOutputHeightPx: actualReconstructedHeightPx,
+    };
+  }
+
+  const geometryStep = afterSteps[geometryStepIndex]!;
+  const plannedAxis = geometryStep.params.axis;
+  const geometry = deriveUniformBackgroundExtension(
+    actualReconstructedWidthPx,
+    actualReconstructedHeightPx,
+    orderedWidthIn,
+    orderedHeightIn,
+  );
+  if (!geometry.needsExtension || geometry.axis !== plannedAxis) {
+    return {
+      status: "refused",
+      reason: "axis_or_extension_mismatch",
+      detail:
+        `The approved plan's geometry step assumed axis "${plannedAxis}", but the actual reconstruction ` +
+        `(${actualReconstructedWidthPx}x${actualReconstructedHeightPx}px) requires ` +
+        `${geometry.needsExtension ? `axis "${geometry.axis}"` : "no extension at all"} — refusing rather than ` +
+        "silently reinterpreting the approved plan.",
+    };
+  }
+
+  // Axis, alignment convention, and fill colour/`"unconfirmed"` carry over
+  // UNCHANGED from the approved step — only the pixel amounts are
+  // recomputed. A step whose colour was never confirmed stays
+  // `"unconfirmed"` here too, so the existing `executeExtend` refusal for
+  // that case is entirely unaffected by this adaptation.
+  const adaptedStep: SignRepairStep = {
+    ...geometryStep,
+    params: { ...geometryStep.params, leadingPx: geometry.leadingPx, trailingPx: geometry.trailingPx },
+  };
+  const adaptedSteps = [...afterSteps];
+  adaptedSteps[geometryStepIndex] = adaptedStep;
+
+  return {
+    status: "adapted",
+    steps: adaptedSteps,
+    expectedOutputWidthPx: geometry.plateWidthPx,
+    expectedOutputHeightPx: geometry.plateHeightPx,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Signs Phase S3C review follow-up: DERIVED EXECUTION GEOMETRY EVIDENCE.
+// ---------------------------------------------------------------------------
+
+/**
+ * The approved, persisted `SignRepairPlan` is APPROVAL/AUDIT AUTHORITY —
+ * immutable, never rewritten, its `planKey` never recomputed to match
+ * whatever actually executed. When `adaptGeometryStepsToActualReconstruction`
+ * adapts a geometry step's pixel amounts, the plan's own recorded step
+ * (e.g. `leadingPx: 153`) and what actually executed (e.g. `leadingPx: 256`)
+ * genuinely differ — this record exists so that fact is never silently
+ * elided. It is PRODUCTION PROVENANCE, not a second authority: it records
+ * what happened; it never authorizes anything the approved plan's own
+ * semantic intent (axis, fill colour, risk classification) did not already
+ * permit — `adaptGeometryStepsToActualReconstruction` enforces that
+ * constraint before this evidence is ever built, not this type.
+ */
+export interface SignExecutionGeometryEvidence {
+  /** Why re-derivation happened — currently the only reason this architecture admits. */
+  reason: "provider_output_geometry_diverged_from_requested";
+  /** The plan's own `reconstruct_resolution` step's requested target — what the persisted plan predicted. */
+  reconstructionRequestedWidthPx: number;
+  reconstructionRequestedHeightPx: number;
+  /** What the provider actually returned (already validated sufficient + proportional before this is ever built). */
+  reconstructionActualWidthPx: number;
+  reconstructionActualHeightPx: number;
+  /**
+   * The geometry-stage step as ACTUALLY executed, with its pixel amounts
+   * re-derived — `null` when the plan had no geometry step at all (the
+   * reconstruction alone, at its actual size, already reached the ordered
+   * aspect). `kind`/`axis`/fill colour are always identical to the approved
+   * plan's own step; only `leadingPx`/`trailingPx` ever differ.
+   */
+  executedStep: {
+    kind: SignRepairStepKind;
+    axis: string | null;
+    leadingPx: number | null;
+    trailingPx: number | null;
+    colorR: number | null;
+    colorG: number | null;
+    colorB: number | null;
+    color: string | null;
+  } | null;
+  outputWidthPx: number;
+  outputHeightPx: number;
+}
+
+/**
+ * Builds the persisted evidence record for an adapted execution — `null`
+ * when `adaptation.status !== "adapted"` (nothing diverged from the plan's
+ * own recorded prediction, so the plan's own steps already are the
+ * complete, truthful transformation record; recording a redundant copy
+ * would be noise, not evidence).
+ */
+export function buildSignExecutionGeometryEvidence(
+  adaptation: AdaptGeometryStepsOutcome,
+  requestedReconstructionWidthPx: number,
+  requestedReconstructionHeightPx: number,
+  actualReconstructionWidthPx: number,
+  actualReconstructionHeightPx: number,
+): SignExecutionGeometryEvidence | null {
+  if (adaptation.status !== "adapted") return null;
+
+  const executedStep = adaptation.steps.find(
+    (step) => step.kind === "extend_uniform_background" || step.kind === "pad_uniform_background",
+  );
+
+  return {
+    reason: "provider_output_geometry_diverged_from_requested",
+    reconstructionRequestedWidthPx: requestedReconstructionWidthPx,
+    reconstructionRequestedHeightPx: requestedReconstructionHeightPx,
+    reconstructionActualWidthPx: actualReconstructionWidthPx,
+    reconstructionActualHeightPx: actualReconstructionHeightPx,
+    executedStep: executedStep
+      ? {
+          kind: executedStep.kind,
+          axis: typeof executedStep.params.axis === "string" ? executedStep.params.axis : null,
+          leadingPx: typeof executedStep.params.leadingPx === "number" ? executedStep.params.leadingPx : null,
+          trailingPx: typeof executedStep.params.trailingPx === "number" ? executedStep.params.trailingPx : null,
+          colorR: typeof executedStep.params.colorR === "number" ? executedStep.params.colorR : null,
+          colorG: typeof executedStep.params.colorG === "number" ? executedStep.params.colorG : null,
+          colorB: typeof executedStep.params.colorB === "number" ? executedStep.params.colorB : null,
+          color: typeof executedStep.params.color === "string" ? executedStep.params.color : null,
+        }
+      : null,
+    outputWidthPx: adaptation.expectedOutputWidthPx,
+    outputHeightPx: adaptation.expectedOutputHeightPx,
+  };
 }
 
 function executeStep(

@@ -33,6 +33,8 @@ export {
   type UploadSignArtworkInput,
 } from "./sign-preparation-capability";
 export {
+  adaptGeometryStepsToActualReconstruction,
+  buildSignExecutionGeometryEvidence,
   encodeSignPlate,
   executeAdmittedSignSteps,
   executeSignRepairPlan,
@@ -40,7 +42,13 @@ export {
   planContainsOnlyAdmittedSteps,
   planRequiresBoundedReconstruction,
   splitPlanAroundReconstruction,
+  type AdaptGeometryStepsOutcome,
   type SignExecutionBounds,
+  type SignExecutionGeometryEvidence,
   type SignExecutionRefusalReason,
   type SignExecutionResult,
 } from "./sign-transform-executor";
+export {
+  deriveUniformBackgroundExtension,
+  type UniformBackgroundExtensionGeometry,
+} from "./sign-geometry";

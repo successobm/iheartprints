@@ -303,6 +303,7 @@ export const TEST_FILES = [
   // Signs Phase S2 (Constitution §16A): deterministic repair execution +
   // authoritative rigid_sign_raster validation. Zero provider dispatch.
   "src/capabilities/sign-preparation/sign-transform-executor.test.ts",
+  "src/capabilities/sign-preparation/sign-geometry.test.ts",
   "src/capabilities/print-validation/rigid-sign-print-validation.test.ts",
   "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",

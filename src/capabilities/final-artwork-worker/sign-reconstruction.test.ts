@@ -11,7 +11,11 @@ import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
 import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
 import { ProviderError } from "@/capabilities/providers/provider-error";
 import { computeSignPlanKey, createSignPreparationCapability } from "@/capabilities/sign-preparation";
-import { exactAspectSignArtwork, toPngBytes } from "@/capabilities/sign-preparation/sign-fixtures";
+import {
+  exactAspectSignArtwork,
+  ruthLikeSignArtwork,
+  toPngBytes,
+} from "@/capabilities/sign-preparation/sign-fixtures";
 import type { ProjectRepository } from "@/lib/db/repository";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
@@ -179,12 +183,24 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
 
   it("B5: one dispatch on a normal reconstruction", async () => {
     const provider = new FakeSignReconstructionProvider();
-    const { signPreparation, finalArtwork, worker, projectId } = await build(provider);
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
     await planNeedingReconstruction(signPreparation, projectId);
-    await finalArtwork.requestSignFinalArtwork(projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
     await worker.processNextJob();
     assert.equal(provider.dispatchCount, 1);
     assert.equal(provider.resumeCount, 0);
+
+    // S3C review follow-up item 8: when the admitted provider result
+    // exactly matches the requested reconstruction size, nothing was
+    // adapted — evidence must say so truthfully rather than fabricating an
+    // adaptation record that never happened.
+    const finalAsset = (await repo.listAssets(projectId)).find(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
+    );
+    assert.ok(finalAsset);
+    const rigidSignMeta = (finalAsset!.metadata as { rigidSign: Record<string, unknown> }).rigidSign;
+    assert.equal(rigidSignMeta.geometryAdapted, false, "the un-adapted case truthfully records no adaptation occurred");
+    assert.equal(rigidSignMeta.executionGeometry, null, "no fabricated execution-evidence record when nothing diverged");
   });
 
   it("B6: reclaiming an already-completed job never reprocesses it", async () => {
@@ -449,47 +465,272 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     assert.match(failed!.lastError ?? "", /proportion/i);
   });
 
-  it("C15: a downstream deterministic refusal after reconstruction never redispatches the provider", async () => {
+  it("C15: an oversized-but-proportional reconstruction (no geometry step in the plan) now succeeds via S3C adaptation, still blocked from print_ready", async () => {
+    // Signs Phase S3C: before this phase, ANY divergence from the plan's
+    // baked-in `expectedOutputWidthPx/HeightPx` refused deterministically —
+    // even a response `validateReconstructedGeometry` itself already
+    // accepted as sufficient and proportional. The real S3B Ruth run proved
+    // that overly strict: a real provider CAN honestly return more than
+    // requested. This plan has no geometry step to adapt (exact aspect,
+    // zero padding steps) — S3C's adaptation simply accepts the actual
+    // reconstructed dimensions as the expected output when they are still
+    // within `SIGN_ASPECT_TOLERANCE` of the ordered aspect (the same
+    // tolerance `validateReconstructedGeometry` itself uses), which this
+    // fixture (a mere +20px on each axis, well under 1%) is.
     const provider = new FakeSignReconstructionProvider();
     const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
     const plan = await planNeedingReconstruction(signPreparation, projectId);
     const step = plan.steps[0]!;
     const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
 
-    // A SUFFICIENT, proportionally-valid response (passes
-    // `validateReconstructedGeometry`) but larger than the plan's own
-    // `expectedOutputWidthPx/HeightPx` assumed — this plan has no geometry
-    // stage to absorb it (exact aspect, zero padding steps), so
-    // `finalizeSignExecution`'s own `output_geometry_mismatch` check must
-    // refuse it deterministically, entirely locally, after a genuinely
-    // successful (and paid-for) reconstruction.
-    provider.behavior = {
-      kind: "oversized_but_valid",
-      widthPx: (step.params.requestedWidthPx as number) + 20,
-      heightPx: (step.params.requestedHeightPx as number) + 20,
-    };
+    const oversizedWidthPx = (step.params.requestedWidthPx as number) + 20;
+    const oversizedHeightPx = (step.params.requestedHeightPx as number) + 20;
+    provider.behavior = { kind: "oversized_but_valid", widthPx: oversizedWidthPx, heightPx: oversizedHeightPx };
     await worker.processNextJob();
 
-    assert.equal(provider.dispatchCount, 1, "reconstruction itself must still succeed and be paid for exactly once");
+    assert.equal(provider.dispatchCount, 1, "reconstruction succeeds and is paid for exactly once");
     const completed = await repo.getFinalArtworkJob(job.id);
     assert.equal(completed!.status, "completed");
-    assert.match(completed!.lastError ?? "", /geometry|does not describe/i);
+    // `lastError` is overloaded to carry the validation summary whenever a
+    // job completes without reaching "ready" (pre-existing, unrelated to
+    // S3C) — it is NOT a sign of execution failure. The asset assertions
+    // below are what actually prove the adapted plate was produced.
     const project = await repo.getProject(projectId);
-    assert.notEqual(project!.project.status, "print_ready");
-    const noFinalAsset = (await repo.listAssets(projectId)).some(
+    assert.notEqual(
+      project!.project.status,
+      "print_ready",
+      "reconstructed provenance still blocks print_ready regardless of how the geometry was adapted",
+    );
+    const finalAsset = (await repo.listAssets(projectId)).find(
       (a) =>
         a.finalArtworkJobId === job.id &&
         a.productionRole === "production_png" &&
         !isReconstructionIntermediateAsset(a),
     );
-    assert.equal(noFinalAsset, false);
+    assert.ok(finalAsset, "the adapted plate IS produced, not refused");
+    assert.equal(finalAsset!.widthPx, oversizedWidthPx);
+    assert.equal(finalAsset!.heightPx, oversizedHeightPx);
 
-    // Retrying does not touch the provider again — the intermediate is
-    // durable, and the deterministic refusal is, correctly, identical.
+    // Retrying does not touch the provider again — the final asset is
+    // already durable (idempotent reuse).
     await repo.updateFinalArtworkJob(job.id, { status: "recoverable", completedAt: null });
     await worker.processNextJob();
-    assert.equal(provider.dispatchCount, 1, "a deterministic downstream refusal must never trigger a second dispatch");
-    assert.equal(provider.resumeCount, 0, "the durable intermediate is read back directly, not resumed via the provider");
+    assert.equal(provider.dispatchCount, 1, "recovery of an already-completed job must never trigger a second dispatch");
+    assert.equal(provider.resumeCount, 0);
+  });
+
+  it("C15b: a distorted (non-proportional) reconstruction result still fails at the provider-geometry gate, unaffected by S3C, never redispatches", async () => {
+    // Regression: `validateReconstructedGeometry`'s own 1% proportionality
+    // tolerance runs BEFORE S3C's adaptation ever does, and is unchanged by
+    // this phase — a genuinely distorted response is still rejected there,
+    // never reaching (and therefore never exercising)
+    // `adaptGeometryStepsToActualReconstruction` at all. See
+    // `sign-geometry.test.ts` for direct, isolated proof of that function's
+    // own axis-mismatch and unapproved-geometry-step refusal branches —
+    // reaching them through this full integration path is not possible
+    // when both tolerances agree (by design, see that file's own doc).
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
+    const plan = await planNeedingReconstruction(signPreparation, projectId);
+    const step = plan.steps[0]!;
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    // Wildly distorted: exceeds the requested dimensions (passes the
+    // sufficiency half of geometry validation) but is stretched far enough
+    // on one axis that `validateReconstructedGeometry`'s own 1% aspect
+    // tolerance would normally catch it — use `wrong_aspect` directly to
+    // reach the executor's OWN adaptation refusal deterministically,
+    // independent of that earlier gate.
+    provider.behavior = {
+      kind: "wrong_aspect",
+      widthPx: (step.params.requestedWidthPx as number) + 400,
+      heightPx: step.params.requestedHeightPx as number,
+    };
+    await worker.processNextJob();
+
+    assert.equal(provider.dispatchCount, 1);
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed!.status, "failed", "a distorted response is rejected by validateReconstructedGeometry itself, before adaptation ever runs");
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+
+    await repo.updateFinalArtworkJob(job.id, { status: "recoverable" });
+    provider.behavior = { kind: "success" };
+    await worker.processNextJob();
+    assert.equal(provider.dispatchCount, 1, "a rejected result must never trigger a second paid dispatch");
+    assert.equal(provider.resumeCount, 1, "recovery resumes the existing paid request");
+  });
+
+  // ---------------------------------------------------------------------
+  // Signs Phase S3C: the real S3B Ruth acceptance geometry, end to end.
+  // ---------------------------------------------------------------------
+
+  it("S3C: the real Ruth acceptance case — Topaz's actual 4096x6144 (not the requested 2448x3672) still produces a valid, correctly-adapted 4608x6144 plate at 256 PPI", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
+    const outcome = await uploadConfirmPlan(signPreparation, projectId, ruthLikeSignArtwork(), 18, 24);
+    assert.equal(outcome.result.status, "planned");
+    const plan = outcome.result.plan!;
+    assert.deepEqual(plan.steps.map((s) => s.kind), ["reconstruct_resolution", "pad_uniform_background"]);
+    assert.equal(plan.overallRisk, "review_required");
+    const reconstructStep = plan.steps[0]!;
+    assert.equal(reconstructStep.params.requestedWidthPx, 2448);
+    assert.equal(reconstructStep.params.requestedHeightPx, 3672);
+    // The plan's OWN (now-superseded-by-adaptation) prediction — unchanged,
+    // never mutated by S3C; this is what the persisted plan/planKey say,
+    // not what actually gets produced when the real provider diverges.
+    assert.equal(plan.expectedOutputWidthPx, 2754);
+    assert.equal(plan.expectedOutputHeightPx, 3672);
+
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    // The real Topaz behavior observed in the S3B live acceptance run:
+    // exactly 4.000x of the source (its own proven ceiling), not the
+    // requested 2.390625x.
+    provider.behavior = { kind: "oversized_but_valid", widthPx: 4096, heightPx: 6144 };
+    await worker.processNextJob();
+
+    assert.equal(provider.dispatchCount, 1, "exactly one paid dispatch");
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed!.status, "completed");
+    // `lastError` carries the validation summary (this plan is
+    // review_required and reconstructed, so never "ready") — not a sign of
+    // execution failure. The asset assertions below prove the adapted
+    // plate was actually produced.
+
+    const finalAsset = (await repo.listAssets(projectId)).find(
+      (a) =>
+        a.finalArtworkJobId === job.id &&
+        a.productionRole === "production_png" &&
+        !isReconstructionIntermediateAsset(a),
+    );
+    assert.ok(finalAsset, "the adapted plate is produced");
+    assert.equal(finalAsset!.widthPx, 4608, "adapted plate width — matches the phase's own audited math exactly");
+    assert.equal(finalAsset!.heightPx, 6144);
+    assert.equal(finalAsset!.hasTransparency, false);
+
+    const rigidSignMeta = (finalAsset!.metadata as { rigidSign: Record<string, unknown> }).rigidSign;
+    assert.equal(rigidSignMeta.resolutionProvenance, "reconstructed");
+    assert.equal(rigidSignMeta.reconstructedWidthPx, 4096);
+    assert.equal(rigidSignMeta.reconstructedHeightPx, 6144);
+    assert.equal(rigidSignMeta.geometryAdapted, true, "auditable: this plate's geometry was execution-derived, not planner-predicted");
+
+    // --- S3C review follow-up: PLAN TRUTHFULNESS / EXECUTION AUDITABILITY ---
+
+    // 1/2: the APPROVED plan (fetched independently, never touched by
+    // execution) still records the ORIGINAL prediction, byte-for-byte —
+    // proves execution never rewrote it.
+    const preparationAfter = await repo.getSignPreparation(projectId);
+    const planAfter = preparationAfter!.plan as unknown as typeof plan;
+    assert.deepEqual(planAfter, plan, "the approved plan is byte-for-byte unchanged by adaptive execution");
+    assert.equal(preparationAfter!.planKey, plan.planKey, "planKey is not recomputed");
+    assert.equal(planAfter.steps[1]!.params.leadingPx, 153, "the plan's OWN recorded prediction stays 153, never rewritten to 256");
+    assert.equal(planAfter.steps[1]!.params.trailingPx, 153);
+    assert.equal(planAfter.expectedOutputWidthPx, 2754);
+    assert.equal(planAfter.expectedOutputHeightPx, 3672);
+
+    // 3/4/5: the ACTUAL execution is separately, explicitly persisted —
+    // both 153/153 (predicted, above) and 256/256 (actual, here) are
+    // independently recoverable from stored evidence without re-deriving
+    // anything from raw reconstruction dimensions.
+    const executionGeometry = rigidSignMeta.executionGeometry as Record<string, unknown>;
+    assert.ok(executionGeometry, "explicit execution-geometry evidence is persisted");
+    assert.equal(executionGeometry.reason, "provider_output_geometry_diverged_from_requested");
+    assert.equal(executionGeometry.reconstructionRequestedWidthPx, 2448);
+    assert.equal(executionGeometry.reconstructionRequestedHeightPx, 3672);
+    assert.equal(executionGeometry.reconstructionActualWidthPx, 4096);
+    assert.equal(executionGeometry.reconstructionActualHeightPx, 6144);
+    assert.equal(executionGeometry.outputWidthPx, 4608);
+    assert.equal(executionGeometry.outputHeightPx, 6144);
+    const executedStep = executionGeometry.executedStep as Record<string, unknown>;
+    assert.equal(executedStep.leadingPx, 256, "the ACTUAL executed pixel amount — distinct from the plan's own 153");
+    assert.equal(executedStep.trailingPx, 256);
+
+    // 6: axis/colour/risk remain exactly what the approved plan permitted —
+    // adaptation never touched them.
+    assert.equal(executedStep.kind, plan.steps[1]!.kind);
+    assert.equal(executedStep.axis, plan.steps[1]!.params.axis, "axis constrained to the approved plan's own axis");
+    assert.equal(executedStep.colorR, plan.steps[1]!.params.colorR, "fill colour constrained to the approved plan's own colour");
+    assert.equal(executedStep.colorG, plan.steps[1]!.params.colorG);
+    assert.equal(executedStep.colorB, plan.steps[1]!.params.colorB);
+    assert.equal(plan.overallRisk, "review_required", "the approved plan's risk classification is untouched");
+
+    // Achieved PPI: 4608/18 = 256, 6144/24 = 256 — exceeds the 150 PPI
+    // target and is accepted (no maximum-PPI rule exists or was invented).
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.notEqual(validation!.status, "ready", "reconstructed provenance still blocks print_ready — S4 gate unaffected");
+    const resolutionCheck = (
+      validation!.report as { checks: Array<{ check: string; status: string; reason: string }> }
+    ).checks.find((c) => c.check === "effective_resolution");
+    assert.equal(resolutionCheck?.status, "pass");
+    assert.match(resolutionCheck?.reason ?? "", /256 PPI/);
+    const dimensionsCheck = (
+      validation!.report as { checks: Array<{ check: string; status: string }> }
+    ).checks.find((c) => c.check === "exact_physical_dimensions");
+    assert.equal(dimensionsCheck?.status, "pass", "4608x6144 independently reconciles to exactly 18x24in on both axes");
+    // 10: the plan-integrity check now truthfully reflects the divergence
+    // too (never claims a byte-identical replay when the pixel amounts
+    // differed) — this does not change the OUTCOME (already blocked
+    // independently by `reconstructed`), only what is honestly claimed.
+    const planIntegrityCheck = (
+      validation!.report as { checks: Array<{ check: string; status: string }> }
+    ).checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
+    assert.equal(planIntegrityCheck?.status, "fail");
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+
+    // 9: recovery preserves the execution evidence exactly, and never
+    // redispatches — the final asset is already durable.
+    await repo.updateFinalArtworkJob(job.id, { status: "recoverable", completedAt: null });
+    await worker.processNextJob();
+    assert.equal(provider.dispatchCount, 1, "recovery of an already-completed adapted plate never redispatches");
+
+    const assetAfterRecovery = (await repo.listAssets(projectId)).find(
+      (a) =>
+        a.finalArtworkJobId === job.id &&
+        a.productionRole === "production_png" &&
+        !isReconstructionIntermediateAsset(a),
+    );
+    assert.equal(assetAfterRecovery!.id, finalAsset!.id, "the same asset is reused, not recreated");
+    const recoveredExecutionGeometry = (
+      (assetAfterRecovery!.metadata as { rigidSign: Record<string, unknown> }).rigidSign as Record<string, unknown>
+    ).executionGeometry;
+    assert.deepEqual(recoveredExecutionGeometry, executionGeometry, "execution evidence survives recovery unchanged");
+    const preparationAfterRecovery = await repo.getSignPreparation(projectId);
+    assert.deepEqual(preparationAfterRecovery!.plan, plan, "the approved plan remains unchanged after recovery too");
+  });
+
+  it("S3C tamper-safety: assets are append-only (no update path exists) and executionGeometry is not part of the validation contract", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
+    await uploadConfirmPlan(signPreparation, projectId, ruthLikeSignArtwork(), 18, 24);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    provider.behavior = { kind: "oversized_but_valid", widthPx: 4096, heightPx: 6144 };
+    await worker.processNextJob();
+
+    // There is architecturally no route to hand-edit a persisted asset's
+    // metadata after the fact: `ProjectRepository` exposes only
+    // `createAsset`/`listAssets`/`getAssetById`/`deleteAsset` — no
+    // "updateAsset". Assets are append-only (Constitution §6.11, "Version
+    // Everything"), so `executionGeometry`, once written, cannot be
+    // silently rewritten through any legitimate code path. This is
+    // verified structurally, not just by a runtime probe:
+    assert.ok(
+      !("updateAsset" in repo),
+      "no repository method exists to mutate a persisted asset's metadata after creation",
+    );
+
+    // The stronger, contract-level guarantee — proven directly in
+    // `print-validation/rigid-sign-print-validation.test.ts` — is that
+    // `RigidSignPlanEvidence` (the only shape print-validation ever reads
+    // for a sign asset) has no `axis`/`colour`/`executionGeometry` field at
+    // all. Even a compromised metadata blob has no channel into the
+    // validator: only the truthful boolean `executedStepsMatchPlan` (set
+    // from `!signGeometryAdapted`, never from the evidence's own nested
+    // step details) can move the `executed_plan_matches_recorded_plan`
+    // check either way.
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.notEqual(validation!.status, "ready");
   });
 
   // ---------------------------------------------------------------------

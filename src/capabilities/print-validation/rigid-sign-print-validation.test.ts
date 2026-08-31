@@ -199,6 +199,21 @@ describe("rigid_sign_raster print validation profile", () => {
     assert.equal(report.status, "finalization_required");
   });
 
+  it("S3C review follow-up: executedStepsMatchPlan=false (the truthful value once execution geometry diverges from the recorded plan) blocks — and it is the ONLY channel through which the divergence can reach validation", () => {
+    // `RigidSignPlanEvidence` has no `axis`/`colour`/`executionGeometry`
+    // field at all (see the type in `./contracts`) — so even a compromised
+    // or hand-edited `rigidSign.executionGeometry` blob on the asset's own
+    // metadata has no way to reach the validator. The only channel through
+    // which "the recorded plan and what actually executed differ" can move
+    // this check is the single truthful boolean below.
+    const report = printValidation.validateArtwork(
+      baseInput({ rigidSign: evidence({ executedStepsMatchPlan: false }) }),
+    );
+    const check = report.checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
+    assert.equal(check?.status, "fail");
+    assert.equal(report.status, "finalization_required");
+  });
+
   it("Rule 1: a plan containing non-admitted steps never reaches ready even if otherwise well-formed", () => {
     const report = printValidation.validateArtwork(
       baseInput({ rigidSign: evidence({ containsOnlyAdmittedSteps: false }) }),

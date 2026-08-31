@@ -120,6 +120,8 @@ import {
 } from "@/capabilities/final-artwork/production-png";
 import type { RigidSignPlanEvidence } from "@/capabilities/print-validation/contracts";
 import {
+  adaptGeometryStepsToActualReconstruction,
+  buildSignExecutionGeometryEvidence,
   computeSignPlanKey,
   deriveRigidSignProductionRequirements,
   encodeSignPlate,
@@ -133,6 +135,7 @@ import {
   SIGN_REPAIR_PLAN_SCHEMA_VERSION,
   splitPlanAroundReconstruction,
   type SignExecutionBounds,
+  type SignExecutionGeometryEvidence,
   type SignRepairPlan,
   type SignRepairStep,
 } from "@/capabilities/sign-preparation";
@@ -1228,6 +1231,22 @@ export function createFinalArtworkWorkerCapability(
         nativeHeightPx: number;
         reconstructedWidthPx: number;
         reconstructedHeightPx: number;
+        /**
+         * Signs Phase S3C: true when the admitted reconstruction diverged
+         * from the plan's own `requestedWidthPx`/`requestedHeightPx` and the
+         * geometry-stage step's pixel amounts (never its axis/colour) were
+         * re-derived from the ACTUAL reconstruction to still exactly reach
+         * the ordered aspect ratio — see `adaptGeometryStepsToActualReconstruction`.
+         */
+        geometryAdapted: boolean;
+        /**
+         * Signs Phase S3C review follow-up: the explicit, self-contained
+         * audit record of what actually executed when `geometryAdapted` is
+         * true — `null` otherwise (the approved plan's own recorded step
+         * already is the complete, truthful record in that case). Never
+         * authorizes anything; see `SignExecutionGeometryEvidence`'s own doc.
+         */
+        executionGeometry: SignExecutionGeometryEvidence | null;
       }
   > {
     // --- Verify the persisted step's own parameters before anything else
@@ -1503,16 +1522,45 @@ export function createFinalArtworkWorkerCapability(
       data: reconstructedPng.data,
     };
 
+    // --- S3C: the plan's OWN geometry-stage step(s) assumed the
+    // reconstruction would return exactly `requestedWidthPx`x`requestedHeightPx`
+    // — the real S3B Ruth acceptance run proved a real provider can honestly
+    // return more than requested (Topaz's own proven 4x ceiling,
+    // proportionally). Re-derive the approved step's pixel amounts from the
+    // ACTUAL reconstruction when it diverges; axis/colour/every other
+    // approved parameter is carried over unchanged, and a plan requiring an
+    // axis change or an unapproved extension refuses rather than adapting.
+    const adaptation = adaptGeometryStepsToActualReconstruction(
+      split.after,
+      reconstructedImage.width,
+      reconstructedImage.height,
+      requestedWidthPx,
+      requestedHeightPx,
+      plan.orderedWidthIn,
+      plan.orderedHeightIn,
+      plan.expectedOutputWidthPx,
+      plan.expectedOutputHeightPx,
+    );
+    if (adaptation.status === "refused") {
+      await completeWithoutAsset(job, adaptation.detail);
+      return { outcome: "handled" };
+    }
+
     const continued = executeAdmittedSignSteps(
       reconstructedImage,
       { x: 0, y: 0, width: reconstructedImage.width, height: reconstructedImage.height },
-      split.after,
+      adaptation.steps,
     );
     if (continued.status === "refused") {
       await completeWithoutAsset(job, continued.detail);
       return { outcome: "handled" };
     }
-    const finalized = finalizeSignExecution(continued.image, continued.contentBounds, plan);
+    const finalized = finalizeSignExecution(
+      continued.image,
+      continued.contentBounds,
+      adaptation.expectedOutputWidthPx,
+      adaptation.expectedOutputHeightPx,
+    );
     if (finalized.status === "refused") {
       await completeWithoutAsset(job, finalized.detail);
       return { outcome: "handled" };
@@ -1529,6 +1577,14 @@ export function createFinalArtworkWorkerCapability(
       nativeHeightPx: preImage.height,
       reconstructedWidthPx,
       reconstructedHeightPx,
+      geometryAdapted: adaptation.status === "adapted",
+      executionGeometry: buildSignExecutionGeometryEvidence(
+        adaptation,
+        requestedWidthPx,
+        requestedHeightPx,
+        reconstructedImage.width,
+        reconstructedImage.height,
+      ),
     };
   }
 
@@ -1654,6 +1710,8 @@ export function createFinalArtworkWorkerCapability(
     let signNativeHeightPx: number | null = null;
     let signReconstructedWidthPx: number | null = null;
     let signReconstructedHeightPx: number | null = null;
+    let signGeometryAdapted = false;
+    let signExecutionGeometry: SignExecutionGeometryEvidence | null = null;
 
     if (!productionAsset) {
       if (!needsReconstruction && !containsOnlyAdmittedSteps) {
@@ -1718,6 +1776,8 @@ export function createFinalArtworkWorkerCapability(
             nativeHeightPx: reconstruction.nativeHeightPx,
             reconstructedWidthPx: reconstruction.reconstructedWidthPx,
             reconstructedHeightPx: reconstruction.reconstructedHeightPx,
+            geometryAdapted: reconstruction.geometryAdapted,
+            executionGeometry: reconstruction.executionGeometry,
           };
         }
 
@@ -1738,6 +1798,8 @@ export function createFinalArtworkWorkerCapability(
           nativeHeightPx: null,
           reconstructedWidthPx: null,
           reconstructedHeightPx: null,
+          geometryAdapted: false,
+          executionGeometry: null,
         };
       });
 
@@ -1779,6 +1841,8 @@ export function createFinalArtworkWorkerCapability(
       signNativeHeightPx = result.nativeHeightPx;
       signReconstructedWidthPx = result.reconstructedWidthPx;
       signReconstructedHeightPx = result.reconstructedHeightPx;
+      signGeometryAdapted = result.geometryAdapted;
+      signExecutionGeometry = result.executionGeometry;
 
       const achievedPpi = image.width / plan.orderedWidthIn;
       const pngBytes = withPhysicalPixelDensity(
@@ -1818,6 +1882,24 @@ export function createFinalArtworkWorkerCapability(
             nativeHeightPx: signNativeHeightPx,
             reconstructedWidthPx: signReconstructedWidthPx,
             reconstructedHeightPx: signReconstructedHeightPx,
+            // Signs Phase S3C: true only when the admitted reconstruction
+            // diverged from the plan's own requested reconstruction size
+            // and the geometry-stage step's pixel amounts were re-derived
+            // (axis/colour unchanged) to still exactly reach the ordered
+            // aspect — auditable without cross-referencing the plan's own
+            // `reconstruct_resolution` params against these dimensions by
+            // hand.
+            geometryAdapted: signGeometryAdapted,
+            // Signs Phase S3C review follow-up: the explicit, self-contained
+            // DERIVED EXECUTION GEOMETRY record — the approved plan (fetched
+            // via `planKey`, never mutated, still recording 153px/153px for
+            // the real Ruth case) remains the sole approval/audit authority
+            // for what was semantically permitted; this is separate
+            // PRODUCTION PROVENANCE recording what actually executed when
+            // the two diverge. `null` whenever `geometryAdapted` is false —
+            // the plan's own recorded step already is the complete record
+            // in that case.
+            executionGeometry: signExecutionGeometry,
           },
         },
       });
@@ -1842,6 +1924,11 @@ export function createFinalArtworkWorkerCapability(
         typeof recorded?.reconstructedWidthPx === "number" ? recorded.reconstructedWidthPx : null;
       signReconstructedHeightPx =
         typeof recorded?.reconstructedHeightPx === "number" ? recorded.reconstructedHeightPx : null;
+      signGeometryAdapted = recorded?.geometryAdapted === true;
+      signExecutionGeometry =
+        recorded?.executionGeometry && typeof recorded.executionGeometry === "object"
+          ? (recorded.executionGeometry as SignExecutionGeometryEvidence)
+          : null;
     }
 
     const policy = getSignResolutionPolicyById(plan.policyId);
@@ -1871,7 +1958,15 @@ export function createFinalArtworkWorkerCapability(
       planSchemaVersion: plan.schemaVersion,
       policyId: plan.policyId,
       planKeyVerified,
-      executedStepsMatchPlan: true,
+      // Signs Phase S3C review follow-up: truthful, not hardcoded — when
+      // `signGeometryAdapted` is true, the geometry-stage step actually
+      // executed with different pixel amounts than the recorded plan's own
+      // step (see `rigidSign.executionGeometry` on the asset metadata for
+      // the explicit record). `!reconstructed` already independently blocks
+      // `print_ready` for every reconstruction case regardless of this
+      // value (unchanged), so this fix corrects what is CLAIMED in the
+      // evidence without changing any validation OUTCOME.
+      executedStepsMatchPlan: !signGeometryAdapted,
       planOverallRisk: plan.overallRisk,
       containsOnlyAdmittedSteps,
       orderedWidthIn: plan.orderedWidthIn,

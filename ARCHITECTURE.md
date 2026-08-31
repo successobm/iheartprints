@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.7
+Version 1.9
 August 2026
 
 ## Document Position
@@ -43,7 +43,7 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3A implemented.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); and BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it. Customer-facing routes and S4/S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed, but the download was correctly rejected by the then-active size cap (a genuine 36,324,544-byte result exceeded the customer-upload-derived 25 MB cap it was wrongly reusing); S3B.1 corrected that cap to a dedicated 64 MiB provider-result allowance. A full successful live acceptance (reconstructed intermediate persisted, deterministic continuation, validated plate) has not yet been demonstrated; operator/internal only |
+| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3C implemented.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); and provider-output-ADAPTIVE deterministic geometry (S3C) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it. Customer-facing routes and S4/S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing two real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`), and S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only |
 | All other categories | Not admitted | Dormant seams only |
 
 **Signs phase boundary** (Constitution §16A/§16B — admission is not implementation, and each phase's own scope is the honest limit of what "implemented" means until the next one lands):
@@ -54,7 +54,8 @@ dormant seams authorize nothing. The registry:
 | S2 | Execute deterministic plan steps; authoritative rigid-sign validation; `print_ready` for non-reconstructed `auto_safe` plans | Implemented |
 | S3A | Bounded provider reconstruction (Topaz) dispatch for `reconstruct_resolution` steps, mocked verification only | Implemented |
 | S3B.1 | Provider-result download cap correction (25 MB customer-upload cap wrongly reused for provider reconstruction output; corrected to a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`) | Implemented |
-| S3B | Live/real bounded provider reconstruction acceptance | One real dispatch attempted (real Ruth artwork); reconstruction succeeded provider-side, download failed on the (now-corrected) size cap. Full successful acceptance not yet demonstrated |
+| S3C | Provider-output-adaptive deterministic geometry (plan's baked-in pad amounts assumed the requested reconstruction size; executor now re-derives them from the actual admitted reconstruction when it proportionally diverges, without mutating the persisted plan/`planKey`), plus the review follow-up's explicit APPROVED PLAN vs DERIVED EXECUTION GEOMETRY evidence split (`rigidSign.executionGeometry`, truthful `executedStepsMatchPlan`) | Implemented |
+| S3B | Live/real bounded provider reconstruction acceptance | One real dispatch attempted (real Ruth artwork); reconstruction succeeded provider-side at 4096×6144 (Topaz's 4× ceiling). Exposed and motivated both S3B.1 and S3C. A deterministic recovery of the existing paid intermediate, using the corrected code, has not yet been separately authorized/performed |
 | S4 | Preservation verification for reconstructed/review-required output | Not implemented |
 | S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
 
@@ -2100,6 +2101,218 @@ result-download host `kosmos-prod.<redacted-account>.r2.cloudflarestorage.com`
 single observation is not a stable contract, and no allowlist was added
 in this phase. That decision remains for a future phase, informed by
 further observation.
+
+### Signs Phase S3C: provider-output-adaptive deterministic geometry
+
+The same real S3B Ruth acceptance run that exposed the download-cap coupling
+(S3B.1) exposed a second, independent provider-contract assumption: the
+plan's own `pad_uniform_background`/`extend_uniform_background` step —
+formulated at PLAN time — baked in absolute pixel amounts
+(`leadingPx`/`trailingPx`) computed under the assumption that
+`reconstruct_resolution` would return EXACTLY its requested
+`requestedWidthPx`/`requestedHeightPx`. The real Topaz result for the real
+Ruth source was **4096×6144** — exactly 4.000× of the 1024×1536 source
+(Topaz's own proven ceiling), not the requested 2.390625× (2448×3672).
+`validateReconstructedGeometry` correctly admitted it (sufficient +
+exactly proportional — Phase 28R's "sufficiency, not exact sizing"
+contract, unchanged), but the plan's baked-in 153px/153px pad amounts were
+computed for a 2448px-wide input and were simply wrong for a 4096px-wide
+one, producing 4402×6144 against the plan's expected 2754×3672 —
+`finalizeSignExecution` correctly refused rather than persist a
+mismatched plate. No data corruption, no false `print_ready`, no second
+paid dispatch — but no completed sign either.
+
+**Principle**: provider reconstruction dimensions are an EXECUTION result,
+never a trustworthy exact PLANNING input. Once a reconstruction has passed
+proportionality, sufficiency, and provider-security validation, the
+deterministic sign executor may derive the exact downstream raster
+geometry from the ACTUAL reconstructed dimensions — provided the resulting
+operation is fully implied by the already-approved semantic repair intent
+(same axis, same alignment convention, same approved fill colour; only the
+pixel amounts change).
+
+**What changed, and what deliberately did not.** `sign-repair-planner.ts`
+is byte-for-byte untouched — every existing persisted `sign-repair-plan:v1`
+plan (including the real Ruth plan and its `planKey`,
+`sign-repair-plan:v1:f6467512227e7fc1fa7aa166d9f140050f5e559f08e2b792d79277bd00d4fdb9`)
+remains exactly as valid, hashable, and tamper-verifiable as before —
+`computeSignPlanKey` was never touched, no schema version bump, no
+migration. What's new lives entirely in the EXECUTION path:
+
+- `sign-preparation/sign-geometry.ts` — a new, pure
+  `deriveUniformBackgroundExtension(contentWidthPx, contentHeightPx,
+  orderedWidthIn, orderedHeightIn)`. Deliberately a SEPARATE
+  re-implementation of the planner's own inline pad-amount formula, not an
+  extraction/refactor of it (the planner itself was out of scope for this
+  phase) — but intentionally the identical arithmetic (`Math.round` for the
+  derived plate dimension, `Math.floor`/remainder for the centered
+  leading/trailing split), so a plan's own PREDICTION and this function's
+  execution-time DERIVATION can never quietly disagree about what "extend
+  to the ordered aspect" means in pixels, only about which input dimensions
+  they were fed.
+- `sign-transform-executor.ts`'s new
+  `adaptGeometryStepsToActualReconstruction` — called (only) from
+  `runSignReconstructionAndContinue` after a successful, already-validated
+  reconstruction, before the plan's remaining (`split.after`) steps
+  execute. Compares the actual reconstruction dimensions to the plan's own
+  `reconstruct_resolution` step's `requestedWidthPx`/`requestedHeightPx`:
+  - **Exact match** (the case every prior test exercised): returns the
+    plan's own steps and `expectedOutputWidthPx`/`expectedOutputHeightPx`
+    completely unchanged — zero behavior difference from before S3C.
+  - **Proportional divergence, geometry step present**: re-derives ONLY
+    `leadingPx`/`trailingPx` via `deriveUniformBackgroundExtension`,
+    carrying the step's `kind`, `axis`, fill colour (including a still-
+    `"unconfirmed"` colour, left exactly as unconfirmed — the executor's
+    existing refusal for that case is unaffected), and `risk` classification
+    forward completely unchanged.
+  - **Divergence with no geometry step in the plan** (the plan expected
+    reconstruction alone to land on the ordered aspect): accepts the actual
+    dimensions as the expected output only if they are ALSO already
+    exact-aspect (guaranteed by upstream proportionality in the ordinary
+    case); refuses — never invents an extension step the plan never
+    approved — otherwise.
+  - **Axis mismatch**: refuses outright rather than ever silently
+    reinterpreting the approved plan onto a different axis. Structurally
+    close to unreachable via a genuinely proportional response (the axis
+    decision is invariant under uniform scaling), kept as a defensive,
+    directly-tested fail-closed branch.
+- `finalizeSignExecution`'s signature changed from `(image, bounds, plan)`
+  to `(image, bounds, expectedWidthPx, expectedHeightPx)` — an internal,
+  never-persisted function; `executeSignRepairPlan`'s own (fully-local,
+  no-reconstruction) call site is unchanged in behavior, passing
+  `plan.expectedOutputWidthPx`/`expectedOutputHeightPx` exactly as before.
+  The reconstruction-continuation call site now passes whatever
+  `adaptGeometryStepsToActualReconstruction` determined — the plan's own
+  persisted `expectedOutputWidthPx`/`expectedOutputHeightPx` fields are
+  NEVER mutated; only what THIS check validates the executed output against
+  can differ from them.
+
+**Auditability**: the final production asset's `rigidSign` metadata gained
+one field, `geometryAdapted: boolean` — true only when the executed
+geometry was execution-derived rather than the plan's own prediction.
+Every other lineage field (`reconstructedWidthPx`/`reconstructedHeightPx`,
+`planKey`, `resolutionProvenance`, …) already recorded enough to detect
+adaptation by cross-referencing the persisted plan's own
+`reconstruct_resolution.params` — this field just makes that fact directly
+queryable without the cross-reference.
+
+### Signs Phase S3C review follow-up: APPROVED REPAIR PLAN vs DERIVED EXECUTION GEOMETRY
+
+The initial S3C cut above correctly derived the real Ruth geometry
+(256px/256px against the plan's own 153px/153px prediction) but left one
+architecture gap: the final asset's `rigidSign` evidence set
+`executedStepsMatchPlan: true` **unconditionally**, even for an adapted
+plate whose actually-executed pixel amounts differ from the persisted
+plan's own step. That was never a validation-outcome bug — reconstructed
+provenance already unconditionally blocks `print_ready` regardless of this
+value — but it was a truthfulness bug: an operator reading the evidence
+could not tell that "153px/153px" (the plan's own words) and "256px/256px"
+(what actually ran) were different things wearing the same claim.
+
+**The architecture now draws this line explicitly, and always will:**
+
+- **APPROVED REPAIR PLAN** (`sign-repair-plan:v1`, `SignRepairPlan`,
+  `planKey`) is immutable historical INTENT, formulated and approved before
+  any provider call. For a plan containing `reconstruct_resolution`, its
+  `requestedWidthPx`/`requestedHeightPx` are a planning-time MINIMUM/
+  PREDICTION, not a promise about what the provider will return; its
+  geometry step's `axis`/alignment convention/fill colour/`risk` are the
+  approved SEMANTIC AUTHORITY — the only things a downstream adaptation is
+  permitted to carry forward unchanged, never reinterpret. This document's
+  "What changed, and what deliberately did not" section above already
+  established that this plan, and its `planKey`, are never mutated,
+  recomputed, or reinterpreted by execution. That remains true and is now
+  additionally covered by direct tests (see below) proving the persisted
+  plan is byte-identical before and after an adapted execution.
+- **DERIVED EXECUTION GEOMETRY** (`rigidSign.executionGeometry`, new this
+  follow-up) is a separate, explicit, persisted PRODUCTION PROVENANCE
+  record of what the deterministic executor actually computed and ran,
+  built once by `buildSignExecutionGeometryEvidence` immediately after
+  `adaptGeometryStepsToActualReconstruction` and threaded through
+  `runSignPreparationJob` exactly like every other `rigidSign` lineage
+  field (assigned once, persisted, and read back unchanged on every
+  recovery/idempotent-replay path). It is `null` whenever nothing was
+  adapted (the ordinary, still-most-common case: the provider returned
+  exactly the requested size, or no reconstruction happened at all — see
+  the B5 test). When adaptation occurred, it records: the reconstruction's
+  REQUESTED vs ACTUAL dimensions, the executed step's `kind`/`axis`/
+  `leadingPx`/`trailingPx`/`colorR`/`colorG`/`colorB`/`color`, and the
+  resulting `outputWidthPx`/`outputHeightPx` — enough for an auditor to
+  recover both "what was approved" (153/153, from the plan, unchanged) and
+  "what actually ran" (256/256, from `executionGeometry`) without reading
+  any runtime code, only the two persisted records side by side.
+
+This interpretation — requested reconstruction dims as prediction/minimum
+intent, geometry-step axis/alignment/colour as approved authority, runtime
+pixel offsets re-derivable only after an admitted proportional provider
+result, the derivation persisted separately as evidence — was checked
+against the plan's existing identity contract (`computeSignPlanKey`
+deliberately hashes `params` by field, and `SignRepairPlan`'s own
+`expectedOutputWidthPx`/`expectedOutputHeightPx` were always documented as
+what the planner PREDICTED, never asserted as a runtime guarantee) and
+found consistent. **No V2 plan schema was needed or introduced** — the
+divergence is fully resolved by separately persisting execution evidence
+alongside the untouched V1 plan, exactly as this section describes.
+
+**Validation semantics — corrected, not redesigned.** `RigidSignPlanEvidence
+.executedStepsMatchPlan` (`print-validation/contracts.ts`) is now computed
+as `!signGeometryAdapted` instead of a hardcoded `true`
+(`final-artwork-worker-capability.ts`). `executed_plan_matches_recorded_plan`
+(`print-validation-capability.ts`) keeps its existing name and meaning —
+"the executed steps are a verified, unmodified replay of the recorded
+plan" — because that is exactly the fact this field now truthfully states;
+renaming it was considered (`approved_plan_integrity`,
+`execution_conforms_to_approved_plan`) and rejected as unnecessary once the
+underlying boolean itself became truthful. The check's OUTCOME is
+unaffected for every existing and new test: `!reconstructed` already
+independently forces `executedPlanOk = false` for every reconstruction
+case (adapted or not), so this fix corrects what is CLAIMED in the
+evidence without changing what is DECIDED. `RigidSignPlanEvidence` itself
+has no `axis`/`colour`/`executionGeometry` field at all — the new
+production-provenance record has no channel into validation whatsoever,
+by construction, not by convention.
+
+**Tamper safety.** `rigidSign.executionGeometry` is written once, from the
+executor's own computed `adaptation` outcome, never from external input;
+`ProjectRepository` exposes no method to update an already-created asset's
+metadata (`createAsset`/`listAssets`/`getAssetById`/`deleteAsset` only —
+assets are append-only, Constitution §6.11 "Version Everything"), so there
+is no legitimate route to hand-edit it post-creation either. Even in a
+hypothetical compromised-metadata scenario, `executionGeometry`'s own axis/
+colour/leadingPx/trailingPx fields are read by nothing except a future
+human auditor — `validateRigidSign` reads only `RigidSignPlanEvidence`,
+whose `executedStepsMatchPlan` boolean is the sole channel, and that
+boolean is set from `signGeometryAdapted` (itself derived from the
+executor's own real-vs-requested dimension comparison), never from
+`executionGeometry`'s nested contents.
+
+**PPI policy — audited, not changed.** The real Ruth adaptation reaches
+4608×6144 at 18×24in — 256 PPI, well above the 150 PPI policy target.
+`validateRigidSign`'s `effective_resolution` check
+(`print-validation-capability.ts`) was already `effectivePpi + tolerance
+>= targetPpi ? pass : ...` — a floor/goal comparison with **no upper
+bound anywhere** — and `exact_physical_dimensions` was already a pure
+`widthPx/orderedWidthIn ≈ heightPx/orderedHeightIn` ratio-reconciliation
+check, never a comparison against a specific fixed pixel count. Both pass
+a 256 PPI exact-aspect plate exactly as they would a 150 PPI one — **zero
+validation-code changes were needed or made** for S3C; no maximum PPI was
+invented, and none should be.
+
+**S4 gate — unchanged, reconfirmed.** `executed_plan_matches_recorded_plan`'s
+unconditional refusal on `resolutionProvenance === "reconstructed"`
+(written in S2, reconfirmed untouched through S3A/S3B.1) still applies —
+an S3C-adapted plate is precisely as blocked from `print_ready` as an
+unadapted one. Proven directly by test: the real Ruth 4096×6144 case
+produces a valid, correctly-dimensioned, `effective_resolution: pass`
+plate and still never reaches `print_ready`.
+
+**No real Topaz call was made or required to build, test, or verify any
+of this** — every test uses `FakeSignReconstructionProvider`, including a
+direct reproduction of the real S3B Ruth acceptance geometry (4096×6144 →
+4608×6144, 256px/256px, 256 PPI) end to end. The actual, already-persisted,
+already-paid-for Ruth intermediate reconstruction was not touched, consumed,
+or mutated by this phase — a separately-authorized deterministic recovery
+of it, using this corrected code, remains a future step.
 
 ### PrintVaultCapability — Reserved
 
