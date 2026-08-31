@@ -170,8 +170,13 @@ export class OpenAISignPreservationSemanticProvider implements SignPreservationS
       ]),
       ...request.reconstructionCrops.flatMap((crop, i) => [
         {
+          // Signs Phase S4.2B.2: no longer claims "(native resolution)" —
+          // reconstruction crops are now capped at a fixed linear scale
+          // over their source counterpart (see
+          // `SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE`), not necessarily
+          // the reconstruction's own full native resolution.
           type: "input_text",
-          text: `RECONSTRUCTED — detail crop ${i + 1} of ${request.reconstructionCrops.length} (native resolution)`,
+          text: `RECONSTRUCTED — detail crop ${i + 1} of ${request.reconstructionCrops.length}`,
         },
         imageContentPart(crop),
       ]),

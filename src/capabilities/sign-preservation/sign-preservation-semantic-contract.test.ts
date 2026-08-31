@@ -128,4 +128,16 @@ describe("buildCombinedVerificationAlgorithmVersion (Signs Phase S4.2A)", () => 
     const combined = buildCombinedVerificationAlgorithmVersion("fake_sign_preservation_semantic_v1", "fake-model-v1");
     assert.notEqual(combined, "sign-preservation-deterministic:v1");
   });
+
+  it("Signs Phase S4.2B.2: the combined identity now encodes the bumped image-derivation version — old (v1) evidence can never be matched/reused under the new (v2) derivation behavior", () => {
+    const combined = buildCombinedVerificationAlgorithmVersion("openai_sign_preservation_semantic", "gpt-5.6-sol");
+    assert.ok(
+      combined.includes("grid=sign-preservation-image-derivation:v2"),
+      `expected the combined identity to include the bumped v2 grid component, got: ${combined}`,
+    );
+    assert.ok(
+      !combined.includes("grid=sign-preservation-image-derivation:v1"),
+      `combined identity must never carry the stale v1 grid component, got: ${combined}`,
+    );
+  });
 });

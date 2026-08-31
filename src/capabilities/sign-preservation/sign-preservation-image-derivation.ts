@@ -1,8 +1,10 @@
 /**
- * Signs Phase S4.2A: deterministic derivation of the bounded, fixed image
- * set sent to the semantic provider. Pure — no I/O, no capability imports
- * (mirrors `sign-geometry.ts`/`sign-preservation-deterministic-checks.ts`'s
- * own discipline).
+ * Signs Phase S4.2A (image count/grid), Signs Phase S4.2B.2 (detail-crop
+ * sizing and opaque encoding): deterministic derivation of the bounded,
+ * fixed image set sent to the semantic provider. Pure — no I/O, no
+ * capability imports (mirrors
+ * `sign-geometry.ts`/`sign-preservation-deterministic-checks.ts`'s own
+ * discipline).
  *
  * Deliberately produces a DATA-INDEPENDENT count: always exactly
  * `SIGN_PRESERVATION_MAX_IMAGE_COUNT` (14) images — 1 source overview, 1
@@ -12,12 +14,15 @@
  * `SIGN_PRESERVATION_GRID_COLUMNS * SIGN_PRESERVATION_GRID_ROWS` (6)
  * geometrically-corresponding crop PAIRS. The overview pair is
  * same-dimensioned (holistic/structural comparison); each crop pair is
- * DELIBERATELY NOT resized to match — the source crop stays at native
- * source resolution and the reconstruction crop stays at native
- * reconstruction resolution for the identical content area, so small
- * text/price legibility is never sacrificed by a second downsample. Never
- * an AI-selected or data-dependent crop — the grid is a fixed geometric
- * partition of the source frame, unconditionally.
+ * DELIBERATELY NOT resized to the SAME dimensions as each other — the
+ * source crop stays at native source resolution and the reconstruction
+ * crop is kept at `SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE`x the source
+ * crop's own dimensions (never the reconstruction's full native scale,
+ * which produced an unnecessarily large ~52 MB request — Signs Phase
+ * S4.2B.1's transport diagnostic), so small text/price legibility is still
+ * never sacrificed to the source crop's own resolution while payload size
+ * stays bounded. Never an AI-selected or data-dependent crop — the grid is
+ * a fixed geometric partition of the source frame, unconditionally.
  *
  * Returns `null` (image derivation UNAVAILABLE, not guessed) when the
  * reconstruction content region is not an exact integer multiple of the
@@ -28,19 +33,43 @@
 import { PNG } from "pngjs";
 
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
-import { resampleExact } from "@/capabilities/final-artwork/raster-transform";
+import { hasAnyTransparentPixel, resampleExact } from "@/capabilities/final-artwork/raster-transform";
 
 import {
+  SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE,
   SIGN_PRESERVATION_GRID_COLUMNS,
   SIGN_PRESERVATION_GRID_ROWS,
   SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION,
 } from "./contracts";
 import type { SignPreservationSemanticImageInput } from "./sign-preservation-semantic-provider";
 
+/**
+ * pngjs's own PNG-spec colour-type constant for 8-bit truecolour WITHOUT
+ * an alpha channel (`node_modules/pngjs/lib/constants.js`:
+ * `COLORTYPE_COLOR = 2`). Not imported directly — pngjs's package `main`
+ * only exports the `PNG` class from its entry file — but this is a stable
+ * PNG-format constant (ISO/IEC 15948 colour type 2), not a pngjs
+ * implementation detail.
+ */
+const PNG_COLOR_TYPE_TRUECOLOR_NO_ALPHA = 2;
+
+/**
+ * Signs Phase S4.2B.2: encodes RGB(A) pixel data as a PNG data URI,
+ * dropping the alpha channel ONLY when every pixel in `image` is proven
+ * fully opaque (`hasAnyTransparentPixel` — actual per-pixel verification,
+ * never assumed intent). This changes no R/G/B byte value: pngjs's packer
+ * reads the same 4-byte-per-pixel input buffer either way
+ * (`inputColorType` stays the default RGBA); requesting
+ * `colorType: COLORTYPE_COLOR` only omits the redundant always-255 alpha
+ * byte from the OUTPUT PNG. When any transparency is detected, RGBA is
+ * retained exactly as before (no behavior change for non-opaque input).
+ */
 export function encodeImageAsDataUri(image: RgbaImage): string {
   const png = new PNG({ width: image.width, height: image.height });
   image.data.copy(png.data);
-  const bytes = PNG.sync.write(png);
+  const bytes = hasAnyTransparentPixel(image)
+    ? PNG.sync.write(png)
+    : PNG.sync.write(png, { colorType: PNG_COLOR_TYPE_TRUECOLOR_NO_ALPHA });
   return `data:image/png;base64,${bytes.toString("base64")}`;
 }
 
@@ -116,18 +145,37 @@ export function deriveSemanticComparisonImages(
         label: `source grid cell (col ${col}, row ${row})`,
       });
 
-      // The geometrically corresponding region in the reconstruction —
-      // native resolution, never downsampled, so small text stays legible.
-      const reconCrop = cropRegion(
+      // The geometrically corresponding region in the reconstruction, at
+      // its own NATIVE resolution first (never a data-dependent crop —
+      // same fixed geometric partition, scaled up by the proven integer
+      // `scale`).
+      const reconCropNative = cropRegion(
         reconstructionContentImage,
         x0 * scale,
         y0 * scale,
         width * scale,
         height * scale,
       );
+
+      // Signs Phase S4.2B.2: cap the SENT reconstruction crop at
+      // `SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE`x the source crop's own
+      // dimensions — e.g. 2x for a 512x512 source crop -> 1024x1024, well
+      // above the source's own resolution (small text stays legible) but
+      // far below a 4x-native 2048x2048 crop (the dominant contributor to
+      // the ~52 MB payload Signs Phase S4.2B.1 measured). `Math.min` with
+      // the native `scale` means this NEVER upscales beyond what the
+      // reconstruction actually contains — when the upstream reconstruction
+      // itself is already at or below the target linear scale (e.g. a 2x
+      // reconstruction), the native crop is used completely unresampled.
+      const targetCropScale = Math.min(scale, SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE);
+      const reconCrop =
+        targetCropScale === scale
+          ? reconCropNative
+          : resampleExact(reconCropNative, width * targetCropScale, height * targetCropScale).image;
+
       reconstructionCrops.push({
         dataUri: encodeImageAsDataUri(reconCrop),
-        label: `reconstruction grid cell (col ${col}, row ${row}), native resolution`,
+        label: `reconstruction grid cell (col ${col}, row ${row}), ${targetCropScale}x linear detail over source`,
       });
     }
   }

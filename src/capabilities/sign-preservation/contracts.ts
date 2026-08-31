@@ -185,10 +185,33 @@ export interface SignPreservationSemanticEvidence {
 /** Explicit staleness levers for the semantic layer — each bumped only when its own behavior-affecting component changes. */
 export const SIGN_PRESERVATION_PROMPT_VERSION = "sign-preservation-prompt:v1";
 export const SIGN_PRESERVATION_SEMANTIC_SCHEMA_VERSION = "sign-preservation-schema:v1";
-export const SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION = "sign-preservation-image-derivation:v1";
+/**
+ * Bumped to v2 at Signs Phase S4.2B.2: reconstruction detail crops are no
+ * longer sent at native upstream-reconstruction resolution (which could be
+ * 4x+ the source and produced a ~52 MB single request — Signs Phase
+ * S4.2B.1's transport diagnostic) — they are now capped at
+ * `SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE`x the source crop's own
+ * dimensions. This changes the bytes sent to the semantic provider, so any
+ * verification evidence recorded under v1 must never be reused as-is under
+ * v2 — the combined identity below encodes this directly.
+ */
+export const SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION = "sign-preservation-image-derivation:v2";
 /** 2 columns x 3 rows = 6 grid cells over the source's own frame, deterministic and data-independent. */
 export const SIGN_PRESERVATION_GRID_COLUMNS = 2;
 export const SIGN_PRESERVATION_GRID_ROWS = 3;
+/**
+ * Signs Phase S4.2B.2: how much larger a reconstruction detail crop is
+ * kept than its corresponding source crop's own dimensions — fixed at 2x
+ * regardless of the upstream reconstruction provider's own native scale
+ * (which may be 4x or more). Retains genuine 2x linear extra detail over
+ * the immutable customer source (enough to distinguish small wording,
+ * numerals, and prices), while capping payload size. Never upscaled beyond
+ * the reconstruction's own native resolution — see
+ * `deriveSemanticComparisonImages`'s `Math.min` use of this constant; this
+ * module fabricates no new detail, exactly like `raster-transform.ts`'s
+ * own "Upscaling Truthfulness" discipline.
+ */
+export const SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE = 2;
 /** source overview + reconstruction overview + 6 source crops + 6 reconstruction crops. */
 export const SIGN_PRESERVATION_MAX_IMAGE_COUNT = 14;
 
