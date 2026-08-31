@@ -24,6 +24,7 @@
  */
 
 import { getCapabilityGraph } from "@/capabilities/composition";
+import { describeSignPlanForCustomer } from "@/capabilities/sign-preparation";
 import {
   getConversation,
   type ApiProjectSnapshot,
@@ -82,4 +83,52 @@ export async function confirmSignArtworkSize(
     throw new SignArtworkBridgeError("Project not found");
   }
   return snapshot;
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #3: "Check my artwork" — the customer's explicit
+ * request to run the EXISTING, already-built inspection/diagnosis/planning
+ * capability (`SignPreparationCapability.planSignRepair`) and see what it
+ * found. This function does no diagnosis of its own: it calls the
+ * authoritative capability, then translates its ACTUAL result through
+ * `describeSignPlanForCustomer` — the same translation `conversation-
+ * service.ts` reconstructs from the durable row on every later reload, so
+ * there is exactly one customer-copy authority, not two.
+ *
+ * Idempotent by the capability's own construction: `planSignRepair`
+ * recomputes from the immutable original and the confirmed spec every
+ * time and overwrites the SAME `SignPreparation` row — repeated clicks
+ * never create a second plan or a competing authority.
+ */
+export async function planSignArtwork(projectId: string): Promise<ApiProjectSnapshot> {
+  const graph = getCapabilityGraph();
+  const outcome = await graph.signPreparation.planSignRepair(projectId);
+
+  const snapshot = await getConversation(projectId);
+  if (!snapshot || !snapshot.signArtwork) {
+    throw new SignArtworkBridgeError("Project not found");
+  }
+
+  // The re-read snapshot's `signArtwork.plan` reconstructs correctly from
+  // the durable row for a PLANNED outcome (safe or needs-review) — but a
+  // BLOCKED outcome durably looks identical to "never planned" (see
+  // `SignArtworkView.plan`'s doc), so the customer would see nothing for
+  // the very click that just told them it's blocked. Overriding with the
+  // view built from THIS call's own fresh, authoritative result closes
+  // that gap for the immediate response; reload afterward is documented,
+  // deliberate, and safe (re-clicking reproduces the identical result).
+  return {
+    ...snapshot,
+    signArtwork: {
+      ...snapshot.signArtwork,
+      plan: describeSignPlanForCustomer({
+        orderedWidthIn: outcome.preparation.orderedWidthIn ?? 0,
+        orderedHeightIn: outcome.preparation.orderedHeightIn ?? 0,
+        artworkWidthPx: outcome.inspection.source.widthPx,
+        artworkHeightPx: outcome.inspection.source.heightPx,
+        defectCodes: outcome.result.defects.map((defect) => defect.code),
+        plan: outcome.result.status === "planned" ? outcome.result.plan : null,
+      }),
+    },
+  };
 }

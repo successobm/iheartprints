@@ -6,6 +6,7 @@ import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
+import type { SignPlanCustomerView } from "@/capabilities/sign-preparation";
 import type { PrintReadySizeView } from "@/capabilities/shared/print-ready-size";
 import type { CustomerFinalizationStatus } from "@/lib/services/conversation-service";
 
@@ -213,9 +214,14 @@ describe("WorkflowChoiceCard", () => {
 function renderSignStep(
   step: Extract<
     UploadedArtworkStep,
-    "choose_artwork_type" | "confirm_sign_size" | "sign_context_saved"
+    "choose_artwork_type" | "confirm_sign_size" | "sign_context_saved" | "sign_plan_review"
   >,
-  signArtwork: { orderedWidthIn: number | null; orderedHeightIn: number | null; specConfirmed: boolean } | null = null,
+  signArtwork: {
+    orderedWidthIn: number | null;
+    orderedHeightIn: number | null;
+    specConfirmed: boolean;
+    plan?: SignPlanCustomerView | null;
+  } | null = null,
 ) {
   return renderToString(
     createElement(UploadedArtworkPanel, {
@@ -225,7 +231,7 @@ function renderSignStep(
       busy: false,
       originalImageUrl: null,
       preparedImageUrl: null,
-      signArtwork,
+      signArtwork: signArtwork ? { plan: null, ...signArtwork } : null,
       onUpload: () => {
         throw new Error("onUpload must never fire from rendering");
       },
@@ -246,6 +252,9 @@ function renderSignStep(
       },
       onConfirmSignSize: () => {
         throw new Error("onConfirmSignSize must never fire from rendering");
+      },
+      onPlanSignArtwork: () => {
+        throw new Error("onPlanSignArtwork must never fire from rendering");
       },
     }),
   );
@@ -302,6 +311,179 @@ describe("Sign artwork type routing (LIVE PRODUCT BLOCKER #1)", () => {
     assert.match(text, /24" × 36"/);
     assert.doesNotMatch(text, /print[- ]ready/i);
     assert.doesNotMatch(text, /approve|finalize|download/i);
+  });
+
+  it("LIVE PRODUCT BLOCKER #3: the saved step offers 'Check my artwork', not a dead end", () => {
+    const html = renderSignStep("sign_context_saved", {
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      specConfirmed: true,
+    });
+    assert.match(html, /Check my artwork/);
+  });
+});
+
+describe("Sign plan review (LIVE PRODUCT BLOCKER #3)", () => {
+  function readyPlan(overrides: Partial<SignPlanCustomerView> = {}): SignPlanCustomerView {
+    return {
+      status: "ready",
+      orderedWidthIn: 12,
+      orderedHeightIn: 16,
+      artworkWidthPx: 1800,
+      artworkHeightPx: 2400,
+      findings: [],
+      proposedAction: null,
+      reviewRequired: false,
+      canProceed: true,
+      ...overrides,
+    };
+  }
+
+  const NEVER_LEAK = [
+    "rigid_sign_raster",
+    "SignPreparation",
+    "SignRepairPlan",
+    "resolutionPolicyId",
+    "resolution_below_minimum",
+    "aspect_ratio_mismatch",
+    "reconstruct_resolution",
+    "extend_uniform_background",
+    "plan_key",
+  ];
+
+  function assertNoLeaks(html: string) {
+    for (const term of NEVER_LEAK) {
+      assert.doesNotMatch(html, new RegExp(term, "i"), `leaked: ${term}`);
+    }
+  }
+
+  it("ready: shows the real dimensions and the real proposed action, no leaked vocabulary, no review/check-back copy", () => {
+    const html = renderSignStep(
+      "sign_plan_review",
+      {
+        orderedWidthIn: 12,
+        orderedHeightIn: 16,
+        specConfirmed: true,
+        plan: readyPlan({
+          artworkWidthPx: 1800,
+          artworkHeightPx: 2400,
+          findings: ["The proportions of your artwork don't exactly match the sign size."],
+          proposedAction: "We can increase your artwork's resolution.",
+        }),
+      },
+    );
+    const text = visibleText(html);
+
+    assert.match(text, /Here's what we found/);
+    assert.match(text, /1800 × 2400 pixels/);
+    assert.match(text, /12" × 16"/);
+    assert.match(text, /don't exactly match the sign size/);
+    assert.match(text, /increase your artwork's resolution/);
+    // LIVE PRODUCT BLOCKER #3A: READY never shows review copy.
+    assert.doesNotMatch(text, /review required/i);
+    assert.doesNotMatch(text, /needs a quick review/i);
+    // LIVE PRODUCT BLOCKER #3A: no unfinished-application framing.
+    assert.doesNotMatch(text, /check back soon/i);
+    assertNoLeaks(html);
+  });
+
+  it("ready with nothing to fix: says the artwork already fits, never fabricates a repair", () => {
+    const html = renderSignStep("sign_plan_review", {
+      orderedWidthIn: 12,
+      orderedHeightIn: 16,
+      specConfirmed: true,
+      plan: readyPlan({ findings: [], proposedAction: null }),
+    });
+    const text = visibleText(html);
+
+    assert.match(text, /already fits/i);
+    assert.match(text, /Nothing needs to change/i);
+    assert.doesNotMatch(text, /review required/i);
+    assert.doesNotMatch(text, /check back soon/i);
+    assertNoLeaks(html);
+  });
+
+  it("needs_review: exactly ONE review explanation, canvas extension is never called a 'border', still shows the proposed action", () => {
+    const html = renderSignStep("sign_plan_review", {
+      orderedWidthIn: 18,
+      orderedHeightIn: 24,
+      specConfirmed: true,
+      plan: readyPlan({
+        status: "needs_review",
+        orderedWidthIn: 18,
+        orderedHeightIn: 24,
+        findings: [
+          "Part of your design reaches the very edge of the artwork, so filling it in needs a closer look.",
+        ],
+        proposedAction:
+          "We can increase your artwork's resolution and add space around the design so it fits your sign without stretching or trimming your artwork.",
+        reviewRequired: true,
+        canProceed: true,
+      }),
+    });
+    const text = visibleText(html);
+
+    // LIVE PRODUCT BLOCKER #3A: exactly one dedicated review section.
+    assert.match(text, /review required/i);
+    assert.match(text, /we'll need your approval before making these changes/i);
+    const reviewMentions = (text.match(/before we make any changes|before making these changes/gi) ?? [])
+      .length;
+    assert.equal(reviewMentions, 1, "the review explanation must appear exactly once");
+    // LIVE PRODUCT BLOCKER #3A: canvas/background extension is never a "border".
+    assert.doesNotMatch(text, /uniform border/i);
+    assert.match(text, /space around the design/i);
+    assert.match(text, /without stretching or trimming/i);
+    assert.doesNotMatch(text, /can't safely prepare this artwork automatically/i);
+    // LIVE PRODUCT BLOCKER #3A: no unfinished-application framing.
+    assert.doesNotMatch(text, /check back soon/i);
+    assertNoLeaks(html);
+  });
+
+  it("blocked: explains the artwork needs additional review, never fabricates a proposed action, no check-back-soon", () => {
+    const html = renderSignStep("sign_plan_review", {
+      orderedWidthIn: 18,
+      orderedHeightIn: 24,
+      specConfirmed: true,
+      plan: readyPlan({
+        status: "blocked",
+        orderedWidthIn: 18,
+        orderedHeightIn: 24,
+        findings: [
+          "Your artwork's resolution is too far below what this size needs for us to safely increase it.",
+        ],
+        proposedAction: null,
+        reviewRequired: false,
+        canProceed: false,
+      }),
+    });
+    const text = visibleText(html);
+
+    assert.match(text, /needs a closer look/i);
+    assert.match(text, /can't safely prepare this artwork automatically/i);
+    assert.doesNotMatch(text, /Here's how we can prepare it/);
+    // LIVE PRODUCT BLOCKER #3A: blocked is not the same product state as
+    // "needs review" (a plan exists, awaiting approval) — it never shows
+    // the "Review required" section, and never claims a check-back date.
+    assert.doesNotMatch(text, /review required/i);
+    assert.doesNotMatch(text, /check back soon/i);
+    assertNoLeaks(html);
+  });
+
+  it("never claims print readiness or offers an approval action at this step, for any status", () => {
+    for (const status of ["ready", "needs_review", "blocked"] as const) {
+      const html = renderSignStep("sign_plan_review", {
+        orderedWidthIn: 24,
+        orderedHeightIn: 36,
+        specConfirmed: true,
+        plan: readyPlan({ status }),
+      });
+      const text = visibleText(html);
+      assert.doesNotMatch(text, /print[- ]ready/i);
+      // "approval" (needs_review's informational copy) is intentional and
+      // distinct from an actual approve/finalize/download ACTION, which
+      // this phase must not add.
+      assert.doesNotMatch(text, /\bapprove\b|finalize|download|authorize/i);
+    }
   });
 });
 

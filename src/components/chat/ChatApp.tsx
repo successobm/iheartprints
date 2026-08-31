@@ -1034,6 +1034,23 @@ export function ChatApp() {
     );
   }
 
+  /**
+   * LIVE PRODUCT BLOCKER #3: "Check my artwork" — runs the existing Signs
+   * inspection/diagnosis/planning capability and shows the translated
+   * result. No body: the project has exactly one `SignPreparation`, same
+   * no-id-to-forge reasoning as every other action here.
+   */
+  async function planSignArtwork() {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/sign-artwork/plan`, {
+          method: "POST",
+        }),
+      "Failed to check your artwork",
+    );
+  }
+
   async function saveUploadedArtworkDetails(input: {
     productSummary: string | null;
     productColor: string | null;
@@ -1296,7 +1313,10 @@ export function ChatApp() {
   const derivedUploadStep = deriveUploadedArtworkStep({
     preparation,
     signArtwork: snapshot?.signArtwork
-      ? { specConfirmed: snapshot.signArtwork.specConfirmed }
+      ? {
+          specConfirmed: snapshot.signArtwork.specConfirmed,
+          hasPlan: snapshot.signArtwork.plan !== null,
+        }
       : null,
     choice: workflowChoice,
     artworkTypeChoice,
@@ -1670,6 +1690,7 @@ export function ChatApp() {
                 onUpload={(file) => void uploadExistingArtwork(file)}
                 onChooseArtworkType={(choice) => chooseArtworkType(choice)}
                 onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
+                onPlanSignArtwork={() => void planSignArtwork()}
                 signArtwork={snapshot?.signArtwork ?? null}
                 onSaveDetails={(input) => void saveUploadedArtworkDetails(input)}
                 onPrepare={() => void prepareUploadedArtwork()}

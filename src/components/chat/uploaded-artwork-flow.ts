@@ -56,12 +56,19 @@ export type UploadedArtworkStep =
   /** Sign path: the human-confirmed ordered width and height (Constitution §16A.2). */
   | "confirm_sign_size"
   /**
-   * Sign path terminal for this phase: the ordered size is durably recorded
-   * against the Signs authority. Inspection/diagnosis/repair review is a
-   * later, separately-approved Signs phase — see `AGENTS.md`'s Signs
-   * guardrail.
+   * Sign path: the ordered size is durably recorded, and the customer may
+   * now ask iHeartPrints to inspect the artwork ("Check my artwork"). No
+   * plan exists yet — this is not the same as a step that has nothing left
+   * to do; the next action is right here.
    */
   | "sign_context_saved"
+  /**
+   * LIVE PRODUCT BLOCKER #3: a plan (safe, needs-review, or blocked — all
+   * three are valid, durable results) has been formulated for this exact
+   * artwork and ordered size. Repair authorization/execution is a later,
+   * separately-approved Signs phase.
+   */
+  | "sign_plan_review"
   /** Analysis is done and has something to say before we touch a pixel. */
   | "review_analysis"
   /** Original vs Prepared, awaiting an explicit approval. */
@@ -77,6 +84,13 @@ export type UploadedArtworkStep =
  */
 export interface SignArtworkFlowState {
   specConfirmed: boolean;
+  /**
+   * LIVE PRODUCT BLOCKER #3: whether a plan has been durably formulated
+   * (`SignPreparation.status === "planned"` — true for a SAFE or a
+   * NEEDS-REVIEW result; a BLOCKED result is not separately durable this
+   * phase, see `SignArtworkView.plan`'s doc in `conversation-service.ts`).
+   */
+  hasPlan: boolean;
 }
 
 export interface UploadedArtworkFlowInput {
@@ -216,7 +230,8 @@ export function deriveUploadedArtworkStep(
   // `artworkTypeChoice`, so a reload after the bridge has run never
   // re-asks "what are we printing" for a job already identified as a sign.
   if (signArtwork) {
-    return signArtwork.specConfirmed ? "sign_context_saved" : "confirm_sign_size";
+    if (!signArtwork.specConfirmed) return "confirm_sign_size";
+    return signArtwork.hasPlan ? "sign_plan_review" : "sign_context_saved";
   }
 
   // Print location is what makes a print-size statement possible at all —

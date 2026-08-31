@@ -19,6 +19,7 @@ import {
 import { OPENING_PROMPT } from "@/lib/domain/conversation";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
 import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
+import type { SignPlanCustomerView } from "@/capabilities/sign-preparation";
 import type {
   CustomerFinalizationStatus,
   SignArtworkView,
@@ -91,6 +92,11 @@ export interface UploadedArtworkPanelProps {
     orderedWidthIn: number;
     orderedHeightIn: number;
   }) => void;
+  /**
+   * LIVE PRODUCT BLOCKER #3: "Check my artwork" — runs the existing Signs
+   * inspection/diagnosis/planning capability.
+   */
+  onPlanSignArtwork?: () => void;
   /** The Signs authority's own state, once a Sign artwork type is chosen. */
   signArtwork?: SignArtworkView | null;
   onSaveDetails: (input: {
@@ -212,7 +218,15 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
       ) : null}
 
       {step === "sign_context_saved" ? (
-        <SignContextSavedStep signArtwork={props.signArtwork ?? null} />
+        <SignContextSavedStep
+          busy={busy}
+          signArtwork={props.signArtwork ?? null}
+          onPlan={props.onPlanSignArtwork}
+        />
+      ) : null}
+
+      {step === "sign_plan_review" && props.signArtwork?.plan ? (
+        <SignPlanReviewStep plan={props.signArtwork.plan} />
       ) : null}
 
       {step === "confirm_details" && preparation ? (
@@ -483,30 +497,125 @@ function SignSizeStep({
 }
 
 /**
- * LIVE PRODUCT BLOCKER #1: the Sign path's terminal step for THIS phase.
- * Deliberately offers no further action — inspection/diagnosis/repair
- * review is a later, separately-approved Signs phase (`AGENTS.md`'s Signs
- * guardrail) — and deliberately never implies anything is print-ready
- * (Constitution: no print-ready claim without authoritative validation).
+ * LIVE PRODUCT BLOCKER #1/#3: the Sign path once the ordered size is saved,
+ * before any plan exists yet. "Check my artwork" is the customer's explicit
+ * request to run the existing inspection/diagnosis/planning capability —
+ * deliberately never automatic, mirroring the DTF path's own explicit
+ * "Remove the Background" action rather than running it silently on arrival.
+ *
+ * Also the step a reload lands back on after a BLOCKED planning outcome
+ * (see `SignArtworkView.plan`'s doc) — re-clicking is safe and
+ * deterministic, so this is never a dead end even then.
  */
 function SignContextSavedStep({
+  busy,
   signArtwork,
+  onPlan,
 }: {
+  busy: boolean;
   signArtwork: SignArtworkView | null;
+  onPlan?: () => void;
 }) {
   const hasSize =
     signArtwork?.orderedWidthIn != null && signArtwork?.orderedHeightIn != null;
   return (
     <div>
-      <p className="text-sm font-semibold text-ink">Got it — sign details saved</p>
+      <p className="text-sm font-semibold text-ink">Your sign details are saved</p>
       <p className="mt-1 text-sm text-muted">
         {hasSize
-          ? `We'll prepare your artwork for a ${signArtwork!.orderedWidthIn}" × ${signArtwork!.orderedHeightIn}" sign.`
+          ? `${signArtwork!.orderedWidthIn}" × ${signArtwork!.orderedHeightIn}"`
           : "We've saved your sign details."}
       </p>
-      <p className="mt-2 text-xs text-muted">
-        We&apos;re not able to continue past this step yet — check back soon.
+      <p className="mt-2 text-sm text-ink">
+        Next, we&apos;ll take a look at your artwork and let you know what we find.
       </p>
+      <button
+        type="button"
+        disabled={busy || !onPlan}
+        onClick={onPlan}
+        className="mt-4 rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        {busy ? "Checking…" : "Check my artwork"}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #3: the customer-facing rendering of a real, already-
+ * formulated Signs plan. Renders ONLY what `describeSignPlanForCustomer`
+ * (`sign-preparation-copy.ts`) already translated — this component makes no
+ * production decision of its own and never renders a raw defect code or
+ * step kind. `plan.status` decides the framing; `plan.findings` and
+ * `plan.proposedAction` are already full, customer-safe sentences.
+ */
+function SignPlanReviewStep({ plan }: { plan: SignPlanCustomerView }) {
+  const headline =
+    plan.status === "blocked"
+      ? "This one needs a closer look"
+      : "Here's what we found";
+
+  return (
+    <div>
+      <p className="text-sm font-semibold text-ink">{headline}</p>
+
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <div>
+          <p className="text-xs font-medium text-muted">Your artwork</p>
+          <p className="text-sm text-ink">
+            {plan.artworkWidthPx} × {plan.artworkHeightPx} pixels
+          </p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-muted">Your sign</p>
+          <p className="text-sm text-ink">
+            {plan.orderedWidthIn}&quot; × {plan.orderedHeightIn}&quot;
+          </p>
+        </div>
+      </div>
+
+      {plan.findings.length > 0 ? (
+        <ul className="mt-3 space-y-1.5">
+          {plan.findings.map((finding) => (
+            <li key={finding} className="text-sm text-ink">
+              {finding}
+            </li>
+          ))}
+        </ul>
+      ) : plan.status === "ready" ? (
+        <p className="mt-3 text-sm text-ink">
+          Your artwork already fits the ordered size well.
+        </p>
+      ) : null}
+
+      {plan.status !== "blocked" ? (
+        <div className="mt-4 rounded-xl border border-black/8 bg-black/[0.02] p-3">
+          <p className="text-sm font-medium text-ink">Here&apos;s how we can prepare it</p>
+          <p className="mt-1 text-sm text-ink">
+            {plan.proposedAction ?? "Nothing needs to change — it's ready as-is."}
+          </p>
+        </div>
+      ) : (
+        <div className="mt-4 rounded-xl border border-black/8 bg-black/[0.02] p-3">
+          <p className="text-sm text-ink">
+            We can&apos;t safely prepare this artwork automatically yet — our team
+            will need to take a closer look.
+          </p>
+        </div>
+      )}
+
+      {/* LIVE PRODUCT BLOCKER #3A: ONE review explanation, in one place —
+          previously this same idea also appeared as a translated finding
+          (`repair_requires_review`), which read as the screen repeating
+          itself. No approval action here yet (Blocker #4). */}
+      {plan.reviewRequired ? (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
+          <p className="text-sm font-medium text-ink">Review required</p>
+          <p className="mt-1 text-sm text-ink">
+            We&apos;ll need your approval before making these changes.
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }

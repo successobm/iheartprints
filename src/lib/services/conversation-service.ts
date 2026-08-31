@@ -4,6 +4,12 @@ import type {
   EmailCaptureResult,
 } from "@/capabilities/acquisition";
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
+import {
+  describeSignPlanForCustomer,
+  type SignDefectCode,
+  type SignPlanCustomerView,
+  type SignRepairPlan,
+} from "@/capabilities/sign-preparation";
 import type { CustomerPaymentView } from "@/capabilities/payment";
 import { getCapabilityGraph } from "@/capabilities/composition";
 import type {
@@ -876,6 +882,23 @@ export interface SignArtworkView {
   orderedWidthIn: number | null;
   orderedHeightIn: number | null;
   specConfirmed: boolean;
+  /**
+   * LIVE PRODUCT BLOCKER #3: the durable, customer-safe planning outcome —
+   * reconstructed from the persisted `SignPreparation.plan` on every
+   * snapshot build (never cached client-side), so a reload resumes at the
+   * plan-review state rather than re-running planning or losing it. `null`
+   * until a plan has been durably formulated (`status === "planned"`).
+   *
+   * A BLOCKED outcome is not separately durable — `sign_preparations` has
+   * no schema state for "planning was attempted and blocked", only
+   * "planned" vs not (Constitution: no default is a decision, and no
+   * migration was authorized for this phase). A reload after a blocked
+   * result correctly re-offers the "Check my artwork" action rather than
+   * silently re-showing stale blocked copy; re-running planning is safe and
+   * deterministic (`planSignRepair` recomputes from the immutable original
+   * every time) and will reach the identical blocked result again.
+   */
+  plan: SignPlanCustomerView | null;
 }
 
 /**
@@ -894,10 +917,41 @@ async function resolveSignArtworkView(
       orderedWidthIn: preparation.orderedWidthIn,
       orderedHeightIn: preparation.orderedHeightIn,
       specConfirmed: preparation.specConfirmedAt !== null,
+      plan: durableSignPlanView(preparation),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #3: reconstructs the customer plan view from the
+ * DURABLE `SignPreparation` row alone — the source of truth on every
+ * reload, never a value trusted from the client. `status === "planned"` is
+ * the only durable signal a plan exists (see `SignArtworkView.plan`'s own
+ * doc for why a blocked outcome isn't separately durable this phase).
+ */
+function durableSignPlanView(preparation: {
+  status: string;
+  plan: Record<string, unknown> | null;
+  orderedWidthIn: number | null;
+  orderedHeightIn: number | null;
+}): SignPlanCustomerView | null {
+  if (preparation.status !== "planned" || !preparation.plan) return null;
+  // Narrowed here, same discipline as `preparation.analysis as unknown as
+  // ArtworkAnalysis` elsewhere: `plan` is untyped jsonb at the repository
+  // boundary, narrowed to its real shape only where a capability already
+  // guarantees it (planSignRepair only ever persists a genuine SignRepairPlan
+  // under `status: "planned"`).
+  const plan = preparation.plan as unknown as SignRepairPlan;
+  return describeSignPlanForCustomer({
+    orderedWidthIn: preparation.orderedWidthIn ?? plan.orderedWidthIn,
+    orderedHeightIn: preparation.orderedHeightIn ?? plan.orderedHeightIn,
+    artworkWidthPx: plan.sourceWidthPx,
+    artworkHeightPx: plan.sourceHeightPx,
+    defectCodes: plan.defects as readonly SignDefectCode[],
+    plan,
+  });
 }
 
 /**

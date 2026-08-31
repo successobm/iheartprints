@@ -182,7 +182,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: false },
+        signArtwork: { specConfirmed: false, hasPlan: false },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -194,7 +194,35 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true },
+        signArtwork: { specConfirmed: true, hasPlan: false },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_context_saved",
+    );
+  });
+
+  it("LIVE PRODUCT BLOCKER #3: a durable plan routes to plan review, independent of everything else", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: { specConfirmed: true, hasPlan: true },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_plan_review",
+    );
+
+    // A reload after a BLOCKED outcome: spec is still confirmed, but no
+    // durable plan exists (see `SignArtworkView.plan`'s doc) — this
+    // correctly re-offers "Check my artwork" rather than trapping the
+    // customer, and is NOT the same as never having asked at all.
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: { specConfirmed: true, hasPlan: false },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -222,7 +250,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation({ printPlacement: null }),
-        signArtwork: { specConfirmed: true },
+        signArtwork: { specConfirmed: true, hasPlan: false },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -245,6 +273,7 @@ describe("uploadedArtworkOwnsSurface", () => {
       "confirm_details",
       "confirm_sign_size",
       "sign_context_saved",
+      "sign_plan_review",
       "review_analysis",
       "compare",
       "approved",

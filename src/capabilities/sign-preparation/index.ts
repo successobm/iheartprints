@@ -57,3 +57,9 @@ export {
   type ProviderAlphaNormalizationEvidence,
   type ProviderAlphaNormalizationOutcome,
 } from "./sign-provider-alpha-normalization";
+export {
+  describeSignPlanForCustomer,
+  type DescribeSignPlanInput,
+  type SignPlanCustomerStatus,
+  type SignPlanCustomerView,
+} from "./sign-preparation-copy";
