@@ -901,6 +901,68 @@ export interface RigidSignPlanEvidence {
   contentBoundsWithinOutput: boolean;
   /** Internal rationale for `contentBoundsWithinOutput` — never customer-facing copy. */
   contentBoundsReason: string;
+  /**
+   * Signs Phase S4→PrintValidation integration: the identity of the asset
+   * THIS evidence is for — the exact plate being validated. Exists solely
+   * so `preservationVerification.finalAssetId` (below) can be compared
+   * against something independent of itself; see that field's own doc for
+   * why this redundant-looking check matters.
+   */
+  finalAssetId: string;
+  /**
+   * The resolved, authoritative Signs preservation-verification record for
+   * this reconstructed plate — never fabricated by this module. `null`
+   * means "no record was found/resolved", which fails closed exactly like
+   * every other missing-evidence case in this profile. Ignored when
+   * `primaryAsset.resolutionProvenance !== "reconstructed"` (a native plate
+   * has nothing to verify).
+   *
+   * Print Validation must never depend on `capabilities/sign-preservation`
+   * (same dependency-direction rule as `sign-preparation`, above) — this is
+   * this module's own narrow copy of exactly the fields needed to bind the
+   * verification to THIS plate/source/plan/algorithm identity, mirroring
+   * `RigidSignPlanEvidence` itself.
+   */
+  preservationVerification: RigidSignPreservationVerificationEvidence | null;
+  /**
+   * The verification-algorithm identity CURRENTLY authoritative for this
+   * preservation check, resolved by the worker independently of any
+   * specific verification record (`SignPreservationCapability
+   * .resolveCurrentVerificationAlgorithmVersion`) — never read off the
+   * record being checked itself, which would make this comparison
+   * trivially circular. A provider/model/prompt/schema change changes this
+   * value, so an older, differently-keyed verification can never silently
+   * authorize a newer plate.
+   */
+  expectedPreservationAlgorithmVersion: string;
+}
+
+/**
+ * Signs Phase S4→PrintValidation integration: the narrow, identity-bound
+ * facts this profile needs from one `SignPreservationVerification` row —
+ * never a bare `preservationPassed: true` shortcut. Every field here exists
+ * to be compared against an independent fact already present elsewhere in
+ * `RigidSignPlanEvidence`/`PrimaryAssetEvidence`, so a verification that is
+ * real but for a DIFFERENT asset, source, plan, or algorithm identity can
+ * never authorize THIS plate.
+ */
+export interface RigidSignPreservationVerificationEvidence {
+  /** Compared against `RigidSignPlanEvidence.finalAssetId` — a verification for a different asset must never authorize this one. */
+  finalAssetId: string;
+  /** Compared against `RigidSignPlanEvidence.sourceAssetId`. */
+  sourceAssetId: string;
+  /** Compared against `RigidSignPlanEvidence.sourceSha256`. */
+  sourceSha256: string;
+  /** Compared against `RigidSignPlanEvidence.planKey` — a verification bound to a superseded plan must never authorize the current one. */
+  planKey: string;
+  /** Compared against `RigidSignPlanEvidence.expectedPreservationAlgorithmVersion` — a verification computed under an old provider/model/prompt/schema identity must never silently pass under a new one. */
+  verificationAlgorithmVersion: string;
+  /**
+   * The verification's own conclusion. Only `"preserved"` may ever
+   * contribute to a `print_ready` result — `"changed"` and `"unknown"`
+   * both fail exactly like a missing record.
+   */
+  status: "preserved" | "changed" | "unknown";
 }
 
 export interface PrintValidationInput {

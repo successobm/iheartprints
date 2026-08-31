@@ -22,6 +22,28 @@ const REQUIREMENTS = deriveRigidSignProductionRequirements(
   RIGID_RECT_UP_TO_24X36_V1,
 );
 
+const EXPECTED_ALGORITHM_VERSION = "sign-preservation-combined:test-v1";
+
+/**
+ * A verification record matching every identity field `evidence()`'s
+ * defaults assert against — the "everything lines up" case. Individual
+ * tests override exactly one field to prove that ONE mismatch alone is
+ * sufficient to fail closed.
+ */
+function preservationVerification(
+  overrides: Partial<RigidSignPlanEvidence["preservationVerification"]> = {},
+) {
+  return {
+    finalAssetId: "asset-final-1",
+    sourceAssetId: "asset-1",
+    sourceSha256: "a".repeat(64),
+    planKey: "sign-repair-plan:v1:abc",
+    verificationAlgorithmVersion: EXPECTED_ALGORITHM_VERSION,
+    status: "preserved" as const,
+    ...overrides,
+  };
+}
+
 function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlanEvidence {
   return {
     sourceAssetId: "asset-1",
@@ -39,6 +61,28 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
     minPpi: RIGID_RECT_UP_TO_24X36_V1.minPpi,
     contentBoundsWithinOutput: true,
     contentBoundsReason: "content fully within bounds",
+    finalAssetId: "asset-final-1",
+    // Fails closed by default — a native (non-reconstructed) plate never
+    // reads this, and a reconstructed one must opt IN to evidence
+    // explicitly (see the "Signs preservation → print_ready" suite below).
+    preservationVerification: null,
+    expectedPreservationAlgorithmVersion: EXPECTED_ALGORITHM_VERSION,
+    ...overrides,
+  };
+}
+
+function reconstructedAsset(
+  overrides: Partial<PrintValidationInput["primaryAsset"]> = {},
+) {
+  return {
+    contentType: "image/png",
+    widthPx: 2754,
+    heightPx: 3672,
+    hasTransparency: false,
+    vectorAssetId: null,
+    resolutionProvenance: "reconstructed" as const,
+    nativeWidthPx: 1024,
+    nativeHeightPx: 1365,
     ...overrides,
   };
 }
@@ -223,23 +267,16 @@ describe("rigid_sign_raster print validation profile", () => {
     assert.equal(report.status, "finalization_required");
   });
 
-  it("Rule 1: provider-reconstructed pixels never reach ready — S4 preservation verification does not exist yet", () => {
+  it("Rule 1: provider-reconstructed pixels with NO preservation evidence never reach ready (superseded by the Signs preservation suite below: reconstruction alone is no longer an automatic block once authoritative evidence exists)", () => {
     const report = printValidation.validateArtwork(
       baseInput({
-        primaryAsset: {
-          contentType: "image/png",
-          widthPx: 2754,
-          heightPx: 3672,
-          hasTransparency: false,
-          vectorAssetId: null,
-          resolutionProvenance: "reconstructed",
-          nativeWidthPx: 1024,
-          nativeHeightPx: 1365,
-        },
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({ preservationVerification: null }),
       }),
     );
     const check = report.checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
     assert.equal(check?.status, "fail");
+    assert.match(check!.reason, /no authoritative preservation verification/i);
     assert.equal(report.status, "finalization_required");
   });
 
@@ -300,5 +337,198 @@ describe("rigid_sign_raster print validation profile", () => {
   it("missing rigidSignRequirements is a hard block", () => {
     const report = printValidation.validateArtwork(baseInput({ rigidSignRequirements: null }));
     assert.equal(report.status, "blocked");
+  });
+});
+
+/**
+ * LIVE PRODUCT BLOCKER #3B: Signs preservation verification →
+ * PrintValidation integration.
+ *
+ * The obsolete rule this replaces was "reconstructed === automatically
+ * invalid". The new rule: reconstruction is acceptable ONLY when an
+ * authoritative `SignPreservationVerification` — identity-bound to THIS
+ * exact final asset, source, plan, and verification-algorithm — concluded
+ * `"preserved"`. Every case below proves ONE way that authority can fail to
+ * hold, and that failing in that one way alone is sufficient to refuse
+ * readiness — never a bare `preservationPassed: true` shortcut.
+ */
+describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => {
+  function checkOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
+  }
+
+  it("1: non-reconstructed valid output — existing behavior preserved, untouched by this phase", () => {
+    const report = printValidation.validateArtwork(baseInput());
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("2: reconstructed + no preservation record → not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({ preservationVerification: null }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("3: reconstructed + status unknown → not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          preservationVerification: preservationVerification({ status: "unknown" }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /concluded "unknown"/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("4: reconstructed + status changed → not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          preservationVerification: preservationVerification({ status: "changed" }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /concluded "changed"/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("5: reconstructed + preserved but wrong final asset → not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          preservationVerification: preservationVerification({
+            finalAssetId: "some-other-asset",
+          }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /does not match this exact asset/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("6: reconstructed + preserved but wrong source → not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          preservationVerification: preservationVerification({
+            sourceAssetId: "some-other-source",
+          }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("6b: reconstructed + preserved but wrong source sha256 → not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          preservationVerification: preservationVerification({ sourceSha256: "b".repeat(64) }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("7: reconstructed + preserved but stale/wrong plan key → not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          preservationVerification: preservationVerification({
+            planKey: "sign-repair-plan:v1:superseded",
+          }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("8: reconstructed + preserved but wrong algorithm/version → not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          preservationVerification: preservationVerification({
+            verificationAlgorithmVersion: "sign-preservation-combined:old-v0",
+          }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("9: reconstructed + authoritative preserved evidence + auto_safe + every other check passes → eligible for print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({ preservationVerification: preservationVerification() }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("10: reconstructed + authoritative preserved evidence + review_required plan → STILL not print_ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          planOverallRisk: "review_required",
+          preservationVerification: preservationVerification(),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /requires human review/i);
+    assert.notEqual(report.status, "ready");
+    // This is the exact real-customer situation this phase must NOT change:
+    // review_required stays refused regardless of how good the preservation
+    // evidence is — that's a SEPARATE authority, not solved here.
+  });
+
+  it("12: preservation status can never be inferred from mere existence of a record — a record that DISAGREES (status !== preserved) still fails, even with every identity field matching", () => {
+    for (const status of ["changed", "unknown"] as const) {
+      const report = printValidation.validateArtwork(
+        baseInput({
+          primaryAsset: reconstructedAsset(),
+          rigidSign: evidence({
+            preservationVerification: preservationVerification({ status }),
+          }),
+        }),
+      );
+      assert.equal(checkOf(report)?.status, "fail", `status=${status} must not pass`);
+      assert.notEqual(report.status, "ready");
+    }
+  });
+
+  it("a native (non-reconstructed) plate never reads preservationVerification at all — absent or garbage, it still passes on its own merits", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          preservationVerification: preservationVerification({ status: "changed" }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
   });
 });

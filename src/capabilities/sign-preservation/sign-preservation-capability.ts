@@ -132,6 +132,22 @@ export interface SignPreservationCapability {
    * throws for.
    */
   verifyPreservation(finalAssetId: string): Promise<SignPreservationVerification>;
+
+  /**
+   * LIVE PRODUCT BLOCKER #3B: the verification-algorithm identity
+   * `verifyPreservation` is CURRENTLY authoritative under, resolved from
+   * this capability's own configured semantic provider — independent of
+   * any specific verification record. Exists so a caller (PrintValidation's
+   * evidence, assembled by the worker) can assert "is the record I have
+   * still current" without re-deriving the identity-composition logic
+   * itself, and without reading the answer off the very record being
+   * checked (which would make that comparison trivially circular).
+   *
+   * Pure and synchronous — no repository call, no provider call. Throws
+   * `SignPreservationStateError` (`semantic_provider_not_configured`) under
+   * the identical condition `verifyPreservation` throws it for.
+   */
+  resolveCurrentVerificationAlgorithmVersion(): string;
 }
 
 export type SignPreservationCapabilityError =
@@ -464,6 +480,20 @@ export function createSignPreservationCapability(
   semanticProvider?: SignPreservationSemanticProvider,
 ): SignPreservationCapability {
   return {
+    resolveCurrentVerificationAlgorithmVersion() {
+      if (!semanticProvider) {
+        throw new SignPreservationStateError(
+          "semantic_provider_not_configured",
+          "No semantic preservation provider was configured on this capability instance.",
+        );
+      }
+      return buildCombinedVerificationAlgorithmVersion(
+        semanticProvider.providerKey,
+        semanticProvider.modelIdentity,
+        semanticProvider.transportVersion,
+      );
+    },
+
     async verifyDeterministicPreservation(finalAssetId) {
       // --- Idempotent reuse: never re-verify an identity already on file. ---
       const existing = await repo.getSignPreservationVerification(

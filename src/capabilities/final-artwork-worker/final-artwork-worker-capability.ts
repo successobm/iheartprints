@@ -42,6 +42,7 @@ import type {
   ConceptEvaluation,
   ConceptEvaluationStatus,
   FinalArtworkJob,
+  SignPreservationVerification,
 } from "@/lib/domain/types";
 import type { AssetCapability } from "@/capabilities/assets";
 import type { PrintValidationCapability } from "@/capabilities/print-validation";
@@ -2035,14 +2036,24 @@ export function createFinalArtworkWorkerCapability(
     //
     // Whatever the COMPLETED preservation status is (`preserved`,
     // `changed`, or `unknown`) execution simply continues to
-    // PrintValidation below, unconditionally — S4.2A.1 persists preservation
-    // evidence only; PrintValidation remains a pure reader and is not
-    // taught S4.4 readiness semantics by this phase. The existing
-    // `resolutionProvenance === "reconstructed"` unconditional block inside
-    // `validateRigidSign` is completely unaffected either way.
+    // PrintValidation below, unconditionally — this worker never decides
+    // readiness itself. LIVE PRODUCT BLOCKER #3B: PrintValidation IS now
+    // taught to read this evidence (`validateRigidSign`'s
+    // `preservationAuthorized` check) — the verification record and the
+    // independently-resolved "current" algorithm identity are threaded
+    // into `rigidSign` below so that check can bind them to this exact
+    // asset/source/plan identity, never trusting a bare boolean.
+    let signPreservationVerification: SignPreservationVerification | null = null;
+    let expectedPreservationAlgorithmVersion = "";
     if (resolutionProvenance === "reconstructed") {
       try {
-        await withPeriodicHeartbeat(job.id, () =>
+        // Resolved BEFORE the (possibly reused) verification call so this
+        // value is always independent of whichever record comes back —
+        // reading it off the record itself would make the identity check
+        // in PrintValidation trivially circular.
+        expectedPreservationAlgorithmVersion =
+          signPreservation.resolveCurrentVerificationAlgorithmVersion();
+        signPreservationVerification = await withPeriodicHeartbeat(job.id, () =>
           signPreservation.verifyPreservation(productionAsset.id),
         );
       } catch (error) {
@@ -2100,6 +2111,21 @@ export function createFinalArtworkWorkerCapability(
       minPpi: policy.minPpi,
       contentBoundsWithinOutput,
       contentBoundsReason,
+      // LIVE PRODUCT BLOCKER #3B: threaded through so PrintValidation can
+      // bind the preservation verification to THIS exact asset, never a
+      // different one.
+      finalAssetId: productionAsset.id,
+      preservationVerification: signPreservationVerification
+        ? {
+            finalAssetId: signPreservationVerification.finalAssetId,
+            sourceAssetId: signPreservationVerification.sourceAssetId,
+            sourceSha256: signPreservationVerification.sourceSha256,
+            planKey: signPreservationVerification.planKey,
+            verificationAlgorithmVersion: signPreservationVerification.verificationAlgorithmVersion,
+            status: signPreservationVerification.status,
+          }
+        : null,
+      expectedPreservationAlgorithmVersion,
     };
 
     const validationInput: PrintValidationInput = {
