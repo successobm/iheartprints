@@ -4,7 +4,10 @@ import { PNG } from "pngjs";
 
 import { MAX_UPLOAD_BYTES } from "@/capabilities/artwork-preparation/upload-limits";
 
-import { TopazTransparencyUpscaleProvider } from "./topaz-transparency-upscale-provider";
+import {
+  MAX_PROVIDER_RESULT_DOWNLOAD_BYTES,
+  TopazTransparencyUpscaleProvider,
+} from "./topaz-transparency-upscale-provider";
 
 /**
  * S3A security patch: the provider-result DOWNLOAD boundary — the SECOND
@@ -95,6 +98,22 @@ async function dispatchOnce(provider: TopazTransparencyUpscaleProvider, requeste
 }
 
 describe("Topaz provider-result download security boundary (Signs Phase S3A)", () => {
+  it("0: the customer-upload limit and the provider-result download cap are independent constants", () => {
+    // S3B.1: S3A originally coupled these (the provider cap WAS
+    // `MAX_UPLOAD_BYTES`) — a real live Ruth acceptance run proved that
+    // wrong (a genuine, already-paid-for Topaz result at ~34.6MB was
+    // rejected by the 25MB customer-upload cap). This asserts the
+    // decoupling: the customer-upload limit is untouched at 25MB, and the
+    // provider cap is a materially different, independently-set value.
+    assert.equal(MAX_UPLOAD_BYTES, 25 * 1024 * 1024, "customer upload limit remains 25 MB, unchanged");
+    assert.equal(MAX_PROVIDER_RESULT_DOWNLOAD_BYTES, 64 * 1024 * 1024, "provider result cap is 64 MiB");
+    assert.notEqual(
+      MAX_PROVIDER_RESULT_DOWNLOAD_BYTES,
+      MAX_UPLOAD_BYTES,
+      "the two caps must never be the same value/reference again",
+    );
+  });
+
   it("1: an HTTPS admitted provider-result URL is accepted", async () => {
     const { fetchImpl } = buildDownloadFake({
       resultUrl: "https://cdn.example.com/output.png",
@@ -204,13 +223,16 @@ describe("Topaz provider-result download security boundary (Signs Phase S3A)", (
   });
 
   it("8: an oversized response is rejected before being fully buffered", async () => {
-    const capBytes = MAX_UPLOAD_BYTES;
+    const capBytes = MAX_PROVIDER_RESULT_DOWNLOAD_BYTES;
     let bytesProducedBeforeAbort = 0;
     const { fetchImpl } = buildDownloadFake({
       resultUrl: "https://cdn.example.com/output.png",
       resultFetch: () => {
         const chunkSize = 1024 * 1024;
         const totalChunks = Math.ceil(capBytes / chunkSize) + 4; // deliberately exceeds the cap
+        // No Content-Length header — exercises the STREAMING enforcement
+        // path (the pre-check in test 8b below is a distinct code path),
+        // exactly a chunked/unknown-length response would.
         const stream = new ReadableStream<Uint8Array>({
           async pull(controller) {
             if (bytesProducedBeforeAbort >= totalChunks * chunkSize) {
@@ -236,7 +258,7 @@ describe("Topaz provider-result download security boundary (Signs Phase S3A)", (
     );
   });
 
-  it("8b: a declared Content-Length over the cap is rejected before the size-capped read begins", async () => {
+  it("8b: a declared Content-Length over the provider cap is rejected before the size-capped read begins", async () => {
     // Note: a `ReadableStream`'s `pull` callback fires eagerly to fill its
     // internal queue as soon as the stream is constructed, independent of
     // whether anything ever calls `.getReader().read()` — so "was pull
@@ -258,13 +280,94 @@ describe("Topaz provider-result download security boundary (Signs Phase S3A)", (
           status: 200,
           headers: {
             "content-type": "image/png",
-            "content-length": String(MAX_UPLOAD_BYTES + 1),
+            "content-length": String(MAX_PROVIDER_RESULT_DOWNLOAD_BYTES + 1),
           },
         });
       },
     });
     const provider = buildProvider(fetchImpl);
     await assert.rejects(() => dispatchOnce(provider), /declared \d+ bytes, exceeding the .*-byte limit/i);
+  });
+
+  it("8c: the exact real-world S3B byte count (36,324,544) clears the size gates that wrongly rejected it pre-fix", async () => {
+    // The exact failure mode observed in the live S3B Ruth acceptance run:
+    // a genuine, successfully-completed Topaz reconstruction reported
+    // 36,324,544 bytes, which the pre-S3B.1 coupled cap (== MAX_UPLOAD_BYTES
+    // == 25MB) rejected via the Content-Length pre-check before ever
+    // reading the body. This proves that EXACT byte count now clears both
+    // size gates (Content-Length pre-check and streaming enforcement) —
+    // the declared length matches the streamed length, and the stream
+    // itself is bounded/synchronous (never actually allocating 34.6MB in
+    // this test process), so what's proven is specifically "the size gates
+    // let this exact count through", isolated from PNG decode (a stub,
+    // non-image body is used deliberately — decode is a separate concern
+    // covered by tests 9-12b).
+    const realWorldObservedBytes = 36_324_544;
+    assert.ok(realWorldObservedBytes > MAX_UPLOAD_BYTES, "sanity: this size WOULD have tripped the old coupled cap");
+    assert.ok(
+      realWorldObservedBytes < MAX_PROVIDER_RESULT_DOWNLOAD_BYTES,
+      "sanity: this size must fit under the new provider cap",
+    );
+    const { fetchImpl } = buildDownloadFake({
+      resultUrl: "https://cdn.example.com/output.png",
+      resultFetch: () => {
+        let produced = 0;
+        const chunkSize = 1024 * 1024;
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (produced >= realWorldObservedBytes) {
+              controller.close();
+              return;
+            }
+            const size = Math.min(chunkSize, realWorldObservedBytes - produced);
+            produced += size;
+            controller.enqueue(new Uint8Array(size));
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "image/png", "content-length": String(realWorldObservedBytes) },
+        });
+      },
+    });
+    const provider = buildProvider(fetchImpl, { downloadTimeoutMs: 30_000 });
+    // Passes the size gates, then correctly fails PNG decode (stub bytes,
+    // not a real image) — proving the rejection this test cares about
+    // (size) did NOT happen, while a genuinely different, later check did.
+    await assert.rejects(() => dispatchOnce(provider), /not a valid PNG image/i);
+  });
+
+  it("8d: exactly at the 64 MiB provider cap is admitted; one byte over is rejected", async () => {
+    const atCap = MAX_PROVIDER_RESULT_DOWNLOAD_BYTES;
+    const overCap = MAX_PROVIDER_RESULT_DOWNLOAD_BYTES + 1;
+
+    async function attemptWithDeclaredLength(declaredLength: number) {
+      const { fetchImpl } = buildDownloadFake({
+        resultUrl: "https://cdn.example.com/output.png",
+        resultFetch: () => {
+          const stream = new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.enqueue(new Uint8Array(1024));
+              controller.close();
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "image/png", "content-length": String(declaredLength) },
+          });
+        },
+      });
+      const provider = buildProvider(fetchImpl);
+      return dispatchOnce(provider);
+    }
+
+    // At-cap must NOT be refused by the Content-Length pre-check (`>`, not
+    // `>=`) — it fails later on decode (the stub body is only 1024 bytes,
+    // not a real image at that declared length), which proves the
+    // pre-check itself let it through rather than rejecting it for size.
+    await assert.rejects(() => attemptWithDeclaredLength(atCap), /not a valid PNG image/i);
+    // One byte over IS refused by the pre-check specifically.
+    await assert.rejects(() => attemptWithDeclaredLength(overCap), /declared \d+ bytes, exceeding the .*-byte limit/i);
   });
 
   it("9: a valid supported Content-Type with genuine PNG bytes is accepted", async () => {
@@ -408,6 +511,79 @@ describe("Topaz provider-result download security boundary (Signs Phase S3A)", (
       },
     });
     assert.equal(submitCount, 1, "a download-security rejection must never trigger a second paid submission");
+    assert.equal(recovered.providerRequestId, submittedRequestId);
+  });
+
+  it("14b: the ACTUAL S3B failure mode (oversized real result) preserves provider identity/billed semantics and never resubmits", async () => {
+    // Mirrors the real live S3B Ruth acceptance run exactly: the paid
+    // submission succeeded, Topaz completed the reconstruction, but the
+    // download was rejected for size (pre-S3B.1: wrongly, at 25MB;
+    // post-fix, this fixture is set safely below the new 64MiB cap so the
+    // scenario proves general oversized-rejection recovery, not this
+    // specific fix — see test 8c for the exact incident value).
+    let submitCount = 0;
+    let firstAttemptOversized = true;
+    const oversizedBytes = MAX_PROVIDER_RESULT_DOWNLOAD_BYTES + 1;
+    const impl = (async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/tool/async")) {
+        submitCount += 1;
+        return jsonResponse(200, { process_id: PROCESS_ID });
+      }
+      if (url.includes("/status/")) {
+        return jsonResponse(200, { status: "Completed" });
+      }
+      if (url.includes("/download/") && url.includes(PROCESS_ID)) {
+        return jsonResponse(200, { url: "https://cdn.example.com/output.png" });
+      }
+      if (url === "https://cdn.example.com/output.png") {
+        if (firstAttemptOversized) {
+          return new Response(null, {
+            status: 200,
+            headers: { "content-type": "image/png", "content-length": String(oversizedBytes) },
+          });
+        }
+        return new Response(new Uint8Array(realPngBytes()), {
+          status: 200,
+          headers: { "content-type": "image/png" },
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    }) as typeof fetch;
+
+    const provider = buildProvider(impl);
+    let submittedRequestId: string | null = null;
+
+    await assert.rejects(
+      () =>
+        provider.produceSignReconstruction({
+          sourceBytes: realPngBytes(32, 32),
+          sourceContentType: "image/png",
+          requestedWidthPx: 64,
+          requestedHeightPx: 64,
+          onProviderRequestSubmitted: async (id) => {
+            submittedRequestId = id;
+          },
+        }),
+      /exceeding the .*-byte limit/i,
+    );
+    assert.equal(submitCount, 1, "the real paid submission occurred exactly once");
+    assert.ok(submittedRequestId, "the paid submission's identity was durably recorded before the download failure");
+
+    // A separately-authorized resume run, later, must resume — not resubmit.
+    firstAttemptOversized = false;
+    const recovered = await provider.produceSignReconstruction({
+      sourceBytes: realPngBytes(32, 32),
+      sourceContentType: "image/png",
+      requestedWidthPx: 64,
+      requestedHeightPx: 64,
+      existingProviderRequest: {
+        providerKey: provider.providerKey,
+        providerRequestId: submittedRequestId!,
+        providerStatus: "submitted",
+      },
+    });
+    assert.equal(submitCount, 1, "an oversized-download rejection must never trigger a second paid submission");
     assert.equal(recovered.providerRequestId, submittedRequestId);
   });
 

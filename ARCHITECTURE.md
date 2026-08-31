@@ -1,6 +1,6 @@
 # iHeartPrints System Architecture
 
-Version 1.6
+Version 1.7
 August 2026
 
 ## Document Position
@@ -43,7 +43,7 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3A implemented.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); and BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it. Live/real provider dispatch, customer-facing routes, and S4/S5 remain **not implemented** — S3A used a mocked provider only (no Topaz credit spent); operator/internal only |
+| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3A implemented.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); and BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A) are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it. Customer-facing routes and S4/S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed, but the download was correctly rejected by the then-active size cap (a genuine 36,324,544-byte result exceeded the customer-upload-derived 25 MB cap it was wrongly reusing); S3B.1 corrected that cap to a dedicated 64 MiB provider-result allowance. A full successful live acceptance (reconstructed intermediate persisted, deterministic continuation, validated plate) has not yet been demonstrated; operator/internal only |
 | All other categories | Not admitted | Dormant seams only |
 
 **Signs phase boundary** (Constitution §16A/§16B — admission is not implementation, and each phase's own scope is the honest limit of what "implemented" means until the next one lands):
@@ -52,8 +52,9 @@ dormant seams authorize nothing. The registry:
 |---|---|---|
 | S1 | Inspect artwork, diagnose defects, formulate a repair plan | Implemented |
 | S2 | Execute deterministic plan steps; authoritative rigid-sign validation; `print_ready` for non-reconstructed `auto_safe` plans | Implemented |
-| S3A | Bounded provider reconstruction (Topaz) dispatch for `reconstruct_resolution` steps, mocked verification only | Implemented (mocked provider only — no real Topaz dispatch has occurred) |
-| S3B | Live/real bounded provider reconstruction acceptance | Not implemented |
+| S3A | Bounded provider reconstruction (Topaz) dispatch for `reconstruct_resolution` steps, mocked verification only | Implemented |
+| S3B.1 | Provider-result download cap correction (25 MB customer-upload cap wrongly reused for provider reconstruction output; corrected to a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`) | Implemented |
+| S3B | Live/real bounded provider reconstruction acceptance | One real dispatch attempted (real Ruth artwork); reconstruction succeeded provider-side, download failed on the (now-corrected) size cap. Full successful acceptance not yet demonstrated |
 | S4 | Preservation verification for reconstructed/review-required output | Not implemented |
 | S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
 
@@ -2017,9 +2018,10 @@ own JSON response, never a value this process chose:
 - **Response size capped while reading, not after buffering.** Enforced
   via a streaming reader (falls back to a bounded `arrayBuffer()` only
   when the runtime exposes no streamable body) plus a `Content-Length`
-  pre-check, reusing the repository's own existing customer-upload byte
-  limit (`artwork-preparation/upload-limits.ts`, `MAX_UPLOAD_BYTES`)
-  rather than inventing an independent allowance.
+  pre-check, against a DEDICATED provider-result cap,
+  `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES` = 64 MiB (67,108,864 bytes) — see
+  "Signs Phase S3B.1" below for why this is no longer
+  `MAX_UPLOAD_BYTES`.
 - **Content-Type is a hint, never trust.** The existing header check is
   unchanged; a NEW, unconditional PNG magic-byte check
   (`bufferStartsWithPngSignature`) runs regardless of what the header
@@ -2039,17 +2041,65 @@ a recovery/retry RESUMES it (never resubmits), and
 `SignReconstructionProvider`'s `dispatchCount` stays at exactly 1 — proven
 directly by test (`topaz-download-security.test.ts`, case 14).
 
-New dependency edge: `final-artwork/topaz-transparency-upscale-provider.ts`
-now imports `MAX_UPLOAD_BYTES` from
-`artwork-preparation/upload-limits.ts` — the same "pure ingress module,
-safely reusable across capabilities" precedent `sign-preparation` and
-`final-artwork-worker` already established for that file.
-
 This hardening applies to BOTH profiles (the same `download()` method), so
 apparel's own live Topaz calls are protected identically — not a
 sign-specific patch. It is narrowly scoped to the download boundary only;
 it is not a general SSRF-remediation program, and no other network call
 in this codebase was touched.
+
+### Signs Phase S3B.1: provider-result download cap correction
+
+S3A's original response-size cap reused `MAX_UPLOAD_BYTES` (the customer
+**upload** limit, 25 MB) as the provider **reconstruction-result** cap,
+reasoning it was "the same order of magnitude" as any raster this
+platform handles. The first real live Ruth acceptance run (S3B) proved
+that reasoning wrong: a genuine, successfully-completed Topaz
+reconstruction of the real 1024×1536 acceptance source (2448×3672
+requested) reported a PNG of **36,324,544 bytes (~34.6 MB)** — an
+already-paid-for result the reused 25 MB cap rejected outright via the
+`Content-Length` pre-check, before any body byte was read.
+
+**The two concerns are not the same thing and must not share a cap.** A
+customer upload is whatever a customer's own file happens to be — 25 MB
+remains the right, unchanged bound for that (`artwork-preparation/upload-limits.ts`
+is untouched by this phase; **customer upload security is not
+weakened**). A provider reconstruction result is a provider-generated
+raster that can legitimately be large at 2–4× source dimensions,
+uncompressed-ish PNG encoding, and near the top of the admitted scale
+range — coupling it to the upload limit meant a legitimate provider
+success could be indistinguishable, from the cap's perspective, from an
+oversized/malicious response.
+
+**The fix**: a new, dedicated, independent constant,
+`MAX_PROVIDER_RESULT_DOWNLOAD_BYTES = 64 * 1024 * 1024` (64 MiB), declared
+in `topaz-transparency-upscale-provider.ts` itself (no longer imported
+from `artwork-preparation`) — ≈1.85× headroom above the observed
+36,324,544-byte real result, still a hard, enforced, streamed-not-buffered
+ceiling, just sized for what a provider reconstruction actually produces
+rather than for what a customer uploads. Every other download-security
+control (HTTPS-only, redirects rejected, timeout, PNG magic-byte
+validation, `malformed_response`/`dispatched_billed` billing semantics)
+is unchanged.
+
+**Dimension validation, audited (not modified) in this phase**: the
+reconstructed raster is decoded and checked against the plan's own
+requested reconstruction geometry (`validateReconstructedGeometry` in
+`runSignReconstructionAndContinue`, `final-artwork-worker-capability.ts`)
+BEFORE `persistIntermediateReconstruction` ever runs — confirmed
+unchanged and still ordered correctly. That check is deliberately a
+sufficiency + proportional-aspect check (Phase 28R's "the provider's job
+is sufficiency, not exact sizing," reused unmodified), not exact-equality
+to the requested pixel dimensions — a genuine, pre-existing, and correct
+design choice (an oversized-but-proportional real Topaz response, as
+apparel's own live incidents proved, must not be rejected merely for
+being larger than requested). This phase did not change that behavior.
+
+**Host allowlist remains out of scope.** The real S3B run observed the
+result-download host `kosmos-prod.<redacted-account>.r2.cloudflarestorage.com`
+(a Cloudflare R2 bucket) for the first time — genuine evidence, but a
+single observation is not a stable contract, and no allowlist was added
+in this phase. That decision remains for a future phase, informed by
+further observation.
 
 ### PrintVaultCapability — Reserved
 
@@ -7440,23 +7490,28 @@ iHeartPrints is exposed beyond trusted operators.
    valid project UUID, so this per-request CPU burn is reachable by the
    same bearer-UUID population as item 1. Belongs on the existing
    authenticated worker queue.
-6. **Topaz result-download trust gap — HARDENED (Signs Phase S3A follow-up
-   patch, before commit).** The download step already had a dedicated
+6. **Topaz result-download trust gap — HARDENED (Signs Phase S3A, size cap
+   corrected in S3B.1).** The download step already had a dedicated
    timeout and a separate retry budget; it now also enforces HTTPS-only on
    the provider-returned URL, `redirect: "manual"` (zero redirects
    followed), a response-size cap enforced while reading (never a full
-   `arrayBuffer()` first) reusing the repository's own
-   `MAX_UPLOAD_BYTES`, and an unconditional PNG magic-byte check
+   `arrayBuffer()` first), and an unconditional PNG magic-byte check
    independent of the Content-Type header
-   (`topaz-transparency-upscale-provider.ts`, `download()`). **Remaining,
+   (`topaz-transparency-upscale-provider.ts`, `download()`). **S3B.1
+   correction**: the size cap is now `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`
+   = 64 MiB, a DEDICATED constant — no longer `MAX_UPLOAD_BYTES` (the
+   customer-upload limit, still 25 MB, unchanged), after the first real
+   live Ruth acceptance run showed a genuine 36,324,544-byte Topaz result
+   being wrongly rejected by the reused 25 MB cap. **Remaining,
    deliberate, documented gap: no destination-host allowlist** — no
    Topaz result-download host is established anywhere in this repository
-   (checked: API docs excerpts, the Phase 2D bake-off materials, both live
-   incident write-ups), so none was invented; an HTTPS URL on any host
-   with a genuine PNG payload is still accepted. Add a real host allowlist
-   once S3B's live acceptance run records the actually-observed result
-   host. See "Signs Phase S3A: bounded provider reconstruction" above for
-   the full change and its tests.
+   beyond one real observation
+   (`kosmos-prod.<redacted-account>.r2.cloudflarestorage.com`, from the
+   S3B run) — a single observation is not yet a stable contract, so none
+   was invented; an HTTPS URL on any host with a genuine PNG payload
+   under the size cap is still accepted. See "Signs Phase S3A: bounded
+   provider reconstruction" and "Signs Phase S3B.1: provider-result
+   download cap correction" above for the full changes and their tests.
 
 ---
 

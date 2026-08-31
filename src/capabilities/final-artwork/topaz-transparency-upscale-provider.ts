@@ -36,7 +36,6 @@ import { withRetry } from "@/capabilities/shared/retry";
 import { ProviderError, isRetryableProviderError } from "@/capabilities/providers/provider-error";
 
 import { resolveWidthConstrainedSizing } from "@/capabilities/shared/print-placement-dimensions";
-import { MAX_UPLOAD_BYTES } from "@/capabilities/artwork-preparation/upload-limits";
 
 import { trimToAlphaBounds, type AlphaTrimOptions } from "./alpha-trim";
 import {
@@ -152,18 +151,36 @@ const DEFAULT_DOWNLOAD_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_DOWNLOAD_ATTEMPTS = 3;
 
 /**
- * S3A security patch — the provider-result download boundary. The provider
- * returns a URL for the reconstructed raster in its own JSON response; that
- * URL is fetched with no host this codebase has ever had a basis to pin
- * down (see `download()`'s own doc comment), so the response body is
- * capped rather than trusted-then-checked. Reuses the repository's own
- * existing customer-upload byte limit
- * (`artwork-preparation/upload-limits.ts`) instead of inventing an
- * independent allowance — the same order of magnitude already governs
- * every raster this platform accepts, and a reconstructed sign/apparel
- * plate is bounded well under it by `MAX_RECONSTRUCTION_DIM_PX`.
+ * S3A security patch (S3B.1 correction) — the provider-result download
+ * boundary. The provider returns a URL for the reconstructed raster in its
+ * own JSON response; that URL is fetched with no host this codebase has
+ * ever had a basis to pin down (see `download()`'s own doc comment), so the
+ * response body is capped rather than trusted-then-checked.
+ *
+ * DELIBERATELY NOT `MAX_UPLOAD_BYTES` (`artwork-preparation/upload-limits.ts`).
+ * S3A originally reused that customer-upload limit here, reasoning it was
+ * "the same order of magnitude" as any raster this platform handles — S3B's
+ * first real live Ruth acceptance run proved that reasoning wrong: a
+ * genuine, successfully-completed Topaz reconstruction of the real
+ * 1024x1536 source (2448x3672 requested) reported a PNG of 36,324,544 bytes
+ * (~34.6 MB), which the reused 25 MB customer-upload cap rejected outright
+ * — a real, already-paid-for result the platform could not read back. A
+ * PROVIDER RECONSTRUCTION OUTPUT and a CUSTOMER UPLOAD are different
+ * concerns with different honest bounds: an upload is whatever a customer's
+ * own file happens to be; a reconstruction output is a provider-generated
+ * raster that can legitimately be uncompressed/large at 2-4x source
+ * dimensions. Coupling the two meant a legitimate provider success could be
+ * indistinguishable, from this cap's perspective, from an attack — that
+ * coupling is the bug this correction removes. `MAX_UPLOAD_BYTES` itself is
+ * UNCHANGED and ungoverned by this constant now.
+ *
+ * 64 MiB gives comfortable headroom above the observed 36,324,544-byte real
+ * result (≈1.85x) without being unbounded — still a hard, enforced ceiling,
+ * still capped while reading (never a full `arrayBuffer()` first, see
+ * `readResponseBodyWithSizeCap`), just sized for what a provider
+ * reconstruction actually produces rather than for what a customer uploads.
  */
-const MAX_DOWNLOAD_RESPONSE_BYTES = MAX_UPLOAD_BYTES;
+export const MAX_PROVIDER_RESULT_DOWNLOAD_BYTES = 64 * 1024 * 1024; // 64 MiB = 67,108,864 bytes
 
 /** The 8-byte PNG signature (RFC 2083 §3.1) — the unconditional decision of whether downloaded bytes are an admitted raster, independent of any Content-Type header. */
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -1453,19 +1470,18 @@ export class TopazTransparencyUpscaleProvider
     }
 
     // --- D. RESPONSE SIZE ---------------------------------------------------
-    // Reuses the repository's own existing customer-upload byte cap
-    // (`artwork-preparation/upload-limits.ts`) rather than inventing an
-    // independent allowance — the same order of magnitude already governs
-    // every raster this platform accepts. Enforced while READING the
-    // response, not after a full `arrayBuffer()` — an oversized body is
-    // never fully buffered into memory first.
+    // A dedicated provider-result cap (S3B.1) — see `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`'s
+    // own doc comment for why this is deliberately NOT the customer-upload
+    // limit. Enforced while READING the response, not after a full
+    // `arrayBuffer()` — an oversized body is never fully buffered into
+    // memory first.
     const declaredLength = imageResponse.headers.get("content-length");
     if (declaredLength) {
       const declared = Number(declaredLength);
-      if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_RESPONSE_BYTES) {
+      if (Number.isFinite(declared) && declared > MAX_PROVIDER_RESULT_DOWNLOAD_BYTES) {
         throw new ProviderError(
           "malformed_response",
-          `The production reconstruction provider's downloaded artwork declared ${declared} bytes, exceeding the ${MAX_DOWNLOAD_RESPONSE_BYTES}-byte limit.`,
+          `The production reconstruction provider's downloaded artwork declared ${declared} bytes, exceeding the ${MAX_PROVIDER_RESULT_DOWNLOAD_BYTES}-byte limit.`,
           undefined,
           "download",
         );
@@ -1475,7 +1491,7 @@ export class TopazTransparencyUpscaleProvider
     try {
       buffer = await readResponseBodyWithSizeCap(
         imageResponse,
-        MAX_DOWNLOAD_RESPONSE_BYTES,
+        MAX_PROVIDER_RESULT_DOWNLOAD_BYTES,
         () => {
           abortedForSize = true;
           controller.abort();
@@ -1485,7 +1501,7 @@ export class TopazTransparencyUpscaleProvider
       if (abortedForSize) {
         throw new ProviderError(
           "malformed_response",
-          `The production reconstruction provider's downloaded artwork exceeded the ${MAX_DOWNLOAD_RESPONSE_BYTES}-byte limit.`,
+          `The production reconstruction provider's downloaded artwork exceeded the ${MAX_PROVIDER_RESULT_DOWNLOAD_BYTES}-byte limit.`,
           undefined,
           "download",
         );
