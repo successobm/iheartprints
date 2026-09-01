@@ -332,6 +332,7 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-plan-authorization.test.ts",
   "src/app/api/projects/[projectId]/sign-artwork/authorize/route.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/authorize/route.test.ts",
+  "src/app/api/internal/projects/[projectId]/sign-artwork/plan/route.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-operator-copy.test.ts",
   "src/capabilities/sign-preparation/sign-plan-operator-review.test.ts",
   "src/app/internal/projects/[projectId]/sign-authorize/sign-authorize-page-state.test.ts",

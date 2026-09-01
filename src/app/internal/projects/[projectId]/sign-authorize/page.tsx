@@ -7,6 +7,7 @@ import { ACQUISITION_SESSION_COOKIE } from "@/lib/http/acquisition-session-cooki
 import { getProjectRepository } from "@/lib/db";
 
 import { SignAuthorizeButton } from "./SignAuthorizeButton";
+import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
 import { SignProductionAction } from "./SignProductionAction";
 import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
 
@@ -28,10 +29,15 @@ type PageProps = {
  * knows which customer project they're reviewing navigates here directly
  * by id.
  *
- * Read-only until the operator explicitly clicks "Authorize plan": this
- * page never plans, replans, or executes anything — it only translates
- * the durably persisted `SignPreparation` row
- * (`loadSignPlanOperatorReview`) into operator language.
+ * Server-rendered from the durably persisted `SignPreparation` row
+ * (`loadSignPlanOperatorReview`), translated into operator language — this
+ * component itself never plans, replans, or executes anything on its own.
+ * Two explicit operator-initiated mutations exist, both behind their own
+ * internal-session-gated routes, never triggered automatically on render:
+ * "Authorize plan" (an existing `review_required`/`auto_safe` plan), and —
+ * Internal Replan Action Phase — "Check this artwork" in the `no_plan`
+ * state, for a project not reachable through the original customer's own
+ * browser session (see `SignCheckArtworkButton`'s own doc comment).
  */
 export default async function SignAuthorizePage({ params }: PageProps) {
   const { projectId } = await params;
@@ -87,10 +93,13 @@ export default async function SignAuthorizePage({ params }: PageProps) {
           This project has no sign artwork uploaded yet.
         </p>
       ) : pageState.kind === "no_plan" ? (
-        <p className="text-sm text-ink" data-sign-authorize-no-plan>
-          This artwork doesn&apos;t currently have a production plan. Either it hasn&apos;t been planned yet, or the
-          planner wasn&apos;t able to formulate an automatic repair for it.
-        </p>
+        <div className="flex flex-col gap-4">
+          <p className="text-sm text-ink" data-sign-authorize-no-plan>
+            This artwork doesn&apos;t currently have a production plan. Either it hasn&apos;t been planned yet, or the
+            planner wasn&apos;t able to formulate an automatic repair for it.
+          </p>
+          <SignCheckArtworkButton projectId={projectId} />
+        </div>
       ) : (
         <SignPlanReview projectId={projectId} review={pageState.review} />
       )}
