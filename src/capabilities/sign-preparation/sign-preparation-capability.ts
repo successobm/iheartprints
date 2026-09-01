@@ -49,6 +49,10 @@ import { inspectSignArtwork } from "./sign-inspection";
 import { computeSignPlanKey } from "./sign-plan-identity";
 import { isAuthorizationSufficientForRisk } from "./sign-plan-authorization";
 import { planSignRepair } from "./sign-repair-planner";
+import { measurePerimeterBand } from "./perimeter-reconstruction";
+import type { SignEdge } from "./contracts";
+
+const ALL_SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
 
 /** Operator-facing state errors. Messages are safe, non-technical sentences. */
 export class SignPreparationStateError extends Error {
@@ -285,12 +289,26 @@ export function createSignPreparationCapability(
         policy,
       );
 
+      // Semantic Worker Wiring Phase: this was the missing wire from the
+      // Production-Aware Perimeter Reconstruction phase — `planSignRepair`
+      // (the planner) has always accepted `perimeterBands` as the evidence
+      // that admits `reconstruct_perimeter_structure`, and its own unit
+      // suite proves admission works, but THIS orchestration call site
+      // never computed or supplied them, so no real (non-test) plan could
+      // ever reach that step. `measurePerimeterBand` is pure/cheap (a
+      // bounded-depth band read, four edges) — always computed alongside
+      // inspection, exactly like the planner's own test helper
+      // (`sign-repair-planner.test.ts`'s `planWithBands`) already assumed
+      // this call site would do.
+      const perimeterBands = ALL_SIGN_EDGES.map((edge) => measurePerimeterBand(decoded.image, edge));
+
       const result = planSignRepair({
         spec: specResolution.spec,
         policy,
         inspection,
         sourceAssetId: preparation.originalAssetId,
         sourceSha256: sha256,
+        perimeterBands,
       });
 
       const updated =

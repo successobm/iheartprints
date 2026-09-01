@@ -99,6 +99,37 @@ export function planRequiresBoundedReconstruction(plan: SignRepairPlan): boolean
 }
 
 /**
+ * Semantic Worker Wiring Phase: the GENERALIZED question — "does executing
+ * this plan produce pixels whose meaning a human/semantic check must
+ * confirm, rather than pixels a deterministic proof alone already covers?"
+ * — deliberately distinct from `planRequiresBoundedReconstruction`, which
+ * answers a narrower, Topaz-specific question ("does this plan need S3A's
+ * bounded PROVIDER dispatch and idempotency machinery?").
+ *
+ * Both `reconstruct_resolution` (provider-synthesized pixels) and
+ * `reconstruct_perimeter_structure` (deterministically tiled, but still
+ * SYNTHESIZED — not a byte-for-byte carry of customer pixels the way
+ * `extend_uniform_background`/`pad_uniform_background`'s flat fill is)
+ * answer "yes" here. Every other step kind (flat-colour extension,
+ * resample, downsample, rotate) is provably self-verifying by construction
+ * — a flat fill is fully checked by exact-colour-match deterministic
+ * evidence alone, so it answers "no".
+ *
+ * This is the ONLY predicate the finalization worker should read to decide
+ * whether to call `SignPreservationCapability.verifyPreservation` — never
+ * `planRequiresBoundedReconstruction` (that remains the Topaz-dispatch-only
+ * question) and never a raw `resolutionProvenance === "reconstructed"`
+ * check (that conflates "a provider touched this" with "this needs
+ * verification", which is exactly the gap that left `reconstruct_
+ * perimeter_structure` permanently unable to reach `print_ready`).
+ */
+export function planRequiresSemanticPreservationVerification(plan: SignRepairPlan): boolean {
+  return plan.steps.some(
+    (step) => step.kind === "reconstruct_resolution" || step.kind === "reconstruct_perimeter_structure",
+  );
+}
+
+/**
  * Signs Phase S3A: splits a plan satisfying `planRequiresBoundedReconstruction`
  * into the steps to execute locally BEFORE the provider reconstruction (e.g.
  * a review-gated `rotate_90`), the reconstruction step itself, and the steps

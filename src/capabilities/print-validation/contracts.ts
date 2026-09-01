@@ -955,11 +955,11 @@ export interface RigidSignPlanEvidence {
   finalAssetId: string;
   /**
    * The resolved, authoritative Signs preservation-verification record for
-   * this reconstructed plate — never fabricated by this module. `null`
-   * means "no record was found/resolved", which fails closed exactly like
-   * every other missing-evidence case in this profile. Ignored when
-   * `primaryAsset.resolutionProvenance !== "reconstructed"` (a native plate
-   * has nothing to verify).
+   * this plate — never fabricated by this module. `null` means "no record
+   * was found/resolved", which fails closed exactly like every other
+   * missing-evidence case in this profile. Ignored when
+   * `planRequiresSemanticPreservationVerification` (below) is `false` — a
+   * plan that never needed the question asked has nothing to verify.
    *
    * Print Validation must never depend on `capabilities/sign-preservation`
    * (same dependency-direction rule as `sign-preparation`, above) — this is
@@ -968,6 +968,25 @@ export interface RigidSignPlanEvidence {
    * `RigidSignPlanEvidence` itself.
    */
   preservationVerification: RigidSignPreservationVerificationEvidence | null;
+  /**
+   * Semantic Worker Wiring Phase: true iff the recorded plan is one this
+   * profile must independently prove `preservationVerification.status ===
+   * "preserved"` for before it can certify ready — mirrors `sign-
+   * preparation/sign-transform-executor.ts`'s own
+   * `planRequiresSemanticPreservationVerification` exactly (this module
+   * never imports that function; the caller re-derives the identical fact
+   * and hands it over as a plain boolean, the same discipline
+   * `planRequiresBoundedReconstruction` already follows).
+   *
+   * Deliberately NOT derived here from `primaryAsset.resolutionProvenance
+   * === "reconstructed"` — that was the exact bug this phase closes.
+   * `reconstruct_perimeter_structure` needs this question asked despite
+   * `resolutionProvenance` staying `"native"` (no provider ever touches
+   * those pixels); gating on provenance silently skipped the preservation-
+   * status check entirely for every such plan, no matter what its semantic
+   * verification actually concluded.
+   */
+  planRequiresSemanticPreservationVerification: boolean;
   /**
    * The verification-algorithm identity CURRENTLY authoritative for this
    * preservation check, resolved by the worker independently of any

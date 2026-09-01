@@ -28,6 +28,7 @@ export {
 export {
   aggregateDeterministicEvidence,
   checkExtensionRegions,
+  checkPerimeterTileExtensionRegions,
   checkLineage,
   checkReconstructionToFinalRgb,
   checkSourceSimilarity,

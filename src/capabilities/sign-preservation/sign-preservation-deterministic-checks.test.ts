@@ -7,6 +7,7 @@ import { fillRect, makeImage } from "@/capabilities/sign-preparation/sign-fixtur
 import {
   aggregateDeterministicEvidence,
   checkExtensionRegions,
+  checkPerimeterTileExtensionRegions,
   checkLineage,
   checkReconstructionToFinalRgb,
   checkSourceSimilarity,
@@ -32,6 +33,7 @@ describe("checkLineage (Signs Phase S4.1)", () => {
     finalAssetPlanKey: "sign-repair-plan:v1:x",
     currentPlanKey: "sign-repair-plan:v1:x",
     resolutionProvenance: "reconstructed",
+    expectedResolutionProvenance: "reconstructed" as const,
     geometryAdapted: true,
     executionEvidencePresent: true,
     intermediateAssetExists: true,
@@ -56,10 +58,24 @@ describe("checkLineage (Signs Phase S4.1)", () => {
     assert.equal(evidence.finalAssetPlanKeyMatches, false);
   });
 
-  it("not a reconstructed asset -> unknown", () => {
-    const evidence = checkLineage({ ...GOOD, resolutionProvenance: "native" });
+  it("provenance does not match what the plan required (claims reconstructed, plan expects native) -> unknown", () => {
+    const evidence = checkLineage({ ...GOOD, resolutionProvenance: "reconstructed", expectedResolutionProvenance: "native" });
     assert.equal(evidence.result, "unknown");
-    assert.equal(evidence.resolutionProvenanceIsReconstructed, false);
+    assert.equal(evidence.resolutionProvenanceConsistentWithPlan, false);
+  });
+
+  it("Semantic Worker Wiring Phase: a TRUTHFUL native asset whose plan never required reconstruction -> still passes (the exact gap this phase closes — native is not itself a lineage failure)", () => {
+    const evidence = checkLineage({
+      ...GOOD,
+      resolutionProvenance: "native",
+      expectedResolutionProvenance: "native",
+      // A perimeter-only plan never dispatches a provider, so it has no
+      // separate job-tied intermediate asset either — mirrors
+      // `sign-preservation-capability.ts`'s own substitution.
+      intermediateAssetTiedToSameJob: true,
+    });
+    assert.equal(evidence.result, "pass");
+    assert.equal(evidence.resolutionProvenanceConsistentWithPlan, true);
   });
 
   it("geometryAdapted true but no execution evidence present -> unknown", () => {
@@ -287,6 +303,81 @@ describe("checkExtensionRegions (Signs Phase S4.1)", () => {
   });
 });
 
+/** Semantic Worker Wiring Phase: the reconstruct_perimeter_structure sibling of checkExtensionRegions. */
+describe("checkPerimeterTileExtensionRegions (Semantic Worker Wiring Phase)", () => {
+  it("every tiled pixel exactly matches the expected periodic colour -> pass", () => {
+    const width = 6;
+    const height = 8;
+    const final = makeImage(width, height, { r: 1, g: 1, b: 1 }); // content placeholder
+    const leadingRows = [{ r: 200, g: 20, b: 20 }, { r: 20, g: 20, b: 20 }]; // period 2
+    const trailingRows = [{ r: 10, g: 200, b: 10 }];
+    const leadingPx = 3;
+    const trailingPx = 1;
+    // Paint the leading region per the SAME formula the executor uses:
+    // distance d = leadingPx - 1 - y.
+    for (let y = 0; y < leadingPx; y++) {
+      const d = leadingPx - 1 - y;
+      const color = leadingRows[(leadingRows.length - 1 - (d % leadingRows.length) + leadingRows.length) % leadingRows.length]!;
+      fillRect(final, 0, y, width, y + 1, color);
+    }
+    // Trailing region, single row -> always rows[0].
+    fillRect(final, 0, leadingPx + height - leadingPx - trailingPx, width, height, trailingRows[0]!);
+    // Content region sits between.
+    const contentRegion = { x: 0, y: leadingPx, width, height: height - leadingPx - trailingPx };
+
+    const evidence = checkPerimeterTileExtensionRegions(
+      final,
+      contentRegion,
+      "vertical",
+      leadingPx,
+      trailingPx,
+      leadingRows,
+      trailingRows,
+    );
+    assert.equal(evidence.result, "pass");
+    assert.equal(evidence.mismatchedPixelCount, 0);
+    assert.equal(evidence.approvedFillRgb, null, "no single flat colour exists for a tiled reconstruction");
+    assert.equal(evidence.totalExtensionPixels, (leadingPx + trailingPx) * width);
+  });
+
+  it("one tiled pixel has the wrong colour -> catastrophic", () => {
+    const final = makeImage(4, 6, { r: 1, g: 1, b: 1 });
+    const leadingRows = [{ r: 200, g: 20, b: 20 }];
+    const trailingRows = [{ r: 10, g: 200, b: 10 }];
+    fillRect(final, 0, 0, 4, 2, leadingRows[0]!);
+    fillRect(final, 0, 4, 4, 6, trailingRows[0]!);
+    final.data[0] = 5; // corrupt one leading pixel
+    const contentRegion = { x: 0, y: 2, width: 4, height: 2 };
+    const evidence = checkPerimeterTileExtensionRegions(final, contentRegion, "vertical", 2, 2, leadingRows, trailingRows);
+    assert.equal(evidence.result, "catastrophic");
+    assert.equal(evidence.mismatchedPixelCount, 1);
+  });
+
+  it("missing band rows -> unknown, never guesses a colour", () => {
+    const final = makeImage(4, 6, { r: 1, g: 1, b: 1 });
+    const contentRegion = { x: 0, y: 2, width: 4, height: 2 };
+    const evidence = checkPerimeterTileExtensionRegions(final, contentRegion, "vertical", 2, 2, null, null);
+    assert.equal(evidence.result, "unknown");
+  });
+
+  it("null content region -> unknown", () => {
+    const final = makeImage(4, 4, { r: 0, g: 0, b: 0 });
+    const evidence = checkPerimeterTileExtensionRegions(final, null, "vertical", 1, 1, [{ r: 1, g: 1, b: 1 }], [{ r: 1, g: 1, b: 1 }]);
+    assert.equal(evidence.result, "unknown");
+  });
+
+  it("horizontal axis: tiles by column", () => {
+    const final = makeImage(6, 4, { r: 1, g: 1, b: 1 });
+    const leadingRows = [{ r: 5, g: 5, b: 200 }];
+    const trailingRows = [{ r: 200, g: 5, b: 5 }];
+    fillRect(final, 0, 0, 2, 4, leadingRows[0]!);
+    fillRect(final, 4, 0, 6, 4, trailingRows[0]!);
+    const contentRegion = { x: 2, y: 0, width: 2, height: 4 };
+    const evidence = checkPerimeterTileExtensionRegions(final, contentRegion, "horizontal", 2, 2, leadingRows, trailingRows);
+    assert.equal(evidence.result, "pass");
+  });
+});
+
 describe("checkSourceSimilarity (Signs Phase S4.1) — advisory only", () => {
   it("clean exact 4x downsample of the source -> concern (advisory), not catastrophic", () => {
     const source = makeImage(4, 4, { r: 100, g: 150, b: 200 });
@@ -334,6 +425,7 @@ describe("aggregateDeterministicEvidence / overallStatusFromDeterministicEvidenc
     finalAssetPlanKey: "k",
     currentPlanKey: "k",
     resolutionProvenance: "reconstructed",
+    expectedResolutionProvenance: "reconstructed",
     geometryAdapted: false,
     executionEvidencePresent: false,
     intermediateAssetExists: true,

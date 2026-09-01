@@ -248,6 +248,9 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
       async recoverAbandonedJobs() {
         return { recoveredCount: 0 };
       },
+      async reconcileSignPrintReadyStatus() {
+        return { invalidated: false, reason: "not exercised by this test" };
+      },
     };
     const scheduler = createFinalArtworkSchedulerCapability(slowWorker, {
       maxJobsPerRun: 5,

@@ -10,13 +10,25 @@ import type { AssetCapability } from "@/capabilities/assets";
 import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
 import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
 import { createSignPreparationCapability } from "@/capabilities/sign-preparation";
-import { ruthLikeSignArtwork, toPngBytes } from "@/capabilities/sign-preparation/sign-fixtures";
+import {
+  ruthLikeSignArtwork,
+  stripedPerimeterBandArtwork,
+  toPngBytes,
+} from "@/capabilities/sign-preparation/sign-fixtures";
 import {
   buildCombinedVerificationAlgorithmVersion,
   createSignPreservationCapability,
+  SIGN_PRESERVATION_SEMANTIC_CATEGORIES,
   type SignPreservationCapability,
+  type SignPreservationSemanticAnswer,
 } from "@/capabilities/sign-preservation";
+import { SIGN_PRESERVATION_TRANSPORT_VERSION_NONE } from "@/capabilities/sign-preservation/contracts";
 import { FakeSignPreservationSemanticProvider } from "@/capabilities/sign-preservation/fake-sign-preservation-semantic-provider";
+import type {
+  SignPreservationSemanticProvider,
+  SignPreservationSemanticProviderResult,
+  SignPreservationSemanticRequest,
+} from "@/capabilities/sign-preservation/sign-preservation-semantic-provider";
 import type { ProjectRepository } from "@/lib/db/repository";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
@@ -411,5 +423,276 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     await ruthShapedFinalAsset(reconstructionProvider, semanticProvider);
     assert.equal(reconstructionProvider.dispatchCount, 1, "exactly the one production reconstruction — none from preservation");
     assert.equal(reconstructionProvider.resumeCount, 0);
+  });
+});
+
+/**
+ * Semantic Worker Wiring Phase: the acceptance proof this phase exists
+ * for — a plan using ONLY `reconstruct_perimeter_structure` (no
+ * `reconstruct_resolution`, zero Topaz involvement) travels the REAL
+ * capability path (upload → confirm spec → `planSignRepair` → authorize →
+ * `requestSignFinalArtwork` → the real worker) all the way to
+ * `print_ready` when every deterministic + semantic preservation category
+ * is affirmative, and is correctly refused otherwise. Every test here uses
+ * `FakeSignPreservationSemanticProvider` (or a purpose-built inline fake
+ * satisfying the identical `SignPreservationSemanticProvider` contract) —
+ * never Topaz, never a real multimodal provider.
+ */
+describe("Semantic Worker Wiring Phase: reconstruct_perimeter_structure end-to-end through the real worker", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-perimeter-worker-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  /**
+   * Answers every category "same" except `overrideCategory`, which gets
+   * `overrideAnswer` — lets each negative test vary EXACTLY one category
+   * (usually `perimeter_edge_alignment`) without touching the rest,
+   * mirroring `FakeSignPreservationSemanticProvider`'s own
+   * `CHANGED_CATEGORY_FOR_BEHAVIOR` shape but supporting any answer value
+   * (in particular `cannot_determine`, which the shared fake only ever
+   * produces for `wording`).
+   */
+  class InlineSemanticProvider implements SignPreservationSemanticProvider {
+    readonly providerKey = "inline-fake-sign-preservation-semantic";
+    readonly modelIdentity: string;
+    readonly transportVersion = SIGN_PRESERVATION_TRANSPORT_VERSION_NONE;
+    dispatchCount = 0;
+    constructor(
+      private readonly overrideCategory: (typeof SIGN_PRESERVATION_SEMANTIC_CATEGORIES)[number],
+      private readonly overrideAnswer: SignPreservationSemanticAnswer["answer"],
+      modelIdentity = "inline-fake-model-v1",
+    ) {
+      this.modelIdentity = modelIdentity;
+    }
+    async compare(_request: SignPreservationSemanticRequest): Promise<SignPreservationSemanticProviderResult> {
+      this.dispatchCount += 1;
+      return {
+        answers: SIGN_PRESERVATION_SEMANTIC_CATEGORIES.map((category) => ({
+          category,
+          answer: category === this.overrideCategory ? this.overrideAnswer : ("same" as const),
+          reason:
+            category === this.overrideCategory
+              ? `inline fake: deliberately ${this.overrideAnswer} for this test`
+              : "inline fake: unchanged",
+          regionReference: null,
+        })),
+        providerRequestId: `inline-fake-${this.dispatchCount}`,
+        rawResponseSummary: { fixture: "inline-override" },
+        tokenUsage: { inputTokens: 1000, outputTokens: 55 },
+      };
+    }
+  }
+
+  async function build(reconstructionProvider: FakeSignReconstructionProvider, semanticProvider: SignPreservationSemanticProvider) {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const realAssets = createAssetCapability(repo, new DataUriAssetStorageProvider(), new PngThumbnailGenerator());
+    const signPreparation = createSignPreparationCapability(repo, realAssets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const signPreservation = createSignPreservationCapability(repo, realAssets, semanticProvider);
+    const worker = createFinalArtworkWorkerCapability(
+      repo,
+      realAssets,
+      reconstructionProvider,
+      undefined,
+      undefined,
+      undefined,
+      signPreservation,
+    );
+    const project = await repo.createProject();
+    return { repo, assets: realAssets, signPreparation, finalArtwork, signPreservation, worker, projectId: project.project.id };
+  }
+
+  /**
+   * `stripedPerimeterBandArtwork(1800, 2700)` at a 12x24in order: 150/112.5
+   * PPI (clears the 100 PPI minimum — never also triggers `reconstruct_
+   * resolution`), aspect-mismatched so the planner extends vertically
+   * (top/bottom), and the top band is the reconstructable accent/fill
+   * stripe `sign-repair-planner.test.ts`'s own "production-aware perimeter
+   * reconstruction" suite already proves is admitted as `reconstruct_
+   * perimeter_structure`, `overallRisk: review_required`. Goes through the
+   * REAL `signPreparation.planSignRepair` — proving the capability-level
+   * `perimeterBands` wiring this phase also completed, not a hand-built
+   * plan bypassing it.
+   */
+  async function perimeterOnlyPlanReadyForFinalArtwork(
+    reconstructionProvider: FakeSignReconstructionProvider,
+    semanticProvider: SignPreservationSemanticProvider,
+  ) {
+    const built = await build(reconstructionProvider, semanticProvider);
+    await built.signPreparation.uploadSignArtwork(built.projectId, {
+      bytes: toPngBytes(stripedPerimeterBandArtwork(1800, 2700)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await built.signPreparation.confirmSignProductionSpec(built.projectId, 12, 24);
+    const { result } = await built.signPreparation.planSignRepair(built.projectId);
+    assert.equal(result.status, "planned", "the real capability must admit reconstruct_perimeter_structure on its own");
+    assert.ok(
+      result.plan!.steps.some((step) => step.kind === "reconstruct_perimeter_structure"),
+      "sanity: this is genuinely the perimeter-only plan shape, not some other admitted plan",
+    );
+    assert.ok(
+      !result.plan!.steps.some((step) => step.kind === "reconstruct_resolution"),
+      "sanity: never combined with bounded (Topaz) reconstruction — this proves the semantic dispatch is NOT merely riding along on that gate",
+    );
+    await built.signPreparation.authorizeSignRepairPlan(built.projectId, { authorizedBy: "operator" });
+    const { job } = await built.finalArtwork.requestSignFinalArtwork(built.projectId);
+    return { ...built, job };
+  }
+
+  it("1: authorized plan -> deterministic perimeter reconstruction -> semantic verification (affirmative) -> perimeter_edge_alignment 'same' -> PrintValidation -> print_ready", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new FakeSignPreservationSemanticProvider();
+    semanticProvider.behavior = { kind: "all_same" };
+    const { repo, projectId, job, worker } = await perimeterOnlyPlanReadyForFinalArtwork(
+      reconstructionProvider,
+      semanticProvider,
+    );
+
+    await worker.processNextJob();
+
+    // Zero Topaz — this plan never contains reconstruct_resolution.
+    assert.equal(reconstructionProvider.dispatchCount, 0, "a perimeter-only plan must never dispatch bounded reconstruction");
+    // Exactly one semantic call — the core fix this phase makes: semantic
+    // verification is now triggered for a plan gated on `reconstruct_
+    // perimeter_structure` alone.
+    assert.equal(semanticProvider.dispatchCount, 1);
+
+    const completedJob = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completedJob!.status, "completed");
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project!.project.status, "print_ready");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation!.status, "ready");
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
+    const substrateCheck = checks.find((c) => c.check === "substrate_boundary_semantics");
+    assert.equal(substrateCheck?.status, "pass");
+  });
+
+  it("2: semantic perimeter_edge_alignment 'changed' -> NOT print_ready (finalization_required), substrate_boundary_semantics fails", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new FakeSignPreservationSemanticProvider();
+    semanticProvider.behavior = { kind: "changed_perimeter_alignment" };
+    const { repo, projectId, job, worker } = await perimeterOnlyPlanReadyForFinalArtwork(
+      reconstructionProvider,
+      semanticProvider,
+    );
+
+    await worker.processNextJob();
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+    assert.equal(project!.project.status, "finalization_required");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation!.status, "finalization_required");
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string; reason: string }> }).checks;
+    const substrateCheck = checks.find((c) => c.check === "substrate_boundary_semantics");
+    assert.equal(substrateCheck?.status, "fail");
+    assert.match(substrateCheck!.reason, /concluded "changed"/i);
+  });
+
+  it("3: semantic perimeter_edge_alignment 'cannot_determine' -> NOT print_ready (an inconclusive answer never authorizes)", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new InlineSemanticProvider("perimeter_edge_alignment", "cannot_determine");
+    const { repo, projectId, job, worker } = await perimeterOnlyPlanReadyForFinalArtwork(
+      reconstructionProvider,
+      semanticProvider,
+    );
+
+    await worker.processNextJob();
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation!.status, "finalization_required");
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
+    assert.equal(checks.find((c) => c.check === "substrate_boundary_semantics")?.status, "fail");
+  });
+
+  it("4: a structurally missing perimeter_edge_alignment answer never silently reaches print_ready — the malformed provider attempt fails the job instead of fabricating an answer", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new FakeSignPreservationSemanticProvider();
+    // `malformed_result` drops the LAST category — `perimeter_edge_alignment`
+    // is deliberately the last entry in `SIGN_PRESERVATION_SEMANTIC_
+    // CATEGORIES`, so this is exactly "the perimeter answer is missing",
+    // not an arbitrary unrelated category.
+    semanticProvider.behavior = { kind: "malformed_result" };
+    const { repo, projectId, job, worker } = await perimeterOnlyPlanReadyForFinalArtwork(
+      reconstructionProvider,
+      semanticProvider,
+    );
+
+    await worker.processNextJob();
+
+    assert.equal(semanticProvider.dispatchCount, 1, "the attempt was made");
+    const failedJob = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failedJob!.status, "failed", "a structurally invalid answer set is an incomplete attempt, never a fabricated completion");
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation, null, "PrintValidation is never even reached for an incomplete preservation attempt");
+  });
+
+  it("5: a changed PROTECTED INTERIOR category (wording) blocks print_ready even though perimeter_edge_alignment itself is affirmative", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new FakeSignPreservationSemanticProvider();
+    semanticProvider.behavior = { kind: "changed_wording" };
+    const { repo, projectId, job, worker } = await perimeterOnlyPlanReadyForFinalArtwork(
+      reconstructionProvider,
+      semanticProvider,
+    );
+
+    await worker.processNextJob();
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation!.status, "finalization_required");
+    // The perimeter check itself is unaffected — proving this is a
+    // DIFFERENT, independent blocking reason, not a mislabeled perimeter
+    // failure.
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
+    assert.equal(checks.find((c) => c.check === "substrate_boundary_semantics")?.status, "pass");
+  });
+
+  it("6: idempotent rerun after a perimeter-only success reuses the persisted preservation record — no duplicate semantic dispatch, no duplicate job, no duplicate asset", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new FakeSignPreservationSemanticProvider();
+    semanticProvider.behavior = { kind: "all_same" };
+    const { repo, projectId, job, worker } = await perimeterOnlyPlanReadyForFinalArtwork(
+      reconstructionProvider,
+      semanticProvider,
+    );
+    await worker.processNextJob();
+    assert.equal(semanticProvider.dispatchCount, 1);
+
+    await repo.updateFinalArtworkJob(job.id, { status: "recoverable", completedAt: null });
+    await worker.processNextJob();
+
+    assert.equal(semanticProvider.dispatchCount, 1, "the recovered run reused the persisted preservation record");
+    assert.equal(reconstructionProvider.dispatchCount, 0);
+    const project = await repo.getProject(projectId);
+    assert.equal(project!.project.status, "print_ready");
+
+    const assetsAfterRerun = (await repo.listAssets(projectId)).filter(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png",
+    );
+    assert.equal(assetsAfterRerun.length, 1, "no duplicate final asset from the idempotent rerun");
   });
 });

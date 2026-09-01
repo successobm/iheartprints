@@ -723,17 +723,32 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
   // certify as `"ready"`.
   //
   // Signs Phase S4→PrintValidation integration: reconstruction itself is no
-  // longer an automatic block. A reconstructed plate may still certify
-  // ready, but ONLY when an authoritative `SignPreservationVerification`
-  // proves the reconstruction preserved the customer's artwork AND that
-  // verification is bound to THIS exact asset/source/plan/algorithm
-  // identity — never a bare boolean, never inferred from the record merely
-  // existing. Missing, unknown, changed, or mismatched-identity evidence
-  // all fail exactly like no evidence at all (fail closed).
-  const reconstructed = asset.resolutionProvenance === "reconstructed";
+  // longer an automatic block. A plan whose steps require semantic
+  // preservation verification may still certify ready, but ONLY when an
+  // authoritative `SignPreservationVerification` proves the executed steps
+  // preserved the customer's artwork AND that verification is bound to
+  // THIS exact asset/source/plan/algorithm identity — never a bare
+  // boolean, never inferred from the record merely existing. Missing,
+  // unknown, changed, or mismatched-identity evidence all fail exactly
+  // like no evidence at all (fail closed).
+  //
+  // Semantic Worker Wiring Phase: gated on `sign.planRequiresSemantic
+  // PreservationVerification` (the caller's own re-derivation of
+  // `sign-preparation`'s `planRequiresSemanticPreservationVerification`),
+  // NEVER on `asset.resolutionProvenance === "reconstructed"` — that used
+  // to be the same condition by coincidence (the only plan shape ever
+  // needing verification was also the only one a provider ever touched).
+  // `reconstruct_perimeter_structure` breaks that coincidence: its pixels
+  // stay `resolutionProvenance: "native"` (no provider is ever involved)
+  // but still need the identical preservation question asked and answered
+  // before this profile may certify ready. Gating on provenance alone
+  // silently skipped this entire check for such a plan — whatever its
+  // semantic verification actually concluded (`changed`, `unknown`, or
+  // simply missing) had no bearing on readiness at all.
+  const needsPreservationAuthorization = sign.planRequiresSemanticPreservationVerification;
   const pv = sign.preservationVerification;
   const preservationAuthorized =
-    !reconstructed ||
+    !needsPreservationAuthorization ||
     (pv !== null &&
       pv.status === "preserved" &&
       pv.finalAssetId === sign.finalAssetId &&
@@ -820,11 +835,11 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
             : `This plan's overall risk classification is "${sign.planOverallRisk}", which requires operator authorization; the recorded authorization is not sufficient.`
         : !preservationAuthorized
           ? pv === null
-            ? "This asset carries provider-reconstructed pixels, and no authoritative preservation verification could be resolved for it — it cannot certify as ready until verification proves the reconstruction preserved the artwork."
+            ? "This plan requires semantic preservation verification, and no authoritative record could be resolved for it — it cannot certify as ready until verification proves the executed steps preserved the artwork."
             : pv.status !== "preserved"
-              ? `This asset carries provider-reconstructed pixels, and its preservation verification concluded "${pv.status}" rather than "preserved" — it cannot certify as ready.`
-              : "This asset carries provider-reconstructed pixels, but its preservation verification does not match this exact asset, source, plan, or verification-algorithm identity — a stale or mismatched verification can never authorize a different output."
-          : `The executed plan is a verified, unmodified replay of the recorded plan, contains only S2-admitted deterministic steps, and carries a sufficient production-risk authorization for its "${sign.planOverallRisk}" classification${reconstructed ? " and a matching, authoritative preservation verification proving the reconstruction preserved the artwork" : ""}.`,
+              ? `This plan requires semantic preservation verification, and it concluded "${pv.status}" rather than "preserved" — it cannot certify as ready.`
+              : "This plan requires semantic preservation verification, but the resolved record does not match this exact asset, source, plan, or verification-algorithm identity — a stale or mismatched verification can never authorize a different output."
+          : `The executed plan is a verified, unmodified replay of the recorded plan, contains only S2-admitted deterministic steps, and carries a sufficient production-risk authorization for its "${sign.planOverallRisk}" classification${needsPreservationAuthorization ? " and a matching, authoritative preservation verification proving the executed steps preserved the artwork" : ""}.`,
   });
   if (!executedPlanOk) {
     requiredTransformations.add("require_human_review");

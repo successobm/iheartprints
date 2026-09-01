@@ -11,7 +11,15 @@
  */
 
 /** Explicit staleness lever — bump on any change to the deterministic-check algorithm below, forcing every prior verification to be re-run. */
-export const SIGN_PRESERVATION_ALGORITHM_VERSION = "sign-preservation-deterministic:v1";
+/**
+ * Bumped to v2 at the Semantic Worker Wiring Phase: `SignPreservationLineageEvidence`'s
+ * `resolutionProvenanceIsReconstructed` field was renamed/regeneralized to
+ * `resolutionProvenanceConsistentWithPlan` (see that field's own doc) —
+ * this is a genuine deterministic-evidence SHAPE change, so any prior
+ * verification recorded under v1 must never be silently treated as still
+ * matching the current evidence layout.
+ */
+export const SIGN_PRESERVATION_ALGORITHM_VERSION = "sign-preservation-deterministic:v2";
 
 /**
  * One deterministic check's own verdict, deliberately distinct from the
@@ -28,7 +36,19 @@ export interface SignPreservationLineageEvidence {
   sourceShaMatchesRehash: boolean;
   finalAssetBelongsToSignPreparation: boolean;
   finalAssetPlanKeyMatches: boolean;
-  resolutionProvenanceIsReconstructed: boolean;
+  /**
+   * Semantic Worker Wiring Phase: RENAMED from `resolutionProvenanceIsReconstructed`
+   * and regeneralized. The old name/meaning ("must unconditionally be
+   * reconstructed") was itself the bug this phase closes — it made a
+   * perimeter-only plan's TRUTHFUL `"native"` provenance read as a lineage
+   * failure forever, even though `"native"` is exactly correct for a plan
+   * that never dispatched a provider. The check now verifies the asset's
+   * claimed provenance is CONSISTENT WITH what its own plan actually
+   * required: `"reconstructed"` for a plan needing `reconstruct_resolution`,
+   * `"native"` for one using only `reconstruct_perimeter_structure`. Either
+   * truthful value now passes; only a MISMATCH (or a fabricated claim) fails.
+   */
+  resolutionProvenanceConsistentWithPlan: boolean;
   executionEvidencePresentWhenAdapted: boolean;
   intermediateAssetExists: boolean;
   intermediateAssetTiedToSameJob: boolean;

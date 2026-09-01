@@ -2709,6 +2709,132 @@ this phase uses `FakeSignReconstructionProvider` and
 `FakeSignPreservationSemanticProvider`. The real, already-persisted,
 already-paid-for Ruth acceptance state was not read or touched.
 
+### Signs Perimeter Safety Phase + Production-Aware Perimeter Reconstruction Phase (undocumented until now)
+
+Two prior phases shipped between S4.2A.1 above and the Semantic Worker
+Wiring Phase below, neither of which updated this document at the time —
+recorded here for continuity, not as new work. **Perimeter Safety** added
+`edge-dependence.ts` (a three-condition deterministic signal distinguishing
+perimeter-dependent artwork from ordinary padding-safe artwork) and
+PrintValidation's `substrate_boundary_semantics` check
+(`RigidSignSubstrateBoundaryEvidence`: `edgeDependentStructureOnAffectedEdge`
++ `perimeterAlignmentAnswer`, the eighth semantic category
+`perimeter_edge_alignment`) — a defense-in-depth backstop that fails closed
+whenever an extension edge carries structure whose finished-edge
+relationship was never affirmatively verified. **Production-Aware
+Perimeter Reconstruction** (Constitution §16A.3 amendment 3.1) then added
+the narrow, non-generative `reconstruct_perimeter_structure` step
+(`perimeter-reconstruction.ts`'s `measurePerimeterBand`/`tiledRowColor`):
+when the planner's own edge-dependence detector fires AND the nearest
+band's rows are each independently, affirmatively uniform enough to tile
+outward, the planner may admit a `review_required` reconstruction that
+extends the canvas using colours MEASURED from the customer's own pixels —
+never synthesized, never blended, never guessed — always `review_required`
+regardless of evidence strength, and never combined with
+`reconstruct_resolution` in the same plan (a deliberate scope limit).
+
+### Semantic Worker Wiring Phase
+
+Closes a gap the prior phase left open: `reconstruct_perimeter_structure`
+was ADMITTED (planner) and EXECUTABLE (`sign-transform-executor.ts`), but
+nothing ever triggered semantic preservation verification for a plan using
+it — S4.2A.1's own gate was `resolutionProvenance === "reconstructed"`,
+true only for provider (Topaz) output, never for perimeter tiling (which
+stays `"native"`, no provider ever touches those pixels). A perimeter-only
+plan could therefore never produce a non-null `perimeterAlignmentAnswer`,
+so `substrate_boundary_semantics` blocked it from `print_ready` forever —
+by omission, not by design.
+
+**The generalized predicate.** `sign-preparation/sign-transform-executor
+.ts`'s new `planRequiresSemanticPreservationVerification(plan)` answers
+"does executing this plan produce pixels whose meaning a semantic check
+must confirm?" — true for `reconstruct_resolution` (provider-synthesized)
+AND `reconstruct_perimeter_structure` (deterministically tiled, but still
+SYNTHESIZED, not a byte-for-byte carry of customer pixels) — deliberately
+distinct from `planRequiresBoundedReconstruction`, which stays the
+narrower, Topaz-dispatch-only question. The worker's semantic-verification
+gate now reads this predicate instead of `resolutionProvenance ===
+"reconstructed"`. `SignPreservationCapability` (`resolvePreservationContext`
+in `sign-preservation-capability.ts`) was generalized the same way: its
+early gate, its intermediate-asset resolution, its pad-step finder, and
+`checkLineage`'s own hardcoded `resolutionProvenance === "reconstructed"`
+requirement (renamed `resolutionProvenanceConsistentWithPlan`, comparing
+against a caller-supplied `expectedResolutionProvenance` instead) all now
+branch on which reconstruction kind the plan actually used, never assume
+Topaz. A new deterministic check, `checkPerimeterTileExtensionRegions`
+(mirrors `checkExtensionRegions`'s role but verifies every extension pixel
+against ITS periodic tiled colour, not one flat fill), closes the
+`structuralAuthorityValid` gap `checkExtensionRegions`'s single-flat-colour
+assumption left for a step with no single `approvedFillRgb`.
+`SIGN_PRESERVATION_ALGORITHM_VERSION` bumped v1→v2 for the evidence-shape
+change. `PrintValidation`'s own `preservationAuthorized` gate had the
+identical narrow assumption (`asset.resolutionProvenance ===
+"reconstructed"`) and is now driven by a new, caller-supplied
+`RigidSignPlanEvidence.planRequiresSemanticPreservationVerification`
+field instead — the caller (the worker) re-derives the identical fact
+`planRequiresSemanticPreservationVerification` computed, never imported
+(PrintValidation still never depends on `sign-preparation`/
+`sign-preservation`). Without this fix, a plan needing verification but
+carrying `resolutionProvenance: "native"` silently skipped the
+preservation-status check entirely, regardless of what its semantic
+verification actually concluded.
+
+**A second, independent gap closed in the same phase:** the real
+orchestration call site, `sign-preparation-capability.ts`'s
+`planSignRepair`, never computed or supplied `perimeterBands` to the
+planner — only the planner's OWN unit-test helper did. `reconstruct_
+perimeter_structure` could therefore never be admitted through the real
+product path at all, only through a test-only bypass. `planSignRepair` now
+computes `measurePerimeterBand` for all four edges (cheap: a bounded-depth
+band read) and passes them through, exactly as its own test suite already
+assumed it would.
+
+### Print-Ready Lifecycle Phase
+
+The supported mechanism for correcting a project whose
+`PrintProject.status` says `"print_ready"` but whose ready asset's plan is
+no longer the preparation's current one — the real incident this phase
+closes: a project remained `print_ready` after a corrected re-evaluation
+of the SAME immutable source landed on `"blocked"` (no plan at all), with
+no supported way to reconcile the two facts short of manual SQL.
+
+**One new capability method**, `FinalArtworkWorkerCapability
+.reconcileSignPrintReadyStatus(projectId)` — symmetric with that same
+capability's existing exclusive authority to ever SET
+`PrintProject.status = "print_ready"` (`maybeTransitionProjectStatus`);
+this is that authority's other direction, never a scattered/UI-level
+status write. **The generalized rule:** a `print_ready` Signs project
+stays authoritative only as long as its ready asset's own frozen plan
+identity (`FinalArtworkJob.signPlanKey`, frozen at enqueue — mirrors
+`productionTreatmentKey`) still equals the preparation's CURRENT
+`planKey`. Because `computeSignPlanKey` is derived from exactly source +
+spec + policy, this one comparison subsumes every concrete reason named
+for supersession — a superseding re-plan, a corrected re-plan landing on
+`"blocked"` (`planKey: null`), a changed production spec, or a changed
+source — without special-casing any one of them. When no completed job's
+own validation actually backs a `"print_ready"` status at all (a
+structurally impossible state by any real code path), the function fails
+closed the same way. The one deliberately-NOT-implemented reason
+("validation requirements change" — e.g. a future preservation-prompt/
+model/schema revision) is named in this doc rather than silently omitted:
+`ProductionAssetValidation.report` does not currently echo back enough
+evidence to decide it without either a broader report-shape change
+(affecting every profile) or a schema addition — a separate, deliberate
+decision outside this phase's minimal-mechanism mandate.
+
+**Never rewrites history.** The ready job, its production asset, its
+`ProductionAssetValidation` row, its `SignPreservationVerification` row
+(if any), and its authorization all remain exactly as they were — a true
+record of what WAS produced and WAS validated under the plan that was
+current at the time. Only `PrintProject.status` moves, and only
+print_ready → `finalization_required` (reused, not a new status — it
+already means "a `FinalArtworkJob` ran to completion but authoritative
+Print Validation did not return ready"); this function never sets
+`print_ready` itself. **Idempotent:** the first check
+(`project.status !== "print_ready"`) makes every repeated call after the
+first a pure no-op — no job, asset, or validation is ever created, and
+`setProjectStatus` is called at most once per actual transition.
+
 ### PrintVaultCapability — Reserved
 
 Stub: `canIngest` → `false`; `listFamily` → `[]`.

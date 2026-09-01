@@ -59,6 +59,7 @@ import {
 import {
   aggregateDeterministicEvidence,
   checkExtensionRegions,
+  checkPerimeterTileExtensionRegions,
   checkLineage,
   checkReconstructionToFinalRgb,
   checkSourceSimilarity,
@@ -188,6 +189,32 @@ function readPadStepFromParams(
 }
 
 /**
+ * Reads one `reconstruct_perimeter_structure` step's measured band rows
+ * back out of its raw, flat params — mirrors `sign-transform-executor.ts`'s
+ * own `decodeBandRows` (never imported; same independent-resolution
+ * discipline `readPadStepFromParams` above already follows). Missing/
+ * malformed data at any index returns `null` for the WHOLE band, never a
+ * partial one.
+ */
+function readPerimeterBandRows(
+  params: Record<string, unknown> | undefined,
+  prefix: "leading" | "trailing",
+): { r: number; g: number; b: number }[] | null {
+  if (!params) return null;
+  const depth = params[`${prefix}BandDepthPx`];
+  if (typeof depth !== "number" || !Number.isInteger(depth) || depth <= 0) return null;
+  const rows: { r: number; g: number; b: number }[] = [];
+  for (let i = 0; i < depth; i += 1) {
+    const r = params[`${prefix}Row${i}R`];
+    const g = params[`${prefix}Row${i}G`];
+    const b = params[`${prefix}Row${i}B`];
+    if (typeof r !== "number" || typeof g !== "number" || typeof b !== "number") return null;
+    rows.push({ r, g, b });
+  }
+  return rows;
+}
+
+/**
  * Everything both `verifyDeterministicPreservation` and `verifyPreservation`
  * need — resolved and computed exactly once, never duplicated between them.
  * Throws `SignPreservationStateError` under the identical conditions
@@ -230,10 +257,10 @@ async function resolvePreservationContext(
     (finalAsset.metadata as Record<string, unknown> | null)?.rigidSign as
       | Record<string, unknown>
       | undefined;
-  if (!rigidSignMeta || rigidSignMeta.resolutionProvenance !== "reconstructed") {
+  if (!rigidSignMeta) {
     throw new SignPreservationStateError(
       "not_a_reconstructed_sign_asset",
-      "Preservation verification only ever applies to a reconstructed rigid-sign final asset.",
+      "Preservation verification only ever applies to a rigid-sign final production asset.",
     );
   }
 
@@ -266,6 +293,29 @@ async function resolvePreservationContext(
     );
   }
 
+  // Semantic Worker Wiring Phase: the GENERALIZED gate — mirrors
+  // `sign-preparation/sign-transform-executor.ts`'s own
+  // `planRequiresSemanticPreservationVerification`, deliberately duplicated
+  // here (never imported) rather than depending on `sign-preparation` at
+  // all — this module resolves every fact from raw, independently-read
+  // rows, the same discipline `readPadStepFromParams` below already
+  // follows for step shape. Replaces the prior `rigidSignMeta.
+  // resolutionProvenance !== "reconstructed"` gate, which conflated "a
+  // provider touched this" with "this needs verification" — a plan using
+  // ONLY the deterministic, non-provider `reconstruct_perimeter_structure`
+  // step needs this exact same question asked despite never involving a
+  // provider.
+  const planSteps = Array.isArray(plan.steps) ? (plan.steps as Array<Record<string, unknown>>) : [];
+  const usesProviderReconstruction = planSteps.some((s) => s.kind === "reconstruct_resolution");
+  const usesPerimeterReconstruction = planSteps.some((s) => s.kind === "reconstruct_perimeter_structure");
+  if (!usesProviderReconstruction && !usesPerimeterReconstruction) {
+    throw new SignPreservationStateError(
+      "not_a_reconstructed_sign_asset",
+      "Preservation verification only ever applies to a plan whose steps actually require it " +
+        "(reconstruct_resolution or reconstruct_perimeter_structure).",
+    );
+  }
+
   // --- Resolve remaining assets — never trust a caller claim. ---
   const projectId = finalAsset.projectId;
   const allAssets = await repo.listAssets(projectId);
@@ -284,17 +334,37 @@ async function resolvePreservationContext(
     ? createHash("sha256").update(sourceBytes.bytes).digest("hex")
     : "";
 
-  const intermediateAsset =
-    allAssets.find(
-      (a) => a.finalArtworkJobId === job.id && isReconstructionIntermediateAsset(a),
-    ) ?? null;
+  // Semantic Worker Wiring Phase: `reconstruct_perimeter_structure` never
+  // dispatches a provider, so no separate `pass1_intermediate` asset exists
+  // for it at all — there is nothing TO be tied to this job. For that
+  // shape (and only that shape), the immutable SOURCE plays the
+  // "reconstruction to diff the final content region against" role
+  // directly: the content region for a perimeter-only plan is, by
+  // construction, an exact byte-for-byte copy of the source (identical to
+  // how `extend_uniform_background`/`pad_uniform_background` already work
+  // — the new step only changes what fills the ADDED region, never how the
+  // original is placed). No new asset row is created; the already-resolved
+  // `sourceAsset`/`sourceBytes` above are reused verbatim.
+  const intermediateAsset = usesProviderReconstruction
+    ? (allAssets.find(
+        (a) => a.finalArtworkJobId === job.id && isReconstructionIntermediateAsset(a),
+      ) ?? null)
+    : sourceAsset;
   if (!intermediateAsset) {
     throw new SignPreservationStateError(
       "intermediate_asset_row_not_found",
       "No reconstruction-intermediate asset row could be resolved for this final asset's job.",
     );
   }
-  const intermediateBytes = await assets.downloadAssetBytes(intermediateAsset.id);
+  const intermediateBytes = usesProviderReconstruction
+    ? await assets.downloadAssetBytes(intermediateAsset.id)
+    : sourceBytes;
+  // Not job-scoped for the perimeter-only substitution — the source is
+  // never tied to any one job, and correctly so; there is no per-job
+  // "intermediate" identity for this shape to mismatch.
+  const intermediateAssetTiedToSameJob = usesProviderReconstruction
+    ? intermediateAsset.finalArtworkJobId === job.id
+    : true;
 
   const finalBytes = await assets.downloadAssetBytes(finalAssetId);
 
@@ -322,10 +392,11 @@ async function resolvePreservationContext(
       typeof rigidSignMeta.resolutionProvenance === "string"
         ? rigidSignMeta.resolutionProvenance
         : "",
+    expectedResolutionProvenance: usesProviderReconstruction ? "reconstructed" : "native",
     geometryAdapted,
     executionEvidencePresent: executionGeometry != null,
     intermediateAssetExists: intermediateBytes != null,
-    intermediateAssetTiedToSameJob: intermediateAsset.finalArtworkJobId === job.id,
+    intermediateAssetTiedToSameJob,
   });
 
   // --- B. Region mapping ---
@@ -341,9 +412,17 @@ async function resolvePreservationContext(
   const executedPadStep = geometryAdapted
     ? readPadStepFromParams(executionGeometry?.executedStep as Record<string, unknown> | undefined)
     : null;
-  const planSteps = Array.isArray(plan.steps) ? (plan.steps as Array<Record<string, unknown>>) : [];
+  // `reconstruct_perimeter_structure` included here too — its params carry
+  // the same axis/leadingPx/trailingPx geometry `deriveContentRegion`
+  // needs; `readPadStepFromParams` correctly reads null colourR/G/B for it
+  // (it has no single flat fill colour), which is exactly what routes the
+  // extension-region check to the TILED verification below instead of the
+  // single-colour one.
   const plannedPadStepRaw = planSteps.find(
-    (s) => s.kind === "pad_uniform_background" || s.kind === "extend_uniform_background",
+    (s) =>
+      s.kind === "pad_uniform_background" ||
+      s.kind === "extend_uniform_background" ||
+      s.kind === "reconstruct_perimeter_structure",
   );
   const plannedPadStep = readPadStepFromParams(
     plannedPadStepRaw?.params as Record<string, unknown> | undefined,
@@ -377,11 +456,24 @@ async function resolvePreservationContext(
     );
 
     const activeStep = executedPadStep ?? plannedPadStep;
-    const approvedFillRgb =
-      activeStep && activeStep.colorR !== null && activeStep.colorG !== null && activeStep.colorB !== null
-        ? { r: activeStep.colorR, g: activeStep.colorG, b: activeStep.colorB }
-        : null;
-    extensionRegions = checkExtensionRegions(finalImage, regionMapping.contentRegion, approvedFillRgb);
+    if (usesPerimeterReconstruction && plannedPadStepRaw?.kind === "reconstruct_perimeter_structure") {
+      const rawParams = plannedPadStepRaw.params as Record<string, unknown> | undefined;
+      extensionRegions = checkPerimeterTileExtensionRegions(
+        finalImage,
+        regionMapping.contentRegion,
+        activeStep?.axis ?? null,
+        activeStep?.leadingPx ?? null,
+        activeStep?.trailingPx ?? null,
+        readPerimeterBandRows(rawParams, "leading"),
+        readPerimeterBandRows(rawParams, "trailing"),
+      );
+    } else {
+      const approvedFillRgb =
+        activeStep && activeStep.colorR !== null && activeStep.colorG !== null && activeStep.colorB !== null
+          ? { r: activeStep.colorR, g: activeStep.colorG, b: activeStep.colorB }
+          : null;
+      extensionRegions = checkExtensionRegions(finalImage, regionMapping.contentRegion, approvedFillRgb);
+    }
 
     if (sourceBytes) {
       const sourceImage = decodePng(sourceBytes.bytes);

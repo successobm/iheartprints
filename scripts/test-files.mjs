@@ -317,6 +317,7 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",
   "src/capabilities/final-artwork-worker/sign-preservation-worker-orchestration.test.ts",
+  "src/capabilities/final-artwork-worker/sign-print-ready-lifecycle.test.ts",
   "src/capabilities/final-artwork/topaz-download-security.test.ts",
   // LIVE PRODUCT BLOCKER #1/#3/#4/#4A/#4B: registered together — discovered
   // during Blocker #4B that none of these had ever been added to this list,

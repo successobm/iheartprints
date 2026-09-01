@@ -53,6 +53,14 @@ export interface LineageCheckInputs {
   currentPlanKey: string;
   /** The final asset's own `rigidSign.resolutionProvenance` claim. */
   resolutionProvenance: string;
+  /**
+   * What the asset's OWN plan actually required — `"reconstructed"` for a
+   * plan needing `reconstruct_resolution`, `"native"` otherwise (including
+   * a `reconstruct_perimeter_structure`-only plan, which never dispatches a
+   * provider and truthfully stays native). Computed by the caller from the
+   * plan's own steps, never guessed here.
+   */
+  expectedResolutionProvenance: "reconstructed" | "native";
   geometryAdapted: boolean;
   /** Whether `rigidSign.executionGeometry` is present (non-null). Required exactly when `geometryAdapted` is true. */
   executionEvidencePresent: boolean;
@@ -66,7 +74,8 @@ export function checkLineage(inputs: LineageCheckInputs): SignPreservationLineag
   const sourceShaMatchesRehash =
     inputs.rehashedSourceSha256 === inputs.finalAssetClaimedSourceSha256;
   const finalAssetPlanKeyMatches = inputs.finalAssetPlanKey === inputs.currentPlanKey;
-  const resolutionProvenanceIsReconstructed = inputs.resolutionProvenance === "reconstructed";
+  const resolutionProvenanceConsistentWithPlan =
+    inputs.resolutionProvenance === inputs.expectedResolutionProvenance;
   const executionEvidencePresentWhenAdapted =
     !inputs.geometryAdapted || inputs.executionEvidencePresent;
 
@@ -84,8 +93,10 @@ export function checkLineage(inputs: LineageCheckInputs): SignPreservationLineag
   if (!finalAssetPlanKeyMatches) {
     reasons.push("The final asset's recorded planKey does not match the sign preparation's current planKey.");
   }
-  if (!resolutionProvenanceIsReconstructed) {
-    reasons.push('Preservation verification was requested against an asset whose resolutionProvenance is not "reconstructed".');
+  if (!resolutionProvenanceConsistentWithPlan) {
+    reasons.push(
+      `The final asset's resolutionProvenance ("${inputs.resolutionProvenance}") does not match what its own plan required ("${inputs.expectedResolutionProvenance}").`,
+    );
   }
   if (!executionEvidencePresentWhenAdapted) {
     reasons.push("Adaptive geometry was recorded (geometryAdapted=true) but no executionGeometry evidence is present.");
@@ -101,7 +112,7 @@ export function checkLineage(inputs: LineageCheckInputs): SignPreservationLineag
     sourceShaMatchesRehash &&
     inputs.finalAssetBelongsToSignPreparation &&
     finalAssetPlanKeyMatches &&
-    resolutionProvenanceIsReconstructed &&
+    resolutionProvenanceConsistentWithPlan &&
     executionEvidencePresentWhenAdapted &&
     inputs.intermediateAssetExists &&
     inputs.intermediateAssetTiedToSameJob;
@@ -115,7 +126,7 @@ export function checkLineage(inputs: LineageCheckInputs): SignPreservationLineag
     sourceShaMatchesRehash,
     finalAssetBelongsToSignPreparation: inputs.finalAssetBelongsToSignPreparation,
     finalAssetPlanKeyMatches,
-    resolutionProvenanceIsReconstructed,
+    resolutionProvenanceConsistentWithPlan,
     executionEvidencePresentWhenAdapted,
     intermediateAssetExists: inputs.intermediateAssetExists,
     intermediateAssetTiedToSameJob: inputs.intermediateAssetTiedToSameJob,
@@ -427,6 +438,116 @@ export function checkExtensionRegions(
     totalExtensionPixels,
     mismatchedPixelCount,
     approvedFillRgb,
+    reasons,
+  };
+}
+
+/**
+ * Semantic Worker Wiring Phase: the `reconstruct_perimeter_structure`
+ * sibling of `checkExtensionRegions` above — same "verify EVERY pixel, not
+ * a sample" discipline, but against a TILED expected colour per line
+ * rather than one flat fill, since that step's own extension region is
+ * never a single colour by construction.
+ *
+ * The tiling formula is deliberately duplicated from `sign-preparation/
+ * perimeter-reconstruction.ts`'s `tiledRowColor` (never imported — this
+ * module resolves every fact independently, the same discipline
+ * `readPadStepFromParams` already follows for step shape) — both compute
+ * the identical `(depth - 1 - (distance % depth) + depth) % depth`
+ * periodic index into the measured rows.
+ */
+function tiledRowColorAt(
+  rows: { r: number; g: number; b: number }[],
+  distanceFromContentPx: number,
+): { r: number; g: number; b: number } {
+  const depth = rows.length;
+  const index = (depth - 1 - (distanceFromContentPx % depth) + depth) % depth;
+  return rows[index]!;
+}
+
+export function checkPerimeterTileExtensionRegions(
+  finalImage: RgbaImage,
+  contentRegion: SignPreservationContentRegion | null,
+  axis: "horizontal" | "vertical" | null,
+  leadingPx: number | null,
+  trailingPx: number | null,
+  leadingRows: { r: number; g: number; b: number }[] | null,
+  trailingRows: { r: number; g: number; b: number }[] | null,
+): SignPreservationExtensionRegionEvidence {
+  const reasons: string[] = [];
+  if (!contentRegion) {
+    reasons.push("No content region was derivable — extension regions cannot be checked.");
+    return { result: "unknown", regionsChecked: 0, totalExtensionPixels: 0, mismatchedPixelCount: 0, approvedFillRgb: null, reasons };
+  }
+  if (!axis || leadingPx === null || trailingPx === null || !leadingRows?.length || !trailingRows?.length) {
+    reasons.push("The reconstructed perimeter's own measured band rows could not be resolved — extension regions cannot be checked.");
+    return { result: "unknown", regionsChecked: 0, totalExtensionPixels: 0, mismatchedPixelCount: 0, approvedFillRgb: null, reasons };
+  }
+
+  let totalExtensionPixels = 0;
+  let mismatchedPixelCount = 0;
+  let regionsChecked = 0;
+
+  function checkPixel(x: number, y: number, expected: { r: number; g: number; b: number }): void {
+    totalExtensionPixels += 1;
+    const idx = (y * finalImage.width + x) * 4;
+    const r = finalImage.data[idx];
+    const g = finalImage.data[idx + 1];
+    const b = finalImage.data[idx + 2];
+    const a = finalImage.data[idx + 3];
+    if (r !== expected.r || g !== expected.g || b !== expected.b || a !== 255) {
+      mismatchedPixelCount += 1;
+    }
+  }
+
+  if (axis === "vertical") {
+    if (leadingPx > 0) {
+      regionsChecked += 1;
+      for (let y = 0; y < leadingPx; y += 1) {
+        const color = tiledRowColorAt(leadingRows, leadingPx - 1 - y);
+        for (let x = 0; x < finalImage.width; x += 1) checkPixel(x, y, color);
+      }
+    }
+    const bottomY = contentRegion.y + contentRegion.height;
+    if (trailingPx > 0) {
+      regionsChecked += 1;
+      for (let y = 0; y < trailingPx; y += 1) {
+        const color = tiledRowColorAt(trailingRows, y);
+        for (let x = 0; x < finalImage.width; x += 1) checkPixel(x, bottomY + y, color);
+      }
+    }
+  } else {
+    if (leadingPx > 0) {
+      regionsChecked += 1;
+      for (let x = 0; x < leadingPx; x += 1) {
+        const color = tiledRowColorAt(leadingRows, leadingPx - 1 - x);
+        for (let y = 0; y < finalImage.height; y += 1) checkPixel(x, y, color);
+      }
+    }
+    const rightX = contentRegion.x + contentRegion.width;
+    if (trailingPx > 0) {
+      regionsChecked += 1;
+      for (let x = 0; x < trailingPx; x += 1) {
+        const color = tiledRowColorAt(trailingRows, x);
+        for (let y = 0; y < finalImage.height; y += 1) checkPixel(rightX + x, y, color);
+      }
+    }
+  }
+
+  if (mismatchedPixelCount > 0) {
+    reasons.push(
+      `${mismatchedPixelCount} of ${totalExtensionPixels} tiled extension pixel(s) did not exactly match the expected measured colour (or were not fully opaque).`,
+    );
+  }
+
+  return {
+    result: mismatchedPixelCount === 0 ? "pass" : "catastrophic",
+    regionsChecked,
+    totalExtensionPixels,
+    mismatchedPixelCount,
+    // No SINGLE approved fill colour exists for a tiled reconstruction —
+    // the measured rows themselves are the approval, not one RGB triple.
+    approvedFillRgb: null,
     reasons,
   };
 }

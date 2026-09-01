@@ -72,6 +72,12 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
     // reads this, and a reconstructed one must opt IN to evidence
     // explicitly (see the "Signs preservation → print_ready" suite below).
     preservationVerification: null,
+    // Semantic Worker Wiring Phase: the default fixture's plan needs no
+    // semantic verification, so this stays false unless a test explicitly
+    // overrides it (every test that pairs `reconstructedAsset()` with this
+    // helper does — see the "Signs preservation → print_ready" suite and
+    // every other suite exercising a reconstructed plate below).
+    planRequiresSemanticPreservationVerification: false,
     expectedPreservationAlgorithmVersion: EXPECTED_ALGORITHM_VERSION,
     // LIVE PRODUCT BLOCKER #4: matches the default `planKey`/`auto_safe`
     // above with a sufficient actor, so every PRE-EXISTING test in this
@@ -289,12 +295,12 @@ describe("rigid_sign_raster print validation profile", () => {
     const report = printValidation.validateArtwork(
       baseInput({
         primaryAsset: reconstructedAsset(),
-        rigidSign: evidence({ preservationVerification: null }),
+        rigidSign: evidence({ planRequiresSemanticPreservationVerification: true, preservationVerification: null }),
       }),
     );
     const check = report.checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
     assert.equal(check?.status, "fail");
-    assert.match(check!.reason, /no authoritative preservation verification/i);
+    assert.match(check!.reason, /no authoritative record could be resolved/i);
     assert.equal(report.status, "finalization_required");
   });
 
@@ -385,7 +391,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
     const report = printValidation.validateArtwork(
       baseInput({
         primaryAsset: reconstructedAsset(),
-        rigidSign: evidence({ preservationVerification: null }),
+        rigidSign: evidence({ planRequiresSemanticPreservationVerification: true, preservationVerification: null }),
       }),
     );
     assert.equal(checkOf(report)?.status, "fail");
@@ -397,6 +403,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           preservationVerification: preservationVerification({ status: "unknown" }),
         }),
       }),
@@ -411,6 +418,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           preservationVerification: preservationVerification({ status: "changed" }),
         }),
       }),
@@ -425,6 +433,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           preservationVerification: preservationVerification({
             finalAssetId: "some-other-asset",
           }),
@@ -441,6 +450,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           preservationVerification: preservationVerification({
             sourceAssetId: "some-other-source",
           }),
@@ -456,6 +466,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           preservationVerification: preservationVerification({ sourceSha256: "b".repeat(64) }),
         }),
       }),
@@ -469,6 +480,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           preservationVerification: preservationVerification({
             planKey: "sign-repair-plan:v1:superseded",
           }),
@@ -484,6 +496,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           preservationVerification: preservationVerification({
             verificationAlgorithmVersion: "sign-preservation-combined:old-v0",
           }),
@@ -498,7 +511,10 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
     const report = printValidation.validateArtwork(
       baseInput({
         primaryAsset: reconstructedAsset(),
-        rigidSign: evidence({ preservationVerification: preservationVerification() }),
+        rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
+          preservationVerification: preservationVerification(),
+        }),
       }),
     );
     assert.equal(checkOf(report)?.status, "pass");
@@ -510,6 +526,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           planOverallRisk: "review_required",
           preservationVerification: preservationVerification(),
         }),
@@ -529,6 +546,7 @@ describe("Signs preservation → print_ready (LIVE PRODUCT BLOCKER #3B)", () => 
         baseInput({
           primaryAsset: reconstructedAsset(),
           rigidSign: evidence({
+            planRequiresSemanticPreservationVerification: true,
             preservationVerification: preservationVerification({ status }),
           }),
         }),
@@ -661,6 +679,7 @@ describe("Signs authorization → print_ready (LIVE PRODUCT BLOCKER #4)", () => 
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           planOverallRisk: "review_required",
           authorization: null,
           preservationVerification: null,
@@ -697,6 +716,7 @@ describe("Signs reconstruction plan-integrity (LIVE PRODUCT BLOCKER #4B)", () =>
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           containsOnlyAdmittedSteps: false,
           planRequiresBoundedReconstruction: true,
           preservationVerification: preservationVerification(),
@@ -716,6 +736,7 @@ describe("Signs reconstruction plan-integrity (LIVE PRODUCT BLOCKER #4B)", () =>
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           containsOnlyAdmittedSteps: false,
           planRequiresBoundedReconstruction: false,
           preservationVerification: preservationVerification(),
@@ -731,6 +752,7 @@ describe("Signs reconstruction plan-integrity (LIVE PRODUCT BLOCKER #4B)", () =>
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           containsOnlyAdmittedSteps: false,
           planRequiresBoundedReconstruction: true,
           preservationVerification: preservationVerification({ status: "unknown" }),
@@ -778,6 +800,7 @@ describe("Signs S3C adaptive-geometry plan-integrity (LIVE PRODUCT BLOCKER #4D)"
     return baseInput({
       primaryAsset: reconstructedAsset(),
       rigidSign: evidence({
+        planRequiresSemanticPreservationVerification: true,
         executedStepsMatchPlan: false,
         containsOnlyAdmittedSteps: false,
         planRequiresBoundedReconstruction: true,
@@ -809,6 +832,7 @@ describe("Signs S3C adaptive-geometry plan-integrity (LIVE PRODUCT BLOCKER #4D)"
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           executedStepsMatchPlan: false,
           containsOnlyAdmittedSteps: false,
           planRequiresBoundedReconstruction: true,
@@ -928,6 +952,7 @@ describe("Signs S3C adaptive-geometry plan-integrity (LIVE PRODUCT BLOCKER #4D)"
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           executedStepsMatchPlan: false,
           containsOnlyAdmittedSteps: false,
           planRequiresBoundedReconstruction: true,
@@ -967,6 +992,7 @@ describe("Signs S3C adaptive-geometry plan-integrity (LIVE PRODUCT BLOCKER #4D)"
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           executedStepsMatchPlan: false,
           containsOnlyAdmittedSteps: false,
           planRequiresBoundedReconstruction: true,
@@ -1090,6 +1116,7 @@ describe("Signs substrate boundary → print_ready (Perimeter Safety Phase)", ()
       baseInput({
         primaryAsset: reconstructedAsset(),
         rigidSign: evidence({
+          planRequiresSemanticPreservationVerification: true,
           preservationVerification: preservationVerification(),
           substrateBoundary: {
             edgeDependentStructureOnAffectedEdge: true,

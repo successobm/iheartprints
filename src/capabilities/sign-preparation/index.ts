@@ -49,6 +49,7 @@ export {
   finalizeSignExecution,
   planContainsOnlyAdmittedSteps,
   planRequiresBoundedReconstruction,
+  planRequiresSemanticPreservationVerification,
   splitPlanAroundReconstruction,
   type AdaptGeometryStepsOutcome,
   type SignExecutionBounds,

@@ -144,6 +144,7 @@ import {
   normalizeProviderAlphaOnVerifiedOpaqueSource,
   planContainsOnlyAdmittedSteps,
   planRequiresBoundedReconstruction,
+  planRequiresSemanticPreservationVerification,
   SIGN_RECONSTRUCTION_SCALE_CEILING,
   SIGN_REPAIR_PLAN_SCHEMA_VERSION,
   splitPlanAroundReconstruction,
@@ -231,6 +232,37 @@ export interface FinalArtworkWorkerCapability {
   recoverAbandonedJobs(
     staleAfterMs?: number,
   ): Promise<{ recoveredCount: number }>;
+  /**
+   * Print-Ready Lifecycle Phase: the supported way to correct a project
+   * whose `PrintProject.status` says `"print_ready"` but whose current,
+   * authoritative Signs production plan no longer matches the plan the
+   * ready asset was actually built/validated from — see this function's
+   * own implementation doc (`reconcileSignPrintReadyStatus`) for the exact
+   * generalized supersession rule. A no-op, safe to call repeatedly/on any
+   * schedule, whenever the project is not currently `print_ready` or its
+   * ready asset's plan is still current — never creates a job, never
+   * touches an asset or a validation record, never rewrites history: the
+   * ONLY possible side effect is one `PrintProject.status` transition to
+   * `"finalization_required"`, mirroring the SAME exclusive authority this
+   * capability already has over setting `"print_ready"` in the first
+   * place (see `maybeTransitionProjectStatus`) — this is that authority's
+   * other direction, never a scattered/UI-level status write.
+   */
+  reconcileSignPrintReadyStatus(
+    projectId: string,
+  ): Promise<SignPrintReadyReconciliationResult>;
+}
+
+/**
+ * Print-Ready Lifecycle Phase: the outcome of one
+ * `reconcileSignPrintReadyStatus` call. `invalidated: false` covers every
+ * "nothing to do" case (not print_ready, not a Signs project, or the ready
+ * asset's plan is still genuinely current) as well as the couldn't-decide
+ * case — `reason` always says which.
+ */
+export interface SignPrintReadyReconciliationResult {
+  invalidated: boolean;
+  reason: string;
 }
 
 interface ProductionProvenanceMeta {
@@ -1751,6 +1783,12 @@ export function createFinalArtworkWorkerCapability(
     const containsOnlyAdmittedSteps = planContainsOnlyAdmittedSteps(plan);
     const needsReconstruction = planRequiresBoundedReconstruction(plan);
     const reconstructionSplit = needsReconstruction ? splitPlanAroundReconstruction(plan) : null;
+    // Semantic Worker Wiring Phase: the GENERALIZED question — see
+    // `planRequiresSemanticPreservationVerification`'s own doc. Distinct
+    // from `needsReconstruction`: every `needsReconstruction` plan also
+    // needs semantic verification, but `reconstruct_perimeter_structure`
+    // needs it WITHOUT needing `needsReconstruction` (no Topaz dispatch).
+    const needsSemanticVerification = planRequiresSemanticPreservationVerification(plan);
 
     // Idempotent asset reuse — mirrors the apparel paths' own idempotency
     // guarantee (Goal 16): a worker crash/retry after the asset was already
@@ -2010,17 +2048,24 @@ export function createFinalArtworkWorkerCapability(
           : null;
     }
 
-    // --- Signs Phase S4.2A.1: deterministic + semantic preservation
-    // verification — ONLY for a reconstructed asset (Constitution §16A.3
-    // has no preservation question to ask about a deterministic-only,
-    // native-resolution plate). `productionAsset` is stable and persisted
-    // by this point in BOTH branches above (freshly uploaded or recovered
-    // from an existing attempt), so its id is a valid, immutable binding
-    // target. Runs under its own heartbeat (mirrors the reconstruction
-    // pass's own `withPeriodicHeartbeat` above — a second, sequential use
-    // of the SAME mechanism, never a second job system) because the
-    // deterministic checks alone decode/compare full-resolution rasters
-    // and can take several seconds at real sign scale.
+    // --- Signs Phase S4.2A.1 / Semantic Worker Wiring Phase: deterministic
+    // + semantic preservation verification — gated on `needsSemanticVerification`
+    // (`planRequiresSemanticPreservationVerification`), NOT on
+    // `resolutionProvenance === "reconstructed"`. That used to be the same
+    // condition by coincidence (the only plan shape needing verification
+    // was also the only one a provider ever touched) — `reconstruct_
+    // perimeter_structure` breaks that coincidence: it needs the identical
+    // preservation question asked (did the reconstructed pixels' relationship
+    // to the finished edge survive?) despite never involving a provider and
+    // never setting `resolutionProvenance` to `"reconstructed"`.
+    // `productionAsset` is stable and persisted by this point in BOTH
+    // branches above (freshly uploaded or recovered from an existing
+    // attempt), so its id is a valid, immutable binding target. Runs under
+    // its own heartbeat (mirrors the reconstruction pass's own
+    // `withPeriodicHeartbeat` above — a second, sequential use of the SAME
+    // mechanism, never a second job system) because the deterministic
+    // checks alone decode/compare full-resolution rasters and can take
+    // several seconds at real sign scale.
     //
     // `verifyPreservation` is internally idempotent (Signs Phase S4.2A) —
     // a completed record already on file for this exact
@@ -2052,7 +2097,7 @@ export function createFinalArtworkWorkerCapability(
     // asset/source/plan identity, never trusting a bare boolean.
     let signPreservationVerification: SignPreservationVerification | null = null;
     let expectedPreservationAlgorithmVersion = "";
-    if (resolutionProvenance === "reconstructed") {
+    if (needsSemanticVerification) {
       try {
         // Resolved BEFORE the (possibly reused) verification call so this
         // value is always independent of whichever record comes back —
@@ -2218,6 +2263,12 @@ export function createFinalArtworkWorkerCapability(
             status: signPreservationVerification.status,
           }
         : null,
+      // Semantic Worker Wiring Phase: the SAME `needsSemanticVerification`
+      // this function already computed above to decide whether to dispatch
+      // preservation verification at all — never recomputed, never
+      // independently re-derived by PrintValidation (mirrors
+      // `planRequiresBoundedReconstruction` immediately above).
+      planRequiresSemanticPreservationVerification: needsSemanticVerification,
       expectedPreservationAlgorithmVersion,
       // LIVE PRODUCT BLOCKER #4: the durable authorization for THIS
       // preparation, exactly as `requestSignFinalArtwork` already required
@@ -3061,7 +3112,7 @@ export function createFinalArtworkWorkerCapability(
     );
   }
 
-  return {
+  const capability: FinalArtworkWorkerCapability = {
     async processNextJob() {
       const job = await repo.claimNextQueuedFinalArtworkJob();
       if (!job) return { processedJobId: null };
@@ -3073,7 +3124,139 @@ export function createFinalArtworkWorkerCapability(
       const recovered = await repo.recoverAbandonedFinalArtworkJobs(staleAfterMs);
       return { recoveredCount: recovered.length };
     },
+
+    async reconcileSignPrintReadyStatus(projectId) {
+      return reconcileSignPrintReadyStatus(projectId);
+    },
   };
+
+  /**
+   * Print-Ready Lifecycle Phase: the supported mechanism for correcting a
+   * project whose `PrintProject.status` says `"print_ready"` but whose
+   * ready asset's own PLAN is no longer the preparation's current one —
+   * the exact shape of the real false-positive incident this phase closes
+   * (a plan superseded by re-planning, or re-planning that landed on
+   * `"blocked"`, while the OLD ready asset/status were left untouched).
+   *
+   * THE GENERALIZED RULE: a `print_ready` project stays authoritative only
+   * as long as its ready asset's own frozen plan identity
+   * (`FinalArtworkJob.signPlanKey` — frozen at enqueue, exactly like
+   * `productionTreatmentKey`) still equals the preparation's CURRENT
+   * `planKey`. Any real reason the task's own scope names — a superseding
+   * re-plan, planning landing on `"blocked"` (`planKey: null`), a changed
+   * production spec, or a changed source — changes `planKey` by
+   * construction (`computeSignPlanKey` is derived from exactly source +
+   * spec + policy), so this ONE comparison is the generalized invariant
+   * that subsumes all of them; nothing here special-cases any one reason.
+   * ("Validation requirements change" — e.g. a future preservation-
+   * prompt/model/schema revision — is a real, independent supersession
+   * ground this function deliberately does NOT check: `ProductionAsset
+   * Validation.report` does not currently echo back enough evidence to
+   * decide it without either a broader report-shape change or a schema
+   * addition, either a separate, deliberate decision outside this
+   * phase's minimal-mechanism mandate.)
+   *
+   * NEVER rewrites history: the ready job, its production asset, its
+   * `ProductionAssetValidation` row, its `SignPreservationVerification`
+   * row (if any), and its authorization all remain exactly as they were —
+   * a real, historical record of what WAS produced and WAS validated
+   * under the plan that was current at the time. Only `PrintProject.status`
+   * moves, and only in the direction print_ready → finalization_required
+   * (this function never sets print_ready itself — that remains
+   * exclusively `maybeTransitionProjectStatus`'s job, driven by a fresh,
+   * successful validation run).
+   *
+   * IDEMPOTENT: the very first check (`project.status !== "print_ready"`)
+   * makes every repeated call after the first a pure no-op — no job,
+   * asset, or validation is ever created, read state is only ever
+   * compared, and `repo.setProjectStatus` is called at most once per
+   * actual transition.
+   */
+  async function reconcileSignPrintReadyStatus(
+    projectId: string,
+  ): Promise<SignPrintReadyReconciliationResult> {
+    const snapshot = await repo.getProject(projectId);
+    if (!snapshot) {
+      return { invalidated: false, reason: "Project does not exist." };
+    }
+    if (snapshot.project.status !== "print_ready") {
+      return {
+        invalidated: false,
+        reason: `Project is not currently print_ready (status: "${snapshot.project.status}") — nothing to reconcile.`,
+      };
+    }
+
+    const preparation = await repo.getSignPreparation(projectId);
+    if (!preparation) {
+      // Not a Signs project at all — this operation only ever governs the
+      // rigid-sign lifecycle; every other profile's print_ready lifecycle
+      // is unaffected and untouched by this function.
+      return { invalidated: false, reason: "No sign preparation exists for this project." };
+    }
+
+    const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
+    const completedJobs = jobs
+      .filter((job) => job.status === "completed" && job.completedAt !== null)
+      .sort((a, b) => new Date(b.completedAt!).getTime() - new Date(a.completedAt!).getTime());
+
+    // Find the most recently completed job whose OWN validation run
+    // actually certified "ready" — never assumed from mere job completion.
+    let readyJob: FinalArtworkJob | null = null;
+    let readyValidation: Awaited<ReturnType<typeof repo.getLatestProductionAssetValidationForJob>> = null;
+    for (const job of completedJobs) {
+      const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      if (validation && validation.status === "ready") {
+        readyJob = job;
+        readyValidation = validation;
+        break;
+      }
+    }
+
+    if (!readyJob || !readyValidation) {
+      // The project claims print_ready, but no completed job's own
+      // validation actually backs that up — fail closed exactly like
+      // every other missing-evidence case in this codebase, rather than
+      // trusting the bare status.
+      await repo.setProjectStatus(projectId, "finalization_required");
+      return {
+        invalidated: true,
+        reason: "print_ready is not backed by any completed job's own ready validation — invalidated.",
+      };
+    }
+
+    if (readyJob.signPlanKey !== preparation.planKey) {
+      await repo.setProjectStatus(projectId, "finalization_required");
+      return {
+        invalidated: true,
+        reason:
+          preparation.planKey === null
+            ? `The ready asset's plan ("${readyJob.signPlanKey}") has been superseded — the preparation currently has no plan at all (status: "${preparation.status}").`
+            : `The ready asset's plan ("${readyJob.signPlanKey}") has been superseded by the preparation's current plan ("${preparation.planKey}").`,
+      };
+    }
+
+    // The task's third named reason ("validation requirements change" —
+    // e.g. a future preservation-prompt/model/schema revision) is a real,
+    // independent supersession ground, deliberately NOT implemented here:
+    // `PrintValidationReport` (what `ProductionAssetValidation.report`
+    // persists) does not currently echo back the `rigidSign` evidence it
+    // was given, so there is no already-persisted, already-authoritative
+    // signal this function could read without either a broader report-
+    // shape change (affecting every profile, not just rigid_sign_raster)
+    // or a new schema column — either is a real, separately-reviewable
+    // decision, not an incidental add-on to this phase's minimal
+    // mechanism. The planKey comparison above already covers every
+    // concretely-required reason (a superseding re-plan, a corrected
+    // re-plan landing on "blocked", a changed spec, a changed source —
+    // `computeSignPlanKey` is derived from exactly those three, so each
+    // one changes `planKey` by construction).
+    return {
+      invalidated: false,
+      reason: "The ready asset's plan is still the preparation's current plan — nothing to reconcile.",
+    };
+  }
+
+  return capability;
 }
 
 /**
