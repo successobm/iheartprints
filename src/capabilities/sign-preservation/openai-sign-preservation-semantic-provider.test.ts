@@ -628,6 +628,70 @@ describe("OpenAISignPreservationSemanticProvider — Responses request/response 
     }
   });
 
+  it("Parametric Frame Semantic Evidence Completion Phase: when the request carries a perimeter overview pair, exactly 16 images are uploaded and referenced (14 base + 2 perimeter), still in ONE Responses call", async () => {
+    const { fetchImpl, log } = createRoutedFetch();
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await provider.compare(
+      sampleRequest({
+        perimeterSourceOverview: image("perimeter source overview"),
+        perimeterReconstructionOverview: image("perimeter reconstruction overview"),
+      }),
+    );
+    assert.equal(log.uploadCalls.length, 16);
+    assert.equal(log.responsesCalls.length, 1, "still exactly one semantic dispatch");
+
+    const body = log.responsesCalls[0].body;
+    const input = body.input as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    const user = input.find((m) => m.role === "user")!;
+    const imageParts = user.content.filter((part) => part.type === "input_image");
+    assert.equal(imageParts.length, 16);
+
+    const filenames = log.uploadCalls.map((c) => (c.form.get("file") as File).name);
+    assert.ok(filenames.some((n) => n.includes("perimeter-source-overview")));
+    assert.ok(filenames.some((n) => n.includes("perimeter-reconstruction-overview")));
+  });
+
+  it("without a perimeter overview pair, the preamble never mentions full-frame/perimeter evidence — the ordinary (non-frame) request shape is textually unchanged", async () => {
+    const { fetchImpl, log } = createRoutedFetch();
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await provider.compare(sampleRequest());
+    const body = log.responsesCalls[0].body;
+    const input = body.input as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    const user = input.find((m) => m.role === "user")!;
+    const preamble = (user.content[0] as { text: string }).text;
+    assert.doesNotMatch(preamble, /FULL-FRAME/);
+  });
+
+  it("with a perimeter overview pair, the preamble explains the full-frame images are perimeter_edge_alignment-only evidence", async () => {
+    const { fetchImpl, log } = createRoutedFetch();
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await provider.compare(
+      sampleRequest({
+        perimeterSourceOverview: image("perimeter source overview"),
+        perimeterReconstructionOverview: image("perimeter reconstruction overview"),
+      }),
+    );
+    const body = log.responsesCalls[0].body;
+    const input = body.input as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    const user = input.find((m) => m.role === "user")!;
+    const preamble = (user.content[0] as { text: string }).text;
+    assert.match(preamble, /FULL-FRAME/);
+    assert.match(preamble, /perimeter_edge_alignment/);
+  });
+
+  it("the system instruction explains aspect-ratio difference between the two full-frame images is never itself evidence of a perimeter_edge_alignment change", async () => {
+    const { fetchImpl, log } = createRoutedFetch();
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await provider.compare(sampleRequest());
+    const body = log.responsesCalls[0].body;
+    const input = body.input as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    const system = input.find((m) => m.role === "system")!;
+    const systemText = (system.content[0] as { text: string }).text;
+    assert.match(systemText, /aspect.ratio/i);
+    assert.match(systemText, /never.*by itself.*evidence/i);
+    assert.match(systemText, /outward/i);
+  });
+
   it("still sends the exact model, strict json_schema contract, and image-text-safety system instruction — semantic contract unchanged", async () => {
     const { fetchImpl, log } = createRoutedFetch();
     const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());

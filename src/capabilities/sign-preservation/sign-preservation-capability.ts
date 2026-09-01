@@ -376,6 +376,15 @@ interface PreservationContext {
     sourceImage: RgbaImage;
     /** The FINAL asset's own content-region sub-image — pixel-identical to the reconstruction whenever `reconstructionToFinalRgb.result === "pass"`. */
     contentSubImage: RgbaImage;
+    /**
+     * Parametric Frame Semantic Evidence Completion Phase: present ONLY for
+     * a `reconstruct_parametric_frame` verification — the FULL (un-cropped)
+     * source and FULL final production asset, perimeter included, for
+     * `deriveSemanticComparisonImages`'s own `perimeterEvidence` parameter.
+     * `null` for every other step kind (nothing to add — see this phase's
+     * own doc audit).
+     */
+    perimeterEvidence: { fullFrameSourceImage: RgbaImage; fullFrameReconstructionImage: RgbaImage } | null;
   } | null;
 }
 
@@ -799,7 +808,16 @@ async function resolvePreservationContext(
             })()
           : decodedSourceImage;
       sourceSimilarity = checkSourceSimilarity(sourceImage, contentSubImage);
-      decodedImages = { sourceImage, contentSubImage };
+      // Parametric Frame Semantic Evidence Completion Phase: the FULL
+      // (un-cropped) source and FULL final production asset — perimeter
+      // included on both sides — for `perimeter_edge_alignment`'s own
+      // dedicated evidence pair. Only for `reconstruct_parametric_frame`;
+      // every other step kind's existing `sourceOverview`/
+      // `reconstructionOverview` already shows everything meaningful.
+      const perimeterEvidence = isParametricFrameStep
+        ? { fullFrameSourceImage: decodedSourceImage, fullFrameReconstructionImage: finalImage }
+        : null;
+      decodedImages = { sourceImage, contentSubImage, perimeterEvidence };
     } else {
       sourceSimilarity = {
         result: "unknown",
@@ -981,6 +999,7 @@ export function createSignPreservationCapability(
       const imageSet = deriveSemanticComparisonImages(
         ctx.decodedImages.sourceImage,
         ctx.decodedImages.contentSubImage,
+        ctx.decodedImages.perimeterEvidence ?? undefined,
       );
       if (!imageSet) {
         return persistWithoutSemantic("unknown", [
@@ -1000,6 +1019,8 @@ export function createSignPreservationCapability(
         reconstructionOverview: imageSet.reconstructionOverview,
         sourceCrops: imageSet.sourceCrops,
         reconstructionCrops: imageSet.reconstructionCrops,
+        perimeterSourceOverview: imageSet.perimeterSourceOverview,
+        perimeterReconstructionOverview: imageSet.perimeterReconstructionOverview,
         idempotencyKey,
         verificationIdentity: {
           projectId: ctx.projectId,

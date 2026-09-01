@@ -822,6 +822,46 @@ describe("Parametric Frame Reconstruction Phase: reconstruct_parametric_frame en
     return { ...built, job };
   }
 
+  /**
+   * Answers every category "same" except `overrideCategory`, which gets
+   * `overrideAnswer` — mirrors the "Semantic Worker Wiring Phase" describe
+   * block's own identically-named/-shaped local class (not shared/hoisted,
+   * the same independent-per-suite discipline every fixture in this file
+   * already follows) — needed here for `cannot_determine`, which the
+   * shared `FakeSignPreservationSemanticProvider` only ever produces for
+   * `wording`, never for `perimeter_edge_alignment`.
+   */
+  class InlineSemanticProvider implements SignPreservationSemanticProvider {
+    readonly providerKey = "inline-fake-sign-preservation-semantic-frame";
+    readonly modelIdentity: string;
+    readonly transportVersion = SIGN_PRESERVATION_TRANSPORT_VERSION_NONE;
+    dispatchCount = 0;
+    constructor(
+      private readonly overrideCategory: (typeof SIGN_PRESERVATION_SEMANTIC_CATEGORIES)[number],
+      private readonly overrideAnswer: SignPreservationSemanticAnswer["answer"],
+      modelIdentity = "inline-fake-model-v1-frame",
+    ) {
+      this.modelIdentity = modelIdentity;
+    }
+    async compare(_request: SignPreservationSemanticRequest): Promise<SignPreservationSemanticProviderResult> {
+      this.dispatchCount += 1;
+      return {
+        answers: SIGN_PRESERVATION_SEMANTIC_CATEGORIES.map((category) => ({
+          category,
+          answer: category === this.overrideCategory ? this.overrideAnswer : ("same" as const),
+          reason:
+            category === this.overrideCategory
+              ? `inline fake: deliberately ${this.overrideAnswer} for this test`
+              : "inline fake: unchanged",
+          regionReference: null,
+        })),
+        providerRequestId: `inline-fake-frame-${this.dispatchCount}`,
+        rawResponseSummary: { fixture: "inline-override" },
+        tokenUsage: { inputTokens: 1000, outputTokens: 55 },
+      };
+    }
+  }
+
   it("1: perimeter-only plan -> deterministic frame reconstruction -> affirmative semantic verification -> PrintValidation -> print_ready", async () => {
     const reconstructionProvider = new FakeSignReconstructionProvider();
     const semanticProvider = new FakeSignPreservationSemanticProvider();
@@ -832,6 +872,18 @@ describe("Parametric Frame Reconstruction Phase: reconstruct_parametric_frame en
 
     assert.equal(reconstructionProvider.dispatchCount, 0, "a perimeter-only frame plan must never dispatch bounded reconstruction");
     assert.equal(semanticProvider.dispatchCount, 1);
+
+    // Parametric Frame Semantic Evidence Completion Phase: the ONE dispatch
+    // carries BOTH the (unchanged) protected-interior evidence AND the NEW
+    // perimeter-visible evidence — never a second request.
+    const dispatchedRequest = semanticProvider.lastRequest!;
+    assert.ok(dispatchedRequest.sourceOverview, "protected-interior source evidence still present");
+    assert.ok(dispatchedRequest.reconstructionOverview, "protected-interior reconstruction evidence still present");
+    assert.equal(dispatchedRequest.sourceCrops.length, 6);
+    assert.equal(dispatchedRequest.reconstructionCrops.length, 6);
+    assert.ok(dispatchedRequest.perimeterSourceOverview, "perimeter-visible source evidence present");
+    assert.ok(dispatchedRequest.perimeterReconstructionOverview, "perimeter-visible reconstruction evidence present");
+    assert.equal(semanticProvider.dispatchCount, 1, "still exactly one semantic provider call for all of the above");
 
     const completedJob = await repo.getFinalArtworkJob(job.id);
     assert.equal(completedJob!.status, "completed");
@@ -989,5 +1041,43 @@ describe("Parametric Frame Reconstruction Phase: reconstruct_parametric_frame en
       (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png",
     );
     assert.equal(assetsAfterRerun.length, 1, "no duplicate final asset from the idempotent rerun");
+  });
+
+  it("7: perimeter_edge_alignment 'cannot_determine' -> NOT print_ready (an inconclusive perimeter answer never authorizes, even with the new perimeter-visible evidence present)", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new InlineSemanticProvider("perimeter_edge_alignment", "cannot_determine");
+    const { repo, projectId, job, worker } = await perimeterOnlyPlanReadyForFinalArtwork(reconstructionProvider, semanticProvider);
+
+    await worker.processNextJob();
+
+    assert.equal(semanticProvider.dispatchCount, 1);
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation!.status, "finalization_required");
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
+    assert.equal(checks.find((c) => c.check === "substrate_boundary_semantics")?.status, "fail");
+  });
+
+  it("8: a structurally missing perimeter_edge_alignment answer still fails closed — the malformed provider attempt fails the job instead of fabricating an answer, even though perimeter evidence was genuinely sent", async () => {
+    const reconstructionProvider = new FakeSignReconstructionProvider();
+    const semanticProvider = new FakeSignPreservationSemanticProvider();
+    // Drops the LAST category — deliberately `perimeter_edge_alignment`,
+    // per this fake's own documented convention.
+    semanticProvider.behavior = { kind: "malformed_result" };
+    const { repo, projectId, job, worker } = await perimeterOnlyPlanReadyForFinalArtwork(reconstructionProvider, semanticProvider);
+
+    await worker.processNextJob();
+
+    assert.equal(semanticProvider.dispatchCount, 1, "the attempt was made — the request DID carry perimeter evidence, the answer set was simply invalid");
+    assert.ok(semanticProvider.lastRequest?.perimeterSourceOverview, "perimeter evidence was genuinely sent to the (fake) provider before it returned a malformed answer set");
+    const failedJob = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failedJob!.status, "failed", "a structurally invalid answer set is an incomplete attempt, never a fabricated completion");
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "print_ready");
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation, null, "PrintValidation is never even reached for an incomplete preservation attempt");
   });
 });

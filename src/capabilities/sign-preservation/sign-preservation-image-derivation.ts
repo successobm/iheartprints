@@ -46,6 +46,7 @@ import {
   SIGN_PRESERVATION_GRID_COLUMNS,
   SIGN_PRESERVATION_GRID_ROWS,
   SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION,
+  SIGN_PRESERVATION_PERIMETER_OVERVIEW_MAX_DIMENSION_PX,
 } from "./contracts";
 import {
   mapSourceRangeToReconstruction,
@@ -98,7 +99,35 @@ export interface SignPreservationSemanticImageSet {
   reconstructionOverview: SignPreservationSemanticImageInput;
   sourceCrops: SignPreservationSemanticImageInput[];
   reconstructionCrops: SignPreservationSemanticImageInput[];
+  /**
+   * Parametric Frame Semantic Evidence Completion Phase: present ONLY when
+   * `perimeterEvidence` was supplied — the FULL, un-cropped source artwork
+   * (its own original perimeter/frame/border visible) and the FULL final
+   * production asset (its own newly-reconstructed perimeter, reaching the
+   * true finished boundary, visible), each independently downscaled to fit
+   * `SIGN_PRESERVATION_PERIMETER_OVERVIEW_MAX_DIMENSION_PX` on its own
+   * longer side — NEVER resampled to match each other's dimensions (unlike
+   * `sourceOverview`/`reconstructionOverview` above), because source and
+   * reconstruction may legitimately carry a DIFFERENT aspect ratio (ordered-
+   * size adaptation) — forcing pixel registration here would misrepresent
+   * that as a distortion. These are the SOLE evidence for
+   * `perimeter_edge_alignment`; `sourceOverview`/`reconstructionOverview`/
+   * `sourceCrops`/`reconstructionCrops` remain the sole evidence for every
+   * other, interior-scoped category, exactly as before this phase.
+   */
+  perimeterSourceOverview?: SignPreservationSemanticImageInput;
+  perimeterReconstructionOverview?: SignPreservationSemanticImageInput;
   imageDerivationVersion: typeof SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION;
+}
+
+/** Downscales `image` (aspect ratio preserved, NEVER upscaled) so its longer side is at most `maxDimensionPx` — used only for the perimeter overview pair, which must never force two legitimately different aspect ratios into a false pixel registration. */
+function boundedAspectPreservingOverview(image: RgbaImage, maxDimensionPx: number): RgbaImage {
+  const longerSide = Math.max(image.width, image.height);
+  if (longerSide <= maxDimensionPx) return image;
+  const scale = maxDimensionPx / longerSide;
+  const targetWidth = Math.max(1, Math.round(image.width * scale));
+  const targetHeight = Math.max(1, Math.round(image.height * scale));
+  return resampleExact(image, targetWidth, targetHeight).image;
 }
 
 /**
@@ -108,10 +137,20 @@ export interface SignPreservationSemanticImageSet {
  * this the same way `checkReconstructionToFinalRgb`'s comparison region
  * does; the deterministic black extension is never sent to the semantic
  * provider).
+ *
+ * `perimeterEvidence`, when supplied (Parametric Frame Semantic Evidence
+ * Completion Phase), additionally derives `perimeterSourceOverview`/
+ * `perimeterReconstructionOverview` from `fullFrameSourceImage`/
+ * `fullFrameReconstructionImage` — the FULL images (perimeter included),
+ * entirely independent of the interior-only pair above. Absent (the
+ * default) for every step kind whose own content region already includes
+ * everything meaningful to compare — see this phase's own doc audit for
+ * why only `reconstruct_parametric_frame` needs this second pair.
  */
 export function deriveSemanticComparisonImages(
   sourceImage: RgbaImage,
   reconstructionContentImage: RgbaImage,
+  perimeterEvidence?: { fullFrameSourceImage: RgbaImage; fullFrameReconstructionImage: RgbaImage },
 ): SignPreservationSemanticImageSet | null {
   const scale = resolveProportionalReconstructionScale(
     sourceImage.width,
@@ -206,11 +245,36 @@ export function deriveSemanticComparisonImages(
     }
   }
 
+  let perimeterSourceOverview: SignPreservationSemanticImageInput | undefined;
+  let perimeterReconstructionOverview: SignPreservationSemanticImageInput | undefined;
+  if (perimeterEvidence) {
+    perimeterSourceOverview = {
+      dataUri: encodeImageAsDataUri(
+        boundedAspectPreservingOverview(
+          perimeterEvidence.fullFrameSourceImage,
+          SIGN_PRESERVATION_PERIMETER_OVERVIEW_MAX_DIMENSION_PX,
+        ),
+      ),
+      label: "source full-frame overview (perimeter visible, own native aspect ratio)",
+    };
+    perimeterReconstructionOverview = {
+      dataUri: encodeImageAsDataUri(
+        boundedAspectPreservingOverview(
+          perimeterEvidence.fullFrameReconstructionImage,
+          SIGN_PRESERVATION_PERIMETER_OVERVIEW_MAX_DIMENSION_PX,
+        ),
+      ),
+      label: "reconstruction full-frame overview (perimeter visible, own native aspect ratio — may legitimately differ from the source's own aspect ratio)",
+    };
+  }
+
   return {
     sourceOverview,
     reconstructionOverview,
     sourceCrops,
     reconstructionCrops,
+    perimeterSourceOverview,
+    perimeterReconstructionOverview,
     imageDerivationVersion: SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION,
   };
 }

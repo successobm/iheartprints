@@ -25,6 +25,17 @@ export interface SignPreservationSemanticRequest {
   /** Same grid order/count as `sourceCrops` — reconstruction-resolution native crops of the geometrically corresponding region, never downsampled. */
   reconstructionCrops: SignPreservationSemanticImageInput[];
   /**
+   * Parametric Frame Semantic Evidence Completion Phase: present ONLY for a
+   * `reconstruct_parametric_frame` verification — the SOLE evidence for the
+   * `perimeter_edge_alignment` category. Absent for every other step kind,
+   * whose `sourceOverview`/`reconstructionOverview`/crops above already
+   * carry everything meaningful to compare. See
+   * `deriveSemanticComparisonImages`'s own doc comment for why these are
+   * never resampled to match each other's dimensions.
+   */
+  perimeterSourceOverview?: SignPreservationSemanticImageInput;
+  perimeterReconstructionOverview?: SignPreservationSemanticImageInput;
+  /**
    * Deterministic, caller-computed identity for this exact comparison
    * (never provider-generated) — implementations MAY use it for their own
    * request-level dedupe, but the platform's own idempotency

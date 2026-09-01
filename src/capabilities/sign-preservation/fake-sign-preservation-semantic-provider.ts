@@ -61,6 +61,15 @@ export class FakeSignPreservationSemanticProvider implements SignPreservationSem
 
   behavior: FakeSignPreservationSemanticBehavior = { kind: "all_same" };
 
+  /**
+   * Parametric Frame Semantic Evidence Completion Phase: the most recent
+   * request this instance actually received — lets a test assert on WHAT
+   * evidence was sent (e.g. that `perimeterSourceOverview`/
+   * `perimeterReconstructionOverview` were present) without needing a
+   * purpose-built inline provider for every such assertion.
+   */
+  lastRequest: SignPreservationSemanticRequest | null = null;
+
   private sequence = 0;
 
   constructor(modelIdentity = "fake-model-v1") {
@@ -68,9 +77,10 @@ export class FakeSignPreservationSemanticProvider implements SignPreservationSem
   }
 
   async compare(
-    _request: SignPreservationSemanticRequest,
+    request: SignPreservationSemanticRequest,
   ): Promise<SignPreservationSemanticProviderResult> {
     this.dispatchCount += 1;
+    this.lastRequest = request;
     const behavior = this.behavior;
 
     if (behavior.kind === "provider_timeout") {

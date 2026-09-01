@@ -8,13 +8,18 @@
  * Signs Phase S4.2C.1: image TRANSPORT rewritten from inline base64 data
  * URIs (which produced a ~17-52 MB single request and repeatedly failed
  * with an ambiguous transport-level error — Signs Phase S4.2B.1/S4.2B.3)
- * to OpenAI Files: each of the 14 deterministic comparison images is
- * uploaded separately first (`purpose: "user_data"`, explicit
- * `expires_after`), then referenced by `file_id` in ONE small Responses
- * API request. The seven-category contract, schema, system instruction,
- * and image derivation (`sign-preservation-image-derivation:v2`) are
- * UNCHANGED — only how the bytes physically reach OpenAI changed. See
- * `SIGN_PRESERVATION_TRANSPORT_VERSION_FILE_ID`'s own doc comment.
+ * to OpenAI Files: each of the (then always exactly 14) deterministic
+ * comparison images is uploaded separately first (`purpose: "user_data"`,
+ * explicit `expires_after`), then referenced by `file_id` in ONE small
+ * Responses API request. AS OF THAT PHASE, the seven-category contract,
+ * schema, system instruction, and image derivation
+ * (`sign-preservation-image-derivation:v2`) were UNCHANGED — only how the
+ * bytes physically reach OpenAI changed. See
+ * `SIGN_PRESERVATION_TRANSPORT_VERSION_FILE_ID`'s own doc comment. (This
+ * transport mechanism itself is STILL unchanged by the Parametric Frame
+ * Semantic Evidence Completion Phase below — only the image derivation and
+ * system instruction changed, from v2 to v3, and the image COUNT can now
+ * be 14 or 16 depending on step kind.)
  *
  * Durable, crash-recoverable upload/cleanup bookkeeping lives in
  * `SignPreservationTransportAttemptStore` (backed by
@@ -95,6 +100,13 @@ const SYSTEM_INSTRUCTION = [
   "",
   "Improved sharpness, anti-aliasing differences, subpixel/colour reconstruction variation, higher resolution, and a black canvas extension added OUTSIDE the original artwork's own content are all EXPECTED, LEGITIMATE reconstruction effects — never mark these as changed. This does NOT apply to perimeter_edge_alignment: a canvas extension that pushes an edge-relative design element away from the edge it depends on IS a change for that category specifically, even though the same extension is legitimate and unchanged for every other category.",
   "",
+  "TWO SETS OF EVIDENCE, TWO DIFFERENT JOBS: the interior overview pair and the six detail crop pairs above show the customer's own PROTECTED CONTENT ONLY (wording, prices, faces, logos, objects, anything added/removed/invented, and whether meaningful content was cropped) — they are the ONLY evidence for those seven categories. If two additional FULL-FRAME overview images are provided further below, they are the ONLY evidence for perimeter_edge_alignment specifically, and MUST be ignored for every other category — a border or frame visible in a full-frame image is never itself \"a logo\" or \"an object\" to judge as added/removed for those other categories.",
+  "",
+  "WHEN FULL-FRAME OVERVIEW IMAGES ARE PROVIDED, they replace the general perimeter_edge_alignment guidance above with this more specific one, because this artwork went through PARAMETRIC FRAME RECONSTRUCTION: the sign's own frame/border/rounded-corner/mounting-hole system was deliberately measured from the original, REMOVED, and REDRAWN at the new, larger finished-panel boundary — an intentional, authorized geometry change, not a defect.",
+  "- The RECONSTRUCTED full-frame image is expected to be a DIFFERENT overall size and may have a DIFFERENT aspect ratio than the ORIGINAL full-frame image — this reflects an intentionally different ordered physical sign size. Aspect-ratio or overall-size difference between the two full-frame images is NEVER by itself evidence of a perimeter_edge_alignment change. Do not attempt to pixel-align or overlay them.",
+  "- The frame/border in the RECONSTRUCTED image is EXPECTED and AUTHORIZED to sit further from the centre (closer to its own new edge) than in the ORIGINAL — that outward movement, by itself, to reach the new finished boundary is NOT a change. Mark \"same\" when the reconstructed frame consistently and symmetrically reaches its own new panel edge on all sides, with the same band colours/sequence, the same style of corner rounding (or lack of it), and the same number and placement pattern of mounting-hole indicators as the original.",
+  "- Mark \"changed\" (this is exactly what this category exists to catch) if, in the RECONSTRUCTED full-frame image, you see: the OLD frame/border still visible somewhere inside the new one (a residual second border, a \"floating\" frame that does not reach the true edge, a doubled/ghosted arc or line near a corner); the frame missing entirely on one or more sides; a corner whose rounding looks inconsistent, broken, or mismatched between corners; a mounting-hole indicator missing, duplicated, or clearly misplaced relative to the others; or the border/frame's own relationship to the panel edge otherwise looking structurally inconsistent or wrong in a way outward-only, uniform movement to a new boundary would not produce.",
+  "",
   "Return ONLY the required structured schema. Do not include any overall readiness judgement, recommendation, or free-form summary beyond the bounded reason fields the schema allows.",
 ].join("\n");
 
@@ -140,7 +152,16 @@ export interface OpenAISignPreservationSemanticProviderConfig {
   filesExpiresAfterSeconds?: number;
 }
 
-/** Fixed, deterministic, non-customer-identifying role + filename for each of the 14 comparison images — same order `SignPreservationSemanticRequest` always carries them in. */
+/**
+ * Fixed, deterministic, non-customer-identifying role + filename for each
+ * comparison image — same order `SignPreservationSemanticRequest` always
+ * carries them in. Always the base 14 (source/reconstruction overview + 6+6
+ * crops); Parametric Frame Semantic Evidence Completion Phase adds 2 more
+ * (`perimeter_source_overview`/`perimeter_reconstruction_overview`) ONLY
+ * when the request actually carries them — absent for every other step
+ * kind, so the role list itself stays exactly as it was before this phase
+ * for non-frame verifications.
+ */
 function orderedImageRoles(
   request: SignPreservationSemanticRequest,
 ): Array<{ role: string; filename: string; image: SignPreservationSemanticImageInput }> {
@@ -162,6 +183,20 @@ function orderedImageRoles(
       image,
     });
   });
+  if (request.perimeterSourceOverview) {
+    entries.push({
+      role: "perimeter_source_overview",
+      filename: "sign-preservation-perimeter-source-overview.png",
+      image: request.perimeterSourceOverview,
+    });
+  }
+  if (request.perimeterReconstructionOverview) {
+    entries.push({
+      role: "perimeter_reconstruction_overview",
+      filename: "sign-preservation-perimeter-reconstruction-overview.png",
+      image: request.perimeterReconstructionOverview,
+    });
+  }
   return entries;
 }
 
@@ -509,29 +544,52 @@ export class OpenAISignPreservationSemanticProvider implements SignPreservationS
 
     const sourceCropCount = entries.filter((e) => e.role.startsWith("source_crop_")).length;
     const reconCropCount = entries.filter((e) => e.role.startsWith("reconstruction_crop_")).length;
+    const hasPerimeterOverview =
+      entries.some((e) => e.role === "perimeter_source_overview") &&
+      entries.some((e) => e.role === "perimeter_reconstruction_overview");
 
     const userContent = [
       {
         type: "input_text",
         text:
           "Compare the ORIGINAL source artwork against the RECONSTRUCTED artwork below. " +
-          "First, two full-frame overview images (normalized to the same dimensions). " +
+          "First, two interior overview images (normalized to the same dimensions) — the customer's own " +
+          "protected content only, evidence for every category EXCEPT perimeter_edge_alignment. " +
           "Then, six geometrically-corresponding detail crop pairs (source crop, then its " +
-          "matching reconstruction crop), covering the whole artwork in a fixed 2x3 grid, " +
-          "left-to-right then top-to-bottom.",
+          "matching reconstruction crop), covering the whole protected interior in a fixed 2x3 grid, " +
+          "left-to-right then top-to-bottom — also for every category except perimeter_edge_alignment." +
+          (hasPerimeterOverview
+            ? " Finally, two FULL-FRAME overview images (each at its OWN native aspect ratio, never " +
+              "resized to match the other) — these show the artwork's own perimeter/frame/border, and are " +
+              "the ONLY evidence for perimeter_edge_alignment. Ignore them for every other category."
+            : ""),
       },
-      { type: "input_text", text: "ORIGINAL — overview" },
+      { type: "input_text", text: "ORIGINAL — interior overview" },
       imagePart("source_overview"),
-      { type: "input_text", text: "RECONSTRUCTED — overview (normalized)" },
+      { type: "input_text", text: "RECONSTRUCTED — interior overview (normalized)" },
       imagePart("reconstruction_overview"),
       ...Array.from({ length: sourceCropCount }, (_, i) => [
-        { type: "input_text", text: `ORIGINAL — detail crop ${i + 1} of ${sourceCropCount}` },
+        { type: "input_text", text: `ORIGINAL — interior detail crop ${i + 1} of ${sourceCropCount}` },
         imagePart(`source_crop_${i}`),
       ]).flat(),
       ...Array.from({ length: reconCropCount }, (_, i) => [
-        { type: "input_text", text: `RECONSTRUCTED — detail crop ${i + 1} of ${reconCropCount}` },
+        { type: "input_text", text: `RECONSTRUCTED — interior detail crop ${i + 1} of ${reconCropCount}` },
         imagePart(`reconstruction_crop_${i}`),
       ]).flat(),
+      ...(hasPerimeterOverview
+        ? [
+            {
+              type: "input_text",
+              text: "ORIGINAL — FULL FRAME overview (own native aspect ratio; perimeter_edge_alignment evidence only)",
+            },
+            imagePart("perimeter_source_overview"),
+            {
+              type: "input_text",
+              text: "RECONSTRUCTED — FULL FRAME overview (own native aspect ratio, may legitimately differ from the original's; perimeter_edge_alignment evidence only)",
+            },
+            imagePart("perimeter_reconstruction_overview"),
+          ]
+        : []),
     ];
 
     let response: Response;

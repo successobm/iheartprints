@@ -6,9 +6,9 @@ import { PNG } from "pngjs";
 import { fillRect, makeImage } from "@/capabilities/sign-preparation/sign-fixtures";
 
 import {
+  SIGN_PRESERVATION_BASE_IMAGE_COUNT,
   SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE,
   SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION,
-  SIGN_PRESERVATION_MAX_IMAGE_COUNT,
 } from "./contracts";
 import {
   deriveSemanticComparisonImages,
@@ -34,7 +34,7 @@ describe("deriveSemanticComparisonImages (Signs Phase S4.2A / S4.2B.2)", () => {
     const set = deriveSemanticComparisonImages(source, reconstruction);
     assert.ok(set);
     const totalImages = 2 + set!.sourceCrops.length + set!.reconstructionCrops.length;
-    assert.equal(totalImages, SIGN_PRESERVATION_MAX_IMAGE_COUNT);
+    assert.equal(totalImages, SIGN_PRESERVATION_BASE_IMAGE_COUNT);
     assert.equal(set!.sourceCrops.length, 6);
     assert.equal(set!.reconstructionCrops.length, 6);
   });
@@ -97,7 +97,7 @@ describe("deriveSemanticComparisonImages (Signs Phase S4.2A / S4.2B.2)", () => {
     const set = deriveSemanticComparisonImages(source, reconstruction);
     assert.ok(set, "a non-integer but proportional scale must derive a real image set");
     const totalImages = 2 + set!.sourceCrops.length + set!.reconstructionCrops.length;
-    assert.equal(totalImages, SIGN_PRESERVATION_MAX_IMAGE_COUNT);
+    assert.equal(totalImages, SIGN_PRESERVATION_BASE_IMAGE_COUNT);
   });
 
   it("a GENUINELY non-proportional (distorted) scale relationship -> unavailable (null), never guessed", () => {
@@ -268,11 +268,19 @@ describe("deriveSemanticComparisonImages (Signs Phase S4.2A / S4.2B.2)", () => {
   });
 
   it("image derivation version was bumped for this phase's behavior change", () => {
-    assert.equal(SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION, "sign-preservation-image-derivation:v2");
+    assert.equal(SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION, "sign-preservation-image-derivation:v3");
     const source = makeImage(1024, 1536, { r: 1, g: 2, b: 3 });
     const reconstruction = makeImage(4096, 6144, { r: 4, g: 5, b: 6 });
     const set = deriveSemanticComparisonImages(source, reconstruction)!;
-    assert.equal(set.imageDerivationVersion, "sign-preservation-image-derivation:v2");
+    assert.equal(set.imageDerivationVersion, "sign-preservation-image-derivation:v3");
+  });
+
+  it("without a perimeter pair supplied, the derived set carries no perimeter fields at all — ordinary (non-frame) behavior is byte-for-byte unchanged", () => {
+    const source = makeImage(1024, 1536, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(4096, 6144, { r: 4, g: 5, b: 6 });
+    const set = deriveSemanticComparisonImages(source, reconstruction)!;
+    assert.equal(set.perimeterSourceOverview, undefined);
+    assert.equal(set.perimeterReconstructionOverview, undefined);
   });
 
   it("deriving comparison images never touches the network — covers both the OpenAI semantic provider and the Topaz reconstruction provider paths, since both dispatch exclusively via global fetch", () => {
@@ -291,6 +299,116 @@ describe("deriveSemanticComparisonImages (Signs Phase S4.2A / S4.2B.2)", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+/** Parametric Frame Semantic Evidence Completion Phase: the perimeter-visible overview pair — deliberately independent of the interior-pair proportionality gate above. */
+describe("deriveSemanticComparisonImages — perimeter overview pair (Parametric Frame Semantic Evidence Completion Phase)", () => {
+  it("derives a perimeter pair when perimeterEvidence is supplied, alongside the unchanged interior pair", () => {
+    const source = makeImage(1086, 1448, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(3258, 4344, { r: 4, g: 5, b: 6 }); // proportional interior, exact 3x scale
+    const fullFrameSourceImage = makeImage(1086, 1448, { r: 10, g: 20, b: 30 });
+    const fullFrameReconstructionImage = makeImage(3672, 5508, { r: 40, g: 50, b: 60 });
+    const set = deriveSemanticComparisonImages(source, reconstruction, {
+      fullFrameSourceImage,
+      fullFrameReconstructionImage,
+    });
+    assert.ok(set);
+    assert.ok(set!.perimeterSourceOverview);
+    assert.ok(set!.perimeterReconstructionOverview);
+    // The interior pair's own derivation is completely unaffected.
+    assert.ok(set!.sourceOverview);
+    assert.ok(set!.reconstructionOverview);
+    assert.equal(set!.sourceCrops.length, 6);
+    assert.equal(set!.reconstructionCrops.length, 6);
+  });
+
+  it("a full-frame pair with a DIFFERENT aspect ratio between source and reconstruction still derives successfully — never forced into the interior pair's own proportionality requirement", () => {
+    const source = makeImage(1086, 1448, { r: 1, g: 2, b: 3 }); // 3:4
+    const reconstruction = makeImage(3258, 4344, { r: 4, g: 5, b: 6 });
+    const fullFrameSourceImage = makeImage(1086, 1448, { r: 10, g: 20, b: 30 }); // 3:4
+    const fullFrameReconstructionImage = makeImage(3672, 5508, { r: 40, g: 50, b: 60 }); // 2:3 — genuinely different aspect, by design (ordered size adaptation)
+    const set = deriveSemanticComparisonImages(source, reconstruction, {
+      fullFrameSourceImage,
+      fullFrameReconstructionImage,
+    });
+    assert.ok(set, "an intentionally different full-frame aspect ratio must never cause derivation to fail");
+  });
+
+  it("the two full-frame overview images are NEVER resampled to match each other's dimensions — each keeps its own aspect ratio", () => {
+    const source = makeImage(1086, 1448, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(3258, 4344, { r: 4, g: 5, b: 6 });
+    const fullFrameSourceImage = makeImage(1086, 1448, { r: 10, g: 20, b: 30 });
+    const fullFrameReconstructionImage = makeImage(3672, 5508, { r: 40, g: 50, b: 60 });
+    const set = deriveSemanticComparisonImages(source, reconstruction, {
+      fullFrameSourceImage,
+      fullFrameReconstructionImage,
+    })!;
+    const decodedSource = decodeDataUri(set.perimeterSourceOverview!.dataUri);
+    const decodedRecon = decodeDataUri(set.perimeterReconstructionOverview!.dataUri);
+    const sourceAspect = decodedSource.width / decodedSource.height;
+    const reconAspect = decodedRecon.width / decodedRecon.height;
+    assert.notEqual(decodedSource.width, decodedRecon.width, "the two overviews must not be forced to the same width");
+    assert.ok(
+      Math.abs(sourceAspect - 1086 / 1448) < 0.01,
+      "the source overview must preserve the true source's own 3:4 aspect ratio",
+    );
+    assert.ok(
+      Math.abs(reconAspect - 3672 / 5508) < 0.01,
+      "the reconstruction overview must preserve the true reconstruction's own 2:3 aspect ratio, unforced to match the source",
+    );
+  });
+
+  it("long side is capped at SIGN_PRESERVATION_PERIMETER_OVERVIEW_MAX_DIMENSION_PX, aspect preserved, never upscaled beyond native", () => {
+    const source = makeImage(1086, 1448, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(3258, 4344, { r: 4, g: 5, b: 6 });
+    const fullFrameSourceImage = makeImage(1086, 1448, { r: 10, g: 20, b: 30 }); // under the cap — must stay native
+    const fullFrameReconstructionImage = makeImage(3672, 5508, { r: 40, g: 50, b: 60 }); // over the cap on its long side (5508) — must be downscaled
+    const set = deriveSemanticComparisonImages(source, reconstruction, {
+      fullFrameSourceImage,
+      fullFrameReconstructionImage,
+    })!;
+    const decodedSource = decodeDataUri(set.perimeterSourceOverview!.dataUri);
+    const decodedRecon = decodeDataUri(set.perimeterReconstructionOverview!.dataUri);
+    assert.equal(decodedSource.width, 1086, "under the cap — sent at native resolution, never upscaled");
+    assert.equal(decodedSource.height, 1448);
+    assert.ok(Math.max(decodedRecon.width, decodedRecon.height) <= 1600, "over the cap — downscaled to fit");
+    assert.ok(
+      Math.abs(decodedRecon.width / decodedRecon.height - 3672 / 5508) < 0.01,
+      "aspect ratio preserved through the downscale",
+    );
+  });
+
+  it("a corrupted/floating-frame marker near the reconstruction's own border is VISIBLE in perimeterReconstructionOverview, proving perimeter evidence is never cropped away", () => {
+    const source = makeImage(1086, 1448, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(3258, 4344, { r: 4, g: 5, b: 6 });
+    const fullFrameSourceImage = makeImage(1086, 1448, { r: 10, g: 20, b: 30 });
+    const fullFrameReconstructionImage = makeImage(1086, 1448, { r: 40, g: 50, b: 60 }); // same dims -> no downscale, exact pixel correspondence
+    // A distinctive marker colour right at the true corner — this is exactly
+    // where a residual old frame / duplicate hole artifact would live, and
+    // is OUTSIDE any interior-only content region.
+    fillRect(fullFrameReconstructionImage, 0, 0, 5, 5, { r: 255, g: 0, b: 255 });
+    const set = deriveSemanticComparisonImages(source, reconstruction, {
+      fullFrameSourceImage,
+      fullFrameReconstructionImage,
+    })!;
+    const decodedRecon = decodeDataUri(set.perimeterReconstructionOverview!.dataUri);
+    const [r, g, b] = pixelAt(decodedRecon, 2, 2);
+    assert.deepEqual([r, g, b], [255, 0, 255], "the corner marker must survive into the perimeter overview unresampled (native dims here)");
+
+    // The ORDINARY (interior-only) reconstructionOverview must NOT show it —
+    // proving the two evidence pairs are genuinely independent.
+    const decodedOrdinary = decodeDataUri(set.reconstructionOverview.dataUri);
+    const [or, og, ob] = pixelAt(decodedOrdinary, 0, 0);
+    assert.notDeepEqual([or, og, ob], [255, 0, 255]);
+  });
+
+  it("without perimeterEvidence, no perimeter fields are derived and the interior pair is unaffected — ordinary reconstruct_perimeter_structure/pad-based behavior stays exactly as before this phase", () => {
+    const source = makeImage(1024, 1536, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(4096, 6144, { r: 4, g: 5, b: 6 });
+    const withoutPerimeter = deriveSemanticComparisonImages(source, reconstruction);
+    const withPerimeterUndefined = deriveSemanticComparisonImages(source, reconstruction, undefined);
+    assert.deepEqual(withoutPerimeter, withPerimeterUndefined);
   });
 });
 

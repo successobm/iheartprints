@@ -227,7 +227,20 @@ export interface SignPreservationSemanticEvidence {
  * this bump; the bump exists so the combined identity documents WHY, the
  * same discipline every other lever here already follows.
  */
-export const SIGN_PRESERVATION_PROMPT_VERSION = "sign-preservation-prompt:v2";
+/**
+ * Parametric Frame Semantic Evidence Completion Phase: bumped to v3 — the
+ * system instruction now explains (1) that TWO ADDITIONAL "full frame"
+ * overview images may be present, showing each side's own perimeter/frame/
+ * border for `perimeter_edge_alignment` specifically, while the original
+ * overview/crop pair stays the sole authority for the other seven,
+ * interior-scoped categories; (2) that source and reconstruction may
+ * legitimately carry different aspect ratios (ordered-size adaptation),
+ * which is never itself evidence of a `perimeter_edge_alignment` change.
+ * The eight-category schema itself is UNCHANGED (see
+ * `SIGN_PRESERVATION_SEMANTIC_SCHEMA_VERSION`, not bumped) — only the
+ * instruction text and what evidence answers which category changed.
+ */
+export const SIGN_PRESERVATION_PROMPT_VERSION = "sign-preservation-prompt:v3";
 export const SIGN_PRESERVATION_SEMANTIC_SCHEMA_VERSION = "sign-preservation-schema:v2";
 /**
  * Bumped to v2 at Signs Phase S4.2B.2: reconstruction detail crops are no
@@ -239,10 +252,32 @@ export const SIGN_PRESERVATION_SEMANTIC_SCHEMA_VERSION = "sign-preservation-sche
  * verification evidence recorded under v1 must never be reused as-is under
  * v2 — the combined identity below encodes this directly.
  */
-export const SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION = "sign-preservation-image-derivation:v2";
+/**
+ * Bumped to v3 at the Parametric Frame Semantic Evidence Completion Phase:
+ * `reconstruct_parametric_frame` verifications now ALSO carry a second,
+ * full-frame overview pair (`perimeterSourceOverview`/
+ * `perimeterReconstructionOverview`) alongside the unchanged interior
+ * overview/crop set — see `deriveSemanticComparisonImages`'s own doc
+ * comment. Every OTHER step kind's derived image set is byte-for-byte
+ * identical to v2 (those two fields are simply absent) — the bump exists
+ * because the SHAPE of what can be sent changed, the same discipline the
+ * v1->v2 crop-cap bump above already followed.
+ */
+export const SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION = "sign-preservation-image-derivation:v3";
 /** 2 columns x 3 rows = 6 grid cells over the source's own frame, deterministic and data-independent. */
 export const SIGN_PRESERVATION_GRID_COLUMNS = 2;
 export const SIGN_PRESERVATION_GRID_ROWS = 3;
+/**
+ * Parametric Frame Semantic Evidence Completion Phase: the long side of
+ * each `perimeterSourceOverview`/`perimeterReconstructionOverview` image is
+ * capped at this many pixels (aspect ratio preserved, NEVER forced to
+ * match the other side's own dimensions — see that field's own doc
+ * comment for why forcing pixel registration here would be wrong). Bounds
+ * payload size for what is coarse, whole-panel structural evidence — small
+ * text/price legibility remains the interior detail crops' own job, at
+ * their own, unrelated linear scale.
+ */
+export const SIGN_PRESERVATION_PERIMETER_OVERVIEW_MAX_DIMENSION_PX = 1600;
 /**
  * Signs Phase S4.2B.2: how much larger a reconstruction detail crop is
  * kept than its corresponding source crop's own dimensions — fixed at 2x
@@ -257,7 +292,17 @@ export const SIGN_PRESERVATION_GRID_ROWS = 3;
  */
 export const SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE = 2;
 /** source overview + reconstruction overview + 6 source crops + 6 reconstruction crops. */
-export const SIGN_PRESERVATION_MAX_IMAGE_COUNT = 14;
+export const SIGN_PRESERVATION_BASE_IMAGE_COUNT = 14;
+/**
+ * Parametric Frame Semantic Evidence Completion Phase: how many additional
+ * images `reconstruct_parametric_frame` verifications carry beyond the base
+ * set — one full-frame overview pair (source, reconstruction), for
+ * `perimeter_edge_alignment` alone. Absent (0) for every other step kind.
+ */
+export const SIGN_PRESERVATION_PERIMETER_OVERVIEW_IMAGE_COUNT = 2;
+/** The ceiling any single verification's derived image set can reach — `SIGN_PRESERVATION_BASE_IMAGE_COUNT` plus the perimeter overview pair when present. Still always a fixed, data-independent, bounded count for whichever shape actually applies — never data-dependent. */
+export const SIGN_PRESERVATION_MAX_IMAGE_COUNT =
+  SIGN_PRESERVATION_BASE_IMAGE_COUNT + SIGN_PRESERVATION_PERIMETER_OVERVIEW_IMAGE_COUNT;
 
 /**
  * Signs Phase S4.2C.1: explicit staleness lever for the TRANSPORT

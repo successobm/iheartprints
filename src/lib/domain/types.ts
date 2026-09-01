@@ -2789,7 +2789,7 @@ export interface SignPreservationTransportAttempt {
   /** Explicit staleness lever for TRANSPORT MECHANISM behavior, independent of `imageDerivationVersion`/model/prompt/schema — see `SIGN_PRESERVATION_TRANSPORT_VERSION_FILE_ID` in `sign-preservation/contracts.ts`. */
   transportVersion: string;
   status: SignPreservationTransportAttemptStatus;
-  /** Exactly `SIGN_PRESERVATION_MAX_IMAGE_COUNT` (14) entries once uploads are underway — never fewer once `status !== "in_progress"` with any file recorded. */
+  /** Exactly `SIGN_PRESERVATION_BASE_IMAGE_COUNT` (14) entries once uploads are underway — `SIGN_PRESERVATION_PERIMETER_OVERVIEW_IMAGE_COUNT` (2) more when the request also carries perimeter-visible evidence (`reconstruct_parametric_frame`) — never fewer once `status !== "in_progress"` with any file recorded, for whichever shape this attempt's own request actually used. */
   files: SignPreservationTransportFileRecord[];
   inferenceDispatchedAt: string | null;
   inferenceOutcome: SignPreservationTransportInferenceOutcome | null;
