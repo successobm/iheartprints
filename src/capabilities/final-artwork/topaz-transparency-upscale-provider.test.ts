@@ -3,7 +3,11 @@ import { describe, it } from "node:test";
 import { PNG } from "pngjs";
 
 import { PRINT_PLACEMENT_SIZING_POLICY } from "@/capabilities/shared/print-placement-dimensions";
-import { ProviderError } from "@/capabilities/providers/provider-error";
+import {
+  ProviderError,
+  classifyFetchRejectionDispatch,
+  isRetryableProviderError,
+} from "@/capabilities/providers/provider-error";
 
 import {
   resolveReconstructionRequest,
@@ -1282,5 +1286,185 @@ describe("Fix Topaz Resume/Download Failure", () => {
       /no longer available/i,
     );
     assert.equal(submitCallCount(), 0, "a permanently-gone resumed result must never fall back to a fresh paid submission");
+  });
+});
+
+/**
+ * Real DTF customer incident (project d2936fe5-...): the real Topaz submit
+ * call for the confirmed 10.5"x14" reconstruction failed with
+ * `TypeError: UND_ERR_CONNECT_TIMEOUT` -- a TCP connect timeout, before any
+ * HTTP response was ever received. Diagnosis found `submit()`'s own network
+ * catch threw with `dispatch` left `undefined`, so it fell back to the
+ * generic per-classification default (`dispatched_ambiguous` for every
+ * `"network"` failure) regardless of the actual cause code -- even though
+ * the shared `classifyFetchRejectionDispatch` classifier (already used by
+ * `stripe-checkout-provider.ts` and both OpenAI adapters, and already
+ * proven correct for this EXACT code in `transport-dispatch-classification
+ * .test.ts`'s "Signs Phase S4.2C.8" case) has always known this specific
+ * cause code is provably pre-dispatch.
+ *
+ * The fix wires that existing classifier into `submit()`'s catch. Nothing
+ * else changes: every other network failure at `submit()` -- a reset, a
+ * generic timeout code, anything unrecognized -- must stay exactly as
+ * conservative (`dispatched_ambiguous`) as before this fix.
+ */
+describe("Topaz submit() dispatch classification (real DTF incident: UND_ERR_CONNECT_TIMEOUT)", () => {
+  function connectTimeoutFetch(): { fetchImpl: typeof fetch; submitCallCount: () => number } {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      throw new TypeError("fetch failed", {
+        cause: { name: "ConnectTimeoutError", code: "UND_ERR_CONNECT_TIMEOUT" },
+      });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, submitCallCount: () => calls };
+  }
+
+  it("1: a TCP connect-timeout at submit() is classified network/not_dispatched -- the exact real-incident shape", async () => {
+    const { fetchImpl, submitCallCount } = connectTimeoutFetch();
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () => provider.produce(baseInput()),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.classification, "network");
+        assert.equal(error.dispatch, "not_dispatched");
+        assert.equal(error.stage, "submit");
+        return true;
+      },
+    );
+    assert.equal(submitCallCount(), 1);
+  });
+
+  it("2: no provider request is ever persisted when submit() never receives a response -- onProviderRequestSubmitted must not fire", async () => {
+    const { fetchImpl } = connectTimeoutFetch();
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(() =>
+      provider.produce(
+        baseInput({
+          onProviderRequestSubmitted: async () => {
+            throw new Error("must never fire -- Topaz never acknowledged a submission");
+          },
+        }),
+      ),
+    );
+  });
+
+  it("3: an ambiguous network failure at submit() (e.g. a mid-flight reset) stays conservative -- not_dispatched protection is NOT broadened", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
+    }) as unknown as typeof fetch;
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () => provider.produce(baseInput()),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.classification, "network");
+        assert.equal(
+          error.dispatch,
+          "dispatched_ambiguous",
+          "a reset can happen after the paid request was already sent -- must never be assumed safe",
+        );
+        return true;
+      },
+    );
+    assert.equal(calls, 1);
+  });
+
+  it("4: an unrecognized submit() network failure also stays conservative", async () => {
+    const fetchImpl = (async () => {
+      throw new Error("some unrecognized transport failure");
+    }) as unknown as typeof fetch;
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () => provider.produce(baseInput()),
+      (error: unknown) =>
+        error instanceof ProviderError &&
+        error.classification === "network" &&
+        error.dispatch === "dispatched_ambiguous",
+    );
+  });
+
+  it("5: retryability now matches the shared provider-error contract -- provably-pre-dispatch is eligible, ambiguous is not", async () => {
+    // Not a Topaz-specific rule: `isRetryableProviderError` is the single
+    // shared gate every provider's transport failure is judged against.
+    // This just confirms the newly-correct `dispatch` value actually lands
+    // on the right side of that existing gate for THIS provider's own
+    // thrown error shape, rather than re-deriving the gate's own logic.
+    const connectTimeoutError = new ProviderError(
+      "network",
+      "x",
+      classifyFetchRejectionDispatch(
+        new TypeError("fetch failed", { cause: { code: "UND_ERR_CONNECT_TIMEOUT" } }),
+      ),
+      "submit",
+    );
+    assert.equal(isRetryableProviderError(connectTimeoutError), true);
+
+    const ambiguousError = new ProviderError(
+      "network",
+      "x",
+      classifyFetchRejectionDispatch(
+        new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }),
+      ),
+      "submit",
+    );
+    assert.equal(isRetryableProviderError(ambiguousError), false);
+  });
+
+  it("6: resuming an existing dispatched request is untouched by this fix -- still never resubmits", async () => {
+    // Belt-and-suspenders alongside "N/U" above: this fix only changes what
+    // `submit()` throws when IT is the call that fails: a caller resuming an
+    // `existingProviderRequest` skips `submit()` entirely and must still
+    // never re-dispatch merely because a later call (poll/download) hits a
+    // transport error.
+    const { fetchImpl, submitCallCount } = buildDownloadFailureFakeFetch({ imageTransientFailures: 0 });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    const output = await provider.produce(
+      baseInput({
+        existingProviderRequest: {
+          providerKey: "topaz_transparency_upscale",
+          providerRequestId: "resume-test-process-id",
+          providerStatus: "submitted",
+        },
+        onProviderRequestSubmitted: async () => {
+          throw new Error("must not be called -- resuming, not submitting");
+        },
+      }),
+    );
+    assert.equal(output.providerRequestId, "resume-test-process-id");
+    assert.equal(submitCallCount(), 0, "resuming an existing request must never call submit()");
   });
 });

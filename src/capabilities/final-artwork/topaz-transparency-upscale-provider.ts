@@ -33,7 +33,11 @@
 import { PNG } from "pngjs";
 
 import { withRetry } from "@/capabilities/shared/retry";
-import { ProviderError, isRetryableProviderError } from "@/capabilities/providers/provider-error";
+import {
+  ProviderError,
+  classifyFetchRejectionDispatch,
+  isRetryableProviderError,
+} from "@/capabilities/providers/provider-error";
 
 import { resolveWidthConstrainedSizing } from "@/capabilities/shared/print-placement-dimensions";
 
@@ -1188,16 +1192,26 @@ export class TopazTransparencyUpscaleProvider
           "submit",
         );
       }
-      // Deliberately NOT `not_dispatched` here (unlike `fetchStatus`'s and
-      // `download`'s equivalent catches below): this is the one call in
-      // this file that IS a paid dispatch, so the stack genuinely cannot
-      // prove the request never reached — and was never billed by — the
-      // provider. Left at its conservative default (`dispatched_ambiguous`)
-      // exactly as before; only the message gains diagnostic detail.
+      // This IS the one call in this file that is a paid dispatch, so a
+      // `fetch` rejection here is not uniformly "nothing was sent" — the
+      // stack must classify HONESTLY, not conservatively-by-default.
+      // `classifyFetchRejectionDispatch` already draws that exact line (the
+      // same shared classifier `stripe-checkout-provider.ts` and both OpenAI
+      // adapters use): only a cause code that could ONLY occur before any
+      // bytes reached a remote peer — DNS failure, refused/unreachable
+      // connection, or (Signs Phase S4.2C.8) a TCP connect timeout that
+      // never finished establishing — comes back `not_dispatched`; every
+      // other cause, including anything unrecognized, stays the
+      // conservative `dispatched_ambiguous` it always was. Previously this
+      // threw with `dispatch` left `undefined`, which falls back to the
+      // generic per-classification default (`dispatched_ambiguous` for
+      // every `"network"` failure) regardless of the actual cause code —
+      // silently discarding the provably-safe cases the shared classifier
+      // already knows how to recognize.
       throw new ProviderError(
         "network",
         `The production reconstruction provider could not be reached (${describeFetchFailure(error)}).`,
-        undefined,
+        classifyFetchRejectionDispatch(error),
         "submit",
       );
     } finally {
