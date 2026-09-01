@@ -212,12 +212,23 @@ export type SignDefectCode =
    * Signs Perimeter Safety Phase: a continuous, near-edge structure on an
    * edge the geometry repair must extend — evidence the artwork's meaning
    * depends on the finished substrate edge (a border, frame, rounded-corner
-   * treatment, or similar), not merely a seam-quality risk. No admitted
-   * repair can resolve this automatically (`edge-dependence.ts`); the plan
-   * refuses outright rather than offering a repair operator review could
-   * (incorrectly) treat as adequate.
+   * treatment, or similar), not merely a seam-quality risk
+   * (`edge-dependence.ts`). Present WHENEVER edge-dependent structure is
+   * detected, whether the plan goes on to block outright (no reconstructable
+   * pattern — see `perimeter_structure_reconstructed` for the alternative)
+   * or to propose bounded reconstruction — the artwork fact is the same
+   * either way; what differs is whether an admitted repair for it exists.
    */
   | "perimeter_structure_at_extension_edge"
+  /**
+   * Production-Aware Perimeter Reconstruction Phase (Constitution §16A.3
+   * amendment 3.1): the edge-dependent structure above cleared
+   * `perimeter-reconstruction.ts`'s affirmative-uniform-per-line evidence
+   * bar, so `reconstruct_perimeter_structure` was proposed instead of an
+   * outright block. Always paired with `repair_requires_review` — this
+   * repair is never `auto_safe` regardless of evidence strength.
+   */
+  | "perimeter_structure_reconstructed"
   /** The fill alternative would cut source pixels — never automatic. */
   | "meaningful_crop_required"
   /** The formulated plan needs human judgment before execution. */
@@ -242,6 +253,19 @@ export type SignRepairStepKind =
   | "reconstruct_resolution"
   | "extend_uniform_background"
   | "pad_uniform_background"
+  /**
+   * Constitution §16A.3 (amendment 3.1) / `sign-preparation/perimeter-
+   * reconstruction.ts`. Extends the canvas along the same axis/leadingPx/
+   * trailingPx geometry `extend_uniform_background`/`pad_uniform_
+   * background` use, but fills the added region by TILING lines actually
+   * measured from the customer's own source pixels near the edge, instead
+   * of one flat colour — for artwork whose edge structure is a simple,
+   * affirmatively uniform-per-line pattern (e.g. stripes), never a guess.
+   * Always `review_required` (never `auto_safe`) by constitutional
+   * requirement, regardless of what risk any other step in the same plan
+   * would independently receive.
+   */
+  | "reconstruct_perimeter_structure"
   | "proportional_resample"
   | "downsample"
   | "approved_crop"

@@ -10,13 +10,16 @@ import { inspectSignArtwork } from "./sign-inspection";
 import { computeSignPlanKey } from "./sign-plan-identity";
 import { planSignRepair } from "./sign-repair-planner";
 import {
+  bandWithEmbeddedMarkArtwork,
   edgeStructureSignArtwork,
   exactAspectSignArtwork,
   ruthLikeSignArtwork,
+  stripedPerimeterBandArtwork,
   transparentSignArtwork,
   uniformBackgroundSignArtwork,
 } from "./sign-fixtures";
 import { describeSignPlanForCustomer } from "./sign-preparation-copy";
+import { measurePerimeterBand } from "./perimeter-reconstruction";
 
 function spec(orderedWidthIn: number, orderedHeightIn: number): SignProductionSpec {
   return {
@@ -42,6 +45,33 @@ function plan(
     inspection,
     sourceAssetId: "asset-1",
     sourceSha256: sha256,
+  });
+}
+
+/**
+ * Same as `plan`, but ALSO measures and supplies `perimeterBands` for all
+ * four edges — exactly what `sign-preparation-capability.ts` computes
+ * alongside inspection in the real orchestration, so this is what a real
+ * planning call for artwork with a reconstructable perimeter actually sees.
+ */
+function planWithBands(
+  image: RgbaImage,
+  orderedWidthIn: number,
+  orderedHeightIn: number,
+  sha256 = "a".repeat(64),
+) {
+  const s = spec(orderedWidthIn, orderedHeightIn);
+  const inspection = inspectSignArtwork(image, s, RIGID_RECT_UP_TO_24X36_V1);
+  const perimeterBands = (["top", "right", "bottom", "left"] as const).map((edge) =>
+    measurePerimeterBand(image, edge),
+  );
+  return planSignRepair({
+    spec: s,
+    policy: RIGID_RECT_UP_TO_24X36_V1,
+    inspection,
+    sourceAssetId: "asset-1",
+    sourceSha256: sha256,
+    perimeterBands,
   });
 }
 
@@ -326,5 +356,89 @@ describe("sign repair planner — perimeter safety (edge-dependent structure)", 
     const result = plan(image, 24, 12);
     assert.equal(result.status, "planned");
     assert.doesNotMatch(JSON.stringify(result), /perimeter_structure_at_extension_edge/);
+  });
+});
+
+/**
+ * Production-Aware Perimeter Reconstruction Phase (Constitution §16A.3
+ * amendment 3.1). Same 1000x1500-source / 12x24in-order geometry as the
+ * perimeter-safety suite above (vertical axis, top/bottom affected) —
+ * proving reconstruction is admitted EXACTLY when the prior phase's
+ * blocking evidence ALSO clears the reconstructability bar, and still
+ * blocks otherwise.
+ */
+describe("sign repair planner — production-aware perimeter reconstruction", () => {
+  const ORDERED_WIDTH_IN = 12;
+  const ORDERED_HEIGHT_IN = 24;
+
+  it("1/2: a reconstructable band (top: 2-colour full-length stripe; bottom: plain uniform, a degenerate reconstructable case) is admitted, never blocked", () => {
+    const image = stripedPerimeterBandArtwork(1800, 2700);
+    const result = planWithBands(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "planned");
+    const p = result.plan!;
+    assert.ok(p.steps.some((step) => step.kind === "reconstruct_perimeter_structure"));
+    assert.doesNotMatch(JSON.stringify(p.steps), /pad_uniform_background/);
+    assert.ok(p.defects.includes("perimeter_structure_reconstructed"));
+  });
+
+  it("10: the reconstruction step is ALWAYS review_required — never auto_safe, regardless of evidence strength (Constitution §16A.3 amendment 3.1)", () => {
+    const image = uniformBackgroundSignArtwork(1000, 1500); // the STRONGEST possible evidence: every row identically flat
+    // Force the same axis by mismatching the aspect, exactly like the striped fixture above.
+    const result = planWithBands(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    // A plain uniform source is normally handled by extend_uniform_background
+    // (auto_safe) — this test exists to confirm THAT remains true (no
+    // edge-dependence ever fires for genuinely uniform edges), by contrast
+    // with the striped case below which DOES trigger reconstruction and
+    // MUST still be review_required despite equally strong evidence.
+    assert.equal(result.status, "planned");
+    assert.equal(result.plan!.overallRisk, "auto_safe");
+
+    const striped = stripedPerimeterBandArtwork(1800, 2700);
+    const stripedResult = planWithBands(striped, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    const step = stripedResult.plan!.steps.find((s) => s.kind === "reconstruct_perimeter_structure")!;
+    assert.equal(step.risk, "review_required");
+    assert.equal(stripedResult.plan!.overallRisk, "review_required");
+    assert.ok(stripedResult.plan!.defects.includes("repair_requires_review"));
+  });
+
+  it("3/9: edge-dependent but NOT reconstructable (no perimeterBands evidence supplied) still blocks — unchanged from the safety-only phase", () => {
+    const image = stripedPerimeterBandArtwork(1800, 2700);
+    const result = plan(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN); // plain `plan`, no perimeterBands
+    assert.equal(result.status, "blocked");
+  });
+
+  it("9: a band containing an embedded mark (an ambiguous corner/hole-like object) is correctly classified not-reconstructable and blocks — never silently tiled through", () => {
+    const image = bandWithEmbeddedMarkArtwork();
+    const result = planWithBands(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "blocked");
+    assert.ok(
+      result.defects.some((defect) => defect.code === "perimeter_structure_at_extension_edge"),
+    );
+    assert.doesNotMatch(JSON.stringify(result), /reconstruct_perimeter_structure/);
+  });
+
+  it("scope limit: never admitted alongside reconstruct_resolution, even when the band would otherwise reconstruct — blocks instead of guessing at a not-yet-supported combination", () => {
+    // Undersized (needs reconstruct_resolution) AND aspect-mismatched with
+    // a reconstructable top band.
+    const image = stripedPerimeterBandArtwork(400, 600);
+    const result = planWithBands(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "blocked");
+    assert.doesNotMatch(JSON.stringify(result), /reconstruct_perimeter_structure/);
+  });
+
+  it("6/16: the reconstructed plate's expected output geometry exactly matches the ordered aspect, identical to the pad-step's own math", () => {
+    const image = stripedPerimeterBandArtwork(1800, 2700);
+    const result = planWithBands(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    const p = result.plan!;
+    assert.ok(Math.abs(p.expectedOutputWidthPx / p.expectedOutputHeightPx - ORDERED_WIDTH_IN / ORDERED_HEIGHT_IN) < 0.001);
+  });
+
+  it("L: planKey differs between the safety-only (blocked) evaluation and the reconstruction-admitted (planned) evaluation of the identical source/order", () => {
+    const image = stripedPerimeterBandArtwork(1800, 2700);
+    const blocked = plan(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    const reconstructed = planWithBands(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(blocked.status, "blocked");
+    assert.equal(reconstructed.status, "planned");
+    assert.ok(reconstructed.plan!.planKey.length > 0);
   });
 });

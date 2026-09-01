@@ -14,6 +14,8 @@ import { PNG } from "pngjs";
 
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 
+import { edgeBandDepthPx } from "./edge-inspection";
+
 export interface Rgba {
   r: number;
   g: number;
@@ -190,7 +192,11 @@ export function edgeStructureSignArtwork(options: {
   ];
   for (let y = 0; y < contentDepthPx; y++) {
     for (let x = marginPx; x < marginPx + contentLengthPx; x++) {
-      const color = options.solidColor ? ALT_COLORS[0]! : ALT_COLORS[(x + y) % ALT_COLORS.length]!;
+      // `y` only (never `x`) — each ROW must be internally uniform for the
+      // `mixed_or_uncertain`-under-the-old-classifier shape this fixture
+      // targets; varying by `x` too would make individual rows non-uniform,
+      // which is a DIFFERENT (also real, separately covered) fixture shape.
+      const color = options.solidColor ? ALT_COLORS[0]! : ALT_COLORS[y % ALT_COLORS.length]!;
       const i = (y * width + x) * 4;
       image.data[i] = color.r;
       image.data[i + 1] = color.g;
@@ -198,6 +204,72 @@ export function edgeStructureSignArtwork(options: {
       image.data[i + 3] = 255;
     }
   }
+  return image;
+}
+
+/**
+ * Production-Aware Perimeter Reconstruction Phase: a genuinely
+ * row-uniform, full-EDGE-LENGTH striped band along the TOP edge — every
+ * row within the measured depth is ONE flat colour across the ENTIRE
+ * width (no margin, unlike `edgeStructureSignArtwork`, which intentionally
+ * leaves one for the coarser whole-band edge-dependence tests). This is
+ * the shape `perimeter-reconstruction.ts`'s STRICT per-row uniform-
+ * coverage bar (`UNIFORM_MIN_COVERAGE`) is actually meant to admit — a
+ * real striped/banded perimeter design, not merely "mostly one colour on
+ * average".
+ */
+export function stripedPerimeterBandArtwork(width = 1000, height = 1500): RgbaImage {
+  const image = uniformBackgroundSignArtwork(width, height);
+  const depth = edgeBandDepthPx(width, height);
+  // Row 0 (the OUTERMOST line, at the actual edge) is a distinct MINORITY
+  // accent colour; every deeper row shares a second, majority colour. Both
+  // groups are individually solid (each row 100% one colour, satisfying
+  // `measurePerimeterBand`'s per-row bar), but because row 0's colour is a
+  // small minority of the whole band, `edge-inspection.ts`'s WHOLE-BAND
+  // dominant colour is the majority one — meaning row 0 does NOT match it,
+  // giving a genuinely LOW `outermostCoverage` and correctly tripping
+  // `isEdgeDependentStructure` too. A naive every-other-row stripe with two
+  // EQUALLY-sized colour groups does NOT do this: ties in the whole-band
+  // dominant-bucket computation resolve to whichever colour was scanned
+  // first (row 0's own colour), which would make the outermost line
+  // trivially "match the dominant colour" and never read as edge-dependent
+  // at all — an accent/fill split avoids that tie entirely.
+  const accentColor: Rgba = { r: 200, g: 20, b: 20 };
+  const fillColor: Rgba = { r: 20, g: 20, b: 20 };
+  fillRect(image, 0, 0, width, 1, accentColor);
+  for (let y = 1; y < depth; y++) {
+    fillRect(image, 0, y, width, y + 1, fillColor);
+  }
+  return image;
+}
+
+/**
+ * Production-Aware Perimeter Reconstruction Phase: a band otherwise
+ * identical to `stripedPerimeterBandArtwork`'s solid-fill degenerate case,
+ * but with one small isolated mark (e.g. a mounting-hole/corner indicator)
+ * embedded roughly in the middle of the band's own depth and length. Must
+ * refuse reconstructability — proves the row-uniform evidence bar alone is
+ * what keeps this capability from ever tiling through unmeasured structure,
+ * without needing any dedicated mark detector (see `perimeter-
+ * reconstruction.ts`'s own module doc for why that is sufficient).
+ */
+export function bandWithEmbeddedMarkArtwork(width = 1000, height = 1500): RgbaImage {
+  const image = uniformBackgroundSignArtwork(width, height);
+  const depth = edgeBandDepthPx(width, height);
+  // Same accent-row-0/majority-fill split `stripedPerimeterBandArtwork`
+  // uses, and for the identical reason: row 0 must be a whole-band MINORITY
+  // colour so the outermost line genuinely does not match the band's
+  // dominant colour, which is what makes this fixture edge-dependent (not
+  // merely non-reconstructable) — the planner never even LOOKS at
+  // reconstructability unless edge-dependence already fired.
+  const accentColor: Rgba = { r: 200, g: 20, b: 20 };
+  const fillColor: Rgba = { r: 40, g: 40, b: 200 };
+  fillRect(image, 0, 0, width, 1, accentColor);
+  for (let y = 1; y < depth; y++) fillRect(image, 0, y, width, y + 1, fillColor);
+  // The mark sits within the FILL rows (never row 0) — it alone is what
+  // must break reconstructability; row 0's own accent colour stays clean.
+  const markY = Math.max(1, Math.floor(depth / 2));
+  fillRect(image, 490, markY, 510, markY + 1, { r: 255, g: 255, b: 255 });
   return image;
 }
 

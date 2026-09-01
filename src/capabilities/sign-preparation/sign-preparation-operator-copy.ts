@@ -129,6 +129,8 @@ function describeStepForOperator(
     case "extend_uniform_background":
     case "pad_uniform_background":
       return describePad(step, inspection);
+    case "reconstruct_perimeter_structure":
+      return describeReconstructPerimeter(step);
     case "rotate_90":
       return describeRotate(step);
     case "approved_crop":
@@ -245,6 +247,39 @@ function describePad(step: SignRepairStep, inspection: SignInspectionReport): Si
     detail,
     needsReview,
     reviewReason,
+  };
+}
+
+/**
+ * Production-Aware Perimeter Reconstruction Phase (Constitution §16A.3
+ * amendment 3.1). Always `needsReview` — this repair is constitutionally
+ * never `auto_safe` — and the copy is explicit that corner/hole indicators
+ * are NOT part of what this repair does, so an operator never assumes a
+ * mark they see near a corner was checked or moved when it was not.
+ */
+function describeReconstructPerimeter(step: SignRepairStep): SignPlanOperatorStepView {
+  const axis = stringParam(step, "axis");
+  const leading = numberParam(step, "leadingPx");
+  const trailing = numberParam(step, "trailingPx");
+  const edges = edgesForAxis(axis);
+
+  let detail: string | null = null;
+  if (edges && leading !== null && trailing !== null) {
+    const [leadEdge, trailEdge] = edges;
+    detail =
+      `Extend the ${leadEdge} edge by ${leading}px and the ${trailEdge} edge by ${trailing}px, ` +
+      "continuing the design's own measured border/edge pattern outward from each edge — every added pixel is a colour " +
+      "already present in the customer's artwork, never invented.";
+  }
+
+  return {
+    summary: "Reconstruct the artwork's own border/edge design outward to reach the finished sign's edges.",
+    detail,
+    needsReview: true,
+    reviewReason:
+      "This repair changes the artwork's perimeter geometry to match the finished sign size, so a human must confirm " +
+      "the result before production — including checking the corners, since this repair does NOT detect or reposition " +
+      "any mounting-hole or corner indicator; if one is present, verify its placement manually.",
   };
 }
 

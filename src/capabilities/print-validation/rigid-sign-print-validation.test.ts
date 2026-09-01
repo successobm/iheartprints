@@ -1115,4 +1115,20 @@ describe("Signs substrate boundary → print_ready (Perimeter Safety Phase)", ()
     assert.equal(checkOf(report)?.status, "fail");
     assert.notEqual(report.status, "ready", "the false-positive shape this phase exists to close");
   });
+
+  it("12: a plan using ONLY reconstruct_perimeter_structure (no reconstruct_resolution) reaches ready once every other check — including substrate boundary — passes; PrintValidation's checks are step-kind-agnostic by design", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          containsOnlyAdmittedSteps: true,
+          planRequiresBoundedReconstruction: false,
+          substrateBoundary: {
+            edgeDependentStructureOnAffectedEdge: true,
+            perimeterAlignmentAnswer: "same",
+          },
+        }),
+      }),
+    );
+    assert.equal(report.status, "ready");
+  });
 });

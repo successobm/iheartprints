@@ -6,18 +6,25 @@
  * not reinterpret — it is the smallest component that turns "here is a
  * plan" into "here are the pixels that plan describes," nothing more.
  *
- * S2 EXECUTES exactly five step kinds: `extend_uniform_background`,
- * `pad_uniform_background`, `proportional_resample`, `downsample`,
- * `rotate_90`. `reconstruct_resolution` and `approved_crop` are NEVER
- * executed here — encountering either in the plan is an immediate, honest
- * refusal before any pixel is touched (Constitution §16A.3: S2 performs zero
- * provider reconstruction; `approved_crop` remains approval-gated, and no
- * approval mechanism exists yet).
+ * S2 EXECUTES exactly six step kinds: `extend_uniform_background`,
+ * `pad_uniform_background`, `reconstruct_perimeter_structure`,
+ * `proportional_resample`, `downsample`, `rotate_90`. `reconstruct_resolution`
+ * and `approved_crop` are NEVER executed here — encountering either in the
+ * plan is an immediate, honest refusal before any pixel is touched
+ * (Constitution §16A.3: S2 performs zero provider reconstruction;
+ * `approved_crop` remains approval-gated, and no approval mechanism exists
+ * yet).
  *
- * Never performs: crop, seam blending, generative extension, content-aware
- * fill, arbitrary color replacement, reconstruction, redraw, or text change.
- * A fill color the plan itself could not determine (`params.color ===
- * "unconfirmed"`) is refused rather than invented.
+ * Never performs: crop, seam blending, content-aware fill, arbitrary color
+ * invention, generative reconstruction, redraw, or text change. A fill color
+ * the plan itself could not determine (`params.color === "unconfirmed"`) is
+ * refused rather than invented. `reconstruct_perimeter_structure` is the one
+ * deliberate, narrow exception to "never performs... reconstruction" — see
+ * its own doc below and `perimeter-reconstruction.ts` (Constitution §16A.3
+ * amendment 3.1): it tiles COLOURS THE PLAN ALREADY MEASURED from the real
+ * source, never anything generated, inferred, or blended, so it is
+ * mechanically no different from `executeExtend`'s existing flat-fill blit —
+ * only the fill pattern the plan supplies differs.
  */
 
 import { PNG } from "pngjs";
@@ -27,6 +34,7 @@ import { hasAnyTransparentPixel, resampleExact } from "@/capabilities/final-artw
 
 import type { SignRepairPlan, SignRepairStep, SignRepairStepKind } from "./contracts";
 import { deriveUniformBackgroundExtension } from "./sign-geometry";
+import { tiledRowColor, type SignPerimeterBandMeasurement, type SignPerimeterBandRow } from "./perimeter-reconstruction";
 
 export interface SignExecutionBounds {
   x: number;
@@ -56,6 +64,7 @@ export type SignExecutionResult =
 const ADMITTED_STEP_KINDS = new Set<SignRepairStep["kind"]>([
   "extend_uniform_background",
   "pad_uniform_background",
+  "reconstruct_perimeter_structure",
   "proportional_resample",
   "downsample",
   "rotate_90",
@@ -473,6 +482,8 @@ function executeStep(
     case "extend_uniform_background":
     case "pad_uniform_background":
       return executeExtend(image, bounds, step);
+    case "reconstruct_perimeter_structure":
+      return executeReconstructPerimeter(image, bounds, step);
     default:
       return {
         status: "refused",
@@ -590,6 +601,152 @@ function requirePositiveIntOrZero(value: unknown): number | null {
     return null;
   }
   return value;
+}
+
+/**
+ * Reads one measured band's rows back out of a step's flat params —
+ * `perimeter-reconstruction.ts` never round-trips through this module
+ * (planning and execution stay separate, same as every other step), so the
+ * flat `{prefix}Row{i}R/G/B` encoding `sign-repair-planner.ts` writes is the
+ * ONLY channel these colours travel through. Missing/malformed data at any
+ * index refuses the WHOLE step — a partially-reconstructed band is never
+ * silently completed with fewer rows than planned.
+ */
+function decodeBandRows(
+  params: Record<string, number | string>,
+  prefix: "leading" | "trailing",
+  depth: number,
+): SignPerimeterBandRow[] | null {
+  const rows: SignPerimeterBandRow[] = [];
+  for (let i = 0; i < depth; i++) {
+    const r = requireByteChannel(params[`${prefix}Row${i}R`]);
+    const g = requireByteChannel(params[`${prefix}Row${i}G`]);
+    const b = requireByteChannel(params[`${prefix}Row${i}B`]);
+    if (r === null || g === null || b === null) return null;
+    rows.push({ r, g, b });
+  }
+  return rows;
+}
+
+function executeReconstructPerimeter(
+  image: RgbaImage,
+  bounds: SignExecutionBounds,
+  step: SignRepairStep,
+): SignExecutionResult {
+  const axis = step.params.axis;
+  if (axis !== "horizontal" && axis !== "vertical") {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail: `Step "${step.kind}" has an invalid axis parameter.`,
+    };
+  }
+  const leadingPx = requirePositiveIntOrZero(step.params.leadingPx);
+  const trailingPx = requirePositiveIntOrZero(step.params.trailingPx);
+  const leadingBandDepthPx = requirePositiveIntOrZero(step.params.leadingBandDepthPx);
+  const trailingBandDepthPx = requirePositiveIntOrZero(step.params.trailingBandDepthPx);
+  if (
+    leadingPx === null ||
+    trailingPx === null ||
+    leadingBandDepthPx === null ||
+    trailingBandDepthPx === null ||
+    leadingBandDepthPx === 0 ||
+    trailingBandDepthPx === 0
+  ) {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail: `Step "${step.kind}" is missing valid leadingPx/trailingPx/band-depth parameters.`,
+    };
+  }
+  const leadingRows = decodeBandRows(step.params, "leading", leadingBandDepthPx);
+  const trailingRows = decodeBandRows(step.params, "trailing", trailingBandDepthPx);
+  if (!leadingRows || !trailingRows) {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail: `Step "${step.kind}" is missing a measured line colour for one of its bands.`,
+    };
+  }
+  const leadingBand: SignPerimeterBandMeasurement = {
+    edge: axis === "vertical" ? "top" : "left",
+    bandDepthPx: leadingBandDepthPx,
+    rows: leadingRows,
+    reconstructable: true,
+    reason: "",
+  };
+  const trailingBand: SignPerimeterBandMeasurement = {
+    edge: axis === "vertical" ? "bottom" : "right",
+    bandDepthPx: trailingBandDepthPx,
+    rows: trailingRows,
+    reconstructable: true,
+    reason: "",
+  };
+
+  const outputWidth = axis === "horizontal" ? image.width + leadingPx + trailingPx : image.width;
+  const outputHeight = axis === "vertical" ? image.height + leadingPx + trailingPx : image.height;
+  const offsetX = axis === "horizontal" ? leadingPx : 0;
+  const offsetY = axis === "vertical" ? leadingPx : 0;
+
+  const data = Buffer.alloc(outputWidth * outputHeight * 4);
+
+  // Fill every line of the added region with its own tiled colour — the
+  // interior (original) region is overwritten below, verbatim, so any
+  // extra work here for interior rows/columns is harmless.
+  if (axis === "vertical") {
+    for (let y = 0; y < leadingPx; y++) {
+      const color = tiledRowColor(leadingBand, leadingPx - 1 - y);
+      fillRow(data, outputWidth, y, color);
+    }
+    for (let y = 0; y < trailingPx; y++) {
+      const color = tiledRowColor(trailingBand, y);
+      fillRow(data, outputWidth, offsetY + image.height + y, color);
+    }
+  } else {
+    for (let x = 0; x < leadingPx; x++) {
+      const color = tiledRowColor(leadingBand, leadingPx - 1 - x);
+      fillColumn(data, outputWidth, outputHeight, x, color);
+    }
+    for (let x = 0; x < trailingPx; x++) {
+      const color = tiledRowColor(trailingBand, x);
+      fillColumn(data, outputWidth, outputHeight, offsetX + image.width + x, color);
+    }
+  }
+
+  // Blit the CURRENT image verbatim at the exact expected offset — original
+  // content pixels are copied byte-for-byte, never touched. Identical to
+  // `executeExtend`'s own blit — only what fills the added region differs.
+  for (let y = 0; y < image.height; y++) {
+    const srcRowStart = y * image.width * 4;
+    const destRowStart = ((y + offsetY) * outputWidth + offsetX) * 4;
+    image.data.copy(data, destRowStart, srcRowStart, srcRowStart + image.width * 4);
+  }
+
+  return {
+    status: "executed",
+    image: { width: outputWidth, height: outputHeight, data },
+    contentBounds: { x: bounds.x + offsetX, y: bounds.y + offsetY, width: bounds.width, height: bounds.height },
+  };
+}
+
+function fillRow(data: Buffer, width: number, y: number, color: SignPerimeterBandRow): void {
+  for (let x = 0; x < width; x++) {
+    const i = (y * width + x) * 4;
+    data[i] = color.r;
+    data[i + 1] = color.g;
+    data[i + 2] = color.b;
+    data[i + 3] = 255;
+  }
+}
+
+function fillColumn(data: Buffer, width: number, height: number, x: number, color: SignPerimeterBandRow): void {
+  for (let y = 0; y < height; y++) {
+    const i = (y * width + x) * 4;
+    data[i] = color.r;
+    data[i + 1] = color.g;
+    data[i + 2] = color.b;
+    data[i + 3] = 255;
+  }
 }
 
 function requireByteChannel(value: unknown): number | null {

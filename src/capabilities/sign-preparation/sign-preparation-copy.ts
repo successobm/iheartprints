@@ -166,6 +166,8 @@ const STEP_ACTION: Partial<Record<SignRepairStepKind, string>> = {
     "add space around the design so it fits your sign without stretching or trimming your artwork",
   pad_uniform_background:
     "add space around the design so it fits your sign without stretching or trimming your artwork",
+  reconstruct_perimeter_structure:
+    "extend the border or edge design of your artwork outward so it still reaches the edges of your sign, without stretching or trimming your artwork",
   proportional_resample: "resize your artwork proportionally",
   downsample: "adjust the resolution to match production requirements",
   approved_crop: "trim your artwork slightly to fit",

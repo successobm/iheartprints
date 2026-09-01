@@ -10,8 +10,20 @@
  *      per-edge evidence)
  *   3. bounded provider reconstruction (refused pre-plan when even the
  *      admitted ceiling cannot reach the blocking minimum)
- *   4. anything touching content — approved_crop, seams over foreground,
+ *   4. bounded, non-generative perimeter STRUCTURE reconstruction
+ *      (Constitution §16A.3 amendment 3.1) — only when an edge the
+ *      extension axis affects carries edge-dependent structure
+ *      (`edge-dependence.ts`) AND that structure clears `perimeter-
+ *      reconstruction.ts`'s affirmative uniform-per-line evidence bar.
+ *      Always human-review-required, never `auto_safe`.
+ *   5. anything touching content — approved_crop, seams over foreground,
  *      opacity decisions — is review or human territory, never automatic.
+ *
+ * Edge-dependent structure that does NOT clear tier 4's evidence bar has no
+ * admitted repair at all — the plan refuses outright (`blocked`) rather
+ * than falling through to tier 5's ordinary `pad_uniform_background`, which
+ * would silently misrepresent an inadmissible repair as an ordinary
+ * reviewable one.
  *
  * Risk discipline: AUTO_SAFE requires proof; uncertainty NEVER downgrades
  * to safe. Fill/crop is never selected automatically (any non-zero crop may
@@ -43,6 +55,7 @@ import {
   SIGN_RECONSTRUCTION_HEADROOM,
   SIGN_RECONSTRUCTION_SCALE_CEILING,
 } from "./resolution-policy";
+import type { SignPerimeterBandMeasurement } from "./perimeter-reconstruction";
 
 export interface SignPlanningInput {
   spec: SignProductionSpec;
@@ -50,6 +63,16 @@ export interface SignPlanningInput {
   inspection: SignInspectionReport;
   sourceAssetId: string;
   sourceSha256: string;
+  /**
+   * Production-Aware Perimeter Reconstruction Phase: one measurement per
+   * edge (however many the caller computed — `sign-preparation-
+   * capability.ts` computes all four), used ONLY when an affected edge is
+   * flagged edge-dependent and would otherwise block. Optional and
+   * defaulted to none — a caller that never supplies this gets EXACTLY the
+   * prior phase's behavior (edge-dependent structure always blocks); this
+   * is additive, never a silent behavior change for an existing caller.
+   */
+  perimeterBands?: SignPerimeterBandMeasurement[];
 }
 
 const RISK_ORDER: Record<SignRiskClass, number> = {
@@ -69,6 +92,41 @@ function edgeByName(
   const found = edges.find((item) => item.edge === edge);
   if (!found) throw new Error(`missing edge evidence for ${edge}`);
   return found;
+}
+
+/**
+ * Flattens both affected edges' measured band rows into `SignRepairStep`'s
+ * flat `Record<string, number | string>` params shape — canonical
+ * serialization (plan identity, `stableStringify`) requires flat values, so
+ * each measured line's colour gets its own dynamically-named key. Every
+ * value here is a real colour `perimeter-reconstruction.ts` measured from
+ * the source; nothing is invented at this layer either.
+ */
+function encodePerimeterBandsParams(
+  axis: "horizontal" | "vertical",
+  leadingPx: number,
+  trailingPx: number,
+  leadingBand: SignPerimeterBandMeasurement,
+  trailingBand: SignPerimeterBandMeasurement,
+): Record<string, number | string> {
+  const params: Record<string, number | string> = {
+    axis,
+    leadingPx,
+    trailingPx,
+    leadingBandDepthPx: leadingBand.bandDepthPx,
+    trailingBandDepthPx: trailingBand.bandDepthPx,
+  };
+  leadingBand.rows.forEach((row, i) => {
+    params[`leadingRow${i}R`] = row.r;
+    params[`leadingRow${i}G`] = row.g;
+    params[`leadingRow${i}B`] = row.b;
+  });
+  trailingBand.rows.forEach((row, i) => {
+    params[`trailingRow${i}R`] = row.r;
+    params[`trailingRow${i}G`] = row.g;
+    params[`trailingRow${i}B`] = row.b;
+  });
+  return params;
 }
 
 /**
@@ -238,30 +296,65 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
     const first = edgeByName(inspection.edges, affectedEdges[0]);
     const second = edgeByName(inspection.edges, affectedEdges[1]);
 
-    // Signs Perimeter Safety Phase: an affected edge whose evidence shows a
-    // continuous, near-edge structure (`edge-dependence.ts`) means this
-    // extension axis would move MEANINGFUL, edge-relative artwork (a
-    // border, frame, rounded-corner treatment, mounting-hole indicators —
-    // anything whose meaning depends on the finished substrate edge) away
-    // from where it needs to end up — a PRODUCTION-SEMANTICS change, never
-    // a pixel-preservation one. Checked, and refused, BEFORE `bothUniform`
-    // below: S1's closed step vocabulary has no structural/generative
-    // repair (Constitution §16A.3's admitted operations are deterministic
-    // pixel ops and one bounded reconstruction, never an outpaint), so no
-    // admitted repair exists — operator review cannot make an incapable
-    // repair safe (a `review_required` plan still offers `pad_uniform_
-    // background` as something to authorize; this is not that — nothing is
-    // offered at all). Pre-rotation edge evidence is never trusted for
-    // this, for the identical reason `bothUniform` already excludes it.
+    // Signs Perimeter Safety / Production-Aware Perimeter Reconstruction
+    // Phases: an affected edge whose evidence shows a continuous, near-edge
+    // structure (`edge-dependence.ts`) means this extension axis would move
+    // MEANINGFUL, edge-relative artwork (a border, frame, rounded-corner
+    // treatment, mounting-hole indicators — anything whose meaning depends
+    // on the finished substrate edge) away from where it needs to end up —
+    // a PRODUCTION-SEMANTICS change, never a pixel-preservation one.
+    // Checked, and resolved, BEFORE `bothUniform` below: either the
+    // narrowly-admitted `reconstruct_perimeter_structure` repair applies
+    // (Constitution §16A.3 amendment 3.1 — real evidence required, always
+    // human-review-required, never `auto_safe`), or no admitted repair
+    // exists at all and the plan refuses outright — `pad_uniform_
+    // background` (the `bothUniform`-false path below) is never offered as
+    // a substitute for either outcome; operator review can authorize a
+    // genuinely admitted repair, never turn an inadmissible one into one.
+    // Pre-rotation edge evidence is never trusted for any of this, for the
+    // identical reason `bothUniform` already excludes it.
     const edgeDependentEdges = rotated
       ? []
       : affectedEdges.filter((edge) =>
           isEdgeDependentStructure(edgeByName(inspection.edges, edge)),
         );
     if (edgeDependentEdges.length > 0) {
+      // Production-Aware Perimeter Reconstruction Phase (Constitution
+      // §16A.3 amendment 3.1): before refusing outright, check whether BOTH
+      // affected edges (not just the one(s) that tripped edge-dependence
+      // above — whatever fills the OTHER side of this axis must also be
+      // provably safe) cleared `perimeter-reconstruction.ts`'s affirmative
+      // uniform-per-line evidence bar. Reconstructability is independent of
+      // — and strictly narrower than — mere edge-dependence: a band can be
+      // edge-dependent (content reaches the edge) yet still not
+      // reconstructable (that content isn't a uniform, tileable pattern),
+      // and that combination still blocks, unchanged from the prior phase.
+      // Scope limit (deliberate, not yet lifted): `reconstruct_perimeter_
+      // structure` never coexists with `reconstruct_resolution` in the same
+      // plan. The band was measured at the SOURCE image's own pixel
+      // geometry, before any provider reconstruction would scale it up —
+      // combining the two needs the measured band depth/colours to be
+      // re-derived proportionally against whatever the provider actually
+      // returns, which `sign-transform-executor.ts`'s S3C adaptive-geometry
+      // machinery does not yet know how to do for this step kind. Blocking
+      // here (never silently falling back to `pad_uniform_background`) is
+      // the honest answer until that combination gets its own audited work.
+      const alreadyNeedsProviderReconstruction = steps.some(
+        (step) => step.kind === "reconstruct_resolution",
+      );
+      const leadingBand = input.perimeterBands?.find((band) => band.edge === affectedEdges[0]);
+      const trailingBand = input.perimeterBands?.find((band) => band.edge === affectedEdges[1]);
+      const reconstructable =
+        !alreadyNeedsProviderReconstruction &&
+        Boolean(leadingBand?.reconstructable && trailingBand?.reconstructable);
+
       defects.push({
         code: "perimeter_structure_at_extension_edge",
-        severity: "blocking",
+        // "blocking" only when no admitted repair actually resolves it — a
+        // plan this defect still allowed to be PRODUCED (the reconstructed
+        // case below) never carries a blocking-severity defect, so nothing
+        // downstream that scans severity has to know this code exists.
+        severity: reconstructable ? "review" : "blocking",
         detail:
           `The ${edgeDependentEdges.join(" and ")} edge band(s) show a continuous, near-edge ` +
           "structure (outermost coverage " +
@@ -272,12 +365,33 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
           edgeDependentEdges
             .map((edge) => edgeByName(inspection.edges, edge).longestNonBackgroundRunPx)
             .join("/") +
-          "px) consistent with artwork whose meaning depends on the finished substrate edge. " +
-          "No admitted repair operation can extend the canvas along this axis without changing that " +
-          "relationship, so this cannot be planned automatically.",
+          "px) consistent with artwork whose meaning depends on the finished substrate edge.",
       });
-      return { status: "blocked", plan: null, defects };
-    }
+
+      if (reconstructable && leadingBand && trailingBand) {
+        defects.push({
+          code: "perimeter_structure_reconstructed",
+          severity: "review",
+          detail:
+            `Both ${affectedEdges.join("/")} edge bands cleared the affirmative uniform-per-line evidence ` +
+            "bar (perimeter-reconstruction.ts) — proposing a bounded, non-generative reconstruction built " +
+            "only from the customer's own measured pixels, never a block. Always human-review-required " +
+            "(Constitution §16A.3 amendment 3.1), regardless of this evidence's strength.",
+        });
+        steps.push({
+          kind: "reconstruct_perimeter_structure",
+          params: encodePerimeterBandsParams(axis, leadingPx, trailingPx, leadingBand, trailingBand),
+          risk: "review_required",
+          reasons: [
+            "Edge-dependent structure was detected, but both affected edges are affirmatively uniform " +
+              "enough per measured line to reconstruct by tiling the customer's own pixels outward — " +
+              "still requires human production review before execution.",
+          ],
+        });
+      } else {
+        return { status: "blocked", plan: null, defects };
+      }
+    } else {
 
     const bothUniform =
       !rotated &&
@@ -360,6 +474,7 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
               .join(" and ")} edge band(s); extending there creates a visible termination seam.`,
         });
       }
+    }
     }
   }
 

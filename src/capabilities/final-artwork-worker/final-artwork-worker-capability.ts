@@ -2100,8 +2100,21 @@ export function createFinalArtworkWorkerCapability(
     // Non-null ONLY when `signGeometryAdapted` is true (the ONE reason
     // `executedStepsMatchPlan` is allowed to be false and still admit a
     // second, evidence-based path to plan integrity).
+    //
+    // Production-Aware Perimeter Reconstruction Phase: `reconstruct_
+    // perimeter_structure` is included here too — NOT for S3C adaptation
+    // (that step never currently coexists with `reconstruct_resolution`,
+    // so `signGeometryAdapted` is always false for it; see `sign-repair-
+    // planner.ts`'s own scope-limiting guard), but because `substrateBoundary`
+    // below reads THIS SAME variable's `axis` to know which edges were
+    // extended. Omitting it here would silently make `edgeDependentStructure
+    // OnAffectedEdge` read `false` for a plan that used the new step — the
+    // one case the `substrate_boundary_semantics` backstop most needs to see.
     const plannedGeometryStep = plan.steps.find(
-      (step) => step.kind === "extend_uniform_background" || step.kind === "pad_uniform_background",
+      (step) =>
+        step.kind === "extend_uniform_background" ||
+        step.kind === "pad_uniform_background" ||
+        step.kind === "reconstruct_perimeter_structure",
     );
     const executedGeometryAdaptation: RigidSignPlanEvidence["executedGeometryAdaptation"] =
       signGeometryAdapted && signExecutionGeometry

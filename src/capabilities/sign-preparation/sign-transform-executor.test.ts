@@ -275,6 +275,214 @@ describe("sign-transform-executor: admitted-step refusals", () => {
   });
 });
 
+/**
+ * Production-Aware Perimeter Reconstruction Phase (Constitution §16A.3
+ * amendment 3.1). Mirrors "extend/pad uniform background" above almost
+ * exactly — same axis/leadingPx/trailingPx geometry, same original-content
+ * blit — the only new surface is what fills the added region.
+ */
+describe("sign-transform-executor: reconstruct_perimeter_structure", () => {
+  it("17: is an S2-admitted step kind, exactly like extend/pad — a plan using only this step needs no separate provider-reconstruction handling", () => {
+    const plan = basePlan({
+      steps: [
+        {
+          kind: "reconstruct_perimeter_structure",
+          params: { axis: "vertical", leadingPx: 2, trailingPx: 2, leadingBandDepthPx: 1, trailingBandDepthPx: 1, leadingRow0R: 1, leadingRow0G: 1, leadingRow0B: 1, trailingRow0R: 1, trailingRow0G: 1, trailingRow0B: 1 },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+    });
+    assert.equal(planContainsOnlyAdmittedSteps(plan), true);
+  });
+
+
+  function bandParams(
+    prefix: "leading" | "trailing",
+    rows: { r: number; g: number; b: number }[],
+  ): Record<string, number> {
+    const params: Record<string, number> = {};
+    rows.forEach((row, i) => {
+      params[`${prefix}Row${i}R`] = row.r;
+      params[`${prefix}Row${i}G`] = row.g;
+      params[`${prefix}Row${i}B`] = row.b;
+    });
+    return params;
+  }
+
+  it("1/4/6: tiles measured rows into the added region (vertical axis), preserves the original content byte-for-byte, and reaches the new outer edges with the outermost measured colour", () => {
+    const source = opaqueImage(100, 60);
+    const leadingRows = [{ r: 200, g: 20, b: 20 }, { r: 20, g: 20, b: 20 }]; // period 2
+    const trailingRows = [{ r: 10, g: 200, b: 10 }];
+    const plan = basePlan({
+      sourceWidthPx: 100,
+      sourceHeightPx: 60,
+      expectedOutputWidthPx: 100,
+      expectedOutputHeightPx: 65,
+      steps: [
+        {
+          kind: "reconstruct_perimeter_structure",
+          params: {
+            axis: "vertical",
+            leadingPx: 4,
+            trailingPx: 1,
+            leadingBandDepthPx: leadingRows.length,
+            trailingBandDepthPx: trailingRows.length,
+            ...bandParams("leading", leadingRows),
+            ...bandParams("trailing", trailingRows),
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+    });
+
+    const result = executeSignRepairPlan(source, plan);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.equal(result.image.width, 100);
+    assert.equal(result.image.height, 65);
+    assert.deepEqual(result.contentBounds, { x: 0, y: 4, width: 100, height: 60 });
+
+    const output = result.image;
+    const px = (x: number, y: number) => {
+      const i = (y * output.width + x) * 4;
+      return [output.data[i], output.data[i + 1], output.data[i + 2], output.data[i + 3]];
+    };
+
+    // Leading region: y=0..3, distance-from-content = 3,2,1,0. Period 2:
+    // tiledRowColor(leadingBand, d) = rows[(1 - (d % 2) + 2) % 2].
+    // d=3 -> index (1-1+2)%2=0 -> rows[0]; d=2 -> index (1-0+2)%2=1 -> rows[1];
+    // d=1 -> rows[0]; d=0 -> rows[1].
+    assert.deepEqual(px(10, 0), [200, 20, 20, 255]); // d=3 -> rows[0]
+    assert.deepEqual(px(10, 1), [20, 20, 20, 255]); // d=2 -> rows[1]
+    assert.deepEqual(px(10, 2), [200, 20, 20, 255]); // d=1 -> rows[0]
+    assert.deepEqual(px(10, 3), [20, 20, 20, 255]); // d=0, adjacent to content -> rows[1]
+
+    // Trailing region: single row, always rows[0].
+    assert.deepEqual(px(10, 64), [10, 200, 10, 255]);
+
+    // Original content copied byte-for-byte at the exact offset.
+    for (let y = 0; y < source.height; y += 7) {
+      for (let x = 0; x < source.width; x += 7) {
+        const srcI = (y * source.width + x) * 4;
+        const destI = ((y + 4) * output.width + x) * 4;
+        assert.deepEqual(
+          [output.data[destI], output.data[destI + 1], output.data[destI + 2], output.data[destI + 3]],
+          [source.data[srcI], source.data[srcI + 1], source.data[srcI + 2], source.data[srcI + 3]],
+        );
+      }
+    }
+  });
+
+  it("horizontal axis: tiles by COLUMN instead of row, same geometry contract as extend_uniform_background", () => {
+    const source = opaqueImage(50, 80);
+    const leadingRows = [{ r: 5, g: 5, b: 200 }];
+    const trailingRows = [{ r: 200, g: 5, b: 5 }];
+    const plan = basePlan({
+      sourceWidthPx: 50,
+      sourceHeightPx: 80,
+      expectedOutputWidthPx: 56,
+      expectedOutputHeightPx: 80,
+      steps: [
+        {
+          kind: "reconstruct_perimeter_structure",
+          params: {
+            axis: "horizontal",
+            leadingPx: 3,
+            trailingPx: 3,
+            leadingBandDepthPx: 1,
+            trailingBandDepthPx: 1,
+            ...bandParams("leading", leadingRows),
+            ...bandParams("trailing", trailingRows),
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+    });
+    const result = executeSignRepairPlan(source, plan);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.deepEqual(result.contentBounds, { x: 3, y: 0, width: 50, height: 80 });
+    const output = result.image;
+    const px = (x: number, y: number) => {
+      const i = (y * output.width + x) * 4;
+      return [output.data[i], output.data[i + 1], output.data[i + 2], output.data[i + 3]];
+    };
+    assert.deepEqual(px(0, 40), [5, 5, 200, 255]);
+    assert.deepEqual(px(55, 40), [200, 5, 5, 255]);
+  });
+
+  it("refuses rather than inventing a colour when a measured row is missing from params", () => {
+    const source = opaqueImage(40, 40);
+    const plan = basePlan({
+      sourceWidthPx: 40,
+      sourceHeightPx: 40,
+      steps: [
+        {
+          kind: "reconstruct_perimeter_structure",
+          params: {
+            axis: "vertical",
+            leadingPx: 5,
+            trailingPx: 5,
+            leadingBandDepthPx: 2,
+            trailingBandDepthPx: 1,
+            // leadingRow1R/G/B deliberately omitted.
+            leadingRow0R: 10,
+            leadingRow0G: 10,
+            leadingRow0B: 10,
+            trailingRow0R: 10,
+            trailingRow0G: 10,
+            trailingRow0B: 10,
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+    });
+    const result = executeSignRepairPlan(source, plan);
+    assert.equal(result.status, "refused");
+  });
+
+  it("5: every tiled colour is one of the measured rows — never a blend, never invented — proving no non-uniform interpolation occurs anywhere in the added region", () => {
+    const source = opaqueImage(60, 60);
+    const leadingRows = [{ r: 11, g: 22, b: 33 }, { r: 44, g: 55, b: 66 }, { r: 77, g: 88, b: 99 }];
+    const plan = basePlan({
+      sourceWidthPx: 60,
+      sourceHeightPx: 60,
+      expectedOutputWidthPx: 60,
+      expectedOutputHeightPx: 68,
+      steps: [
+        {
+          kind: "reconstruct_perimeter_structure",
+          params: {
+            axis: "vertical",
+            leadingPx: 8,
+            trailingPx: 0,
+            leadingBandDepthPx: leadingRows.length,
+            trailingBandDepthPx: 1,
+            ...bandParams("leading", leadingRows),
+            ...bandParams("trailing", [{ r: 1, g: 1, b: 1 }]),
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+    });
+    const result = executeSignRepairPlan(source, plan);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    const output = result.image;
+    const validColors = new Set(leadingRows.map((r) => `${r.r},${r.g},${r.b}`));
+    for (let y = 0; y < 8; y++) {
+      const i = (y * output.width + 30) * 4;
+      const key = `${output.data[i]},${output.data[i + 1]},${output.data[i + 2]}`;
+      assert.ok(validColors.has(key), `row ${y} produced an invented colour: ${key}`);
+    }
+  });
+});
+
 describe("sign-transform-executor: PNG encode", () => {
   it("12/13: encodes a valid, decodable, opaque PNG", () => {
     const image = opaqueImage(30, 30);

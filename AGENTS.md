@@ -37,10 +37,21 @@ explicitly approved Signs phases (S1 and later, each approved by the
 product owner). Outside an approved Signs phase, do not add sign behavior,
 copy, or claims. This admission authorizes nothing else: no banners,
 vehicle wraps, multi-panel murals, contour cutting, dimensional letters,
-installation, vector ingestion (SVG/EPS/AI/PDF), generative redesign or
-outpainting, CMYK/ICC workflows, imposition, sign pricing/catalogs/
+installation, vector ingestion (SVG/EPS/AI/PDF), general generative
+redesign/outpainting/inpainting or any generative-model use against
+customer artwork, CMYK/ICC workflows, imposition, sign pricing/catalogs/
 fulfillment, or customer-facing sign storefront — and no embroidery,
-engraving, paper, or 3D engines. Never treat the dormant `signage`
+engraving, paper, or 3D engines. Constitution §16A.3 (amendment 3.1) admits
+exactly one narrow, non-generative exception — deterministic, pixel-sourced
+perimeter structure reconstruction (`reconstruct_perimeter_structure`,
+`src/capabilities/sign-preparation/perimeter-reconstruction.ts`), gated on
+affirmative deterministic reconstructability evidence, always
+operator-review-required, never inferring a manufacturing specification not
+already present in the artwork or order, and never permitted to touch
+protected interior content beyond uniform proportional scaling. That one
+step is the entire exception; nothing else on this list is authorized by
+it, and it is itself gated behind its own approved Signs phase like
+everything else here. Never treat the dormant `signage`
 placeholder arm in `production-requirements.ts` (36×72 in guess,
 `targetPpi: null`, vector-flavored) as approved policy: the rigid-sign
 profile will be built to Constitution §16A and the Phase S0 audit, not to
