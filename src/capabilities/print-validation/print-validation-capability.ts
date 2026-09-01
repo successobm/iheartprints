@@ -900,6 +900,36 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
     reason: sign.contentBoundsReason,
   });
 
+  // Signs Perimeter Safety Phase: defense in depth (real incident
+  // cc6cfc4b-...) — every check above can pass (pixels preserved, correct
+  // dimensions/PPI, opaque, nothing cropped) while a geometry-extension
+  // repair has still moved edge-relative artwork away from the finished
+  // substrate edge it depends on. This never trusts `sign-repair-planner
+  // .ts` to have already refused such a plan — a future planner regression
+  // must still be caught here, independently, from the plate's own
+  // evidence. `edgeDependentStructureOnAffectedEdge=false` (nothing
+  // edge-dependent was extended) passes trivially — this check adds no
+  // risk to the ordinary case.
+  const substrateBoundaryOk =
+    !sign.substrateBoundary.edgeDependentStructureOnAffectedEdge ||
+    sign.substrateBoundary.perimeterAlignmentAnswer === "same" ||
+    sign.substrateBoundary.perimeterAlignmentAnswer === "not_applicable";
+  checks.push({
+    check: "substrate_boundary_semantics",
+    status: substrateBoundaryOk ? "pass" : "fail",
+    severity: "blocking",
+    reason: !sign.substrateBoundary.edgeDependentStructureOnAffectedEdge
+      ? "No edge-dependent artwork structure was detected on any edge this repair extended."
+      : substrateBoundaryOk
+        ? `Edge-dependent artwork structure was detected on an extended edge, and semantic verification confirmed its relationship to the finished edge (${sign.substrateBoundary.perimeterAlignmentAnswer}).`
+        : sign.substrateBoundary.perimeterAlignmentAnswer === null
+          ? "Edge-dependent artwork structure was detected on an extended edge, and no semantic verification of its finished-edge relationship exists — it cannot certify as ready until that relationship is affirmatively verified."
+          : `Edge-dependent artwork structure was detected on an extended edge, and semantic verification concluded "${sign.substrateBoundary.perimeterAlignmentAnswer}" rather than confirming its relationship to the finished edge survived — it cannot certify as ready.`,
+  });
+  if (!substrateBoundaryOk) {
+    requiredTransformations.add("require_human_review");
+  }
+
   const status = aggregateStatus(checks);
   return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, status);
 }

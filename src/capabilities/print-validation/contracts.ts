@@ -395,6 +395,20 @@ export const PRINT_VALIDATION_CHECK_CODES = [
   "no_unintended_transparency",
   /** Every original source pixel remains inside the plate's bounds, and every added (extended/padded) region lies outside the original content region. */
   "content_within_bounds",
+  /**
+   * Signs Perimeter Safety Phase: defense-in-depth against a genuine real
+   * false positive (project cc6cfc4b-...) — a plate that passed every check
+   * above (dimensions correct, opaque, every source pixel preserved, no
+   * crop) but whose geometry-extension repair pushed edge-relative artwork
+   * (a border, frame, rounded-corner treatment, mounting-hole indicator)
+   * away from the finished substrate edge it depends on. Blocking whenever
+   * the plate's own edge evidence shows edge-dependent structure on an
+   * extended edge AND no semantic verification affirmatively confirms that
+   * relationship survived — independent of, and never inferable from,
+   * `content_within_bounds`, `executed_plan_matches_recorded_plan`, or any
+   * other check here. See `validateRigidSign`'s own reasoning.
+   */
+  "substrate_boundary_semantics",
   /** A repair plan was actually persisted and recorded for this preparation — the plan the executed job claims to have replayed. */
   "repair_plan_recorded",
   /** The plan actually executed is provably the plan that was recorded: its canonical key recomputes identically and only S2-admitted, content-preserving steps were replayed. Also where the print-ready risk boundary is enforced — see this check's own reason text on a `review_required`/`blocked` plan. */
@@ -976,6 +990,14 @@ export interface RigidSignPlanEvidence {
    * `review_required` plan accepts only `"operator"`.
    */
   authorization: RigidSignPlanAuthorizationEvidence | null;
+  /**
+   * Signs Perimeter Safety Phase: see `RigidSignSubstrateBoundaryEvidence`'s
+   * own doc. Required (never optional/undefined) so no existing caller can
+   * silently omit it and have this defense-in-depth check pass by absence —
+   * every caller must state, explicitly, whether an extension happened and
+   * whether its finished-edge relationship was verified.
+   */
+  substrateBoundary: RigidSignSubstrateBoundaryEvidence;
 }
 
 /**
@@ -1027,6 +1049,45 @@ export interface RigidSignPreservationVerificationEvidence {
  * `leadingPx`/`trailingPx` are deliberately excluded: those are the ONE
  * thing a legitimate S3C adaptation is allowed to re-derive.
  */
+/**
+ * Signs Perimeter Safety Phase: the minimum defense-in-depth evidence
+ * PrintValidation needs to independently refuse `print_ready` when a
+ * geometry-extension repair may have moved edge-relative artwork (a
+ * border, frame, rounded-corner treatment, mounting-hole indicator, or
+ * similar) away from the finished substrate edge it depends on — even if
+ * `sign-repair-planner.ts` itself has a future bug that admits such a
+ * repair anyway. Deliberately keyed to NOTHING image/customer-specific
+ * (never a planKey, never a colour, never a project id) — this is a
+ * general production invariant, re-derivable for any rigid-sign plate.
+ *
+ * This module must never import `capabilities/sign-preparation` or
+ * `capabilities/sign-preservation` (same dependency-direction rule
+ * `RigidSignPlanEvidence` itself already follows) — both fields here are
+ * plain booleans/string-unions the WORKER re-derives independently, never
+ * types borrowed from either of those capabilities.
+ */
+export interface RigidSignSubstrateBoundaryEvidence {
+  /**
+   * True when the executed geometry-extension step's own affected edge(s)
+   * carried the deterministic edge-dependence signal
+   * (`sign-preparation/edge-dependence.ts`'s `isEdgeDependentStructure`,
+   * re-derived by the worker from the plate's own persisted edge evidence —
+   * never trusted from the plan's own defect list alone). `false` when no
+   * geometry-extension step executed at all (nothing was extended, nothing
+   * to check) — never a reason to fail this check on its own.
+   */
+  edgeDependentStructureOnAffectedEdge: boolean;
+  /**
+   * The semantic preservation verification's own answer for the
+   * `perimeter_edge_alignment` category, carried as a plain string (never
+   * `SignPreservationSemanticAnswerValue`, to preserve the dependency
+   * direction above). `null` when no semantic verification exists for this
+   * plate at all — treated exactly like a `"changed"`/`"cannot_determine"`
+   * answer below: missing evidence never authorizes.
+   */
+  perimeterAlignmentAnswer: "same" | "changed" | "cannot_determine" | "not_applicable" | null;
+}
+
 export interface RigidSignGeometryStepEvidence {
   kind: string;
   axis: string | null;

@@ -10,11 +10,13 @@ import { inspectSignArtwork } from "./sign-inspection";
 import { computeSignPlanKey } from "./sign-plan-identity";
 import { planSignRepair } from "./sign-repair-planner";
 import {
+  edgeStructureSignArtwork,
   exactAspectSignArtwork,
   ruthLikeSignArtwork,
   transparentSignArtwork,
   uniformBackgroundSignArtwork,
 } from "./sign-fixtures";
+import { describeSignPlanForCustomer } from "./sign-preparation-copy";
 
 function spec(orderedWidthIn: number, orderedHeightIn: number): SignProductionSpec {
   return {
@@ -237,5 +239,92 @@ describe("canonical plan identity", () => {
       })),
     });
     assert.equal(reworded, p.planKey);
+  });
+});
+
+/**
+ * Signs Perimeter Safety Phase (real incident: project cc6cfc4b-..., a
+ * warning/inspection sign whose designed perimeter border and mounting-hole
+ * indicators were pushed inward by a generic `pad_uniform_background`
+ * repair — a real production false positive human review caught after
+ * every deterministic/machine check had already passed).
+ */
+describe("sign repair planner — perimeter safety (edge-dependent structure)", () => {
+  // 1000x1500 (aspect 0.667) against a 12x24in order (aspect 0.5) —
+  // mismatched, forcing the vertical-axis (top/bottom) geometry stage
+  // `edgeStructureSignArtwork` itself affects.
+  const ORDERED_WIDTH_IN = 12;
+  const ORDERED_HEIGHT_IN = 24;
+
+  it("E: generic padding is refused (blocked, no plan) when an affected edge shows edge-dependent structure — never offered for review", () => {
+    const image = edgeStructureSignArtwork({ solidColor: false });
+    const result = plan(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+
+    assert.equal(result.status, "blocked");
+    assert.equal(result.plan, null);
+    assert.ok(
+      result.defects.some((defect) => defect.code === "perimeter_structure_at_extension_edge"),
+      "must carry the specific perimeter defect, not just a generic blocking reason",
+    );
+    const perimeterDefect = result.defects.find(
+      (defect) => defect.code === "perimeter_structure_at_extension_edge",
+    )!;
+    assert.equal(perimeterDefect.severity, "blocking");
+    // Never the generic pad step — nothing resembling "we can still do this
+    // with review" is emitted anywhere in the result.
+    assert.doesNotMatch(JSON.stringify(result), /pad_uniform_background/);
+  });
+
+  it("a plan for the SAME aspect mismatch on an ordinary uniform-background source is unaffected — still an auto_safe extend, not blocked (no over-triggering)", () => {
+    const image = uniformBackgroundSignArtwork(1000, 1500);
+    const result = plan(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "planned");
+    assert.ok(result.plan!.steps.some((step) => step.kind === "extend_uniform_background"));
+    assert.equal(result.plan!.overallRisk, "auto_safe");
+  });
+
+  it("F: operator authorization cannot convert this into a valid executable plan — there is nothing to authorize at all (canProceed/canAuthorize both false, no steps offered)", () => {
+    const image = edgeStructureSignArtwork({ solidColor: false });
+    const result = plan(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "blocked");
+
+    const customerView = describeSignPlanForCustomer({
+      orderedWidthIn: ORDERED_WIDTH_IN,
+      orderedHeightIn: ORDERED_HEIGHT_IN,
+      artworkWidthPx: 1000,
+      artworkHeightPx: 1500,
+      defectCodes: result.defects.map((defect) => defect.code),
+      plan: result.plan,
+    });
+    assert.equal(customerView.status, "blocked");
+    assert.equal(customerView.canProceed, false);
+    assert.equal(customerView.proposedAction, null, "nothing is proposed to authorize");
+    assert.ok(
+      customerView.findings.some((finding) => /border or frame/i.test(finding)),
+      "the actual production problem must be stated in plain language",
+    );
+  });
+
+  it("L: the plan identity is destroyed, not silently reused, once the same source is re-inspected as edge-dependent — a prior planKey can never carry over to a blocked result", () => {
+    const safeImage = uniformBackgroundSignArtwork(1000, 1500);
+    const safeResult = plan(safeImage, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(safeResult.status, "planned");
+    assert.ok(safeResult.plan!.planKey.length > 0);
+
+    const dependentImage = edgeStructureSignArtwork({ solidColor: false });
+    const dependentResult = plan(dependentImage, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(dependentResult.status, "blocked");
+    assert.equal(dependentResult.plan, null, "no planKey exists at all for a blocked result");
+  });
+
+  it("only the edges the geometry stage actually extends are checked — edge-dependent structure on an edge NOT being extended never blocks", () => {
+    // The same fixture's structure sits on TOP; ordering at 24x12 (aspect
+    // 2.0, far from the source's own 0.667/1.5-rotated aspects) drives the
+    // mismatch onto the HORIZONTAL axis (left/right) instead — both of
+    // which remain ordinary, untouched uniform background in this fixture.
+    const image = edgeStructureSignArtwork({ solidColor: false });
+    const result = plan(image, 24, 12);
+    assert.equal(result.status, "planned");
+    assert.doesNotMatch(JSON.stringify(result), /perimeter_structure_at_extension_edge/);
   });
 });

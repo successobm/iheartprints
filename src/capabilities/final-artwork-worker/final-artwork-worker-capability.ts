@@ -115,6 +115,7 @@ import {
   createSignPreservationCapability,
   resolveSignPreservationSemanticProvider,
   type SignPreservationCapability,
+  type SignPreservationSemanticEvidence,
 } from "@/capabilities/sign-preservation";
 import { ProviderError } from "@/capabilities/providers/provider-error";
 import { attachAttentionCheckName } from "@/capabilities/shared/production-variant";
@@ -124,9 +125,14 @@ import {
   pixelsPerMetreForPpi,
   withPhysicalPixelDensity,
 } from "@/capabilities/final-artwork/production-png";
-import type { RigidSignPlanEvidence } from "@/capabilities/print-validation/contracts";
+import type {
+  RigidSignPlanEvidence,
+  RigidSignSubstrateBoundaryEvidence,
+} from "@/capabilities/print-validation/contracts";
 import {
   adaptGeometryStepsToActualReconstruction,
+  affectedEdgesForAxis,
+  anyEdgeIsEdgeDependent,
   buildSignExecutionGeometryEvidence,
   computeSignPlanKey,
   deriveRigidSignProductionRequirements,
@@ -144,6 +150,7 @@ import {
   type ProviderAlphaNormalizationEvidence,
   type SignExecutionBounds,
   type SignExecutionGeometryEvidence,
+  type SignInspectionReport,
   type SignRepairPlan,
   type SignRepairStep,
 } from "@/capabilities/sign-preparation";
@@ -2129,6 +2136,30 @@ export function createFinalArtworkWorkerCapability(
           }
         : null;
 
+    // Signs Perimeter Safety Phase: re-derived independently from the
+    // plate's own persisted evidence — NEVER trusted from the plan's own
+    // defect list (planning may have a future bug; this is the backstop).
+    // `plannedGeometryStep`'s axis is authoritative even under an S3C
+    // adaptation — `axis` is one of the fields `RigidSignExecutedGeometry
+    // AdaptationEvidence` already asserts must be IDENTICAL between the
+    // planned and executed step.
+    const persistedInspection = preparation.inspection as unknown as SignInspectionReport | null;
+    const extendedEdges = affectedEdgesForAxis(
+      typeof plannedGeometryStep?.params.axis === "string" ? plannedGeometryStep.params.axis : null,
+    );
+    const edgeDependentStructureOnAffectedEdge =
+      extendedEdges !== null && persistedInspection !== null
+        ? anyEdgeIsEdgeDependent(persistedInspection.edges, extendedEdges)
+        : false;
+    const semanticEvidence =
+      signPreservationVerification?.semanticEvidence as SignPreservationSemanticEvidence | null | undefined;
+    const perimeterAlignmentAnswer =
+      semanticEvidence?.answers.find((answer) => answer.category === "perimeter_edge_alignment")?.answer ?? null;
+    const substrateBoundary: RigidSignSubstrateBoundaryEvidence = {
+      edgeDependentStructureOnAffectedEdge,
+      perimeterAlignmentAnswer,
+    };
+
     const rigidSign: RigidSignPlanEvidence = {
       sourceAssetId: preparation.originalAssetId,
       sourceSha256,
@@ -2185,6 +2216,7 @@ export function createFinalArtworkWorkerCapability(
         preparation.authorizedPlanKey && preparation.authorizedBy
           ? { planKey: preparation.authorizedPlanKey, authorizedBy: preparation.authorizedBy }
           : null,
+      substrateBoundary,
     };
 
     const validationInput: PrintValidationInput = {

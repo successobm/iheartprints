@@ -189,3 +189,43 @@ describe("buildCombinedVerificationAlgorithmVersion (Signs Phase S4.2A)", () => 
     assert.ok(fileId.includes("transport=sign-preservation-transport:file-id-v1"));
   });
 });
+
+/**
+ * Signs Perimeter Safety Phase: `perimeter_edge_alignment` is the 8th
+ * category, added because the original 7 had a categorical blind spot for
+ * the real cc6cfc4b-... incident — `meaningful_crop_loss` only ever answers
+ * whether CONTENT was lost to a crop, and nothing was cropped there
+ * (uniform-background padding preserves every source pixel).
+ */
+describe("perimeter_edge_alignment category (Signs Perimeter Safety Phase)", () => {
+  it("G: is one of exactly eight required categories", () => {
+    assert.equal(SIGN_PRESERVATION_SEMANTIC_CATEGORIES.length, 8);
+    assert.ok(SIGN_PRESERVATION_SEMANTIC_CATEGORIES.includes("perimeter_edge_alignment"));
+  });
+
+  it("H: a response answering only the original seven categories (missing perimeter_edge_alignment) fails closed — the exact regression this phase exists to prevent", () => {
+    const legacySevenOnly = allSame().filter((answer) => answer.category !== "perimeter_edge_alignment");
+    assert.equal(validateSemanticAnswers(legacySevenOnly), false);
+  });
+
+  it("a fully well-formed eight-answer response, including perimeter_edge_alignment, validates", () => {
+    assert.equal(validateSemanticAnswers(allSame()), true);
+  });
+
+  it("a 'changed' perimeter_edge_alignment answer, even with every other category 'same', makes the overall verdict 'changed' — meaningful_crop_loss staying 'same' never masks it", () => {
+    const answers = allSame().map((answer) =>
+      answer.category === "perimeter_edge_alignment" ? { ...answer, answer: "changed" as const } : answer,
+    );
+    const meaningfulCropLoss = answers.find((answer) => answer.category === "meaningful_crop_loss")!;
+    assert.equal(meaningfulCropLoss.answer, "same", "nothing was cropped — this category correctly stays same");
+    assert.equal(deriveSemanticVerdict(answers), "changed");
+  });
+
+  it("I: an affirmative 'same' (or 'not_applicable') perimeter_edge_alignment answer, with everything else same, still verifies as preserved", () => {
+    assert.equal(deriveSemanticVerdict(allSame()), "preserved");
+    const notApplicable = allSame().map((answer) =>
+      answer.category === "perimeter_edge_alignment" ? { ...answer, answer: "not_applicable" as const } : answer,
+    );
+    assert.equal(deriveSemanticVerdict(notApplicable), "preserved");
+  });
+});

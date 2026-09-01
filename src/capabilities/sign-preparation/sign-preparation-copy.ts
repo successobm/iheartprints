@@ -118,6 +118,8 @@ const DEFECT_FINDING: Partial<Record<SignDefectCode, string>> = {
     "Your artwork has transparent areas, and signs print on an opaque background.",
   foreground_reaches_extension_edge:
     "Part of your design reaches the very edge of the artwork, so filling it in needs a closer look.",
+  perimeter_structure_at_extension_edge:
+    "Part of your design — like a border or frame — is built right up to the edge of your artwork. Adding space around it to fit this sign size would move that part inward, away from the actual edge of the finished sign, so we can't do that automatically.",
   meaningful_crop_required:
     "Fitting your artwork to this size exactly would mean trimming part of your design.",
   // Deliberately NOT mapped: `repair_requires_review` is meta-commentary

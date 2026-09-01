@@ -29,6 +29,7 @@ export type FakeSignPreservationSemanticBehavior =
   | { kind: "missing_object" }
   | { kind: "invented_object" }
   | { kind: "crop_loss" }
+  | { kind: "changed_perimeter_alignment" }
   | { kind: "cannot_determine" }
   | { kind: "all_not_applicable" }
   /** Returns structurally invalid answers (a missing category) WITHOUT throwing — proves the ORCHESTRATOR's own `validateSemanticAnswers` catches this, not just providers that self-report failure. */
@@ -45,6 +46,7 @@ const CHANGED_CATEGORY_FOR_BEHAVIOR: Partial<
   missing_object: "meaningful_objects",
   invented_object: "added_removed_invented",
   crop_loss: "meaningful_crop_loss",
+  changed_perimeter_alignment: "perimeter_edge_alignment",
 };
 
 export class FakeSignPreservationSemanticProvider implements SignPreservationSemanticProvider {

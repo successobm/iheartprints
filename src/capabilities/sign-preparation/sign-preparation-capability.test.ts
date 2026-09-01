@@ -17,7 +17,7 @@ import {
   createSignPreparationCapability,
   SignPreparationStateError,
 } from "./sign-preparation-capability";
-import { ruthLikeSignArtwork, toPngBytes } from "./sign-fixtures";
+import { edgeStructureSignArtwork, ruthLikeSignArtwork, toPngBytes } from "./sign-fixtures";
 
 /**
  * End-to-end S1 flow against the real local repository and a real asset
@@ -201,6 +201,57 @@ describe("SignPreparationCapability", () => {
     assert.equal(await capability.getSignPreparation(other.project.id), null);
     await assert.rejects(
       capability.planSignRepair(other.project.id),
+      SignPreparationStateError,
+    );
+  });
+
+  it("M (Signs Perimeter Safety Phase): an authorization for an earlier, safe plan can never authorize a superseding, corrected (blocked) plan for the same preparation", async () => {
+    const { repo, capability, projectId } = await build();
+    const bytes = toPngBytes(edgeStructureSignArtwork({ solidColor: false }));
+
+    await capability.uploadSignArtwork(projectId, {
+      bytes,
+      declaredContentType: "image/png",
+      filename: "perimeter-design.png",
+    });
+
+    // First confirmation: 12x18in exactly matches the fixture's own 2:3
+    // aspect — no geometry-extension step at all, so edge-dependence is
+    // never even evaluated. Plans cleanly, auto_safe, authorizable by a
+    // customer.
+    await capability.confirmSignProductionSpec(projectId, 12, 18);
+    const safeOutcome = await capability.planSignRepair(projectId);
+    assert.equal(safeOutcome.result.status, "planned");
+    const safePlan = safeOutcome.result.plan!;
+    assert.equal(safePlan.overallRisk, "auto_safe");
+
+    const authorized = await capability.authorizeSignRepairPlan(projectId, { authorizedBy: "customer" });
+    assert.equal(authorized.authorizedPlanKey, safePlan.planKey);
+
+    // Re-confirming a DIFFERENT, mismatched ordered size (12x24, aspect
+    // 0.5) against the SAME immutable original forces the vertical-axis
+    // geometry stage — which this fixture's own top-edge structure now
+    // refuses outright.
+    await capability.confirmSignProductionSpec(projectId, 12, 24);
+    const correctedOutcome = await capability.planSignRepair(projectId);
+    assert.equal(correctedOutcome.result.status, "blocked");
+    assert.ok(
+      correctedOutcome.result.defects.some((defect) => defect.code === "perimeter_structure_at_extension_edge"),
+    );
+
+    // The stale authorization is durably left in place (never silently
+    // cleared) — but the corrected preparation now carries NO plan/planKey
+    // at all, so nothing exists for it to match.
+    const persisted = await repo.getSignPreparation(projectId);
+    assert.equal(persisted!.plan, null);
+    assert.equal(persisted!.planKey, null);
+    assert.equal(persisted!.authorizedPlanKey, safePlan.planKey, "the old authorization record itself is untouched");
+
+    // The one rule this proves: that stale authorization can never be used
+    // to finalize the corrected preparation — there is no plan left to
+    // authorize at all.
+    await assert.rejects(
+      capability.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" }),
       SignPreparationStateError,
     );
   });

@@ -115,10 +115,22 @@ export interface SignPreservationDeterministicEvidence {
 // ---------------------------------------------------------------------
 
 /**
- * The seven fixed, closed comparison categories every semantic
+ * The eight fixed, closed comparison categories every semantic
  * verification answers — never data-dependent, never customer-specific
  * (Ruth is an acceptance example, never a template baked into these
  * categories or any downstream code).
+ *
+ * Signs Perimeter Safety Phase: `perimeter_edge_alignment` added as the
+ * eighth category. The real cc6cfc4b-... incident proved the original
+ * seven had a categorical blind spot: `meaningful_crop_loss` is the closest
+ * existing category to "did geometry repair change something meaningful",
+ * but it only ever answers whether CONTENT was lost to a crop — a uniform-
+ * background PADDING repair crops nothing and preserves every source pixel,
+ * so that category correctly (and unhelpfully) answers "same" even when the
+ * repair pushed a border/frame/mounting-hole system away from the finished
+ * edge it depends on. No existing category asks about a design element's
+ * POSITIONAL relationship to the panel's own physical edge — this one does,
+ * reusing the exact same comparison images/transport, no new provider call.
  */
 export const SIGN_PRESERVATION_SEMANTIC_CATEGORIES = [
   "wording",
@@ -128,6 +140,7 @@ export const SIGN_PRESERVATION_SEMANTIC_CATEGORIES = [
   "meaningful_objects",
   "added_removed_invented",
   "meaningful_crop_loss",
+  "perimeter_edge_alignment",
 ] as const;
 
 export type SignPreservationSemanticCategory =
@@ -182,9 +195,20 @@ export interface SignPreservationSemanticEvidence {
   tokenUsage: { inputTokens: number | null; outputTokens: number | null } | null;
 }
 
-/** Explicit staleness levers for the semantic layer — each bumped only when its own behavior-affecting component changes. */
-export const SIGN_PRESERVATION_PROMPT_VERSION = "sign-preservation-prompt:v1";
-export const SIGN_PRESERVATION_SEMANTIC_SCHEMA_VERSION = "sign-preservation-schema:v1";
+/**
+ * Explicit staleness levers for the semantic layer — each bumped only when
+ * its own behavior-affecting component changes. Both bumped to v2 at the
+ * Signs Perimeter Safety Phase: the category set, schema (`minItems`/
+ * `maxItems`/enum all derive from `SIGN_PRESERVATION_SEMANTIC_CATEGORIES`),
+ * and prompt text all changed together (the new `perimeter_edge_alignment`
+ * category) — any verification recorded under v1 asked a strictly narrower
+ * question than v1's own 7-answer shape now fails `validateSemanticAnswers`
+ * outright (a length mismatch), so reuse was never possible even without
+ * this bump; the bump exists so the combined identity documents WHY, the
+ * same discipline every other lever here already follows.
+ */
+export const SIGN_PRESERVATION_PROMPT_VERSION = "sign-preservation-prompt:v2";
+export const SIGN_PRESERVATION_SEMANTIC_SCHEMA_VERSION = "sign-preservation-schema:v2";
 /**
  * Bumped to v2 at Signs Phase S4.2B.2: reconstruction detail crops are no
  * longer sent at native upstream-reconstruction resolution (which could be

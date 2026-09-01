@@ -131,6 +131,76 @@ export function transparentSignArtwork(width = 600, height = 800): RgbaImage {
   return image;
 }
 
+/**
+ * Signs Perimeter Safety Phase: a continuous, near-full-length band of
+ * non-background content sitting right at the TOP edge — the deterministic
+ * shape a designed perimeter/border/frame graphic produces, regardless of
+ * whether `edge-inspection.ts`'s coarse three-way classifier lands on
+ * `foreground_bleed` or `mixed_or_uncertain`. Geometry is hand-derived (not
+ * guessed) against `edgeBandDepthPx(1000, 1500) === 20`: `contentDepthPx`
+ * rows nearest the edge, across `contentLengthPx` of the width (leaving a
+ * small untouched margin at both ends, never literally 100%), everything
+ * else in the band left as the same uniform background
+ * `uniformBackgroundSignArtwork` uses.
+ *
+ *   `solidColor: true`  — ONE flat alternate colour fills the content rows.
+ *                          With a shallow `contentDepthPx` (4 of 20 band
+ *                          rows), background still covers ~81% of the WHOLE
+ *                          band, so `dominantCoverage` clears
+ *                          `DOMINANT_MIN_COVERAGE` and this classifies
+ *                          `foreground_bleed` under the EXISTING three-way
+ *                          classifier — the "strong continuous border"
+ *                          case (a full-length run, unlike
+ *                          `ruthLikeSignArtwork`'s partial ~12.5% one, at
+ *                          the SAME classification).
+ *   `solidColor: false` — content rows cycle through several DISTINCT
+ *                          alternate colours (no single one competes with
+ *                          the background bucket) across a DEEPER
+ *                          `contentDepthPx` (9 of 20 band rows, ~58%
+ *                          background overall) — `dominantCoverage` lands
+ *                          just under 0.6, classifying `mixed_or_uncertain`
+ *                          — the real S1 acceptance incident's own measured
+ *                          shape (dominantCoverage ~0.595, outermostCoverage
+ *                          ~0.07, longest run ~93% of the edge length).
+ *
+ * Both variants put the SAME outermost-line evidence in front of
+ * `isEdgeDependentStructure` (`outermostCoverage` ~0.07, longest
+ * contiguous run ~93% of the edge length) — proving the signal fires
+ * identically regardless of which three-way bucket the coarse classifier
+ * happens to land on, which is the whole point of it being a genuinely
+ * independent, more specific concept.
+ */
+export function edgeStructureSignArtwork(options: {
+  width?: number;
+  height?: number;
+  solidColor: boolean;
+}): RgbaImage {
+  const width = options.width ?? 1000;
+  const height = options.height ?? 1500;
+  const image = uniformBackgroundSignArtwork(width, height);
+  const contentDepthPx = options.solidColor ? 4 : 9;
+  const marginPx = Math.round(width * 0.035);
+  const contentLengthPx = width - 2 * marginPx;
+  const ALT_COLORS: Rgba[] = [
+    { r: 200, g: 20, b: 20 },
+    { r: 20, g: 20, b: 20 },
+    { r: 20, g: 90, b: 160 },
+    { r: 210, g: 150, b: 20 },
+    { r: 90, g: 20, b: 140 },
+  ];
+  for (let y = 0; y < contentDepthPx; y++) {
+    for (let x = marginPx; x < marginPx + contentLengthPx; x++) {
+      const color = options.solidColor ? ALT_COLORS[0]! : ALT_COLORS[(x + y) % ALT_COLORS.length]!;
+      const i = (y * width + x) * 4;
+      image.data[i] = color.r;
+      image.data[i + 1] = color.g;
+      image.data[i + 2] = color.b;
+      image.data[i + 3] = 255;
+    }
+  }
+  return image;
+}
+
 /** No dominant edge colour anywhere — deterministic "cannot prove" case. */
 export function noisyEdgeSignArtwork(width = 400, height = 600): RgbaImage {
   const image = makeImage(width, height, NEAR_BLACK);

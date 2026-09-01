@@ -208,6 +208,16 @@ export type SignDefectCode =
   | "transparency_present"
   /** Foreground provably reaches an edge the geometry repair must extend — visible seam. */
   | "foreground_reaches_extension_edge"
+  /**
+   * Signs Perimeter Safety Phase: a continuous, near-edge structure on an
+   * edge the geometry repair must extend — evidence the artwork's meaning
+   * depends on the finished substrate edge (a border, frame, rounded-corner
+   * treatment, or similar), not merely a seam-quality risk. No admitted
+   * repair can resolve this automatically (`edge-dependence.ts`); the plan
+   * refuses outright rather than offering a repair operator review could
+   * (incorrectly) treat as adequate.
+   */
+  | "perimeter_structure_at_extension_edge"
   /** The fill alternative would cut source pixels — never automatic. */
   | "meaningful_crop_required"
   /** The formulated plan needs human judgment before execution. */

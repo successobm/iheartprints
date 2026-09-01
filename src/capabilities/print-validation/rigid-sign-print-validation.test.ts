@@ -80,6 +80,11 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
     // override this explicitly (see the "Signs authorization → print_ready"
     // suite below).
     authorization: { planKey: "sign-repair-plan:v1:abc", authorizedBy: "customer" },
+    // Signs Perimeter Safety Phase: the default fixture extended nothing
+    // edge-dependent, so this stays trivially passing unless a test
+    // explicitly overrides it (see the "Signs substrate boundary →
+    // print_ready" suite below).
+    substrateBoundary: { edgeDependentStructureOnAffectedEdge: false, perimeterAlignmentAnswer: null },
     ...overrides,
   };
 }
@@ -980,5 +985,134 @@ describe("Signs S3C adaptive-geometry plan-integrity (LIVE PRODUCT BLOCKER #4D)"
     assert.equal(checkOf(report)?.status, "pass", "sanity: the preserved control case still passes");
     assert.equal(checkOf(changedReport)?.status, "fail");
     assert.notEqual(changedReport.status, "ready");
+  });
+});
+
+/**
+ * Signs Perimeter Safety Phase (real incident: project cc6cfc4b-..., where
+ * every check above passed — dimensions, PPI, opacity, content bounds,
+ * ordinary semantic preservation, crop checks, plan authorization — while a
+ * geometry-extension repair still pushed edge-relative artwork away from
+ * the finished substrate edge it depended on). Defense in depth: this check
+ * must independently refuse `print_ready` even when planning itself has a
+ * future bug that admits such a repair anyway.
+ */
+describe("Signs substrate boundary → print_ready (Perimeter Safety Phase)", () => {
+  function checkOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "substrate_boundary_semantics");
+  }
+
+  it("K: no edge-dependent structure on any extended edge — passes trivially, existing behavior unaffected", () => {
+    const report = printValidation.validateArtwork(baseInput());
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("edge-dependent structure present, but no semantic verification of the finished-edge relationship exists at all → fails closed", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          substrateBoundary: {
+            edgeDependentStructureOnAffectedEdge: true,
+            perimeterAlignmentAnswer: null,
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /no semantic verification/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("edge-dependent structure present, semantic verification concluded 'changed' → fails", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          substrateBoundary: {
+            edgeDependentStructureOnAffectedEdge: true,
+            perimeterAlignmentAnswer: "changed",
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /concluded "changed"/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("edge-dependent structure present, semantic verification 'cannot_determine' → fails (an inconclusive answer never authorizes)", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          substrateBoundary: {
+            edgeDependentStructureOnAffectedEdge: true,
+            perimeterAlignmentAnswer: "cannot_determine",
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("I: edge-dependent structure present, semantic verification affirmatively 'same' → passes this specific check", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          substrateBoundary: {
+            edgeDependentStructureOnAffectedEdge: true,
+            perimeterAlignmentAnswer: "same",
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("edge-dependent structure present, semantic verification 'not_applicable' → also passes (the element genuinely does not depend on the edge after all)", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          substrateBoundary: {
+            edgeDependentStructureOnAffectedEdge: true,
+            perimeterAlignmentAnswer: "not_applicable",
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("J: fails Print Ready even when EVERY other check passes — dimensions, PPI, opacity, content bounds, ordinary preservation, plan authorization all green", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          preservationVerification: preservationVerification(),
+          substrateBoundary: {
+            edgeDependentStructureOnAffectedEdge: true,
+            perimeterAlignmentAnswer: "cannot_determine",
+          },
+        }),
+      }),
+    );
+    // Sanity: every OTHER blocking check genuinely passed.
+    for (const other of [
+      "exact_physical_dimensions",
+      "effective_resolution",
+      "no_unintended_transparency",
+      "content_within_bounds",
+      "executed_plan_matches_recorded_plan",
+      "repair_plan_recorded",
+      "source_lineage",
+    ]) {
+      const check = report.checks.find((c) => c.check === other);
+      assert.ok(check, `expected a "${other}" check to exist`);
+      assert.equal(check!.status, "pass", `"${other}" was expected to pass in this control scenario`);
+    }
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready", "the false-positive shape this phase exists to close");
   });
 });

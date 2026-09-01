@@ -31,6 +31,7 @@ import type {
 } from "./contracts";
 import { SIGN_REPAIR_PLAN_SCHEMA_VERSION } from "./contracts";
 import { diagnoseInspection } from "./sign-diagnosis";
+import { isEdgeDependentStructure } from "./edge-dependence";
 import { computeSignPlanKey } from "./sign-plan-identity";
 import {
   containPlacement,
@@ -236,6 +237,48 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
 
     const first = edgeByName(inspection.edges, affectedEdges[0]);
     const second = edgeByName(inspection.edges, affectedEdges[1]);
+
+    // Signs Perimeter Safety Phase: an affected edge whose evidence shows a
+    // continuous, near-edge structure (`edge-dependence.ts`) means this
+    // extension axis would move MEANINGFUL, edge-relative artwork (a
+    // border, frame, rounded-corner treatment, mounting-hole indicators —
+    // anything whose meaning depends on the finished substrate edge) away
+    // from where it needs to end up — a PRODUCTION-SEMANTICS change, never
+    // a pixel-preservation one. Checked, and refused, BEFORE `bothUniform`
+    // below: S1's closed step vocabulary has no structural/generative
+    // repair (Constitution §16A.3's admitted operations are deterministic
+    // pixel ops and one bounded reconstruction, never an outpaint), so no
+    // admitted repair exists — operator review cannot make an incapable
+    // repair safe (a `review_required` plan still offers `pad_uniform_
+    // background` as something to authorize; this is not that — nothing is
+    // offered at all). Pre-rotation edge evidence is never trusted for
+    // this, for the identical reason `bothUniform` already excludes it.
+    const edgeDependentEdges = rotated
+      ? []
+      : affectedEdges.filter((edge) =>
+          isEdgeDependentStructure(edgeByName(inspection.edges, edge)),
+        );
+    if (edgeDependentEdges.length > 0) {
+      defects.push({
+        code: "perimeter_structure_at_extension_edge",
+        severity: "blocking",
+        detail:
+          `The ${edgeDependentEdges.join(" and ")} edge band(s) show a continuous, near-edge ` +
+          "structure (outermost coverage " +
+          edgeDependentEdges
+            .map((edge) => edgeByName(inspection.edges, edge).outermostCoverage.toFixed(4))
+            .join("/") +
+          ", longest non-background run " +
+          edgeDependentEdges
+            .map((edge) => edgeByName(inspection.edges, edge).longestNonBackgroundRunPx)
+            .join("/") +
+          "px) consistent with artwork whose meaning depends on the finished substrate edge. " +
+          "No admitted repair operation can extend the canvas along this axis without changing that " +
+          "relationship, so this cannot be planned automatically.",
+      });
+      return { status: "blocked", plan: null, defects };
+    }
+
     const bothUniform =
       !rotated &&
       first.classification === "uniform_background" &&

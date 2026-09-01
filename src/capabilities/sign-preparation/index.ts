@@ -16,6 +16,14 @@ export {
   inspectSignEdge,
 } from "./edge-inspection";
 export {
+  EDGE_DEPENDENCE_MAX_OUTERMOST_COVERAGE,
+  EDGE_DEPENDENCE_MIN_DOMINANT_COVERAGE,
+  EDGE_DEPENDENCE_MIN_RUN_FRACTION,
+  affectedEdgesForAxis,
+  anyEdgeIsEdgeDependent,
+  isEdgeDependentStructure,
+} from "./edge-dependence";
+export {
   SIGN_ASPECT_TOLERANCE,
   SIGN_PPI_TOLERANCE,
   containPlacement,
