@@ -1051,7 +1051,24 @@ function CompareStep({
         </p>
         <button
           type="button"
-          disabled={busy || !preparedImageUrl}
+          // Phase 28I Defect (real Chili & Sponsor DTF order): eligibility
+          // must be the DURABLE server answer -- `preparation.hasPreparedArtwork`,
+          // present the instant the very first snapshot loads -- never the
+          // CLIENT's own signed-URL fetch for the comparison thumbnail
+          // (`preparedImageUrl`, minted by a separate round trip in
+          // `ChatApp.tsx` purely so the tile has something to paint).
+          // `CorrectionWorkspace` takes only `projectId` and loads its own
+          // canvas image independently (see `correction-image-load.ts`'s
+          // own loading state) -- it has never needed `preparedImageUrl` to
+          // be populated in this component first. Gating on it anyway left
+          // the doorway looking permanently broken for several seconds on
+          // every load of artwork complex enough to make that thumbnail
+          // fetch slow (real intricate DTF art -- many separation regions
+          // computing concurrently), with no loading affordance to explain
+          // why. A customer should never have to take an unrelated action
+          // (e.g. re-submitting the automatic review) to "unstick" it --
+          // there was never anything to unstick; the gate itself was wrong.
+          disabled={busy || !preparation.hasPreparedArtwork}
           onClick={() => setCorrectionMode("editing")}
           className="mt-2.5 rounded-full border border-black/10 px-3.5 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
           data-action="remove-background-manually"

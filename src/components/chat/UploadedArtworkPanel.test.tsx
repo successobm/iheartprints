@@ -1245,3 +1245,80 @@ describe("Edit Artwork routing (Phase 27E UX correction, Phase 27G/28F renamed)"
     }
   });
 });
+
+/**
+ * Phase 28I (real DTF customer case: a car-show graphic with a black
+ * background and meaningful black internal artwork). "Edit Artwork" was
+ * gated on `!preparedImageUrl` -- the CLIENT's own signed-URL fetch for the
+ * comparison thumbnail, minted by a separate round trip in `ChatApp.tsx` --
+ * rather than the DURABLE, already-known-at-first-render answer,
+ * `preparation.hasPreparedArtwork`. On real, detail-heavy artwork that
+ * thumbnail fetch (racing the separation-review computation for the same
+ * request queue) can take several seconds, during which the doorway looked
+ * permanently disabled with no loading affordance -- exactly the review
+ * screen described in the real customer case. `CorrectionWorkspace` takes
+ * only `projectId` and loads its own canvas independently (see
+ * `correction-image-load.ts`), so it never needed `preparedImageUrl`
+ * pre-loaded here at all; the fix removes the spurious coupling rather than
+ * adding a new loading state to paper over it.
+ */
+describe("Edit Artwork eligibility (Phase 28I — durable eligibility, not transient image hydration)", () => {
+  function render(overrides: {
+    hasPreparedArtwork?: boolean;
+    preparedImageUrl?: string | null;
+    busy?: boolean;
+  } = {}) {
+    return renderToString(
+      createElement(UploadedArtworkPanel, {
+        projectId: "test-project-id",
+        step: "compare" as UploadedArtworkStep,
+        preparation: preparation({ hasPreparedArtwork: overrides.hasPreparedArtwork ?? true }),
+        busy: overrides.busy ?? false,
+        originalImageUrl: "https://signed.example/original.png",
+        preparedImageUrl: overrides.preparedImageUrl ?? "https://signed.example/prepared.png",
+        onUpload: () => {},
+        onSaveDetails: () => {},
+        onPrepare: () => {},
+        onApprove: () => {},
+        onReconsider: () => {},
+      }),
+    );
+  }
+
+  function editArtworkDisabled(html: string): boolean {
+    const compact = html.replace(/\s+/g, " ");
+    const match = /<button([^>]*)data-action="remove-background-manually"[^>]*>/.exec(compact);
+    assert.ok(match, "Edit Artwork button must exist");
+    return /disabled=""/.test(match![1]);
+  }
+
+  it("1: enabled the instant prepared artwork durably exists, even while the comparison thumbnail is still loading (preparedImageUrl null) — the exact real-project shape", () => {
+    const html = render({ hasPreparedArtwork: true, preparedImageUrl: null });
+    assert.equal(editArtworkDisabled(html), false);
+  });
+
+  it("2: enabled once the thumbnail has also finished loading (the ordinary, settled case)", () => {
+    const html = render({ hasPreparedArtwork: true, preparedImageUrl: "https://signed.example/prepared.png" });
+    assert.equal(editArtworkDisabled(html), false);
+  });
+
+  it("3: stays disabled when no prepared artwork durably exists yet — a genuinely ineligible project, not a loading race", () => {
+    const html = render({ hasPreparedArtwork: false, preparedImageUrl: null });
+    assert.equal(editArtworkDisabled(html), true);
+  });
+
+  it("4: disabled while an unrelated action is in flight (busy), independent of prepared-artwork eligibility", () => {
+    const html = render({ hasPreparedArtwork: true, preparedImageUrl: "https://signed.example/prepared.png", busy: true });
+    assert.equal(editArtworkDisabled(html), true);
+  });
+
+  it("no longer reads the client-fetched thumbnail URL to gate eligibility", () => {
+    const PANEL_SOURCE = readFileSync(path.join(__dirname, "UploadedArtworkPanel.tsx"), "utf8");
+    const buttonSource = PANEL_SOURCE.slice(
+      PANEL_SOURCE.indexOf('data-action="remove-background-manually"') - 400,
+      PANEL_SOURCE.indexOf('data-action="remove-background-manually"'),
+    );
+    assert.match(buttonSource, /disabled=\{busy \|\| !preparation\.hasPreparedArtwork\}/);
+    assert.doesNotMatch(buttonSource, /!preparedImageUrl/);
+  });
+});
