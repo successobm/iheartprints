@@ -35,6 +35,7 @@ import { hasAnyTransparentPixel, resampleExact } from "@/capabilities/final-artw
 import type { SignRepairPlan, SignRepairStep, SignRepairStepKind } from "./contracts";
 import { deriveUniformBackgroundExtension } from "./sign-geometry";
 import { tiledRowColor, type SignPerimeterBandMeasurement, type SignPerimeterBandRow } from "./perimeter-reconstruction";
+import { bandColorAtDepth, frameDepthAt, type SignFrameBand } from "./frame-structure-model";
 
 export interface SignExecutionBounds {
   x: number;
@@ -65,6 +66,7 @@ const ADMITTED_STEP_KINDS = new Set<SignRepairStep["kind"]>([
   "extend_uniform_background",
   "pad_uniform_background",
   "reconstruct_perimeter_structure",
+  "reconstruct_parametric_frame",
   "proportional_resample",
   "downsample",
   "rotate_90",
@@ -125,7 +127,10 @@ export function planRequiresBoundedReconstruction(plan: SignRepairPlan): boolean
  */
 export function planRequiresSemanticPreservationVerification(plan: SignRepairPlan): boolean {
   return plan.steps.some(
-    (step) => step.kind === "reconstruct_resolution" || step.kind === "reconstruct_perimeter_structure",
+    (step) =>
+      step.kind === "reconstruct_resolution" ||
+      step.kind === "reconstruct_perimeter_structure" ||
+      step.kind === "reconstruct_parametric_frame",
   );
 }
 
@@ -336,7 +341,10 @@ export function adaptGeometryStepsToActualReconstruction(
   }
 
   const geometryStepIndex = afterSteps.findIndex(
-    (step) => step.kind === "extend_uniform_background" || step.kind === "pad_uniform_background",
+    (step) =>
+      step.kind === "extend_uniform_background" ||
+      step.kind === "pad_uniform_background" ||
+      step.kind === "reconstruct_parametric_frame",
   );
 
   if (geometryStepIndex === -1) {
@@ -394,9 +402,24 @@ export function adaptGeometryStepsToActualReconstruction(
   // recomputed. A step whose colour was never confirmed stays
   // `"unconfirmed"` here too, so the existing `executeExtend` refusal for
   // that case is entirely unaffected by this adaptation.
+  //
+  // Height/Redistribution Policy: `reconstruct_parametric_frame` never
+  // trusts `deriveUniformBackgroundExtension`'s own default (roughly
+  // even) leading/trailing split — its plan-time-measured `leadingShare`
+  // (a stable RATIO, not an absolute pixel amount, so it needs no
+  // adaptation of its own) re-splits the SAME total pad this geometry
+  // re-derived, preserving the artwork's own measured proportions
+  // regardless of what the provider's actual output size turned out to be.
+  const totalPad = geometry.leadingPx + geometry.trailingPx;
+  const leadingShare = typeof geometryStep.params.leadingShare === "number" ? geometryStep.params.leadingShare : null;
+  const adaptedLeadingPx =
+    geometryStep.kind === "reconstruct_parametric_frame" && leadingShare !== null
+      ? Math.round(totalPad * leadingShare)
+      : geometry.leadingPx;
+  const adaptedTrailingPx = totalPad - adaptedLeadingPx;
   const adaptedStep: SignRepairStep = {
     ...geometryStep,
-    params: { ...geometryStep.params, leadingPx: geometry.leadingPx, trailingPx: geometry.trailingPx },
+    params: { ...geometryStep.params, leadingPx: adaptedLeadingPx, trailingPx: adaptedTrailingPx },
   };
   const adaptedSteps = [...afterSteps];
   adaptedSteps[geometryStepIndex] = adaptedStep;
@@ -473,7 +496,10 @@ export function buildSignExecutionGeometryEvidence(
   if (adaptation.status !== "adapted") return null;
 
   const executedStep = adaptation.steps.find(
-    (step) => step.kind === "extend_uniform_background" || step.kind === "pad_uniform_background",
+    (step) =>
+      step.kind === "extend_uniform_background" ||
+      step.kind === "pad_uniform_background" ||
+      step.kind === "reconstruct_parametric_frame",
   );
 
   return {
@@ -515,6 +541,8 @@ function executeStep(
       return executeExtend(image, bounds, step);
     case "reconstruct_perimeter_structure":
       return executeReconstructPerimeter(image, bounds, step);
+    case "reconstruct_parametric_frame":
+      return executeReconstructParametricFrame(image, bounds, step);
     default:
       return {
         status: "refused",
@@ -757,6 +785,263 @@ function executeReconstructPerimeter(
     status: "executed",
     image: { width: outputWidth, height: outputHeight, data },
     contentBounds: { x: bounds.x + offsetX, y: bounds.y + offsetY, width: bounds.width, height: bounds.height },
+  };
+}
+
+function requireInt(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) return null;
+  return value;
+}
+
+/**
+ * Decodes one `reconstruct_parametric_frame` step's flat params back into
+ * the measured band sequence + optional corner/hole geometry — the exact
+ * inverse of `sign-repair-planner.ts`'s own `encodeFrameStructuralModelParams`
+ * (never round-tripped through a shared type; planning and execution stay
+ * separate, the same discipline every other step kind already follows).
+ * `null` on any missing/malformed field — a partially-reconstructed frame
+ * is never silently completed with fewer bands or invented geometry.
+ */
+interface DecodedFrameStructuralModelParams {
+  bands: SignFrameBand[];
+  fillColor: { r: number; g: number; b: number };
+  outerBackgroundColor: { r: number; g: number; b: number } | null;
+  cornerRadiusPx: number | null;
+  hole: {
+    ringColor: { r: number; g: number; b: number };
+    interiorColor: { r: number; g: number; b: number };
+    radiusPx: number;
+    offsetFromCornerXPx: number;
+    offsetFromCornerYPx: number;
+  } | null;
+  modelSourceWidthPx: number;
+  modelSourceHeightPx: number;
+}
+
+function decodeFrameStructuralModelParams(params: Record<string, number | string>): DecodedFrameStructuralModelParams | null {
+  const modelSourceWidthPx = requireInt(params.modelSourceWidthPx);
+  const modelSourceHeightPx = requireInt(params.modelSourceHeightPx);
+  const bandCount = requireInt(params.bandCount);
+  const fillColorR = requireByteChannel(params.fillColorR);
+  const fillColorG = requireByteChannel(params.fillColorG);
+  const fillColorB = requireByteChannel(params.fillColorB);
+  const cornerRadiusRaw = requireInt(params.cornerRadiusPx);
+  if (
+    modelSourceWidthPx === null ||
+    modelSourceHeightPx === null ||
+    bandCount === null ||
+    bandCount <= 0 ||
+    fillColorR === null ||
+    fillColorG === null ||
+    fillColorB === null ||
+    cornerRadiusRaw === null
+  ) {
+    return null;
+  }
+  const bands: SignFrameBand[] = [];
+  for (let i = 0; i < bandCount; i++) {
+    const r = requireByteChannel(params[`band${i}R`]);
+    const g = requireByteChannel(params[`band${i}G`]);
+    const b = requireByteChannel(params[`band${i}B`]);
+    const thicknessPx = requirePositiveIntOrZero(params[`band${i}ThicknessPx`]);
+    if (r === null || g === null || b === null || thicknessPx === null) return null;
+    bands.push({ color: { r, g, b }, thicknessPx });
+  }
+  const cornerRadiusPx = cornerRadiusRaw < 0 ? null : cornerRadiusRaw;
+  let outerBackgroundColor: { r: number; g: number; b: number } | null = null;
+  if (cornerRadiusPx !== null) {
+    const r = requireByteChannel(params.outerBackgroundColorR);
+    const g = requireByteChannel(params.outerBackgroundColorG);
+    const b = requireByteChannel(params.outerBackgroundColorB);
+    if (r === null || g === null || b === null) return null;
+    outerBackgroundColor = { r, g, b };
+  }
+  let hole: DecodedFrameStructuralModelParams["hole"] = null;
+  if (params.hasHole === "true") {
+    const radiusPx = requirePositiveIntOrZero(params.holeRadiusPx);
+    const offsetFromCornerXPx = requirePositiveIntOrZero(params.holeOffsetXPx);
+    const offsetFromCornerYPx = requirePositiveIntOrZero(params.holeOffsetYPx);
+    const ringR = requireByteChannel(params.holeRingColorR);
+    const ringG = requireByteChannel(params.holeRingColorG);
+    const ringB = requireByteChannel(params.holeRingColorB);
+    const intR = requireByteChannel(params.holeInteriorColorR);
+    const intG = requireByteChannel(params.holeInteriorColorG);
+    const intB = requireByteChannel(params.holeInteriorColorB);
+    if (
+      radiusPx === null ||
+      offsetFromCornerXPx === null ||
+      offsetFromCornerYPx === null ||
+      ringR === null || ringG === null || ringB === null ||
+      intR === null || intG === null || intB === null
+    ) {
+      return null;
+    }
+    hole = {
+      radiusPx,
+      offsetFromCornerXPx,
+      offsetFromCornerYPx,
+      ringColor: { r: ringR, g: ringG, b: ringB },
+      interiorColor: { r: intR, g: intG, b: intB },
+    };
+  }
+  return {
+    bands,
+    fillColor: { r: fillColorR, g: fillColorG, b: fillColorB },
+    outerBackgroundColor,
+    cornerRadiusPx,
+    hole,
+    modelSourceWidthPx,
+    modelSourceHeightPx,
+  };
+}
+
+/**
+ * True iff (x,y) on a canvas of size `w`x`h` falls within the hole-ring or
+ * hole-interior anomaly at ANY of the 4 corners — mirrors
+ * `frame-structure-model.ts`'s own hole placement convention (centre
+ * offset from the TRUE corner, along each axis) at whatever scale `hole`
+ * has already been pre-scaled to by the caller.
+ */
+function holeColorAt(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  hole: { radiusPx: number; offsetFromCornerXPx: number; offsetFromCornerYPx: number; ringColor: { r: number; g: number; b: number }; interiorColor: { r: number; g: number; b: number } },
+): { r: number; g: number; b: number } | null {
+  const corners: [number, number, 1 | -1, 1 | -1][] = [
+    [0, 0, 1, 1],
+    [w - 1, 0, -1, 1],
+    [0, h - 1, 1, -1],
+    [w - 1, h - 1, -1, -1],
+  ];
+  for (const [cx, cy, sx, sy] of corners) {
+    const centerX = cx + sx * hole.offsetFromCornerXPx;
+    const centerY = cy + sy * hole.offsetFromCornerYPx;
+    const d = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
+    if (d <= hole.radiusPx) return hole.interiorColor;
+    if (d <= hole.radiusPx + 2) return hole.ringColor;
+  }
+  return null;
+}
+
+/**
+ * Parametric Perimeter Frame Reconstruction Phase (Constitution §16A.3
+ * amendment 3.1's own bounded carve-out, extended). Unlike every other
+ * step here, this one does NOT simply blit the current image verbatim
+ * into a larger canvas — it CROPS OUT the measured protected interior
+ * (discarding the OLD frame band entirely; those pixels are never copied
+ * anywhere in the output) and redraws the SAME measured band sequence,
+ * corner rounding, and hole geometry at the new finished-substrate
+ * boundary, with the interior repositioned inside it. This is what makes
+ * "no residual old corner arc, no duplicate hole indicator" true BY
+ * CONSTRUCTION rather than by careful masking: the old frame's pixels
+ * simply never appear in the output at all.
+ *
+ * Every colour drawn comes from the plan's own already-measured model
+ * (`sign-repair-planner.ts`'s `encodeFrameStructuralModelParams`) — never
+ * generated, inferred, or blended. Band thicknesses/corner radius/hole
+ * geometry are scaled by `image.width / modelSourceWidthPx` — the exact,
+ * deterministic ratio between the model's own source resolution and
+ * whatever resolution `image` actually is when this step runs (1.0 when
+ * no preceding `reconstruct_resolution` step ran; the provider's actual
+ * — not merely requested — scale otherwise, re-derived fresh every time
+ * this executes rather than trusting a plan-time prediction).
+ */
+function executeReconstructParametricFrame(
+  image: RgbaImage,
+  // Unlike every other step, this one never extends the INCOMING bounds —
+  // it replaces them outright with the freshly-cropped interior's own
+  // placement (see the returned `contentBounds` below), so the incoming
+  // value is intentionally never read.
+  _bounds: SignExecutionBounds,
+  step: SignRepairStep,
+): SignExecutionResult {
+  const axis = step.params.axis;
+  if (axis !== "horizontal" && axis !== "vertical") {
+    return { status: "refused", reason: "unsupported_step_kind", detail: `Step "${step.kind}" has an invalid axis parameter.` };
+  }
+  const leadingPx = requirePositiveIntOrZero(step.params.leadingPx);
+  const trailingPx = requirePositiveIntOrZero(step.params.trailingPx);
+  if (leadingPx === null || trailingPx === null) {
+    return { status: "refused", reason: "unsupported_step_kind", detail: `Step "${step.kind}" is missing valid leadingPx/trailingPx parameters.` };
+  }
+  const decoded = decodeFrameStructuralModelParams(step.params);
+  if (!decoded) {
+    return { status: "refused", reason: "unsupported_step_kind", detail: `Step "${step.kind}" is missing valid frame structural model parameters.` };
+  }
+  const { bands, fillColor, outerBackgroundColor, cornerRadiusPx, hole, modelSourceWidthPx } = decoded;
+
+  // The scale between the model's own SOURCE resolution and whatever
+  // resolution `image` actually is right now — re-derived fresh at
+  // execution time (never trusting a plan-time prediction), exactly the
+  // same "recompute from the actual input, not the request" discipline
+  // `adaptGeometryStepsToActualReconstruction` already applies to
+  // leadingPx/trailingPx for this same step.
+  const scaleFactor = image.width / modelSourceWidthPx;
+  const scaledBands: SignFrameBand[] = bands.map((b) => ({
+    color: b.color,
+    thicknessPx: Math.max(0, Math.round(b.thicknessPx * scaleFactor)),
+  }));
+  const oldFrameDepthPxScaled = scaledBands.reduce((s, b) => s + b.thicknessPx, 0);
+  const scaledCornerRadius = cornerRadiusPx !== null ? Math.round(cornerRadiusPx * scaleFactor) : 0;
+  const scaledHole = hole
+    ? {
+        radiusPx: Math.max(1, Math.round(hole.radiusPx * scaleFactor)),
+        offsetFromCornerXPx: Math.round(hole.offsetFromCornerXPx * scaleFactor),
+        offsetFromCornerYPx: Math.round(hole.offsetFromCornerYPx * scaleFactor),
+        ringColor: hole.ringColor,
+        interiorColor: hole.interiorColor,
+      }
+    : null;
+
+  const interiorWidth = image.width - 2 * oldFrameDepthPxScaled;
+  const interiorHeight = image.height - 2 * oldFrameDepthPxScaled;
+  if (interiorWidth <= 0 || interiorHeight <= 0) {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail: `Step "${step.kind}": the scaled frame depth leaves no positive-area protected interior to preserve.`,
+    };
+  }
+
+  const outputWidth = axis === "horizontal" ? image.width + leadingPx + trailingPx : image.width;
+  const outputHeight = axis === "vertical" ? image.height + leadingPx + trailingPx : image.height;
+  const interiorOffsetX = axis === "horizontal" ? leadingPx + oldFrameDepthPxScaled : oldFrameDepthPxScaled;
+  const interiorOffsetY = axis === "vertical" ? leadingPx + oldFrameDepthPxScaled : oldFrameDepthPxScaled;
+
+  const data = Buffer.alloc(outputWidth * outputHeight * 4);
+  for (let y = 0; y < outputHeight; y++) {
+    for (let x = 0; x < outputWidth; x++) {
+      const i = (y * outputWidth + x) * 4;
+      const inInteriorX = x >= interiorOffsetX && x < interiorOffsetX + interiorWidth;
+      const inInteriorY = y >= interiorOffsetY && y < interiorOffsetY + interiorHeight;
+      let color: { r: number; g: number; b: number };
+      if (inInteriorX && inInteriorY) {
+        const srcX = x - interiorOffsetX + oldFrameDepthPxScaled;
+        const srcY = y - interiorOffsetY + oldFrameDepthPxScaled;
+        const si = (srcY * image.width + srcX) * 4;
+        color = { r: image.data[si]!, g: image.data[si + 1]!, b: image.data[si + 2]! };
+      } else {
+        const holeColor = scaledHole ? holeColorAt(x, y, outputWidth, outputHeight, scaledHole) : null;
+        if (holeColor) {
+          color = holeColor;
+        } else {
+          const depth = frameDepthAt(x, y, outputWidth, outputHeight, scaledCornerRadius);
+          color = bandColorAtDepth(depth, scaledBands, fillColor, outerBackgroundColor);
+        }
+      }
+      data[i] = color.r;
+      data[i + 1] = color.g;
+      data[i + 2] = color.b;
+      data[i + 3] = 255;
+    }
+  }
+
+  return {
+    status: "executed",
+    image: { width: outputWidth, height: outputHeight, data },
+    contentBounds: { x: interiorOffsetX, y: interiorOffsetY, width: interiorWidth, height: interiorHeight },
   };
 }
 

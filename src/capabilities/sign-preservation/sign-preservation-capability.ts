@@ -60,12 +60,17 @@ import {
   aggregateDeterministicEvidence,
   checkExtensionRegions,
   checkPerimeterTileExtensionRegions,
+  checkParametricFrameRegions,
   checkLineage,
   checkReconstructionToFinalRgb,
   checkSourceSimilarity,
   deriveContentRegion,
+  deriveParametricFrameContentRegion,
   overallStatusFromDeterministicEvidence,
+  replayLocalGeometrySteps,
   type PadStepGeometry,
+  type SignPreservationFrameBand,
+  type SignPreservationFrameHole,
 } from "./sign-preservation-deterministic-checks";
 import { deriveSemanticComparisonImages } from "./sign-preservation-image-derivation";
 import type { SignPreservationSemanticProvider } from "./sign-preservation-semantic-provider";
@@ -173,6 +178,17 @@ function decodePng(bytes: Buffer): RgbaImage {
   return { width: png.width, height: png.height, data: png.data };
 }
 
+/** Exact, unresampled sub-rectangle crop — never used for anything but re-deriving an already-known interior placement. */
+function cropImage(image: RgbaImage, x: number, y: number, width: number, height: number): RgbaImage {
+  const data = Buffer.alloc(width * height * 4);
+  for (let row = 0; row < height; row += 1) {
+    const srcStart = ((y + row) * image.width + x) * 4;
+    const destStart = row * width * 4;
+    image.data.copy(data, destStart, srcStart, srcStart + width * 4);
+  }
+  return { width, height, data };
+}
+
 function readPadStepFromParams(
   params: Record<string, unknown> | undefined,
 ): PadStepGeometry | null {
@@ -212,6 +228,129 @@ function readPerimeterBandRows(
     rows.push({ r, g, b });
   }
   return rows;
+}
+
+/**
+ * Reads one `reconstruct_parametric_frame` step's measured band/corner/hole
+ * model back out of its raw, flat params — mirrors `sign-repair-planner
+ * .ts`'s own `encodeFrameStructuralModelParams` (never imported; same
+ * independent-resolution discipline every reader in this file already
+ * follows). `null` on any missing/malformed required field.
+ */
+function readFrameModelFromParams(params: Record<string, unknown> | undefined): {
+  axis: "horizontal" | "vertical";
+  leadingPx: number;
+  trailingPx: number;
+  modelSourceWidthPx: number;
+  bands: SignPreservationFrameBand[];
+  fillColor: { r: number; g: number; b: number };
+  cornerRadiusPx: number | null;
+  outerBackgroundColor: { r: number; g: number; b: number } | null;
+  hole: SignPreservationFrameHole | null;
+} | null {
+  if (!params) return null;
+  const axis = params.axis;
+  if (axis !== "horizontal" && axis !== "vertical") return null;
+  const leadingPx = params.leadingPx;
+  const trailingPx = params.trailingPx;
+  const modelSourceWidthPx = params.modelSourceWidthPx;
+  const bandCount = params.bandCount;
+  const fillColorR = params.fillColorR;
+  const fillColorG = params.fillColorG;
+  const fillColorB = params.fillColorB;
+  const cornerRadiusRaw = params.cornerRadiusPx;
+  if (
+    typeof leadingPx !== "number" ||
+    typeof trailingPx !== "number" ||
+    typeof modelSourceWidthPx !== "number" ||
+    typeof bandCount !== "number" ||
+    bandCount <= 0 ||
+    typeof fillColorR !== "number" ||
+    typeof fillColorG !== "number" ||
+    typeof fillColorB !== "number" ||
+    typeof cornerRadiusRaw !== "number"
+  ) {
+    return null;
+  }
+  const bands: SignPreservationFrameBand[] = [];
+  for (let i = 0; i < bandCount; i++) {
+    const r = params[`band${i}R`];
+    const g = params[`band${i}G`];
+    const b = params[`band${i}B`];
+    const thicknessPx = params[`band${i}ThicknessPx`];
+    if (typeof r !== "number" || typeof g !== "number" || typeof b !== "number" || typeof thicknessPx !== "number") return null;
+    bands.push({ color: { r, g, b }, thicknessPx });
+  }
+  const cornerRadiusPx = cornerRadiusRaw < 0 ? null : cornerRadiusRaw;
+  let outerBackgroundColor: { r: number; g: number; b: number } | null = null;
+  if (cornerRadiusPx !== null) {
+    const r = params.outerBackgroundColorR;
+    const g = params.outerBackgroundColorG;
+    const b = params.outerBackgroundColorB;
+    if (typeof r !== "number" || typeof g !== "number" || typeof b !== "number") return null;
+    outerBackgroundColor = { r, g, b };
+  }
+  let hole: SignPreservationFrameHole | null = null;
+  if (params.hasHole === "true") {
+    const radiusPx = params.holeRadiusPx;
+    const offsetFromCornerXPx = params.holeOffsetXPx;
+    const offsetFromCornerYPx = params.holeOffsetYPx;
+    const ringR = params.holeRingColorR;
+    const ringG = params.holeRingColorG;
+    const ringB = params.holeRingColorB;
+    const intR = params.holeInteriorColorR;
+    const intG = params.holeInteriorColorG;
+    const intB = params.holeInteriorColorB;
+    if (
+      typeof radiusPx !== "number" ||
+      typeof offsetFromCornerXPx !== "number" ||
+      typeof offsetFromCornerYPx !== "number" ||
+      typeof ringR !== "number" || typeof ringG !== "number" || typeof ringB !== "number" ||
+      typeof intR !== "number" || typeof intG !== "number" || typeof intB !== "number"
+    ) {
+      return null;
+    }
+    hole = {
+      radiusPx,
+      offsetFromCornerXPx,
+      offsetFromCornerYPx,
+      ringColor: { r: ringR, g: ringG, b: ringB },
+      interiorColor: { r: intR, g: intG, b: intB },
+    };
+  }
+  return { axis, leadingPx, trailingPx, modelSourceWidthPx, bands, fillColor: { r: fillColorR, g: fillColorG, b: fillColorB }, cornerRadiusPx, outerBackgroundColor, hole };
+}
+
+/**
+ * Scales a decoded frame model's band thicknesses/corner radius/hole
+ * geometry by `scaleFactor` — the exact, deterministic ratio between the
+ * model's own measured source resolution and whatever resolution the
+ * INTERMEDIATE asset actually is (1.0 for a native/perimeter-only plan;
+ * the provider's own actual — never merely requested — scale otherwise).
+ * Mirrors `sign-transform-executor.ts`'s own identical scaling, applied
+ * independently here (never imported) for the SAME reason every other
+ * duplicated formula in this file exists.
+ */
+function scaleFrameModel<T extends ReturnType<typeof readFrameModelFromParams>>(
+  model: NonNullable<T>,
+  scaleFactor: number,
+) {
+  const scaledBands: SignPreservationFrameBand[] = model.bands.map((b) => ({
+    color: b.color,
+    thicknessPx: Math.max(0, Math.round(b.thicknessPx * scaleFactor)),
+  }));
+  const frameDepthPxScaled = scaledBands.reduce((s, b) => s + b.thicknessPx, 0);
+  const scaledCornerRadius = model.cornerRadiusPx !== null ? Math.round(model.cornerRadiusPx * scaleFactor) : null;
+  const scaledHole: SignPreservationFrameHole | null = model.hole
+    ? {
+        radiusPx: Math.max(1, Math.round(model.hole.radiusPx * scaleFactor)),
+        offsetFromCornerXPx: Math.round(model.hole.offsetFromCornerXPx * scaleFactor),
+        offsetFromCornerYPx: Math.round(model.hole.offsetFromCornerYPx * scaleFactor),
+        ringColor: model.hole.ringColor,
+        interiorColor: model.hole.interiorColor,
+      }
+    : null;
+  return { scaledBands, frameDepthPxScaled, scaledCornerRadius, scaledHole };
 }
 
 /**
@@ -308,11 +447,12 @@ async function resolvePreservationContext(
   const planSteps = Array.isArray(plan.steps) ? (plan.steps as Array<Record<string, unknown>>) : [];
   const usesProviderReconstruction = planSteps.some((s) => s.kind === "reconstruct_resolution");
   const usesPerimeterReconstruction = planSteps.some((s) => s.kind === "reconstruct_perimeter_structure");
-  if (!usesProviderReconstruction && !usesPerimeterReconstruction) {
+  const usesParametricFrameReconstruction = planSteps.some((s) => s.kind === "reconstruct_parametric_frame");
+  if (!usesProviderReconstruction && !usesPerimeterReconstruction && !usesParametricFrameReconstruction) {
     throw new SignPreservationStateError(
       "not_a_reconstructed_sign_asset",
       "Preservation verification only ever applies to a plan whose steps actually require it " +
-        "(reconstruct_resolution or reconstruct_perimeter_structure).",
+        "(reconstruct_resolution, reconstruct_perimeter_structure, or reconstruct_parametric_frame).",
     );
   }
 
@@ -422,20 +562,87 @@ async function resolvePreservationContext(
     (s) =>
       s.kind === "pad_uniform_background" ||
       s.kind === "extend_uniform_background" ||
-      s.kind === "reconstruct_perimeter_structure",
+      s.kind === "reconstruct_perimeter_structure" ||
+      s.kind === "reconstruct_parametric_frame",
   );
   const plannedPadStep = readPadStepFromParams(
     plannedPadStepRaw?.params as Record<string, unknown> | undefined,
   );
+  const activeStep = executedPadStep ?? plannedPadStep;
 
-  const regionMapping = deriveContentRegion({
-    finalWidthPx: finalAsset.widthPx ?? 0,
-    finalHeightPx: finalAsset.heightPx ?? 0,
-    reconstructedWidthPx,
-    reconstructedHeightPx,
-    executedPadStep,
-    plannedPadStep: executedPadStep ? null : plannedPadStep,
-  });
+  // Parametric Frame Reconstruction Phase: the frame model itself (bands,
+  // corner radius, hole) never changes under S3C-style geometry adaptation
+  // — only leadingPx/trailingPx do — so it is always read from the PLANNED
+  // step's own params, never from `executionGeometry.executedStep` (which
+  // does not carry it at all). Scaled fresh here by the same
+  // intermediate-vs-model-source ratio `executeReconstructParametricFrame`
+  // itself recomputes at execution time (never trusting a plan-time
+  // prediction).
+  const plannedFrameModel =
+    usesParametricFrameReconstruction && plannedPadStepRaw?.kind === "reconstruct_parametric_frame"
+      ? readFrameModelFromParams(plannedPadStepRaw.params as Record<string, unknown> | undefined)
+      : null;
+  // The image `reconstruct_parametric_frame` actually ran against is NOT
+  // reliably `intermediateAsset` — a `downsample` (or other dimension-
+  // changing) step can sit BETWEEN the source/Topaz-intermediate and the
+  // frame step in a plan that never needed `reconstruct_resolution` at all
+  // (S2's own local geometry pipeline, entirely unrelated to Topaz). The
+  // one fact that IS always trustworthy is the FINAL asset's own persisted
+  // dimensions, together with the step's own (possibly S3C-adapted)
+  // axis/leadingPx/trailingPx — `executeReconstructParametricFrame`'s own
+  // `outputWidth = axis==="horizontal" ? image.width+leadingPx+trailingPx
+  // : image.width` inverts cleanly: the pre-frame-step image's own width is
+  // exactly `outputWidth - leadingPx - trailingPx` on the extended axis,
+  // and `outputWidth` unchanged on the other — `outputWidth`/`outputHeight`
+  // being precisely the FINAL asset's own dimensions.
+  const preFrameStepWidthPx =
+    activeStep && activeStep.axis === "horizontal"
+      ? (finalAsset.widthPx ?? 0) - activeStep.leadingPx - activeStep.trailingPx
+      : (finalAsset.widthPx ?? 0);
+  const preFrameStepHeightPx =
+    activeStep && activeStep.axis === "vertical"
+      ? (finalAsset.heightPx ?? 0) - activeStep.leadingPx - activeStep.trailingPx
+      : (finalAsset.heightPx ?? 0);
+  const frameModelScaleFactor =
+    plannedFrameModel && plannedFrameModel.modelSourceWidthPx > 0
+      ? preFrameStepWidthPx / plannedFrameModel.modelSourceWidthPx
+      : null;
+  const scaledFrameModel =
+    plannedFrameModel && frameModelScaleFactor !== null
+      ? scaleFrameModel(plannedFrameModel, frameModelScaleFactor)
+      : null;
+
+  const regionMapping =
+    usesParametricFrameReconstruction && plannedPadStepRaw?.kind === "reconstruct_parametric_frame"
+      ? scaledFrameModel && activeStep
+        ? deriveParametricFrameContentRegion({
+            finalWidthPx: finalAsset.widthPx ?? 0,
+            finalHeightPx: finalAsset.heightPx ?? 0,
+            intermediateWidthPx: preFrameStepWidthPx,
+            intermediateHeightPx: preFrameStepHeightPx,
+            axis: activeStep.axis,
+            leadingPx: activeStep.leadingPx,
+            trailingPx: activeStep.trailingPx,
+            frameDepthPxScaled: scaledFrameModel.frameDepthPxScaled,
+          })
+        : {
+            result: "unknown" as const,
+            finalWidthPx: finalAsset.widthPx ?? 0,
+            finalHeightPx: finalAsset.heightPx ?? 0,
+            contentRegion: null,
+            derivedFrom: "unavailable" as const,
+            regionFitsWithinFinalCanvas: false,
+            regionDimensionsMatchReconstruction: false,
+            reasons: ["The reconstructed frame's own measured band model could not be resolved from the plan's step params."],
+          }
+      : deriveContentRegion({
+          finalWidthPx: finalAsset.widthPx ?? 0,
+          finalHeightPx: finalAsset.heightPx ?? 0,
+          reconstructedWidthPx,
+          reconstructedHeightPx,
+          executedPadStep,
+          plannedPadStep: executedPadStep ? null : plannedPadStep,
+        });
 
   // --- Decode images only when the lineage/region evidence is usable —
   // never decode/compare against a region we've already proven is
@@ -445,17 +652,88 @@ async function resolvePreservationContext(
   let sourceSimilarity: SignPreservationDeterministicEvidence["sourceSimilarity"];
   let decodedImages: PreservationContext["decodedImages"] = null;
 
+  const isParametricFrameStep =
+    usesParametricFrameReconstruction && plannedPadStepRaw?.kind === "reconstruct_parametric_frame";
+  // `intermediateBytes` (the source, for a plan with no `reconstruct_
+  // resolution`; the Topaz output otherwise) is not necessarily the exact
+  // pre-frame-step image byte-for-byte — a purely LOCAL, deterministic S2
+  // geometry step (`rotate_90`, `downsample`, `proportional_resample`) can
+  // sit between it and `reconstruct_parametric_frame` in a plan that never
+  // needed a SEPARATE persisted asset row for that intermediate result.
+  // Replay those (and only those — never `reconstruct_resolution` itself,
+  // whose real output IS `intermediateBytes`) to reproduce the exact input
+  // the frame step actually ran against.
+  const frameStepIndex = plannedPadStepRaw ? planSteps.indexOf(plannedPadStepRaw) : -1;
+  const reconstructResolutionIndex = planSteps.findIndex((s) => s.kind === "reconstruct_resolution");
+  const replaySteps =
+    isParametricFrameStep && frameStepIndex >= 0
+      ? planSteps
+          .slice(reconstructResolutionIndex >= 0 ? reconstructResolutionIndex + 1 : 0, frameStepIndex)
+          .map((s) => ({ kind: s.kind as string, params: s.params as Record<string, unknown> | undefined }))
+      : [];
+
+  // `intermediateUsableForRgbIntegrity` is only false when the REPLAYED
+  // pre-frame-step image's own dimensions still fail to match
+  // `preFrameStepWidthPx/HeightPx` (a malformed/unreadable replay step) —
+  // fail closed to "unknown" rather than compare mismatched-resolution
+  // buffers or crash attempting to.
+  let intermediateUsableForRgbIntegrity = true;
+
   if (finalBytes && intermediateBytes && regionMapping.contentRegion) {
     const finalImage = decodePng(finalBytes.bytes);
-    const reconstructionImage = decodePng(intermediateBytes.bytes);
+    const decodedIntermediateImage = decodePng(intermediateBytes.bytes);
+    const actualPreFrameStepImage = isParametricFrameStep
+      ? replayLocalGeometrySteps(decodedIntermediateImage, replaySteps)
+      : decodedIntermediateImage;
+    if (
+      isParametricFrameStep &&
+      (actualPreFrameStepImage.width !== preFrameStepWidthPx || actualPreFrameStepImage.height !== preFrameStepHeightPx)
+    ) {
+      intermediateUsableForRgbIntegrity = false;
+    }
+    // `checkReconstructionToFinalRgb` requires the reconstruction image's
+    // own dimensions to match the content region exactly — true by
+    // construction for every other step (the content region IS the whole
+    // reconstruction), but `reconstruct_parametric_frame` crops the interior
+    // OUT of the (replayed) pre-frame-step image first. Crop here so the
+    // existing check can be reused unmodified, rather than special-casing
+    // it.
+    //
+    // The crop rectangle within that image is NOT `regionMapping
+    // .contentRegion` verbatim — that region's x/y are in FINAL
+    // (post-padding) image space, which includes `leadingPx` on the
+    // extended axis. The pre-frame-step image has no padding yet: its own
+    // interior starts at `frameDepthPxScaled` on BOTH axes (the frame
+    // surrounds it symmetrically), exactly mirroring
+    // `executeReconstructParametricFrame`'s own
+    // `srcX = x - interiorOffsetX + oldFrameDepthPxScaled` inverse.
+    const reconstructionImage =
+      isParametricFrameStep && intermediateUsableForRgbIntegrity && scaledFrameModel
+        ? cropImage(
+            actualPreFrameStepImage,
+            scaledFrameModel.frameDepthPxScaled,
+            scaledFrameModel.frameDepthPxScaled,
+            regionMapping.contentRegion.width,
+            regionMapping.contentRegion.height,
+          )
+        : decodedIntermediateImage;
 
-    reconstructionToFinalRgb = checkReconstructionToFinalRgb(
-      reconstructionImage,
-      finalImage,
-      regionMapping.contentRegion,
-    );
+    reconstructionToFinalRgb = intermediateUsableForRgbIntegrity
+      ? checkReconstructionToFinalRgb(reconstructionImage, finalImage, regionMapping.contentRegion)
+      : {
+          result: "unknown" as const,
+          compared: false,
+          reconstructionWidthPx: decodedIntermediateImage.width,
+          reconstructionHeightPx: decodedIntermediateImage.height,
+          contentRegionWidthPx: regionMapping.contentRegion.width,
+          contentRegionHeightPx: regionMapping.contentRegion.height,
+          mismatchedPixelCount: 0,
+          maxChannelDelta: 0,
+          reasons: [
+            "Replaying the plan's own local geometry steps (rotate_90/downsample/proportional_resample) between the resolved intermediate and reconstruct_parametric_frame still did not reproduce the image the frame step actually ran against — RGB integrity cannot be checked against it.",
+          ],
+        };
 
-    const activeStep = executedPadStep ?? plannedPadStep;
     if (usesPerimeterReconstruction && plannedPadStepRaw?.kind === "reconstruct_perimeter_structure") {
       const rawParams = plannedPadStepRaw.params as Record<string, unknown> | undefined;
       extensionRegions = checkPerimeterTileExtensionRegions(
@@ -467,6 +745,16 @@ async function resolvePreservationContext(
         readPerimeterBandRows(rawParams, "leading"),
         readPerimeterBandRows(rawParams, "trailing"),
       );
+    } else if (usesParametricFrameReconstruction && plannedPadStepRaw?.kind === "reconstruct_parametric_frame") {
+      extensionRegions = checkParametricFrameRegions(
+        finalImage,
+        regionMapping.contentRegion,
+        scaledFrameModel?.scaledCornerRadius ?? null,
+        scaledFrameModel?.scaledBands ?? null,
+        plannedFrameModel?.fillColor ?? null,
+        plannedFrameModel?.outerBackgroundColor ?? null,
+        scaledFrameModel?.scaledHole ?? null,
+      );
     } else {
       const approvedFillRgb =
         activeStep && activeStep.colorR !== null && activeStep.colorG !== null && activeStep.colorB !== null
@@ -476,7 +764,7 @@ async function resolvePreservationContext(
     }
 
     if (sourceBytes) {
-      const sourceImage = decodePng(sourceBytes.bytes);
+      const decodedSourceImage = decodePng(sourceBytes.bytes);
       const { x, y, width, height } = regionMapping.contentRegion;
       const contentSubImage: RgbaImage = {
         width,
@@ -488,6 +776,28 @@ async function resolvePreservationContext(
         const destStart = row * width * 4;
         finalImage.data.copy(contentSubImage.data, destStart, srcStart, srcStart + width * 4);
       }
+      // `contentSubImage` is the FINAL asset's protected interior ONLY —
+      // the frame band is never part of it (`reconstruct_parametric_frame`
+      // crops it away by construction). The whole, uncropped source image
+      // still HAS its own old frame — comparing it verbatim against an
+      // interior-only crop distorts the X/Y scale relationship (a frame's
+      // depth is a fixed pixel offset, not a proportional one), which is
+      // exactly what previously made `deriveSemanticComparisonImages`
+      // conclude "not proportional" for every genuinely-valid frame
+      // reconstruction. Crop the source to ITS OWN measured interior first
+      // — the plan's own frame model was measured against this exact
+      // source asset, at its own (unscaled, scale factor 1) resolution.
+      const sourceImage =
+        isParametricFrameStep && plannedFrameModel
+          ? (() => {
+              const sourceFrameDepthPx = plannedFrameModel.bands.reduce((s, b) => s + b.thicknessPx, 0);
+              const sourceInteriorWidth = decodedSourceImage.width - 2 * sourceFrameDepthPx;
+              const sourceInteriorHeight = decodedSourceImage.height - 2 * sourceFrameDepthPx;
+              return sourceInteriorWidth > 0 && sourceInteriorHeight > 0
+                ? cropImage(decodedSourceImage, sourceFrameDepthPx, sourceFrameDepthPx, sourceInteriorWidth, sourceInteriorHeight)
+                : decodedSourceImage;
+            })()
+          : decodedSourceImage;
       sourceSimilarity = checkSourceSimilarity(sourceImage, contentSubImage);
       decodedImages = { sourceImage, contentSubImage };
     } else {

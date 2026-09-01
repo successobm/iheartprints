@@ -50,6 +50,7 @@ import { computeSignPlanKey } from "./sign-plan-identity";
 import { isAuthorizationSufficientForRisk } from "./sign-plan-authorization";
 import { planSignRepair } from "./sign-repair-planner";
 import { measurePerimeterBand } from "./perimeter-reconstruction";
+import { measureCleanFillRunPx, measureFrameStructuralModel } from "./frame-structure-model";
 import type { SignEdge } from "./contracts";
 
 const ALL_SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
@@ -302,6 +303,20 @@ export function createSignPreparationCapability(
       // this call site would do.
       const perimeterBands = ALL_SIGN_EDGES.map((edge) => measurePerimeterBand(decoded.image, edge));
 
+      // Parametric Perimeter Frame Reconstruction Phase: the identical
+      // wiring gap `perimeterBands` closed above, for the frame-structure
+      // primitive — computed alongside inspection, always, exactly like
+      // the planner's own test helpers already assume this call site does.
+      // Both cheap, bounded-depth/bounded-window pixel reads; neither
+      // makes a network call.
+      const frameStructuralModel = measureFrameStructuralModel(decoded.image);
+      const frameCleanFillRunPx: Partial<Record<SignEdge, number>> = {};
+      if (frameStructuralModel.status === "measured") {
+        for (const edge of ALL_SIGN_EDGES) {
+          frameCleanFillRunPx[edge] = measureCleanFillRunPx(decoded.image, edge, frameStructuralModel.model.frameDepthPx);
+        }
+      }
+
       const result = planSignRepair({
         spec: specResolution.spec,
         policy,
@@ -309,6 +324,8 @@ export function createSignPreparationCapability(
         sourceAssetId: preparation.originalAssetId,
         sourceSha256: sha256,
         perimeterBands,
+        frameStructuralModel,
+        frameCleanFillRunPx,
       });
 
       const updated =

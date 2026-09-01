@@ -233,6 +233,98 @@ export function deriveContentRegion(
   };
 }
 
+export interface ParametricFrameRegionMappingInputs {
+  finalWidthPx: number;
+  finalHeightPx: number;
+  /** The dimensions of the asset `reconstruct_parametric_frame` actually ran against — the Topaz intermediate when combined with `reconstruct_resolution`, otherwise the source itself. */
+  intermediateWidthPx: number;
+  intermediateHeightPx: number;
+  axis: "horizontal" | "vertical";
+  leadingPx: number;
+  trailingPx: number;
+  /** The frame model's own measured band depths, already scaled to the intermediate's resolution — `frameDepthPxScaled` from `scaleFrameModel`. */
+  frameDepthPxScaled: number;
+}
+
+/**
+ * `deriveContentRegion`'s own `regionDimensionsMatchReconstruction`
+ * invariant (content region dims === reconstruction dims) does not hold for
+ * `reconstruct_parametric_frame`: that step CROPS the interior away from the
+ * old frame band before redrawing at the new boundary, so the protected
+ * interior is by design a strictly SMALLER sub-rectangle than the
+ * intermediate it was cropped from. This mirrors
+ * `sign-transform-executor.ts`'s own `executeReconstructParametricFrame`
+ * interior-placement arithmetic exactly (duplicated, never imported, the
+ * same discipline every other check in this file already follows).
+ */
+export function deriveParametricFrameContentRegion(
+  inputs: ParametricFrameRegionMappingInputs,
+): SignPreservationRegionMappingEvidence {
+  const reasons: string[] = [];
+  const interiorWidth = inputs.intermediateWidthPx - 2 * inputs.frameDepthPxScaled;
+  const interiorHeight = inputs.intermediateHeightPx - 2 * inputs.frameDepthPxScaled;
+  const positiveInteriorArea = interiorWidth > 0 && interiorHeight > 0;
+  if (!positiveInteriorArea) {
+    reasons.push("The scaled frame depth leaves no positive-area protected interior to derive a content region from.");
+    return {
+      result: "unknown",
+      finalWidthPx: inputs.finalWidthPx,
+      finalHeightPx: inputs.finalHeightPx,
+      contentRegion: null,
+      derivedFrom: "execution_geometry",
+      regionFitsWithinFinalCanvas: false,
+      regionDimensionsMatchReconstruction: false,
+      reasons,
+    };
+  }
+
+  const interiorOffsetX =
+    inputs.axis === "horizontal" ? inputs.leadingPx + inputs.frameDepthPxScaled : inputs.frameDepthPxScaled;
+  const interiorOffsetY =
+    inputs.axis === "vertical" ? inputs.leadingPx + inputs.frameDepthPxScaled : inputs.frameDepthPxScaled;
+  const contentRegion: SignPreservationContentRegion = {
+    x: interiorOffsetX,
+    y: interiorOffsetY,
+    width: interiorWidth,
+    height: interiorHeight,
+  };
+
+  const regionFitsWithinFinalCanvas =
+    contentRegion.x >= 0 &&
+    contentRegion.y >= 0 &&
+    contentRegion.x + contentRegion.width <= inputs.finalWidthPx &&
+    contentRegion.y + contentRegion.height <= inputs.finalHeightPx;
+  if (!regionFitsWithinFinalCanvas) {
+    reasons.push("The derived content region does not fit inside the final asset's own dimensions.");
+  }
+
+  // The reconstruction-dims-match invariant `deriveContentRegion` enforces
+  // does not apply to this step by design (see doc comment above) — the
+  // analogous structural invariant here is that the interior is STRICTLY
+  // smaller than the intermediate it was cropped from on at least one axis,
+  // proving the old frame band was actually discarded rather than merely
+  // padded around.
+  const regionDimensionsMatchReconstruction =
+    contentRegion.width < inputs.intermediateWidthPx || contentRegion.height < inputs.intermediateHeightPx;
+  if (!regionDimensionsMatchReconstruction) {
+    reasons.push("The derived content region is not strictly smaller than the intermediate it was cropped from — the old frame band may not have been discarded.");
+  }
+
+  const result: SignPreservationCheckResult =
+    regionFitsWithinFinalCanvas && regionDimensionsMatchReconstruction ? "pass" : "unknown";
+
+  return {
+    result,
+    finalWidthPx: inputs.finalWidthPx,
+    finalHeightPx: inputs.finalHeightPx,
+    contentRegion,
+    derivedFrom: "execution_geometry",
+    regionFitsWithinFinalCanvas,
+    regionDimensionsMatchReconstruction,
+    reasons,
+  };
+}
+
 // ---------------------------------------------------------------------
 // C. Reconstruction -> final RGB integrity
 // ---------------------------------------------------------------------
@@ -550,6 +642,205 @@ export function checkPerimeterTileExtensionRegions(
     approvedFillRgb: null,
     reasons,
   };
+}
+
+// ---------------------------------------------------------------------
+// D.2 Parametric Perimeter Frame Reconstruction Phase: verifies every
+// pixel OUTSIDE the content region against the plan's own already-
+// measured, already-scaled frame model — the `reconstruct_parametric_frame`
+// sibling of `checkPerimeterTileExtensionRegions` above. Deliberately
+// duplicates `sign-preparation/frame-structure-model.ts`'s rounded-rect
+// depth formula and band lookup (never imported — this module resolves
+// every fact independently, the same discipline every other check here
+// already follows).
+// ---------------------------------------------------------------------
+
+export interface SignPreservationFrameBand {
+  color: { r: number; g: number; b: number };
+  thicknessPx: number;
+}
+export interface SignPreservationFrameHole {
+  radiusPx: number;
+  offsetFromCornerXPx: number;
+  offsetFromCornerYPx: number;
+  ringColor: { r: number; g: number; b: number };
+  interiorColor: { r: number; g: number; b: number };
+}
+
+function parametricFrameDepthAt(x: number, y: number, w: number, h: number, radius: number): number | null {
+  const inCornerX = x < radius ? radius - x : x > w - 1 - radius ? x - (w - 1 - radius) : 0;
+  const inCornerY = y < radius ? radius - y : y > h - 1 - radius ? y - (h - 1 - radius) : 0;
+  if (inCornerX > 0 && inCornerY > 0) {
+    const dist = Math.sqrt(inCornerX * inCornerX + inCornerY * inCornerY);
+    return dist > radius ? null : radius - dist;
+  }
+  return Math.min(x, y, w - 1 - x, h - 1 - y);
+}
+
+function parametricFrameColorAt(
+  depth: number | null,
+  bands: SignPreservationFrameBand[],
+  fillColor: { r: number; g: number; b: number },
+  outerBackgroundColor: { r: number; g: number; b: number } | null,
+): { r: number; g: number; b: number } {
+  if (depth === null) return outerBackgroundColor ?? fillColor;
+  let acc = 0;
+  for (const band of bands) {
+    if (depth < acc + band.thicknessPx) return band.color;
+    acc += band.thicknessPx;
+  }
+  return fillColor;
+}
+
+function parametricFrameHoleColorAt(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  hole: SignPreservationFrameHole,
+): { r: number; g: number; b: number } | null {
+  const corners: [number, number, 1 | -1, 1 | -1][] = [
+    [0, 0, 1, 1],
+    [w - 1, 0, -1, 1],
+    [0, h - 1, 1, -1],
+    [w - 1, h - 1, -1, -1],
+  ];
+  for (const [cx, cy, sx, sy] of corners) {
+    const centerX = cx + sx * hole.offsetFromCornerXPx;
+    const centerY = cy + sy * hole.offsetFromCornerYPx;
+    const d = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
+    if (d <= hole.radiusPx) return hole.interiorColor;
+    if (d <= hole.radiusPx + 2) return hole.ringColor;
+  }
+  return null;
+}
+
+export function checkParametricFrameRegions(
+  finalImage: RgbaImage,
+  contentRegion: SignPreservationContentRegion | null,
+  cornerRadiusPx: number | null,
+  bands: SignPreservationFrameBand[] | null,
+  fillColor: { r: number; g: number; b: number } | null,
+  outerBackgroundColor: { r: number; g: number; b: number } | null,
+  hole: SignPreservationFrameHole | null,
+): SignPreservationExtensionRegionEvidence {
+  const reasons: string[] = [];
+  if (!contentRegion) {
+    reasons.push("No content region was derivable — extension regions cannot be checked.");
+    return { result: "unknown", regionsChecked: 0, totalExtensionPixels: 0, mismatchedPixelCount: 0, approvedFillRgb: null, reasons };
+  }
+  if (!bands || bands.length === 0 || !fillColor) {
+    reasons.push("The reconstructed frame's own measured band model could not be resolved — extension regions cannot be checked.");
+    return { result: "unknown", regionsChecked: 0, totalExtensionPixels: 0, mismatchedPixelCount: 0, approvedFillRgb: null, reasons };
+  }
+
+  const w = finalImage.width;
+  const h = finalImage.height;
+  let totalExtensionPixels = 0;
+  let mismatchedPixelCount = 0;
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (x >= contentRegion.x && x < contentRegion.x + contentRegion.width && y >= contentRegion.y && y < contentRegion.y + contentRegion.height) {
+        continue; // interior — not this check's territory.
+      }
+      totalExtensionPixels++;
+      const holeColor = hole ? parametricFrameHoleColorAt(x, y, w, h, hole) : null;
+      const expected = holeColor ?? parametricFrameColorAt(parametricFrameDepthAt(x, y, w, h, cornerRadiusPx ?? 0), bands, fillColor, outerBackgroundColor);
+      const idx = (y * w + x) * 4;
+      const r = finalImage.data[idx];
+      const g = finalImage.data[idx + 1];
+      const b = finalImage.data[idx + 2];
+      const a = finalImage.data[idx + 3];
+      if (r !== expected.r || g !== expected.g || b !== expected.b || a !== 255) mismatchedPixelCount++;
+    }
+  }
+
+  if (mismatchedPixelCount > 0) {
+    reasons.push(
+      `${mismatchedPixelCount} of ${totalExtensionPixels} redrawn frame pixel(s) did not exactly match the plan's own measured band/hole model.`,
+    );
+  }
+
+  return {
+    result: mismatchedPixelCount === 0 ? "pass" : "catastrophic",
+    regionsChecked: 1,
+    totalExtensionPixels,
+    mismatchedPixelCount,
+    approvedFillRgb: null,
+    reasons,
+  };
+}
+
+// ---------------------------------------------------------------------
+// D.3 Parametric Perimeter Frame Reconstruction Phase: replays the LOCAL,
+// deterministic S2 geometry steps that can sit between the source/Topaz-
+// intermediate and `reconstruct_parametric_frame` in a plan that needed no
+// resolution reconstruction of its own axis alone (`rotate_90`,
+// `downsample`, `proportional_resample`) — never `reconstruct_resolution`
+// itself (that step's real output is already available as the resolved
+// intermediate asset's own bytes; this only ever reproduces LOCAL,
+// algorithmic steps). Exists because the persisted asset model has no
+// separate row for "the image after a local resample" — only Topaz's own
+// output gets a durable intermediate asset — so the RGB-integrity proof
+// must re-derive that exact byte-for-byte input itself, the same
+// discipline every other duplicated formula in this file already follows
+// (`resampleExact` is a genuinely shared, neutral raster utility — never a
+// `sign-preparation` import).
+// ---------------------------------------------------------------------
+
+function rotate90ForReplay(image: RgbaImage): RgbaImage {
+  const outputWidth = image.height;
+  const outputHeight = image.width;
+  const data = Buffer.alloc(outputWidth * outputHeight * 4);
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const srcIdx = (y * image.width + x) * 4;
+      const destX = outputWidth - 1 - y;
+      const destY = x;
+      const destIdx = (destY * outputWidth + destX) * 4;
+      data[destIdx] = image.data[srcIdx]!;
+      data[destIdx + 1] = image.data[srcIdx + 1]!;
+      data[destIdx + 2] = image.data[srcIdx + 2]!;
+      data[destIdx + 3] = image.data[srcIdx + 3]!;
+    }
+  }
+  return { width: outputWidth, height: outputHeight, data };
+}
+
+export interface ReplayableGeometryStep {
+  kind: string;
+  params: Record<string, unknown> | undefined;
+}
+
+/**
+ * Applies each of `steps` (in order) to `image` — `rotate_90` (a fixed 90°
+ * clockwise turn) and `downsample`/`proportional_resample` (an exact
+ * resample to that step's own recorded `targetWidthPx`/`targetHeightPx`)
+ * — and returns the result. Any other step kind, or a resample step with
+ * missing/malformed target dimensions, is left un-applied (a no-op) —
+ * the caller's own downstream dimension-match check is what fails closed
+ * on that, never a guess made here.
+ */
+export function replayLocalGeometrySteps(image: RgbaImage, steps: ReplayableGeometryStep[]): RgbaImage {
+  let current = image;
+  for (const step of steps) {
+    if (step.kind === "rotate_90") {
+      current = rotate90ForReplay(current);
+    } else if (step.kind === "downsample" || step.kind === "proportional_resample") {
+      const targetWidthPx = step.params?.targetWidthPx;
+      const targetHeightPx = step.params?.targetHeightPx;
+      if (
+        typeof targetWidthPx === "number" &&
+        typeof targetHeightPx === "number" &&
+        targetWidthPx > 0 &&
+        targetHeightPx > 0
+      ) {
+        current = resampleExact(current, Math.round(targetWidthPx), Math.round(targetHeightPx)).image;
+      }
+    }
+  }
+  return current;
 }
 
 // ---------------------------------------------------------------------

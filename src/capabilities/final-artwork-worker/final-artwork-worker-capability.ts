@@ -2155,11 +2155,20 @@ export function createFinalArtworkWorkerCapability(
     // extended. Omitting it here would silently make `edgeDependentStructure
     // OnAffectedEdge` read `false` for a plan that used the new step — the
     // one case the `substrate_boundary_semantics` backstop most needs to see.
+    //
+    // Parametric Frame Reconstruction Phase: `reconstruct_parametric_frame`
+    // is included here for the SAME `substrateBoundary`/axis reason — AND,
+    // unlike `reconstruct_perimeter_structure`, this step CAN genuinely
+    // coexist with `reconstruct_resolution`, so `signGeometryAdapted` may
+    // legitimately be true for it; `colorR/G/B/color` stay `null` for this
+    // step (it has no single flat fill colour), the same null shape
+    // `reconstruct_perimeter_structure` already produces here.
     const plannedGeometryStep = plan.steps.find(
       (step) =>
         step.kind === "extend_uniform_background" ||
         step.kind === "pad_uniform_background" ||
-        step.kind === "reconstruct_perimeter_structure",
+        step.kind === "reconstruct_perimeter_structure" ||
+        step.kind === "reconstruct_parametric_frame",
     );
     const executedGeometryAdaptation: RigidSignPlanEvidence["executedGeometryAdaptation"] =
       signGeometryAdapted && signExecutionGeometry

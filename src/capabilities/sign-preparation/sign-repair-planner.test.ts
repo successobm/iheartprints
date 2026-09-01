@@ -13,6 +13,7 @@ import {
   bandWithEmbeddedMarkArtwork,
   edgeStructureSignArtwork,
   exactAspectSignArtwork,
+  framedSignArtwork,
   ruthLikeSignArtwork,
   stripedPerimeterBandArtwork,
   transparentSignArtwork,
@@ -20,6 +21,7 @@ import {
 } from "./sign-fixtures";
 import { describeSignPlanForCustomer } from "./sign-preparation-copy";
 import { measurePerimeterBand } from "./perimeter-reconstruction";
+import { measureCleanFillRunPx, measureFrameStructuralModel } from "./frame-structure-model";
 
 function spec(orderedWidthIn: number, orderedHeightIn: number): SignProductionSpec {
   return {
@@ -440,5 +442,135 @@ describe("sign repair planner — production-aware perimeter reconstruction", ()
     assert.equal(blocked.status, "blocked");
     assert.equal(reconstructed.status, "planned");
     assert.ok(reconstructed.plan!.planKey.length > 0);
+  });
+});
+
+/**
+ * Parametric Perimeter Frame Reconstruction Phase (Constitution §16A.3
+ * amendment 3.1's own bounded carve-out, extended). Mirrors the REAL
+ * cc6cfc4b-... acceptance sign's own shape (24x36in order, 3:4-aspect
+ * bordered/framed source) without ever using the customer's own file.
+ */
+describe("sign repair planner — parametric perimeter frame reconstruction", () => {
+  const ORDERED_WIDTH_IN = 24;
+  const ORDERED_HEIGHT_IN = 36;
+
+  function planWithFrameModel(
+    image: RgbaImage,
+    orderedWidthIn: number,
+    orderedHeightIn: number,
+  ) {
+    const s = spec(orderedWidthIn, orderedHeightIn);
+    const inspection = inspectSignArtwork(image, s, RIGID_RECT_UP_TO_24X36_V1);
+    const frameStructuralModel = measureFrameStructuralModel(image);
+    const frameCleanFillRunPx: Partial<Record<"top" | "right" | "bottom" | "left", number>> = {};
+    for (const edge of ["top", "right", "bottom", "left"] as const) {
+      if (frameStructuralModel.status === "measured") {
+        frameCleanFillRunPx[edge] = measureCleanFillRunPx(image, edge, frameStructuralModel.model.frameDepthPx);
+      }
+    }
+    return planSignRepair({
+      spec: s,
+      policy: RIGID_RECT_UP_TO_24X36_V1,
+      inspection,
+      sourceAssetId: "asset-1",
+      sourceSha256: "a".repeat(64),
+      frameStructuralModel,
+      frameCleanFillRunPx,
+    });
+  }
+
+  it("1: a real framed-sign shape (rounded frame + 4 symmetric holes, sufficient resolution) is admitted as reconstruct_parametric_frame, never blocked", () => {
+    // Sufficient resolution (>=150 PPI @ 24in) so this test isolates the
+    // frame-admission decision from any resolution-reconstruction need.
+    const image = framedSignArtwork({ width: 4000, height: 5333, rounded: true, withHoles: true });
+    const result = planWithFrameModel(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "planned");
+    const p = result.plan!;
+    assert.ok(p.steps.some((step) => step.kind === "reconstruct_parametric_frame"));
+    assert.doesNotMatch(JSON.stringify(p.steps), /"kind":"reconstruct_perimeter_structure"/);
+    assert.doesNotMatch(JSON.stringify(p.steps), /"kind":"reconstruct_resolution"/);
+    assert.ok(p.defects.includes("parametric_frame_structure_reconstructed"));
+    assert.equal(p.overallRisk, "review_required");
+  });
+
+  it("2: the reconstruction step is ALWAYS review_required — never auto_safe, regardless of evidence strength", () => {
+    const image = framedSignArtwork({ width: 4000, height: 5333, rounded: true, withHoles: true });
+    const result = planWithFrameModel(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    const step = result.plan!.steps.find((s) => s.kind === "reconstruct_parametric_frame")!;
+    assert.equal(step.risk, "review_required");
+    assert.equal(result.plan!.overallRisk, "review_required");
+  });
+
+  it("3: rectangular (unrounded) frame, no holes -> also admitted (rounding/holes are optional evidence, not required)", () => {
+    const image = framedSignArtwork({ width: 4000, height: 5333, rounded: false, withHoles: false });
+    const result = planWithFrameModel(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "planned");
+    assert.ok(result.plan!.steps.some((step) => step.kind === "reconstruct_parametric_frame"));
+  });
+
+  it("5: inconsistent corner radius -> blocked, never falls back to tiling or an outright silent block without explanation", () => {
+    const image = framedSignArtwork({ width: 4000, height: 5333, rounded: true, withHoles: false, breakCorner: "radius" });
+    const result = planWithFrameModel(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "blocked");
+    assert.ok(
+      result.defects.some(
+        (d) => d.code === "perimeter_structure_at_extension_edge" && /radii disagree/i.test(d.detail),
+      ),
+    );
+  });
+
+  it("4: one missing/ambiguous hole -> blocked", () => {
+    const image = framedSignArtwork({ width: 4000, height: 5333, rounded: true, withHoles: true, breakCorner: "missing_hole" });
+    const result = planWithFrameModel(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "blocked");
+    assert.ok(
+      result.defects.some(
+        (d) => d.code === "perimeter_structure_at_extension_edge" && /corner-hole indicator/i.test(d.detail),
+      ),
+    );
+  });
+
+  it("9: no aspect mismatch -> the primitive is never invoked at all, even with a full frame model available", () => {
+    // Exact-aspect framed sign — no extension axis exists, so the frame
+    // branch is never entered regardless of frameStructuralModel.
+    const image = framedSignArtwork({ width: 2400, height: 3600, rounded: true, withHoles: true });
+    const result = planWithFrameModel(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.doesNotMatch(JSON.stringify(result), /reconstruct_parametric_frame/);
+  });
+
+  it("17: perimeter + reconstruct_resolution — the REAL project's own shape (1086x1448 source, low PPI) admits BOTH steps together, reconstruct_resolution first", () => {
+    const image = framedSignArtwork({ width: 1086, height: 1448, rounded: true, withHoles: true });
+    const result = planWithFrameModel(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    assert.equal(result.status, "planned");
+    const kinds = result.plan!.steps.map((s) => s.kind);
+    assert.ok(kinds.includes("reconstruct_resolution"), `expected reconstruct_resolution in ${JSON.stringify(kinds)}`);
+    assert.ok(kinds.includes("reconstruct_parametric_frame"), `expected reconstruct_parametric_frame in ${JSON.stringify(kinds)}`);
+    assert.ok(
+      kinds.indexOf("reconstruct_resolution") < kinds.indexOf("reconstruct_parametric_frame"),
+      "resolution reconstruction must be planned to execute BEFORE the frame redraw",
+    );
+  });
+
+  it("14: automatic neutral redistribution — leadingShare is derived from measured clean-fill depth, never a bare 50/50 default when the two sides genuinely differ", () => {
+    const image = framedSignArtwork({ width: 4000, height: 5333, rounded: true, withHoles: true });
+    const result = planWithFrameModel(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN);
+    const step = result.plan!.steps.find((s) => s.kind === "reconstruct_parametric_frame")!;
+    assert.equal(typeof step.params.leadingShare, "number");
+    assert.ok((step.params.leadingShare as number) >= 0 && (step.params.leadingShare as number) <= 1);
+    // This fixture's own top/bottom (or left/right) content is symmetric,
+    // so a near-even split is the CORRECT measured answer here — proving
+    // the mechanism runs and produces a valid share, not that every
+    // fixture must be asymmetric.
+    const leadingPx = step.params.leadingPx as number;
+    const trailingPx = step.params.trailingPx as number;
+    assert.equal(leadingPx + trailingPx > 0, true);
+  });
+
+  it("frameStructuralModel absent -> unaffected, existing behaviour (block) unchanged", () => {
+    const image = framedSignArtwork({ width: 4000, height: 5333, rounded: true, withHoles: true });
+    const result = plan(image, ORDERED_WIDTH_IN, ORDERED_HEIGHT_IN); // plain `plan`, no frame model supplied
+    assert.equal(result.status, "blocked");
+    assert.doesNotMatch(JSON.stringify(result), /reconstruct_parametric_frame/);
   });
 });

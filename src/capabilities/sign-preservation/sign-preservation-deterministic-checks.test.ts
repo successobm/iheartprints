@@ -8,11 +8,14 @@ import {
   aggregateDeterministicEvidence,
   checkExtensionRegions,
   checkPerimeterTileExtensionRegions,
+  checkParametricFrameRegions,
   checkLineage,
   checkReconstructionToFinalRgb,
   checkSourceSimilarity,
   deriveContentRegion,
+  deriveParametricFrameContentRegion,
   overallStatusFromDeterministicEvidence,
+  replayLocalGeometrySteps,
 } from "./sign-preservation-deterministic-checks";
 
 /**
@@ -187,9 +190,145 @@ describe("deriveContentRegion (Signs Phase S4.1)", () => {
   });
 });
 
+/** Parametric Frame Reconstruction Phase: the reconstruct_parametric_frame sibling of deriveContentRegion — a cropped-interior content region, never the whole reconstruction. */
+describe("deriveParametricFrameContentRegion (Parametric Frame Reconstruction Phase)", () => {
+  it("horizontal axis: interior offset includes leadingPx on the extended axis, frame depth only on the other", () => {
+    const region = deriveParametricFrameContentRegion({
+      finalWidthPx: 15,
+      finalHeightPx: 6,
+      intermediateWidthPx: 10,
+      intermediateHeightPx: 6,
+      axis: "horizontal",
+      leadingPx: 3,
+      trailingPx: 2,
+      frameDepthPxScaled: 1,
+    });
+    assert.equal(region.result, "pass");
+    assert.equal(region.derivedFrom, "execution_geometry");
+    assert.deepEqual(region.contentRegion, { x: 4, y: 1, width: 8, height: 4 });
+  });
+
+  it("vertical axis: interior offset includes leadingPx on the extended (Y) axis, frame depth only on X", () => {
+    const region = deriveParametricFrameContentRegion({
+      finalWidthPx: 6,
+      finalHeightPx: 15,
+      intermediateWidthPx: 6,
+      intermediateHeightPx: 10,
+      axis: "vertical",
+      leadingPx: 3,
+      trailingPx: 2,
+      frameDepthPxScaled: 1,
+    });
+    assert.equal(region.result, "pass");
+    assert.deepEqual(region.contentRegion, { x: 1, y: 4, width: 4, height: 8 });
+  });
+
+  it("scaled frame depth leaves no positive-area interior -> unknown, null content region", () => {
+    const region = deriveParametricFrameContentRegion({
+      finalWidthPx: 13,
+      finalHeightPx: 6,
+      intermediateWidthPx: 10,
+      intermediateHeightPx: 6,
+      axis: "horizontal",
+      leadingPx: 3,
+      trailingPx: 0,
+      frameDepthPxScaled: 5,
+    });
+    assert.equal(region.result, "unknown");
+    assert.equal(region.contentRegion, null);
+  });
+
+  it("region that does not fit inside the final canvas -> unknown", () => {
+    const region = deriveParametricFrameContentRegion({
+      finalWidthPx: 11, // too small — the real final canvas would be 15
+      finalHeightPx: 6,
+      intermediateWidthPx: 10,
+      intermediateHeightPx: 6,
+      axis: "horizontal",
+      leadingPx: 3,
+      trailingPx: 2,
+      frameDepthPxScaled: 1,
+    });
+    assert.equal(region.result, "unknown");
+    assert.equal(region.regionFitsWithinFinalCanvas, false);
+  });
+
+  it("zero frame depth (old frame apparently never discarded) -> unknown, never a false pass", () => {
+    const region = deriveParametricFrameContentRegion({
+      finalWidthPx: 15,
+      finalHeightPx: 6,
+      intermediateWidthPx: 10,
+      intermediateHeightPx: 6,
+      axis: "horizontal",
+      leadingPx: 3,
+      trailingPx: 2,
+      frameDepthPxScaled: 0,
+    });
+    assert.equal(region.result, "unknown");
+    assert.equal(region.regionDimensionsMatchReconstruction, false);
+    assert.deepEqual(region.contentRegion, { x: 3, y: 0, width: 10, height: 6 });
+  });
+});
+
 function image(width: number, height: number, r: number, g: number, b: number, a = 255): RgbaImage {
   return makeImage(width, height, { r, g, b, a });
 }
+
+/** Parametric Frame Reconstruction Phase: reproduces the LOCAL S2 geometry steps a plan can interpose before reconstruct_parametric_frame. */
+describe("replayLocalGeometrySteps (Parametric Frame Reconstruction Phase)", () => {
+  it("no steps -> the image is returned unchanged", () => {
+    const img = image(4, 6, 1, 2, 3);
+    const result = replayLocalGeometrySteps(img, []);
+    assert.equal(result, img);
+  });
+
+  it("downsample step -> resamples to the step's own targetWidthPx/targetHeightPx", () => {
+    const img = image(8, 8, 10, 20, 30);
+    const result = replayLocalGeometrySteps(img, [{ kind: "downsample", params: { targetWidthPx: 4, targetHeightPx: 4 } }]);
+    assert.equal(result.width, 4);
+    assert.equal(result.height, 4);
+  });
+
+  it("proportional_resample step -> the SAME resample behaviour as downsample (both read targetWidthPx/targetHeightPx)", () => {
+    const img = image(4, 4, 10, 20, 30);
+    const result = replayLocalGeometrySteps(img, [
+      { kind: "proportional_resample", params: { targetWidthPx: 8, targetHeightPx: 8 } },
+    ]);
+    assert.equal(result.width, 8);
+    assert.equal(result.height, 8);
+  });
+
+  it("rotate_90 step -> swaps width/height (a fixed clockwise turn)", () => {
+    const img = image(4, 6, 10, 20, 30);
+    const result = replayLocalGeometrySteps(img, [{ kind: "rotate_90", params: undefined }]);
+    assert.equal(result.width, 6);
+    assert.equal(result.height, 4);
+  });
+
+  it("multiple steps apply in order — rotate then resample", () => {
+    const img = image(4, 6, 10, 20, 30); // rotate_90 -> 6x4, then downsample -> 3x2
+    const result = replayLocalGeometrySteps(img, [
+      { kind: "rotate_90", params: undefined },
+      { kind: "downsample", params: { targetWidthPx: 3, targetHeightPx: 2 } },
+    ]);
+    assert.equal(result.width, 3);
+    assert.equal(result.height, 2);
+  });
+
+  it("a resample step with missing target dimensions is left un-applied — never guessed", () => {
+    const img = image(4, 4, 10, 20, 30);
+    const result = replayLocalGeometrySteps(img, [{ kind: "downsample", params: {} }]);
+    assert.equal(result.width, 4);
+    assert.equal(result.height, 4);
+  });
+
+  it("an unrecognized step kind is skipped (never a guess, never a crash)", () => {
+    const img = image(4, 4, 10, 20, 30);
+    const result = replayLocalGeometrySteps(img, [{ kind: "reconstruct_perimeter_structure", params: {} }]);
+    assert.equal(result.width, 4);
+    assert.equal(result.height, 4);
+  });
+});
 
 describe("checkReconstructionToFinalRgb (Signs Phase S4.1)", () => {
   it("exact RGB match -> pass, zero mismatches", () => {
@@ -375,6 +514,112 @@ describe("checkPerimeterTileExtensionRegions (Semantic Worker Wiring Phase)", ()
     const contentRegion = { x: 2, y: 0, width: 2, height: 4 };
     const evidence = checkPerimeterTileExtensionRegions(final, contentRegion, "horizontal", 2, 2, leadingRows, trailingRows);
     assert.equal(evidence.result, "pass");
+  });
+});
+
+/** Parametric Frame Reconstruction Phase: the reconstruct_parametric_frame sibling of checkPerimeterTileExtensionRegions/checkExtensionRegions. */
+describe("checkParametricFrameRegions (Parametric Frame Reconstruction Phase)", () => {
+  const bands = [{ color: { r: 0, g: 0, b: 0 }, thicknessPx: 2 }];
+  const fillColor = { r: 0, g: 0, b: 0 };
+
+  function rectangularFramedImage(): RgbaImage {
+    const final = makeImage(10, 10, { r: 0, g: 0, b: 0 });
+    fillRect(final, 2, 2, 8, 8, { r: 1, g: 1, b: 1 }); // interior placeholder — never this check's territory
+    return final;
+  }
+
+  it("every redrawn frame pixel exactly matches the plan's own measured band model -> pass", () => {
+    const final = rectangularFramedImage();
+    const contentRegion = { x: 2, y: 2, width: 6, height: 6 };
+    const evidence = checkParametricFrameRegions(final, contentRegion, null, bands, fillColor, null, null);
+    assert.equal(evidence.result, "pass");
+    assert.equal(evidence.mismatchedPixelCount, 0);
+    assert.equal(evidence.totalExtensionPixels, 100 - 36);
+  });
+
+  it("one redrawn frame pixel has the wrong colour -> catastrophic", () => {
+    const final = rectangularFramedImage();
+    final.data[0] = 5; // corrupt the top-left corner pixel
+    const contentRegion = { x: 2, y: 2, width: 6, height: 6 };
+    const evidence = checkParametricFrameRegions(final, contentRegion, null, bands, fillColor, null, null);
+    assert.equal(evidence.result, "catastrophic");
+    assert.equal(evidence.mismatchedPixelCount, 1);
+  });
+
+  const testHole = {
+    radiusPx: 1,
+    offsetFromCornerXPx: 1,
+    offsetFromCornerYPx: 1,
+    ringColor: { r: 0, g: 0, b: 0 },
+    interiorColor: { r: 9, g: 9, b: 9 },
+  };
+
+  /** Paints every pixel of one corner's hole (interior disk + ring) exactly per the check's own distance formula — never just the center pixel. */
+  function paintHoleAtCorner(
+    final: RgbaImage,
+    w: number,
+    h: number,
+    corner: readonly [number, number, 1 | -1, 1 | -1],
+    hole: typeof testHole,
+  ): void {
+    const [cx, cy, sx, sy] = corner;
+    const centerX = cx + sx * hole.offsetFromCornerXPx;
+    const centerY = cy + sy * hole.offsetFromCornerYPx;
+    const margin = hole.radiusPx + 2;
+    for (let y = Math.max(0, centerY - margin); y <= Math.min(h - 1, centerY + margin); y++) {
+      for (let x = Math.max(0, centerX - margin); x <= Math.min(w - 1, centerX + margin); x++) {
+        const d = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
+        const color = d <= hole.radiusPx ? hole.interiorColor : d <= hole.radiusPx + 2 ? hole.ringColor : null;
+        if (!color) continue;
+        const i = (y * w + x) * 4;
+        final.data[i] = color.r;
+        final.data[i + 1] = color.g;
+        final.data[i + 2] = color.b;
+      }
+    }
+  }
+
+  const ALL_FOUR_CORNERS = [
+    [0, 0, 1, 1],
+    [19, 0, -1, 1],
+    [0, 19, 1, -1],
+    [19, 19, -1, -1],
+  ] as const;
+
+  it("a flat frame + 4 symmetric holes reconstruction matches the model exactly -> pass", () => {
+    // frame depth 2 (from `bands`), holes offset (1,1)/radius 1 from each
+    // corner — well inside the extension band, never touching contentRegion.
+    const final = makeImage(20, 20, { r: 0, g: 0, b: 0 });
+    fillRect(final, 2, 2, 18, 18, { r: 1, g: 1, b: 1 });
+    for (const corner of ALL_FOUR_CORNERS) paintHoleAtCorner(final, 20, 20, corner, testHole);
+    const contentRegion = { x: 2, y: 2, width: 16, height: 16 };
+    const evidence = checkParametricFrameRegions(final, contentRegion, null, bands, fillColor, null, testHole);
+    assert.equal(evidence.result, "pass", evidence.reasons.join("; "));
+  });
+
+  it("one hole missing (never painted, still frame colour) -> catastrophic", () => {
+    const final = makeImage(20, 20, { r: 0, g: 0, b: 0 });
+    fillRect(final, 2, 2, 18, 18, { r: 1, g: 1, b: 1 });
+    // Paint only 3 of the 4 corners' holes — the 4th is left as plain frame colour.
+    for (const corner of ALL_FOUR_CORNERS.slice(0, 3)) paintHoleAtCorner(final, 20, 20, corner, testHole);
+    const contentRegion = { x: 2, y: 2, width: 16, height: 16 };
+    const evidence = checkParametricFrameRegions(final, contentRegion, null, bands, fillColor, null, testHole);
+    assert.equal(evidence.result, "catastrophic");
+    // Only the missing hole's own interior disk (radius 1 -> 5 pixels: centre + 4 cardinal neighbours) mismatches — its ring colour already matches the plain frame background.
+    assert.equal(evidence.mismatchedPixelCount, 5);
+  });
+
+  it("null content region -> unknown", () => {
+    const final = rectangularFramedImage();
+    const evidence = checkParametricFrameRegions(final, null, null, bands, fillColor, null, null);
+    assert.equal(evidence.result, "unknown");
+  });
+
+  it("missing band model -> unknown, never guesses a colour", () => {
+    const final = rectangularFramedImage();
+    const contentRegion = { x: 2, y: 2, width: 6, height: 6 };
+    const evidence = checkParametricFrameRegions(final, contentRegion, null, null, null, null, null);
+    assert.equal(evidence.result, "unknown");
   });
 });
 

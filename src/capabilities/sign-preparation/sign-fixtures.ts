@@ -273,6 +273,124 @@ export function bandWithEmbeddedMarkArtwork(width = 1000, height = 1500): RgbaIm
   return image;
 }
 
+/**
+ * Parametric Perimeter Frame Reconstruction Phase: a synthetic bordered
+ * sign — concentric band sequence (outer stroke / gap / inner stroke),
+ * optional rounded corners, optional four symmetric corner-hole
+ * indicators, and a distinct interior "content" fill so the protected
+ * interior is visually and numerically distinguishable from the frame's
+ * own fill colour. Deliberately mirrors the REAL cc6cfc4b-... acceptance
+ * sign's own measured geometry (outer stroke ~9px, gap ~15px, inner stroke
+ * ~7px, corner radius ~42px, hole radius ~9px, hole offset ~33/33px from
+ * each corner) without reproducing the customer's own artwork.
+ */
+export function framedSignArtwork(options: {
+  width?: number;
+  height?: number;
+  rounded?: boolean;
+  withHoles?: boolean;
+  /** Deliberately break one corner's rounding (different radius) or hole (missing) — for the ambiguous/blocked fixtures. */
+  breakCorner?: "radius" | "missing_hole" | null;
+  /**
+   * Interior "content" fill colour — defaults to a bright near-white,
+   * distinct from the frame's own fill colour. Override to `NEAR_BLACK`
+   * (or similar) for a worker-level test that ALSO dispatches
+   * `FakeSignReconstructionProvider`: its own solid-fill fake output is
+   * always near-black, and `checkSourceSimilarity`'s advisory catastrophic
+   * floor compares the source's own interior against it — a bright content
+   * colour reads as a genuine catastrophic mismatch against that fake
+   * output, exactly as `ruthLikeSignArtwork`'s own near-black background
+   * already accounts for.
+   */
+  contentColor?: Rgba;
+}): RgbaImage {
+  const width = options.width ?? 1086;
+  const height = options.height ?? 1448;
+  const rounded = options.rounded ?? true;
+  const withHoles = options.withHoles ?? true;
+  const breakCorner = options.breakCorner ?? null;
+
+  const outerStroke: Rgba = { r: 4, g: 4, b: 4 };
+  const gapColor: Rgba = { r: 253, g: 253, b: 253 };
+  const innerStroke: Rgba = { r: 4, g: 4, b: 4 };
+  const fillColor: Rgba = { r: 202, g: 14, b: 14 };
+  const contentColor: Rgba = options.contentColor ?? { r: 250, g: 250, b: 250 };
+  const holeRing: Rgba = { r: 4, g: 4, b: 4 };
+  const holeInterior: Rgba = { r: 253, g: 253, b: 253 };
+
+  const OUTER_T = 9, GAP_T = 15, INNER_T = 7;
+  const frameDepth = OUTER_T + GAP_T + INNER_T;
+  const radius = rounded ? 42 : 0;
+  const brokenRadius = 30; // a deliberately DIFFERENT radius for the "inconsistent corner" fixture.
+  const holeRadius = 9;
+  const holeOffsetX = 33, holeOffsetY = 33;
+
+  const image = makeImage(width, height, fillColor);
+  // Interior "content" fill, distinct from the frame's own fill colour —
+  // never touched by this module's own measurement, just makes the
+  // fixture visually/numerically honest about where content begins.
+  fillRect(image, frameDepth, frameDepth, width - frameDepth, height - frameDepth, contentColor);
+
+  function cornerRadiusFor(cx: number, cy: number): number {
+    if (breakCorner === "radius" && cx === 0 && cy === 0) return brokenRadius;
+    return radius;
+  }
+
+  function bandColorAt(depth: number): Rgba | null {
+    if (depth < OUTER_T) return outerStroke;
+    if (depth < OUTER_T + GAP_T) return gapColor;
+    if (depth < frameDepth) return innerStroke;
+    return null; // fill — already painted, leave untouched.
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cornerX = x < width / 2 ? 0 : width - 1;
+      const cornerY = y < height / 2 ? 0 : height - 1;
+      const r = cornerRadiusFor(cornerX, cornerY);
+      const inCornerX = x < r ? r - x : x > width - 1 - r ? x - (width - 1 - r) : 0;
+      const inCornerY = y < r ? r - y : y > height - 1 - r ? y - (height - 1 - r) : 0;
+      let depth: number | null;
+      if (inCornerX > 0 && inCornerY > 0) {
+        const dist = Math.sqrt(inCornerX * inCornerX + inCornerY * inCornerY);
+        depth = dist > r ? null : r - dist;
+      } else {
+        depth = Math.min(x, y, width - 1 - x, height - 1 - y);
+      }
+      if (depth === null) {
+        fillRect(image, x, y, x + 1, y + 1, gapColor); // outer background pocket outside the rounded corner.
+        continue;
+      }
+      const color = bandColorAt(depth);
+      if (color) fillRect(image, x, y, x + 1, y + 1, color);
+    }
+  }
+
+  if (withHoles) {
+    const corners: [number, number, 1 | -1, 1 | -1][] = [
+      [0, 0, 1, 1],
+      [width - 1, 0, -1, 1],
+      [0, height - 1, 1, -1],
+      [width - 1, height - 1, -1, -1],
+    ];
+    for (const [cx, cy, sx, sy] of corners) {
+      if (breakCorner === "missing_hole" && cx === 0 && cy === 0) continue; // one corner deliberately has NO hole.
+      const centerX = cx + sx * holeOffsetX;
+      const centerY = cy + sy * holeOffsetY;
+      for (let y = Math.floor(centerY - holeRadius - 2); y <= centerY + holeRadius + 2; y++) {
+        for (let x = Math.floor(centerX - holeRadius - 2); x <= centerX + holeRadius + 2; x++) {
+          if (x < 0 || y < 0 || x >= width || y >= height) continue;
+          const d = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
+          if (d <= holeRadius) fillRect(image, x, y, x + 1, y + 1, holeInterior);
+          else if (d <= holeRadius + 2) fillRect(image, x, y, x + 1, y + 1, holeRing);
+        }
+      }
+    }
+  }
+
+  return image;
+}
+
 /** No dominant edge colour anywhere — deterministic "cannot prove" case. */
 export function noisyEdgeSignArtwork(width = 400, height = 600): RgbaImage {
   const image = makeImage(width, height, NEAR_BLACK);

@@ -229,6 +229,20 @@ export type SignDefectCode =
    * repair is never `auto_safe` regardless of evidence strength.
    */
   | "perimeter_structure_reconstructed"
+  /**
+   * Parametric Perimeter Frame Reconstruction Phase (Constitution §16A.3
+   * amendment 3.1's own bounded carve-out, extended): the edge-dependent
+   * structure above is a measurable concentric BAND SEQUENCE (a frame —
+   * optionally rounded, optionally carrying repeated corner-hole
+   * indicators), not a tileable stripe pattern —
+   * `frame-structure-model.ts` measured it with real, checkable
+   * cross-edge/cross-corner agreement, so `reconstruct_parametric_frame`
+   * was proposed instead of an outright block. Always paired with
+   * `repair_requires_review` — never `auto_safe` regardless of evidence
+   * strength, the same discipline `perimeter_structure_reconstructed`
+   * already follows.
+   */
+  | "parametric_frame_structure_reconstructed"
   /** The fill alternative would cut source pixels — never automatic. */
   | "meaningful_crop_required"
   /** The formulated plan needs human judgment before execution. */
@@ -266,6 +280,31 @@ export type SignRepairStepKind =
    * would independently receive.
    */
   | "reconstruct_perimeter_structure"
+  /**
+   * Parametric Perimeter Frame Reconstruction Phase (Constitution §16A.3
+   * amendment 3.1's own bounded carve-out, extended) /
+   * `sign-preparation/frame-structure-model.ts`. For artwork whose
+   * perimeter is a measurable concentric BAND SEQUENCE (a frame —
+   * optionally rounded, optionally carrying repeated corner-hole
+   * indicators) rather than a tileable stripe pattern
+   * (`reconstruct_perimeter_structure`'s own narrower shape): crops out
+   * the measured protected interior (removing the OLD frame band
+   * entirely — never blitted anywhere in the output), then redraws the
+   * SAME measured band sequence/corner rounding/hole geometry — colours
+   * and proportions only ever taken from the customer's own source pixels,
+   * never generated or invented — at the NEW finished substrate boundary,
+   * with the interior repositioned (never resized non-uniformly, never
+   * resampled) inside it. Always `review_required` (never `auto_safe`) by
+   * constitutional requirement, identical to
+   * `reconstruct_perimeter_structure`'s own discipline. May coexist with a
+   * preceding `reconstruct_resolution` step (unlike
+   * `reconstruct_perimeter_structure`, which is scope-limited against
+   * that combination) — see `sign-transform-executor.ts`'s own doc on
+   * why: this step re-derives every pixel amount from whatever the prior
+   * step's ACTUAL output size is, at EXECUTION time, rather than baking
+   * in a plan-time prediction.
+   */
+  | "reconstruct_parametric_frame"
   | "proportional_resample"
   | "downsample"
   | "approved_crop"

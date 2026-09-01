@@ -298,6 +298,8 @@ export const TEST_FILES = [
   // Includes the Ruth-shaped synthetic acceptance fixture (1024×1536 → 18×24).
   "src/capabilities/sign-preparation/sign-inspection.test.ts",
   "src/capabilities/sign-preparation/sign-repair-planner.test.ts",
+  "src/capabilities/sign-preparation/frame-structure-model.test.ts",
+  "src/capabilities/sign-preparation/sign-transform-executor-parametric-frame.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-capability.test.ts",
   "src/capabilities/sign-preparation/rigid-sign-category.test.ts",
   // Signs Phase S2 (Constitution §16A): deterministic repair execution +

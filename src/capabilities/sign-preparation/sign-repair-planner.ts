@@ -56,6 +56,7 @@ import {
   SIGN_RECONSTRUCTION_SCALE_CEILING,
 } from "./resolution-policy";
 import type { SignPerimeterBandMeasurement } from "./perimeter-reconstruction";
+import type { SignFrameStructuralModel, SignFrameStructuralModelResult } from "./frame-structure-model";
 
 export interface SignPlanningInput {
   spec: SignProductionSpec;
@@ -73,6 +74,23 @@ export interface SignPlanningInput {
    * is additive, never a silent behavior change for an existing caller.
    */
   perimeterBands?: SignPerimeterBandMeasurement[];
+  /**
+   * Parametric Perimeter Frame Reconstruction Phase: the caller's own
+   * `frame-structure-model.ts` measurement of the SOURCE image, used ONLY
+   * when an affected edge is flagged edge-dependent and would otherwise
+   * block or fall to `reconstruct_perimeter_structure`'s narrower tiling
+   * bar. Optional and defaulted to absent — a caller that never supplies
+   * this gets exactly the prior phase's behaviour, unaffected.
+   */
+  frameStructuralModel?: SignFrameStructuralModelResult;
+  /**
+   * Height/Redistribution Policy: `frame-structure-model.ts`'s own
+   * `measureCleanFillRunPx`, one measurement per edge — how the newly
+   * added space should be split between the axis's two affected edges
+   * (see `encodeFrameStructuralModelParams`'s own doc). Only meaningful
+   * alongside `frameStructuralModel`.
+   */
+  frameCleanFillRunPx?: Partial<Record<SignEdge, number>>;
 }
 
 const RISK_ORDER: Record<SignRiskClass, number> = {
@@ -126,6 +144,73 @@ function encodePerimeterBandsParams(
     params[`trailingRow${i}G`] = row.g;
     params[`trailingRow${i}B`] = row.b;
   });
+  return params;
+}
+
+/**
+ * Flattens a measured `SignFrameStructuralModel` (bands, corner rounding,
+ * hole geometry, all still in SOURCE-image pixel units) plus this axis's
+ * redistribution share into `SignRepairStep`'s flat params shape. Every
+ * value is either directly measured from the source (never invented) or
+ * a plain geometry fact (axis, leadingPx/trailingPx, leadingShare)
+ * `sign-transform-executor.ts` independently re-derives from at
+ * EXECUTION time when a preceding `reconstruct_resolution` step's actual
+ * output diverges from what was requested — see that module's own
+ * `adaptGeometryStepsToActualReconstruction` doc.
+ *
+ * `leadingShare` — Height/Redistribution Policy: the neutral, measured
+ * proportion (0..1) of the newly added space that goes to the LEADING
+ * side, derived from each side's own measured "clean fill" depth
+ * (`measureCleanFillRunPx`) — preserving the artwork's own existing
+ * top/bottom (or left/right) proportions rather than an arbitrary 50/50
+ * split, while never asking an operator to type a number. Falls back to
+ * an even 0.5 split only when NEITHER side measured any clean fill at
+ * all (both exactly 0) — a genuinely symmetric case, not a guess.
+ */
+function encodeFrameStructuralModelParams(
+  axis: "horizontal" | "vertical",
+  leadingPx: number,
+  trailingPx: number,
+  leadingShare: number,
+  model: SignFrameStructuralModel,
+): Record<string, number | string> {
+  const params: Record<string, number | string> = {
+    axis,
+    leadingPx,
+    trailingPx,
+    leadingShare,
+    modelSourceWidthPx: model.sourceWidthPx,
+    modelSourceHeightPx: model.sourceHeightPx,
+    frameDepthPx: model.frameDepthPx,
+    bandCount: model.bands.length,
+    fillColorR: model.fillColor.r,
+    fillColorG: model.fillColor.g,
+    fillColorB: model.fillColor.b,
+    cornerRadiusPx: model.cornerRadiusPx ?? -1,
+    hasHole: model.hole ? "true" : "false",
+  };
+  model.bands.forEach((band, i) => {
+    params[`band${i}R`] = band.color.r;
+    params[`band${i}G`] = band.color.g;
+    params[`band${i}B`] = band.color.b;
+    params[`band${i}ThicknessPx`] = band.thicknessPx;
+  });
+  if (model.outerBackgroundColor) {
+    params.outerBackgroundColorR = model.outerBackgroundColor.r;
+    params.outerBackgroundColorG = model.outerBackgroundColor.g;
+    params.outerBackgroundColorB = model.outerBackgroundColor.b;
+  }
+  if (model.hole) {
+    params.holeRadiusPx = model.hole.radiusPx;
+    params.holeOffsetXPx = model.hole.offsetFromCornerXPx;
+    params.holeOffsetYPx = model.hole.offsetFromCornerYPx;
+    params.holeRingColorR = model.hole.ringColor.r;
+    params.holeRingColorG = model.hole.ringColor.g;
+    params.holeRingColorB = model.hole.ringColor.b;
+    params.holeInteriorColorR = model.hole.interiorColor.r;
+    params.holeInteriorColorG = model.hole.interiorColor.g;
+    params.holeInteriorColorB = model.hole.interiorColor.b;
+  }
   return params;
 }
 
@@ -318,7 +403,82 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
       : affectedEdges.filter((edge) =>
           isEdgeDependentStructure(edgeByName(inspection.edges, edge)),
         );
-    if (edgeDependentEdges.length > 0) {
+    // Parametric Perimeter Frame Reconstruction Phase (Constitution
+    // §16A.3 amendment 3.1's own bounded carve-out, extended): the frame
+    // model's OWN cross-edge/cross-corner agreement is independent,
+    // purpose-built affirmative evidence — strictly STRONGER than
+    // `edge-dependence.ts`'s cruder whole-band dominant-colour heuristic
+    // (built for detecting stripe-like edge bleeding, not concentric
+    // frame band sequences). Gating frame admission on `edgeDependentEdges`
+    // firing FIRST would make it a hostage to that unrelated heuristic's
+    // own tie-breaking: a genuinely, symmetrically framed sign with SQUARE
+    // (unrounded) corners can measure a near-even black/white row split
+    // within `edge-inspection.ts`'s own band-depth window, occasionally
+    // landing outermostCoverage on the "matches dominant" side purely by
+    // which colour bucket a tie resolves to — a fact about a DIFFERENT
+    // measurement's window depth, never evidence the frame itself is any
+    // less real. A measured (or ambiguous) frame model is therefore
+    // checked on its OWN terms here, never gated behind edge-dependence.
+    const hasFrameEvidence =
+      !rotated && input.frameStructuralModel !== undefined && input.frameStructuralModel.status !== "not_present";
+    if (edgeDependentEdges.length > 0 || hasFrameEvidence) {
+      if (hasFrameEvidence) {
+        // `hasFrameEvidence` already established `input.frameStructuralModel`
+        // is defined and not `"not_present"` — captured once here so
+        // TypeScript's control-flow narrowing (which does not follow
+        // through the multi-condition boolean above) has a single,
+        // definitely-typed value for the rest of this branch.
+        const frameResult = input.frameStructuralModel!;
+        if (frameResult.status === "ambiguous") {
+          defects.push({
+            code: "perimeter_structure_at_extension_edge",
+            severity: "blocking",
+            detail:
+              `The ${affectedEdges.join("/")} edge band(s) show a continuous, near-edge structure ` +
+              "consistent with a frame, but its own geometry could not be measured with affirmative " +
+              `cross-edge/cross-corner agreement: ${frameResult.reason}`,
+          });
+          return { status: "blocked", plan: null, defects };
+        }
+        if (frameResult.status !== "measured") {
+          // Structurally unreachable: `hasFrameEvidence` already excluded
+          // `"not_present"`, and `"ambiguous"` returned above.
+          return { status: "blocked", plan: null, defects };
+        }
+        const model = frameResult.model;
+        const leadingRunPx = input.frameCleanFillRunPx?.[affectedEdges[0]] ?? 0;
+        const trailingRunPx = input.frameCleanFillRunPx?.[affectedEdges[1]] ?? 0;
+        const totalRunPx = leadingRunPx + trailingRunPx;
+        const leadingShare = totalRunPx > 0 ? leadingRunPx / totalRunPx : 0.5;
+        const totalPad = leadingPx + trailingPx;
+        const adaptedLeadingPx = Math.round(totalPad * leadingShare);
+        const adaptedTrailingPx = totalPad - adaptedLeadingPx;
+
+        defects.push({
+          code: "parametric_frame_structure_reconstructed",
+          severity: "review",
+          detail:
+            `The ${affectedEdges.join("/")} edge bands show a measurable concentric frame (band sequence ` +
+            `depth ${model.frameDepthPx}px${model.cornerRadiusPx !== null ? `, corner radius ~${model.cornerRadiusPx}px` : ""}` +
+            `${model.hole ? ", with repeated corner-hole indicators" : ""}) — proposing a parametric frame ` +
+            "reconstruction built only from the customer's own measured geometry, never a block. Always " +
+            "human-review-required (Constitution §16A.3 amendment 3.1), regardless of this evidence's strength.",
+        });
+        steps.push({
+          kind: "reconstruct_parametric_frame",
+          params: encodeFrameStructuralModelParams(axis, adaptedLeadingPx, adaptedTrailingPx, leadingShare, model),
+          risk: "review_required",
+          reasons: [
+            "Edge-dependent structure was detected, and the perimeter measures as a genuine concentric " +
+              "frame (band sequence, optional rounding, optional corner-hole indicators) with real, checkable " +
+              "agreement across all four edges/corners — still requires human production review before execution.",
+          ],
+        });
+        // Deliberately skips BOTH the `reconstruct_perimeter_structure`
+        // tiling check AND the outright-block fallthrough below — a
+        // measured frame model is a strictly MORE informative, more
+        // semantically correct repair for this shape than either.
+      } else {
       // Production-Aware Perimeter Reconstruction Phase (Constitution
       // §16A.3 amendment 3.1): before refusing outright, check whether BOTH
       // affected edges (not just the one(s) that tripped edge-dependence
@@ -391,6 +551,7 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
       } else {
         return { status: "blocked", plan: null, defects };
       }
+      } // closes the `frameStructuralModel` not-present/absent fallback branch opened above.
     } else {
 
     const bothUniform =
