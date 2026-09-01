@@ -263,14 +263,39 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     const stored = await built.repo.getSignPreservationVerification(finalAsset!.id, combinedVersion);
     assert.equal(stored, null, "the transient failure persisted nothing");
 
-    // FinalArtworkCapability's own existing revive-a-failed-job path.
-    await built.finalArtwork.requestSignFinalArtwork(built.projectId);
+    // FinalArtworkCapability's own existing revive-a-failed-job path — the
+    // SAME thing "Prepare artwork"/"Try again" does in the real product.
+    const revived = await built.finalArtwork.requestSignFinalArtwork(built.projectId);
+    // LIVE PRODUCT BLOCKER #4F: the real recovery requirement — the EXISTING
+    // job is revived in place, never a second FinalArtworkJob.
+    assert.equal(revived.job.id, job.id, "recovery must reuse the SAME FinalArtworkJob, never create a new one");
     semanticProvider.behavior = { kind: "all_same" };
     await built.worker.processNextJob();
 
     assert.equal(semanticProvider.dispatchCount, 2, "one failed attempt + one successful attempt");
+    // LIVE PRODUCT BLOCKER #4F: the real recovery requirement — a failed
+    // preservation attempt must never cause a second Topaz reconstruction.
+    // `resolveExistingProductionAsset` finds the already-persisted, already-
+    // geometry-adapted final asset (excluding the marked intermediate) and
+    // the worker's own "recovered/retried job" branch recomputes evidence
+    // from its recorded metadata instead of re-executing reconstruction.
+    assert.equal(
+      reconstructionProvider.dispatchCount,
+      1,
+      "a preservation-only retry must never resubmit reconstruction — the existing final asset is reused",
+    );
     const retriedJob = await built.repo.getFinalArtworkJob(job.id);
     assert.equal(retriedJob!.status, "completed");
+
+    const assetsAfterRetry = (await built.repo.listAssets(built.projectId)).filter(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
+    );
+    assert.equal(
+      assetsAfterRetry.length,
+      1,
+      "exactly the one original final asset must exist — recovery must never produce a duplicate",
+    );
+    assert.equal(assetsAfterRetry[0]!.id, finalAsset!.id, "the SAME final asset must be reused, never regenerated");
   });
 
   it("6: LIVE PRODUCT BLOCKER #4D — an OPERATOR-AUTHORIZED review_required plan with a 'preserved' record and a proven S3C geometry adaptation NOW reaches print_ready", async () => {

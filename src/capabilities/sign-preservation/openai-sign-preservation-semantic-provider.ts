@@ -179,6 +179,64 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
 
+/**
+ * LIVE PRODUCT BLOCKER #4F: how much of a non-2xx Responses API error body
+ * to surface — mirrors `openai-files-transport-client.ts`'s own
+ * `MAX_ERROR_DETAIL_LENGTH`/`classifyNonOkResponse` precedent (established
+ * there for exactly this same class of incident, Signs Phase S4.2C.3),
+ * applied here to the ONE call site that never received it: the Responses
+ * inference request itself. Bounded enough to never risk leaking something
+ * unbounded; never the request, never a secret.
+ */
+const MAX_OPENAI_ERROR_FIELD_LENGTH = 300;
+
+/**
+ * LIVE PRODUCT BLOCKER #4F: before this fix, a non-2xx Responses API
+ * response was discarded entirely — `last_error` only ever recorded the
+ * bare HTTP status, so the real customer's HTTP 400 gave no way to tell
+ * WHY OpenAI rejected the request without reproducing a paid call. Parses
+ * OpenAI's documented `{"error": {"type", "code", "param", "message"}}`
+ * error-body shape into a short, bounded, sanitized diagnostic string.
+ *
+ * Reads ONLY the response body OpenAI sent back — never this process's own
+ * request (so never the Authorization header, an image byte, a file_id, or
+ * any customer artwork). Every extracted field is bounded to
+ * `MAX_OPENAI_ERROR_FIELD_LENGTH`. Falls back to a bounded raw-text excerpt
+ * if the body is not JSON or does not match the documented shape, and to
+ * `null` if the body cannot be read at all — never throws.
+ */
+async function describeOpenAIErrorBody(response: Response): Promise<string | null> {
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    return null;
+  }
+  if (!text) return null;
+
+  const bound = (value: string) => value.slice(0, MAX_OPENAI_ERROR_FIELD_LENGTH);
+
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const error =
+      parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).error : null;
+    if (error && typeof error === "object") {
+      const e = error as Record<string, unknown>;
+      const parts = [
+        typeof e.type === "string" && e.type ? `type=${bound(e.type)}` : null,
+        typeof e.code === "string" && e.code ? `code=${bound(e.code)}` : null,
+        typeof e.param === "string" && e.param ? `param=${bound(e.param)}` : null,
+        typeof e.message === "string" && e.message ? `message=${bound(e.message)}` : null,
+      ].filter((part): part is string => part !== null);
+      if (parts.length > 0) return parts.join(" ");
+    }
+  } catch {
+    // Not JSON, or not the documented shape — fall through to raw excerpt.
+  }
+
+  return bound(text) || null;
+}
+
 /** Immutable "insert or replace by role" helper for the small (14-entry) file-record array — never a data-dependent index. */
 function upsertFileRecord(
   files: SignPreservationTransportFileRecord[],
@@ -484,7 +542,15 @@ export class OpenAISignPreservationSemanticProvider implements SignPreservationS
         },
         body: JSON.stringify({
           model: this.model,
-          temperature: 0,
+          // LIVE PRODUCT BLOCKER #4F: deliberately no `temperature` — the
+          // real customer's first live request was rejected with HTTP 400
+          // because GPT-5-family reasoning models (this provider's
+          // `gpt-5.6-luna` included) do not accept sampling parameters at
+          // all; OpenAI's documented replacement is `reasoning.effort`,
+          // never sent here since the schema-constrained, closed-question
+          // contract needs no explicit effort tuning. Determinism for this
+          // task comes from the strict `json_schema` output contract and
+          // the closed four-way answer enum, not from `temperature`.
           input: [
             { role: "system", content: [{ type: "input_text", text: SYSTEM_INSTRUCTION }] },
             { role: "user", content: userContent },
@@ -509,22 +575,36 @@ export class OpenAISignPreservationSemanticProvider implements SignPreservationS
       clearTimeout(timeout);
     }
 
-    if (response.status === 429) {
-      throw new ProviderError(
-        "rate_limited",
-        "The semantic preservation provider is rate-limiting requests right now.",
-      );
-    }
-    if (response.status === 401 || response.status === 403) {
-      throw new ProviderError("auth", "The semantic preservation provider rejected the configured credentials.");
-    }
-    if (response.status >= 500) {
-      throw new ProviderError("unavailable", "The semantic preservation provider is temporarily unavailable.");
-    }
     if (!response.ok) {
+      // LIVE PRODUCT BLOCKER #4F: every non-2xx branch below now captures a
+      // sanitized, bounded diagnostic from the response body OpenAI itself
+      // sent back (never the request) — see `describeOpenAIErrorBody`'s own
+      // doc comment. Classification/retry behavior for every status is
+      // UNCHANGED from before this phase; only the message gained detail.
+      const detail = await describeOpenAIErrorBody(response);
+      const suffix = detail ? ` (${detail})` : "";
+
+      if (response.status === 429) {
+        throw new ProviderError(
+          "rate_limited",
+          `The semantic preservation provider is rate-limiting requests right now.${suffix}`,
+        );
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw new ProviderError(
+          "auth",
+          `The semantic preservation provider rejected the configured credentials.${suffix}`,
+        );
+      }
+      if (response.status >= 500) {
+        throw new ProviderError(
+          "unavailable",
+          `The semantic preservation provider is temporarily unavailable.${suffix}`,
+        );
+      }
       throw new ProviderError(
         "malformed_response",
-        `The semantic preservation provider returned an unexpected status (${response.status}).`,
+        `The semantic preservation provider returned an unexpected status (${response.status}).${suffix}`,
       );
     }
 

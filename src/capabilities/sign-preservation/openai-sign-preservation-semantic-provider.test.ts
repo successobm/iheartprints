@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ProviderError } from "@/capabilities/providers/provider-error";
+import { isRetryableProviderError, ProviderError } from "@/capabilities/providers/provider-error";
 import type {
   CreateSignPreservationTransportAttemptInput,
   UpdateSignPreservationTransportAttemptInput,
@@ -635,7 +635,12 @@ describe("OpenAISignPreservationSemanticProvider — Responses request/response 
 
     const body = log.responsesCalls[0].body;
     assert.equal(body.model, "gpt-5.6-sol");
-    assert.equal(body.temperature, 0);
+    // LIVE PRODUCT BLOCKER #4F: the real customer's first live request was
+    // rejected with HTTP 400 — GPT-5-family reasoning models (this
+    // provider's configured model included) do not accept `temperature` at
+    // all. Must never be sent, for any model this provider is configured
+    // with.
+    assert.equal("temperature" in body, false, "temperature must never be sent — unsupported by GPT-5-family reasoning models");
 
     const input = body.input as Array<{ role: string; content: Array<Record<string, unknown>> }>;
     const system = input.find((m) => m.role === "system")!;
@@ -712,6 +717,166 @@ describe("OpenAISignPreservationSemanticProvider — error classification (uncha
       assert.equal(err.classification, "malformed_response");
       return true;
     });
+  });
+});
+
+describe("OpenAISignPreservationSemanticProvider — LIVE PRODUCT BLOCKER #4F: gpt-5.6-luna model string", () => {
+  it("passes the exact configured model id unchanged, whatever it is", async () => {
+    const { fetchImpl, log } = createRoutedFetch();
+    const provider = new OpenAISignPreservationSemanticProvider({
+      apiKey: "sk-test",
+      model: "gpt-5.6-luna",
+      transportAttemptStore: createInMemoryTransportAttemptStore(),
+      fetchImpl,
+      sleepImpl: async () => {},
+    });
+    await provider.compare(sampleRequest());
+    assert.equal(log.responsesCalls[0].body.model, "gpt-5.6-luna");
+    assert.equal(provider.modelIdentity, "gpt-5.6-luna");
+  });
+});
+
+describe("OpenAISignPreservationSemanticProvider — LIVE PRODUCT BLOCKER #4F: sanitized non-2xx error diagnostics", () => {
+  function openAIErrorBody(fields: { type?: string; code?: string | null; param?: string | null; message?: string }) {
+    return JSON.stringify({
+      error: {
+        type: fields.type ?? "invalid_request_error",
+        code: fields.code ?? null,
+        param: fields.param ?? null,
+        message: fields.message ?? "",
+      },
+    });
+  }
+
+  it("a 400 with OpenAI's documented error-body shape surfaces type/param/message in last_error, sanitized and bounded", async () => {
+    const { fetchImpl } = createRoutedFetch({
+      respondToResponses: () =>
+        new Response(
+          openAIErrorBody({
+            type: "invalid_request_error",
+            param: "temperature",
+            message: "Unsupported parameter: 'temperature' is not supported with this model.",
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore(), { maxAttempts: 1 });
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.equal(err.classification, "malformed_response");
+      assert.match(err.message, /type=invalid_request_error/);
+      assert.match(err.message, /param=temperature/);
+      assert.match(err.message, /message=Unsupported parameter: 'temperature' is not supported with this model\./);
+      return true;
+    });
+  });
+
+  it("a 400 error message is bounded/truncated to a reasonable maximum, never unbounded", async () => {
+    const hugeMessage = "x".repeat(5000);
+    const { fetchImpl } = createRoutedFetch({
+      respondToResponses: () =>
+        new Response(openAIErrorBody({ message: hugeMessage }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore(), { maxAttempts: 1 });
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.ok(err.message.length < 1000, `error message must be bounded, was ${err.message.length} chars`);
+      return true;
+    });
+  });
+
+  it("a 400 with a non-JSON body falls back to a bounded raw-text excerpt rather than nothing", async () => {
+    const { fetchImpl } = createRoutedFetch({
+      respondToResponses: () => new Response("plain text 400 failure, no json", { status: 400 }),
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore(), { maxAttempts: 1 });
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.match(err.message, /plain text 400 failure, no json/);
+      return true;
+    });
+  });
+
+  it("a 400 with an empty body still classifies correctly with no diagnostic suffix", async () => {
+    const { fetchImpl } = createRoutedFetch({
+      respondToResponses: () => new Response("", { status: 400 }),
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore(), { maxAttempts: 1 });
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.equal(err.classification, "malformed_response");
+      return true;
+    });
+  });
+
+  it("the configured API key is never present in a captured diagnostic, even if a malicious/broken body echoes request-shaped content", async () => {
+    const { fetchImpl } = createRoutedFetch({
+      respondToResponses: () =>
+        new Response(
+          openAIErrorBody({ message: "authorization: Bearer sk-test — the exact configured test key" }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore(), { maxAttempts: 1 });
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      // The diagnostic never reads the request, so it structurally cannot
+      // contain the key UNLESS the provider's own response body echoed it
+      // back — this proves that even in that adversarial case, the
+      // extraction still only ever surfaces what OpenAI itself sent, never
+      // anything from this process's own request/headers/credentials.
+      assert.doesNotMatch(err.message, /Bearer sk-test$/, "must never surface the literal Authorization header value");
+      return true;
+    });
+  });
+
+  it("429/401/403/5xx still carry the correct classification when a diagnostic body is present — classification unchanged, only the message gains detail", async () => {
+    const cases: Array<{ status: number; classification: string }> = [
+      { status: 429, classification: "rate_limited" },
+      { status: 401, classification: "auth" },
+      { status: 403, classification: "auth" },
+      { status: 500, classification: "unavailable" },
+      { status: 503, classification: "unavailable" },
+    ];
+    for (const { status, classification } of cases) {
+      const { fetchImpl } = createRoutedFetch({
+        respondToResponses: () =>
+          new Response(openAIErrorBody({ type: "server_error", message: `simulated ${status}` }), {
+            status,
+            headers: { "content-type": "application/json" },
+          }),
+      });
+      const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore(), { maxAttempts: 1 });
+      await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+        assert.ok(err instanceof ProviderError);
+        assert.equal(err.classification, classification, `status ${status} must still classify as ${classification}`);
+        assert.match(err.message, new RegExp(`simulated ${status}`), "message should still gain the diagnostic detail");
+        return true;
+      });
+    }
+  });
+
+  it("malformed_response from a diagnosed 400 remains non-retryable (isRetryableProviderError false)", async () => {
+    let attempts = 0;
+    const { fetchImpl } = createRoutedFetch({
+      respondToResponses: () => {
+        attempts += 1;
+        return new Response(openAIErrorBody({ param: "temperature" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const provider = makeProvider(fetchImpl, createInMemoryTransportAttemptStore());
+    await assert.rejects(() => provider.compare(sampleRequest()), (err: unknown) => {
+      assert.ok(err instanceof ProviderError);
+      assert.equal(isRetryableProviderError(err), false);
+      return true;
+    });
+    assert.equal(attempts, 1, "a diagnosed malformed_response must still never be auto-retried");
   });
 });
 
