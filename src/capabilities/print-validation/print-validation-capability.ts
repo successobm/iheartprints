@@ -29,6 +29,7 @@ import type {
   PrintValidationStatus,
   ProductionNormalizationSummary,
   ProductionRequirements,
+  RigidSignGeometryStepEvidence,
   RigidSignPlanEvidence,
   UploadedPreserveEvidence,
 } from "./contracts";
@@ -563,6 +564,58 @@ const RIGID_SIGN_ASPECT_TOLERANCE = 0.01;
 /** PPI comparison tolerance, mirroring `EFFECTIVE_PPI_TOLERANCE`. */
 const RIGID_SIGN_PPI_TOLERANCE = 0.5;
 
+/**
+ * LIVE PRODUCT BLOCKER #4D: independently re-derives whether a
+ * reconstruction-provider result is PROPORTIONAL to what the approved plan
+ * requested — never trusting the worker's own claim that it was. Reuses
+ * `RIGID_SIGN_ASPECT_TOLERANCE`, the SAME tolerance this profile already
+ * applies to "do both ordered axes independently reconcile" — one
+ * tolerance value for one meaning ("proportional, modulo ordinary raster
+ * rounding") throughout this profile, not a second, possibly-disagreeing
+ * one for this specific check.
+ */
+function reconstructionIsProportional(
+  requestedWidthPx: number,
+  requestedHeightPx: number,
+  actualWidthPx: number,
+  actualHeightPx: number,
+): boolean {
+  if (!(requestedWidthPx > 0) || !(requestedHeightPx > 0) || !(actualWidthPx > 0) || !(actualHeightPx > 0)) {
+    return false;
+  }
+  const scaleX = actualWidthPx / requestedWidthPx;
+  const scaleY = actualHeightPx / requestedHeightPx;
+  const larger = Math.max(scaleX, scaleY);
+  return Math.abs(scaleX - scaleY) / larger <= RIGID_SIGN_ASPECT_TOLERANCE;
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #4D: true only when BOTH sides are `null` (no
+ * geometry step on either the approved plan or the executed steps — a
+ * bare reconstruction that reached the ordered aspect on its own) or BOTH
+ * are present AND identical in `kind`/`axis`/fill. Pixel amounts
+ * (`leadingPx`/`trailingPx`) are deliberately not part of this evidence —
+ * re-deriving them is the ONE thing a legitimate S3C adaptation is
+ * permitted to do; anything else diverging (a different step kind, a
+ * different axis, a different fill, or one side present without the
+ * other) means the executed geometry did not implement the approved plan.
+ */
+function geometryStepIdentityMatches(
+  planned: RigidSignGeometryStepEvidence | null,
+  executed: RigidSignGeometryStepEvidence | null,
+): boolean {
+  if (planned === null && executed === null) return true;
+  if (planned === null || executed === null) return false;
+  return (
+    planned.kind === executed.kind &&
+    planned.axis === executed.axis &&
+    planned.colorR === executed.colorR &&
+    planned.colorG === executed.colorG &&
+    planned.colorB === executed.colorB &&
+    planned.color === executed.color
+  );
+}
+
 function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
   const profile: PrintValidationProfile = "rigid_sign_raster";
   const productionTreatment: ProductionTreatment = DEFAULT_PRODUCTION_TREATMENT;
@@ -688,8 +741,53 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
       pv.sourceSha256 === sign.sourceSha256 &&
       pv.planKey === sign.planKey &&
       pv.verificationAlgorithmVersion === sign.expectedPreservationAlgorithmVersion);
+  // LIVE PRODUCT BLOCKER #4B: `containsOnlyAdmittedSteps` alone is `false`
+  // for ANY plan needing bounded provider reconstruction, by construction
+  // (`reconstruct_resolution` is never S2-admitted) — that made plan
+  // integrity unconditionally fail for every such plan, regardless of how
+  // well reconstruction or preservation went, a gap between Signs Phase
+  // S3A/S4 (which built the full reconstruct→verify pipeline) and this
+  // still-S2-era rule. `planRequiresBoundedReconstruction` admits EXACTLY
+  // that one S3A-recognized shape (a plan whose only non-admitted content
+  // is a single `reconstruct_resolution` step) — never `approved_crop`,
+  // never any other unrecognized step kind, and never anything the worker
+  // itself refused to execute in the first place. This does not weaken
+  // readiness on its own: `preservationAuthorized` (below) independently
+  // still requires an authoritative `"preserved"` verification, bound to
+  // this exact asset/source/plan/algorithm identity, before a reconstructed
+  // plate's `executedPlanOk` can ever be true.
+  //
+  // LIVE PRODUCT BLOCKER #4D: `executedStepsMatchPlan` alone made an
+  // "exact, unmodified replay" the ONLY admissible execution — but a real
+  // reconstruction provider can honestly return more than requested
+  // (proportionally), and the Signs Phase S3C adaptive-geometry path
+  // exists PRECISELY to deterministically re-derive a geometry step's
+  // pixel amounts from that actual result while still reaching the
+  // ordered aspect. `executedStepsMatchPlan` is `false` in exactly that
+  // case (a genuine, honest divergence from the plan's own predicted
+  // numbers) — this never changes that flag's own meaning. Instead, a
+  // SEPARATE, independently-verified path admits it: `geometryAdaptationOk`
+  // re-derives, from raw facts alone (never a trusted "adaptation was
+  // valid" claim), that (a) the actual reconstruction was genuinely
+  // proportional to what was requested, and (b) the executed geometry
+  // step's kind/axis/fill are IDENTICAL to the approved plan's own
+  // recorded step — only pixel amounts differ. Anything else (a crop, a
+  // distortion, a different step kind or axis, or missing/malformed
+  // adaptation evidence) fails this independently of `executedStepsMatchPlan`.
+  const adaptation = sign.executedGeometryAdaptation;
+  const geometryAdaptationOk =
+    adaptation !== null &&
+    reconstructionIsProportional(
+      adaptation.reconstructionRequestedWidthPx,
+      adaptation.reconstructionRequestedHeightPx,
+      adaptation.reconstructionActualWidthPx,
+      adaptation.reconstructionActualHeightPx,
+    ) &&
+    geometryStepIdentityMatches(adaptation.plannedStep, adaptation.executedStep);
   const planIntegrityOk =
-    sign.planKeyVerified && sign.executedStepsMatchPlan && sign.containsOnlyAdmittedSteps;
+    sign.planKeyVerified &&
+    (sign.executedStepsMatchPlan || geometryAdaptationOk) &&
+    (sign.containsOnlyAdmittedSteps || sign.planRequiresBoundedReconstruction);
   // LIVE PRODUCT BLOCKER #4: production-risk authorization, identity-bound
   // to THIS plan — never `planOverallRisk === "auto_safe"` alone anymore.
   // The one rule this profile enforces ("who may authorize which risk

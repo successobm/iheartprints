@@ -31,6 +31,7 @@ import type {
   SignPreservationSimilarityEvidence,
 } from "./contracts";
 import { SIGN_PRESERVATION_ALGORITHM_VERSION } from "./contracts";
+import { resolveProportionalReconstructionScale } from "./sign-preservation-geometry";
 
 // ---------------------------------------------------------------------
 // A. Lineage
@@ -452,14 +453,16 @@ export function checkSourceSimilarity(
   reconstructionContentImage: RgbaImage,
 ): SignPreservationSimilarityEvidence {
   const reasons: string[] = [];
-  const scaleX = reconstructionContentImage.width / sourceImage.width;
-  const scaleY = reconstructionContentImage.height / sourceImage.height;
-  const isExactIntegerScale =
-    Number.isInteger(scaleX) && Number.isInteger(scaleY) && scaleX === scaleY && scaleX > 0;
+  const scale = resolveProportionalReconstructionScale(
+    sourceImage.width,
+    sourceImage.height,
+    reconstructionContentImage.width,
+    reconstructionContentImage.height,
+  );
 
-  if (!isExactIntegerScale) {
+  if (!scale) {
     reasons.push(
-      "The reconstruction is not an exact integer multiple of the source dimensions — similarity evidence is unavailable, not guessed.",
+      "The reconstruction's X/Y scale relative to the source is not proportional within tolerance — similarity evidence is unavailable, not guessed.",
     );
     return {
       result: "unknown",
@@ -525,7 +528,7 @@ export function checkSourceSimilarity(
   return {
     result: catastrophic ? "catastrophic" : "concern",
     computed: true,
-    scaleFactor: scaleX,
+    scaleFactor: scale.scaleX,
     globalMeanAbsoluteError,
     worstTileMeanAbsoluteError,
     tileGridSize: SIMILARITY_TILE_GRID_SIZE,

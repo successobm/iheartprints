@@ -24,10 +24,16 @@
  * stays bounded. Never an AI-selected or data-dependent crop — the grid is
  * a fixed geometric partition of the source frame, unconditionally.
  *
- * Returns `null` (image derivation UNAVAILABLE, not guessed) when the
- * reconstruction content region is not an exact integer multiple of the
- * source dimensions — the same precondition
- * `checkSourceSimilarity` already requires before computing anything.
+ * LIVE PRODUCT BLOCKER #4C: returns `null` (image derivation UNAVAILABLE,
+ * not guessed) when the reconstruction content region's X/Y scale relative
+ * to the source is not PROPORTIONAL within
+ * `RECONSTRUCTION_SCALE_PROPORTIONALITY_TOLERANCE`
+ * (`sign-preservation-geometry.ts`) — never that it must be an exact
+ * integer multiple. Every crop boundary below is mapped through explicit,
+ * bounds-checked per-axis coordinate transforms
+ * (`mapSourceRangeToReconstruction`), never naive `coordinate * scale`
+ * float arithmetic. The same precondition `checkSourceSimilarity` already
+ * requires before computing anything.
  */
 
 import { PNG } from "pngjs";
@@ -41,6 +47,10 @@ import {
   SIGN_PRESERVATION_GRID_ROWS,
   SIGN_PRESERVATION_IMAGE_DERIVATION_VERSION,
 } from "./contracts";
+import {
+  mapSourceRangeToReconstruction,
+  resolveProportionalReconstructionScale,
+} from "./sign-preservation-geometry";
 import type { SignPreservationSemanticImageInput } from "./sign-preservation-semantic-provider";
 
 /**
@@ -103,12 +113,19 @@ export function deriveSemanticComparisonImages(
   sourceImage: RgbaImage,
   reconstructionContentImage: RgbaImage,
 ): SignPreservationSemanticImageSet | null {
-  const scaleX = reconstructionContentImage.width / sourceImage.width;
-  const scaleY = reconstructionContentImage.height / sourceImage.height;
-  const isExactIntegerScale =
-    Number.isInteger(scaleX) && Number.isInteger(scaleY) && scaleX === scaleY && scaleX > 0;
-  if (!isExactIntegerScale) return null;
-  const scale = scaleX;
+  const scale = resolveProportionalReconstructionScale(
+    sourceImage.width,
+    sourceImage.height,
+    reconstructionContentImage.width,
+    reconstructionContentImage.height,
+  );
+  if (!scale) return null;
+  // The linear detail-crop cap (below) applies uniformly to both axes —
+  // proportional reconstructions have `scaleX`/`scaleY` within tolerance
+  // of each other, so either is representative; the smaller of the two is
+  // used defensively so the capped crop is never asked to exceed what the
+  // reconstruction actually contains on ITS more-constrained axis.
+  const nativeLinearScale = Math.min(scale.scaleX, scale.scaleY);
 
   const sourceOverview: SignPreservationSemanticImageInput = {
     dataUri: encodeImageAsDataUri(sourceImage),
@@ -147,14 +164,18 @@ export function deriveSemanticComparisonImages(
 
       // The geometrically corresponding region in the reconstruction, at
       // its own NATIVE resolution first (never a data-dependent crop —
-      // same fixed geometric partition, scaled up by the proven integer
-      // `scale`).
+      // same fixed geometric partition, mapped through the proven
+      // PROPORTIONAL (not necessarily integer) `scale`). Each axis is
+      // mapped independently and explicitly bounds-checked — never naive
+      // `x0 * scale` float arithmetic indexed straight into the buffer.
+      const reconX = mapSourceRangeToReconstruction(x0, x1, scale.scaleX, reconstructionContentImage.width);
+      const reconY = mapSourceRangeToReconstruction(y0, y1, scale.scaleY, reconstructionContentImage.height);
       const reconCropNative = cropRegion(
         reconstructionContentImage,
-        x0 * scale,
-        y0 * scale,
-        width * scale,
-        height * scale,
+        reconX.start,
+        reconY.start,
+        reconX.end - reconX.start,
+        reconY.end - reconY.start,
       );
 
       // Signs Phase S4.2B.2: cap the SENT reconstruction crop at
@@ -163,15 +184,20 @@ export function deriveSemanticComparisonImages(
       // above the source's own resolution (small text stays legible) but
       // far below a 4x-native 2048x2048 crop (the dominant contributor to
       // the ~52 MB payload Signs Phase S4.2B.1 measured). `Math.min` with
-      // the native `scale` means this NEVER upscales beyond what the
-      // reconstruction actually contains — when the upstream reconstruction
-      // itself is already at or below the target linear scale (e.g. a 2x
-      // reconstruction), the native crop is used completely unresampled.
-      const targetCropScale = Math.min(scale, SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE);
+      // the native (proportional, possibly non-integer) linear scale means
+      // this NEVER upscales beyond what the reconstruction actually
+      // contains — when the upstream reconstruction itself is already at
+      // or below the target linear scale (e.g. a 2x reconstruction), the
+      // native crop is used completely unresampled.
+      const targetCropScale = Math.min(nativeLinearScale, SIGN_PRESERVATION_DETAIL_CROP_LINEAR_SCALE);
       const reconCrop =
-        targetCropScale === scale
+        targetCropScale === nativeLinearScale
           ? reconCropNative
-          : resampleExact(reconCropNative, width * targetCropScale, height * targetCropScale).image;
+          : resampleExact(
+              reconCropNative,
+              Math.max(1, Math.round(width * targetCropScale)),
+              Math.max(1, Math.round(height * targetCropScale)),
+            ).image;
 
       reconstructionCrops.push({
         dataUri: encodeImageAsDataUri(reconCrop),

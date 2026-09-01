@@ -274,6 +274,32 @@ export interface FinalArtworkCapability {
     projectId: string,
   ): Promise<CurrentProductionDelivery | null>;
   /**
+   * LIVE PRODUCT BLOCKER #4B: the sign-authority counterpart of
+   * `resolveCurrentProductionDelivery` — deliberately a THIRD parallel
+   * resolver, never folded into `resolveSatisfiedProductionDelivery`
+   * (create_new/prepared_upload only; matches on requested-output width,
+   * treatment, and print placement, none of which has any meaning for a
+   * sign). A `SignRepairPlan`'s own `planKey` already IS the complete,
+   * canonical production intent — there is no separate width/treatment
+   * match to perform.
+   *
+   * Returns the exact same shape as every other delivery resolver
+   * (`{ job, assetId }` or `null`) so a download route can be written
+   * identically: a completed `sign_preparation` job, bound to the
+   * preparation's CURRENT `planKey` (a stale/superseded plan's job is
+   * never returned), with a real `production_png` asset, and an
+   * authoritative `ProductionAssetValidation` for that exact asset saying
+   * `"ready"`. A `"completed"` job alone is never sufficient — see
+   * `resolveSatisfiedProductionDelivery`'s own identical warning: a
+   * `completeWithoutAsset` outcome, or one whose validation says anything
+   * other than `"ready"` (including a reconstructed asset whose
+   * preservation verification came back `"changed"`/`"unknown"`), never
+   * resolves here, and is therefore never downloadable.
+   */
+  resolveCurrentSignProductionDelivery(
+    projectId: string,
+  ): Promise<CurrentProductionDelivery | null>;
+  /**
    * Print'em All Phase 3 (V1 multi-variant package): the same job-resolution
    * logic `resolveCurrentMatchingProductionJob` uses, generalized to an
    * EXPLICIT treatment key instead of the project's current one — so a
@@ -748,6 +774,10 @@ export function createFinalArtworkCapability(
       return resolveSatisfiedProductionDelivery(repo, projectId);
     },
 
+    async resolveCurrentSignProductionDelivery(projectId) {
+      return resolveSatisfiedSignProductionDelivery(repo, projectId);
+    },
+
     async resolveProductionVariantState(projectId, treatmentKey) {
       const nothing: ProductionVariantJobState = {
         job: null,
@@ -953,6 +983,55 @@ async function resolveSatisfiedProductionDelivery(
   if (validation.assetId !== assetId) return null;
 
   return { job, assetId };
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #4B: the sign-authority counterpart of
+ * `resolveSatisfiedProductionDelivery` — see
+ * `FinalArtworkCapability.resolveCurrentSignProductionDelivery`'s own doc
+ * for why this is a separate function rather than a branch inside that
+ * one. Every check below is the identical SHAPE that function applies
+ * (current authority → job bound to that authority's current intent →
+ * completed → real asset → authoritative `"ready"` validation for that
+ * exact asset), substituting the sign authority's own intent identity
+ * (the preparation's CURRENT `planKey`) for the apparel width/treatment
+ * match `resolveCurrentMatchingProductionJob` performs.
+ */
+async function resolveSatisfiedSignProductionDelivery(
+  repo: ProjectRepository,
+  projectId: string,
+): Promise<CurrentProductionDelivery | null> {
+  const preparation = await repo.getSignPreparation(projectId);
+  if (!preparation || preparation.projectId !== projectId) return null;
+  if (preparation.status !== "planned" || !preparation.planKey) return null;
+
+  const jobs = await repo.listFinalArtworkJobsForSignPreparation(
+    projectId,
+    preparation.id,
+  );
+  // A stale/superseded plan's job is never returned — only the job bound
+  // to the preparation's CURRENT plan key can ever be this project's
+  // current sign deliverable.
+  const job = jobs.find((candidate) => candidate.signPlanKey === preparation.planKey);
+  if (!job || job.status !== "completed") return null;
+
+  const assets = await repo.listAssets(projectId);
+  const asset = assets.find(
+    (candidate) =>
+      candidate.finalArtworkJobId === job.id &&
+      candidate.productionRole === "production_png" &&
+      !isReconstructionIntermediateAsset(candidate),
+  );
+  if (!asset) return null;
+
+  const validation = await repo.getLatestProductionAssetValidationForJob(
+    projectId,
+    job.id,
+  );
+  if (!validation || validation.status !== "ready") return null;
+  if (validation.assetId !== asset.id) return null;
+
+  return { job, assetId: asset.id };
 }
 
 /**

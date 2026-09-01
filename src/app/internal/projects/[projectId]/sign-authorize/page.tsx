@@ -7,6 +7,7 @@ import { ACQUISITION_SESSION_COOKIE } from "@/lib/http/acquisition-session-cooki
 import { getProjectRepository } from "@/lib/db";
 
 import { SignAuthorizeButton } from "./SignAuthorizeButton";
+import { SignProductionAction } from "./SignProductionAction";
 import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
 
 type PageProps = {
@@ -185,6 +186,12 @@ function SignPlanReview({
           </p>
         )}
       </section>
+
+      {isAuthorized ? (
+        <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
+          <SignProductionAction projectId={projectId} production={review.production} />
+        </section>
+      ) : null}
     </div>
   );
 }

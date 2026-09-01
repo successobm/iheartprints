@@ -33,6 +33,8 @@ export type LocalFinalArtworkTriggerReason =
   | "approve_final_direction"
   /** Existing Artwork → Print Ready Phase 2: the upload workflow's equivalent post-enqueue kick. */
   | "prepare_uploaded_artwork"
+  /** LIVE PRODUCT BLOCKER #4B: the sign authority's equivalent post-enqueue kick. */
+  | "prepare_sign_artwork"
   | "status_poll"
   | "project_reload";
 

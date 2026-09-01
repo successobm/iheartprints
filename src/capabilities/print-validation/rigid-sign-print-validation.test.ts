@@ -55,6 +55,12 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
     executedStepsMatchPlan: true,
     planOverallRisk: "auto_safe",
     containsOnlyAdmittedSteps: true,
+    // LIVE PRODUCT BLOCKER #4B: the default fixture is a no-reconstruction
+    // plan, so this stays false unless a test explicitly overrides it.
+    planRequiresBoundedReconstruction: false,
+    // LIVE PRODUCT BLOCKER #4D: the default fixture is an unmodified
+    // replay, so this stays null unless a test explicitly overrides it.
+    executedGeometryAdaptation: null,
     orderedWidthIn: 18,
     orderedHeightIn: 24,
     targetPpi: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
@@ -658,5 +664,321 @@ describe("Signs authorization → print_ready (LIVE PRODUCT BLOCKER #4)", () => 
     );
     assert.equal(checkOf(report)?.status, "fail");
     assert.notEqual(report.status, "ready");
+  });
+});
+
+/**
+ * LIVE PRODUCT BLOCKER #4B: `planIntegrityOk` used to require
+ * `containsOnlyAdmittedSteps` alone — and any plan needing bounded
+ * provider reconstruction has `containsOnlyAdmittedSteps === false` by
+ * construction (`reconstruct_resolution` is never S2-admitted), so no
+ * such plan could ever reach `"ready"`, no matter how well reconstruction
+ * or preservation went. Every test ABOVE that exercises `reconstructedAsset()`
+ * relies on `evidence()`'s default `containsOnlyAdmittedSteps: true` — a
+ * combination the REAL worker never actually produces for a reconstructed
+ * asset (that field is computed independently of `resolutionProvenance`,
+ * and is genuinely `false` whenever any `reconstruct_resolution` step
+ * exists) — so none of them, before this fix, actually proved a REALISTIC
+ * reconstruction could ever reach ready. These do, with the realistic
+ * `containsOnlyAdmittedSteps: false` a genuine worker run sends.
+ */
+describe("Signs reconstruction plan-integrity (LIVE PRODUCT BLOCKER #4B)", () => {
+  function checkOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
+  }
+
+  it("realistic reconstruction shape (containsOnlyAdmittedSteps: false, planRequiresBoundedReconstruction: true) + preserved → ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          containsOnlyAdmittedSteps: false,
+          planRequiresBoundedReconstruction: true,
+          preservationVerification: preservationVerification(),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass", "the fix: a genuinely preserved, S3A-shaped reconstruction now passes");
+    assert.equal(report.status, "ready");
+  });
+
+  it("NOT the S3A-admitted shape (containsOnlyAdmittedSteps: false, planRequiresBoundedReconstruction: false) → still never ready, even preserved", () => {
+    // The negative proof this fix is narrowly scoped: some OTHER
+    // unrecognized non-admitted step shape (e.g. `approved_crop`, or a
+    // plan a future build no longer recognizes) is never silently admitted
+    // just because a preservation record happens to say "preserved".
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          containsOnlyAdmittedSteps: false,
+          planRequiresBoundedReconstruction: false,
+          preservationVerification: preservationVerification(),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("realistic reconstruction shape, but preservation not preserved → still not ready — the fix does not weaken the preservation gate", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          containsOnlyAdmittedSteps: false,
+          planRequiresBoundedReconstruction: true,
+          preservationVerification: preservationVerification({ status: "unknown" }),
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("a plan needing NO reconstruction at all (containsOnlyAdmittedSteps: true) is unaffected by this fix — unchanged, still ready", () => {
+    const report = printValidation.validateArtwork(baseInput());
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+});
+
+/**
+ * LIVE PRODUCT BLOCKER #4D: `executedStepsMatchPlan` is `false` whenever a
+ * real reconstruction-provider result diverged (proportionally) from the
+ * plan's own requested reconstruction size and the geometry step's pixel
+ * amounts were re-derived (Signs Phase S3C). This suite proves the SEPARATE,
+ * independently-verified `executedGeometryAdaptation` path this phase adds —
+ * never a trusted "the adaptation was valid" claim, and never a general
+ * escape hatch for anything OTHER than a genuine, kind/axis/fill-preserving
+ * pixel-amount re-derivation.
+ */
+describe("Signs S3C adaptive-geometry plan-integrity (LIVE PRODUCT BLOCKER #4D)", () => {
+  function checkOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
+  }
+
+  const plannedPadStep = {
+    kind: "pad_uniform_background",
+    axis: "vertical",
+    colorR: 251,
+    colorG: 252,
+    colorB: 252,
+    color: null,
+  };
+
+  function adaptedInput(overrides: {
+    executedGeometryAdaptation: NonNullable<RigidSignPlanEvidence["executedGeometryAdaptation"]>;
+  }) {
+    return baseInput({
+      primaryAsset: reconstructedAsset(),
+      rigidSign: evidence({
+        executedStepsMatchPlan: false,
+        containsOnlyAdmittedSteps: false,
+        planRequiresBoundedReconstruction: true,
+        preservationVerification: preservationVerification(),
+        ...overrides,
+      }),
+    });
+  }
+
+  it("proportional oversized reconstruction + step identity preserved + preserved → ready (the fix)", () => {
+    const report = printValidation.validateArtwork(
+      adaptedInput({
+        executedGeometryAdaptation: {
+          reconstructionRequestedWidthPx: 2448,
+          reconstructionRequestedHeightPx: 3672,
+          reconstructionActualWidthPx: 4896,
+          reconstructionActualHeightPx: 7344, // exactly 2x the requested, both axes — proportional
+          plannedStep: plannedPadStep,
+          executedStep: plannedPadStep, // identical kind/axis/fill — only pixel amounts (not carried here) differ
+        },
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("NO adaptation evidence at all (executedGeometryAdaptation: null) while executedStepsMatchPlan is false → still fails — this is not a general escape hatch", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          executedStepsMatchPlan: false,
+          containsOnlyAdmittedSteps: false,
+          planRequiresBoundedReconstruction: true,
+          preservationVerification: preservationVerification(),
+          executedGeometryAdaptation: null,
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("materially non-proportional (distorted) reconstruction → fails even with everything else aligned", () => {
+    const report = printValidation.validateArtwork(
+      adaptedInput({
+        executedGeometryAdaptation: {
+          reconstructionRequestedWidthPx: 2448,
+          reconstructionRequestedHeightPx: 3672,
+          reconstructionActualWidthPx: 4896, // 2x
+          reconstructionActualHeightPx: 6000, // ~1.63x — over 10% off from 2x
+          plannedStep: plannedPadStep,
+          executedStep: plannedPadStep,
+        },
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("executed step KIND differs from the planned step (e.g. an unapproved crop substituted in) → fails", () => {
+    const report = printValidation.validateArtwork(
+      adaptedInput({
+        executedGeometryAdaptation: {
+          reconstructionRequestedWidthPx: 2448,
+          reconstructionRequestedHeightPx: 3672,
+          reconstructionActualWidthPx: 4896,
+          reconstructionActualHeightPx: 7344,
+          plannedStep: plannedPadStep,
+          executedStep: { ...plannedPadStep, kind: "approved_crop" },
+        },
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("executed step AXIS differs from the planned step → fails", () => {
+    const report = printValidation.validateArtwork(
+      adaptedInput({
+        executedGeometryAdaptation: {
+          reconstructionRequestedWidthPx: 2448,
+          reconstructionRequestedHeightPx: 3672,
+          reconstructionActualWidthPx: 4896,
+          reconstructionActualHeightPx: 7344,
+          plannedStep: plannedPadStep,
+          executedStep: { ...plannedPadStep, axis: "horizontal" },
+        },
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("executed step FILL colour differs from the planned step → fails", () => {
+    const report = printValidation.validateArtwork(
+      adaptedInput({
+        executedGeometryAdaptation: {
+          reconstructionRequestedWidthPx: 2448,
+          reconstructionRequestedHeightPx: 3672,
+          reconstructionActualWidthPx: 4896,
+          reconstructionActualHeightPx: 7344,
+          plannedStep: plannedPadStep,
+          executedStep: { ...plannedPadStep, colorR: 0, colorG: 0, colorB: 0 },
+        },
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("plannedStep present but executedStep null (inconsistent presence) → fails", () => {
+    const report = printValidation.validateArtwork(
+      adaptedInput({
+        executedGeometryAdaptation: {
+          reconstructionRequestedWidthPx: 2448,
+          reconstructionRequestedHeightPx: 3672,
+          reconstructionActualWidthPx: 4896,
+          reconstructionActualHeightPx: 7344,
+          plannedStep: plannedPadStep,
+          executedStep: null,
+        },
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("both plannedStep and executedStep null (bare reconstruction, no geometry step on either side), proportional → ready", () => {
+    const report = printValidation.validateArtwork(
+      adaptedInput({
+        executedGeometryAdaptation: {
+          reconstructionRequestedWidthPx: 2448,
+          reconstructionRequestedHeightPx: 3672,
+          reconstructionActualWidthPx: 4896,
+          reconstructionActualHeightPx: 7344,
+          plannedStep: null,
+          executedStep: null,
+        },
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("review_required + adapted geometry + NO operator authorization → still refused (Blocker #4's gate is untouched)", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          executedStepsMatchPlan: false,
+          containsOnlyAdmittedSteps: false,
+          planRequiresBoundedReconstruction: true,
+          planOverallRisk: "review_required",
+          authorization: null,
+          preservationVerification: preservationVerification(),
+          executedGeometryAdaptation: {
+            reconstructionRequestedWidthPx: 2448,
+            reconstructionRequestedHeightPx: 3672,
+            reconstructionActualWidthPx: 4896,
+            reconstructionActualHeightPx: 7344,
+            plannedStep: plannedPadStep,
+            executedStep: plannedPadStep,
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("adapted geometry + preservation status 'changed' → still refused (Blocker #3B's gate is untouched)", () => {
+    const report = printValidation.validateArtwork(
+      adaptedInput({
+        executedGeometryAdaptation: {
+          reconstructionRequestedWidthPx: 2448,
+          reconstructionRequestedHeightPx: 3672,
+          reconstructionActualWidthPx: 4896,
+          reconstructionActualHeightPx: 7344,
+          plannedStep: plannedPadStep,
+          executedStep: plannedPadStep,
+        },
+      }),
+    );
+    // Sanity re-check with preservation swapped to "changed".
+    const changedReport = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: reconstructedAsset(),
+        rigidSign: evidence({
+          executedStepsMatchPlan: false,
+          containsOnlyAdmittedSteps: false,
+          planRequiresBoundedReconstruction: true,
+          preservationVerification: preservationVerification({ status: "changed" }),
+          executedGeometryAdaptation: {
+            reconstructionRequestedWidthPx: 2448,
+            reconstructionRequestedHeightPx: 3672,
+            reconstructionActualWidthPx: 4896,
+            reconstructionActualHeightPx: 7344,
+            plannedStep: plannedPadStep,
+            executedStep: plannedPadStep,
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass", "sanity: the preserved control case still passes");
+    assert.equal(checkOf(changedReport)?.status, "fail");
+    assert.notEqual(changedReport.status, "ready");
   });
 });

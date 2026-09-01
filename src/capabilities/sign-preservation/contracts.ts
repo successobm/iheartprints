@@ -79,7 +79,7 @@ export interface SignPreservationExtensionRegionEvidence {
 
 export interface SignPreservationSimilarityEvidence {
   result: SignPreservationCheckResult;
-  /** `false` when the source/reconstruction dimensions are not an exact integer multiple — this evidence bucket is then simply unavailable, never guessed. */
+  /** `false` when the source/reconstruction X/Y scale is not proportional within tolerance (`sign-preservation-geometry.ts`) — this evidence bucket is then simply unavailable, never guessed. */
   computed: boolean;
   scaleFactor: number | null;
   globalMeanAbsoluteError: number | null;

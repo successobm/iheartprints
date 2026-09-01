@@ -582,7 +582,7 @@ export function createSignPreservationCapability(
       );
       if (!imageSet) {
         return persistWithoutSemantic("unknown", [
-          "Source and reconstruction dimensions are not an exact integer multiple — semantic comparison image derivation is unavailable.",
+          "The reconstruction's X/Y scale relative to the source is not proportional within tolerance — semantic comparison image derivation is unavailable.",
         ]);
       }
 

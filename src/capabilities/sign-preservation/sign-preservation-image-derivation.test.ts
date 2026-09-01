@@ -88,11 +88,46 @@ describe("deriveSemanticComparisonImages (Signs Phase S4.2A / S4.2B.2)", () => {
     }
   });
 
-  it("non-integer scale relationship -> unavailable (null), never guessed", () => {
-    const source = makeImage(101, 151, { r: 1, g: 2, b: 3 });
-    const reconstruction = makeImage(400, 600, { r: 4, g: 5, b: 6 }); // not an exact integer multiple of 101x151
+  it("LIVE PRODUCT BLOCKER #4C: a realistic non-integer PROPORTIONAL scale (the real customer's own 3.3812x) derives all 14 images successfully — non-integer is no longer unavailable", () => {
+    // The real customer's persisted plan: 1086x1448 source, a bounded
+    // reconstruction requesting 3672x4896 (scale 3.38121546961326, exactly
+    // proportional on both axes — 3672/1086 === 4896/1448).
+    const source = makeImage(1086, 1448, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(3672, 4896, { r: 4, g: 5, b: 6 });
+    const set = deriveSemanticComparisonImages(source, reconstruction);
+    assert.ok(set, "a non-integer but proportional scale must derive a real image set");
+    const totalImages = 2 + set!.sourceCrops.length + set!.reconstructionCrops.length;
+    assert.equal(totalImages, SIGN_PRESERVATION_MAX_IMAGE_COUNT);
+  });
+
+  it("a GENUINELY non-proportional (distorted) scale relationship -> unavailable (null), never guessed", () => {
+    // scaleX = 16/5 = 3.2, scaleY = 20/7 ≈ 2.857 — over 10% apart, a real
+    // aspect distortion, not ordinary raster rounding.
+    const source = makeImage(5, 7, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(16, 20, { r: 4, g: 5, b: 6 });
     const set = deriveSemanticComparisonImages(source, reconstruction);
     assert.equal(set, null);
+  });
+
+  it("X/Y scale within ordinary raster-rounding tolerance (not bit-identical, still proportional) still derives successfully", () => {
+    // scaleX = 500/200 = 2.5, scaleY = 499/200 = 2.495 — a 0.2% disagreement,
+    // exactly the kind of one-pixel-of-independent-rounding difference two
+    // separately Math.round()-ed axis dimensions can legitimately produce.
+    const source = makeImage(200, 200, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(500, 499, { r: 4, g: 5, b: 6 });
+    const set = deriveSemanticComparisonImages(source, reconstruction);
+    assert.ok(set, "a tiny, ordinary rounding-scale disagreement must not be treated as distortion");
+  });
+
+  it("mapped crops never exceed source/reconstruction bounds, even at a non-integer scale with an odd source size", () => {
+    const source = makeImage(101, 151, { r: 1, g: 2, b: 3 });
+    const reconstruction = makeImage(342, 511, { r: 4, g: 5, b: 6 }); // scale ~3.386, ~3.384 — within tolerance
+    const set = deriveSemanticComparisonImages(source, reconstruction);
+    assert.ok(set);
+    for (const crop of set!.reconstructionCrops) {
+      const decoded = decodeDataUri(crop.dataUri);
+      assert.ok(decoded.width >= 1 && decoded.height >= 1, "every mapped crop must be non-empty");
+    }
   });
 
   it("grid derivation is fully deterministic — re-deriving with identical inputs produces byte-identical output", () => {

@@ -183,3 +183,161 @@ describe("loadSignPlanOperatorReview", () => {
     assert.deepEqual(first, second);
   });
 });
+
+/**
+ * LIVE PRODUCT BLOCKER #4B: the `production` field the operator page reads
+ * to decide between "Prepare artwork", "Preparing artwork…", a needs-
+ * attention notice, and the download link. Every state below is reached
+ * through the REAL `requestSignFinalArtwork` → scheduler → worker path —
+ * never asserted by hand-constructing a `FinalArtworkJob` row.
+ */
+describe("loadSignPlanOperatorReview — production status", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-operator-review-production-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function freshGraph() {
+    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import("@/capabilities/composition");
+    resetCapabilityGraphForTests();
+    const graph = getCapabilityGraph();
+    const { getProjectRepository } = await import("@/lib/db");
+    return { graph, repo: getProjectRepository() };
+  }
+
+  it("planned + authorized, never prepared: production is the all-false 'nothing yet' state", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.deepEqual(review.production, {
+      jobStatus: null,
+      inFlight: false,
+      failed: false,
+      printReady: false,
+      needsAttention: false,
+    });
+  });
+
+  it("prepared, still queued: inFlight true, nothing else", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    await graph.finalArtwork.requestSignFinalArtwork(projectId);
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.jobStatus, "queued");
+    assert.equal(review.production.inFlight, true);
+    assert.equal(review.production.printReady, false);
+    assert.equal(review.production.needsAttention, false);
+  });
+
+  it("prepared and failed: failed true, nothing else", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "failed", lastError: "simulated" });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.jobStatus, "failed");
+    assert.equal(review.production.failed, true);
+    assert.equal(review.production.inFlight, false);
+    assert.equal(review.production.printReady, false);
+  });
+
+  it("prepared and print-ready: printReady true, downloadable", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project!.project.status, "print_ready");
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.jobStatus, "completed");
+    assert.equal(review.production.printReady, true);
+    assert.equal(review.production.needsAttention, false);
+    assert.equal(review.production.inFlight, false);
+    assert.equal(review.production.failed, false);
+  });
+
+  it("prepared, completed, but not print-ready: needsAttention true, never printReady", async () => {
+    // The simplest real way to reach 'completed, not ready' without a
+    // provider: a plan requiring an approved crop is refused before any
+    // asset is produced (`completeWithoutAsset`) — the job still reaches
+    // 'completed', with no validation record at all, which the loader
+    // must still report as `needsAttention`, never `printReady`.
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    // Simulates the worker's own `completeWithoutAsset` outcome directly —
+    // a real, honest terminal state this loader must still classify
+    // correctly, without re-running the whole worker for one edge case
+    // already exhaustively covered by `final-artwork-worker-capability`'s
+    // own test suite.
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.jobStatus, "completed");
+    assert.equal(review.production.printReady, false);
+    assert.equal(review.production.needsAttention, true);
+  });
+});

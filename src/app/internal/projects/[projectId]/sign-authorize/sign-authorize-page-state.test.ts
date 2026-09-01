@@ -81,6 +81,7 @@ describe("LIVE PRODUCT BLOCKER #4A — sign-authorize operator page state", () =
         steps: [],
       },
       authorization: { authorizedBy: null, authorizedAt: null, matchesCurrentPlan: false },
+      production: { jobStatus: null, inFlight: false, failed: false, printReady: false, needsAttention: false },
     };
     assert.deepEqual(
       resolveSignAuthorizePageState({ configured: true, isInternal: true, review }),

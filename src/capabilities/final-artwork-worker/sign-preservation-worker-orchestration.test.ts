@@ -273,40 +273,52 @@ describe("Signs Phase S4.2A.1: preservation verification wired through the real 
     assert.equal(retriedJob!.status, "completed");
   });
 
-  it("6: an OPERATOR-AUTHORIZED review_required plan with a 'preserved' record still does not reach print_ready HERE — for a reason unrelated to Blocker #4", async () => {
+  it("6: LIVE PRODUCT BLOCKER #4D — an OPERATOR-AUTHORIZED review_required plan with a 'preserved' record and a proven S3C geometry adaptation NOW reaches print_ready", async () => {
     // This fixture's plan is `review_required`, and `ruthShapedFinalAsset`
-    // now authorizes it as "operator" (the only actor sufficient for that
-    // risk class) BEFORE enqueueing — Blocker #4's own gates (risk
-    // authorization) and Blocker #3B's own gate (preservation) both PASS
-    // here (confirmed directly below). This fixture still lands on
-    // `finalization_required`, but for a THIRD, independent, pre-existing
-    // reason this suite is not about: the fake reconstruction provider's
-    // `oversized_but_valid` behavior returns a genuinely different size
-    // than the plan's own recorded step requested, so S3C's adaptive-
-    // geometry honesty correctly reports `executedStepsMatchPlan: false`
-    // — `planIntegrityOk` fails before risk/preservation are even
-    // consulted. The positive "everything aligned" path is proven at the
-    // pure PrintValidation level instead (`rigid-sign-print-validation
-    // .test.ts`'s "Signs authorization → print_ready" suite, test 12) —
-    // reconstructing a worker fixture where the fake provider returns the
-    // EXACT requested size would duplicate that proof for no new coverage.
+    // authorizes it as "operator" (the only actor sufficient for that risk
+    // class) BEFORE enqueueing — Blocker #4's own gate (risk authorization)
+    // and Blocker #3B's own gate (preservation) both pass here.
+    //
+    // Before LIVE PRODUCT BLOCKER #4D, this fixture landed on
+    // `finalization_required` for a THIRD, independent reason: the fake
+    // reconstruction provider's `oversized_but_valid` behavior (4096x6144)
+    // returns a genuinely different size than the plan's own recorded step
+    // requested (2448x3672), so Signs Phase S3C's adaptive-geometry
+    // mechanism re-derives the `extend_uniform_background` step's own
+    // pixel amounts — an honest, deterministic, plan-faithful adaptation,
+    // NOT an unmodified replay. `executedStepsMatchPlan` is correctly
+    // `false` for that (unchanged by this phase) — but Blocker #4D adds
+    // the SEPARATE, independently-verified `executedGeometryAdaptation`
+    // path PrintValidation now checks: the actual reconstruction (4096x6144)
+    // IS exactly proportional to the requested (2448x3672) — both axes
+    // exactly 4x, well within tolerance — AND the executed step's kind
+    // (`extend_uniform_background`), axis (`horizontal`, forced by Ruth's
+    // own aspect mismatch), and fill colour are IDENTICAL to the approved
+    // plan's own recorded step — only `leadingPx`/`trailingPx` differ,
+    // which is exactly the ONE thing S3C is permitted to re-derive. That
+    // is a genuinely plan-faithful execution, not a bypass, so this is the
+    // CORRECT new outcome, not merely a changed assertion.
     const reconstructionProvider = new FakeSignReconstructionProvider();
     const semanticProvider = new FakeSignPreservationSemanticProvider();
     semanticProvider.behavior = { kind: "all_same" };
 
-    const { repo, projectId, job } = await ruthShapedFinalAsset(reconstructionProvider, semanticProvider);
+    const { repo, projectId, job, finalAsset } = await ruthShapedFinalAsset(reconstructionProvider, semanticProvider);
     const project = await repo.getProject(projectId);
-    assert.notEqual(project!.project.status, "print_ready");
-    assert.equal(project!.project.status, "finalization_required");
+    assert.equal(project!.project.status, "print_ready");
 
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation!.status, "ready");
     const executedPlanCheck = (
       validation!.report as { checks: Array<{ check: string; status: string; reason: string }> }
     ).checks.find((c) => c.check === "executed_plan_matches_recorded_plan");
-    // Proves this is the geometry-adaptation reason, NOT an authorization
-    // or preservation refusal — those have their own dedicated messages
-    // (see the print-validation suite) and this is neither of them.
-    assert.match(executedPlanCheck!.reason, /exact, unmodified replay/i);
+    assert.equal(executedPlanCheck!.status, "pass");
+
+    // The final asset's own dimensions are the ADAPTED geometry (4608x6144
+    // — the actual 4096x6144 reconstruction plus 256px/256px black
+    // extension on each side), never the plan's own STALE predicted
+    // numbers (which assumed a 2448x3672 reconstruction).
+    assert.equal(finalAsset.widthPx, 4608);
+    assert.equal(finalAsset.heightPx, 6144);
   });
 
   it("7: review_required plan risk is a static planning fact, unaffected by authorization or preservation status", async () => {

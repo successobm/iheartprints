@@ -25,6 +25,9 @@
 
 import { getCapabilityGraph } from "@/capabilities/composition";
 import { describeSignPlanForCustomer } from "@/capabilities/sign-preparation";
+import type { FinalArtworkJobStatus } from "@/lib/domain/types";
+import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
+import { buildPrintReadyFilename } from "@/lib/services/print-ready-filename";
 import {
   getConversation,
   type ApiProjectSnapshot,
@@ -162,4 +165,94 @@ export async function authorizeSignArtwork(
     throw new SignArtworkBridgeError("Project not found");
   }
   return snapshot;
+}
+
+export interface PrepareSignArtworkResult {
+  jobId: string;
+  jobStatus: FinalArtworkJobStatus;
+  /** True when an already-queued/running/completed job for this exact plan was reused rather than created. */
+  alreadyRequested: boolean;
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #4B: the operator's "Prepare artwork" action —
+ * deliberately separate from "Authorize plan"
+ * (`authorizeSignArtwork`/`SignPreparationCapability.authorizeSignRepairPlan`
+ * above). This function does no authorization judgment of its own: it
+ * calls the ALREADY-BUILT `FinalArtworkCapability.requestSignFinalArtwork`,
+ * which is the ONE place the production-risk authorization gate
+ * (`isAuthorizationSufficientForRisk`) is enforced before any
+ * `FinalArtworkJob` is created — a `review_required` plan with no
+ * sufficient operator authorization for its CURRENT `planKey` refuses here,
+ * regardless of which route called this.
+ *
+ * Idempotent on (sign preparation, plan key), by that same capability's own
+ * construction (Goal 14's guarantee, applied to signs): a double click, a
+ * page reload, or a retry all resolve to the SAME job rather than creating
+ * duplicates — this function performs no dedup logic of its own.
+ *
+ * Mirrors `prepareUploadedArtworkForPrint`'s own shape exactly: after the
+ * job is durably queued/reused, kicks the SAME interactive-`next dev`-only
+ * local worker trigger — no second worker, no second scheduler exists for
+ * signs.
+ */
+export async function prepareSignArtworkForProduction(
+  projectId: string,
+): Promise<PrepareSignArtworkResult> {
+  const graph = getCapabilityGraph();
+  const { job, alreadyRequested } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+
+  if (job.status === "queued" || job.status === "running" || job.status === "recoverable") {
+    maybeTriggerLocalFinalArtworkWorker({
+      projectId,
+      reason: "prepare_sign_artwork",
+    });
+  }
+
+  return { jobId: job.id, jobStatus: job.status, alreadyRequested };
+}
+
+export interface SignProductionArtworkDownload {
+  bytes: Buffer;
+  contentType: string;
+  filename: string;
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #4B: streams the project's current, AUTHORITATIVE
+ * print-ready sign production PNG — the same "resolve the one exact
+ * validated asset, then download its real bytes" shape
+ * `getProductionArtworkDownload` (`conversation-service.ts`) already uses
+ * for apparel, applied to the sign authority's own parallel resolver
+ * (`FinalArtworkCapability.resolveCurrentSignProductionDelivery`) rather
+ * than the apparel-shaped one. Returns `null` for every miss — no job yet,
+ * a job still in flight, a completed job whose validation is not `"ready"`
+ * (including a reconstructed asset whose preservation verification was
+ * never `"preserved"`), or a asset that can no longer be read — a caller
+ * must not distinguish those cases (Goal 15: no internal reason ever
+ * reaches whoever is asking whether a file exists).
+ */
+export async function getSignProductionArtworkDownload(
+  projectId: string,
+): Promise<SignProductionArtworkDownload | null> {
+  const graph = getCapabilityGraph();
+  const delivery = await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+  if (!delivery) return null;
+
+  const downloaded = await graph.assets.downloadAssetBytes(delivery.assetId);
+  if (!downloaded) return null;
+
+  const preparation = await graph.signPreparation.getSignPreparation(projectId);
+  const mimeType = downloaded.contentType || "image/png";
+
+  return {
+    bytes: downloaded.bytes,
+    contentType: mimeType,
+    filename: buildPrintReadyFilename({
+      uploadedFilename: preparation?.originalFilename ?? null,
+      exactText: null,
+      productSummary: null,
+      mimeType,
+    }),
+  };
 }

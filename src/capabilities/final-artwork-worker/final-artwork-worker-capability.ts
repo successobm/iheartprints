@@ -2087,6 +2087,48 @@ export function createFinalArtworkWorkerCapability(
       policy,
     );
 
+    // LIVE PRODUCT BLOCKER #4D: the raw facts behind a Signs Phase S3C
+    // adaptive-geometry execution, for PrintValidation's OWN independent
+    // re-verification — never a trusted "the adaptation was valid" claim.
+    // Non-null ONLY when `signGeometryAdapted` is true (the ONE reason
+    // `executedStepsMatchPlan` is allowed to be false and still admit a
+    // second, evidence-based path to plan integrity).
+    const plannedGeometryStep = plan.steps.find(
+      (step) => step.kind === "extend_uniform_background" || step.kind === "pad_uniform_background",
+    );
+    const executedGeometryAdaptation: RigidSignPlanEvidence["executedGeometryAdaptation"] =
+      signGeometryAdapted && signExecutionGeometry
+        ? {
+            reconstructionRequestedWidthPx: signExecutionGeometry.reconstructionRequestedWidthPx,
+            reconstructionRequestedHeightPx: signExecutionGeometry.reconstructionRequestedHeightPx,
+            reconstructionActualWidthPx: signExecutionGeometry.reconstructionActualWidthPx,
+            reconstructionActualHeightPx: signExecutionGeometry.reconstructionActualHeightPx,
+            plannedStep: plannedGeometryStep
+              ? {
+                  kind: plannedGeometryStep.kind,
+                  axis: typeof plannedGeometryStep.params.axis === "string" ? plannedGeometryStep.params.axis : null,
+                  colorR:
+                    typeof plannedGeometryStep.params.colorR === "number" ? plannedGeometryStep.params.colorR : null,
+                  colorG:
+                    typeof plannedGeometryStep.params.colorG === "number" ? plannedGeometryStep.params.colorG : null,
+                  colorB:
+                    typeof plannedGeometryStep.params.colorB === "number" ? plannedGeometryStep.params.colorB : null,
+                  color: typeof plannedGeometryStep.params.color === "string" ? plannedGeometryStep.params.color : null,
+                }
+              : null,
+            executedStep: signExecutionGeometry.executedStep
+              ? {
+                  kind: signExecutionGeometry.executedStep.kind,
+                  axis: signExecutionGeometry.executedStep.axis,
+                  colorR: signExecutionGeometry.executedStep.colorR,
+                  colorG: signExecutionGeometry.executedStep.colorG,
+                  colorB: signExecutionGeometry.executedStep.colorB,
+                  color: signExecutionGeometry.executedStep.color,
+                }
+              : null,
+          }
+        : null;
+
     const rigidSign: RigidSignPlanEvidence = {
       sourceAssetId: preparation.originalAssetId,
       sourceSha256,
@@ -2098,13 +2140,20 @@ export function createFinalArtworkWorkerCapability(
       // `signGeometryAdapted` is true, the geometry-stage step actually
       // executed with different pixel amounts than the recorded plan's own
       // step (see `rigidSign.executionGeometry` on the asset metadata for
-      // the explicit record). `!reconstructed` already independently blocks
-      // `print_ready` for every reconstruction case regardless of this
-      // value (unchanged), so this fix corrects what is CLAIMED in the
-      // evidence without changing any validation OUTCOME.
+      // the explicit record). This value's own meaning is unchanged by
+      // LIVE PRODUCT BLOCKER #4D — a genuine adaptation still makes it
+      // `false`; `executedGeometryAdaptation` (below) is the SEPARATE,
+      // independently-verified path that may still admit plan integrity
+      // for exactly that case.
       executedStepsMatchPlan: !signGeometryAdapted,
+      executedGeometryAdaptation,
       planOverallRisk: plan.overallRisk,
       containsOnlyAdmittedSteps,
+      // LIVE PRODUCT BLOCKER #4B: the SAME `needsReconstruction` this
+      // function already computed above to decide whether to dispatch
+      // bounded reconstruction at all — never recomputed, never
+      // independently re-derived by PrintValidation.
+      planRequiresBoundedReconstruction: needsReconstruction,
       orderedWidthIn: plan.orderedWidthIn,
       orderedHeightIn: plan.orderedHeightIn,
       targetPpi: policy.targetPpi,

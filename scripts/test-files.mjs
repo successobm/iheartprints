@@ -306,6 +306,9 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-geometry.test.ts",
   "src/capabilities/sign-preparation/sign-provider-alpha-normalization.test.ts",
   "src/capabilities/sign-preservation/sign-preservation-deterministic-checks.test.ts",
+  // LIVE PRODUCT BLOCKER #4C: source-space <-> reconstruction-space
+  // coordinate mapping, tested in isolation from image bytes.
+  "src/capabilities/sign-preservation/sign-preservation-geometry.test.ts",
   "src/capabilities/sign-preservation/sign-preservation-capability.test.ts",
   "src/capabilities/sign-preservation/sign-preservation-semantic-contract.test.ts",
   "src/capabilities/sign-preservation/sign-preservation-image-derivation.test.ts",
@@ -315,6 +318,24 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",
   "src/capabilities/final-artwork-worker/sign-preservation-worker-orchestration.test.ts",
   "src/capabilities/final-artwork/topaz-download-security.test.ts",
+  // LIVE PRODUCT BLOCKER #1/#3/#4/#4A/#4B: registered together — discovered
+  // during Blocker #4B that none of these had ever been added to this list,
+  // so `npm test` never actually ran them despite being reported as part of
+  // the full regression suite in every prior phase's own report. See the
+  // Blocker #4B final report for the full accounting.
+  "src/app/api/projects/[projectId]/sign-artwork/route.test.ts",
+  "src/app/api/projects/[projectId]/sign-artwork/plan/route.test.ts",
+  "src/capabilities/sign-preparation/sign-preparation-copy.test.ts",
+  "src/capabilities/sign-preparation/sign-plan-authorization.test.ts",
+  "src/app/api/projects/[projectId]/sign-artwork/authorize/route.test.ts",
+  "src/app/api/internal/projects/[projectId]/sign-artwork/authorize/route.test.ts",
+  "src/capabilities/sign-preparation/sign-preparation-operator-copy.test.ts",
+  "src/capabilities/sign-preparation/sign-plan-operator-review.test.ts",
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-authorize-page-state.test.ts",
+  "src/app/api/internal/projects/[projectId]/sign-artwork/original-image/route.test.ts",
+  "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
+  "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",
+  "src/app/api/internal/projects/[projectId]/sign-artwork/download/route.test.ts",
   // Garment colour is production context, never authority over customer
   // pixels: preparation must be byte-identical on a white and a black shirt.
   "src/capabilities/artwork-preparation/garment-color-preparation-isolation.test.ts",

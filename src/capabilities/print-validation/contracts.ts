@@ -891,6 +891,36 @@ export interface RigidSignPlanEvidence {
   planOverallRisk: "auto_safe" | "review_required" | "blocked";
   /** True when every executed step's kind is one of S2's admitted deterministic operations — never `reconstruct_resolution` or `approved_crop`. */
   containsOnlyAdmittedSteps: boolean;
+  /**
+   * LIVE PRODUCT BLOCKER #4B: true when the recorded plan's ONLY
+   * non-S2-admitted content is exactly one `reconstruct_resolution` step —
+   * the Signs Phase S3A/S4 bounded-provider-reconstruction shape
+   * (`sign-preparation/sign-transform-executor.ts`'s own
+   * `planRequiresBoundedReconstruction`, carried here as a plain boolean —
+   * this module never imports that function). Distinct from
+   * `containsOnlyAdmittedSteps`, which is `false` for any such plan by
+   * construction (`reconstruct_resolution` itself is never S2-admitted).
+   * Exists so `planIntegrityOk` can admit a genuinely reconstructed,
+   * genuinely preserved plate — never any OTHER non-admitted shape (e.g.
+   * `approved_crop`, or a plan the worker itself refused to execute) —
+   * without weakening what `containsOnlyAdmittedSteps` alone still
+   * protects for a plan needing no reconstruction at all.
+   */
+  planRequiresBoundedReconstruction: boolean;
+  /**
+   * LIVE PRODUCT BLOCKER #4D: non-null ONLY when `executedStepsMatchPlan`
+   * is `false` because a real reconstruction-provider result diverged
+   * (proportionally) from the plan's own requested reconstruction size,
+   * and the worker deterministically re-derived a geometry step's pixel
+   * amounts to still reach the ordered aspect — the Signs Phase S3C
+   * adaptive-geometry path. `null` for every OTHER reason
+   * `executedStepsMatchPlan` might be `false` (this is never a general
+   * escape hatch). PrintValidation independently re-verifies
+   * proportionality and step-identity preservation from these raw facts
+   * — it never trusts a bare "the adaptation was valid" claim, the same
+   * discipline `preservationVerification`/`authorization` already apply.
+   */
+  executedGeometryAdaptation: RigidSignExecutedGeometryAdaptationEvidence | null;
   /** The exact ordered physical size the plate was produced for. Both axes — never width-only apparel semantics. */
   orderedWidthIn: number;
   orderedHeightIn: number;
@@ -987,6 +1017,41 @@ export interface RigidSignPreservationVerificationEvidence {
    * both fail exactly like a missing record.
    */
   status: "preserved" | "changed" | "unknown";
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #4D: the identity of ONE geometry-stage step
+ * (`extend_uniform_background`/`pad_uniform_background`), stripped to
+ * exactly the fields that must NEVER change between the approved plan's
+ * own recorded step and what actually executed — `kind`/`axis`/fill.
+ * `leadingPx`/`trailingPx` are deliberately excluded: those are the ONE
+ * thing a legitimate S3C adaptation is allowed to re-derive.
+ */
+export interface RigidSignGeometryStepEvidence {
+  kind: string;
+  axis: string | null;
+  colorR: number | null;
+  colorG: number | null;
+  colorB: number | null;
+  color: string | null;
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #4D: the raw facts behind ONE Signs Phase S3C
+ * adaptive-geometry execution — never a bare "the adaptation was valid"
+ * claim. See `RigidSignPlanEvidence.executedGeometryAdaptation`'s own doc.
+ */
+export interface RigidSignExecutedGeometryAdaptationEvidence {
+  /** What the approved plan's own `reconstruct_resolution` step requested. */
+  reconstructionRequestedWidthPx: number;
+  reconstructionRequestedHeightPx: number;
+  /** What the reconstruction provider actually returned. */
+  reconstructionActualWidthPx: number;
+  reconstructionActualHeightPx: number;
+  /** The approved plan's OWN recorded geometry step — approval authority, never mutated. `null` when the plan had no geometry step (reconstruction alone was expected to reach the ordered aspect). */
+  plannedStep: RigidSignGeometryStepEvidence | null;
+  /** What actually executed — `kind`/`axis`/fill must be identical to `plannedStep`; only pixel amounts (not carried here) may differ. `null` exactly when `plannedStep` is also `null`. */
+  executedStep: RigidSignGeometryStepEvidence | null;
 }
 
 export interface PrintValidationInput {

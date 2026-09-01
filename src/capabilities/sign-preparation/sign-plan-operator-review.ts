@@ -20,10 +20,58 @@
  */
 
 import type { ProjectRepository } from "@/lib/db/repository";
-import type { SignPlanAuthorizationActor } from "@/lib/domain/types";
+import type { FinalArtworkJobStatus, SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/types";
 
 import type { SignInspectionReport, SignRepairPlan } from "./contracts";
 import { describeSignPlanForOperator, type SignPlanOperatorView } from "./sign-preparation-operator-copy";
+
+/**
+ * LIVE PRODUCT BLOCKER #4B: the minimum production-status facts the
+ * operator page needs to decide what to show — "Prepare artwork", a
+ * processing state, a download, or a needs-attention notice. Deliberately
+ * READS the same durable `FinalArtworkJob`/`ProductionAssetValidation`
+ * records `FinalArtworkCapability.resolveCurrentSignProductionDelivery`
+ * treats as authoritative for the DOWNLOAD decision — but this is a
+ * lighter, presentation-only peek (status booleans only, never an asset
+ * id), not a second authority. Only the job bound to the preparation's
+ * CURRENT `planKey` is ever considered; a stale/superseded plan's job is
+ * invisible here, exactly like every other sign authority resolution.
+ */
+export interface SignPlanOperatorProductionStatus {
+  jobStatus: FinalArtworkJobStatus | null;
+  /** `queued` | `running` | `recoverable` — work is in flight right now. */
+  inFlight: boolean;
+  failed: boolean;
+  /** `completed`, with an authoritative `"ready"` validation for its asset. */
+  printReady: boolean;
+  /** `completed`, but not print-ready — needs further review before it can be finalized. */
+  needsAttention: boolean;
+}
+
+async function resolveSignProductionStatus(
+  repo: ProjectRepository,
+  projectId: string,
+  preparation: SignPreparation,
+): Promise<SignPlanOperatorProductionStatus> {
+  const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
+  const job = jobs.find((candidate) => candidate.signPlanKey === preparation.planKey) ?? null;
+
+  if (!job) {
+    return { jobStatus: null, inFlight: false, failed: false, printReady: false, needsAttention: false };
+  }
+
+  const inFlight = job.status === "queued" || job.status === "running" || job.status === "recoverable";
+  const failed = job.status === "failed";
+
+  let printReady = false;
+  if (job.status === "completed") {
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    printReady = validation?.status === "ready";
+  }
+  const needsAttention = job.status === "completed" && !printReady;
+
+  return { jobStatus: job.status, inFlight, failed, printReady, needsAttention };
+}
 
 export type SignPlanOperatorReview =
   | { status: "not_found" }
@@ -48,6 +96,7 @@ export type SignPlanOperatorReview =
         /** False for a stale authorization left over from a since-replanned artwork. */
         matchesCurrentPlan: boolean;
       };
+      production: SignPlanOperatorProductionStatus;
     };
 
 /** Read-only. Never mutates. Safe to call from a Server Component render. */
@@ -82,6 +131,8 @@ export async function loadSignPlanOperatorReview(
     plan,
   });
 
+  const production = await resolveSignProductionStatus(repo, projectId, preparation);
+
   return {
     status: "ready",
     orderedWidthIn,
@@ -94,5 +145,6 @@ export async function loadSignPlanOperatorReview(
       matchesCurrentPlan:
         preparation.authorizedPlanKey !== null && preparation.authorizedPlanKey === preparation.planKey,
     },
+    production,
   };
 }
