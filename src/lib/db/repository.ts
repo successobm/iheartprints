@@ -306,8 +306,11 @@ export type CreateFinalArtworkJobInput =
       signPreparationId: string;
       /** The canonical `SignRepairPlan` identity this job is enqueued to execute — the full idempotency key alongside the preparation id. */
       signPlanKey: string;
-      /** No `ArtworkVersion` exists for a sign job — see `FinalArtworkJob.artworkVersionId`'s doc. Always the authorizing `SignPreparation.id`. */
-      artworkVersionId: string;
+      // LIVE PRODUCT BLOCKER #4E: deliberately NO `artworkVersionId` here —
+      // no `ArtworkVersion` exists for a sign job, and `artwork_version_id`
+      // carries a real foreign key to `artwork_versions`. `signPreparationId`
+      // above already is this job's creative-source identity; see
+      // `FinalArtworkJob.artworkVersionId`'s own doc.
     };
 
 /**

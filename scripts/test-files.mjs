@@ -551,4 +551,14 @@ export const TEST_FILES = [
   "src/components/chat/garment-preview-image.test.ts",
   "src/components/chat/correction-image-load.test.ts",
   "src/components/chat/correction-workspace-loading.test.ts",
+  // LIVE PRODUCT BLOCKER #4E: final_artwork_jobs.artwork_version_id was a
+  // NOT NULL column with a hard FK to artwork_versions, overloaded by the
+  // sign job path to carry a sign_preparations id -- the real customer's
+  // first live "Prepare artwork" click failed with a Postgres FK
+  // violation the entire (LocalProjectRepository-backed) test suite could
+  // never have caught. Fixed by making artwork_version_id nullable and
+  // routing sign identity exclusively through the existing
+  // sign_preparation_id column -- registered immediately per the
+  // established discipline.
+  "src/lib/db/final-artwork-job-source-identity.migration.test.ts",
 ];

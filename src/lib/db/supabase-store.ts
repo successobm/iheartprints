@@ -372,7 +372,8 @@ type DbFinalArtworkJob = {
   requested_production_output: string | null;
   /** Print'em All Phase 2: frozen treatment identity. NULL = legacy job predating treatment binding. */
   production_treatment_key: string | null;
-  artwork_version_id: string;
+  /** LIVE PRODUCT BLOCKER #4E: nullable — `null` for a `"sign_preparation"` job, whose creative-source identity is `sign_preparation_id` instead. */
+  artwork_version_id: string | null;
   status: FinalArtworkJobStatus;
   attempts: number;
   last_error: string | null;
@@ -805,7 +806,7 @@ function mapFinalArtworkJob(row: DbFinalArtworkJob): FinalArtworkJob {
     // project's current key — normalizing it would be able to make two
     // genuinely different production intents look like one.
     productionTreatmentKey: row.production_treatment_key ?? null,
-    artworkVersionId: row.artwork_version_id,
+    artworkVersionId: row.artwork_version_id ?? null,
     status: row.status,
     attempts: row.attempts,
     lastError: row.last_error,
@@ -2493,11 +2494,14 @@ export class SupabaseProjectRepository implements ProjectRepository {
                 status: "queued",
               }
             : {
-                // Signs Phase S2.
+                // Signs Phase S2. LIVE PRODUCT BLOCKER #4E: `artwork_version_id`
+                // is deliberately omitted (defaults to its column NULL) —
+                // no `ArtworkVersion` exists for a sign job, and that column
+                // carries a real foreign key to `artwork_versions`.
+                // `sign_preparation_id` is this job's creative-source identity.
                 project_id: projectId,
                 sign_preparation_id: input.signPreparationId,
                 sign_plan_key: input.signPlanKey,
-                artwork_version_id: input.artworkVersionId,
                 status: "queued",
               },
       )

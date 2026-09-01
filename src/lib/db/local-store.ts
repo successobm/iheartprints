@@ -1958,7 +1958,10 @@ export class LocalProjectRepository implements ProjectRepository {
         input.sourceKind === "sign_preparation" ? null : input.productionTreatmentKey,
       requestedProductionOutput:
         input.sourceKind === "sign_preparation" ? null : input.requestedProductionOutput,
-      artworkVersionId: input.artworkVersionId,
+      // LIVE PRODUCT BLOCKER #4E: `null` for a sign job — no `ArtworkVersion`
+      // exists for one, and mirroring the real `artwork_version_id` foreign
+      // key's own new nullability (see the S2.5 schema-fix migration).
+      artworkVersionId: input.sourceKind === "sign_preparation" ? null : input.artworkVersionId,
       status: "queued",
       attempts: 0,
       lastError: null,

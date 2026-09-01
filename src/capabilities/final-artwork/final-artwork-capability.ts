@@ -1431,9 +1431,9 @@ async function resolveSignJob(
       sourceKind: "sign_preparation",
       signPreparationId,
       signPlanKey,
-      // No `ArtworkVersion` exists for a sign job — see
-      // `FinalArtworkJob.artworkVersionId`'s domain doc.
-      artworkVersionId: signPreparationId,
+      // LIVE PRODUCT BLOCKER #4E: deliberately no `artworkVersionId` — no
+      // `ArtworkVersion` exists for a sign job; `signPreparationId` above
+      // is this job's own creative-source identity.
     });
     return { job, alreadyRequested: false };
   } catch (error) {

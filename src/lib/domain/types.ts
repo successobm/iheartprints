@@ -2308,14 +2308,17 @@ export interface FinalArtworkJob {
   requestedProductionOutput: StoredRequestedProductionOutput | null;
   /**
    * Denormalized for convenient querying — always the same artwork the
-   * authorizing record references. Signs Phase S2: for a `"sign_preparation"`
-   * job, no `ArtworkVersion` exists (Constitution §16A) — this holds the
-   * authorizing `SignPreparation.id` instead, filling the same structural
-   * role ("which creative-source record this job describes") honestly,
-   * without a fabricated `ArtworkVersion` row. See the S2 authority
-   * migration's own audit for why this was the narrower choice.
+   * authorizing record references. LIVE PRODUCT BLOCKER #4E: `null` for a
+   * `"sign_preparation"` job — no `ArtworkVersion` exists for a sign
+   * (Constitution §16A), and the earlier design (storing the authorizing
+   * `SignPreparation.id` here instead) was a real production defect, not a
+   * narrower-but-honest choice: this column carries a real foreign key to
+   * `artwork_versions`, so a sign preparation's id here is rejected by the
+   * database — see the S2.5 schema-fix migration's own audit. The
+   * authorizing `SignPreparation.id` lives on `signPreparationId`, which
+   * already fills that structural role.
    */
-  artworkVersionId: string;
+  artworkVersionId: string | null;
   status: FinalArtworkJobStatus;
   /**
    * Sprint 2M Phase 2C: mirrors `GenerationJob.attempts` — bumped on every
