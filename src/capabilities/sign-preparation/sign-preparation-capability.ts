@@ -51,6 +51,7 @@ import { isAuthorizationSufficientForRisk } from "./sign-plan-authorization";
 import { planSignRepair } from "./sign-repair-planner";
 import { measurePerimeterBand } from "./perimeter-reconstruction";
 import { measureCleanFillRunPx, measureFrameStructuralModel } from "./frame-structure-model";
+import { segmentStructuralLayout } from "./sign-layout-segmentation";
 import type { SignEdge } from "./contracts";
 
 const ALL_SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
@@ -317,6 +318,26 @@ export function createSignPreparationCapability(
         }
       }
 
+      // Structural Layout Reflow Phase 2B (Planning Orchestration Wiring):
+      // the identical wiring gap `perimeterBands`/`frameStructuralModel`
+      // closed above, for `sign-layout-segmentation.ts`'s own primitive —
+      // computed alongside them, always, from the SAME already-decoded
+      // `decoded.image` (never a second decode of the source bytes), so it
+      // corresponds to exactly the source version/hash this planning pass
+      // is considering. Deterministic, pure, provider-free, and bounded by
+      // the image's own dimensions — the same cost class as decoding the
+      // image itself, not an unbounded or network operation. Computing it
+      // unconditionally (rather than gating on a new speculative "is this
+      // artwork banner-shaped" heuristic) mirrors this exact precedent: the
+      // PLANNER, not this orchestration layer, is the sole authority for
+      // whether the evidence is relevant/admissible — `planSignRepair`'s
+      // own `evaluateStructuralReflow` (axis, rotation, region count, fill
+      // evidence, safe inset) already decides that, and correctly falls
+      // back to `reconstruct_parametric_frame` (or further) when this
+      // evidence is absent, ambiguous, or inconclusive; this call site
+      // only ever supplies evidence, never a decision.
+      const structuralLayoutSegmentation = segmentStructuralLayout(decoded.image);
+
       const result = planSignRepair({
         spec: specResolution.spec,
         policy,
@@ -326,6 +347,7 @@ export function createSignPreparationCapability(
         perimeterBands,
         frameStructuralModel,
         frameCleanFillRunPx,
+        structuralLayoutSegmentation,
       });
 
       const updated =

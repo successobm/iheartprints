@@ -303,6 +303,10 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/frame-structure-model.test.ts",
   "src/capabilities/sign-preparation/sign-transform-executor-parametric-frame.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-capability.test.ts",
+  // Structural Layout Reflow Phase 2B (Planning Orchestration Wiring):
+  // reflow_structural_layout through the REAL SignPreparationCapability
+  // path (upload -> confirm spec -> plan), not only direct unit calls.
+  "src/capabilities/sign-preparation/sign-preparation-capability-structural-reflow.test.ts",
   "src/capabilities/sign-preparation/rigid-sign-category.test.ts",
   // Structural Layout Reflow Phase 1 (Foundations): dormant reflow_
   // structural_layout contract, SignProductionTemplate, the 0.125in safe
