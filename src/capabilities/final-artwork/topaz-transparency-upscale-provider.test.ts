@@ -1468,3 +1468,134 @@ describe("Topaz submit() dispatch classification (real DTF incident: UND_ERR_CON
     assert.equal(submitCallCount(), 0, "resuming an existing request must never call submit()");
   });
 });
+
+/**
+ * Exhausted Provider Result Recovery Phase (real Signs acceptance
+ * incident): `resumeSignReconstruction` — deliberately a SEPARATE method
+ * from `produceSignReconstruction`, never sharing its submit-capable
+ * internals. These tests exercise the REAL adapter (not the fake used at
+ * the worker layer) against real HTTP mocking, proving what the code
+ * comment on the method itself claims: no code path here can ever reach
+ * `/tool/async`.
+ */
+describe("TopazTransparencyUpscaleProvider.resumeSignReconstruction (Exhausted Provider Result Recovery Phase)", () => {
+  function resumeInput(overrides: Partial<Parameters<TopazTransparencyUpscaleProvider["resumeSignReconstruction"]>[0]> = {}) {
+    return {
+      existingProviderRequest: {
+        providerKey: "topaz_transparency_upscale",
+        providerRequestId: "existing-resume-only-process-id",
+        providerStatus: "submitted",
+      },
+      requestedWidthPx: expectedRectRequest(1000, 1500, PRINT_PLACEMENT_SIZING_POLICY.sleeve).widthPx,
+      requestedHeightPx: expectedRectRequest(1000, 1500, PRINT_PLACEMENT_SIZING_POLICY.sleeve).heightPx,
+      sourceWidthPx: 1000,
+      sourceHeightPx: 1500,
+      ...overrides,
+    };
+  }
+
+  it("resumes an already-completed request via poll+download only — never touches /tool/async", async () => {
+    const requested = resumeInput();
+    const { fetchImpl, calls } = buildFakeFetch({
+      statusSequence: ["Completed"],
+      downloadBytes: buildRectFixturePng(requested.requestedWidthPx, requested.requestedHeightPx),
+    });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    const output = await provider.resumeSignReconstruction(requested);
+
+    assert.equal(output.providerRequestId, "existing-resume-only-process-id");
+    assert.equal(output.widthPx, requested.requestedWidthPx);
+    assert.equal(output.heightPx, requested.requestedHeightPx);
+    const submitCalls = calls.filter((c) => c.url.endsWith("/tool/async"));
+    assert.equal(submitCalls.length, 0, "structurally incapable of a fresh submission — zero /tool/async calls, ever");
+    const statusCalls = calls.filter((c) => c.url.includes("/status/existing-resume-only-process-id"));
+    assert.ok(statusCalls.length >= 1);
+  });
+
+  it("still processing: polls until the shared pollTimeoutMs ceiling, then throws a classified timeout — never submits", async () => {
+    const requested = resumeInput();
+    const { fetchImpl, calls } = buildFakeFetch({ statusSequence: ["Processing"] });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+      pollTimeoutMs: 5,
+    });
+
+    await assert.rejects(
+      () => provider.resumeSignReconstruction(requested),
+      (error: unknown) => error instanceof ProviderError && error.classification === "timeout",
+    );
+    assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 0);
+  });
+
+  it("provider reports the request failed — throws a classified provider_job_failed, never submits", async () => {
+    const requested = resumeInput();
+    const { fetchImpl, calls } = buildFakeFetch({ statusSequence: ["Failed"] });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () => provider.resumeSignReconstruction(requested),
+      (error: unknown) => error instanceof ProviderError && error.classification === "provider_job_failed",
+    );
+    assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 0);
+  });
+
+  it("refuses to resume a request submitted by a different provider — fails closed, never submits", async () => {
+    const { fetchImpl, calls } = buildFakeFetch();
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () =>
+        provider.resumeSignReconstruction(
+          resumeInput({
+            existingProviderRequest: {
+              providerKey: "some_other_provider",
+              providerRequestId: "existing-resume-only-process-id",
+              providerStatus: "submitted",
+            },
+          }),
+        ),
+      (error: unknown) => error instanceof ProviderError && error.classification === "invalid_request",
+    );
+    assert.equal(calls.length, 0, "refused before any network call at all");
+  });
+
+  it("a geometry-insufficient existing result is rejected, not silently accepted — never submits", async () => {
+    const requested = resumeInput();
+    const { fetchImpl, calls } = buildFakeFetch({
+      statusSequence: ["Completed"],
+      // Far too small for the requested target -- fails validateReconstructedGeometry's sufficiency check.
+      downloadBytes: buildRectFixturePng(10, 15),
+    });
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    await assert.rejects(
+      () => provider.resumeSignReconstruction(requested),
+      (error: unknown) => error instanceof ProviderError && error.classification === "malformed_response",
+    );
+    assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 0);
+  });
+});

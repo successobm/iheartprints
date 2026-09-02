@@ -3,6 +3,7 @@ export {
   DEFAULT_FINAL_ARTWORK_STALE_JOB_MS,
   MAX_FINAL_ARTWORK_ATTEMPTS,
   type FinalArtworkWorkerCapability,
+  type ExhaustedSignProviderResultRecovery,
 } from "./final-artwork-worker-capability";
 export {
   checkSourceEligibleForFinalization,

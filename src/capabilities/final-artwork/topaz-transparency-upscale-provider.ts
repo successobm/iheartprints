@@ -59,6 +59,8 @@ import type {
   SignReconstructionProvider,
   SignReconstructionProviderInput,
   SignReconstructionProviderOutput,
+  SignReconstructionResumeInput,
+  SignReconstructionResumeProvider,
 } from "./sign-reconstruction-provider";
 
 const TOPAZ_API_BASE = "https://api.topazlabs.com/image/v1";
@@ -676,7 +678,7 @@ export function validateReconstructedGeometry(
 }
 
 export class TopazTransparencyUpscaleProvider
-  implements FinalArtworkProvider, SignReconstructionProvider
+  implements FinalArtworkProvider, SignReconstructionProvider, SignReconstructionResumeProvider
 {
   readonly providerKey = "topaz_transparency_upscale";
 
@@ -806,6 +808,71 @@ export class TopazTransparencyUpscaleProvider
       throw new ProviderError("malformed_response", geometryCheck.reason);
     }
 
+    return {
+      bytes: PNG.sync.write(reconstructed),
+      widthPx: reconstructed.width,
+      heightPx: reconstructed.height,
+      providerRequestId: processId,
+    };
+  }
+
+  /**
+   * Exhausted Provider Result Recovery Phase: resumes/polls/downloads an
+   * ALREADY-SUBMITTED paid request ONLY — deliberately does NOT call
+   * `submitOrResumePass`/`runReconstructionPass` (the shared helpers
+   * `produceSignReconstruction` uses), because those helpers' whole
+   * purpose is to submit when no existing request is given. This method's
+   * only path to Topaz is `pollUntilDone` + `download`, neither of which
+   * is a paid-submission call — `submit()` (the ONE paid-dispatch method
+   * on this class) is never referenced anywhere in this method's own call
+   * graph, so a fresh submission is structurally unreachable from here,
+   * not merely avoided by a runtime check. `existingProviderRequest` is a
+   * required (non-optional) field on `SignReconstructionResumeInput` for
+   * the same reason — there is no absent-request branch to fall back to a
+   * submission from.
+   */
+  async resumeSignReconstruction(
+    input: SignReconstructionResumeInput,
+  ): Promise<SignReconstructionProviderOutput> {
+    if (input.existingProviderRequest.providerKey !== this.providerKey) {
+      throw new ProviderError(
+        "invalid_request",
+        `This provider ("${this.providerKey}") cannot resume a request submitted by a different provider ("${input.existingProviderRequest.providerKey}").`,
+        "not_dispatched",
+      );
+    }
+    const processId = input.existingProviderRequest.providerRequestId;
+    await this.pollUntilDone(processId);
+    const bytes = await withRetry(() => this.download(processId), {
+      attempts: this.downloadAttempts,
+      isRetryable: isRetryableProviderError,
+      delayMs: (attempt) => 500 * attempt,
+      sleep: this.sleepImpl,
+    });
+    let reconstructed: PNG;
+    try {
+      reconstructed = PNG.sync.read(bytes);
+    } catch (error) {
+      throw new ProviderError(
+        "malformed_response",
+        `The production reconstruction provider returned bytes that could not be decoded as a PNG: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        undefined,
+        "download",
+      );
+    }
+    const geometryCheck = validateReconstructedGeometry({
+      sourceWidthPx: input.sourceWidthPx,
+      sourceHeightPx: input.sourceHeightPx,
+      targetWidthPx: input.requestedWidthPx,
+      targetHeightPx: input.requestedHeightPx,
+      actualWidthPx: reconstructed.width,
+      actualHeightPx: reconstructed.height,
+    });
+    if (!geometryCheck.valid) {
+      throw new ProviderError("malformed_response", geometryCheck.reason);
+    }
     return {
       bytes: PNG.sync.write(reconstructed),
       widthPx: reconstructed.width,

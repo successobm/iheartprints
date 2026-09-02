@@ -712,7 +712,7 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     assert.doesNotMatch(failed!.lastError!, /uploadProductionAsset/);
   });
 
-  it("Instrumentation: the persist-step's own listAssets call gets a label distinct from the self-heal's — reached only after self-heal itself succeeds", async () => {
+  it("Instrumentation: the persist-step's own listAssetsForFinalArtworkJob call gets a label distinct from the self-heal's — reached only after self-heal itself succeeds", async () => {
     const provider = new FakeSignReconstructionProvider();
     const { LocalProjectRepository } = await import("@/lib/db/local-store");
     const repo: ProjectRepository = new LocalProjectRepository();
@@ -728,23 +728,22 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     await planNeedingReconstruction(signPreparation, projectId);
     const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
 
-    // A claimed sign job issues listAssets THREE times before it could ever
-    // reach parametric reconstruction: (1) `resolveExistingProductionAsset`'s
-    // own unlabeled idempotency check at the very top of the job — not
-    // wrapped by this phase, since it runs before Topaz is ever called, the
-    // task's own instrumentation window; (2) the self-heal's labeled call;
-    // (3) the persist step's own labeled dedup check. Succeed on the first
-    // two, fail on the third.
+    // Query-Narrowing Phase: a claimed sign job issues
+    // listAssetsForFinalArtworkJob THREE times before it could ever reach
+    // parametric reconstruction: (1) `resolveExistingProductionAsset`'s own
+    // labeled idempotency check at the very top of the job; (2) the self-
+    // heal's labeled call; (3) the persist step's own labeled dedup check.
+    // Succeed on the first two, fail on the third.
     let listAssetsCalls = 0;
     const crashingRepo = new Proxy(repo, {
       get(target, prop) {
-        if (prop === "listAssets") {
-          return async (...args: Parameters<ProjectRepository["listAssets"]>) => {
+        if (prop === "listAssetsForFinalArtworkJob") {
+          return async (...args: Parameters<ProjectRepository["listAssetsForFinalArtworkJob"]>) => {
             listAssetsCalls += 1;
             if (listAssetsCalls === 3) {
               throw new Error("simulated statement timeout listing assets");
             }
-            return (target as ProjectRepository).listAssets(...args);
+            return (target as ProjectRepository).listAssetsForFinalArtworkJob(...args);
           };
         }
         const value = (target as unknown as Record<string, unknown>)[prop as string];
@@ -760,12 +759,12 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     assert.equal(failed!.status, "failed");
     assert.match(
       failed!.lastError!,
-      /^resolveExistingIntermediateReconstruction\.persist\.listAssets failed after \d+ms: simulated statement timeout listing assets$/,
-      "the persist-step's own dedup-check listAssets call is labeled distinctly from the self-heal's, and its failure is still caught (unlike the self-heal's own — see the next test)",
+      /^resolveExistingIntermediateReconstruction\.persist\.listAssetsForFinalArtworkJob failed after \d+ms: simulated statement timeout listing assets$/,
+      "the persist-step's own dedup-check call is labeled distinctly from the self-heal's, and its failure is still caught (unlike the self-heal's own — see the next test)",
     );
   });
 
-  it("Instrumentation: a self-heal listAssets failure IS labeled but remains uncaught (documents a known, deliberately out-of-scope gap — not fixed in this phase)", async () => {
+  it("Instrumentation: a self-heal listAssetsForFinalArtworkJob failure IS labeled but remains uncaught (documents a known, deliberately out-of-scope gap — not fixed in this phase)", async () => {
     const provider = new FakeSignReconstructionProvider();
     const { LocalProjectRepository } = await import("@/lib/db/local-store");
     const repo: ProjectRepository = new LocalProjectRepository();
@@ -781,20 +780,19 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     await planNeedingReconstruction(signPreparation, projectId);
     const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
 
-    // Call 1 (`resolveExistingProductionAsset`'s own, unlabeled — it runs
-    // before Topaz is ever called, outside this phase's instrumentation
-    // window) must succeed so execution actually reaches the self-heal;
+    // Call 1 (`resolveExistingProductionAsset`'s own labeled idempotency
+    // check) must succeed so execution actually reaches the self-heal;
     // call 2 (the self-heal itself) is the one under test.
     let listAssetsCalls = 0;
     const crashingRepo = new Proxy(repo, {
       get(target, prop) {
-        if (prop === "listAssets") {
-          return async (...args: Parameters<ProjectRepository["listAssets"]>) => {
+        if (prop === "listAssetsForFinalArtworkJob") {
+          return async (...args: Parameters<ProjectRepository["listAssetsForFinalArtworkJob"]>) => {
             listAssetsCalls += 1;
             if (listAssetsCalls === 1) {
-              return (target as ProjectRepository).listAssets(...args);
+              return (target as ProjectRepository).listAssetsForFinalArtworkJob(...args);
             }
-            throw new Error("simulated statement timeout on the self-heal's own listAssets call");
+            throw new Error("simulated statement timeout on the self-heal's own listAssetsForFinalArtworkJob call");
           };
         }
         const value = (target as unknown as Record<string, unknown>)[prop as string];
@@ -812,7 +810,7 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     assert.ok(caught instanceof Error, "sanity: must still reject, exactly as before this instrumentation phase");
     assert.match(
       (caught as Error).message,
-      /^resolveExistingIntermediateReconstruction\.signSelfHeal\.listAssets failed after \d+ms: simulated statement timeout on the self-heal's own listAssets call$/,
+      /^resolveExistingIntermediateReconstruction\.signSelfHeal\.listAssetsForFinalArtworkJob failed after \d+ms: simulated statement timeout on the self-heal's own listAssetsForFinalArtworkJob call$/,
     );
 
     // The job is left exactly where it was BEFORE this attempt — this

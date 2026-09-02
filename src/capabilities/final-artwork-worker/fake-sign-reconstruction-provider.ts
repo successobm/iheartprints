@@ -24,6 +24,8 @@ import type {
   SignReconstructionProvider,
   SignReconstructionProviderInput,
   SignReconstructionProviderOutput,
+  SignReconstructionResumeInput,
+  SignReconstructionResumeProvider,
 } from "@/capabilities/final-artwork/sign-reconstruction-provider";
 
 export type FakeSignReconstructionBehavior =
@@ -54,6 +56,14 @@ export type FakeSignReconstructionBehavior =
   | { kind: "oversized_with_border_alpha_defect"; widthPx: number; heightPx: number }
   /** Returns bytes that do not decode as a PNG at all. */
   | { kind: "malformed_bytes" }
+  /** Throws the given `ProviderError` (or a default terminal failure) instead of returning. */
+  | { kind: "throw"; error?: ProviderError };
+
+/** Exhausted Provider Result Recovery Phase: `resumeSignReconstruction`'s own, independent behavior configuration. */
+export type FakeSignReconstructionResumeBehavior =
+  | { kind: "success"; widthPx?: number; heightPx?: number }
+  /** Simulates Topaz still processing the request — the real adapter's `pollUntilDone` would eventually throw a `"timeout"` `ProviderError` after its own poll ceiling. */
+  | { kind: "processing" }
   /** Throws the given `ProviderError` (or a default terminal failure) instead of returning. */
   | { kind: "throw"; error?: ProviderError };
 
@@ -99,16 +109,20 @@ function makeSolidPngWithBorderAlphaDefect(width: number, height: number): Buffe
  * actually exercises).
  */
 export class FakeSignReconstructionProvider
-  implements FinalArtworkProvider, SignReconstructionProvider
+  implements FinalArtworkProvider, SignReconstructionProvider, SignReconstructionResumeProvider
 {
   readonly providerKey = "fake_sign_reconstruction_v1";
 
   /** Number of genuinely NEW paid submissions this instance has made. */
   dispatchCount = 0;
-  /** Number of times an existing (never resubmitted) request was resumed. */
+  /** Number of times an existing (never resubmitted) request was resumed via the NORMAL `produceSignReconstruction` resume-or-submit contract. */
   resumeCount = 0;
+  /** Exhausted Provider Result Recovery Phase: number of times `resumeSignReconstruction` (the structurally-no-submit-capable method) was called. */
+  resumeOnlyCallCount = 0;
 
   behavior: FakeSignReconstructionBehavior = { kind: "success" };
+  /** Exhausted Provider Result Recovery Phase: behavior for `resumeSignReconstruction` specifically — independent of `behavior` above. */
+  resumeOnlyBehavior: FakeSignReconstructionResumeBehavior = { kind: "success" };
 
   private sequence = 0;
 
@@ -175,6 +189,43 @@ export class FakeSignReconstructionProvider
       widthPx: input.requestedWidthPx,
       heightPx: input.requestedHeightPx,
       providerRequestId,
+    };
+  }
+
+  /**
+   * Exhausted Provider Result Recovery Phase: the fake's own no-submit-
+   * capable method — mirrors `TopazTransparencyUpscaleProvider.resumeSignReconstruction`'s
+   * contract exactly (never touches `dispatchCount`/`sequence`/
+   * `onProviderRequestSubmitted` — nothing here can register as a fresh
+   * submission, by construction, same as the real adapter).
+   */
+  async resumeSignReconstruction(
+    input: SignReconstructionResumeInput,
+  ): Promise<SignReconstructionProviderOutput> {
+    this.resumeOnlyCallCount += 1;
+    const behavior = this.resumeOnlyBehavior;
+    if (behavior.kind === "processing") {
+      throw new ProviderError(
+        "timeout",
+        "The fake reconstruction provider did not complete within the allotted time.",
+      );
+    }
+    if (behavior.kind === "throw") {
+      throw (
+        behavior.error ??
+        new ProviderError(
+          "provider_job_failed",
+          "The fake reconstruction provider reported this request as terminally failed.",
+        )
+      );
+    }
+    const widthPx = behavior.widthPx ?? input.requestedWidthPx;
+    const heightPx = behavior.heightPx ?? input.requestedHeightPx;
+    return {
+      bytes: makeSolidPng(widthPx, heightPx),
+      widthPx,
+      heightPx,
+      providerRequestId: input.existingProviderRequest.providerRequestId,
     };
   }
 }

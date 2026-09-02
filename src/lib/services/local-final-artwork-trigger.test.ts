@@ -251,6 +251,9 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
       async reconcileSignPrintReadyStatus() {
         return { invalidated: false, reason: "not exercised by this test" };
       },
+      async recoverExhaustedSignProviderResult() {
+        return { outcome: "refused" as const, reason: "no_sign_preparation" as const };
+      },
     };
     const scheduler = createFinalArtworkSchedulerCapability(slowWorker, {
       maxJobsPerRun: 5,

@@ -1767,6 +1767,16 @@ export class LocalProjectRepository implements ProjectRepository {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
+  async listAssetsForFinalArtworkJob(
+    projectId: string,
+    finalArtworkJobId: string,
+  ): Promise<AssetRecord[]> {
+    const db = await readDb();
+    return db.assets
+      .filter((asset) => asset.projectId === projectId && asset.finalArtworkJobId === finalArtworkJobId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
   async getAssetById(assetId: string): Promise<AssetRecord | null> {
     const db = await readDb();
     return db.assets.find((asset) => asset.id === assetId) ?? null;

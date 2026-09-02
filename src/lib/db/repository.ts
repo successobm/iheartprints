@@ -1124,6 +1124,25 @@ export interface ProjectRepository {
   /** Sprint 2H Part 1: real asset persistence, backing AssetCapability. */
   createAsset(projectId: string, input: CreateAssetInput): Promise<AssetRecord>;
   listAssets(projectId: string): Promise<AssetRecord[]>;
+  /**
+   * Query-Narrowing Phase (real Signs acceptance incident, reproducible
+   * SQLSTATE 57014): the narrow alternative to `listAssets(projectId)` for
+   * every final-artwork-job lookup that only ever needed ONE job's own
+   * assets — `resolveExistingProductionAsset`/
+   * `resolveExistingIntermediateReconstruction` previously fetched every
+   * asset the whole project has ever produced, then filtered client-side.
+   * `projectId` stays a real filter (never dropped for "the job id alone
+   * is enough") — tenant-defense-in-depth: a caller-supplied
+   * `finalArtworkJobId` is never trusted alone to prove it belongs to the
+   * project asking for it. `production_role`/intermediate-marker
+   * qualification stays entirely with the caller, exactly as it already
+   * does for `listAssets` — this method only narrows WHICH rows reach that
+   * check, never what the check itself does.
+   */
+  listAssetsForFinalArtworkJob(
+    projectId: string,
+    finalArtworkJobId: string,
+  ): Promise<AssetRecord[]>;
   getAssetById(assetId: string): Promise<AssetRecord | null>;
   /**
    * Sprint 2H Part 2A: hard-deletes an asset row. Only ever used for

@@ -74,3 +74,50 @@ export function hasSignReconstructionCapability<T extends { providerKey: string 
 ): provider is T & SignReconstructionProvider {
   return typeof (provider as Partial<SignReconstructionProvider>).produceSignReconstruction === "function";
 }
+
+/**
+ * Exhausted Provider Result Recovery Phase: input for `resumeSignReconstruction`
+ * below. `existingProviderRequest` is REQUIRED — unlike
+ * `SignReconstructionProviderInput`'s own optional field of the same name —
+ * because this contract has no fresh-submission fallback to fall back TO.
+ * `sourceBytes` is deliberately absent: nothing in a resume-only poll/
+ * download/decode ever needs the original source image, and omitting the
+ * field is one more thing that makes a fresh dispatch structurally
+ * unreachable from this call shape, not merely unused.
+ */
+export interface SignReconstructionResumeInput {
+  existingProviderRequest: FinalArtworkProviderResumeContext;
+  requestedWidthPx: number;
+  requestedHeightPx: number;
+  sourceWidthPx: number;
+  sourceHeightPx: number;
+}
+
+/**
+ * Exhausted Provider Result Recovery Phase: a provider capability that can
+ * ONLY resume/poll/download an ALREADY-SUBMITTED paid request — never
+ * submit a new one. For use exclusively by the exhausted-job existing-
+ * result recovery path (`FinalArtworkWorkerCapability.recoverExhaustedSignProviderResult`),
+ * never by the normal resume-or-submit reconstruction path.
+ *
+ * A provider implementing this must make fresh submission STRUCTURALLY
+ * impossible from within `resumeSignReconstruction` itself — never merely
+ * "won't submit because the request happens to be present" (which the
+ * existing `produceSignReconstruction`/`existingProviderRequest` contract
+ * already offers, and which this interface deliberately does NOT reuse):
+ * this method's own implementation must have no code path that reaches its
+ * paid-submission method at all, regardless of what it's called with.
+ */
+export interface SignReconstructionResumeProvider {
+  readonly providerKey: string;
+  resumeSignReconstruction(
+    input: SignReconstructionResumeInput,
+  ): Promise<SignReconstructionProviderOutput>;
+}
+
+/** True iff `provider` also implements `SignReconstructionResumeProvider` — the configured production provider (Topaz) does; a local-only/dev/fake provider does not unless it deliberately opts in. */
+export function hasSignReconstructionResumeCapability<T extends { providerKey: string }>(
+  provider: T,
+): provider is T & SignReconstructionResumeProvider {
+  return typeof (provider as Partial<SignReconstructionResumeProvider>).resumeSignReconstruction === "function";
+}

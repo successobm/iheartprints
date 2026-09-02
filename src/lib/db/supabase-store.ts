@@ -2381,6 +2381,20 @@ export class SupabaseProjectRepository implements ProjectRepository {
     return ((data as DbAsset[]) ?? []).map(mapAsset);
   }
 
+  async listAssetsForFinalArtworkJob(
+    projectId: string,
+    finalArtworkJobId: string,
+  ): Promise<AssetRecord[]> {
+    const { data, error } = await this.client
+      .from("assets")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("final_artwork_job_id", finalArtworkJobId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbAsset[]) ?? []).map(mapAsset);
+  }
+
   async getAssetById(assetId: string): Promise<AssetRecord | null> {
     const { data, error } = await this.client
       .from("assets")

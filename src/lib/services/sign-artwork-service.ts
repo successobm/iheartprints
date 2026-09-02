@@ -24,6 +24,7 @@
  */
 
 import { getCapabilityGraph } from "@/capabilities/composition";
+import type { ExhaustedSignProviderResultRecovery } from "@/capabilities/final-artwork-worker";
 import { describeSignPlanForCustomer } from "@/capabilities/sign-preparation";
 import type { FinalArtworkJobStatus } from "@/lib/domain/types";
 import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
@@ -210,6 +211,27 @@ export async function prepareSignArtworkForProduction(
   }
 
   return { jobId: job.id, jobStatus: job.status, alreadyRequested };
+}
+
+/**
+ * Exhausted Provider Result Recovery Phase (real Signs acceptance
+ * incident): the operator-only bridge into
+ * `FinalArtworkWorkerCapability.recoverExhaustedSignProviderResult` —
+ * deliberately NOT the same code path as `prepareSignArtworkForProduction`
+ * above (never calls `requestSignFinalArtwork`, never touches
+ * `providerRecoveryAttempts`, never triggers the ordinary local-worker
+ * convenience). This function performs NO precondition checks of its
+ * own — every one of them (job exists, is failed, its recovery budget is
+ * genuinely exhausted, it has an existing provider request, the provider
+ * supports resume-only reads) lives in the capability itself, which fails
+ * closed (`"refused"`, with a reason) rather than throwing, so a caller
+ * can render a precise, honest reason rather than a generic error.
+ */
+export async function resumeExhaustedSignProviderResult(
+  projectId: string,
+): Promise<ExhaustedSignProviderResultRecovery> {
+  const graph = getCapabilityGraph();
+  return graph.finalArtworkWorker.recoverExhaustedSignProviderResult(projectId);
 }
 
 export interface SignProductionArtworkDownload {

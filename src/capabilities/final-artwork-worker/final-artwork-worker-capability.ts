@@ -42,6 +42,7 @@ import type {
   ConceptEvaluation,
   ConceptEvaluationStatus,
   FinalArtworkJob,
+  FinalArtworkJobStatus,
   SignPreservationVerification,
 } from "@/lib/domain/types";
 import type { AssetCapability } from "@/capabilities/assets";
@@ -157,6 +158,7 @@ import {
 } from "@/capabilities/sign-preparation";
 import {
   hasSignReconstructionCapability,
+  hasSignReconstructionResumeCapability,
   type SignReconstructionProviderOutput,
 } from "@/capabilities/final-artwork/sign-reconstruction-provider";
 import {
@@ -251,7 +253,52 @@ export interface FinalArtworkWorkerCapability {
   reconcileSignPrintReadyStatus(
     projectId: string,
   ): Promise<SignPrintReadyReconciliationResult>;
+  /**
+   * Exhausted Provider Result Recovery Phase (real Signs acceptance
+   * incident): the ONLY sanctioned way to continue a sign job whose normal
+   * 5-attempt recovery budget is already exhausted but whose existing paid
+   * Topaz request may still be resumable — never resets or reinterprets
+   * that budget, never creates a replacement job, and is structurally
+   * incapable of a fresh paid submission (see
+   * `runSignReconstructionAndContinue`'s `"existingResultOnly"` mode and
+   * `TopazTransparencyUpscaleProvider.resumeSignReconstruction`'s own doc
+   * comments for exactly how). Fails closed — returns `"refused"`, never
+   * throws, never mutates anything — for every precondition this operation
+   * requires but doesn't find. A genuinely different operation from
+   * `processNextJob`: it does not claim a queued/recoverable job, and it
+   * never touches `providerRecoveryAttempts`.
+   */
+  recoverExhaustedSignProviderResult(
+    projectId: string,
+  ): Promise<ExhaustedSignProviderResultRecovery>;
 }
+
+/**
+ * Exhausted Provider Result Recovery Phase: the outcome of one
+ * `recoverExhaustedSignProviderResult` call.
+ *
+ *   "refused" — one of the required preconditions did not hold; `reason`
+ *     says which. Nothing was mutated.
+ *   "attempted" — the job was claimed into this special path and
+ *     `runSignPreparationJob` ran to whatever conclusion it reached
+ *     (`finalStatus` reports the job's resulting status — "completed" and
+ *     "failed" are both legitimate outcomes here, exactly like any other
+ *     job execution; this operation only guarantees HOW it tried, not that
+ *     it succeeded).
+ */
+export type ExhaustedSignProviderResultRecovery =
+  | {
+      outcome: "refused";
+      reason:
+        | "no_sign_preparation"
+        | "no_plan"
+        | "no_matching_job"
+        | "job_not_failed"
+        | "recovery_budget_not_exhausted"
+        | "no_existing_provider_request"
+        | "provider_does_not_support_resume";
+    }
+  | { outcome: "attempted"; jobId: string; finalStatus: FinalArtworkJobStatus | null };
 
 /**
  * Print-Ready Lifecycle Phase: the outcome of one
@@ -645,7 +692,10 @@ export function createFinalArtworkWorkerCapability(
     job: FinalArtworkJob,
     targetIn: EffectiveProductionTargetIn | null,
   ): Promise<AssetRecord | null> {
-    const existingAssets = await repo.listAssets(job.projectId);
+    const existingAssets = await withOperationTiming(
+      "resolveExistingProductionAsset.listAssetsForFinalArtworkJob",
+      () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
+    );
     const candidates = existingAssets.filter(
       (asset) =>
         asset.finalArtworkJobId === job.id &&
@@ -683,8 +733,8 @@ export function createFinalArtworkWorkerCapability(
     callSite: "apparelSelfHeal" | "signSelfHeal" | "persist",
   ): Promise<{ asset: AssetRecord; providerRequestId: string } | null> {
     const existingAssets = await withOperationTiming(
-      `resolveExistingIntermediateReconstruction.${callSite}.listAssets`,
-      () => repo.listAssets(job.projectId),
+      `resolveExistingIntermediateReconstruction.${callSite}.listAssetsForFinalArtworkJob`,
+      () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
     );
     const candidate = existingAssets.find(
       (asset) =>
@@ -1303,6 +1353,20 @@ export function createFinalArtworkWorkerCapability(
     plan: SignRepairPlan,
     split: { before: SignRepairStep[]; reconstruct: SignRepairStep; after: SignRepairStep[] },
     sourceImage: RgbaImage,
+    /**
+     * Exhausted Provider Result Recovery Phase: `"normal"` (the default,
+     * every existing caller) preserves the resume-or-submit contract and
+     * recovery-budget semantics EXACTLY as before this phase.
+     * `"existingResultOnly"` is used ONLY by
+     * `recoverExhaustedSignProviderResult` — the provider-dispatch branch
+     * below is structurally incapable of a fresh submission in this mode
+     * (calls `resumeSignReconstruction`, never `produceSignReconstruction`),
+     * NEVER checks or increments `providerRecoveryAttempts` (the exhausted
+     * 5/5 budget is a precondition this mode is invoked under, not
+     * something it re-evaluates or spends further), and fails closed if no
+     * existing provider request is attached.
+     */
+    mode: "normal" | "existingResultOnly",
   ): Promise<
     | { outcome: "handled" }
     | {
@@ -1426,18 +1490,26 @@ export function createFinalArtworkWorkerCapability(
       effectiveJob.providerRequestId !== null &&
       effectiveJob.providerRequestId === existingIntermediate.providerRequestId
     ) {
+      // Exhausted Provider Result Recovery Phase: this self-heal's own
+      // `providerRecoveryAttempts: 0` reset frees the job's slot for a
+      // FUTURE fresh submission — exactly correct in normal mode, but a
+      // hard "never reset the exhausted budget" violation in
+      // `existingResultOnly` mode. providerKey/providerRequestId/
+      // providerStatus still clear either way (the bytes are now durably
+      // stored elsewhere; that part of the self-heal's own idempotency
+      // guarantee is unrelated to budget semantics).
       await repo.updateFinalArtworkJob(job.id, {
         providerKey: null,
         providerRequestId: null,
         providerStatus: null,
-        providerRecoveryAttempts: 0,
+        ...(mode === "normal" ? { providerRecoveryAttempts: 0 } : {}),
       });
       effectiveJob = {
         ...effectiveJob,
         providerKey: null,
         providerRequestId: null,
         providerStatus: null,
-        providerRecoveryAttempts: 0,
+        ...(mode === "normal" ? { providerRecoveryAttempts: 0 } : {}),
       };
     }
 
@@ -1466,10 +1538,6 @@ export function createFinalArtworkWorkerCapability(
       reconstructedHeightPx = existingIntermediate.asset.heightPx;
       providerRequestId = existingIntermediate.providerRequestId;
     } else {
-      // "Separate Provider Recovery Attempt Budget" — classify THIS claim
-      // exactly as `produceProductionAsset` does for apparel, reusing the
-      // identical two ceilings so a sign reconstruction can never become an
-      // unbounded retry loop, paid or unpaid.
       const existingProviderRequest: FinalArtworkProviderResumeContext | null =
         effectiveJob.providerKey === signProvider.providerKey && effectiveJob.providerRequestId
           ? {
@@ -1478,87 +1546,156 @@ export function createFinalArtworkWorkerCapability(
               providerStatus: effectiveJob.providerStatus,
             }
           : null;
-      const attemptClassification: FinalArtworkAttemptClassification = existingProviderRequest
-        ? "resume"
-        : "fresh_execution";
 
-      if (attemptClassification === "fresh_execution") {
-        if (job.attempts > MAX_FINAL_ARTWORK_ATTEMPTS) {
+      let output: SignReconstructionProviderOutput;
+
+      if (mode === "existingResultOnly") {
+        // Exhausted Provider Result Recovery Phase: reached ONLY via
+        // `recoverExhaustedSignProviderResult`, which has already verified
+        // (before this function was ever called) that the normal recovery
+        // budget is genuinely exhausted. This branch therefore NEVER checks
+        // `providerRecoveryAttempts` against the ceiling and NEVER
+        // increments it — the exhausted 5/5 is the precondition this mode
+        // runs under, not something it re-spends. It is also structurally
+        // incapable of a fresh paid submission: `resumeSignReconstruction`
+        // (never `produceSignReconstruction`) is the only provider method
+        // called here, and that method has no code path back to the
+        // provider's own paid-submission call — see its own doc comment on
+        // `TopazTransparencyUpscaleProvider`. Fails closed, immediately,
+        // if no existing request is attached or the provider doesn't
+        // support resume-only reads.
+        if (!existingProviderRequest) {
           await failJob(
             job,
-            `Exceeded maximum finalization attempts (${MAX_FINAL_ARTWORK_ATTEMPTS}) after repeated recovery.`,
+            "No existing provider request is attached to this job -- existing-result recovery cannot proceed without one.",
+          );
+          return { outcome: "handled" };
+        }
+        if (!hasSignReconstructionResumeCapability(signProvider)) {
+          await failJob(job, "The configured provider does not support existing-result-only recovery.");
+          return { outcome: "handled" };
+        }
+        const resumedAt = Date.now();
+        try {
+          output = await signProvider.resumeSignReconstruction({
+            existingProviderRequest,
+            requestedWidthPx,
+            requestedHeightPx,
+            sourceWidthPx: preImage.width,
+            sourceHeightPx: preImage.height,
+          });
+          console.info(
+            `[sign-final-artwork] operation=resumeSignReconstruction elapsed_ms=${Date.now() - resumedAt} outcome=success`,
+          );
+        } catch (error) {
+          const elapsedMs = Date.now() - resumedAt;
+          console.info(
+            `[sign-final-artwork] operation=resumeSignReconstruction elapsed_ms=${elapsedMs} outcome=error`,
+          );
+          if (error instanceof ProviderError && error.classification === "provider_job_failed") {
+            // Identity clears (this specific request is genuinely dead —
+            // Topaz itself said so) but `providerRecoveryAttempts` is
+            // deliberately NOT touched, unlike the identical-looking reset
+            // in normal mode: this mode must never leave the budget in any
+            // state other than exactly what the caller found it in.
+            await repo.updateFinalArtworkJob(job.id, {
+              providerKey: null,
+              providerRequestId: null,
+              providerStatus: null,
+            });
+          }
+          await failJob(
+            job,
+            `resumeSignReconstruction failed after ${elapsedMs}ms: ${describeFinalArtworkError(error)}`,
           );
           return { outcome: "handled" };
         }
       } else {
-        if (effectiveJob.providerRecoveryAttempts >= MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS) {
-          await failJob(
-            job,
-            `This reconstruction's existing paid provider request could not be recovered after ${MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS} attempts. ` +
-              "It was never resubmitted -- the paid request itself may need manual attention.",
-          );
-          return { outcome: "handled" };
-        }
-        const nextRecoveryAttempts = effectiveJob.providerRecoveryAttempts + 1;
-        await repo.updateFinalArtworkJob(job.id, { providerRecoveryAttempts: nextRecoveryAttempts });
-        effectiveJob = { ...effectiveJob, providerRecoveryAttempts: nextRecoveryAttempts };
-      }
+        // "Separate Provider Recovery Attempt Budget" — classify THIS claim
+        // exactly as `produceProductionAsset` does for apparel, reusing the
+        // identical two ceilings so a sign reconstruction can never become an
+        // unbounded retry loop, paid or unpaid.
+        const attemptClassification: FinalArtworkAttemptClassification = existingProviderRequest
+          ? "resume"
+          : "fresh_execution";
 
-      let output: SignReconstructionProviderOutput;
-      // Final Recovery Instrumentation Phase: pure timing, deliberately NOT
-      // routed through `withOperationTiming` — that helper re-throws a new
-      // plain Error, which would break every `error instanceof ProviderError`
-      // check below (the classification/dispatch this catch depends on to
-      // decide whether identity is safe to clear, and to route a pre-
-      // dispatch refusal to `completeWithoutAsset` instead of `failJob`).
-      // The ORIGINAL error is inspected completely unchanged; only the
-      // MESSAGE STRINGS handed to `completeWithoutAsset`/`failJob` below
-      // gain an elapsed-time prefix.
-      const producedAt = Date.now();
-      try {
-        output = await signProvider.produceSignReconstruction({
-          sourceBytes: encodeSignPlate(preImage),
-          sourceContentType: "image/png",
-          requestedWidthPx,
-          requestedHeightPx,
-          existingProviderRequest,
-          onProviderRequestSubmitted: async (submittedProviderRequestId) => {
-            // Persisted BEFORE polling begins — a crash any time after this
-            // write is resumable without a second paid submission.
+        if (attemptClassification === "fresh_execution") {
+          if (job.attempts > MAX_FINAL_ARTWORK_ATTEMPTS) {
+            await failJob(
+              job,
+              `Exceeded maximum finalization attempts (${MAX_FINAL_ARTWORK_ATTEMPTS}) after repeated recovery.`,
+            );
+            return { outcome: "handled" };
+          }
+        } else {
+          if (effectiveJob.providerRecoveryAttempts >= MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS) {
+            await failJob(
+              job,
+              `This reconstruction's existing paid provider request could not be recovered after ${MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS} attempts. ` +
+                "It was never resubmitted -- the paid request itself may need manual attention.",
+            );
+            return { outcome: "handled" };
+          }
+          const nextRecoveryAttempts = effectiveJob.providerRecoveryAttempts + 1;
+          await repo.updateFinalArtworkJob(job.id, { providerRecoveryAttempts: nextRecoveryAttempts });
+          effectiveJob = { ...effectiveJob, providerRecoveryAttempts: nextRecoveryAttempts };
+        }
+
+        // Final Recovery Instrumentation Phase: pure timing, deliberately NOT
+        // routed through `withOperationTiming` — that helper re-throws a new
+        // plain Error, which would break every `error instanceof ProviderError`
+        // check below (the classification/dispatch this catch depends on to
+        // decide whether identity is safe to clear, and to route a pre-
+        // dispatch refusal to `completeWithoutAsset` instead of `failJob`).
+        // The ORIGINAL error is inspected completely unchanged; only the
+        // MESSAGE STRINGS handed to `completeWithoutAsset`/`failJob` below
+        // gain an elapsed-time prefix.
+        const producedAt = Date.now();
+        try {
+          output = await signProvider.produceSignReconstruction({
+            sourceBytes: encodeSignPlate(preImage),
+            sourceContentType: "image/png",
+            requestedWidthPx,
+            requestedHeightPx,
+            existingProviderRequest,
+            onProviderRequestSubmitted: async (submittedProviderRequestId) => {
+              // Persisted BEFORE polling begins — a crash any time after this
+              // write is resumable without a second paid submission.
+              await repo.updateFinalArtworkJob(job.id, {
+                providerKey: signProvider.providerKey,
+                providerRequestId: submittedProviderRequestId,
+                providerStatus: "submitted",
+                providerRecoveryAttempts: 0,
+              });
+            },
+          });
+          console.info(
+            `[sign-final-artwork] operation=produceSignReconstruction elapsed_ms=${Date.now() - producedAt} outcome=success`,
+          );
+        } catch (error) {
+          const elapsedMs = Date.now() - producedAt;
+          console.info(
+            `[sign-final-artwork] operation=produceSignReconstruction elapsed_ms=${elapsedMs} outcome=error`,
+          );
+          if (error instanceof ProviderError && error.classification === "provider_job_failed") {
             await repo.updateFinalArtworkJob(job.id, {
-              providerKey: signProvider.providerKey,
-              providerRequestId: submittedProviderRequestId,
-              providerStatus: "submitted",
+              providerKey: null,
+              providerRequestId: null,
+              providerStatus: null,
               providerRecoveryAttempts: 0,
             });
-          },
-        });
-        console.info(
-          `[sign-final-artwork] operation=produceSignReconstruction elapsed_ms=${Date.now() - producedAt} outcome=success`,
-        );
-      } catch (error) {
-        const elapsedMs = Date.now() - producedAt;
-        console.info(
-          `[sign-final-artwork] operation=produceSignReconstruction elapsed_ms=${elapsedMs} outcome=error`,
-        );
-        if (error instanceof ProviderError && error.classification === "provider_job_failed") {
-          await repo.updateFinalArtworkJob(job.id, {
-            providerKey: null,
-            providerRequestId: null,
-            providerStatus: null,
-            providerRecoveryAttempts: 0,
-          });
-        }
-        if (
-          error instanceof ProviderError &&
-          error.classification === "invalid_request" &&
-          error.dispatch === "not_dispatched"
-        ) {
-          await completeWithoutAsset(job, `produceSignReconstruction failed after ${elapsedMs}ms: ${error.message}`);
+          }
+          if (
+            error instanceof ProviderError &&
+            error.classification === "invalid_request" &&
+            error.dispatch === "not_dispatched"
+          ) {
+            await completeWithoutAsset(job, `produceSignReconstruction failed after ${elapsedMs}ms: ${error.message}`);
+            return { outcome: "handled" };
+          }
+          await failJob(job, `produceSignReconstruction failed after ${elapsedMs}ms: ${describeFinalArtworkError(error)}`);
           return { outcome: "handled" };
         }
-        await failJob(job, `produceSignReconstruction failed after ${elapsedMs}ms: ${describeFinalArtworkError(error)}`);
-        return { outcome: "handled" };
       }
 
       // --- RESULT DIMENSION VALIDATION (S3A): the provider's paid output is
@@ -1775,7 +1912,11 @@ export function createFinalArtworkWorkerCapability(
    * refuses — no reconstructed sign becomes `print_ready` until a future
    * phase (S4) adds preservation verification to justify it.
    */
-  async function runSignPreparationJob(job: FinalArtworkJob): Promise<void> {
+  async function runSignPreparationJob(
+    job: FinalArtworkJob,
+    /** See `runSignReconstructionAndContinue`'s own doc for exactly what `"existingResultOnly"` changes. Defaults to normal behavior for every existing caller. */
+    mode: "normal" | "existingResultOnly" = "normal",
+  ): Promise<void> {
     if (!job.signPreparationId || !job.signPlanKey) {
       await failJob(job, "This sign finalization job records no sign preparation.");
       return;
@@ -1915,6 +2056,7 @@ export function createFinalArtworkWorkerCapability(
             plan,
             reconstructionSplit,
             decoded.image,
+            mode,
           );
           if (reconstruction.outcome === "handled") {
             return { outcome: "handled" as const };
@@ -3191,6 +3333,54 @@ export function createFinalArtworkWorkerCapability(
 
     async reconcileSignPrintReadyStatus(projectId) {
       return reconcileSignPrintReadyStatus(projectId);
+    },
+
+    async recoverExhaustedSignProviderResult(projectId) {
+      const preparation = await repo.getSignPreparation(projectId);
+      if (!preparation || preparation.projectId !== projectId) {
+        return { outcome: "refused", reason: "no_sign_preparation" };
+      }
+      if (preparation.status !== "planned" || !preparation.plan || !preparation.planKey) {
+        return { outcome: "refused", reason: "no_plan" };
+      }
+
+      const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
+      const job = jobs.find((candidate) => candidate.signPlanKey === preparation.planKey);
+      if (!job) {
+        return { outcome: "refused", reason: "no_matching_job" };
+      }
+      if (job.status !== "failed") {
+        return { outcome: "refused", reason: "job_not_failed" };
+      }
+      // This path exists ONLY for a genuinely exhausted budget — never a
+      // shortcut around a normal, still-available recovery attempt.
+      if (job.providerRecoveryAttempts < MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS) {
+        return { outcome: "refused", reason: "recovery_budget_not_exhausted" };
+      }
+      if (!job.providerKey || !job.providerRequestId) {
+        return { outcome: "refused", reason: "no_existing_provider_request" };
+      }
+      if (!hasSignReconstructionResumeCapability(provider)) {
+        return { outcome: "refused", reason: "provider_does_not_support_resume" };
+      }
+
+      // A deliberately DIFFERENT transition from the normal claim
+      // (`claimNextQueuedFinalArtworkJob`, which only ever claims
+      // "queued"/"recoverable" jobs and always bumps `attempts`) — this
+      // job is "failed", and neither `attempts` nor
+      // `providerRecoveryAttempts` is touched by this claim itself.
+      const claimed = await repo.updateFinalArtworkJob(job.id, {
+        status: "running",
+        startedAt: new Date().toISOString(),
+        heartbeatAt: new Date().toISOString(),
+        lastError: null,
+        completedAt: null,
+      });
+
+      await withPeriodicHeartbeat(claimed.id, () => runSignPreparationJob(claimed, "existingResultOnly"));
+
+      const finalJob = await repo.getFinalArtworkJob(claimed.id);
+      return { outcome: "attempted", jobId: claimed.id, finalStatus: finalJob?.status ?? null };
     },
   };
 
