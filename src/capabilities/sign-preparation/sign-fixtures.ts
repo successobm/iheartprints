@@ -538,6 +538,33 @@ export function bannerSignEdgeContentArtwork(): RgbaImage {
   return image;
 }
 
+/**
+ * Structural Layout Reflow Phase 2 (Planner Wiring): a synthetic banner
+ * sign sized to the REAL cc6cfc4b-... acceptance sign's own SOURCE pixel
+ * dimensions (1086×1448, ordered 24×36in) — but a GENERIC banner-style
+ * structural layout (top/middle/bottom bands, no customer wording, no
+ * customer geometry), never the customer's own file. Proves segmentation
+ * and the reflow planner path against the real incident's own scale
+ * without touching the real project.
+ */
+export function acceptanceBannerSignArtwork(): RgbaImage {
+  const width = 1086;
+  const height = 1448;
+  const image = makeImage(width, height, BANNER_BACKGROUND_COLOR);
+
+  fillRect(image, 0, 0, width, 160, BANNER_TOP_COLOR); // top banner fill, touches y=0.
+  stripeContentBlock(image, 160, 260, CONTENT_A, CONTENT_B); // meaningful content well inside the top banner.
+  fillRect(image, 0, 260, width, 340, BANNER_BACKGROUND_COLOR); // gap 1.
+  stripeContentBlock(image, 340, 520, CONTENT_A, CONTENT_C); // middle content 1.
+  fillRect(image, 0, 520, width, 600, BANNER_BACKGROUND_COLOR); // gap 2.
+  stripeContentBlock(image, 600, 780, CONTENT_D, CONTENT_C); // middle content 2.
+  fillRect(image, 0, 780, width, 860, BANNER_BACKGROUND_COLOR); // gap 3.
+  stripeContentBlock(image, 860, 960, CONTENT_A, CONTENT_B); // meaningful content well inside the bottom banner.
+  fillRect(image, 0, 960, width, height, BANNER_BOTTOM_COLOR); // bottom banner fill, touches y=height.
+
+  return image;
+}
+
 /** No dominant edge colour anywhere — deterministic "cannot prove" case. */
 export function noisyEdgeSignArtwork(width = 400, height = 600): RgbaImage {
   const image = makeImage(width, height, NEAR_BLACK);

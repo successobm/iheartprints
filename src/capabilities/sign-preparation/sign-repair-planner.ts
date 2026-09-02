@@ -37,6 +37,7 @@ import type {
   SignInspectionReport,
   SignPlanningResult,
   SignProductionSpec,
+  SignProductionTemplate,
   SignRepairPlan,
   SignRepairStep,
   SignRiskClass,
@@ -57,6 +58,12 @@ import {
 } from "./resolution-policy";
 import type { SignPerimeterBandMeasurement } from "./perimeter-reconstruction";
 import type { SignFrameStructuralModel, SignFrameStructuralModelResult } from "./frame-structure-model";
+import { buildSignProductionTemplate } from "./sign-production-template";
+import type {
+  SignStructuralGap,
+  SignStructuralLayoutSegmentationResult,
+  SignStructuralRegion,
+} from "./sign-layout-segmentation";
 
 export interface SignPlanningInput {
   spec: SignProductionSpec;
@@ -91,6 +98,24 @@ export interface SignPlanningInput {
    * alongside `frameStructuralModel`.
    */
   frameCleanFillRunPx?: Partial<Record<SignEdge, number>>;
+  /**
+   * Structural Layout Reflow Phase 2 (Planner Wiring): the caller's own
+   * `sign-layout-segmentation.ts` measurement of the SOURCE image, used
+   * ONLY when the aspect-correction axis is `"vertical"` (segmentation is
+   * a row-scan and has nothing to say about a horizontal mismatch) and the
+   * source was not rotated (pre-rotation segmentation is never trusted,
+   * identical discipline to `frameStructuralModel`/edge evidence above).
+   * Optional and defaulted to absent — a caller that never supplies this
+   * gets EXACTLY the prior phase's behaviour (frame-model / perimeter-band
+   * / block, unaffected). When supplied and admissible, this evidence is
+   * PREFERRED over `frameStructuralModel`: a banner-style structural
+   * layout and a concentric perimeter frame are different shapes, and the
+   * real Signs acceptance incident proved the frame-model's "source
+   * perimeter defines the substrate" assumption wrong for this shape —
+   * `reconstruct_parametric_frame` is never even considered once this
+   * evidence is supplied and admissible.
+   */
+  structuralLayoutSegmentation?: SignStructuralLayoutSegmentationResult;
 }
 
 const RISK_ORDER: Record<SignRiskClass, number> = {
@@ -211,6 +236,70 @@ function encodeFrameStructuralModelParams(
     params.holeInteriorColorG = model.hole.interiorColor.g;
     params.holeInteriorColorB = model.hole.interiorColor.b;
   }
+  return params;
+}
+
+/**
+ * Structural Layout Reflow Phase 2 (Planner Wiring): flattens a `"measured"`
+ * segmentation's regions/gaps plus the authoritative `SignProductionTemplate`
+ * into `SignRepairStep`'s flat params shape — the same `${prefix}Count` +
+ * per-index dynamically-named-key convention `encodeFrameStructuralModelParams`
+ * /`encodePerimeterBandsParams` already use. Every bound/colour here is
+ * exactly what `sign-layout-segmentation.ts` measured from the SOURCE image
+ * — still in SOURCE-image pixel units, never pre-rescaled to any later
+ * pixel space (mirrors `encodeFrameStructuralModelParams`'s own discipline:
+ * a future executor re-derives actual output pixels from whatever a
+ * preceding `reconstruct_resolution` step's ACTUAL output turns out to be,
+ * exactly like it already does for `reconstruct_parametric_frame` — this
+ * phase does not implement that).
+ *
+ * `scalingMode`/`layoutTransform` are explicit, literal flat-string
+ * declarations of V1's only permitted repair semantics — translation plus
+ * source-derived gap redistribution, NEVER non-uniform scaling of
+ * meaningful content — so a future executor (or an auditor reading a
+ * persisted plan) never has to infer permission from the mere absence of a
+ * scaling parameter.
+ */
+function encodeStructuralReflowParams(
+  axis: "horizontal" | "vertical",
+  totalAddedPx: number,
+  template: SignProductionTemplate,
+  regions: SignStructuralRegion[],
+  gaps: SignStructuralGap[],
+): Record<string, number | string> {
+  const params: Record<string, number | string> = {
+    axis,
+    totalAddedPx,
+    templateWidthIn: template.widthIn,
+    templateHeightIn: template.heightIn,
+    templateShape: template.shape,
+    templateMinimumSafeInsetIn: template.minimumSafeInsetIn,
+    scalingMode: "none",
+    layoutTransform: "translate_and_redistribute_gaps",
+    regionCount: regions.length,
+    gapCount: gaps.length,
+  };
+  regions.forEach((region, i) => {
+    params[`region${i}Id`] = region.id;
+    params[`region${i}Role`] = region.role;
+    params[`region${i}SourceStartYPx`] = region.sourceBounds.startYPx;
+    params[`region${i}SourceHeightPx`] = region.sourceBounds.heightPx;
+    params[`region${i}ContentStartYPx`] = region.contentBounds.startYPx;
+    params[`region${i}ContentHeightPx`] = region.contentBounds.heightPx;
+    params[`region${i}FillEdgeReaching`] = region.fillEdgeReaching ? "true" : "false";
+    params[`region${i}Expandable`] = region.expandable ? "true" : "false";
+    if (region.fillColor) {
+      params[`region${i}FillColorR`] = region.fillColor.r;
+      params[`region${i}FillColorG`] = region.fillColor.g;
+      params[`region${i}FillColorB`] = region.fillColor.b;
+    }
+  });
+  gaps.forEach((gap, i) => {
+    params[`gap${i}SourceHeightPx`] = gap.sourceHeightPx;
+    params[`gap${i}FillColorR`] = gap.fillColor.r;
+    params[`gap${i}FillColorG`] = gap.fillColor.g;
+    params[`gap${i}FillColorB`] = gap.fillColor.b;
+  });
   return params;
 }
 
@@ -421,8 +510,144 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
     // checked on its OWN terms here, never gated behind edge-dependence.
     const hasFrameEvidence =
       !rotated && input.frameStructuralModel !== undefined && input.frameStructuralModel.status !== "not_present";
-    if (edgeDependentEdges.length > 0 || hasFrameEvidence) {
-      if (hasFrameEvidence) {
+    // Structural Layout Reflow Phase 2 (Planner Wiring): segmentation is a
+    // row-scan (`sign-layout-segmentation.ts`'s own doc — vertical-axis
+    // only), so it can only ever speak to a VERTICAL (top/bottom) mismatch;
+    // a horizontal mismatch simply never routes through this evidence,
+    // exactly as if it had never been supplied. `!rotated` mirrors
+    // `hasFrameEvidence`'s own discipline — pre-rotation segmentation is
+    // never trusted post-rotation.
+    const hasStructuralReflowEvidence =
+      !rotated &&
+      axis === "vertical" &&
+      input.structuralLayoutSegmentation !== undefined &&
+      input.structuralLayoutSegmentation.status !== "not_present";
+    if (edgeDependentEdges.length > 0 || hasFrameEvidence || hasStructuralReflowEvidence) {
+      if (hasStructuralReflowEvidence) {
+        // Preferred over `reconstruct_parametric_frame` for this shape —
+        // see `SignPlanningInput.structuralLayoutSegmentation`'s own doc.
+        // `hasStructuralReflowEvidence` already established
+        // `input.structuralLayoutSegmentation` is defined and not
+        // `"not_present"`.
+        const segmentation = input.structuralLayoutSegmentation!;
+        if (segmentation.status === "ambiguous") {
+          defects.push({
+            code: "perimeter_structure_at_extension_edge",
+            severity: "blocking",
+            detail:
+              `The ${affectedEdges.join("/")} edge structural layout could not be resolved: ${segmentation.reason} ` +
+              "Never guessed — this axis has no admitted repair without affirmative segmentation evidence.",
+          });
+          return { status: "blocked", plan: null, defects };
+        }
+        if (segmentation.status !== "measured") {
+          // Structurally unreachable: `hasStructuralReflowEvidence` already
+          // excluded `"not_present"`, and `"ambiguous"` returned above —
+          // kept only so TypeScript's narrowing (which does not follow
+          // through the separately-computed boolean flag) has a definite
+          // type for the rest of this branch, mirroring `hasFrameEvidence`'s
+          // own identical defensive check.
+          return { status: "blocked", plan: null, defects };
+        }
+
+        const template = buildSignProductionTemplate(spec, policy);
+        const regions = segmentation.regions;
+        const topRegion = regions[0];
+        const bottomRegion = regions[regions.length - 1];
+        const gaps = segmentation.gaps;
+
+        const eligibilityFailures: string[] = [];
+        // Defensive, currently unreachable in V1 (the only admitted shape),
+        // kept as an explicit PROOF point rather than an assumption — a
+        // future second `SignProductionTemplateShape` must not silently
+        // start passing this gate.
+        if (template.shape !== "straight_rectangle") {
+          eligibilityFailures.push(`the production template's shape (${template.shape}) is not a straight rectangle`);
+        }
+        if (!topRegion || topRegion.role !== "top_anchor") {
+          eligibilityFailures.push("no top_anchor structural region is available");
+        }
+        if (!bottomRegion || bottomRegion.role !== "bottom_anchor" || bottomRegion === topRegion) {
+          eligibilityFailures.push("no distinct bottom_anchor structural region is available");
+        }
+        if (!topRegion?.fillEdgeReaching || !topRegion.fillColor) {
+          eligibilityFailures.push("the top anchor has no measured, edge-reaching fill to extend to the new cut edge");
+        }
+        if (!bottomRegion?.fillEdgeReaching || !bottomRegion.fillColor) {
+          eligibilityFailures.push("the bottom anchor has no measured, edge-reaching fill to extend to the new cut edge");
+        }
+        if (gaps.length === 0) {
+          eligibilityFailures.push(
+            "no measured inter-region gap exists to redistribute the added space into without stretching meaningful content",
+          );
+        }
+        if (topRegion && bottomRegion && topRegion !== bottomRegion) {
+          const topGapPx = topRegion.contentBounds.startYPx - topRegion.sourceBounds.startYPx;
+          const bottomGapPx =
+            bottomRegion.sourceBounds.startYPx +
+            bottomRegion.sourceBounds.heightPx -
+            (bottomRegion.contentBounds.startYPx + bottomRegion.contentBounds.heightPx);
+          const topGapIn = topGapPx / effectivePpi;
+          const bottomGapIn = bottomGapPx / effectivePpi;
+          // Full pixel-output enforcement belongs to later deterministic
+          // verification (Phase 3+) — this is the plan-time NECESSARY-
+          // condition check the task calls for: reject geometry that is
+          // already provably incapable of clearing the minimum, using the
+          // SOURCE's own truthful physical density (stable regardless of
+          // any later resolution-stage pixel-density change — see
+          // `encodeStructuralReflowParams`'s own doc).
+          if (topGapIn + 1e-9 < template.minimumSafeInsetIn) {
+            eligibilityFailures.push(
+              `the top anchor's meaningful content sits only ${topGapIn.toFixed(3)}in from its own fill's source edge, short of the ${template.minimumSafeInsetIn}in minimum safe inset`,
+            );
+          }
+          if (bottomGapIn + 1e-9 < template.minimumSafeInsetIn) {
+            eligibilityFailures.push(
+              `the bottom anchor's meaningful content sits only ${bottomGapIn.toFixed(3)}in from its own fill's source edge, short of the ${template.minimumSafeInsetIn}in minimum safe inset`,
+            );
+          }
+        }
+
+        if (eligibilityFailures.length > 0) {
+          defects.push({
+            code: "perimeter_structure_at_extension_edge",
+            severity: "blocking",
+            detail:
+              `Structural layout reflow evidence for the ${affectedEdges.join("/")} edges is insufficient to propose ` +
+              `a repair: ${eligibilityFailures.join("; ")}. Never guessed — this axis has no admitted repair without ` +
+              "sufficient affirmative evidence.",
+          });
+          return { status: "blocked", plan: null, defects };
+        }
+
+        defects.push({
+          code: "structural_layout_reflow_proposed",
+          severity: "review",
+          detail:
+            `The ${affectedEdges.join("/")} edges show a measurable banner-style structural layout (${regions.length} ` +
+            `regions, ${gaps.length} measured gap(s)) — proposing a structural reflow onto the ordered straight-` +
+            "rectangle production template: measured background fills extend to the new cut edges, spacing between " +
+            "middle regions redistributes proportionally from the source's own gaps, and meaningful content is only " +
+            "translated, never stretched. Always human-review-required, regardless of this evidence's strength.",
+        });
+        steps.push({
+          kind: "reflow_structural_layout",
+          params: encodeStructuralReflowParams(axis, totalPad, template, regions, gaps),
+          risk: "review_required",
+          reasons: [
+            "Edge-dependent/frame-like structure was detected, but the artwork's own perimeter is not what defines " +
+              "the finished substrate boundary — a deterministic banner-style structural layout was measured instead, " +
+              "and the ordered straight-rectangle production template is authoritative over it. Still requires human " +
+              "production review before execution.",
+          ],
+        });
+        // Deliberately skips the `hasFrameEvidence` frame-model branch, the
+        // `reconstruct_perimeter_structure` tiling check, AND the outright-
+        // block fallthrough below — see this input field's own doc for why
+        // structural reflow evidence, once supplied and admissible, is
+        // exclusive/authoritative for this axis rather than falling back to
+        // either.
+      } else if (hasFrameEvidence) {
         // `hasFrameEvidence` already established `input.frameStructuralModel`
         // is defined and not `"not_present"` — captured once here so
         // TypeScript's control-flow narrowing (which does not follow

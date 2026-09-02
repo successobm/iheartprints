@@ -145,10 +145,19 @@ function runLengthEncode(image: RgbaImage): RunSegment[] {
   return runs;
 }
 
-let regionIdCounter = 0;
-function nextRegionId(): string {
-  regionIdCounter += 1;
-  return `region-${regionIdCounter}`;
+/**
+ * Structural Layout Reflow Phase 2 (Planner Wiring): positional, purely a
+ * function of `regions`'s own current length at call time — never a
+ * module-level counter. A plan's `reflow_structural_layout` step persists
+ * `region${i}Id` (`sign-repair-planner.ts`'s `encodeStructuralReflowParams`)
+ * as PART of its canonical params, so identity must be reproducible:
+ * calling `segmentStructuralLayout` twice on the identical image must
+ * yield identical ids, which a module-global incrementing counter (this
+ * function's own prior implementation) cannot guarantee — it depends on
+ * how many OTHER images this process happened to have already segmented.
+ */
+function nextRegionId(regions: SignStructuralRegion[]): string {
+  return `region-${regions.length}`;
 }
 
 /**
@@ -250,7 +259,7 @@ export function segmentStructuralLayout(image: RgbaImage): SignStructuralLayoutS
     const role: SignStructuralRegionRole = isFirstContent ? "top_anchor" : isLastContent ? "bottom_anchor" : "middle";
 
     regions.push({
-      id: nextRegionId(),
+      id: nextRegionId(regions),
       sourceBounds,
       contentBounds,
       role,

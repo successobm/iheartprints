@@ -133,6 +133,8 @@ function describeStepForOperator(
       return describeReconstructPerimeter(step);
     case "reconstruct_parametric_frame":
       return describeReconstructParametricFrame(step);
+    case "reflow_structural_layout":
+      return describeReflowStructuralLayout(step);
     case "rotate_90":
       return describeRotate(step);
     case "approved_crop":
@@ -345,6 +347,62 @@ function describeReconstructParametricFrame(step: SignRepairStep): SignPlanOpera
     detail: detailParts.join(" "),
     needsReview: true,
     reviewReason: `A human must confirm the result before production: ${joinClauses(reviewClauses)}.`,
+  };
+}
+
+/**
+ * Structural Layout Reflow Phase 2 (Planner Wiring): the operator-facing
+ * translation of a `reflow_structural_layout` step. Generic production
+ * language throughout — never the customer's own wording, never a literal
+ * quote of any region's content, and never a manufacturing claim; only
+ * what MOVES (structural sections, spacing) and what stays fixed
+ * (meaningful content, never stretched). Every figure below is read from
+ * the plan's own persisted params (`encodeStructuralReflowParams`) —
+ * nothing here is invented or assumed about a specific sign.
+ */
+function describeReflowStructuralLayout(step: SignRepairStep): SignPlanOperatorStepView {
+  const regionCount = numberParam(step, "regionCount");
+  const gapCount = numberParam(step, "gapCount");
+  const templateWidthIn = numberParam(step, "templateWidthIn");
+  const templateHeightIn = numberParam(step, "templateHeightIn");
+  const minimumSafeInsetIn = numberParam(step, "templateMinimumSafeInsetIn");
+  const middleCount = regionCount !== null ? Math.max(0, regionCount - 2) : null;
+
+  const detailParts: string[] = [
+    "Create the ordered, straight-edged rectangular production area — the artwork's own perimeter shape (a rounded corner, a drawn border, or similar) never defines the finished substrate boundary.",
+    "Anchor the artwork's first structural section to the top of that area and its last structural section to the bottom.",
+  ];
+  if (middleCount !== null) {
+    detailParts.push(
+      middleCount > 0
+        ? `Keep the ${middleCount} structural section${middleCount === 1 ? "" : "s"} between them in the same order, unchanged.`
+        : "There are no structural sections between the top and bottom anchors.",
+    );
+  }
+  detailParts.push(
+    "Only the measured background fill behind the top and bottom sections extends to reach the new cut edges — nothing is generated or invented.",
+  );
+  if (gapCount !== null && gapCount > 0) {
+    detailParts.push(
+      `Redistribute the added space across the ${gapCount} measured gap${gapCount === 1 ? "" : "s"} already present in the source layout, in proportion to each gap's own size.`,
+    );
+  }
+  if (minimumSafeInsetIn !== null) {
+    detailParts.push(`Meaningful content stays at least ${minimumSafeInsetIn}in inside every cut edge.`);
+  }
+  detailParts.push("The artwork itself is only repositioned, never stretched or resized non-uniformly.");
+  if (templateWidthIn !== null && templateHeightIn !== null) {
+    detailParts.push(`Production area: ${templateWidthIn} × ${templateHeightIn}in.`);
+  }
+
+  return {
+    summary:
+      "Rebuild the sign's layout on the ordered straight-rectangle production area, anchoring the top and bottom sections and redistributing the space between them.",
+    detail: detailParts.join(" "),
+    needsReview: true,
+    reviewReason:
+      "This repair moves structural artwork sections to fit the ordered size, so a human must confirm the result " +
+      "before production — including that meaningful content stayed inside the safety area and nothing was stretched.",
   };
 }
 

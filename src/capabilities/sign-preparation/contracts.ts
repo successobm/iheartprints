@@ -278,6 +278,22 @@ export type SignDefectCode =
    * already follows.
    */
   | "parametric_frame_structure_reconstructed"
+  /**
+   * Structural Layout Reflow Phase 2 (Planner Wiring): the affected axis's
+   * edge-dependent/frame-like structure is instead a deterministically
+   * measured, banner-style structural layout (`sign-layout-segmentation.ts`
+   * — a distinct top/bottom anchor plus ordered middle regions, never a
+   * concentric frame band sequence) — proposing `reflow_structural_layout`
+   * (translation + source-derived fill extension + proportional gap
+   * redistribution onto the authoritative straight-rectangle
+   * `SignProductionTemplate`), preferred over `reconstruct_parametric_
+   * frame` for this shape because the source's own perimeter never defines
+   * the physical substrate boundary (the real Signs acceptance incident
+   * this phase corrects). Always paired with `repair_requires_review` —
+   * never `auto_safe`, identical discipline to every other perimeter/frame
+   * repair code above.
+   */
+  | "structural_layout_reflow_proposed"
   /** The fill alternative would cut source pixels — never automatic. */
   | "meaningful_crop_required"
   /** The formulated plan needs human judgment before execution. */
@@ -341,14 +357,17 @@ export type SignRepairStepKind =
    */
   | "reconstruct_parametric_frame"
   /**
-   * Structural Layout Reflow Phase 1 (Foundations): DORMANT in this phase —
-   * defined here so the plan-identity/serialization machinery and future
-   * planner/executor work have a stable, closed-vocabulary name to target,
-   * but neither `sign-repair-planner.ts` nor `sign-transform-executor.ts`
-   * emits or executes it yet (see each module's own doc for confirmation
-   * once wired). Distinct in kind from `reconstruct_parametric_frame`,
-   * never an overload of it: that step treats the SOURCE artwork's own
-   * measured perimeter/frame geometry as the finished substrate boundary
+   * Structural Layout Reflow Phase 2 (Planner Wiring): `sign-repair-
+   * planner.ts` now proposes this step — but ONLY when a caller explicitly
+   * supplies `SignPlanningInput.structuralLayoutSegmentation` (an opt-in,
+   * additive input, exactly like `frameStructuralModel`/`perimeterBands`
+   * before it; a caller that never supplies it gets identical behaviour to
+   * every prior phase). `sign-transform-executor.ts` still does not admit
+   * or execute it (absent from `ADMITTED_STEP_KINDS`) — planning only, no
+   * pixel is ever moved by this phase. Distinct in kind from
+   * `reconstruct_parametric_frame`, never an overload of it: that step
+   * treats the SOURCE artwork's own measured perimeter/frame geometry as
+   * the finished substrate boundary
    * to redraw — the real Signs acceptance incident that motivated this
    * phase proved that model wrong for ordinary rectangular signs (the
    * ORDERED cut template, never the artwork, defines the physical

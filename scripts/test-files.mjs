@@ -310,6 +310,10 @@ export const TEST_FILES = [
   // module. Additive only — not wired into planning/execution.
   "src/capabilities/sign-preparation/sign-structural-reflow-foundations.test.ts",
   "src/capabilities/sign-preparation/sign-layout-segmentation.test.ts",
+  // Structural Layout Reflow Phase 2 (Planner Wiring): reflow_structural_
+  // layout is now planner-emitted, but ONLY when a caller opts in by
+  // supplying structuralLayoutSegmentation — still not executor-admitted.
+  "src/capabilities/sign-preparation/sign-repair-planner-structural-reflow.test.ts",
   // Signs Phase S2 (Constitution §16A): deterministic repair execution +
   // authoritative rigid_sign_raster validation. Zero provider dispatch.
   "src/capabilities/sign-preparation/sign-transform-executor.test.ts",
