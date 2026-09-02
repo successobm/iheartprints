@@ -565,6 +565,178 @@ export function acceptanceBannerSignArtwork(): RgbaImage {
   return image;
 }
 
+/**
+ * Structural Layout Reflow Phase 2C (Frame-Interior-Aware Segmentation): a
+ * banner-style structural layout (top/middle/bottom fills + content,
+ * measured gaps — the SAME shape `bannerSignArtwork`/
+ * `acceptanceBannerSignArtwork` already represent) drawn WITHIN the
+ * measured interior of a genuine, deterministic, `measureFrameStructural
+ * Model`-compatible decorative frame — reproducing the real cc6cfc4b-...
+ * sign's own defining property: a continuous border on ALL FOUR sides,
+ * which defeats full-width row uniformity everywhere UNLESS analysis is
+ * windowed to the frame's own measured interior.
+ *
+ * Uses the SAME band thicknesses `framedSignArtwork`'s own OUTER_T/GAP_T/
+ * INNER_T do, so `measureFrameStructuralModel` measures it identically. A
+ * deliberately SMALL rounding radius (<= frameDepth, only when `rounded`)
+ * so a rounded corner's own curve never intrudes past the straight-edge
+ * interior rectangle: `frame-structure-model.ts`'s own `interior` is a
+ * simple inset-by-`frameDepthPx` rectangle, and a rounding radius LARGER
+ * than that depth would curl a few corner pixels of genuine frame band
+ * INTO it — a real, general property of that module this fixture
+ * deliberately avoids exercising (it is not what THIS phase's tests are
+ * about) rather than conflating the two. Hole indicators, when present,
+ * are likewise offset close enough to the true corner to stay entirely
+ * within the frame band, never reaching the interior either.
+ *
+ * LAYOUT CONSTRAINT (found empirically, not obvious from either module's
+ * own doc): `measureFrameStructuralModel`'s own LEFT/RIGHT edge band scan
+ * tries a "middle third of the edge" candidate window FIRST — for a
+ * source this tall, `[image.height/3, 2·image.height/3)`, roughly 1/3 of
+ * the FULL image height — and needs to find ONE CONSISTENT colour at
+ * shallow interior depth across that ENTIRE window before it will
+ * successfully complete the innermost band. A banner interior's own
+ * top/bottom fills are comfortably short of that window on their own, so
+ * this fixture places ONE deliberately large, uniform background gap
+ * spanning the image's own middle third (with generous margin either
+ * side) — the SAME "measured background gap" `sign-layout-segmentation
+ * .ts` already represents, just sized to also satisfy the frame model's
+ * own scan. Without this, the LEFT/RIGHT scan's candidate window crosses
+ * a genuine colour boundary partway through, and — because that module
+ * returns the FIRST candidate that produces ANY result, including a
+ * degraded partial one, rather than continuing to try a cleaner
+ * candidate — the innermost band is silently dropped from ONLY those two
+ * edges, and the whole frame model reports `"ambiguous"` ("top and right
+ * edges show different band sequences") purely as an artefact of THIS
+ * fixture's own interior content, never a real frame-model defect.
+ */
+export function framedBannerSignArtwork(options: {
+  width?: number;
+  height?: number;
+  rounded?: boolean;
+  withHoles?: boolean;
+  /**
+   * Fills the ENTIRE interior with two directly-adjacent, differently
+   * -coloured bands and no content between them — the windowed analogue
+   * of `ambiguousAdjacentFillArtwork` — instead of the ordinary banner
+   * layout below, for the "framed ambiguous interior" fixture.
+   */
+  ambiguousInterior?: boolean;
+}): RgbaImage {
+  const width = options.width ?? 1086;
+  const height = options.height ?? 1448;
+  const rounded = options.rounded ?? false;
+  const withHoles = options.withHoles ?? false;
+  const ambiguousInterior = options.ambiguousInterior ?? false;
+
+  const outerStroke: Rgba = { r: 4, g: 4, b: 4 };
+  const gapColor: Rgba = { r: 253, g: 253, b: 253 };
+  const innerStroke: Rgba = { r: 4, g: 4, b: 4 };
+  const frameFillColor: Rgba = { r: 202, g: 14, b: 14 };
+  // Deliberately NOT the shared module-level `BANNER_BACKGROUND_COLOR`
+  // ({10,10,10}) — found empirically to sit within `frame-structure-
+  // model.ts`'s own LOOSE inter-depth continuity tolerance
+  // (`EDGE_BACKGROUND_TOLERANCE * 2`) of this frame's `innerStroke`
+  // ({4,4,4}), which makes its own band-scan treat the innerStroke band
+  // and this fixture's own background gap as ONE continuous run —
+  // silently dropping the innermost band from the measured sequence and
+  // reporting the whole model `"ambiguous"` as a pure colour-choice
+  // artefact, never a real frame defect. A clearly distinguishable mid-
+  // grey (Chebyshev distance comfortably over that tolerance from every
+  // frame band colour AND the frame's own fill) avoids the collision.
+  const bannerGapColor: Rgba = { r: 120, g: 120, b: 120 };
+  const holeRing: Rgba = { r: 4, g: 4, b: 4 };
+  const holeInterior: Rgba = { r: 253, g: 253, b: 253 };
+
+  const OUTER_T = 9, GAP_T = 15, INNER_T = 7;
+  const frameDepth = OUTER_T + GAP_T + INNER_T; // 31 — identical to framedSignArtwork's own, for proven measureFrameStructuralModel compatibility.
+  const radius = rounded ? 20 : 0; // <= frameDepth: the rounded curve never intrudes past the straight interior inset (see this function's own doc).
+  const holeRadius = 6;
+  const holeOffsetX = 15, holeOffsetY = 15; // well inside frameDepth (31): the hole never reaches the interior.
+
+  const ix = frameDepth;
+  const iy = frameDepth;
+  const iw = width - 2 * frameDepth;
+  const ih = height - 2 * frameDepth;
+
+  const image = makeImage(width, height, frameFillColor);
+
+  if (ambiguousInterior) {
+    // The split sits well BEFORE the image's own middle-third window (see
+    // this function's own doc) so the frame model's LEFT/RIGHT scan still
+    // finds a consistent colour there and measures successfully — this
+    // fixture tests SEGMENTATION's own ambiguity handling once windowed,
+    // never the frame model's.
+    const splitAt = iy + 150;
+    fillRect(image, ix, iy, ix + iw, splitAt, BANNER_TOP_COLOR);
+    fillRect(image, ix, splitAt, ix + iw, iy + ih, BANNER_BOTTOM_COLOR);
+  } else {
+    // top_anchor (fill + content), a small gap, one middle content
+    // region, THEN the large image-middle-third-spanning gap this
+    // function's own doc requires, a second middle content region, a
+    // small gap, then bottom_anchor (content + fill).
+    fillRect(image, ix, iy, ix + iw, iy + 99, BANNER_TOP_COLOR);
+    stripeContentBlock(image, iy + 99, iy + 159, CONTENT_A, CONTENT_B);
+    fillRect(image, ix, iy + 159, ix + iw, iy + 199, bannerGapColor); // gap 1.
+    stripeContentBlock(image, iy + 199, iy + 299, CONTENT_A, CONTENT_C); // middle content 1.
+    fillRect(image, ix, iy + 299, ix + iw, iy + 1019, bannerGapColor); // gap 2 — spans the image's own middle third.
+    stripeContentBlock(image, iy + 1019, iy + 1119, CONTENT_D, CONTENT_C); // middle content 2.
+    fillRect(image, ix, iy + 1119, ix + iw, iy + 1159, bannerGapColor); // gap 3.
+    stripeContentBlock(image, iy + 1159, iy + 1219, CONTENT_A, CONTENT_B);
+    fillRect(image, ix, iy + 1219, ix + iw, iy + ih, BANNER_BOTTOM_COLOR);
+  }
+
+  function bandColorAt(depth: number): Rgba | null {
+    if (depth < OUTER_T) return outerStroke;
+    if (depth < OUTER_T + GAP_T) return gapColor;
+    if (depth < frameDepth) return innerStroke;
+    return null; // fill/interior — already painted, leave untouched.
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const inCornerX = x < radius ? radius - x : x > width - 1 - radius ? x - (width - 1 - radius) : 0;
+      const inCornerY = y < radius ? radius - y : y > height - 1 - radius ? y - (height - 1 - radius) : 0;
+      let depth: number | null;
+      if (inCornerX > 0 && inCornerY > 0) {
+        const dist = Math.sqrt(inCornerX * inCornerX + inCornerY * inCornerY);
+        depth = dist > radius ? null : radius - dist;
+      } else {
+        depth = Math.min(x, y, width - 1 - x, height - 1 - y);
+      }
+      if (depth === null) {
+        fillRect(image, x, y, x + 1, y + 1, gapColor); // outer background pocket outside the rounded corner.
+        continue;
+      }
+      const color = bandColorAt(depth);
+      if (color) fillRect(image, x, y, x + 1, y + 1, color);
+    }
+  }
+
+  if (withHoles) {
+    const corners: [number, number, 1 | -1, 1 | -1][] = [
+      [0, 0, 1, 1],
+      [width - 1, 0, -1, 1],
+      [0, height - 1, 1, -1],
+      [width - 1, height - 1, -1, -1],
+    ];
+    for (const [cx, cy, sx, sy] of corners) {
+      const centerX = cx + sx * holeOffsetX;
+      const centerY = cy + sy * holeOffsetY;
+      for (let y = Math.floor(centerY - holeRadius - 2); y <= centerY + holeRadius + 2; y++) {
+        for (let x = Math.floor(centerX - holeRadius - 2); x <= centerX + holeRadius + 2; x++) {
+          if (x < 0 || y < 0 || x >= width || y >= height) continue;
+          const d = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
+          if (d <= holeRadius) fillRect(image, x, y, x + 1, y + 1, holeInterior);
+          else if (d <= holeRadius + 2) fillRect(image, x, y, x + 1, y + 1, holeRing);
+        }
+      }
+    }
+  }
+
+  return image;
+}
+
 /** No dominant edge colour anywhere — deterministic "cannot prove" case. */
 export function noisyEdgeSignArtwork(width = 400, height = 600): RgbaImage {
   const image = makeImage(width, height, NEAR_BLACK);

@@ -60,6 +60,7 @@ import type { SignPerimeterBandMeasurement } from "./perimeter-reconstruction";
 import type { SignFrameStructuralModel, SignFrameStructuralModelResult } from "./frame-structure-model";
 import { buildSignProductionTemplate } from "./sign-production-template";
 import type {
+  SignStructuralAnalysisWindow,
   SignStructuralGap,
   SignStructuralLayoutSegmentationResult,
   SignStructuralRegion,
@@ -259,6 +260,18 @@ function encodeFrameStructuralModelParams(
  * meaningful content — so a future executor (or an auditor reading a
  * persisted plan) never has to infer permission from the mere absence of a
  * scaling parameter.
+ *
+ * Phase 2C: `analysisWindow` (`null` when segmentation analyzed the full
+ * source image) is persisted explicitly as `analysisWindowXPx`/`YPx`/
+ * `WidthPx`/`HeightPx` when present — a future executor (or an auditor)
+ * must never have to INFER whether `region*FillEdgeReaching` meant "reaches
+ * the true source canvas edge" or "reaches only the analysis window's own
+ * boundary, still inside a frame's own measured band depth" (see
+ * `SignStructuralRegion.fillEdgeReaching`'s own doc) — this makes that
+ * distinction an explicit, persisted plan fact rather than something
+ * reconstructed later from `sourceWidthPx`/`sourceHeightPx` and a region's
+ * own bounds, which would be exactly the kind of offset-inference this
+ * phase's own architecture explicitly refuses to require.
  */
 function encodeStructuralReflowParams(
   axis: "horizontal" | "vertical",
@@ -266,6 +279,7 @@ function encodeStructuralReflowParams(
   template: SignProductionTemplate,
   regions: SignStructuralRegion[],
   gaps: SignStructuralGap[],
+  analysisWindow: SignStructuralAnalysisWindow | null,
 ): Record<string, number | string> {
   const params: Record<string, number | string> = {
     axis,
@@ -279,6 +293,12 @@ function encodeStructuralReflowParams(
     regionCount: regions.length,
     gapCount: gaps.length,
   };
+  if (analysisWindow) {
+    params.analysisWindowXPx = analysisWindow.x;
+    params.analysisWindowYPx = analysisWindow.y;
+    params.analysisWindowWidthPx = analysisWindow.width;
+    params.analysisWindowHeightPx = analysisWindow.height;
+  }
   regions.forEach((region, i) => {
     params[`region${i}Id`] = region.id;
     params[`region${i}Role`] = region.role;
@@ -304,7 +324,13 @@ function encodeStructuralReflowParams(
 }
 
 type StructuralReflowEvaluation =
-  | { status: "eligible"; template: SignProductionTemplate; regions: SignStructuralRegion[]; gaps: SignStructuralGap[] }
+  | {
+      status: "eligible";
+      template: SignProductionTemplate;
+      regions: SignStructuralRegion[];
+      gaps: SignStructuralGap[];
+      analysisWindow: SignStructuralAnalysisWindow | null;
+    }
   | { status: "ambiguous"; reason: string }
   | { status: "insufficient"; failures: string[] }
   | { status: "not_applicable" };
@@ -427,7 +453,7 @@ function evaluateStructuralReflow(
   }
 
   if (failures.length > 0) return { status: "insufficient", failures };
-  return { status: "eligible", template, regions, gaps };
+  return { status: "eligible", template, regions, gaps, analysisWindow: segmentation.analysisWindow };
 }
 
 /**
@@ -675,6 +701,7 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
             reflowEvaluation.template,
             reflowEvaluation.regions,
             reflowEvaluation.gaps,
+            reflowEvaluation.analysisWindow,
           ),
           risk: "review_required",
           reasons: [

@@ -51,7 +51,7 @@ import { isAuthorizationSufficientForRisk } from "./sign-plan-authorization";
 import { planSignRepair } from "./sign-repair-planner";
 import { measurePerimeterBand } from "./perimeter-reconstruction";
 import { measureCleanFillRunPx, measureFrameStructuralModel } from "./frame-structure-model";
-import { segmentStructuralLayout } from "./sign-layout-segmentation";
+import { resolveFrameAnalysisWindow, segmentStructuralLayout } from "./sign-layout-segmentation";
 import type { SignEdge } from "./contracts";
 
 const ALL_SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
@@ -336,7 +336,27 @@ export function createSignPreparationCapability(
       // back to `reconstruct_parametric_frame` (or further) when this
       // evidence is absent, ambiguous, or inconclusive; this call site
       // only ever supplies evidence, never a decision.
-      const structuralLayoutSegmentation = segmentStructuralLayout(decoded.image);
+      //
+      // Structural Layout Reflow Phase 2C (Frame-Interior-Aware
+      // Segmentation): `resolveFrameAnalysisWindow` derives a validated
+      // analysis window from the SAME `frameStructuralModel` already
+      // measured above (never a second frame measurement, never a
+      // different image) — `null` whenever that model doesn't safely
+      // support one, in which case segmentation transparently analyzes
+      // the full image exactly as it always has. This is what lets a sign
+      // surrounded by a continuous decorative frame — whose own left/right
+      // bands otherwise defeat full-width row uniformity on every row —
+      // still be analyzed for the banner structure that exists WITHIN it.
+      // The frame interior only ever becomes an ANALYSIS WINDOW here; it
+      // is never read by, or reachable from, `buildSignProductionTemplate`
+      // (`sign-production-template.ts`), which remains derived solely from
+      // the ordered production spec + policy.
+      const structuralAnalysisWindow = resolveFrameAnalysisWindow(
+        frameStructuralModel,
+        decoded.image.width,
+        decoded.image.height,
+      );
+      const structuralLayoutSegmentation = segmentStructuralLayout(decoded.image, structuralAnalysisWindow ?? undefined);
 
       const result = planSignRepair({
         spec: specResolution.spec,

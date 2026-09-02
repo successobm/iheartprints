@@ -307,6 +307,10 @@ export const TEST_FILES = [
   // reflow_structural_layout through the REAL SignPreparationCapability
   // path (upload -> confirm spec -> plan), not only direct unit calls.
   "src/capabilities/sign-preparation/sign-preparation-capability-structural-reflow.test.ts",
+  // Structural Layout Reflow Phase 2C (Frame-Interior-Aware Segmentation):
+  // reflow_structural_layout through the REAL SignPreparationCapability
+  // path for a continuously-framed, multi-region banner sign.
+  "src/capabilities/sign-preparation/sign-preparation-capability-frame-interior.test.ts",
   "src/capabilities/sign-preparation/rigid-sign-category.test.ts",
   // Structural Layout Reflow Phase 1 (Foundations): dormant reflow_
   // structural_layout contract, SignProductionTemplate, the 0.125in safe
@@ -314,6 +318,10 @@ export const TEST_FILES = [
   // module. Additive only — not wired into planning/execution.
   "src/capabilities/sign-preparation/sign-structural-reflow-foundations.test.ts",
   "src/capabilities/sign-preparation/sign-layout-segmentation.test.ts",
+  // Structural Layout Reflow Phase 2C (Frame-Interior-Aware Segmentation):
+  // the optional analysisWindow parameter, resolveFrameAnalysisWindow's
+  // own validation, and frame-interior-windowed structural results.
+  "src/capabilities/sign-preparation/sign-layout-segmentation-analysis-window.test.ts",
   // Structural Layout Reflow Phase 2 (Planner Wiring): reflow_structural_
   // layout is now planner-emitted, but ONLY when a caller opts in by
   // supplying structuralLayoutSegmentation — still not executor-admitted.

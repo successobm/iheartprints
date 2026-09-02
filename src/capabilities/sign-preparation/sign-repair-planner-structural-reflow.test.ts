@@ -201,6 +201,7 @@ describe("sign repair planner — structural layout reflow (opt-in evidence)", (
         },
       ],
       gaps: [],
+      analysisWindow: null,
     };
     const result = planSignRepair({
       spec: s,
