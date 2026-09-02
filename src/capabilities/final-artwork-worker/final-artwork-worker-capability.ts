@@ -275,6 +275,32 @@ export interface FinalArtworkWorkerCapability {
   recoverExhaustedSignProviderResult(
     projectId: string,
   ): Promise<ExhaustedSignProviderResultRecovery>;
+  /**
+   * Post-Provider Resume Phase (real Signs acceptance incident: a durable
+   * `pass1_intermediate` asset was found to exist for a job stuck at
+   * `status: "running"` with a stale heartbeat, its own `providerKey`/
+   * `providerRequestId` already cleared by `persistIntermediateReconstruction`'s
+   * own unconditional post-persist clear): the ONLY sanctioned way to
+   * continue a job whose provider stage is ALREADY DURABLY COMPLETE — never
+   * a provider recovery operation (that remains
+   * `recoverExhaustedSignProviderResult`'s own, distinct job: provider
+   * stage NOT complete, existing paid request still needs resuming). This
+   * operation never contacts a provider at all: it reclaims the job's lease
+   * and re-enters `runSignPreparationJob` in `"existingResultOnly"` mode,
+   * which — via `resolveExistingIntermediateReconstruction`'s own existing
+   * "signSelfHeal" check inside `runSignReconstructionAndContinue` — finds
+   * the persisted intermediate and reads it back from storage instead of
+   * ever reaching the provider-dispatch branch. Fails closed — returns
+   * `"refused"`, never throws, never mutates anything — for every
+   * precondition this operation requires but doesn't find, including
+   * refusing to steal a `"running"` job whose heartbeat is still fresh (a
+   * genuinely active worker). Idempotent by the same construction
+   * `runSignPreparationJob` already gives every caller: a production asset
+   * that already exists is reused, never reprocessed.
+   */
+  resumeSignFromPersistedIntermediate(
+    projectId: string,
+  ): Promise<SignPostProviderResumeResult>;
 }
 
 /**
@@ -301,6 +327,32 @@ export type ExhaustedSignProviderResultRecovery =
         | "recovery_budget_not_exhausted"
         | "no_existing_provider_request"
         | "provider_does_not_support_resume";
+    }
+  | { outcome: "attempted"; jobId: string; finalStatus: FinalArtworkJobStatus | null };
+
+/**
+ * Post-Provider Resume Phase: the outcome of one
+ * `resumeSignFromPersistedIntermediate` call. Distinct reason set from
+ * `ExhaustedSignProviderResultRecovery` — a different lifecycle operation,
+ * with different preconditions.
+ *
+ *   "refused" — one of the required preconditions did not hold; `reason`
+ *     says which. Nothing was mutated.
+ *   "attempted" — the job was reclaimed into this special path and
+ *     `runSignPreparationJob` ran (in `"existingResultOnly"` mode, so it is
+ *     structurally incapable of a provider call) to whatever conclusion it
+ *     reached.
+ */
+export type SignPostProviderResumeResult =
+  | {
+      outcome: "refused";
+      reason:
+        | "no_sign_preparation"
+        | "no_plan"
+        | "no_matching_job"
+        | "job_status_not_reclaimable"
+        | "active_worker_still_fresh"
+        | "no_persisted_intermediate";
     }
   | { outcome: "attempted"; jobId: string; finalStatus: FinalArtworkJobStatus | null };
 
@@ -734,7 +786,7 @@ export function createFinalArtworkWorkerCapability(
      * sign self-heal, AND from inside `persistIntermediateReconstruction`
      * itself.
      */
-    callSite: "apparelSelfHeal" | "signSelfHeal" | "persist",
+    callSite: "apparelSelfHeal" | "signSelfHeal" | "persist" | "postProviderResumePrecheck",
   ): Promise<{ asset: AssetRecord; providerRequestId: string } | null> {
     const existingAssets = await withOperationTiming(
       `resolveExistingIntermediateReconstruction.${callSite}.listAssetsForFinalArtworkJob`,
@@ -3385,6 +3437,81 @@ export function createFinalArtworkWorkerCapability(
 
       const finalJob = await repo.getFinalArtworkJob(claimed.id);
       return { outcome: "attempted", jobId: claimed.id, finalStatus: finalJob?.status ?? null };
+    },
+
+    async resumeSignFromPersistedIntermediate(projectId) {
+      const preparation = await repo.getSignPreparation(projectId);
+      if (!preparation || preparation.projectId !== projectId) {
+        return { outcome: "refused", reason: "no_sign_preparation" };
+      }
+      if (preparation.status !== "planned" || !preparation.plan || !preparation.planKey) {
+        return { outcome: "refused", reason: "no_plan" };
+      }
+
+      const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
+      // The job-match itself is what guarantees "current planKey matches
+      // job planKey" (Post-Provider Resume Phase requirement) — a job whose
+      // own `signPlanKey` differs from the preparation's CURRENT `planKey`
+      // is never found here, exactly like `recoverExhaustedSignProviderResult`'s
+      // identical match.
+      const job = jobs.find((candidate) => candidate.signPlanKey === preparation.planKey);
+      if (!job) {
+        return { outcome: "refused", reason: "no_matching_job" };
+      }
+      if (job.status !== "running" && job.status !== "failed") {
+        return { outcome: "refused", reason: "job_status_not_reclaimable" };
+      }
+      if (job.status === "running") {
+        const heartbeatAgeMs = job.heartbeatAt
+          ? Date.now() - new Date(job.heartbeatAt).getTime()
+          : Number.POSITIVE_INFINITY;
+        // Never steal a genuinely active worker's lease — only a lease
+        // whose heartbeat has gone stale by the SAME threshold the rest of
+        // this capability already uses for abandoned-job recovery
+        // (`DEFAULT_FINAL_ARTWORK_STALE_JOB_MS`).
+        if (heartbeatAgeMs < DEFAULT_FINAL_ARTWORK_STALE_JOB_MS) {
+          return { outcome: "refused", reason: "active_worker_still_fresh" };
+        }
+      }
+
+      // The single precondition that actually defines this operation: the
+      // provider stage must already be durably complete. Reuses the exact
+      // same matching function (and its own defensive "malformed/legacy
+      // row" exclusion) the persist step's own self-heal relies on — never
+      // a second, possibly-drifting definition of "what counts as a
+      // persisted intermediate".
+      const existingIntermediate = await resolveExistingIntermediateReconstruction(
+        job,
+        "postProviderResumePrecheck",
+      );
+      if (!existingIntermediate) {
+        return { outcome: "refused", reason: "no_persisted_intermediate" };
+      }
+
+      // A stale "running" lease keeps its own original `startedAt` — this
+      // is a continuation of the SAME still-open attempt, not a fresh
+      // restart. A "failed" job has no attempt currently in flight, so both
+      // timestamps are set fresh, exactly like
+      // `recoverExhaustedSignProviderResult`'s own "failed"-only claim.
+      // Either way `heartbeatAt` is always refreshed: the periodic
+      // heartbeat mechanism needs a current baseline to tick from
+      // regardless of which branch reclaimed the lease.
+      const claimed = await repo.updateFinalArtworkJob(job.id, {
+        status: "running",
+        startedAt: job.status === "failed" ? new Date().toISOString() : job.startedAt,
+        heartbeatAt: new Date().toISOString(),
+        lastError: null,
+        completedAt: null,
+      });
+
+      // "existingResultOnly" mode: structurally incapable of a provider
+      // dispatch (see this file's own `runSignReconstructionAndContinue`
+      // doc) — belt-and-suspenders alongside the precondition above, not a
+      // substitute for it.
+      await withPeriodicHeartbeat(claimed.id, () => runSignPreparationJob(claimed, "existingResultOnly"));
+
+      const finalJobAfterResume = await repo.getFinalArtworkJob(claimed.id);
+      return { outcome: "attempted", jobId: claimed.id, finalStatus: finalJobAfterResume?.status ?? null };
     },
   };
 

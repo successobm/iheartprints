@@ -81,6 +81,8 @@ export const TEST_FILES = [
   "src/capabilities/providers/concept-prompt-fidelity.test.ts",
   "src/capabilities/providers/no-text-contract.test.ts",
   "src/capabilities/assets/asset-capability.test.ts",
+  "src/capabilities/assets/asset-capability-persistence-durability.test.ts",
+  "src/capabilities/assets/asset-capability-production-storage.test.ts",
   "src/lib/config/generation-provider-config.test.ts",
   "src/lib/config/openai-concept-image-quality.test.ts",
   "src/lib/config/asset-storage-config.test.ts",
@@ -319,6 +321,7 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",
   "src/capabilities/final-artwork-worker/exhausted-provider-result-recovery.test.ts",
+  "src/capabilities/final-artwork-worker/post-provider-resume.test.ts",
   "src/capabilities/final-artwork-worker/sign-preservation-worker-orchestration.test.ts",
   "src/capabilities/final-artwork-worker/sign-print-ready-lifecycle.test.ts",
   "src/capabilities/final-artwork/topaz-download-security.test.ts",
@@ -341,6 +344,7 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/resume-existing-result/route.test.ts",
+  "src/app/api/internal/projects/[projectId]/sign-artwork/resume-from-intermediate/route.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/download/route.test.ts",
   // Garment colour is production context, never authority over customer
   // pixels: preparation must be byte-identical on a white and a black shirt.

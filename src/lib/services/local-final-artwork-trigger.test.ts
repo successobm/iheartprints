@@ -254,6 +254,9 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
       async recoverExhaustedSignProviderResult() {
         return { outcome: "refused" as const, reason: "no_sign_preparation" as const };
       },
+      async resumeSignFromPersistedIntermediate() {
+        return { outcome: "refused" as const, reason: "no_sign_preparation" as const };
+      },
     };
     const scheduler = createFinalArtworkSchedulerCapability(slowWorker, {
       maxJobsPerRun: 5,

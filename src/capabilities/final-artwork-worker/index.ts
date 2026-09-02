@@ -4,6 +4,7 @@ export {
   MAX_FINAL_ARTWORK_ATTEMPTS,
   type FinalArtworkWorkerCapability,
   type ExhaustedSignProviderResultRecovery,
+  type SignPostProviderResumeResult,
 } from "./final-artwork-worker-capability";
 export {
   checkSourceEligibleForFinalization,

@@ -24,7 +24,10 @@
  */
 
 import { getCapabilityGraph } from "@/capabilities/composition";
-import type { ExhaustedSignProviderResultRecovery } from "@/capabilities/final-artwork-worker";
+import type {
+  ExhaustedSignProviderResultRecovery,
+  SignPostProviderResumeResult,
+} from "@/capabilities/final-artwork-worker";
 import { describeSignPlanForCustomer } from "@/capabilities/sign-preparation";
 import type { FinalArtworkJobStatus } from "@/lib/domain/types";
 import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
@@ -232,6 +235,26 @@ export async function resumeExhaustedSignProviderResult(
 ): Promise<ExhaustedSignProviderResultRecovery> {
   const graph = getCapabilityGraph();
   return graph.finalArtworkWorker.recoverExhaustedSignProviderResult(projectId);
+}
+
+/**
+ * Post-Provider Resume Phase (real Signs acceptance incident): the
+ * operator-only bridge into
+ * `FinalArtworkWorkerCapability.resumeSignFromPersistedIntermediate` —
+ * mirrors `resumeExhaustedSignProviderResult` immediately above in every
+ * respect except which capability method it calls, because it is a
+ * genuinely different lifecycle operation: this one requires the provider
+ * stage to ALREADY be durably complete (a persisted intermediate exists)
+ * and never contacts a provider under any circumstance, where the other
+ * requires the provider stage to still need resuming. Every precondition
+ * lives in the capability itself, which fails closed (`"refused"`, with a
+ * reason) rather than throwing.
+ */
+export async function resumeSignFromPersistedIntermediate(
+  projectId: string,
+): Promise<SignPostProviderResumeResult> {
+  const graph = getCapabilityGraph();
+  return graph.finalArtworkWorker.resumeSignFromPersistedIntermediate(projectId);
 }
 
 export interface SignProductionArtworkDownload {
