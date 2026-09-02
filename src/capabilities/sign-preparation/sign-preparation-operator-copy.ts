@@ -131,6 +131,8 @@ function describeStepForOperator(
       return describePad(step, inspection);
     case "reconstruct_perimeter_structure":
       return describeReconstructPerimeter(step);
+    case "reconstruct_parametric_frame":
+      return describeReconstructParametricFrame(step);
     case "rotate_90":
       return describeRotate(step);
     case "approved_crop":
@@ -280,6 +282,69 @@ function describeReconstructPerimeter(step: SignRepairStep): SignPlanOperatorSte
       "This repair changes the artwork's perimeter geometry to match the finished sign size, so a human must confirm " +
       "the result before production — including checking the corners, since this repair does NOT detect or reposition " +
       "any mounting-hole or corner indicator; if one is present, verify its placement manually.",
+  };
+}
+
+/**
+ * Parametric Frame Reconstruction Phase (Constitution §16A.3 amendment 3.1's
+ * own bounded carve-out, extended). Unlike `describeReconstructPerimeter`,
+ * this repair DOES measure and reconstruct rounded corners and corner-hole
+ * indicators when the plan's own persisted frame model actually contains
+ * them (`sign-repair-planner.ts`'s `encodeFrameStructuralModelParams`) —
+ * every conditional sentence below reads that SAME plan evidence rather
+ * than assuming the artwork has either feature. Never claims a feature the
+ * plan's own model did not measure, and never describes either as a
+ * MANUFACTURING specification (drill diameter, hardware size, a physical
+ * corner radius) — both are the customer's own ARTWORK graphics being
+ * preserved/repositioned, exactly like every other pixel in the interior.
+ */
+function describeReconstructParametricFrame(step: SignRepairStep): SignPlanOperatorStepView {
+  const axis = stringParam(step, "axis");
+  const leading = numberParam(step, "leadingPx");
+  const trailing = numberParam(step, "trailingPx");
+  const edges = edgesForAxis(axis);
+  const cornerRadiusPx = numberParam(step, "cornerRadiusPx");
+  // `-1` is the planner's own persisted sentinel for "no rounding measured"
+  // (`encodeFrameStructuralModelParams`) — never treat it as a real radius.
+  const hasRoundedCorners = cornerRadiusPx !== null && cornerRadiusPx >= 0;
+  const hasHole = stringParam(step, "hasHole") === "true";
+
+  const detailParts: string[] = [
+    "Rebuild the artwork's own measured frame/border at the finished sign edges while preserving the central artwork.",
+  ];
+  if (edges && leading !== null && trailing !== null) {
+    const [leadEdge, trailEdge] = edges;
+    detailParts.push(
+      leading === trailing
+        ? `The frame moves outward by ${leading}px on the ${leadEdge} and ${trailEdge} edges to reach the new boundary.`
+        : `The frame moves outward by ${leading}px on the ${leadEdge} edge and ${trailing}px on the ${trailEdge} edge to reach the new boundary.`,
+    );
+  }
+  if (hasRoundedCorners) {
+    detailParts.push("Preserves the artwork's existing rounded-corner treatment at the frame's corners.");
+  }
+  if (hasHole) {
+    detailParts.push(
+      "Repositions the artwork's four existing corner-hole indicators with the reconstructed frame — these are the customer's own graphic elements, not a manufacturing drilling instruction.",
+    );
+  }
+  detailParts.push("The customer's artwork will not be stretched.");
+
+  const reviewClauses: string[] = [
+    "this repair discards the artwork's own old frame/border and redraws it at the finished sign edges",
+  ];
+  if (hasHole) {
+    reviewClauses.push("all four corner-hole indicators reconstructed correctly with none lost or duplicated");
+  }
+  if (hasRoundedCorners) {
+    reviewClauses.push("every corner's rounding looks consistent");
+  }
+
+  return {
+    summary: "Adapt the sign's perimeter artwork to the ordered size.",
+    detail: detailParts.join(" "),
+    needsReview: true,
+    reviewReason: `A human must confirm the result before production: ${joinClauses(reviewClauses)}.`,
   };
 }
 

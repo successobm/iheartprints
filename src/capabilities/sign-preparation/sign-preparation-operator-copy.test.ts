@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { noisyEdgeSignArtwork, ruthLikeSignArtwork } from "./sign-fixtures";
+import { framedSignArtwork, noisyEdgeSignArtwork, ruthLikeSignArtwork } from "./sign-fixtures";
 import {
   RIGID_SIGN_CATEGORY,
   SIGN_INSPECTION_VERSION,
@@ -40,6 +40,8 @@ const INTERNAL_VOCABULARY = [
   "extend_uniform_background",
   "pad_uniform_background",
   "proportional_resample",
+  "reconstruct_perimeter_structure",
+  "reconstruct_parametric_frame",
   "approved_crop",
   "rotate_90",
   "plan_key",
@@ -351,6 +353,216 @@ describe("describeSignPlanForOperator — per-step translation", () => {
     assertNoLeakedVocabulary(view);
   });
 
+  /** A `reconstruct_parametric_frame` step's own flat param shape — mirrors `sign-repair-planner.ts`'s `encodeFrameStructuralModelParams` exactly. */
+  function parametricFrameParams(overrides?: {
+    cornerRadiusPx?: number;
+    hasHole?: boolean;
+  }): Record<string, number | string> {
+    const cornerRadiusPx = overrides?.cornerRadiusPx ?? -1;
+    const hasHole = overrides?.hasHole ?? false;
+    const params: Record<string, number | string> = {
+      axis: "vertical",
+      leadingPx: 30,
+      trailingPx: 40,
+      leadingShare: 0.4,
+      modelSourceWidthPx: 1086,
+      modelSourceHeightPx: 1448,
+      frameDepthPx: 27,
+      bandCount: 1,
+      fillColorR: 202,
+      fillColorG: 14,
+      fillColorB: 14,
+      cornerRadiusPx,
+      hasHole: hasHole ? "true" : "false",
+      band0R: 4,
+      band0G: 4,
+      band0B: 4,
+      band0ThicknessPx: 27,
+    };
+    if (cornerRadiusPx >= 0) {
+      params.outerBackgroundColorR = 255;
+      params.outerBackgroundColorG = 255;
+      params.outerBackgroundColorB = 255;
+    }
+    if (hasHole) {
+      params.holeRadiusPx = 9;
+      params.holeOffsetXPx = 33;
+      params.holeOffsetYPx = 33;
+      params.holeRingColorR = 4;
+      params.holeRingColorG = 4;
+      params.holeRingColorB = 4;
+      params.holeInteriorColorR = 253;
+      params.holeInteriorColorG = 253;
+      params.holeInteriorColorB = 253;
+    }
+    return params;
+  }
+
+  it("reconstruct_parametric_frame: square corners, no hole — never uses the generic fallback, never claims a feature the model didn't measure", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_parametric_frame",
+          params: parametricFrameParams(),
+          risk: "review_required",
+          reasons: ["internal-only"],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      artworkWidthPx: 1086,
+      artworkHeightPx: 1448,
+      inspection: inspectionWithEdges([]),
+      plan,
+    });
+
+    const step = view.steps[0]!;
+    assert.notEqual(step.summary, "A production adjustment is proposed for this artwork.", "must never fall through to the generic fallback");
+    assert.match(step.summary, /perimeter|frame/i);
+    assert.match(step.detail!, /frame\/border/i);
+    assert.match(step.detail!, /preserving the central artwork/i);
+    assert.match(step.detail!, /will not be stretched/i);
+    // Neither feature was measured for this step — never claimed.
+    assert.doesNotMatch(step.detail!, /rounded/i);
+    assert.doesNotMatch(step.detail!, /hole/i);
+    assert.equal(step.needsReview, true);
+    assert.match(step.reviewReason!, /production/i);
+    assertNoLeakedVocabulary(view);
+  });
+
+  it("reconstruct_parametric_frame: geometry (axis/leadingPx/trailingPx) translated to plain edges", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_parametric_frame",
+          params: parametricFrameParams(),
+          risk: "review_required",
+          reasons: ["internal-only"],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      artworkWidthPx: 1086,
+      artworkHeightPx: 1448,
+      inspection: inspectionWithEdges([]),
+      plan,
+    });
+    const step = view.steps[0]!;
+    assert.match(step.detail!, /30px on the top edge/i);
+    assert.match(step.detail!, /40px on the bottom edge/i);
+  });
+
+  it("reconstruct_parametric_frame: rounded corners measured — copy conditionally includes rounded-corner language, no hole claim", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_parametric_frame",
+          params: parametricFrameParams({ cornerRadiusPx: 42 }),
+          risk: "review_required",
+          reasons: ["internal-only"],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      artworkWidthPx: 1086,
+      artworkHeightPx: 1448,
+      inspection: inspectionWithEdges([]),
+      plan,
+    });
+    const step = view.steps[0]!;
+    assert.match(step.detail!, /rounded-corner/i);
+    assert.match(step.reviewReason!, /rounding/i);
+    assert.doesNotMatch(step.detail!, /hole/i);
+  });
+
+  it("reconstruct_parametric_frame: corner-hole indicators measured — copy conditionally includes hole language, explicitly artwork-not-manufacturing", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_parametric_frame",
+          params: parametricFrameParams({ hasHole: true }),
+          risk: "review_required",
+          reasons: ["internal-only"],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      artworkWidthPx: 1086,
+      artworkHeightPx: 1448,
+      inspection: inspectionWithEdges([]),
+      plan,
+    });
+    const step = view.steps[0]!;
+    assert.match(step.detail!, /corner-hole indicators/i);
+    assert.match(step.detail!, /not a manufacturing drilling instruction/i);
+    assert.match(step.reviewReason!, /corner-hole indicators/i);
+    // Never implies a manufacturing/hardware specification.
+    assert.doesNotMatch(step.detail!, /drill diameter|hardware size|physical corner radius/i);
+    assert.doesNotMatch(step.detail!, /rounded-corner/i, "no rounding was measured for this fixture");
+  });
+
+  it("reconstruct_parametric_frame: rounded corners AND holes both measured — both conditionally described together", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_parametric_frame",
+          params: parametricFrameParams({ cornerRadiusPx: 55, hasHole: true }),
+          risk: "review_required",
+          reasons: ["internal-only"],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      artworkWidthPx: 1086,
+      artworkHeightPx: 1448,
+      inspection: inspectionWithEdges([]),
+      plan,
+    });
+    const step = view.steps[0]!;
+    assert.match(step.detail!, /rounded-corner/i);
+    assert.match(step.detail!, /corner-hole indicators/i);
+    assert.match(step.reviewReason!, /rounding/i);
+    assert.match(step.reviewReason!, /corner-hole indicators/i);
+  });
+
+  it("reconstruct_parametric_frame: always flagged for review even if the plan somehow marked it otherwise (constitutional requirement, mirrors reconstruct_perimeter_structure's own discipline)", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_parametric_frame",
+          params: parametricFrameParams(),
+          risk: "auto_safe",
+          reasons: ["internal-only"],
+        },
+      ],
+      "auto_safe",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      artworkWidthPx: 1086,
+      artworkHeightPx: 1448,
+      inspection: inspectionWithEdges([]),
+      plan,
+    });
+    assert.equal(view.steps[0]!.needsReview, true);
+  });
+
   it("only parameters actually present in the step are shown — nothing fabricated", () => {
     const plan = planWithSteps(
       [{ kind: "reconstruct_resolution", params: {}, risk: "auto_safe", reasons: [] }],
@@ -366,6 +578,68 @@ describe("describeSignPlanForOperator — per-step translation", () => {
     });
 
     assert.equal(view.steps[0]!.detail, null);
+  });
+});
+
+/**
+ * General Product Rule audit (Parametric Frame Operator Review Copy Phase):
+ * every `SignRepairStepKind` `sign-repair-planner.ts` can ACTUALLY emit
+ * today must render real, non-generic operator copy — never the silent
+ * "A production adjustment is proposed for this artwork." fallback.
+ *
+ * `"proportional_resample"` is DELIBERATELY excluded from this list: it is
+ * a reserved, dormant `SignRepairStepKind` (declared in `contracts.ts`,
+ * admitted by `sign-transform-executor.ts`) that `sign-repair-planner.ts`
+ * never actually emits — grep-verified. Writing operator-facing copy for a
+ * step kind with no established planner semantics would be inventing
+ * intent the codebase has not yet decided, exactly what this phase's own
+ * "never claim a feature the plan/model cannot substantiate" rule forbids.
+ * A dormant hook is not an unfinished requirement (`AGENTS.md`) — if a
+ * future phase ever makes the planner emit it, this same audit (and the
+ * generic-fallback assertion below) will need a first-class case added
+ * alongside it, exactly like `reconstruct_parametric_frame` got here.
+ */
+describe("General Product Rule audit: no currently-reachable SignRepairStepKind falls through to generic copy", () => {
+  const GENERIC_FALLBACK_SUMMARY = "A production adjustment is proposed for this artwork.";
+
+  const REACHABLE_STEPS: SignRepairStep[] = [
+    { kind: "reconstruct_resolution", params: { requestedScale: 2, requestedWidthPx: 2000, requestedHeightPx: 2000 }, risk: "auto_safe", reasons: [] },
+    { kind: "downsample", params: { targetWidthPx: 2000, targetHeightPx: 2000 }, risk: "auto_safe", reasons: [] },
+    { kind: "extend_uniform_background", params: { axis: "vertical", leadingPx: 10, trailingPx: 10, colorR: 250, colorG: 250, colorB: 250 }, risk: "auto_safe", reasons: [] },
+    { kind: "pad_uniform_background", params: { axis: "vertical", leadingPx: 10, trailingPx: 10, colorR: 250, colorG: 250, colorB: 250 }, risk: "review_required", reasons: [] },
+    { kind: "reconstruct_perimeter_structure", params: { axis: "vertical", leadingPx: 10, trailingPx: 10, leadingBandDepthPx: 1, trailingBandDepthPx: 1 }, risk: "review_required", reasons: [] },
+    {
+      kind: "reconstruct_parametric_frame",
+      params: {
+        axis: "vertical", leadingPx: 10, trailingPx: 10, leadingShare: 0.5,
+        modelSourceWidthPx: 1000, modelSourceHeightPx: 1000, frameDepthPx: 10, bandCount: 1,
+        fillColorR: 200, fillColorG: 10, fillColorB: 10, cornerRadiusPx: -1, hasHole: "false",
+        band0R: 4, band0G: 4, band0B: 4, band0ThicknessPx: 10,
+      },
+      risk: "review_required",
+      reasons: [],
+    },
+    { kind: "rotate_90", params: {}, risk: "review_required", reasons: [] },
+    { kind: "approved_crop", params: {}, risk: "auto_safe", reasons: [] },
+  ];
+
+  it("every currently-reachable step kind produces a real summary, never the generic fallback", () => {
+    for (const step of REACHABLE_STEPS) {
+      const plan = planWithSteps([step], step.risk);
+      const view = describeSignPlanForOperator({
+        orderedWidthIn: 18,
+        orderedHeightIn: 24,
+        artworkWidthPx: 1000,
+        artworkHeightPx: 1000,
+        inspection: inspectionWithEdges([]),
+        plan,
+      });
+      assert.notEqual(
+        view.steps[0]!.summary,
+        GENERIC_FALLBACK_SUMMARY,
+        `step kind "${step.kind}" fell through to the generic fallback — add first-class operator-review copy for it`,
+      );
+    }
   });
 });
 
@@ -393,6 +667,34 @@ function realPlan(image: Parameters<typeof inspectSignArtwork>[0], orderedWidthI
     inspection,
     sourceAssetId: "asset-1",
     sourceSha256: "a".repeat(64),
+  });
+  return { inspection, result };
+}
+
+/** Like `realPlan`, but also measures and supplies the frame structural model — required for the planner to admit `reconstruct_parametric_frame` at all. */
+async function realFramePlan(
+  image: Parameters<typeof inspectSignArtwork>[0],
+  orderedWidthIn: number,
+  orderedHeightIn: number,
+) {
+  const { measureCleanFillRunPx, measureFrameStructuralModel } = await import("./frame-structure-model");
+  const s = spec(orderedWidthIn, orderedHeightIn);
+  const inspection = inspectSignArtwork(image, s, RIGID_RECT_UP_TO_24X36_V1);
+  const frameStructuralModel = measureFrameStructuralModel(image);
+  const frameCleanFillRunPx: Partial<Record<SignEdge, number>> = {};
+  if (frameStructuralModel.status === "measured") {
+    for (const edge of ["top", "right", "bottom", "left"] as const) {
+      frameCleanFillRunPx[edge] = measureCleanFillRunPx(image, edge, frameStructuralModel.model.frameDepthPx);
+    }
+  }
+  const result = planSignRepair({
+    spec: s,
+    policy: RIGID_RECT_UP_TO_24X36_V1,
+    inspection,
+    sourceAssetId: "asset-1",
+    sourceSha256: "a".repeat(64),
+    frameStructuralModel,
+    frameCleanFillRunPx,
   });
   return { inspection, result };
 }
@@ -474,6 +776,64 @@ describe("describeSignPlanForOperator — real planner output", () => {
       assert.equal(step.needsReview, false);
       assert.equal(step.reviewReason, null);
     }
+    assertNoLeakedVocabulary(view);
+  });
+
+  it("Framed sign artwork (rounded corners + 4 holes, real measured geometry): operator copy names both features, never generic, never leaked vocabulary", async () => {
+    const { inspection, result } = await realFramePlan(
+      framedSignArtwork({ width: 4000, height: 5333, rounded: true, withHoles: true }),
+      24,
+      36,
+    );
+    assert.equal(result.status, "planned");
+    assert.ok(result.plan!.steps.some((step) => step.kind === "reconstruct_parametric_frame"), "sanity: this is genuinely the parametric-frame plan shape");
+
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      artworkWidthPx: inspection.source.widthPx,
+      artworkHeightPx: inspection.source.heightPx,
+      inspection,
+      plan: result.plan!,
+    });
+
+    const frameStep = view.steps.find((step) => /perimeter|frame/i.test(step.summary));
+    assert.ok(frameStep, "expected a real, non-generic parametric-frame step summary");
+    assert.notEqual(frameStep!.summary, "A production adjustment is proposed for this artwork.");
+    assert.match(frameStep!.detail!, /rounded-corner/i, "the real fixture's own measured model has rounding — must be named");
+    assert.match(frameStep!.detail!, /corner-hole indicators/i, "the real fixture's own measured model has holes — must be named");
+    assert.match(frameStep!.detail!, /will not be stretched/i);
+    assert.equal(frameStep!.needsReview, true);
+    assertNoLeakedVocabulary(view);
+  });
+
+  it("The real cc6cfc4b-... project's own shape (1086×1448 source, 24×36 ordered, resolution + frame combined): both steps render real, distinct, non-generic copy", async () => {
+    const { inspection, result } = await realFramePlan(
+      framedSignArtwork({ width: 1086, height: 1448, rounded: true, withHoles: true }),
+      24,
+      36,
+    );
+    assert.equal(result.status, "planned");
+    assert.ok(result.plan!.steps.some((step) => step.kind === "reconstruct_resolution"));
+    assert.ok(result.plan!.steps.some((step) => step.kind === "reconstruct_parametric_frame"));
+
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      artworkWidthPx: inspection.source.widthPx,
+      artworkHeightPx: inspection.source.heightPx,
+      inspection,
+      plan: result.plan!,
+    });
+
+    assert.equal(view.steps.length, 2);
+    for (const step of view.steps) {
+      assert.notEqual(step.summary, "A production adjustment is proposed for this artwork.");
+    }
+    assert.match(view.steps[0]!.summary, /resolution/i, "resolution reconstruction is presented first, matching the proven transform order");
+    assert.match(view.steps[1]!.summary, /perimeter|frame/i);
+    assert.match(view.steps[1]!.detail!, /rounded-corner/i);
+    assert.match(view.steps[1]!.detail!, /corner-hole indicators/i);
     assertNoLeakedVocabulary(view);
   });
 });
