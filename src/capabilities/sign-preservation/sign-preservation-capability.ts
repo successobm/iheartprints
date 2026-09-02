@@ -38,6 +38,7 @@ import { createHash } from "node:crypto";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
 import { ProviderError } from "@/capabilities/providers/provider-error";
+import { boundedErrorDescription, describeOperationError } from "@/capabilities/shared/safe-error-description";
 import type { AssetCapability } from "@/capabilities/assets";
 import type { AssetRecord, FinalArtworkJob, SignPreparation } from "@/lib/domain/types";
 import type { ProjectRepository } from "@/lib/db/repository";
@@ -388,7 +389,57 @@ interface PreservationContext {
   } | null;
 }
 
+/**
+ * Preservation Context Query-Narrowing Phase (real Signs acceptance
+ * incident: `verifyPreservation` failed with `lastError: "Preservation
+ * verification could not complete: [object Object]"`, forensically traced
+ * to `resolvePreservationContext`'s own former unbounded `repo.listAssets
+ * (projectId)` scan — the same class of raw, unwrapped PostgREST-object
+ * throw this whole engagement has repeatedly hit on broad, unindexed scans
+ * elsewhere). Thin wrapper around the real implementation so BOTH callers
+ * (`verifyDeterministicPreservation` and `verifyPreservation`) get the
+ * identical safe, bounded, labeled diagnostic on any UNEXPECTED failure —
+ * never a raw `String(error)` collapsing to `"[object Object]"` by the time
+ * it reaches `FinalArtworkWorkerCapability`'s own outer catch.
+ *
+ * Deliberately does NOT route every error through the shared
+ * `withOperationTiming` blindly — that helper always replaces the caught
+ * error with a new plain `Error`, which would silently destroy
+ * `SignPreservationStateError`'s own type identity that
+ * `resolvePreservationContextUnsafe` throws BY DESIGN for a required row
+ * that cannot be resolved (never an infrastructure failure — a normal,
+ * typed, expected outcome existing tests assert on via `instanceof`). Only
+ * a genuinely UNEXPECTED error (a raw DB/transport failure, exactly like
+ * the real incident this phase fixes) gets the safe bounded description;
+ * `SignPreservationStateError` always propagates completely unchanged —
+ * the same "preserve original type/identity for a caller that dispatches
+ * on it" discipline `runSignReconstructionAndContinue`'s own produce-vs-
+ * resume dispatch already established for an identical reason.
+ */
 async function resolvePreservationContext(
+  repo: ProjectRepository,
+  assets: AssetCapability,
+  finalAssetId: string,
+): Promise<PreservationContext> {
+  const label = "resolvePreservationContext";
+  const startedAt = Date.now();
+  try {
+    const result = await resolvePreservationContextUnsafe(repo, assets, finalAssetId);
+    console.info(`[sign-preservation] operation=${label} elapsed_ms=${Date.now() - startedAt} outcome=success`);
+    return result;
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    console.info(`[sign-preservation] operation=${label} elapsed_ms=${elapsedMs} outcome=error`);
+    if (error instanceof SignPreservationStateError) {
+      throw error;
+    }
+    throw new Error(
+      boundedErrorDescription(`${label} failed after ${elapsedMs}ms: ${describeOperationError(error)}`),
+    );
+  }
+}
+
+async function resolvePreservationContextUnsafe(
   repo: ProjectRepository,
   assets: AssetCapability,
   finalAssetId: string,
@@ -466,12 +517,32 @@ async function resolvePreservationContext(
   }
 
   // --- Resolve remaining assets — never trust a caller claim. ---
+  //
+  // Preservation Context Query-Narrowing Phase: this used to fetch EVERY
+  // asset in the project (`repo.listAssets(projectId)`) and filter it down
+  // to two specific rows in memory — an unbounded, unindexed scan that
+  // repeatedly failed under real load on a real project with many historical
+  // assets. Both rows this function actually needs are resolvable by a
+  // narrow, indexed lookup instead: `sourceAssetId` is already a known,
+  // exact id (from the plan or the preparation's own `originalAssetId`),
+  // and the intermediate is scoped to this exact job via the same
+  // `listAssetsForFinalArtworkJob` query already used everywhere else in
+  // this codebase for the identical reason (see the earlier
+  // Query-Narrowing Phase this one directly mirrors). Neither query can
+  // ever return a cross-project or cross-job row.
   const projectId = finalAsset.projectId;
-  const allAssets = await repo.listAssets(projectId);
 
   const sourceAssetId =
     typeof plan.sourceAssetId === "string" ? plan.sourceAssetId : preparation.originalAssetId;
-  const sourceAsset = allAssets.find((a) => a.id === sourceAssetId) ?? null;
+  const sourceAssetCandidate = await repo.getAssetById(sourceAssetId);
+  // Defense in depth: `getAssetById` is not itself project-scoped (asset
+  // ids are globally unique, but a stray/forged id from a different
+  // project must never silently satisfy this lookup) — the OLD code got
+  // this for free by only ever searching within an already
+  // `listAssets(projectId)`-scoped array; this explicit check preserves
+  // that exact guarantee under the narrower query.
+  const sourceAsset =
+    sourceAssetCandidate && sourceAssetCandidate.projectId === projectId ? sourceAssetCandidate : null;
   if (!sourceAsset) {
     throw new SignPreservationStateError(
       "source_asset_row_not_found",
@@ -495,9 +566,8 @@ async function resolvePreservationContext(
   // original is placed). No new asset row is created; the already-resolved
   // `sourceAsset`/`sourceBytes` above are reused verbatim.
   const intermediateAsset = usesProviderReconstruction
-    ? (allAssets.find(
-        (a) => a.finalArtworkJobId === job.id && isReconstructionIntermediateAsset(a),
-      ) ?? null)
+    ? ((await repo.listAssetsForFinalArtworkJob(projectId, job.id)).find(isReconstructionIntermediateAsset) ??
+      null)
     : sourceAsset;
   if (!intermediateAsset) {
     throw new SignPreservationStateError(

@@ -633,3 +633,215 @@ describe("Signs Phase S4.2A: semantic preservation verification", () => {
     assert.ok(result.answers.every((a) => a.answer === "cannot_determine"));
   });
 });
+
+/**
+ * Preservation Context Query-Narrowing Phase (real Signs acceptance
+ * incident: `verifyPreservation` failed with `lastError: "Preservation
+ * verification could not complete: [object Object]"`, forensically traced
+ * to `resolvePreservationContext`'s own former unbounded
+ * `repo.listAssets(projectId)` scan). Proves the narrowed lookup — a
+ * project-wide scan replaced by `getAssetById` (source) +
+ * `listAssetsForFinalArtworkJob` (intermediate) — resolves the exact same
+ * relationships the old code did, cannot be satisfied by an unrelated
+ * historical/cross-job/cross-project asset, and that a raw PostgREST-style
+ * thrown object no longer collapses to `"[object Object]"`.
+ */
+describe("Preservation Context Query-Narrowing Phase", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-preservation-query-narrowing-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function build(provider: FakeSignReconstructionProvider, assets?: AssetCapability) {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const realAssets =
+      assets ?? createAssetCapability(repo, new DataUriAssetStorageProvider(), new PngThumbnailGenerator());
+    const signPreparation = createSignPreparationCapability(repo, realAssets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const worker = createFinalArtworkWorkerCapability(repo, realAssets, provider);
+    const preservation = createSignPreservationCapability(repo, realAssets);
+    const project = await repo.createProject();
+    return {
+      repo,
+      assets: realAssets,
+      signPreparation,
+      finalArtwork,
+      worker,
+      preservation,
+      projectId: project.project.id,
+    };
+  }
+
+  /** Mirrors the sibling describe block's identical fixture — kept local, deliberately not exported, matching this file's own established per-block convention. */
+  async function ruthShapedFinalAsset(provider: FakeSignReconstructionProvider, assets?: AssetCapability) {
+    const built = await build(provider, assets);
+    await built.signPreparation.uploadSignArtwork(built.projectId, {
+      bytes: toPngBytes(ruthLikeSignArtwork()),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await built.signPreparation.confirmSignProductionSpec(built.projectId, 18, 24);
+    await built.signPreparation.planSignRepair(built.projectId);
+    await built.signPreparation.authorizeSignRepairPlan(built.projectId, { authorizedBy: "operator" });
+    const { job } = await built.finalArtwork.requestSignFinalArtwork(built.projectId);
+    provider.behavior = { kind: "oversized_but_valid", widthPx: 4096, heightPx: 6144 };
+    await built.worker.processNextJob();
+
+    const finalAsset = (await built.repo.listAssetsForFinalArtworkJob(built.projectId, job.id)).find(
+      (a) => a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
+    );
+    assert.ok(finalAsset, "the Ruth-shaped final asset must exist before preservation verification runs");
+    return { ...built, job, finalAsset: finalAsset! };
+  }
+
+  it("1: no broad project-wide asset scan — verification succeeds even when repo.listAssets THROWS if called", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, assets, signPreparation, finalArtwork, worker, projectId } = await build(provider);
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(ruthLikeSignArtwork()),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 18, 24);
+    await signPreparation.planSignRepair(projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    provider.behavior = { kind: "oversized_but_valid", widthPx: 4096, heightPx: 6144 };
+    await worker.processNextJob();
+    const finalAsset = (await repo.listAssetsForFinalArtworkJob(projectId, job.id)).find(
+      (a) => a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
+    );
+    assert.ok(finalAsset);
+
+    // The strongest available proof: if verification ever fell back to a
+    // project-wide scan, this throws and the test fails immediately.
+    const throwingRepo = new Proxy(repo, {
+      get(target, prop, receiver) {
+        if (prop === "listAssets") {
+          return () => {
+            throw new Error("listAssets(projectId) must never be called by preservation verification");
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as ProjectRepository;
+    const preservation = createSignPreservationCapability(throwingRepo, assets);
+
+    const result = await preservation.verifyDeterministicPreservation(finalAsset!.id);
+    assert.equal(result.finalAssetId, finalAsset!.id);
+  });
+
+  it("2: cross-job isolation — a second job's intermediate/final assets in the SAME project never satisfy the lookup", async () => {
+    const providerA = new FakeSignReconstructionProvider();
+    const a = await ruthShapedFinalAsset(providerA);
+    // A second, unrelated job in the SAME project, same preservation
+    // capability instance backed by the SAME repo — proves the narrowed
+    // job-scoped query can't accidentally pick up job B's intermediate for
+    // job A's verification.
+    const providerB = new FakeSignReconstructionProvider();
+    const b = await ruthShapedFinalAsset(providerB, a.assets);
+
+    const resultA = await a.preservation.verifyDeterministicPreservation(a.finalAsset.id);
+    assert.equal(resultA.finalAssetId, a.finalAsset.id);
+    assert.notEqual(resultA.intermediateAssetId, undefined);
+
+    const bIntermediates = (await b.repo.listAssetsForFinalArtworkJob(b.projectId, b.job.id)).filter(
+      isReconstructionIntermediateAsset,
+    );
+    assert.equal(bIntermediates.length, 1);
+    assert.notEqual(
+      resultA.intermediateAssetId,
+      bIntermediates[0]!.id,
+      "job A's verification must never bind to job B's intermediate",
+    );
+  });
+
+  it("3: cross-project isolation — an asset in a DIFFERENT project can never satisfy the source-asset lookup", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, preservation, finalAsset, projectId } = await ruthShapedFinalAsset(provider);
+
+    // A different project, whose own assets — even one seeded with the
+    // exact same source-asset id shape — must never leak across.
+    const otherProject = await repo.createProject();
+    assert.notEqual(otherProject.project.id, projectId);
+
+    const result = await preservation.verifyDeterministicPreservation(finalAsset.id);
+    assert.equal(result.finalAssetId, finalAsset.id);
+    // Sanity: the resolved source asset genuinely belongs to THIS project.
+    const list = await repo.listAssets(projectId);
+    const resolvedSource = list.find((asset) => asset.id === result.sourceAssetId);
+    assert.ok(resolvedSource);
+    assert.equal(resolvedSource!.projectId, projectId);
+  });
+
+  it("4: unrelated historical assets in the same project are ignored — verification still resolves the exact right rows", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, assets, preservation, finalAsset, projectId } = await ruthShapedFinalAsset(provider);
+
+    // Seed a pile of decoy historical assets — the kind of accumulated
+    // project history that made the OLD project-wide scan slow/fragile.
+    for (let i = 0; i < 10; i += 1) {
+      await assets.registerAsset(projectId, {
+        kind: "generated_artwork",
+        storageKey: `data:image/png;base64,decoy${i}`,
+        contentType: "image/png",
+        isThumbnail: false,
+        widthPx: 100,
+        heightPx: 100,
+        hasTransparency: false,
+        providerKey: null,
+        generationJobId: null,
+        metadata: {},
+        vectorAssetId: null,
+        printAssetId: null,
+        finalArtworkJobId: null,
+        productionRole: null,
+      });
+    }
+
+    const result = await preservation.verifyDeterministicPreservation(finalAsset.id);
+    assert.equal(result.finalAssetId, finalAsset.id);
+    assert.equal((result.deterministicEvidence as Record<string, unknown> & { lineage: { result: string } }).lineage.result, "pass");
+    void repo;
+  });
+
+  it("5: a raw PostgREST-style thrown object is safely described — never collapses to \"[object Object]\"", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, assets, finalAsset } = await ruthShapedFinalAsset(provider);
+
+    const failingRepo = new Proxy(repo, {
+      get(target, prop, receiver) {
+        if (prop === "listAssetsForFinalArtworkJob") {
+          return async () => {
+            // Mirrors real PostgREST behavior: a raw, unwrapped plain
+            // object thrown directly (see `supabase-store.ts`'s own
+            // `if (error) throw error` pattern) — never an Error instance.
+            throw { code: "57014", message: "canceling statement due to statement timeout" };
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as ProjectRepository;
+    const preservation = createSignPreservationCapability(failingRepo, assets);
+
+    await assert.rejects(
+      preservation.verifyDeterministicPreservation(finalAsset.id),
+      (error: unknown) => {
+        assert.ok(error instanceof Error, "the thrown value must already be a proper Error by this point");
+        assert.doesNotMatch(error.message, /^\[object Object\]$/);
+        assert.match(error.message, /resolvePreservationContext failed after \d+ms:/);
+        assert.match(error.message, /57014/);
+        return true;
+      },
+    );
+  });
+});

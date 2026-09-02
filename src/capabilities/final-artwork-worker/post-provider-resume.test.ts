@@ -155,6 +155,33 @@ describe("Post-Provider Resume Phase: resumeSignFromPersistedIntermediate", () =
     });
   }
 
+  /**
+   * Existing Final-Asset Reuse Phase: persists a FINAL (non-intermediate)
+   * production asset for `job` — mirrors what `reconstruct_parametric_frame`
+   * itself would have already produced. Deliberately carries no
+   * `reconstructionStage` marker, so `isReconstructionIntermediateAsset`
+   * (and therefore `resolveExistingProductionAsset`) never mistakes it for
+   * the pass1 intermediate.
+   */
+  async function persistFinalAssetFor(assets: AssetCapability, projectId: string, job: FinalArtworkJob) {
+    return assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-final`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2700)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2700,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {
+        rigidSign: {
+          planKey: "sign-repair-plan:v1:test",
+          providerKey: "topaz_transparency_upscale",
+        },
+      },
+    });
+  }
+
   /** Puts a job into the exact real-incident shape: provider stage complete, identity cleared, stuck at a given status/heartbeat age. */
   async function stallJobPostPersist(
     repo: ProjectRepository,
@@ -429,5 +456,45 @@ describe("Post-Provider Resume Phase: resumeSignFromPersistedIntermediate", () =
       "historical-topaz-request-distinct",
       "sanity: the intermediate's own provenance is the historical Topaz request, untouched",
     );
+  });
+
+  // -------------------------------------------------------------------
+  // Existing Final-Asset Reuse Phase: the parametric-frame reconstruction
+  // itself (a purely local, non-provider operation) must never re-run once
+  // a final production asset already exists for this job — proven here at
+  // the resume-capability layer, not just relying on
+  // `resolveExistingProductionAsset`'s own pre-existing short-circuit
+  // implicitly.
+  // -------------------------------------------------------------------
+
+  it("an existing final production asset is reused — reconstruction is never re-executed, no duplicate asset, zero provider contact", async () => {
+    const { repo, assets, projectId, job } = await buildPreparedProject();
+    await persistIntermediateFor(assets, projectId, job, "historical-topaz-request-1");
+    const existingFinal = await persistFinalAssetFor(assets, projectId, job);
+    await stallJobPostPersist(repo, job, { providerRecoveryAttempts: 5 });
+
+    const { worker } = buildWorker(repo, assets);
+    // Both Topaz and OpenAI doubles remain throwing — if reconstruction (or
+    // anything provider-facing) were re-executed, this would fail via an
+    // uncaught rejection before ever reaching the assertions below.
+    const result = await worker.resumeSignFromPersistedIntermediate(projectId);
+
+    assert.equal(result.outcome, "attempted");
+    if (result.outcome === "attempted") {
+      assert.equal(result.jobId, job.id, "same FinalArtworkJob");
+    }
+
+    const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
+    const finalCandidates = jobAssets.filter(
+      (a) =>
+        a.productionRole === "production_png" &&
+        (a.metadata as Record<string, unknown> | null)?.reconstructionStage !==
+          RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER,
+    );
+    assert.equal(finalCandidates.length, 1, "no duplicate final production asset was created");
+    assert.equal(finalCandidates[0]!.id, existingFinal.id, "the SAME existing final asset was reused, not replaced");
+
+    const finalJob = await repo.getFinalArtworkJob(job.id);
+    assert.equal(finalJob!.providerRecoveryAttempts, 5, "providerRecoveryAttempts untouched");
   });
 });
