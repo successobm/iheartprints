@@ -127,6 +127,14 @@ function SignPlanReview({
         className="w-full rounded-lg border border-ink/10"
       />
 
+      {review.production.blockedCandidateAssetId ? (
+        <BlockedProductionCandidate
+          projectId={projectId}
+          assetId={review.production.blockedCandidateAssetId}
+          validationStatus={review.production.blockedValidationStatus}
+        />
+      ) : null}
+
       <section className="flex flex-col gap-1">
         <h2 className="text-sm font-semibold text-ink">Ordered output</h2>
         <p className="text-sm text-ink">
@@ -202,5 +210,61 @@ function SignPlanReview({
         </section>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Blocked Production Candidate Inspection Phase: operator-only visual
+ * comparison surface — deliberately rendered ALONGSIDE the original
+ * artwork preview above (never replacing it), so an operator can compare
+ * ORIGINAL vs. the BLOCKED PRODUCTION CANDIDATE directly. Never claims or
+ * implies Print Ready anywhere in its copy. The preview/download both go
+ * through the SAME internal-session-gated route
+ * (`/api/internal/projects/[projectId]/sign-artwork/production-candidate`)
+ * that independently re-resolves and re-verifies the exact validation-
+ * bound asset server-side — this component never trusts `assetId` for
+ * anything beyond display; the route is the actual authority.
+ */
+function BlockedProductionCandidate({
+  projectId,
+  assetId,
+  validationStatus,
+}: {
+  projectId: string;
+  assetId: string;
+  validationStatus: string | null;
+}) {
+  const candidateUrl = `/api/internal/projects/${projectId}/sign-artwork/production-candidate`;
+  return (
+    <section
+      className="flex flex-col gap-3 rounded-lg border border-amber-400 bg-amber-50 p-3"
+      data-sign-authorize-blocked-candidate
+    >
+      <div>
+        <h2 className="text-sm font-semibold text-amber-800">Blocked production candidate</h2>
+        <p className="text-sm font-semibold text-amber-800" data-sign-authorize-blocked-candidate-label>
+          NOT PRINT READY — requires review
+        </p>
+      </div>
+      {/* eslint-disable-next-line @next/next/no-img-element -- internal operator tool, not the customer image pipeline */}
+      <img
+        src={candidateUrl}
+        alt="Blocked production candidate — not print ready, requires review"
+        className="w-full rounded-lg border border-amber-400"
+      />
+      <p className="text-sm text-amber-800" data-sign-authorize-blocked-candidate-status>
+        Validation status: {validationStatus ?? "unknown"}
+      </p>
+      <p className="text-xs text-muted" data-sign-authorize-blocked-candidate-asset-id>
+        Asset id (internal diagnostics): {assetId}
+      </p>
+      <a
+        href={candidateUrl}
+        className="text-sm font-medium text-ink underline"
+        data-sign-authorize-blocked-candidate-download
+      >
+        Download blocked candidate for review
+      </a>
+    </section>
   );
 }

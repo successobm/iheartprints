@@ -19,6 +19,7 @@
  * session before this is ever called.
  */
 
+import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { FinalArtworkJobStatus, SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/types";
 
@@ -46,6 +47,24 @@ export interface SignPlanOperatorProductionStatus {
   printReady: boolean;
   /** `completed`, but not print-ready — needs further review before it can be finalized. */
   needsAttention: boolean;
+  /**
+   * Blocked Production Candidate Inspection Phase: the exact asset id of a
+   * NOT-print-ready production candidate the operator page may offer for
+   * visual inspection — `null` whenever `needsAttention` is false, OR when
+   * it's true but there is genuinely nothing to inspect (a
+   * `completeWithoutAsset` determination produced no asset at all). Mirrors
+   * `FinalArtworkCapability.resolveBlockedSignProductionCandidate`'s own
+   * validation-bound (never positional) resolution — this is a lighter,
+   * presentation-only peek at the SAME durable records that capability
+   * treats as authoritative for the actual DOWNLOAD decision, exactly like
+   * `printReady`/`needsAttention` above already are for the certified
+   * download; never a second authority.
+   */
+  blockedCandidateAssetId: string | null;
+  /** The blocked candidate's own validation id — `null` alongside `blockedCandidateAssetId`. Diagnostics only. */
+  blockedValidationId: string | null;
+  /** The blocked candidate's own validation status (e.g. `"finalization_required"`) — `null` alongside `blockedCandidateAssetId`. Never re-interpreted as an authorization signal. */
+  blockedValidationStatus: string | null;
 }
 
 async function resolveSignProductionStatus(
@@ -53,24 +72,65 @@ async function resolveSignProductionStatus(
   projectId: string,
   preparation: SignPreparation,
 ): Promise<SignPlanOperatorProductionStatus> {
+  const nothing: SignPlanOperatorProductionStatus = {
+    jobStatus: null,
+    inFlight: false,
+    failed: false,
+    printReady: false,
+    needsAttention: false,
+    blockedCandidateAssetId: null,
+    blockedValidationId: null,
+    blockedValidationStatus: null,
+  };
+
   const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
   const job = jobs.find((candidate) => candidate.signPlanKey === preparation.planKey) ?? null;
 
-  if (!job) {
-    return { jobStatus: null, inFlight: false, failed: false, printReady: false, needsAttention: false };
-  }
+  if (!job) return nothing;
 
   const inFlight = job.status === "queued" || job.status === "running" || job.status === "recoverable";
   const failed = job.status === "failed";
 
   let printReady = false;
+  let blockedCandidateAssetId: string | null = null;
+  let blockedValidationId: string | null = null;
+  let blockedValidationStatus: string | null = null;
   if (job.status === "completed") {
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
     printReady = validation?.status === "ready";
+    if (validation && !printReady) {
+      // Blocked Production Candidate Inspection Phase: the SAME
+      // validation-bound (never positional) asset check
+      // `resolveBlockedSignProductionCandidate` uses — reusing the
+      // `validation` row already fetched above rather than a second query.
+      const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
+      const asset = jobAssets.find(
+        (candidate) =>
+          candidate.id === validation.assetId &&
+          candidate.projectId === projectId &&
+          candidate.finalArtworkJobId === job.id &&
+          candidate.productionRole === "production_png" &&
+          !isReconstructionIntermediateAsset(candidate),
+      );
+      if (asset) {
+        blockedCandidateAssetId = asset.id;
+        blockedValidationId = validation.id;
+        blockedValidationStatus = validation.status;
+      }
+    }
   }
   const needsAttention = job.status === "completed" && !printReady;
 
-  return { jobStatus: job.status, inFlight, failed, printReady, needsAttention };
+  return {
+    jobStatus: job.status,
+    inFlight,
+    failed,
+    printReady,
+    needsAttention,
+    blockedCandidateAssetId,
+    blockedValidationId,
+    blockedValidationStatus,
+  };
 }
 
 export type SignPlanOperatorReview =

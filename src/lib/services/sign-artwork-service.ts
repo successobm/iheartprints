@@ -301,3 +301,52 @@ export async function getSignProductionArtworkDownload(
     }),
   };
 }
+
+export interface SignBlockedProductionCandidateDownload {
+  bytes: Buffer;
+  contentType: string;
+  /** Deliberately never `buildPrintReadyFilename` — this is not a print-ready deliverable and must never carry a filename implying otherwise. */
+  filename: string;
+  jobId: string;
+  assetId: string;
+  validationId: string;
+  validationStatus: string;
+}
+
+/**
+ * Blocked Production Candidate Inspection Phase (real Signs acceptance
+ * incident): streams the project's current BLOCKED sign production
+ * candidate — a completed job's exact validation-bound asset when that
+ * validation is anything other than `"ready"` — for internal operator
+ * visual inspection only. Deliberately calls
+ * `FinalArtworkCapability.resolveBlockedSignProductionCandidate`, never
+ * `resolveCurrentSignProductionDelivery` — the certified resolver already
+ * refuses whenever validation isn't `"ready"`, and this resolver is the
+ * exact mirror image: it refuses whenever validation IS `"ready"` (that
+ * state has a certified download already, nothing to inspect here).
+ * Returns `null` for every miss — same "a caller must not distinguish
+ * why" discipline `getSignProductionArtworkDownload` already follows.
+ */
+export async function getSignBlockedProductionCandidateDownload(
+  projectId: string,
+): Promise<SignBlockedProductionCandidateDownload | null> {
+  const graph = getCapabilityGraph();
+  const candidate = await graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+  if (!candidate) return null;
+
+  const downloaded = await graph.assets.downloadAssetBytes(candidate.assetId);
+  if (!downloaded) return null;
+
+  const mimeType = downloaded.contentType || "image/png";
+  const extension = mimeType === "image/png" ? "png" : mimeType.split("/")[1] || "png";
+
+  return {
+    bytes: downloaded.bytes,
+    contentType: mimeType,
+    filename: `BLOCKED-NOT-PRINT-READY-sign-production-candidate.${extension}`,
+    jobId: candidate.job.id,
+    assetId: candidate.assetId,
+    validationId: candidate.validationId,
+    validationStatus: candidate.validationStatus,
+  };
+}

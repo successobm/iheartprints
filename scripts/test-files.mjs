@@ -345,6 +345,7 @@ export const TEST_FILES = [
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/resume-existing-result/route.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/resume-from-intermediate/route.test.ts",
+  "src/app/api/internal/projects/[projectId]/sign-artwork/production-candidate/route.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/download/route.test.ts",
   // Garment colour is production context, never authority over customer
   // pixels: preparation must be byte-identical on a white and a black shirt.

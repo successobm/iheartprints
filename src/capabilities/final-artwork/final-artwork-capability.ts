@@ -300,6 +300,26 @@ export interface FinalArtworkCapability {
     projectId: string,
   ): Promise<CurrentProductionDelivery | null>;
   /**
+   * Blocked Production Candidate Inspection Phase (real Signs acceptance
+   * incident: a corrected regeneration produced a final asset that a real
+   * OpenAI semantic dispatch then correctly rejected — `perimeter_edge_
+   * alignment: "changed"` — leaving a completed job with no certified
+   * deliverable, but a genuine candidate operator staff need to visually
+   * inspect before deciding the next engineering/design step). NEVER the
+   * customer-delivery authority — `resolveCurrentSignProductionDelivery`
+   * remains the only path that can ever say "this is print-ready", and
+   * this resolver explicitly REFUSES whenever the latest validation IS
+   * `"ready"` (that state has nothing to inspect here; it already has a
+   * certified download). Mirrors `resolveCurrentSignProductionDelivery`'s
+   * own job resolution (current-plan job only, via `signPlanKey`) and its
+   * own validation-bound asset resolution (never positional — see that
+   * resolver's own doc for why a job can legitimately carry more than one
+   * final). Read-only: never creates, mutates, or deletes anything.
+   */
+  resolveBlockedSignProductionCandidate(
+    projectId: string,
+  ): Promise<BlockedSignProductionCandidate | null>;
+  /**
    * Print'em All Phase 3 (V1 multi-variant package): the same job-resolution
    * logic `resolveCurrentMatchingProductionJob` uses, generalized to an
    * EXPLICIT treatment key instead of the project's current one — so a
@@ -359,6 +379,24 @@ export interface ProductionVariantJobState {
 export interface CurrentProductionDelivery {
   job: FinalArtworkJob;
   assetId: string;
+}
+
+/**
+ * Blocked Production Candidate Inspection Phase (real Signs acceptance
+ * incident): proof that a completed sign job has a REVIEW-REQUIRED
+ * production candidate — the operator-inspection counterpart of
+ * `CurrentProductionDelivery`, deliberately a DIFFERENT shape (never
+ * reused as an overload) so a caller can never accidentally treat a
+ * blocked candidate as customer-deliverable. `validationStatus` is
+ * whatever non-`"ready"` status the authoritative validation actually
+ * recorded (e.g. `"finalization_required"`) — surfaced for operator
+ * diagnostics only, never re-interpreted as an authorization signal.
+ */
+export interface BlockedSignProductionCandidate {
+  job: FinalArtworkJob;
+  assetId: string;
+  validationId: string;
+  validationStatus: string;
 }
 
 export function createFinalArtworkCapability(
@@ -778,6 +816,10 @@ export function createFinalArtworkCapability(
       return resolveSatisfiedSignProductionDelivery(repo, projectId);
     },
 
+    async resolveBlockedSignProductionCandidate(projectId) {
+      return resolveBlockedSignProductionCandidateFor(repo, projectId);
+    },
+
     async resolveProductionVariantState(projectId, treatmentKey) {
       const nothing: ProductionVariantJobState = {
         job: null,
@@ -1041,6 +1083,50 @@ async function resolveSatisfiedSignProductionDelivery(
   if (!asset) return null;
 
   return { job, assetId: asset.id };
+}
+
+/**
+ * Blocked Production Candidate Inspection Phase: the inverse of
+ * `resolveSatisfiedSignProductionDelivery` above — same current-plan job
+ * resolution, same validation-bound (never positional) asset resolution,
+ * but requires the latest validation to exist and be anything OTHER than
+ * `"ready"`. A completed job with NO validation at all (a
+ * `completeWithoutAsset` determination — nothing was ever produced) has
+ * no candidate to show and correctly resolves `null` here too.
+ */
+async function resolveBlockedSignProductionCandidateFor(
+  repo: ProjectRepository,
+  projectId: string,
+): Promise<BlockedSignProductionCandidate | null> {
+  const preparation = await repo.getSignPreparation(projectId);
+  if (!preparation || preparation.projectId !== projectId) return null;
+  if (preparation.status !== "planned" || !preparation.planKey) return null;
+
+  const jobs = await repo.listFinalArtworkJobsForSignPreparation(
+    projectId,
+    preparation.id,
+  );
+  const job = jobs.find((candidate) => candidate.signPlanKey === preparation.planKey);
+  if (!job || job.status !== "completed") return null;
+
+  const validation = await repo.getLatestProductionAssetValidationForJob(
+    projectId,
+    job.id,
+  );
+  if (!validation || validation.status === "ready") return null;
+
+  const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
+  const asset = jobAssets.find(
+    (candidate) =>
+      candidate.id === validation.assetId &&
+      candidate.projectId === projectId &&
+      candidate.finalArtworkJobId === job.id &&
+      candidate.productionRole === "production_png" &&
+      !isReconstructionIntermediateAsset(candidate),
+  );
+  if (!asset) return null;
+
+  return { job, assetId: asset.id, validationId: validation.id, validationStatus: validation.status };
 }
 
 /**

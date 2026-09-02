@@ -1,5 +1,6 @@
 export {
   createFinalArtworkCapability,
+  type BlockedSignProductionCandidate,
   type FinalArtworkCapability,
   type RequestFinalArtworkResult,
   type RequestPreparedUploadFinalArtworkResult,

@@ -747,3 +747,324 @@ describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4D): real-customer-shape
     assert.equal(decoded.height, 6885);
   });
 });
+
+/**
+ * Blocked Production Candidate Inspection Phase (real Signs acceptance
+ * incident): `FinalArtworkCapability.resolveBlockedSignProductionCandidate`
+ * — the mirror image of `resolveCurrentSignProductionDelivery`, proven
+ * here at the capability layer with the same exact-asset, never-positional
+ * discipline. Never calls a provider — every fixture here is either a
+ * deterministic-only plan or hand-seeded rows, exactly like this file's
+ * own sibling suites.
+ */
+describe("resolveBlockedSignProductionCandidate", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-blocked-candidate-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function build() {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const assets = createAssetCapability(repo, new DataUriAssetStorageProvider(), new PngThumbnailGenerator());
+    const signPreparation = createSignPreparationCapability(repo, assets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const worker = createFinalArtworkWorkerCapability(repo, assets, new ThrowingProvider());
+    const project = await repo.createProject();
+    return { repo, assets, signPreparation, finalArtwork, worker, projectId: project.project.id };
+  }
+
+  async function planAndAuthorize(
+    signPreparation: Awaited<ReturnType<typeof build>>["signPreparation"],
+    finalArtwork: Awaited<ReturnType<typeof build>>["finalArtwork"],
+    projectId: string,
+  ) {
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await signPreparation.planSignRepair(projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    return job;
+  }
+
+  it("no job at all: resolves null", async () => {
+    const { finalArtwork, projectId } = await build();
+    assert.equal(await finalArtwork.resolveBlockedSignProductionCandidate(projectId), null);
+  });
+
+  it("job still in flight: resolves null", async () => {
+    const { signPreparation, finalArtwork, worker, projectId } = await build();
+    await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    assert.equal(await finalArtwork.resolveBlockedSignProductionCandidate(projectId), null);
+    await worker.processNextJob(); // drain, per this file's own established convention
+  });
+
+  it("job completed with NO validation at all (completeWithoutAsset): resolves null — nothing was ever produced", async () => {
+    const { repo, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+    assert.equal(await finalArtwork.resolveBlockedSignProductionCandidate(projectId), null);
+  });
+
+  it("job completed with a READY validation: resolves null — a certified asset is never a blocked candidate", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const asset = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-ready`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "ready",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+    assert.equal(await finalArtwork.resolveBlockedSignProductionCandidate(projectId), null);
+  });
+
+  it("job completed with a BLOCKING validation: resolves the exact validation-bound asset", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const blockedAsset = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-blocked`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    const validation = await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: blockedAsset.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const candidate = await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    assert.ok(candidate);
+    assert.equal(candidate!.job.id, job.id);
+    assert.equal(candidate!.assetId, blockedAsset.id);
+    assert.equal(candidate!.validationId, validation.id);
+    assert.equal(candidate!.validationStatus, "finalization_required");
+  });
+
+  it("the historical rejected final is never selected positionally when a corrected candidate also exists", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    // Older, historical plate — created FIRST, so a positional (oldest-
+    // first) pick would land here.
+    const historicalRejected = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-legacy`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    // The corrected regeneration — created second, and the one the LATEST
+    // validation actually binds to.
+    const corrected = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-corrected`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    const validation = await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: corrected.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const candidate = await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    assert.ok(candidate);
+    assert.equal(candidate!.assetId, corrected.id, "resolves the validation-bound corrected plate");
+    assert.notEqual(candidate!.assetId, historicalRejected.id, "never the older historical plate");
+    void validation;
+  });
+
+  it("an intermediate asset bound by a malformed validation is refused (never served as a candidate)", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const intermediate = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-intermediate`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: { reconstructionStage: "pass1_intermediate", providerKey: "topaz_transparency_upscale", providerRequestId: "req-1" },
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: intermediate.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    assert.equal(
+      await finalArtwork.resolveBlockedSignProductionCandidate(projectId),
+      null,
+      "an intermediate must never be servable as a blocked candidate",
+    );
+  });
+
+  it("a validation bound to an asset from a DIFFERENT job is refused", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const otherJob = await repo.createFinalArtworkJob(projectId, {
+      sourceKind: "sign_preparation",
+      signPreparationId: "other-prep",
+      signPlanKey: "other-plan-key",
+    });
+    const wrongJobAsset = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${otherJob.id}-wrong-job`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: otherJob.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: wrongJobAsset.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    assert.equal(await finalArtwork.resolveBlockedSignProductionCandidate(projectId), null);
+  });
+
+  it("a validation bound to an asset from a DIFFERENT project is refused", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const otherProject = await repo.createProject();
+    const wrongProjectAsset = await assets.uploadProductionAsset(otherProject.project.id, {
+      conceptId: `sign-${job.id}-wrong-project`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: wrongProjectAsset.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    assert.equal(await finalArtwork.resolveBlockedSignProductionCandidate(projectId), null);
+  });
+
+  it("no project/job/validation/asset mutation — pure read", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const blockedAsset = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-blocked-readonly`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    const validation = await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: blockedAsset.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const before = await repo.getFinalArtworkJob(job.id);
+    const beforeValidation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    const beforeProject = await repo.getProject(projectId);
+
+    await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    await finalArtwork.resolveBlockedSignProductionCandidate(projectId); // duplicate call — still pure
+
+    const after = await repo.getFinalArtworkJob(job.id);
+    const afterValidation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    const afterProject = await repo.getProject(projectId);
+
+    assert.deepEqual(after, before);
+    assert.deepEqual(afterValidation, beforeValidation);
+    assert.deepEqual(afterProject, beforeProject);
+    assert.equal(afterValidation!.id, validation.id);
+  });
+
+  it("certified delivery remains refused for the exact same state a blocked candidate resolves for", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const blockedAsset = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-blocked-vs-certified`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: blockedAsset.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const blocked = await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    assert.ok(blocked);
+    const certified = await finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+    assert.equal(certified, null, "the certified download route must remain refused for a blocked state");
+  });
+});

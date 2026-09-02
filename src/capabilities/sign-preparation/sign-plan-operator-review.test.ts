@@ -234,6 +234,9 @@ describe("loadSignPlanOperatorReview — production status", () => {
       failed: false,
       printReady: false,
       needsAttention: false,
+      blockedCandidateAssetId: null,
+      blockedValidationId: null,
+      blockedValidationStatus: null,
     });
   });
 
@@ -339,5 +342,76 @@ describe("loadSignPlanOperatorReview — production status", () => {
     assert.equal(review.production.jobStatus, "completed");
     assert.equal(review.production.printReady, false);
     assert.equal(review.production.needsAttention, true);
+    assert.equal(
+      review.production.blockedCandidateAssetId,
+      null,
+      "completeWithoutAsset produced no validation and no asset — nothing to inspect",
+    );
+    assert.equal(review.production.blockedValidationId, null);
+    assert.equal(review.production.blockedValidationStatus, null);
+  });
+
+  it("Blocked Production Candidate Inspection Phase: a completed job with a blocking validation surfaces the exact validation-bound asset", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const blockedAsset = await graph.assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-blocked-test`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: { rigidSign: { planKey: "sign-repair-plan:v1:test" } },
+    });
+    const validation = await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: blockedAsset.id,
+      status: "finalization_required",
+      report: {},
+    });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.needsAttention, true);
+    assert.equal(review.production.printReady, false);
+    assert.equal(review.production.blockedCandidateAssetId, blockedAsset.id);
+    assert.equal(review.production.blockedValidationId, validation.id);
+    assert.equal(review.production.blockedValidationStatus, "finalization_required");
+  });
+
+  it("Blocked Production Candidate Inspection Phase: a print-ready job never surfaces a blocked candidate", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    const outcome = await graph.signPreparation.planSignRepair(projectId);
+    assert.equal(outcome.result.plan!.steps.length, 0, "sanity: zero-step plan needs no provider");
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.printReady, true);
+    assert.equal(review.production.blockedCandidateAssetId, null);
   });
 });
