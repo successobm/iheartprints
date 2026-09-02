@@ -677,19 +677,39 @@ function parametricFrameDepthAt(x: number, y: number, w: number, h: number, radi
   return Math.min(x, y, w - 1 - x, h - 1 - y);
 }
 
+/**
+ * Parametric Frame Geometry Defect Correction Phase (real Signs acceptance
+ * incident): the verification-side twin of `sign-transform-executor.ts`'s
+ * own `bandColorAtDepthWithOuterExtension` — this module deliberately
+ * duplicates the executor's rounded-rect depth/band-lookup formula rather
+ * than importing it (see this section's own header comment), so the two
+ * independent implementations must be kept in agreement by hand whenever
+ * either changes. Before this phase, BOTH sides independently encoded the
+ * same defect (a flat `fillColor` fallback once `depth` exceeds every
+ * measured band) — which meant this check could never have caught the
+ * real defect: it was comparing the actual image against an "expected"
+ * value that reproduced the exact same bug. Fixed identically on both
+ * sides: once `depth` exceeds every measured band, the expectation is the
+ * OUTERMOST band's own colour (`bands[0]`) continuing to the interior —
+ * never an unrelated fill colour — so this check now actually verifies
+ * the frame reaches the substrate boundary, and would fail closed again if
+ * the executor's own fix were ever reverted.
+ */
 function parametricFrameColorAt(
   depth: number | null,
   bands: SignPreservationFrameBand[],
-  fillColor: { r: number; g: number; b: number },
   outerBackgroundColor: { r: number; g: number; b: number } | null,
 ): { r: number; g: number; b: number } {
-  if (depth === null) return outerBackgroundColor ?? fillColor;
+  if (bands.length === 0) {
+    return outerBackgroundColor ?? { r: 0, g: 0, b: 0 };
+  }
+  if (depth === null) return outerBackgroundColor ?? bands[0]!.color;
   let acc = 0;
   for (const band of bands) {
     if (depth < acc + band.thicknessPx) return band.color;
     acc += band.thicknessPx;
   }
-  return fillColor;
+  return bands[0]!.color;
 }
 
 function parametricFrameHoleColorAt(
@@ -746,7 +766,7 @@ export function checkParametricFrameRegions(
       }
       totalExtensionPixels++;
       const holeColor = hole ? parametricFrameHoleColorAt(x, y, w, h, hole) : null;
-      const expected = holeColor ?? parametricFrameColorAt(parametricFrameDepthAt(x, y, w, h, cornerRadiusPx ?? 0), bands, fillColor, outerBackgroundColor);
+      const expected = holeColor ?? parametricFrameColorAt(parametricFrameDepthAt(x, y, w, h, cornerRadiusPx ?? 0), bands, outerBackgroundColor);
       const idx = (y * w + x) * 4;
       const r = finalImage.data[idx];
       const g = finalImage.data[idx + 1];

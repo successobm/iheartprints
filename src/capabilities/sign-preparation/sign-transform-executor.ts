@@ -35,7 +35,7 @@ import { hasAnyTransparentPixel, resampleExact } from "@/capabilities/final-artw
 import type { SignRepairPlan, SignRepairStep, SignRepairStepKind } from "./contracts";
 import { deriveUniformBackgroundExtension } from "./sign-geometry";
 import { tiledRowColor, type SignPerimeterBandMeasurement, type SignPerimeterBandRow } from "./perimeter-reconstruction";
-import { bandColorAtDepth, frameDepthAt, type SignFrameBand } from "./frame-structure-model";
+import { frameDepthAt, type SignFrameBand } from "./frame-structure-model";
 
 export interface SignExecutionBounds {
   x: number;
@@ -926,6 +926,68 @@ function holeColorAt(
 }
 
 /**
+ * Parametric Frame Geometry Defect Correction Phase (real Signs acceptance
+ * incident: semantic verification's own `perimeter_edge_alignment`
+ * category correctly caught "large blank red extensions above and below
+ * the artwork, leaving the original inner border/frame system visibly
+ * inset from the new outer panel boundary"): identical to the shared
+ * `bandColorAtDepth` (`frame-structure-model.ts`) EXCEPT for what happens
+ * once `depth` exceeds every measured band's own cumulative thickness.
+ *
+ * The shared function falls back to a flat `fillColor` there — correct for
+ * its OTHER caller (`findHoleNearCorner`'s hole-anomaly detection, where
+ * that depth range is essentially never reached: on an un-extended axis
+ * the protected interior begins exactly where the measured band stack
+ * ends, so `fillColor` was always closer to vestigial insurance than a
+ * visible design element). This executor is different: an aspect-correcting
+ * `leadingPx`/`trailingPx` extension (`adaptGeometryStepsToActualReconstruction`'s
+ * own measured `leadingShare` re-split — itself correct and untouched by
+ * this fix, see that function's own doc) can push the interior's own start
+ * well past where the measured band stack ends, leaving a wide gap on
+ * exactly the extended axis. That gap belongs to the FRAME, never an
+ * unrelated flat fill colour.
+ *
+ * The fix: extend `bands[0]` — the OUTERMOST, edge-adjacent band, i.e. the
+ * measured design's own dominant/background field
+ * (`frame-structure-model.ts`'s own `outerBandColor` convention,
+ * `measureFrameStructuralModel`'s `bands[0]`) — all the way to the
+ * interior, so the finished frame visually reaches the true substrate
+ * boundary on every side with no seam and no unrelated colour patch. Every
+ * OTHER band keeps its exact measured thickness and relative position
+ * (the geometry-defect-correction requirement that "measured border-band
+ * relationships remain visually consistent") — only the dominant
+ * background band absorbs the aspect-correction gap, never an accent
+ * band, and never by scaling every band proportionally (which would make
+ * accent bands implausibly thick whenever the gap is large relative to
+ * the original frame depth, exactly the real case here: leadingPx=444 vs.
+ * a frame depth far smaller).
+ *
+ * Deliberately a LOCAL helper, never a change to the shared
+ * `bandColorAtDepth` itself — that function's other caller (hole-anomaly
+ * detection) must never be affected by a fix scoped to this executor's own
+ * aspect-correction rendering.
+ */
+function bandColorAtDepthWithOuterExtension(
+  depth: number | null,
+  bands: SignFrameBand[],
+  outerBackgroundColor: { r: number; g: number; b: number } | null,
+): { r: number; g: number; b: number } {
+  if (bands.length === 0) {
+    return outerBackgroundColor ?? { r: 0, g: 0, b: 0 };
+  }
+  if (depth === null) return outerBackgroundColor ?? bands[0]!.color;
+  let acc = 0;
+  for (const band of bands) {
+    if (depth < acc + band.thicknessPx) return band.color;
+    acc += band.thicknessPx;
+  }
+  // Beyond every measured band: the gap belongs to the frame's own
+  // outermost/dominant band, never an unrelated fill colour — see this
+  // function's own doc comment.
+  return bands[0]!.color;
+}
+
+/**
  * Parametric Perimeter Frame Reconstruction Phase (Constitution §16A.3
  * amendment 3.1's own bounded carve-out, extended). Unlike every other
  * step here, this one does NOT simply blit the current image verbatim
@@ -970,7 +1032,7 @@ function executeReconstructParametricFrame(
   if (!decoded) {
     return { status: "refused", reason: "unsupported_step_kind", detail: `Step "${step.kind}" is missing valid frame structural model parameters.` };
   }
-  const { bands, fillColor, outerBackgroundColor, cornerRadiusPx, hole, modelSourceWidthPx } = decoded;
+  const { bands, outerBackgroundColor, cornerRadiusPx, hole, modelSourceWidthPx } = decoded;
 
   // The scale between the model's own SOURCE resolution and whatever
   // resolution `image` actually is right now — re-derived fresh at
@@ -1028,7 +1090,7 @@ function executeReconstructParametricFrame(
           color = holeColor;
         } else {
           const depth = frameDepthAt(x, y, outputWidth, outputHeight, scaledCornerRadius);
-          color = bandColorAtDepth(depth, scaledBands, fillColor, outerBackgroundColor);
+          color = bandColorAtDepthWithOuterExtension(depth, scaledBands, outerBackgroundColor);
         }
       }
       data[i] = color.r;
