@@ -374,6 +374,161 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     assert.equal(producedAfter.length, 1);
   });
 
+  // ---------------------------------------------------------------------
+  // Signs — Fix Unguarded Intermediate Reconstruction Persistence Failure:
+  // `persistIntermediateReconstruction` (the ONE step in
+  // `runSignReconstructionAndContinue` that previously had no guard, unlike
+  // provider dispatch/PNG-decode/geometry-check right above it) is now
+  // wrapped exactly like its siblings. B10c below also documents WHY the
+  // OTHER two partial-persistence sub-cases (storage upload failing before
+  // any row exists; storage succeeding but `repo.createAsset` failing) need
+  // no new test of their own — `AssetCapability.uploadProductionAsset`
+  // ALREADY makes both safe by construction (upload-then-create ordering,
+  // with `safeDelete` cleanup on a `createAsset` failure — see
+  // `asset-capability.ts`), so a persistence retry after either one is a
+  // plain, already-idempotent re-upload with nothing orphaned to clean up.
+  // ---------------------------------------------------------------------
+
+  it("B10b: a crash persisting the intermediate reconstruction becomes a failed job, not an uncaught worker-batch rejection — providerKey/providerRequestId survive", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const realAssets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    // Partial-persistence case A: the upload call itself fails before either
+    // a storage object or an AssetRecord exists — nothing to clean up.
+    const crashingAssets: AssetCapability = {
+      ...realAssets,
+      uploadProductionAsset: async () => {
+        throw new Error("simulated storage failure persisting the reconstruction intermediate");
+      },
+    };
+    const signPreparation = createSignPreparationCapability(repo, realAssets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const project = await repo.createProject();
+    const projectId = project.project.id;
+    await planNeedingReconstruction(signPreparation, projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    const crashingWorker = createFinalArtworkWorkerCapability(repo, crashingAssets, provider);
+    // The entire point of the fix: this must resolve, never reject.
+    const result = await crashingWorker.processNextJob();
+    assert.equal(result.processedJobId, job.id);
+
+    const failed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failed!.status, "failed", "must reach a real terminal state instead of staying stuck at running");
+    assert.ok(failed!.lastError, "lastError must be populated");
+    assert.match(failed!.lastError!, /simulated storage failure/i);
+    assert.ok(failed!.completedAt, "a terminal job must record when it ended");
+
+    // Requirement: persistence failure is NOT proof the paid provider
+    // request itself failed — the Topaz identity must survive untouched,
+    // exactly like `failJob` already leaves it for every other failure kind.
+    assert.equal(failed!.providerKey, provider.providerKey);
+    assert.equal(failed!.providerRequestId, "fake-sign-reconstruction-1");
+    assert.equal(provider.dispatchCount, 1, "no second paid submission");
+    assert.equal(provider.resumeCount, 0);
+
+    // No second FinalArtworkJob was created for this plan.
+    const preparation = await repo.getSignPreparation(projectId);
+    const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation!.id);
+    assert.equal(jobs.length, 1);
+
+    // Nothing durable was left behind — the failed upload never reached
+    // storage or the DB.
+    const assetsAfter = await repo.listAssets(projectId);
+    assert.equal(assetsAfter.filter((a) => a.finalArtworkJobId === job.id).length, 0);
+
+    // Nothing downstream ran: no PrintValidation for this job.
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation, null);
+  });
+
+  it("B10c: a crash clearing provider fields AFTER the intermediate asset was persisted (partial-persistence case C) is safe — recovery never duplicates the asset or redispatches", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const realAssets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const signPreparation = createSignPreparationCapability(repo, realAssets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const project = await repo.createProject();
+    const projectId = project.project.id;
+    await planNeedingReconstruction(signPreparation, projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    // Fails ONLY `persistIntermediateReconstruction`'s own clear-call (it
+    // never sets `providerRecoveryAttempts`, unlike the separate pre-
+    // existing self-heal clear a few lines earlier in the worker, which
+    // does — this distinguishes the two so the test targets the exact call
+    // this phase's fix guards, not the older self-heal path). Every other
+    // repository call passes through to the real instance untouched.
+    let sawClearCall = false;
+    const crashingRepo = new Proxy(repo, {
+      get(target, prop) {
+        if (prop === "updateFinalArtworkJob") {
+          return async (jobId: string, patch: Record<string, unknown>) => {
+            if (
+              !sawClearCall &&
+              patch.providerKey === null &&
+              patch.providerRequestId === null &&
+              patch.providerStatus === null &&
+              !("providerRecoveryAttempts" in patch)
+            ) {
+              sawClearCall = true;
+              throw new Error("simulated DB failure clearing provider fields after intermediate persistence");
+            }
+            return (target as ProjectRepository).updateFinalArtworkJob(jobId, patch as never);
+          };
+        }
+        const value = (target as unknown as Record<string, unknown>)[prop as string];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as ProjectRepository;
+
+    const crashingWorker = createFinalArtworkWorkerCapability(crashingRepo, realAssets, provider);
+    await crashingWorker.processNextJob();
+    assert.equal(sawClearCall, true, "sanity: the simulated failure actually fired on the targeted call");
+
+    const failed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failed!.status, "failed");
+    assert.equal(provider.dispatchCount, 1);
+
+    // The intermediate asset DID get created — only the clear-call
+    // afterward failed. This is partial-persistence case C.
+    const intermediateBefore = (await repo.listAssets(projectId)).filter(
+      (a) => a.finalArtworkJobId === job.id && isReconstructionIntermediateAsset(a),
+    );
+    assert.equal(
+      intermediateBefore.length,
+      1,
+      "the intermediate asset must have been durably persisted before the simulated clear-call failure",
+    );
+
+    // Recover: the pre-existing self-heal (`runSignReconstructionAndContinue`'s
+    // own "a two-pass-style intermediate already durably exists" branch)
+    // must recognize the already-persisted intermediate and read it back
+    // directly — never re-upload it, never call the provider again.
+    await repo.updateFinalArtworkJob(job.id, { status: "recoverable", lastError: null, completedAt: null });
+    await crashingWorker.processNextJob();
+
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed!.status, "completed");
+    assert.equal(provider.dispatchCount, 1, "still exactly one paid dispatch across both attempts");
+    assert.equal(provider.resumeCount, 0, "recovery reads the durable intermediate directly — mirrors B10, never resumed via the provider");
+
+    const intermediateAfter = (await repo.listAssets(projectId)).filter(
+      (a) => a.finalArtworkJobId === job.id && isReconstructionIntermediateAsset(a),
+    );
+    assert.equal(intermediateAfter.length, 1, "no duplicate intermediate asset was created on recovery");
+  });
+
   it("B11: existing final production asset recovery never redispatches (review_required plan, still not print_ready)", async () => {
     const provider = new FakeSignReconstructionProvider();
     const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);

@@ -1574,12 +1574,32 @@ export function createFinalArtworkWorkerCapability(
       // `onIntermediateReconstructionProduced`'s own "persist before
       // continuing" ordering: a crash any time after this write never
       // re-spends this paid credit.
-      await persistIntermediateReconstruction(job, signProvider, `sign-${job.id}`, {
-        bytes: reconstructedBytes,
-        widthPx: reconstructedWidthPx,
-        heightPx: reconstructedHeightPx,
-        providerRequestId,
-      });
+      //
+      // Guarded like every other risky step above (provider dispatch, PNG
+      // decode): a storage/DB failure here is NOT proof the paid provider
+      // request failed, so it must become an ordinary `failJob` outcome —
+      // never an uncaught exception that escapes this claimed job's own
+      // execution and rejects the whole worker batch (which previously
+      // left the job stuck at `status: "running"` forever, since nothing
+      // downstream of this call could ever reach `failJob`). Deliberately
+      // does NOT touch `providerKey`/`providerRequestId` — `failJob` never
+      // does, which is exactly correct here: the Topaz result itself is
+      // still good, only its local persistence failed, and
+      // `persistIntermediateReconstruction`'s own idempotent re-run
+      // (`resolveExistingIntermediateReconstruction` dedup, plus
+      // `uploadProductionAsset`'s own upload-then-create-with-cleanup
+      // ordering) is what makes retrying this exact job safe afterward.
+      try {
+        await persistIntermediateReconstruction(job, signProvider, `sign-${job.id}`, {
+          bytes: reconstructedBytes,
+          widthPx: reconstructedWidthPx,
+          heightPx: reconstructedHeightPx,
+          providerRequestId,
+        });
+      } catch (error) {
+        await failJob(job, describeFinalArtworkError(error));
+        return { outcome: "handled" };
+      }
     }
 
     let reconstructedPng: PNG;
