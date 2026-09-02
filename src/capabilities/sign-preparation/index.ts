@@ -44,6 +44,7 @@ export {
   adaptGeometryStepsToActualReconstruction,
   buildSignExecutionGeometryEvidence,
   encodeSignPlate,
+  SIGN_EXECUTION_IMPLEMENTATION_VERSION,
   executeAdmittedSignSteps,
   executeSignRepairPlan,
   finalizeSignExecution,

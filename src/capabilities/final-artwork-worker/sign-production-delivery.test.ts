@@ -173,6 +173,56 @@ describe("resolveCurrentSignProductionDelivery — deterministic-only (no recons
     assert.ok(downloaded, "the resolved asset id must actually download real bytes");
   });
 
+  it("Rejected-Final Regeneration Phase: with a stale rejected final PRESERVED alongside the corrected one, delivery resolves exactly the validation-bound asset — never positionally", async () => {
+    const { repo, assets, signPreparation, finalArtwork, worker, projectId } = await build();
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await signPreparation.planSignRepair(projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    // The real incident's own shape, in the real incident's own order: a
+    // final drawn by the pre-correction implementation (no
+    // executionImplementationVersion stamp) already sits on the job,
+    // OLDER than anything the worker will now produce — so a positional
+    // oldest-first pick would land on it, not on the corrected plate.
+    const staleFinal = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-legacy`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: { rigidSign: { planKey: "sign-repair-plan:v1:test" } },
+    });
+
+    await worker.processNextJob();
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project!.project.status, "print_ready");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validation!.status, "ready");
+    assert.notEqual(validation!.assetId, staleFinal.id, "sanity: certification belongs to the regenerated plate, never the stale one");
+
+    const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
+    const finals = jobAssets.filter(
+      (a) => a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
+    );
+    assert.equal(finals.length, 2, "the rejected plate is preserved as history alongside the corrected one");
+
+    const delivery = await finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+    assert.ok(delivery, "delivery must resolve despite two finals on the job");
+    assert.equal(delivery!.assetId, validation!.assetId, "the delivered asset is the validation-bound one");
+    assert.notEqual(delivery!.assetId, staleFinal.id, "the stale rejected plate is never what the customer downloads");
+  });
+
   it("a genuine repair (aspect-mismatch canvas extension) reaches print_ready with the ACTUAL corrected geometry", async () => {
     const { repo, signPreparation, finalArtwork, worker, projectId } = await build();
     await signPreparation.uploadSignArtwork(projectId, {

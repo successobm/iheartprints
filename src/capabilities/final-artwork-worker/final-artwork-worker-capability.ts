@@ -150,6 +150,7 @@ import {
   planContainsOnlyAdmittedSteps,
   planRequiresBoundedReconstruction,
   planRequiresSemanticPreservationVerification,
+  SIGN_EXECUTION_IMPLEMENTATION_VERSION,
   SIGN_RECONSTRUCTION_SCALE_CEILING,
   SIGN_REPAIR_PLAN_SCHEMA_VERSION,
   splitPlanAroundReconstruction,
@@ -297,6 +298,17 @@ export interface FinalArtworkWorkerCapability {
    * genuinely active worker). Idempotent by the same construction
    * `runSignPreparationJob` already gives every caller: a production asset
    * that already exists is reused, never reprocessed.
+   *
+   * Rejected-Final Regeneration Phase extension: a `"completed"` job is
+   * also reclaimable, but ONLY when its own latest validation exists and is
+   * blocking (not `"ready"`) — the run finished yet could not certify. In
+   * that state, `runSignPreparationJob`'s own execution-implementation-
+   * version check (see the reuse logic around
+   * `resolveExistingProductionAsset`) regenerates a corrected final from
+   * the SAME persisted intermediate when the stale final was drawn by a
+   * since-corrected implementation — still zero provider contact, still
+   * never deleting or overwriting the rejected final, its storage object,
+   * or its validation history.
    */
   resumeSignFromPersistedIntermediate(
     projectId: string,
@@ -2051,6 +2063,50 @@ export function createFinalArtworkWorkerCapability(
     // exclusion the apparel two-pass path already depends on.
     let productionAsset: AssetRecord | null = await resolveExistingProductionAsset(job, null);
 
+    // Rejected-Final Regeneration Phase (real Signs acceptance incident: a
+    // final asset drawn by the since-corrected parametric-frame
+    // implementation was rejected by semantic verification, yet shared the
+    // plan's own unchanged `planKey` — so unqualified reuse would have
+    // returned the defective plate forever). A resolved final whose
+    // recorded execution implementation differs from the CURRENT one
+    // (absence = the retroactive v1 pre-correction implementation) is not
+    // automatically current:
+    //   1. Prefer a CURRENT-implementation sibling on the same job if one
+    //      already exists (a completed earlier regeneration) — deterministic
+    //      selection regardless of the repository's own oldest-first
+    //      ordering, and what makes a duplicate regeneration invocation
+    //      converge on ONE corrected final rather than piling up more.
+    //   2. Otherwise regenerate ONLY when the job's latest validation is
+    //      not "ready" — a certified plate is never churned merely because
+    //      the implementation moved on; an uncertified (rejected/blocking)
+    //      one must never be reused past the correction that obsoleted it.
+    // The stale final itself is never deleted or overwritten — it, its
+    // storage object, and its own validation rows remain immutable history.
+    if (
+      productionAsset &&
+      signExecutionImplementationVersionOf(productionAsset) !== SIGN_EXECUTION_IMPLEMENTATION_VERSION
+    ) {
+      const jobAssets = await repo.listAssetsForFinalArtworkJob(job.projectId, job.id);
+      const currentImplementationSibling =
+        jobAssets.find(
+          (asset) =>
+            asset.productionRole === "production_png" &&
+            !isReconstructionIntermediateAsset(asset) &&
+            signExecutionImplementationVersionOf(asset) === SIGN_EXECUTION_IMPLEMENTATION_VERSION,
+        ) ?? null;
+      if (currentImplementationSibling) {
+        productionAsset = currentImplementationSibling;
+      } else {
+        const latestValidation = await repo.getLatestProductionAssetValidationForJob(
+          job.projectId,
+          job.id,
+        );
+        if (!latestValidation || latestValidation.status !== "ready") {
+          productionAsset = null;
+        }
+      }
+    }
+
     let sourceSha256 = "";
     let contentBoundsWithinOutput = false;
     let contentBoundsReason = "";
@@ -2207,7 +2263,15 @@ export function createFinalArtworkWorkerCapability(
       );
 
       productionAsset = await assets.uploadProductionAsset(job.projectId, {
-        conceptId: `sign-${job.id}`,
+        // Rejected-Final Regeneration Phase: the storage-grouping id is
+        // qualified by the CURRENT execution implementation version, so a
+        // corrected regeneration lands at a DIFFERENT deterministic object
+        // key than any stale-implementation final this same job produced
+        // earlier — create-only storage semantics mean the historical
+        // object is never overwritten, and the key stays fully
+        // deterministic per (job, implementation version) so re-entry
+        // still self-heals/adopts rather than duplicating.
+        conceptId: `sign-${job.id}-${SIGN_EXECUTION_IMPLEMENTATION_VERSION}`,
         bytes: pngBytes,
         contentType: "image/png",
         widthPx: image.width,
@@ -2217,6 +2281,12 @@ export function createFinalArtworkWorkerCapability(
         productionRole: "production_png",
         metadata: {
           rigidSign: {
+            // Rejected-Final Regeneration Phase: which pixel-producing
+            // implementation actually drew this plate — see
+            // `SIGN_EXECUTION_IMPLEMENTATION_VERSION`'s own doc. An absent
+            // value on an older asset means the retroactive v1
+            // (pre-correction) implementation.
+            executionImplementationVersion: SIGN_EXECUTION_IMPLEMENTATION_VERSION,
             sourceAssetId: preparation.originalAssetId,
             sourceSha256,
             planKey: plan.planKey,
@@ -3458,8 +3528,26 @@ export function createFinalArtworkWorkerCapability(
       if (!job) {
         return { outcome: "refused", reason: "no_matching_job" };
       }
-      if (job.status !== "running" && job.status !== "failed") {
+      if (job.status !== "running" && job.status !== "failed" && job.status !== "completed") {
         return { outcome: "refused", reason: "job_status_not_reclaimable" };
+      }
+      // Rejected-Final Regeneration Phase: a "completed" job is reclaimable
+      // ONLY when its own latest validation exists and is blocking (not
+      // "ready") — i.e. the run genuinely finished but could not certify
+      // (the real incident: semantic verification correctly rejected a
+      // final drawn by a since-corrected implementation). A completed job
+      // whose validation IS ready has nothing to fix and stays refused, and
+      // a completed job with NO validation at all is a plan-level
+      // determination (`completeWithoutAsset`), not a persistence or
+      // certification stall — also refused.
+      if (job.status === "completed") {
+        const latestValidation = await repo.getLatestProductionAssetValidationForJob(
+          projectId,
+          job.id,
+        );
+        if (!latestValidation || latestValidation.status === "ready") {
+          return { outcome: "refused", reason: "job_status_not_reclaimable" };
+        }
       }
       if (job.status === "running") {
         const heartbeatAgeMs = job.heartbeatAt
@@ -3498,7 +3586,10 @@ export function createFinalArtworkWorkerCapability(
       // regardless of which branch reclaimed the lease.
       const claimed = await repo.updateFinalArtworkJob(job.id, {
         status: "running",
-        startedAt: job.status === "failed" ? new Date().toISOString() : job.startedAt,
+        // Only a stale "running" lease keeps its original startedAt (a
+        // continuation of the same still-open attempt) — "failed" and
+        // "completed" both have no attempt in flight, so both start fresh.
+        startedAt: job.status === "running" ? job.startedAt : new Date().toISOString(),
         heartbeatAt: new Date().toISOString(),
         lastError: null,
         completedAt: null,
@@ -3733,6 +3824,20 @@ function unsupportedFinalizationReason(
  * completely unchanged; only the definitions moved.
  */
 const describeFinalArtworkError = describeOperationError;
+
+/**
+ * Rejected-Final Regeneration Phase: the execution implementation version a
+ * sign final production asset recorded at persist time — `null` for an
+ * asset persisted before stamping existed (the retroactive v1,
+ * pre-correction implementation) or for any non-sign asset. Read-only
+ * metadata inspection; never a lineage or authorization judgment.
+ */
+function signExecutionImplementationVersionOf(asset: AssetRecord): string | null {
+  const rigidSign = (asset.metadata as Record<string, unknown> | null)?.rigidSign;
+  if (!rigidSign || typeof rigidSign !== "object") return null;
+  const version = (rigidSign as Record<string, unknown>).executionImplementationVersion;
+  return typeof version === "string" ? version : null;
+}
 /** Thin partial application preserving this file's own existing 2-arg call sites and log prefix unchanged. */
 function withOperationTiming<T>(label: string, fn: () => Promise<T>): Promise<T> {
   return sharedWithOperationTiming("final-artwork-persist", label, fn);

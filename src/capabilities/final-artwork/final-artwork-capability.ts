@@ -1015,21 +1015,30 @@ async function resolveSatisfiedSignProductionDelivery(
   const job = jobs.find((candidate) => candidate.signPlanKey === preparation.planKey);
   if (!job || job.status !== "completed") return null;
 
-  const assets = await repo.listAssets(projectId);
-  const asset = assets.find(
-    (candidate) =>
-      candidate.finalArtworkJobId === job.id &&
-      candidate.productionRole === "production_png" &&
-      !isReconstructionIntermediateAsset(candidate),
-  );
-  if (!asset) return null;
-
+  // Rejected-Final Regeneration Phase: the ready validation is the binding
+  // authority, so the delivered asset is resolved BY the validation's own
+  // recorded `assetId` — never "the first production_png on the job". A job
+  // can legitimately carry more than one final (a rejected, stale-
+  // implementation plate preserved as history alongside its corrected
+  // regeneration), and picking positionally would either deliver the wrong
+  // plate or spuriously fail the identity check below. Also narrowed from
+  // the former project-wide `listAssets` scan to the job-scoped indexed
+  // query, per the same Query-Narrowing discipline applied everywhere else.
   const validation = await repo.getLatestProductionAssetValidationForJob(
     projectId,
     job.id,
   );
   if (!validation || validation.status !== "ready") return null;
-  if (validation.assetId !== asset.id) return null;
+
+  const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
+  const asset = jobAssets.find(
+    (candidate) =>
+      candidate.id === validation.assetId &&
+      candidate.finalArtworkJobId === job.id &&
+      candidate.productionRole === "production_png" &&
+      !isReconstructionIntermediateAsset(candidate),
+  );
+  if (!asset) return null;
 
   return { job, assetId: asset.id };
 }

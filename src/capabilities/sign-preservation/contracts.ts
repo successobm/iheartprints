@@ -18,8 +18,20 @@
  * this is a genuine deterministic-evidence SHAPE change, so any prior
  * verification recorded under v1 must never be silently treated as still
  * matching the current evidence layout.
+ *
+ * Bumped to v3 at the Parametric Frame Geometry Defect Correction Phase:
+ * `checkParametricFrameRegions`' own expected-geometry model changed —
+ * `parametricFrameColorAt` now expects the OUTERMOST measured band
+ * (`bands[0]`) to continue through the aspect-correction gap to the
+ * protected interior, where it previously expected the flat `fillColor`
+ * fallback (the exact rendering defect that phase fixed on the executor
+ * side too). A verification recorded under v2 was judged against the OLD
+ * expected geometry and must never be silently treated as a verdict about
+ * the corrected one — the identity bump is what forces a fresh
+ * deterministic pass (and therefore a fresh combined semantic identity)
+ * for any asset verified after the correction.
  */
-export const SIGN_PRESERVATION_ALGORITHM_VERSION = "sign-preservation-deterministic:v2";
+export const SIGN_PRESERVATION_ALGORITHM_VERSION = "sign-preservation-deterministic:v3";
 
 /**
  * One deterministic check's own verdict, deliberately distinct from the

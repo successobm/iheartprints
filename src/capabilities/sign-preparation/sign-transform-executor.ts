@@ -37,6 +37,33 @@ import { deriveUniformBackgroundExtension } from "./sign-geometry";
 import { tiledRowColor, type SignPerimeterBandMeasurement, type SignPerimeterBandRow } from "./perimeter-reconstruction";
 import { frameDepthAt, type SignFrameBand } from "./frame-structure-model";
 
+/**
+ * Rejected-Final Regeneration Phase: the deterministic identity of THIS
+ * MODULE'S pixel-producing implementation — the executor-side sibling of
+ * `sign-preservation/contracts.ts`'s `SIGN_PRESERVATION_ALGORITHM_VERSION`
+ * (which identifies how output is VERIFIED, never how it is PRODUCED).
+ * Stamped into every sign final production asset's own `rigidSign`
+ * metadata at persist time, so the worker can distinguish "same plan,
+ * produced by the current implementation" from "same plan, produced by a
+ * since-corrected implementation" — the real incident this exists for: a
+ * final asset rendered by the pre-correction parametric-frame executor
+ * (its aspect-correction gap painted with the flat `fillColor` fallback)
+ * shares the plan's own `planKey` with a corrected rendering, and planKey
+ * alone must never keep such an asset reusable forever once the
+ * implementation that drew it has been fixed.
+ *
+ * Versioning discipline: `"sign-execution-v1"` is RETROACTIVE — the
+ * pre-correction implementation never stamped anything, so an ABSENT value
+ * means v1. Bump this whenever any admitted step's pixel-producing
+ * behavior changes (never for refactors that leave output byte-identical).
+ * Kept path-safe (lowercase, dashes) because it also qualifies the final
+ * asset's deterministic storage-grouping id — a corrected regeneration
+ * must land at a DIFFERENT deterministic object key than the stale final
+ * it supersedes (create-only storage semantics; the historical object is
+ * never overwritten).
+ */
+export const SIGN_EXECUTION_IMPLEMENTATION_VERSION = "sign-execution-v2";
+
 export interface SignExecutionBounds {
   x: number;
   y: number;

@@ -21,7 +21,10 @@ import type {
   SignReconstructionResumeInput,
   SignReconstructionResumeProvider,
 } from "@/capabilities/final-artwork/sign-reconstruction-provider";
-import { createSignPreparationCapability } from "@/capabilities/sign-preparation";
+import {
+  createSignPreparationCapability,
+  SIGN_EXECUTION_IMPLEMENTATION_VERSION,
+} from "@/capabilities/sign-preparation";
 import { exactAspectSignArtwork, toPngBytes } from "@/capabilities/sign-preparation/sign-fixtures";
 import { createSignPreservationCapability } from "@/capabilities/sign-preservation";
 import type {
@@ -30,7 +33,7 @@ import type {
   SignPreservationSemanticRequest,
 } from "@/capabilities/sign-preservation/sign-preservation-semantic-provider";
 import type { ProjectRepository } from "@/lib/db/repository";
-import type { FinalArtworkJob, FinalArtworkJobStatus } from "@/lib/domain/types";
+import type { AssetRecord, FinalArtworkJob, FinalArtworkJobStatus } from "@/lib/domain/types";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 import {
@@ -162,10 +165,25 @@ describe("Post-Provider Resume Phase: resumeSignFromPersistedIntermediate", () =
    * `reconstructionStage` marker, so `isReconstructionIntermediateAsset`
    * (and therefore `resolveExistingProductionAsset`) never mistakes it for
    * the pass1 intermediate.
+   *
+   * Rejected-Final Regeneration Phase: stamps the CURRENT execution
+   * implementation version by default (mirroring what the real worker now
+   * persists); pass `executionImplementationVersion: null` to seed the
+   * real incident's own shape — a final drawn by the pre-correction
+   * implementation, which never stamped anything.
    */
-  async function persistFinalAssetFor(assets: AssetCapability, projectId: string, job: FinalArtworkJob) {
+  async function persistFinalAssetFor(
+    assets: AssetCapability,
+    projectId: string,
+    job: FinalArtworkJob,
+    overrides: { executionImplementationVersion?: string | null } = {},
+  ) {
+    const executionImplementationVersion =
+      overrides.executionImplementationVersion === undefined
+        ? SIGN_EXECUTION_IMPLEMENTATION_VERSION
+        : overrides.executionImplementationVersion;
     return assets.uploadProductionAsset(projectId, {
-      conceptId: `sign-${job.id}-final`,
+      conceptId: `sign-${job.id}-final${executionImplementationVersion ? `-${executionImplementationVersion}` : ""}`,
       bytes: toPngBytes(exactAspectSignArtwork(1800, 2700)),
       contentType: "image/png",
       widthPx: 1800,
@@ -175,6 +193,7 @@ describe("Post-Provider Resume Phase: resumeSignFromPersistedIntermediate", () =
       productionRole: "production_png",
       metadata: {
         rigidSign: {
+          ...(executionImplementationVersion ? { executionImplementationVersion } : {}),
           planKey: "sign-repair-plan:v1:test",
           providerKey: "topaz_transparency_upscale",
         },
@@ -496,5 +515,163 @@ describe("Post-Provider Resume Phase: resumeSignFromPersistedIntermediate", () =
 
     const finalJob = await repo.getFinalArtworkJob(job.id);
     assert.equal(finalJob!.providerRecoveryAttempts, 5, "providerRecoveryAttempts untouched");
+  });
+
+  // -------------------------------------------------------------------
+  // Rejected-Final Regeneration Phase (real Signs acceptance incident: the
+  // semantic verifier correctly rejected a final drawn by the since-
+  // corrected parametric-frame implementation, leaving a completed job, a
+  // blocking validation, and a stale final sharing the plan's unchanged
+  // planKey). Every test uses the same throwing Topaz/OpenAI doubles as
+  // the rest of this suite — any provider touch fails the test outright.
+  // -------------------------------------------------------------------
+
+  function finalCandidatesOf(jobAssets: AssetRecord[]): AssetRecord[] {
+    return jobAssets.filter(
+      (a) =>
+        a.productionRole === "production_png" &&
+        (a.metadata as Record<string, unknown> | null)?.reconstructionStage !==
+          RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER,
+    );
+  }
+
+  function executionVersionOf(asset: AssetRecord): string | null {
+    const rigidSign = (asset.metadata as Record<string, unknown> | null)?.rigidSign;
+    if (!rigidSign || typeof rigidSign !== "object") return null;
+    const v = (rigidSign as Record<string, unknown>).executionImplementationVersion;
+    return typeof v === "string" ? v : null;
+  }
+
+  it("regenerates a corrected final: completed job + blocking validation + stale-implementation final -> new final from the SAME intermediate, history preserved, zero provider contact", async () => {
+    const { repo, assets, projectId, job } = await buildPreparedProject();
+    await persistIntermediateFor(assets, projectId, job, "historical-topaz-request-1");
+    const staleFinal = await persistFinalAssetFor(assets, projectId, job, {
+      executionImplementationVersion: null,
+    });
+    const blockingValidation = await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: staleFinal.id,
+      status: "finalization_required",
+      report: { fixture: "rejected by semantic verification under the pre-correction implementation" },
+    });
+    await stallJobPostPersist(repo, job, { status: "completed", providerRecoveryAttempts: 5 });
+
+    const { worker } = buildWorker(repo, assets);
+    const result = await worker.resumeSignFromPersistedIntermediate(projectId);
+    assert.equal(result.outcome, "attempted", "a completed job with a blocking validation is reclaimable");
+
+    const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
+    const finals = finalCandidatesOf(jobAssets);
+    assert.equal(finals.length, 2, "exactly one NEW corrected final alongside the preserved rejected one");
+    const preserved = finals.find((a) => a.id === staleFinal.id);
+    assert.ok(preserved, "the rejected final remains queryable, untouched");
+    assert.equal(executionVersionOf(preserved!), null, "the rejected final's own metadata was never rewritten");
+    const corrected = finals.find((a) => a.id !== staleFinal.id)!;
+    assert.equal(
+      executionVersionOf(corrected),
+      SIGN_EXECUTION_IMPLEMENTATION_VERSION,
+      "the new final records the current execution implementation",
+    );
+    assert.notEqual(corrected.storageKey, staleFinal.storageKey, "the new final landed at its own object key — nothing overwritten");
+
+    // The throwing semantic double stops this run at the semantic gate, so
+    // no NEW validation can exist yet (an incomplete verification must
+    // never reach PrintValidation) — what matters here is that the
+    // historical blocking validation is PRESERVED verbatim: same row, same
+    // status, still bound to the rejected plate, never mutated toward the
+    // regenerated one. (The full regenerate→verify→new-ready-validation
+    // chain is proven end-to-end by the delivery suite's own
+    // two-finals test, where the semantic fake affirms.)
+    const latestValidation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(latestValidation!.id, blockingValidation.id, "the historical validation row is preserved");
+    assert.equal(latestValidation!.status, "finalization_required", "its status was never mutated");
+    assert.equal(latestValidation!.assetId, staleFinal.id, "it still binds to the rejected plate, never the new one");
+
+    const finalJob = await repo.getFinalArtworkJob(job.id);
+    assert.equal(finalJob!.providerRecoveryAttempts, 5, "providerRecoveryAttempts untouched");
+  });
+
+  it("duplicate regeneration invocation converges — the corrected final is created at most once, never a growing pile", async () => {
+    const { repo, assets, projectId, job } = await buildPreparedProject();
+    await persistIntermediateFor(assets, projectId, job, "historical-topaz-request-1");
+    const staleFinal = await persistFinalAssetFor(assets, projectId, job, {
+      executionImplementationVersion: null,
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: staleFinal.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await stallJobPostPersist(repo, job, { status: "completed", providerRecoveryAttempts: 5 });
+
+    const { worker } = buildWorker(repo, assets);
+    const first = await worker.resumeSignFromPersistedIntermediate(projectId);
+    assert.equal(first.outcome, "attempted");
+
+    const afterFirst = finalCandidatesOf(await repo.listAssetsForFinalArtworkJob(projectId, job.id));
+    assert.equal(afterFirst.length, 2);
+    const correctedId = afterFirst.find((a) => a.id !== staleFinal.id)!.id;
+
+    // Whatever terminal state the first run reached (failed via the
+    // throwing semantic double, or completed-with-blocking-validation),
+    // both remain reclaimable — invoke again and prove convergence.
+    const second = await worker.resumeSignFromPersistedIntermediate(projectId);
+    assert.equal(second.outcome, "attempted", "a still-uncertified job remains reclaimable for retry");
+
+    const afterSecond = finalCandidatesOf(await repo.listAssetsForFinalArtworkJob(projectId, job.id));
+    assert.equal(afterSecond.length, 2, "no third final — the current-implementation sibling is reused");
+    assert.ok(
+      afterSecond.some((a) => a.id === correctedId),
+      "the second invocation converged on the SAME corrected final",
+    );
+
+    const finalJob = await repo.getFinalArtworkJob(job.id);
+    assert.equal(finalJob!.providerRecoveryAttempts, 5);
+  });
+
+  it("a completed job whose validation is READY stays refused — certification is never reopened by this action", async () => {
+    const { repo, assets, projectId, job } = await buildPreparedProject();
+    await persistIntermediateFor(assets, projectId, job, "historical-topaz-request-1");
+    const certifiedFinal = await persistFinalAssetFor(assets, projectId, job, {
+      executionImplementationVersion: null,
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: certifiedFinal.id,
+      status: "ready",
+      report: {},
+    });
+    await stallJobPostPersist(repo, job, { status: "completed", providerRecoveryAttempts: 5 });
+
+    const { worker } = buildWorker(repo, assets);
+    const result = await worker.resumeSignFromPersistedIntermediate(projectId);
+    assert.deepEqual(result, { outcome: "refused", reason: "job_status_not_reclaimable" });
+
+    const finals = finalCandidatesOf(await repo.listAssetsForFinalArtworkJob(projectId, job.id));
+    assert.equal(finals.length, 1, "nothing was regenerated");
+  });
+
+  it("a stale-implementation final with a READY validation is never churned — reclaim of a failed job reuses the certified plate", async () => {
+    const { repo, assets, projectId, job } = await buildPreparedProject();
+    await persistIntermediateFor(assets, projectId, job, "historical-topaz-request-1");
+    const certifiedFinal = await persistFinalAssetFor(assets, projectId, job, {
+      executionImplementationVersion: null,
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: certifiedFinal.id,
+      status: "ready",
+      report: {},
+    });
+    await stallJobPostPersist(repo, job, { status: "failed", providerRecoveryAttempts: 5 });
+
+    const { worker } = buildWorker(repo, assets);
+    const result = await worker.resumeSignFromPersistedIntermediate(projectId);
+    assert.equal(result.outcome, "attempted");
+
+    const finals = finalCandidatesOf(await repo.listAssetsForFinalArtworkJob(projectId, job.id));
+    assert.equal(finals.length, 1, "an implementation change alone never regenerates a certified plate");
+    assert.equal(finals[0]!.id, certifiedFinal.id);
   });
 });
