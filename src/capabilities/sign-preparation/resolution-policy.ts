@@ -21,6 +21,20 @@ import {
   RECONSTRUCTION_HEADROOM,
 } from "@/capabilities/final-artwork/topaz-transparency-upscale-provider";
 
+/**
+ * Structural Layout Reflow Phase 1 (Foundations): the minimum physical
+ * clearance meaningful content must keep from a rigid sign's finished cut
+ * edge, on all four sides. A single, central figure — never duplicated as
+ * a magic number anywhere else this value is needed (`SignProductionTemplate
+ * .minimumSafeInsetIn`, `signSafeInsetPx`). This is a genuine production
+ * fact (finishing/cutting tolerance), not an apparel figure and not
+ * derived from `targetPpi`/`minPpi` — it could in principle vary by
+ * policy exactly like they do, which is why it lives ON the policy row
+ * rather than as a single bare global constant; V1 has exactly one rigid-
+ * sign policy, so today every policy shares this same figure.
+ */
+export const SIGN_MINIMUM_SAFE_INSET_IN = 0.125;
+
 export interface SignResolutionPolicy {
   /** Stable identity, stamped onto confirmations and plans. Versioned. */
   id: string;
@@ -34,6 +48,8 @@ export interface SignResolutionPolicy {
    */
   shortSideMaxIn: number;
   longSideMaxIn: number;
+  /** See `SIGN_MINIMUM_SAFE_INSET_IN`'s own doc. */
+  minimumSafeInsetIn: number;
 }
 
 /**
@@ -48,6 +64,7 @@ export const RIGID_RECT_UP_TO_24X36_V1: SignResolutionPolicy = {
   minPpi: 100,
   shortSideMaxIn: 24,
   longSideMaxIn: 36,
+  minimumSafeInsetIn: SIGN_MINIMUM_SAFE_INSET_IN,
 };
 
 export const RIGID_SIGN_RESOLUTION_POLICIES: readonly SignResolutionPolicy[] = [

@@ -2,12 +2,17 @@ export * from "./contracts";
 export {
   RIGID_RECT_UP_TO_24X36_V1,
   RIGID_SIGN_RESOLUTION_POLICIES,
+  SIGN_MINIMUM_SAFE_INSET_IN,
   SIGN_RECONSTRUCTION_HEADROOM,
   SIGN_RECONSTRUCTION_SCALE_CEILING,
   getSignResolutionPolicyById,
   resolveSignResolutionPolicy,
   type SignResolutionPolicy,
 } from "./resolution-policy";
+export {
+  buildSignProductionTemplate,
+  signSafeInsetPx,
+} from "./sign-production-template";
 export { isValidOrderedDimensionIn, resolveSignProductionSpec } from "./sign-spec";
 export {
   EDGE_BACKGROUND_TOLERANCE,

@@ -79,15 +79,30 @@ function chebyshev(r1: number, g1: number, b1: number, r2: number, g2: number, b
 
 const BUCKET_SHIFT = 4;
 
-/** Dominant-colour coverage of ONE pixel line — the same bucket/membership technique `edge-inspection.ts` uses for a whole band, applied to a single row/column. */
-function measureLine(
+/** One pixel line's own dominant-colour membership measurement — see `measureLine`'s own doc. */
+export interface SignLineMeasurement {
+  dominantColor: SignPerimeterBandRow | null;
+  coverage: number;
+  transparentFraction: number;
+}
+
+/**
+ * Dominant-colour coverage of ONE pixel line — the same bucket/membership
+ * technique `edge-inspection.ts` uses for a whole band, applied to a
+ * single row/column. Exported (Structural Layout Reflow Phase 1) for
+ * `sign-layout-segmentation.ts`'s own reuse — the identical measurement
+ * this module already trusts for perimeter-band reconstructability,
+ * applied to full-width rows instead of edge-band lines. No behavior
+ * change to this module's own callers.
+ */
+export function measureLine(
   image: RgbaImage,
   x0: number,
   y0: number,
   dx: number,
   dy: number,
   length: number,
-): { dominantColor: SignPerimeterBandRow | null; coverage: number; transparentFraction: number } {
+): SignLineMeasurement {
   const data = image.data;
   const bucketCount = new Map<number, number>();
   const bucketSum = new Map<number, [number, number, number]>();

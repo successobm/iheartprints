@@ -304,6 +304,12 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-transform-executor-parametric-frame.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-capability.test.ts",
   "src/capabilities/sign-preparation/rigid-sign-category.test.ts",
+  // Structural Layout Reflow Phase 1 (Foundations): dormant reflow_
+  // structural_layout contract, SignProductionTemplate, the 0.125in safe
+  // inset policy, and the deterministic structural-layout segmentation
+  // module. Additive only — not wired into planning/execution.
+  "src/capabilities/sign-preparation/sign-structural-reflow-foundations.test.ts",
+  "src/capabilities/sign-preparation/sign-layout-segmentation.test.ts",
   // Signs Phase S2 (Constitution §16A): deterministic repair execution +
   // authoritative rigid_sign_raster validation. Zero provider dispatch.
   "src/capabilities/sign-preparation/sign-transform-executor.test.ts",

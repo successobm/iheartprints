@@ -391,6 +391,153 @@ export function framedSignArtwork(options: {
   return image;
 }
 
+/**
+ * Structural Layout Reflow Phase 1 (Foundations): banner-sign fixture
+ * family for `sign-layout-segmentation.ts`. These are a GENERAL synthetic
+ * banner shape (colored top/bottom bands with "content" inside them,
+ * middle content blocks, measured background gaps) — never the real
+ * customer's own wording or exact geometry, and deliberately generic so a
+ * fixture-specific detector could never pass these tests: the segmentation
+ * module must derive everything from measured colour/uniformity evidence
+ * alone.
+ *
+ * "Content" rows are built with `stripeContentRow` — full-width alternating
+ * colour stripes — rather than a single flat colour, because
+ * `segmentStructuralLayout` classifies each row independently across its
+ * FULL width: a row painted one solid colour is indistinguishable from fill
+ * no matter what colour it is, so genuine "content" rows must be internally
+ * non-uniform themselves (simulating text/icon rows), not merely a
+ * different colour from their neighbours.
+ */
+function stripeContentRow(
+  image: RgbaImage,
+  y: number,
+  colorA: Rgba,
+  colorB: Rgba,
+  stripeWidthPx = 24,
+): void {
+  for (let x = 0; x < image.width; x++) {
+    const color = Math.floor(x / stripeWidthPx) % 2 === 0 ? colorA : colorB;
+    const i = (y * image.width + x) * 4;
+    image.data[i] = color.r;
+    image.data[i + 1] = color.g;
+    image.data[i + 2] = color.b;
+    image.data[i + 3] = 255;
+  }
+}
+
+function stripeContentBlock(
+  image: RgbaImage,
+  y0: number,
+  y1: number, // exclusive
+  colorA: Rgba,
+  colorB: Rgba,
+  stripeWidthPx = 24,
+): void {
+  for (let y = y0; y < y1; y++) stripeContentRow(image, y, colorA, colorB, stripeWidthPx);
+}
+
+const BANNER_TOP_COLOR: Rgba = { r: 200, g: 28, b: 28 };
+const BANNER_BOTTOM_COLOR: Rgba = { r: 26, g: 58, b: 150 };
+const BANNER_BACKGROUND_COLOR: Rgba = { r: 10, g: 10, b: 10 };
+const CONTENT_A: Rgba = { r: 250, g: 250, b: 250 };
+const CONTENT_B: Rgba = { r: 40, g: 40, b: 40 };
+const CONTENT_C: Rgba = { r: 250, g: 200, b: 40 };
+const CONTENT_D: Rgba = { r: 40, g: 140, b: 200 };
+
+/**
+ * (1) Valid structured banner sign — the primary segmentation fixture.
+ * 900×800 (9:8): deliberately NOT the same aspect ratio as any admitted
+ * production template (e.g. 24×36in is 2:3) — segmentation must operate
+ * on SOURCE geometry alone, independent of any ordered target size.
+ *
+ * Top banner fill (edge-reaching) with content inside it, two separate
+ * measured-background-gap-separated middle content blocks, bottom banner
+ * fill (edge-reaching) with content inside it. Expected: 4 regions
+ * (`top_anchor`, `middle`, `middle`, `bottom_anchor`), 3 gaps.
+ */
+export function bannerSignArtwork(): RgbaImage {
+  const width = 900;
+  const height = 800;
+  const image = makeImage(width, height, BANNER_BACKGROUND_COLOR);
+
+  fillRect(image, 0, 0, width, 150, BANNER_TOP_COLOR); // top banner fill, touches y=0.
+  stripeContentBlock(image, 150, 230, CONTENT_A, CONTENT_B); // content inside top banner.
+  fillRect(image, 0, 230, width, 280, BANNER_BACKGROUND_COLOR); // gap 1.
+  stripeContentBlock(image, 280, 380, CONTENT_A, CONTENT_C); // middle content 1.
+  fillRect(image, 0, 380, width, 430, BANNER_BACKGROUND_COLOR); // gap 2.
+  stripeContentBlock(image, 430, 530, CONTENT_D, CONTENT_C); // middle content 2.
+  fillRect(image, 0, 530, width, 580, BANNER_BACKGROUND_COLOR); // gap 3.
+  stripeContentBlock(image, 580, 660, CONTENT_A, CONTENT_B); // content inside bottom banner.
+  fillRect(image, 0, 660, width, height, BANNER_BOTTOM_COLOR); // bottom banner fill, touches y=height.
+
+  return image;
+}
+
+/**
+ * (2) Ambiguous-background case — two directly adjacent full-width fill
+ * runs of genuinely different measured colours, no content anywhere. There
+ * is no single colour that can represent a "gap" between them; segmentation
+ * must fail closed (`status: "ambiguous"`), never guess which colour wins.
+ */
+export function ambiguousAdjacentFillArtwork(): RgbaImage {
+  const width = 900;
+  const height = 600;
+  const image = makeImage(width, height, BANNER_TOP_COLOR);
+  fillRect(image, 0, 300, width, height, BANNER_BOTTOM_COLOR);
+  return image;
+}
+
+/**
+ * (3) No-inter-region-gap case — two visually distinct "content" blocks
+ * (different stripe colours) painted back-to-back with NO separating fill
+ * run between them. Row-run-length-encoding merges consecutive content
+ * rows regardless of their own colours, so this must segment as ONE middle
+ * region spanning both blocks, not two — proving a measured background gap
+ * is what delineates separate regions, not a mere colour change within
+ * content.
+ */
+export function bannerSignNoGapMiddleArtwork(): RgbaImage {
+  const width = 900;
+  const height = 900;
+  const image = makeImage(width, height, BANNER_BACKGROUND_COLOR);
+
+  fillRect(image, 0, 0, width, 120, BANNER_TOP_COLOR);
+  stripeContentBlock(image, 120, 200, CONTENT_A, CONTENT_B);
+  fillRect(image, 0, 200, width, 250, BANNER_BACKGROUND_COLOR); // gap 1.
+  stripeContentBlock(image, 250, 350, CONTENT_A, CONTENT_C); // "block A" — no gap follows.
+  stripeContentBlock(image, 350, 450, CONTENT_D, CONTENT_C); // "block B" — directly adjacent to block A, must merge with it.
+  fillRect(image, 0, 450, width, 500, BANNER_BACKGROUND_COLOR); // gap 2.
+  stripeContentBlock(image, 500, 600, CONTENT_A, CONTENT_D); // a genuinely separate middle region.
+  fillRect(image, 0, 600, width, 650, BANNER_BACKGROUND_COLOR); // gap 3.
+  stripeContentBlock(image, 650, 730, CONTENT_A, CONTENT_B);
+  fillRect(image, 0, 730, width, height, BANNER_BOTTOM_COLOR);
+
+  return image;
+}
+
+/**
+ * (4) Meaningful content sitting directly at the top canvas edge (no
+ * banner fill before it at all) — for later safe-area reasoning, which
+ * needs to know a region's `contentBounds` can legitimately start at
+ * `startYPx === 0` with no owning fill (`fillColor: null`,
+ * `fillEdgeReaching: false`). A separate later content block (with its own
+ * edge-reaching bottom banner) keeps the top region's own measurement
+ * clean of that unrelated bottom absorption.
+ */
+export function bannerSignEdgeContentArtwork(): RgbaImage {
+  const width = 900;
+  const height = 1200;
+  const image = makeImage(width, height, BANNER_BACKGROUND_COLOR);
+
+  stripeContentBlock(image, 0, 90, CONTENT_A, CONTENT_B); // touches y=0 directly — no banner fill precedes it.
+  fillRect(image, 0, 90, width, 400, BANNER_BACKGROUND_COLOR); // gap.
+  stripeContentBlock(image, 400, 1120, CONTENT_A, CONTENT_C);
+  fillRect(image, 0, 1120, width, height, BANNER_BOTTOM_COLOR); // touches y=height.
+
+  return image;
+}
+
 /** No dominant edge colour anywhere — deterministic "cannot prove" case. */
 export function noisyEdgeSignArtwork(width = 400, height = 600): RgbaImage {
   const image = makeImage(width, height, NEAR_BLACK);

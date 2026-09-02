@@ -49,6 +49,41 @@ export interface SignProductionSpec {
   resolutionPolicyId: string;
 }
 
+/**
+ * Structural Layout Reflow Phase 1 (Foundations): the physical production
+ * canvas's own shape, in the closed vocabulary V1 admits. `straight_
+ * rectangle` is the ONLY member — deliberately no speculative future
+ * shapes added ahead of a real, separately-authorized need. See
+ * `SignProductionTemplate`'s own doc for why nothing derived from customer
+ * artwork may ever select a value here.
+ */
+export type SignProductionTemplateShape = "straight_rectangle";
+
+/**
+ * Structural Layout Reflow Phase 1 (Foundations): the AUTHORITATIVE
+ * physical production canvas — real Signs acceptance incident: the
+ * pipeline had been treating the customer's own drawn perimeter (frame
+ * bands, corner rounding, a decorative border) as though it defined the
+ * finished substrate. It never does. The ordered dimensions ALONE define
+ * the physical cut area, and for V1 that cut area is always a straight
+ * rectangle — Print'em All ships rigid-sign production files this way
+ * regardless of any rounded/decorative treatment drawn INSIDE the
+ * artwork. `buildSignProductionTemplate` (`sign-production-template.ts`)
+ * is the only constructor, and it is built from `SignProductionSpec` +
+ * `SignResolutionPolicy` alone — no inspection report, no measured frame
+ * model, no pixel of customer artwork is ever a parameter, which is what
+ * makes it structurally impossible for a customer's rounded corner, frame
+ * radius, or hole placement to select `shape` or otherwise redefine this
+ * template.
+ */
+export interface SignProductionTemplate {
+  widthIn: number;
+  heightIn: number;
+  shape: SignProductionTemplateShape;
+  /** See `SIGN_MINIMUM_SAFE_INSET_IN` (`resolution-policy.ts`) — a policy figure, carried here so every consumer reads one authoritative value rather than re-importing the policy separately. */
+  minimumSafeInsetIn: number;
+}
+
 export type SignSpecMissing =
   | "ordered_width"
   | "ordered_height"
@@ -305,6 +340,28 @@ export type SignRepairStepKind =
    * in a plan-time prediction.
    */
   | "reconstruct_parametric_frame"
+  /**
+   * Structural Layout Reflow Phase 1 (Foundations): DORMANT in this phase —
+   * defined here so the plan-identity/serialization machinery and future
+   * planner/executor work have a stable, closed-vocabulary name to target,
+   * but neither `sign-repair-planner.ts` nor `sign-transform-executor.ts`
+   * emits or executes it yet (see each module's own doc for confirmation
+   * once wired). Distinct in kind from `reconstruct_parametric_frame`,
+   * never an overload of it: that step treats the SOURCE artwork's own
+   * measured perimeter/frame geometry as the finished substrate boundary
+   * to redraw — the real Signs acceptance incident that motivated this
+   * phase proved that model wrong for ordinary rectangular signs (the
+   * ORDERED cut template, never the artwork, defines the physical
+   * boundary; Print'em All ships these as straight rectangles). This step
+   * instead treats the source as a sequence of structural regions
+   * (`sign-layout-segmentation.ts`) that TRANSLATE onto the authoritative
+   * `SignProductionTemplate`, with their own measured background/fill
+   * extended to reach the cut edges where authorized and the redistributed
+   * spacing between them derived from the source's own proportions —
+   * never a redraw of source perimeter geometry as substrate shape, never
+   * non-uniform scaling of meaningful content, never generative fill.
+   */
+  | "reflow_structural_layout"
   | "proportional_resample"
   | "downsample"
   | "approved_crop"
