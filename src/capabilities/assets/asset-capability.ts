@@ -11,14 +11,44 @@
 
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { AssetKind, AssetRecord, ProductionAssetRole } from "@/lib/domain/types";
-import { buildObjectKey, type AssetStorageProvider } from "@/capabilities/asset-storage";
+import {
+  buildObjectKey,
+  DataUriAssetStorageProvider,
+  type AssetStorageProvider,
+} from "@/capabilities/asset-storage";
 import { asPaidImagePersistenceError } from "@/capabilities/shared/paid-image-failure";
-import { withOperationTiming as sharedWithOperationTiming } from "@/capabilities/shared/safe-error-description";
+import {
+  boundedErrorDescription,
+  describeOperationError,
+  withOperationTiming as sharedWithOperationTiming,
+} from "@/capabilities/shared/safe-error-description";
 import type { ThumbnailGenerator } from "./thumbnail-generator";
 
 /** Thin partial application — this module's own fixed log prefix, so every call site below stays a plain 2-arg call. */
 function withOperationTiming<T>(label: string, fn: () => Promise<T>): Promise<T> {
   return sharedWithOperationTiming("assets", label, fn);
+}
+
+/**
+ * Production Asset Storage Correction Phase (real Signs acceptance
+ * incident): historical-representation-aware reads. `ASSET_STORAGE_MODE`
+ * decides what NEW uploads use, but a `storageKey` already persisted under a
+ * DIFFERENT mode (most concretely: this real environment's own history of
+ * `data_uri` rows, before this phase switched the configured default to
+ * `supabase_storage`) must remain readable forever — the active provider is
+ * never consulted for a key whose OWN representation is self-describing. A
+ * data URI carries its bytes inline (see `DataUriAssetStorageProvider`'s own
+ * doc) and needs no provider round-trip to read; this fallback instance is
+ * stateless and provider-neutral, so using it here — regardless of which
+ * provider is actually configured — is never a second storage backend to
+ * keep in sync, only a read-side interpretation of one self-contained
+ * representation. Never used for NEW uploads — `resolveAssetStorageProvider`
+ * remains the only decision about where new bytes go.
+ */
+const DATA_URI_FALLBACK_PROVIDER = new DataUriAssetStorageProvider();
+
+function isDataUriObjectKey(objectKey: string): boolean {
+  return objectKey.startsWith("data:");
 }
 
 /**
@@ -160,6 +190,59 @@ async function findAdoptableProductionAsset(
     ) ?? null
   );
 }
+
+/**
+ * Production Asset Storage Correction Phase (real Signs acceptance
+ * incident: an intermediate asset for the exact same job was ultimately
+ * found durably persisted despite the client-visible `createAsset` call
+ * having errored with SQLSTATE 57014): which `createAsset` failures are
+ * classified "ambiguous" — capable of having actually committed despite the
+ * client seeing an error — versus a failure safe to treat as a confirmed
+ * non-write. Deliberately narrow: 57014 (`statement_timeout`) is Postgres
+ * cancelling a statement already in flight, on the response path, after the
+ * write may already have reached disk — never assumed to mean "nothing
+ * happened", the same discipline already established for storage transport
+ * errors. The same transport-reset codes used for storage retry
+ * (`RETRYABLE_TRANSPORT_ERROR_CODES`) are reused here for the identical
+ * reason: a connection reset can happen after the server's own commit, not
+ * only before it. Every other error (a validation failure, a uniqueness
+ * violation, "permission denied") is a confirmed non-write or a confirmed
+ * rejection — never given the extra delayed look; blanket-classifying every
+ * DB error as ambiguous would only add latency to genuine failures.
+ */
+const AMBIGUOUS_DB_WRITE_SQLSTATES = new Set(["57014"]);
+
+function isAmbiguousDbWriteError(error: unknown): boolean {
+  if (error && typeof error === "object") {
+    const code = (error as { code?: unknown }).code;
+    if (
+      typeof code === "string" &&
+      (AMBIGUOUS_DB_WRITE_SQLSTATES.has(code) || RETRYABLE_TRANSPORT_ERROR_CODES.has(code))
+    ) {
+      return true;
+    }
+    const cause = (error as { cause?: unknown }).cause;
+    if (cause && typeof cause === "object") {
+      const causeCode = (cause as { code?: unknown }).code;
+      if (
+        typeof causeCode === "string" &&
+        (AMBIGUOUS_DB_WRITE_SQLSTATES.has(causeCode) || RETRYABLE_TRANSPORT_ERROR_CODES.has(causeCode))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Bounded, deterministic, single extra wait before the ONE additional
+ * lineage lookup for an ambiguous `createAsset` failure — never a loop,
+ * never a second INSERT. Long enough to give a genuinely-in-flight commit a
+ * real chance to become visible; short enough to bound worst-case added
+ * latency to a single constant.
+ */
+const AMBIGUOUS_CREATE_ASSET_SELF_HEAL_DELAY_MS = 400;
 
 /** Signed URLs default to a short lifetime — "Signed URLs should expire." */
 export const DEFAULT_SIGNED_URL_EXPIRY_SECONDS = 300;
@@ -395,43 +478,95 @@ export function createAssetCapability(
         uploadStorageWithSelfHealAndBoundedRetry(storage, uploadInput),
       );
 
+      // Manual timing (not `withOperationTiming`) so the RAW caught error
+      // — with its own `.code`/`.cause.code` intact — is available to
+      // `isAmbiguousDbWriteError` below. `withOperationTiming` would already
+      // have replaced it with a new plain `Error` carrying only a formatted
+      // message by the time a catch block here could inspect it, exactly
+      // like `runSignReconstructionAndContinue`'s own produce-vs-resume
+      // dispatch already avoids that helper for the same reason. The final
+      // thrown error still carries the identical
+      // `"<label> failed after <n>ms: <safe description>"` shape either way.
+      const createAssetStartedAt = Date.now();
       try {
-        return await withOperationTiming("uploadProductionAsset.createAsset", () =>
-          repo.createAsset(designId, {
-            kind: "generated_artwork",
-            storageKey: uploaded.objectKey,
-            contentType: input.contentType,
-            isThumbnail: false,
-            widthPx: input.widthPx,
-            heightPx: input.heightPx,
-            hasTransparency: input.hasTransparency,
-            providerKey: null,
-            generationJobId: null,
-            metadata: input.metadata,
-            vectorAssetId: null,
-            printAssetId: null,
-            finalArtworkJobId: input.finalArtworkJobId,
-            productionRole: input.productionRole,
-          }),
+        const created = await repo.createAsset(designId, {
+          kind: "generated_artwork",
+          storageKey: uploaded.objectKey,
+          contentType: input.contentType,
+          isThumbnail: false,
+          widthPx: input.widthPx,
+          heightPx: input.heightPx,
+          hasTransparency: input.hasTransparency,
+          providerKey: null,
+          generationJobId: null,
+          metadata: input.metadata,
+          vectorAssetId: null,
+          printAssetId: null,
+          finalArtworkJobId: input.finalArtworkJobId,
+          productionRole: input.productionRole,
+        });
+        console.info(
+          `[assets] operation=uploadProductionAsset.createAsset elapsed_ms=${Date.now() - createAssetStartedAt} outcome=success`,
         );
-      } catch (error) {
-        const adopted = await findAdoptableProductionAsset(
-          repo,
-          designId,
-          input.finalArtworkJobId,
-          input.productionRole,
-          uploaded.objectKey,
+        return created;
+      } catch (rawError) {
+        const elapsedMs = Date.now() - createAssetStartedAt;
+        console.info(
+          `[assets] operation=uploadProductionAsset.createAsset elapsed_ms=${elapsedMs} outcome=error`,
         );
-        if (adopted) return adopted;
+        const labeledError = new Error(
+          boundedErrorDescription(
+            `uploadProductionAsset.createAsset failed after ${elapsedMs}ms: ${describeOperationError(rawError)}`,
+          ),
+        );
+
+        const immediatelyAdopted = await withOperationTiming(
+          "uploadProductionAsset.createAsset.immediateLineageLookup",
+          () =>
+            findAdoptableProductionAsset(
+              repo,
+              designId,
+              input.finalArtworkJobId,
+              input.productionRole,
+              uploaded.objectKey,
+            ),
+        );
+        if (immediatelyAdopted) return immediatelyAdopted;
+
+        // Production Asset Storage Correction Phase: an ambiguous DB-write
+        // failure (SQLSTATE 57014, or a transport reset that could equally
+        // have happened after the server's own commit) gets ONE bounded,
+        // deterministic extra chance to become visible before cleanup runs
+        // — never a second INSERT, never a loop. A non-ambiguous failure
+        // (a validation error, a uniqueness violation) skips straight to
+        // cleanup: the immediate lookup already found nothing, and there is
+        // no reason to believe waiting would change that.
+        if (isAmbiguousDbWriteError(rawError)) {
+          await delay(AMBIGUOUS_CREATE_ASSET_SELF_HEAL_DELAY_MS);
+          const delayedAdopted = await withOperationTiming(
+            "uploadProductionAsset.createAsset.delayedLineageLookup",
+            () =>
+              findAdoptableProductionAsset(
+                repo,
+                designId,
+                input.finalArtworkJobId,
+                input.productionRole,
+                uploaded.objectKey,
+              ),
+          );
+          if (delayedAdopted) return delayedAdopted;
+        }
 
         // Same orphan-cleanup guarantee as uploadConceptImage — only
-        // reached once we've confirmed no row adopted this object, so
-        // cleanup can never delete something a successful continuation is
-        // now relying on.
+        // reached once both lookups (immediate, and — for an ambiguous
+        // failure — the bounded delayed retry) confirmed no row adopted
+        // this object, so cleanup can never delete something a successful
+        // continuation is now relying on. Still bounded: this is not
+        // unbounded orphan preservation, only a single deterministic wait.
         await withOperationTiming("uploadProductionAsset.cleanupStorage", () =>
           safeDelete(storage, uploaded.objectKey),
         );
-        throw error;
+        throw labeledError;
       }
     },
 
@@ -473,16 +608,23 @@ export function createAssetCapability(
     async getSignedUrl(assetId, expiresInSeconds) {
       const asset = await repo.getAssetById(assetId);
       if (!asset || !asset.storageKey) return null;
-      return storage.getSignedUrl(
-        asset.storageKey,
-        clampSignedUrlExpirySeconds(expiresInSeconds),
-      );
+      const expirySeconds = clampSignedUrlExpirySeconds(expiresInSeconds);
+      // Historical-representation-aware read: a data URI is self-contained
+      // and never needs the configured provider — see
+      // `DATA_URI_FALLBACK_PROVIDER`'s own doc.
+      // `DataUriAssetStorageProvider.getSignedUrl` ignores expiry (a data
+      // URI is already a self-contained, non-expiring representation).
+      return isDataUriObjectKey(asset.storageKey)
+        ? DATA_URI_FALLBACK_PROVIDER.getSignedUrl(asset.storageKey)
+        : storage.getSignedUrl(asset.storageKey, expirySeconds);
     },
 
     async downloadAssetBytes(assetId) {
       const asset = await repo.getAssetById(assetId);
       if (!asset || !asset.storageKey) return null;
-      const bytes = await storage.download(asset.storageKey);
+      const bytes = isDataUriObjectKey(asset.storageKey)
+        ? await DATA_URI_FALLBACK_PROVIDER.download(asset.storageKey)
+        : await storage.download(asset.storageKey);
       return { bytes, contentType: asset.contentType ?? "application/octet-stream" };
     },
 
@@ -490,7 +632,13 @@ export function createAssetCapability(
       const asset = await repo.getAssetById(assetId);
       if (!asset) return;
       if (asset.storageKey) {
-        await safeDelete(storage, asset.storageKey);
+        // A data URI has nothing external to remove (`DataUriAssetStorageProvider.delete`
+        // is already a no-op) — routing it there rather than the configured
+        // provider only matters if that provider would otherwise misinterpret
+        // the data URI string as one of its own object keys.
+        await (isDataUriObjectKey(asset.storageKey)
+          ? safeDelete(DATA_URI_FALLBACK_PROVIDER, asset.storageKey)
+          : safeDelete(storage, asset.storageKey));
       }
       await repo.deleteAsset(assetId);
     },
