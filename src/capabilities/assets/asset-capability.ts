@@ -11,9 +11,155 @@
 
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { AssetKind, AssetRecord, ProductionAssetRole } from "@/lib/domain/types";
-import type { AssetStorageProvider } from "@/capabilities/asset-storage";
+import { buildObjectKey, type AssetStorageProvider } from "@/capabilities/asset-storage";
 import { asPaidImagePersistenceError } from "@/capabilities/shared/paid-image-failure";
+import { withOperationTiming as sharedWithOperationTiming } from "@/capabilities/shared/safe-error-description";
 import type { ThumbnailGenerator } from "./thumbnail-generator";
+
+/** Thin partial application — this module's own fixed log prefix, so every call site below stays a plain 2-arg call. */
+function withOperationTiming<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  return sharedWithOperationTiming("assets", label, fn);
+}
+
+/**
+ * Intermediate-Asset-Persistence-Durability Phase (real Signs acceptance
+ * incident: SQLSTATE 57014 and ECONNRESET both observed at this exact
+ * boundary across real recovery attempts): bounded, narrow retry ONLY for
+ * error classes independently established as capable of occurring AFTER a
+ * connection was already carrying real bytes — never assumed to mean
+ * "nothing was sent" (that would be exactly the mistake this phase's own
+ * audit was told not to make). Mirrors the admission discipline
+ * `provider-error.ts`'s `PROVABLY_PRE_DISPATCH_CODES` documents for a
+ * different boundary: a code belongs here only because retrying it is
+ * safe GIVEN the self-heal existence-check this module always runs first
+ * (see `uploadWithExistenceCheckAndBoundedRetry`) — never because the
+ * code alone "looks transient".
+ */
+const RETRYABLE_TRANSPORT_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ECONNABORTED",
+  "EPIPE",
+  "UND_ERR_SOCKET",
+]);
+
+/** Maximum ADDITIONAL attempts after the first — never the total attempt count. */
+const MAX_PERSISTENCE_TRANSPORT_RETRY_ATTEMPTS = 2;
+
+function isRetryableTransportError(error: unknown): boolean {
+  if (error && typeof error === "object") {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && RETRYABLE_TRANSPORT_ERROR_CODES.has(code)) return true;
+    const cause = (error as { cause?: unknown }).cause;
+    if (cause && typeof cause === "object") {
+      const causeCode = (cause as { code?: unknown }).code;
+      if (typeof causeCode === "string" && RETRYABLE_TRANSPORT_ERROR_CODES.has(causeCode)) return true;
+    }
+  }
+  // Node/undici commonly wraps the underlying socket error in a bare
+  // "fetch failed" TypeError whose OWN `.code` is absent — the real code
+  // lives on `.cause` (already checked above). This catches the rare case
+  // where even that's missing but the message still names it.
+  if (error instanceof Error && /fetch failed/i.test(error.message)) return true;
+  return false;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Read-only, provider-neutral existence check using `AssetStorageProvider`'s
+ * ALREADY-EXISTING `download` method — no new interface primitive added.
+ * `buildObjectKey`'s own determinism (same `projectId`+`conceptId`+
+ * `fileName` always resolves to the same key) is what makes this a
+ * meaningful check at all: if a PRIOR attempt's bytes already landed at
+ * this exact key, this finds them. Byte-length equality is a real, but
+ * deliberately modest, match check ("where available", per this phase's
+ * own design brief) — not a cryptographic guarantee, just enough to reject
+ * an unrelated stale object at a key that shouldn't normally collide.
+ */
+async function objectAlreadyLandedAt(
+  storage: AssetStorageProvider,
+  objectKey: string,
+  expectedByteLength: number,
+): Promise<boolean> {
+  try {
+    const bytes = await storage.download(objectKey);
+    return bytes.length === expectedByteLength;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Intermediate-Asset-Persistence-Durability Phase: the storage-upload sub-
+ * step, hardened with a self-heal-then-bounded-retry design —
+ * "CHECK FOR SUCCESS, RETRY ONLY IF SAFE", never a blind repeated write.
+ *
+ * On ANY upload failure (regardless of classification — never assumed to
+ * mean "the server did nothing", per this phase's own explicit audit
+ * requirement), first checks whether the deterministic object already
+ * landed (`objectAlreadyLandedAt`). If so, the upload already succeeded —
+ * adopt it immediately, no retry, no duplicate write. Only when the object
+ * genuinely does not exist AND the failure is one independently classified
+ * as capable of occurring without the server having accepted anything
+ * (`isRetryableTransportError`) does this retry, bounded to
+ * `MAX_PERSISTENCE_TRANSPORT_RETRY_ATTEMPTS` additional attempts with a
+ * short linear backoff. A non-retryable failure (or a retryable one that's
+ * exhausted its budget) propagates immediately.
+ */
+async function uploadStorageWithSelfHealAndBoundedRetry(
+  storage: AssetStorageProvider,
+  input: { projectId: string; conceptId: string; fileName: string; bytes: Buffer; contentType: string },
+): Promise<{ objectKey: string }> {
+  const objectKey = buildObjectKey(input);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await storage.upload(input);
+    } catch (error) {
+      if (await objectAlreadyLandedAt(storage, objectKey, input.bytes.length)) {
+        return { objectKey };
+      }
+      if (!isRetryableTransportError(error) || attempt >= MAX_PERSISTENCE_TRANSPORT_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      await delay(250 * (attempt + 1));
+    }
+  }
+}
+
+/**
+ * Intermediate-Asset-Persistence-Durability Phase: after a `createAsset`
+ * failure, checks whether the INSERT actually committed despite the
+ * client-side error (a `statement_timeout` can fire on the response path
+ * after Postgres already wrote the row; a connection reset can happen
+ * after the server's own commit). No automatic in-process retry is
+ * attempted for `createAsset` itself (see this phase's own report for why
+ * a same-process retry has low expected value against the specific
+ * SQLSTATE 57014 failures observed here) — this self-heal check is what
+ * makes a LATER, outer retry (the existing, human-gated "resume existing
+ * provider result" action, or any other caller of
+ * `persistIntermediateReconstruction`) safe: it will find this exact row
+ * via `listAssetsForFinalArtworkJob` and adopt it rather than duplicating.
+ * Matches on `finalArtworkJobId` + `productionRole` + the exact
+ * `storageKey` this attempt just uploaded to — the deterministic key
+ * makes this precise, not merely "a" matching row.
+ */
+async function findAdoptableProductionAsset(
+  repo: ProjectRepository,
+  projectId: string,
+  finalArtworkJobId: string,
+  productionRole: ProductionAssetRole,
+  storageKey: string,
+): Promise<AssetRecord | null> {
+  const candidates = await repo.listAssetsForFinalArtworkJob(projectId, finalArtworkJobId);
+  return (
+    candidates.find(
+      (asset) => asset.productionRole === productionRole && asset.storageKey === storageKey,
+    ) ?? null
+  );
+}
 
 /** Signed URLs default to a short lifetime — "Signed URLs should expire." */
 export const DEFAULT_SIGNED_URL_EXPIRY_SECONDS = 300;
@@ -237,34 +383,54 @@ export function createAssetCapability(
     },
 
     async uploadProductionAsset(designId, input) {
-      const uploaded = await storage.upload({
+      const uploadInput = {
         projectId: designId,
         conceptId: input.conceptId,
         fileName: `production${extensionForContentType(input.contentType)}`,
         bytes: input.bytes,
         contentType: input.contentType,
-      });
+      };
+
+      const uploaded = await withOperationTiming("uploadProductionAsset.storageUpload", () =>
+        uploadStorageWithSelfHealAndBoundedRetry(storage, uploadInput),
+      );
 
       try {
-        return await repo.createAsset(designId, {
-          kind: "generated_artwork",
-          storageKey: uploaded.objectKey,
-          contentType: input.contentType,
-          isThumbnail: false,
-          widthPx: input.widthPx,
-          heightPx: input.heightPx,
-          hasTransparency: input.hasTransparency,
-          providerKey: null,
-          generationJobId: null,
-          metadata: input.metadata,
-          vectorAssetId: null,
-          printAssetId: null,
-          finalArtworkJobId: input.finalArtworkJobId,
-          productionRole: input.productionRole,
-        });
+        return await withOperationTiming("uploadProductionAsset.createAsset", () =>
+          repo.createAsset(designId, {
+            kind: "generated_artwork",
+            storageKey: uploaded.objectKey,
+            contentType: input.contentType,
+            isThumbnail: false,
+            widthPx: input.widthPx,
+            heightPx: input.heightPx,
+            hasTransparency: input.hasTransparency,
+            providerKey: null,
+            generationJobId: null,
+            metadata: input.metadata,
+            vectorAssetId: null,
+            printAssetId: null,
+            finalArtworkJobId: input.finalArtworkJobId,
+            productionRole: input.productionRole,
+          }),
+        );
       } catch (error) {
-        // Same orphan-cleanup guarantee as uploadConceptImage.
-        await safeDelete(storage, uploaded.objectKey);
+        const adopted = await findAdoptableProductionAsset(
+          repo,
+          designId,
+          input.finalArtworkJobId,
+          input.productionRole,
+          uploaded.objectKey,
+        );
+        if (adopted) return adopted;
+
+        // Same orphan-cleanup guarantee as uploadConceptImage — only
+        // reached once we've confirmed no row adopted this object, so
+        // cleanup can never delete something a successful continuation is
+        // now relying on.
+        await withOperationTiming("uploadProductionAsset.cleanupStorage", () =>
+          safeDelete(storage, uploaded.objectKey),
+        );
         throw error;
       }
     },

@@ -618,17 +618,17 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
 
   it("Diagnostic Hardening 6: an object with no allowed shallow scalar fields falls back to the generic message (behind the operation label)", async () => {
     const lastError = await lastErrorForThrownUploadValue({ nested: { message: "buried, never read" } });
-    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Final artwork production failed for an unknown reason\.$/);
+    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Operation failed for an unknown reason.$/);
   });
 
   it("Diagnostic Hardening 7: a null throw falls back to the generic message (behind the operation label)", async () => {
     const lastError = await lastErrorForThrownUploadValue(null);
-    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Final artwork production failed for an unknown reason\.$/);
+    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Operation failed for an unknown reason.$/);
   });
 
   it("Diagnostic Hardening 8: an undefined throw falls back to the generic message (behind the operation label)", async () => {
     const lastError = await lastErrorForThrownUploadValue(undefined);
-    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Final artwork production failed for an unknown reason\.$/);
+    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Operation failed for an unknown reason.$/);
   });
 
   it("Diagnostic Hardening 9: a circular object never crashes the formatter", async () => {

@@ -120,6 +120,10 @@ import {
 } from "@/capabilities/sign-preservation";
 import { ProviderError } from "@/capabilities/providers/provider-error";
 import { attachAttentionCheckName } from "@/capabilities/shared/production-variant";
+import {
+  describeOperationError,
+  withOperationTiming as sharedWithOperationTiming,
+} from "@/capabilities/shared/safe-error-description";
 
 import { decodePngUpload } from "@/capabilities/artwork-preparation/image-decode";
 import {
@@ -3592,121 +3596,19 @@ function unsupportedFinalizationReason(
 }
 
 /**
- * Diagnostic-Hardening Phase (real Signs acceptance incident): the ONLY
- * scalar fields ever read off a non-`Error` thrown/rejected value, in this
- * exact priority order. Every name here was chosen because it is a plain,
- * human-readable label (never a secret, credential, or a full request/
- * response payload) — deliberately the same shape `PostgrestError`/
- * `StorageError`/`ProviderError` themselves already expose. This is a strict
- * ALLOWLIST, not a denylist: a field not named here is never read, no
- * matter what it's called, so there is no separate "sensitive field" list
- * to keep in sync — leaving one out here is the only way to exclude it.
+ * Intermediate-Asset-Persistence-Durability Phase: `describeFinalArtworkError`/
+ * `withOperationTiming` moved to the shared, provider-neutral
+ * `safe-error-description.ts` module so `AssetCapability`'s own
+ * persistence sub-steps (a genuinely different capability) can reuse the
+ * identical formatter/timing wrapper rather than a second, possibly-
+ * drifting copy — every call site in THIS file keeps calling
+ * `describeFinalArtworkError(error)`/`withOperationTiming(label, fn)`
+ * completely unchanged; only the definitions moved.
  */
-const ERROR_DESCRIPTION_ALLOWED_FIELDS = [
-  "message",
-  "msg",
-  "error",
-  "code",
-  "status",
-  "statusCode",
-  "name",
-  "details",
-  "hint",
-] as const;
-
-/** Hard ceiling on the resulting diagnostic string — never grows unbounded from a hostile or oversized caught value. */
-const MAX_ERROR_DESCRIPTION_LENGTH = 500;
-
-function boundedErrorDescription(value: string): string {
-  return value.length > MAX_ERROR_DESCRIPTION_LENGTH
-    ? `${value.slice(0, MAX_ERROR_DESCRIPTION_LENGTH)}…`
-    : value;
-}
-
-/**
- * Final Recovery Instrumentation Phase (real Signs acceptance incident,
- * reproducible SQLSTATE 57014): wraps ONE Supabase/PostgREST/storage
- * operation in the sign/apparel intermediate-persistence path with a label
- * and elapsed-ms timing, purely so a future failure identifies WHICH
- * repository operation was slow — never used to change control flow.
- *
- * On success, logs a concise, non-sensitive timing line and returns the
- * result unchanged. On failure, logs the same line with `outcome=error`,
- * then re-throws a NEW `Error` whose message is
- * `"<label> failed after <n>ms: <safe description>"` — the safe description
- * comes from `describeFinalArtworkError` itself, so this introduces no new
- * leakage surface beyond what that function already allows (its own doc
- * comment: no secrets, no signed URLs, no request/response bodies — only a
- * fixed allowlist of scalar fields). The original error's own type/identity
- * is intentionally NOT preserved — every call site this wraps is a leaf DB/
- * storage call whose result nothing downstream inspects by
- * `instanceof`/`.classification`/`.dispatch` (unlike the provider-dispatch
- * call in `runSignReconstructionAndContinue`, which is deliberately NOT
- * wrapped with this helper — see the comment at that call site for why).
- */
-async function withOperationTiming<T>(label: string, fn: () => Promise<T>): Promise<T> {
-  const startedAt = Date.now();
-  try {
-    const result = await fn();
-    console.info(`[final-artwork-persist] operation=${label} elapsed_ms=${Date.now() - startedAt} outcome=success`);
-    return result;
-  } catch (error) {
-    const elapsedMs = Date.now() - startedAt;
-    console.info(`[final-artwork-persist] operation=${label} elapsed_ms=${elapsedMs} outcome=error`);
-    // Bounded the same way `describeFinalArtworkError` itself bounds its own
-    // output — the label+timing prefix must never push the TOTAL persisted
-    // message past the same length ceiling.
-    throw new Error(boundedErrorDescription(`${label} failed after ${elapsedMs}ms: ${describeFinalArtworkError(error)}`));
-  }
-}
-
-/**
- * Sanitized, non-secret description — safe to store as `FinalArtworkJob.lastError`
- * (internal only; confirmed by audit that no current call site ever surfaces
- * this raw value to a customer — `resolveAttentionCheckName` in
- * `production-variant.ts` short-circuits to `null` for every non-`completed`
- * status, which is every status this function's callers ever produce, and
- * even for a `completed` job it extracts only a regex-marked safe code,
- * never this string's own content).
- *
- * Diagnostic-Hardening Phase: previously fell straight to the generic
- * fallback for anything that wasn't a proper `Error` with a message — a real
- * Signs acceptance job hit exactly that gap (traced across `ProviderError`,
- * `@supabase/storage-js`, and `@supabase/postgrest-js`; every one of THOSE
- * is a well-formed `Error`, so the true cause remains unidentified, but the
- * NEXT time something else throws a bare string/object/primitive, this
- * makes it diagnosable without server log access). Deliberately never calls
- * `JSON.stringify` on an arbitrary caught value and never recurses into a
- * nested object — only the named scalar fields above are ever read, so a
- * caught value carrying credentials, a signed URL, or a full request/
- * response body (none of which are among the allowed field names) can never
- * leak through this function, and a circular reference elsewhere in the
- * object is never touched in the first place.
- */
-function describeFinalArtworkError(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return boundedErrorDescription(error.message);
-  }
-  if (typeof error === "string" && error) {
-    return boundedErrorDescription(error);
-  }
-  if (typeof error === "number" || typeof error === "boolean" || typeof error === "bigint") {
-    return boundedErrorDescription(`Unrecognized failure value (${typeof error}): ${String(error)}`);
-  }
-  if (error !== null && typeof error === "object") {
-    const record = error as Record<string, unknown>;
-    const parts: string[] = [];
-    for (const field of ERROR_DESCRIPTION_ALLOWED_FIELDS) {
-      const value = record[field];
-      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-        parts.push(`${field}=${String(value)}`);
-      }
-    }
-    if (parts.length > 0) {
-      return boundedErrorDescription(`Unrecognized failure value: ${parts.join("; ")}`);
-    }
-  }
-  return "Final artwork production failed for an unknown reason.";
+const describeFinalArtworkError = describeOperationError;
+/** Thin partial application preserving this file's own existing 2-arg call sites and log prefix unchanged. */
+function withOperationTiming<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  return sharedWithOperationTiming("final-artwork-persist", label, fn);
 }
 
 /**
