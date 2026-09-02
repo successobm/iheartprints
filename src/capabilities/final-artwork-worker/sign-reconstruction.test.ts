@@ -529,6 +529,122 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     assert.equal(intermediateAfter.length, 1, "no duplicate intermediate asset was created on recovery");
   });
 
+  // ---------------------------------------------------------------------
+  // Diagnostic Hardening Phase (real Signs acceptance incident):
+  // `describeFinalArtworkError` is SHARED generic worker infra — used by
+  // both the apparel and sign job paths, module-private (not exported), and
+  // confirmed by audit to never surface `lastError`'s raw content to a
+  // customer (`resolveAttentionCheckName` short-circuits to `null` for
+  // every non-"completed" status, which is every status `failJob` ever
+  // produces). Exercised HERE, through the sign path's own
+  // `persistIntermediateReconstruction` guard (B10b/B10c, above) purely
+  // because it's the lightest existing harness that reaches it with an
+  // arbitrary thrown value — this coverage is not sign-specific behavior.
+  // ---------------------------------------------------------------------
+
+  /** Runs a plan whose intermediate-persistence step throws `thrownValue` verbatim, and returns the resulting job's `lastError`. */
+  async function lastErrorForThrownUploadValue(thrownValue: unknown): Promise<string | null> {
+    const provider = new FakeSignReconstructionProvider();
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const realAssets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const crashingAssets: AssetCapability = {
+      ...realAssets,
+      uploadProductionAsset: async () => {
+        // Deliberately a non-Error thrown value — exactly what this phase hardens against.
+        throw thrownValue;
+      },
+    };
+    const signPreparation = createSignPreparationCapability(repo, realAssets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const project = await repo.createProject();
+    const projectId = project.project.id;
+    await planNeedingReconstruction(signPreparation, projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    const crashingWorker = createFinalArtworkWorkerCapability(repo, crashingAssets, provider);
+    await crashingWorker.processNextJob();
+
+    const failed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failed!.status, "failed", "sanity: the simulated throw must still reach a clean failed state");
+    return failed!.lastError;
+  }
+
+  it("Diagnostic Hardening 1: a normal Error's message is unchanged", async () => {
+    const lastError = await lastErrorForThrownUploadValue(new Error("storage failed"));
+    assert.equal(lastError, "storage failed");
+  });
+
+  it("Diagnostic Hardening 2: a bare string throw is used directly", async () => {
+    const lastError = await lastErrorForThrownUploadValue("a plain string failure");
+    assert.equal(lastError, "a plain string failure");
+  });
+
+  it('Diagnostic Hardening 3: object with { message, code } produces a labeled diagnostic', async () => {
+    const lastError = await lastErrorForThrownUploadValue({ message: "storage failed", code: "XYZ" });
+    assert.match(lastError!, /message=storage failed/);
+    assert.match(lastError!, /code=XYZ/);
+  });
+
+  it('Diagnostic Hardening 4: object with { error, status } produces a labeled diagnostic', async () => {
+    const lastError = await lastErrorForThrownUploadValue({ error: "provider failed", status: 502 });
+    assert.match(lastError!, /error=provider failed/);
+    assert.match(lastError!, /status=502/);
+  });
+
+  it("Diagnostic Hardening 5: safe fields are included, sensitive fields never appear", async () => {
+    const lastError = await lastErrorForThrownUploadValue({
+      message: "failure",
+      code: "X",
+      authorization: "Bearer SECRET_TOKEN_VALUE",
+      signedUrl: "https://storage.example.com/signed?token=SUPER_SECRET",
+      response: { status: 500, body: "leaked body" },
+      apiKey: "sk-should-never-appear",
+    });
+    assert.match(lastError!, /message=failure/);
+    assert.match(lastError!, /code=X/);
+    assert.doesNotMatch(lastError!, /SECRET_TOKEN_VALUE/);
+    assert.doesNotMatch(lastError!, /SUPER_SECRET/);
+    assert.doesNotMatch(lastError!, /leaked body/);
+    assert.doesNotMatch(lastError!, /sk-should-never-appear/);
+    assert.doesNotMatch(lastError!, /authorization/i);
+    assert.doesNotMatch(lastError!, /signedUrl/i);
+    assert.doesNotMatch(lastError!, /apiKey/i);
+  });
+
+  it("Diagnostic Hardening 6: an object with no allowed shallow scalar fields falls back to the generic message", async () => {
+    const lastError = await lastErrorForThrownUploadValue({ nested: { message: "buried, never read" } });
+    assert.equal(lastError, "Final artwork production failed for an unknown reason.");
+  });
+
+  it("Diagnostic Hardening 7: a null throw falls back to the generic message", async () => {
+    const lastError = await lastErrorForThrownUploadValue(null);
+    assert.equal(lastError, "Final artwork production failed for an unknown reason.");
+  });
+
+  it("Diagnostic Hardening 8: an undefined throw falls back to the generic message", async () => {
+    const lastError = await lastErrorForThrownUploadValue(undefined);
+    assert.equal(lastError, "Final artwork production failed for an unknown reason.");
+  });
+
+  it("Diagnostic Hardening 9: a circular object never crashes the formatter", async () => {
+    const circular: Record<string, unknown> = { message: "circular but safe", code: "C1" };
+    circular.self = circular;
+    const lastError = await lastErrorForThrownUploadValue(circular);
+    assert.match(lastError!, /message=circular but safe/);
+    assert.match(lastError!, /code=C1/);
+  });
+
+  it("Diagnostic Hardening 10: an oversized safe scalar value is capped", async () => {
+    const lastError = await lastErrorForThrownUploadValue({ message: "x".repeat(2000) });
+    assert.ok(lastError!.length <= 501, `expected a capped length, got ${lastError!.length}`);
+    assert.match(lastError!, /message=x+…$/);
+  });
+
   it("B11: existing final production asset recovery never redispatches (review_required plan, still not print_ready)", async () => {
     const provider = new FakeSignReconstructionProvider();
     const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
