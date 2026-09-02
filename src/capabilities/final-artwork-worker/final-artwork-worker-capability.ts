@@ -670,8 +670,22 @@ export function createFinalArtworkWorkerCapability(
    */
   async function resolveExistingIntermediateReconstruction(
     job: FinalArtworkJob,
+    /**
+     * Final Recovery Instrumentation Phase: identifies WHICH of this
+     * function's three call sites is running, purely for the operation
+     * label below — never read for any control-flow decision. Distinct
+     * labels per caller are what let a persisted `lastError` (or a server
+     * log line) say exactly which repeated call site was slow, since this
+     * one shared helper is invoked from the apparel two-pass self-heal, the
+     * sign self-heal, AND from inside `persistIntermediateReconstruction`
+     * itself.
+     */
+    callSite: "apparelSelfHeal" | "signSelfHeal" | "persist",
   ): Promise<{ asset: AssetRecord; providerRequestId: string } | null> {
-    const existingAssets = await repo.listAssets(job.projectId);
+    const existingAssets = await withOperationTiming(
+      `resolveExistingIntermediateReconstruction.${callSite}.listAssets`,
+      () => repo.listAssets(job.projectId),
+    );
     const candidate = existingAssets.find(
       (asset) =>
         asset.finalArtworkJobId === job.id &&
@@ -706,34 +720,38 @@ export function createFinalArtworkWorkerCapability(
     storageGroupingId: string,
     result: FinalArtworkProviderIntermediateReconstruction,
   ): Promise<void> {
-    const existing = await resolveExistingIntermediateReconstruction(job);
+    const existing = await resolveExistingIntermediateReconstruction(job, "persist");
     if (!existing || existing.providerRequestId !== result.providerRequestId) {
-      await assets.uploadProductionAsset(job.projectId, {
-        conceptId: storageGroupingId,
-        bytes: result.bytes,
-        contentType: "image/png",
-        widthPx: result.widthPx,
-        heightPx: result.heightPx,
-        // Best-effort only — this is never the validated customer
-        // deliverable and never runs through print validation.
-        hasTransparency: true,
-        finalArtworkJobId: job.id,
-        productionRole: "production_png",
-        metadata: {
-          reconstructionStage: RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER,
-          providerKey: activeProvider.providerKey,
-          providerRequestId: result.providerRequestId,
-        },
-      });
+      await withOperationTiming("persistIntermediateReconstruction.uploadProductionAsset", () =>
+        assets.uploadProductionAsset(job.projectId, {
+          conceptId: storageGroupingId,
+          bytes: result.bytes,
+          contentType: "image/png",
+          widthPx: result.widthPx,
+          heightPx: result.heightPx,
+          // Best-effort only — this is never the validated customer
+          // deliverable and never runs through print validation.
+          hasTransparency: true,
+          finalArtworkJobId: job.id,
+          productionRole: "production_png",
+          metadata: {
+            reconstructionStage: RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER,
+            providerKey: activeProvider.providerKey,
+            providerRequestId: result.providerRequestId,
+          },
+        }),
+      );
     }
     // Section 8: pass 1's identity now lives durably on the intermediate
     // asset's own metadata for audit — free the job's single
     // outstanding-request slot for pass 2's fresh submission.
-    await repo.updateFinalArtworkJob(job.id, {
-      providerKey: null,
-      providerRequestId: null,
-      providerStatus: null,
-    });
+    await withOperationTiming("persistIntermediateReconstruction.updateFinalArtworkJob", () =>
+      repo.updateFinalArtworkJob(job.id, {
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+      }),
+    );
   }
 
   function provenanceFromExistingAsset(
@@ -836,7 +854,7 @@ export function createFinalArtworkWorkerCapability(
     // is charged. Neither this call nor the self-heal it may perform reads
     // `source`, so nothing here changes what a fresh-execution-exhausted
     // claim costs: it still fails before any asset bytes are read.
-    const existingIntermediate = await resolveExistingIntermediateReconstruction(job);
+    const existingIntermediate = await resolveExistingIntermediateReconstruction(job, "apparelSelfHeal");
     let effectiveJob = job;
     if (
       existingIntermediate &&
@@ -1401,7 +1419,7 @@ export function createFinalArtworkWorkerCapability(
     // from a prior attempt at THIS exact job (a crash landed between
     // persisting it and clearing the job's outstanding-request slot) —
     // mirrors `produceProductionAsset`'s own Section 7/8 self-heal exactly.
-    const existingIntermediate = await resolveExistingIntermediateReconstruction(job);
+    const existingIntermediate = await resolveExistingIntermediateReconstruction(job, "signSelfHeal");
     let effectiveJob = job;
     if (
       existingIntermediate &&
@@ -1487,6 +1505,16 @@ export function createFinalArtworkWorkerCapability(
       }
 
       let output: SignReconstructionProviderOutput;
+      // Final Recovery Instrumentation Phase: pure timing, deliberately NOT
+      // routed through `withOperationTiming` — that helper re-throws a new
+      // plain Error, which would break every `error instanceof ProviderError`
+      // check below (the classification/dispatch this catch depends on to
+      // decide whether identity is safe to clear, and to route a pre-
+      // dispatch refusal to `completeWithoutAsset` instead of `failJob`).
+      // The ORIGINAL error is inspected completely unchanged; only the
+      // MESSAGE STRINGS handed to `completeWithoutAsset`/`failJob` below
+      // gain an elapsed-time prefix.
+      const producedAt = Date.now();
       try {
         output = await signProvider.produceSignReconstruction({
           sourceBytes: encodeSignPlate(preImage),
@@ -1505,7 +1533,14 @@ export function createFinalArtworkWorkerCapability(
             });
           },
         });
+        console.info(
+          `[sign-final-artwork] operation=produceSignReconstruction elapsed_ms=${Date.now() - producedAt} outcome=success`,
+        );
       } catch (error) {
+        const elapsedMs = Date.now() - producedAt;
+        console.info(
+          `[sign-final-artwork] operation=produceSignReconstruction elapsed_ms=${elapsedMs} outcome=error`,
+        );
         if (error instanceof ProviderError && error.classification === "provider_job_failed") {
           await repo.updateFinalArtworkJob(job.id, {
             providerKey: null,
@@ -1519,10 +1554,10 @@ export function createFinalArtworkWorkerCapability(
           error.classification === "invalid_request" &&
           error.dispatch === "not_dispatched"
         ) {
-          await completeWithoutAsset(job, error.message);
+          await completeWithoutAsset(job, `produceSignReconstruction failed after ${elapsedMs}ms: ${error.message}`);
           return { outcome: "handled" };
         }
-        await failJob(job, describeFinalArtworkError(error));
+        await failJob(job, `produceSignReconstruction failed after ${elapsedMs}ms: ${describeFinalArtworkError(error)}`);
         return { outcome: "handled" };
       }
 
@@ -3396,6 +3431,43 @@ function boundedErrorDescription(value: string): string {
   return value.length > MAX_ERROR_DESCRIPTION_LENGTH
     ? `${value.slice(0, MAX_ERROR_DESCRIPTION_LENGTH)}…`
     : value;
+}
+
+/**
+ * Final Recovery Instrumentation Phase (real Signs acceptance incident,
+ * reproducible SQLSTATE 57014): wraps ONE Supabase/PostgREST/storage
+ * operation in the sign/apparel intermediate-persistence path with a label
+ * and elapsed-ms timing, purely so a future failure identifies WHICH
+ * repository operation was slow — never used to change control flow.
+ *
+ * On success, logs a concise, non-sensitive timing line and returns the
+ * result unchanged. On failure, logs the same line with `outcome=error`,
+ * then re-throws a NEW `Error` whose message is
+ * `"<label> failed after <n>ms: <safe description>"` — the safe description
+ * comes from `describeFinalArtworkError` itself, so this introduces no new
+ * leakage surface beyond what that function already allows (its own doc
+ * comment: no secrets, no signed URLs, no request/response bodies — only a
+ * fixed allowlist of scalar fields). The original error's own type/identity
+ * is intentionally NOT preserved — every call site this wraps is a leaf DB/
+ * storage call whose result nothing downstream inspects by
+ * `instanceof`/`.classification`/`.dispatch` (unlike the provider-dispatch
+ * call in `runSignReconstructionAndContinue`, which is deliberately NOT
+ * wrapped with this helper — see the comment at that call site for why).
+ */
+async function withOperationTiming<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    console.info(`[final-artwork-persist] operation=${label} elapsed_ms=${Date.now() - startedAt} outcome=success`);
+    return result;
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    console.info(`[final-artwork-persist] operation=${label} elapsed_ms=${elapsedMs} outcome=error`);
+    // Bounded the same way `describeFinalArtworkError` itself bounds its own
+    // output — the label+timing prefix must never push the TOTAL persisted
+    // message past the same length ceiling.
+    throw new Error(boundedErrorDescription(`${label} failed after ${elapsedMs}ms: ${describeFinalArtworkError(error)}`));
+  }
 }
 
 /**

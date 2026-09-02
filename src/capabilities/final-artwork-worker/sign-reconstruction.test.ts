@@ -574,14 +574,14 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     return failed!.lastError;
   }
 
-  it("Diagnostic Hardening 1: a normal Error's message is unchanged", async () => {
+  it("Diagnostic Hardening 1: a normal Error's message is preserved verbatim (now behind the instrumentation phase's own operation label)", async () => {
     const lastError = await lastErrorForThrownUploadValue(new Error("storage failed"));
-    assert.equal(lastError, "storage failed");
+    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: storage failed$/);
   });
 
-  it("Diagnostic Hardening 2: a bare string throw is used directly", async () => {
+  it("Diagnostic Hardening 2: a bare string throw is used directly (now behind the instrumentation phase's own operation label)", async () => {
     const lastError = await lastErrorForThrownUploadValue("a plain string failure");
-    assert.equal(lastError, "a plain string failure");
+    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: a plain string failure$/);
   });
 
   it('Diagnostic Hardening 3: object with { message, code } produces a labeled diagnostic', async () => {
@@ -616,19 +616,19 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     assert.doesNotMatch(lastError!, /apiKey/i);
   });
 
-  it("Diagnostic Hardening 6: an object with no allowed shallow scalar fields falls back to the generic message", async () => {
+  it("Diagnostic Hardening 6: an object with no allowed shallow scalar fields falls back to the generic message (behind the operation label)", async () => {
     const lastError = await lastErrorForThrownUploadValue({ nested: { message: "buried, never read" } });
-    assert.equal(lastError, "Final artwork production failed for an unknown reason.");
+    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Final artwork production failed for an unknown reason\.$/);
   });
 
-  it("Diagnostic Hardening 7: a null throw falls back to the generic message", async () => {
+  it("Diagnostic Hardening 7: a null throw falls back to the generic message (behind the operation label)", async () => {
     const lastError = await lastErrorForThrownUploadValue(null);
-    assert.equal(lastError, "Final artwork production failed for an unknown reason.");
+    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Final artwork production failed for an unknown reason\.$/);
   });
 
-  it("Diagnostic Hardening 8: an undefined throw falls back to the generic message", async () => {
+  it("Diagnostic Hardening 8: an undefined throw falls back to the generic message (behind the operation label)", async () => {
     const lastError = await lastErrorForThrownUploadValue(undefined);
-    assert.equal(lastError, "Final artwork production failed for an unknown reason.");
+    assert.match(lastError!, /^persistIntermediateReconstruction\.uploadProductionAsset failed after \d+ms: Final artwork production failed for an unknown reason\.$/);
   });
 
   it("Diagnostic Hardening 9: a circular object never crashes the formatter", async () => {
@@ -643,6 +643,247 @@ describe("Signs Phase S3A: bounded provider reconstruction", () => {
     const lastError = await lastErrorForThrownUploadValue({ message: "x".repeat(2000) });
     assert.ok(lastError!.length <= 501, `expected a capped length, got ${lastError!.length}`);
     assert.match(lastError!, /message=x+…$/);
+  });
+
+  // ---------------------------------------------------------------------
+  // Final Recovery Instrumentation Phase (real Signs acceptance incident,
+  // reproducible SQLSTATE 57014): `withOperationTiming` — the new label +
+  // elapsed-ms wrapper around each repository/storage call in the
+  // intermediate-persistence path. Diagnostic-only: every test here proves
+  // labeling/timing is ADDITIVE (safe content, provider identity, job
+  // transitions, and the success path all unchanged), never that behavior
+  // changed.
+  // ---------------------------------------------------------------------
+
+  it("Instrumentation: updateFinalArtworkJob clear-call failure gets its own distinct operation label, separate from uploadProductionAsset's", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const realAssets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const signPreparation = createSignPreparationCapability(repo, realAssets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const project = await repo.createProject();
+    const projectId = project.project.id;
+    await planNeedingReconstruction(signPreparation, projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    // Fails ONLY the persist-step's own clear-call (never sets
+    // providerRecoveryAttempts, unlike the earlier self-heal clear —
+    // mirrors B10c's exact discriminator).
+    let sawClearCall = false;
+    const crashingRepo = new Proxy(repo, {
+      get(target, prop) {
+        if (prop === "updateFinalArtworkJob") {
+          return async (jobId: string, patch: Record<string, unknown>) => {
+            if (
+              !sawClearCall &&
+              patch.providerKey === null &&
+              patch.providerRequestId === null &&
+              patch.providerStatus === null &&
+              !("providerRecoveryAttempts" in patch)
+            ) {
+              sawClearCall = true;
+              throw new Error("simulated statement timeout clearing provider fields");
+            }
+            return (target as ProjectRepository).updateFinalArtworkJob(jobId, patch as never);
+          };
+        }
+        const value = (target as unknown as Record<string, unknown>)[prop as string];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as ProjectRepository;
+
+    const crashingWorker = createFinalArtworkWorkerCapability(crashingRepo, realAssets, provider);
+    await crashingWorker.processNextJob();
+    assert.equal(sawClearCall, true, "sanity: the simulated failure actually fired on the targeted call");
+
+    const failed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failed!.status, "failed");
+    assert.match(
+      failed!.lastError!,
+      /^persistIntermediateReconstruction\.updateFinalArtworkJob failed after \d+ms: simulated statement timeout clearing provider fields$/,
+    );
+    // Distinct from the upload operation's own label — proves the two
+    // steps inside the same function are independently identifiable.
+    assert.doesNotMatch(failed!.lastError!, /uploadProductionAsset/);
+  });
+
+  it("Instrumentation: the persist-step's own listAssets call gets a label distinct from the self-heal's — reached only after self-heal itself succeeds", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const realAssets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const signPreparation = createSignPreparationCapability(repo, realAssets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const project = await repo.createProject();
+    const projectId = project.project.id;
+    await planNeedingReconstruction(signPreparation, projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    // A claimed sign job issues listAssets THREE times before it could ever
+    // reach parametric reconstruction: (1) `resolveExistingProductionAsset`'s
+    // own unlabeled idempotency check at the very top of the job — not
+    // wrapped by this phase, since it runs before Topaz is ever called, the
+    // task's own instrumentation window; (2) the self-heal's labeled call;
+    // (3) the persist step's own labeled dedup check. Succeed on the first
+    // two, fail on the third.
+    let listAssetsCalls = 0;
+    const crashingRepo = new Proxy(repo, {
+      get(target, prop) {
+        if (prop === "listAssets") {
+          return async (...args: Parameters<ProjectRepository["listAssets"]>) => {
+            listAssetsCalls += 1;
+            if (listAssetsCalls === 3) {
+              throw new Error("simulated statement timeout listing assets");
+            }
+            return (target as ProjectRepository).listAssets(...args);
+          };
+        }
+        const value = (target as unknown as Record<string, unknown>)[prop as string];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as ProjectRepository;
+
+    const crashingWorker = createFinalArtworkWorkerCapability(crashingRepo, realAssets, provider);
+    await crashingWorker.processNextJob();
+    assert.equal(listAssetsCalls, 3, "sanity: resolveExistingProductionAsset, the self-heal, and the persist-step calls must all have fired");
+
+    const failed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failed!.status, "failed");
+    assert.match(
+      failed!.lastError!,
+      /^resolveExistingIntermediateReconstruction\.persist\.listAssets failed after \d+ms: simulated statement timeout listing assets$/,
+      "the persist-step's own dedup-check listAssets call is labeled distinctly from the self-heal's, and its failure is still caught (unlike the self-heal's own — see the next test)",
+    );
+  });
+
+  it("Instrumentation: a self-heal listAssets failure IS labeled but remains uncaught (documents a known, deliberately out-of-scope gap — not fixed in this phase)", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const realAssets = createAssetCapability(
+      repo,
+      new DataUriAssetStorageProvider(),
+      new PngThumbnailGenerator(),
+    );
+    const signPreparation = createSignPreparationCapability(repo, realAssets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const project = await repo.createProject();
+    const projectId = project.project.id;
+    await planNeedingReconstruction(signPreparation, projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    // Call 1 (`resolveExistingProductionAsset`'s own, unlabeled — it runs
+    // before Topaz is ever called, outside this phase's instrumentation
+    // window) must succeed so execution actually reaches the self-heal;
+    // call 2 (the self-heal itself) is the one under test.
+    let listAssetsCalls = 0;
+    const crashingRepo = new Proxy(repo, {
+      get(target, prop) {
+        if (prop === "listAssets") {
+          return async (...args: Parameters<ProjectRepository["listAssets"]>) => {
+            listAssetsCalls += 1;
+            if (listAssetsCalls === 1) {
+              return (target as ProjectRepository).listAssets(...args);
+            }
+            throw new Error("simulated statement timeout on the self-heal's own listAssets call");
+          };
+        }
+        const value = (target as unknown as Record<string, unknown>)[prop as string];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as ProjectRepository;
+
+    const crashingWorker = createFinalArtworkWorkerCapability(crashingRepo, realAssets, provider);
+    let caught: unknown = null;
+    try {
+      await crashingWorker.processNextJob();
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof Error, "sanity: must still reject, exactly as before this instrumentation phase");
+    assert.match(
+      (caught as Error).message,
+      /^resolveExistingIntermediateReconstruction\.signSelfHeal\.listAssets failed after \d+ms: simulated statement timeout on the self-heal's own listAssets call$/,
+    );
+
+    // The job is left exactly where it was BEFORE this attempt — this
+    // instrumentation phase deliberately does not add a new catch here
+    // (that would be a job-state-transition change, out of scope), so a
+    // real recurrence of this exact candidate would still need a follow-up
+    // fix mirroring the earlier persistIntermediateReconstruction guard.
+    const stillQueued = await repo.getFinalArtworkJob(job.id);
+    assert.equal(stillQueued!.status, "running", "unchanged from the claim — no failJob call exists on this path yet");
+  });
+
+  it("Instrumentation: produceSignReconstruction failure gets an elapsed-time-labeled message while provider classification is completely unchanged", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    provider.behavior = {
+      kind: "throw",
+      error: new ProviderError(
+        "provider_job_failed",
+        "The fake reconstruction provider reported this request as terminally failed.",
+      ),
+    };
+    const { signPreparation, finalArtwork, worker, repo, projectId } = await build(provider);
+    await planNeedingReconstruction(signPreparation, projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    await worker.processNextJob();
+
+    const failed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(failed!.status, "failed");
+    assert.match(
+      failed!.lastError!,
+      /^produceSignReconstruction failed after \d+ms: The fake reconstruction provider reported this request as terminally failed\.$/,
+    );
+    // Requirement: provider classification/identity-clearing behavior is
+    // completely unaffected by the added timing — `provider_job_failed`
+    // still clears the provider identity exactly as before instrumentation.
+    assert.equal(failed!.providerKey, null);
+    assert.equal(failed!.providerRequestId, null);
+    assert.equal(provider.dispatchCount, 1, "no retry/resubmission was introduced");
+  });
+
+  it("Instrumentation: the successful reconstruction path is completely unaffected — no label ever appears, dispatch/asset counts unchanged", async () => {
+    const provider = new FakeSignReconstructionProvider();
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build(provider);
+    const plan = await planNeedingReconstruction(signPreparation, projectId);
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+
+    await worker.processNextJob();
+
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed!.status, "completed");
+    // Not asserting `lastError === null` here: this fixture's plan requires
+    // reconstruction, which (per `planRequiresSemanticPreservationVerification`)
+    // also requires semantic preservation verification — `build()`'s default
+    // placeholder semantic provider returns "unknown" (never "preserved"),
+    // and that inconclusive verdict is legitimately recorded on the job even
+    // though it still reaches "completed" — entirely pre-existing behavior,
+    // unrelated to this instrumentation phase. What this test actually
+    // proves is narrower and still exact: none of the new operation labels
+    // ever appear when every instrumented call succeeds.
+    if (completed!.lastError) {
+      assert.doesNotMatch(completed!.lastError, /elapsed_ms|failed after \d+ms|listAssets failed|uploadProductionAsset failed|updateFinalArtworkJob failed|produceSignReconstruction failed/);
+    }
+    assert.equal(provider.dispatchCount, 1);
+    assert.equal(provider.resumeCount, 0);
+    const intermediateAssets = (await repo.listAssets(projectId)).filter(
+      (a) => a.finalArtworkJobId === job.id && isReconstructionIntermediateAsset(a),
+    );
+    assert.equal(intermediateAssets.length, 1);
+    // Sanity that the plan actually needed reconstruction (otherwise this
+    // test would trivially pass without exercising any instrumented call).
+    assert.deepEqual(plan.steps.map((s) => s.kind), ["reconstruct_resolution"]);
   });
 
   it("B11: existing final production asset recovery never redispatches (review_required plan, still not print_ready)", async () => {
