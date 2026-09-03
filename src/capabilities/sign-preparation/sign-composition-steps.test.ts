@@ -14,14 +14,17 @@ import { makeImage, fillRect } from "./sign-fixtures";
 import {
   applyFillRect,
   applyMoveRegion,
+  applyReplaceRegionWithBackground,
   deriveUniformFitDimensions,
   encodeCropRegionParams,
   encodeFillRectParams,
   encodeFitArtworkToCanvasParams,
   encodeMoveRegionParams,
+  encodeReplaceRegionWithBackgroundParams,
   executeCompositionSteps,
   executeCropRegion,
   executeFitArtworkToCanvas,
+  verifyReplaceRegionSurroundingContext,
 } from "./sign-composition-steps";
 
 function pixelAt(image: RgbaImage, x: number, y: number): { r: number; g: number; b: number; a: number } {
@@ -250,5 +253,91 @@ describe("sign-composition-steps: executeCompositionSteps orchestration", () => 
     const bounds = { x: 0, y: 0, width: source.width, height: source.height };
     const result = executeCompositionSteps(source, bounds, steps);
     assert.equal(result.status, "refused");
+  });
+});
+
+describe("sign-composition-steps: replace_region_with_background (Fit to Production)", () => {
+  function canvasWithArtifact(): RgbaImage {
+    // 100x100 uniform red canvas with a small black "hole" artifact near
+    // the top-left corner (10..30, 10..30) — mirrors the real Signs
+    // acceptance sign's own corner hole/ring graphic against a uniform
+    // banner background.
+    const image = makeImage(100, 100, { r: 200, g: 10, b: 10 });
+    fillRect(image, 10, 10, 30, 30, { r: 20, g: 20, b: 20 });
+    return image;
+  }
+
+  it("removes a bounded artifact when the surrounding context genuinely is the claimed colour", () => {
+    const canvas = canvasWithArtifact();
+    const working = Buffer.from(canvas.data);
+    const s = step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+      xPx: 5, yPx: 5, widthPx: 30, heightPx: 30, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+    }));
+    const refusal = applyReplaceRegionWithBackground(working, 100, 100, s);
+    assert.equal(refusal, null);
+    const result: RgbaImage = { width: 100, height: 100, data: working };
+    assert.deepEqual(pixelAt(result, 20, 20), { r: 200, g: 10, b: 10, a: 255 }); // was black, now red
+    assert.deepEqual(pixelAt(result, 50, 50), { r: 200, g: 10, b: 10, a: 255 }); // untouched elsewhere
+  });
+
+  it("refuses when the surrounding context is NOT uniformly the claimed colour (crosses non-uniform artwork)", () => {
+    const canvas = canvasWithArtifact();
+    const working = Buffer.from(canvas.data);
+    // Rect too small to contain the artifact -> its own surrounding ring
+    // still touches the black artifact -> must refuse, never partially
+    // erase or silently shrink to fit.
+    const s = step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+      xPx: 15, yPx: 15, widthPx: 10, heightPx: 10, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+    }));
+    const refusal = applyReplaceRegionWithBackground(working, 100, 100, s);
+    assert.notEqual(refusal, null);
+    // Never partially applied — canvas is byte-identical to before.
+    assert.deepEqual(working, canvas.data);
+  });
+
+  it("refuses a rectangle exceeding the canvas bounds", () => {
+    const canvas = makeImage(50, 50, { r: 0, g: 0, b: 0 });
+    const working = Buffer.from(canvas.data);
+    const s = step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+      xPx: 45, yPx: 45, widthPx: 10, heightPx: 10, colorR: 0, colorG: 0, colorB: 0, contextDepthPx: 2,
+    }));
+    const refusal = applyReplaceRegionWithBackground(working, 50, 50, s);
+    assert.notEqual(refusal, null);
+  });
+
+  it("refuses on a source-identity mismatch — malformed/missing params never silently default", () => {
+    const working = Buffer.from(makeImage(50, 50, { r: 0, g: 0, b: 0 }).data);
+    const s = step("replace_region_with_background", { xPx: 0, yPx: 0, widthPx: 10 }); // missing required params
+    const refusal = applyReplaceRegionWithBackground(working, 50, 50, s);
+    assert.notEqual(refusal, null);
+  });
+
+  it("verifyReplaceRegionSurroundingContext reports the exact mismatch count, never just true/false", () => {
+    const canvas = canvasWithArtifact();
+    const working = Buffer.from(canvas.data);
+    const result = verifyReplaceRegionSurroundingContext(working, 100, 100, {
+      xPx: 15, yPx: 15, widthPx: 10, heightPx: 10, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+    });
+    assert.equal(result.uniform, false);
+    assert.ok(result.mismatchedPx > 0);
+    assert.ok(result.sampledPx >= result.mismatchedPx);
+  });
+
+  it("executeCompositionSteps runs replace_region_with_background as the final move/fill-stage operation", () => {
+    const source = canvasWithArtifact();
+    const steps: SignRepairStep[] = [
+      step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+        expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100, canvasWidthPx: 100, canvasHeightPx: 100,
+        placementXPx: 0, placementYPx: 0, backgroundR: 200, backgroundG: 10, backgroundB: 10,
+      })),
+      step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+        xPx: 5, yPx: 5, widthPx: 30, heightPx: 30, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      })),
+    ];
+    const bounds = { x: 0, y: 0, width: source.width, height: source.height };
+    const result = executeCompositionSteps(source, bounds, steps);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.deepEqual(pixelAt(result.image, 20, 20), { r: 200, g: 10, b: 10, a: 255 });
   });
 });

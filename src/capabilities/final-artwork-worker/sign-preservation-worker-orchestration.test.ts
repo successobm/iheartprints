@@ -573,14 +573,24 @@ describe("Semantic Worker Wiring Phase: reconstruct_perimeter_structure end-to-e
     const completedJob = await repo.getFinalArtworkJob(job.id);
     assert.equal(completedJob!.status, "completed");
 
+    // Signs Phase 3B (Fit to Production, Section J): the perimeter/semantic
+    // wiring this test proves (dispatch counts, evidence shape, above) still
+    // succeeds exactly as before — but this fixture's synthetic accent
+    // stripe sits within the real 0.125in safe inset at this plan's real
+    // achieved PPI, so the NEW `protected_content_safe_inset` gate now
+    // correctly withholds `print_ready` pending Fit to Production operator
+    // review. That gate replacing an old blanket "print_ready" expectation
+    // is this phase's whole point — it is not a wiring regression.
     const project = await repo.getProject(projectId);
-    assert.equal(project!.project.status, "print_ready");
+    assert.equal(project!.project.status, "finalization_required");
 
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
-    assert.equal(validation!.status, "ready");
+    assert.equal(validation!.status, "finalization_required");
     const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
     const substrateCheck = checks.find((c) => c.check === "substrate_boundary_semantics");
-    assert.equal(substrateCheck?.status, "pass");
+    assert.equal(substrateCheck?.status, "pass", "the perimeter semantic check this test targets still passes on its own");
+    const fitToProductionCheck = checks.find((c) => c.check === "protected_content_safe_inset");
+    assert.equal(fitToProductionCheck?.status, "fail", "the ONLY new blocker is Fit to Production, not a regression in an existing check");
   });
 
   it("2: semantic perimeter_edge_alignment 'changed' -> NOT print_ready (finalization_required), substrate_boundary_semantics fails", async () => {
@@ -689,8 +699,13 @@ describe("Semantic Worker Wiring Phase: reconstruct_perimeter_structure end-to-e
 
     assert.equal(semanticProvider.dispatchCount, 1, "the recovered run reused the persisted preservation record");
     assert.equal(reconstructionProvider.dispatchCount, 0);
+    // Same Fit to Production reasoning as test 1 above: this fixture's
+    // accent stripe legitimately sits inside the real safe inset, so the
+    // idempotent rerun still (correctly) lands on `finalization_required`
+    // rather than `print_ready` — this test's own point (no duplicate
+    // semantic dispatch, no duplicate asset, below) is unaffected.
     const project = await repo.getProject(projectId);
-    assert.equal(project!.project.status, "print_ready");
+    assert.equal(project!.project.status, "finalization_required");
 
     const assetsAfterRerun = (await repo.listAssets(projectId)).filter(
       (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png",
@@ -888,11 +903,23 @@ describe("Parametric Frame Reconstruction Phase: reconstruct_parametric_frame en
     const completedJob = await repo.getFinalArtworkJob(job.id);
     assert.equal(completedJob!.status, "completed");
 
+    // Signs Phase 3B (Fit to Production, Section J): the frame-semantic
+    // wiring this test proves above still succeeds exactly as before — but
+    // this fixture's decorative frame band sits within the real 0.125in
+    // safe inset at this plan's real achieved PPI, so the NEW
+    // `protected_content_safe_inset` gate now correctly withholds
+    // `print_ready` pending Fit to Production operator review. That gate
+    // replacing an old blanket "print_ready" expectation is this phase's
+    // whole point — it is not a wiring regression.
     const project = await repo.getProject(projectId);
-    assert.equal(project!.project.status, "print_ready");
+    assert.equal(project!.project.status, "finalization_required");
 
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
-    assert.equal(validation!.status, "ready");
+    assert.equal(validation!.status, "finalization_required");
+    const fitToProductionCheck = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks.find(
+      (c) => c.check === "protected_content_safe_inset",
+    );
+    assert.equal(fitToProductionCheck?.status, "fail", "the ONLY new blocker is Fit to Production, not a regression in an existing check");
   });
 
   it("2: combined reconstruct_resolution + reconstruct_parametric_frame plan (the real project's own shape) -> print_ready", async () => {
@@ -909,11 +936,18 @@ describe("Parametric Frame Reconstruction Phase: reconstruct_parametric_frame en
     const completedJob = await repo.getFinalArtworkJob(job.id);
     assert.equal(completedJob!.status, "completed");
 
+    // Same Fit to Production reasoning as test 1 above — the combined
+    // (Topaz + frame) plan's real achieved PPI puts the decorative frame
+    // band's own boundary inside the required safe inset too.
     const project = await repo.getProject(projectId);
-    assert.equal(project!.project.status, "print_ready");
+    assert.equal(project!.project.status, "finalization_required");
 
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
-    assert.equal(validation!.status, "ready");
+    assert.equal(validation!.status, "finalization_required");
+    const fitToProductionCheck = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks.find(
+      (c) => c.check === "protected_content_safe_inset",
+    );
+    assert.equal(fitToProductionCheck?.status, "fail", "the ONLY new blocker is Fit to Production, not a regression in an existing check");
   });
 
   it("3: semantic perimeter_edge_alignment 'changed' -> NOT print_ready, substrate_boundary_semantics fails", async () => {
@@ -970,8 +1004,14 @@ describe("Parametric Frame Reconstruction Phase: reconstruct_parametric_frame en
     assert.ok(foundFinalAsset, "the first, clean pass must succeed before this test corrupts it");
     const finalAsset = foundFinalAsset!;
 
+    // Signs Phase 3B (Fit to Production, Section J): this fixture's frame
+    // band sits within the real safe inset, so the clean first pass now
+    // (correctly) lands on `finalization_required`, not `print_ready` — see
+    // test 1 above. This test's own point (corrupted frame never reaches
+    // the semantic provider) is unaffected: it only needs the first pass to
+    // have genuinely completed and produced an asset, which it did.
     const project = await repo.getProject(projectId);
-    assert.equal(project!.project.status, "print_ready", "sanity: the clean first pass really did reach print_ready");
+    assert.equal(project!.project.status, "finalization_required", "sanity: the clean first pass really did complete");
 
     // Corrupt exactly one pixel at the true (0,0) corner — always inside
     // the redrawn frame's own extension region for any positive frame
@@ -1034,8 +1074,9 @@ describe("Parametric Frame Reconstruction Phase: reconstruct_parametric_frame en
 
     assert.equal(semanticProvider.dispatchCount, 1, "the recovered run reused the persisted preservation record");
     assert.equal(reconstructionProvider.dispatchCount, 0);
+    // Same Fit to Production reasoning as test 1 above.
     const project = await repo.getProject(projectId);
-    assert.equal(project!.project.status, "print_ready");
+    assert.equal(project!.project.status, "finalization_required");
 
     const assetsAfterRerun = (await repo.listAssets(projectId)).filter(
       (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png",

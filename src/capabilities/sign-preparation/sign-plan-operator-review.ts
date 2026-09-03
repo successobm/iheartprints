@@ -65,6 +65,43 @@ export interface SignPlanOperatorProductionStatus {
   blockedValidationId: string | null;
   /** The blocked candidate's own validation status (e.g. `"finalization_required"`) — `null` alongside `blockedCandidateAssetId`. Never re-interpreted as an authorization signal. */
   blockedValidationStatus: string | null;
+  /**
+   * Signs Phase 3B (Fit to Production, Section G): the operator page's own
+   * read of the `protected_content_safe_inset` PrintValidation check —
+   * read from the SAME latest validation record already fetched above for
+   * `printReady`/`blockedCandidateAssetId`, never a second, independent
+   * pixel analysis (the worker is the sole place that ever computes it).
+   * `null` when no completed job/validation exists yet to read from.
+   */
+  fitToProduction: SignFitToProductionSummary | null;
+}
+
+/**
+ * Presentation-only summary of the `protected_content_safe_inset`
+ * PrintValidation check — `reason` is the SAME rich, per-edge-clearance
+ * sentence `print-validation-capability.ts`'s own `describeFitToProduction
+ * Result` already composed (e.g. "top 94px/0.607in, right 30px/0.194in,
+ * bottom (fail, 5px/0.032in)…"), never re-derived or re-measured here.
+ */
+export interface SignFitToProductionSummary {
+  status: string;
+  reason: string;
+}
+
+/**
+ * Reads the `protected_content_safe_inset` check's own status/reason back
+ * out of a persisted `PrintValidationReport`'s generic `Record<string,
+ * unknown>` shape — this module never imports `print-validation` (the same
+ * dependency-direction discipline `sign-preservation`'s own duplicated
+ * readers already follow). `null` on any malformed/missing shape, never
+ * guessed.
+ */
+function readFitToProductionSummary(report: Record<string, unknown> | null | undefined): SignFitToProductionSummary | null {
+  const checks = report?.checks;
+  if (!Array.isArray(checks)) return null;
+  const raw = (checks as Record<string, unknown>[]).find((c) => c.check === "protected_content_safe_inset");
+  if (!raw || typeof raw.status !== "string" || typeof raw.reason !== "string") return null;
+  return { status: raw.status, reason: raw.reason };
 }
 
 async function resolveSignProductionStatus(
@@ -81,6 +118,7 @@ async function resolveSignProductionStatus(
     blockedCandidateAssetId: null,
     blockedValidationId: null,
     blockedValidationStatus: null,
+    fitToProduction: null,
   };
 
   const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
@@ -95,9 +133,11 @@ async function resolveSignProductionStatus(
   let blockedCandidateAssetId: string | null = null;
   let blockedValidationId: string | null = null;
   let blockedValidationStatus: string | null = null;
+  let fitToProduction: SignFitToProductionSummary | null = null;
   if (job.status === "completed") {
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
     printReady = validation?.status === "ready";
+    fitToProduction = readFitToProductionSummary(validation?.report as Record<string, unknown> | null | undefined);
     if (validation && !printReady) {
       // Blocked Production Candidate Inspection Phase: the SAME
       // validation-bound (never positional) asset check
@@ -130,6 +170,7 @@ async function resolveSignProductionStatus(
     blockedCandidateAssetId,
     blockedValidationId,
     blockedValidationStatus,
+    fitToProduction,
   };
 }
 

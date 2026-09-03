@@ -60,6 +60,7 @@ export const COMPOSITION_STEP_KINDS = new Set<SignRepairStep["kind"]>([
   "fit_artwork_to_canvas",
   "move_region",
   "fill_rect",
+  "replace_region_with_background",
 ]);
 
 /** True iff `kind` is one of the four Phase 3B composition primitives. */
@@ -399,6 +400,152 @@ export function applyFillRect(
 }
 
 // ---------------------------------------------------------------------------
+// replace_region_with_background — operator-authorized REMOVAL of an
+// unwanted artifact (e.g. a decorative rounded-corner arc, a mounting-hole
+// graphic), never a `fill_rect`-shaped "construct known background" op.
+// ---------------------------------------------------------------------------
+
+/**
+ * Chebyshev RGB membership tolerance for the surrounding-context check.
+ * Deliberately LOOSER than `edge-inspection.ts`'s own `EDGE_BACKGROUND_
+ * TOLERANCE` (12) — that figure was calibrated for a genuinely flat,
+ * computer-generated EXPORT; the real cc6cfc4b-… acceptance sign's own
+ * "solid" red banners measured a genuine ±20-30 unit variance across their
+ * own field (a subtle rendered gradient/shading, not a defect, confirmed
+ * by direct measurement at multiple points before this constant was set)
+ * — a print/photographic sign mockup, unlike a flat vector export, is
+ * legitimately not perfectly flat. Still meaningfully strict: a genuinely
+ * DIFFERENT colour (black border residue against red, or vice versa) is
+ * an order of magnitude further away than this and is still refused
+ * every time — see this module's own tests.
+ */
+export const REPLACE_REGION_CONTEXT_TOLERANCE = 40;
+
+export interface ReplaceRegionWithBackgroundParams {
+  xPx: number;
+  yPx: number;
+  widthPx: number;
+  heightPx: number;
+  colorR: number;
+  colorG: number;
+  colorB: number;
+  /** How many px of surrounding context (outside the rect, clamped to canvas bounds) must independently verify as the same uniform colour before this step is allowed to run. */
+  contextDepthPx: number;
+}
+
+export function encodeReplaceRegionWithBackgroundParams(p: ReplaceRegionWithBackgroundParams): Record<string, number | string> {
+  return { ...p };
+}
+
+export function decodeReplaceRegionWithBackgroundParams(params: Record<string, number | string>): ReplaceRegionWithBackgroundParams | null {
+  const xPx = requireNonNegativeInt(params.xPx);
+  const yPx = requireNonNegativeInt(params.yPx);
+  const widthPx = requirePositiveInt(params.widthPx);
+  const heightPx = requirePositiveInt(params.heightPx);
+  const colorR = requireByteChannel(params.colorR);
+  const colorG = requireByteChannel(params.colorG);
+  const colorB = requireByteChannel(params.colorB);
+  const contextDepthPx = requirePositiveInt(params.contextDepthPx);
+  if (
+    xPx === null || yPx === null || widthPx === null || heightPx === null ||
+    colorR === null || colorG === null || colorB === null || contextDepthPx === null
+  ) {
+    return null;
+  }
+  return { xPx, yPx, widthPx, heightPx, colorR, colorG, colorB, contextDepthPx };
+}
+
+function chebyshevDistance(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number): number {
+  return Math.max(Math.abs(r1 - r2), Math.abs(g1 - g2), Math.abs(b1 - b2));
+}
+
+/**
+ * Independently re-measures the ring of pixels immediately surrounding
+ * `[xPx,yPx,widthPx,heightPx]` (out to `contextDepthPx`, clamped to the
+ * canvas) and requires EVERY one to match `(colorR,colorG,colorB)` within
+ * `REPLACE_REGION_CONTEXT_TOLERANCE` — the "refuses ambiguous/nonuniform
+ * background" requirement, made real and executable rather than a
+ * documentation-only promise. Reads from `working` (the canvas as it
+ * ACTUALLY stands at this point in the plan — after any prior fit/move/
+ * fill — never the pre-move base snapshot), because what must blend
+ * seamlessly is the FINAL output, not an earlier intermediate state.
+ */
+export function verifyReplaceRegionSurroundingContext(
+  working: Buffer,
+  canvasWidthPx: number,
+  canvasHeightPx: number,
+  p: ReplaceRegionWithBackgroundParams,
+): { uniform: boolean; detail: string; sampledPx: number; mismatchedPx: number } {
+  const ringX0 = Math.max(0, p.xPx - p.contextDepthPx);
+  const ringY0 = Math.max(0, p.yPx - p.contextDepthPx);
+  const ringX1 = Math.min(canvasWidthPx, p.xPx + p.widthPx + p.contextDepthPx);
+  const ringY1 = Math.min(canvasHeightPx, p.yPx + p.heightPx + p.contextDepthPx);
+  let sampled = 0;
+  let mismatched = 0;
+  for (let y = ringY0; y < ringY1; y++) {
+    const insideRectRow = y >= p.yPx && y < p.yPx + p.heightPx;
+    for (let x = ringX0; x < ringX1; x++) {
+      if (insideRectRow && x >= p.xPx && x < p.xPx + p.widthPx) continue; // inside the rect itself — not context
+      sampled++;
+      const i = (y * canvasWidthPx + x) * 4;
+      if (chebyshevDistance(working[i]!, working[i + 1]!, working[i + 2]!, p.colorR, p.colorG, p.colorB) > REPLACE_REGION_CONTEXT_TOLERANCE) {
+        mismatched++;
+      }
+    }
+  }
+  const uniform = sampled > 0 && mismatched === 0;
+  return {
+    uniform,
+    detail: uniform
+      ? `${sampled}px of surrounding context all matched rgb(${p.colorR},${p.colorG},${p.colorB}) within tolerance ${REPLACE_REGION_CONTEXT_TOLERANCE}.`
+      : sampled === 0
+        ? "No surrounding context pixels were available to verify (contextDepthPx entirely clipped by canvas bounds)."
+        : `${mismatched} of ${sampled} surrounding context px did not match rgb(${p.colorR},${p.colorG},${p.colorB}) within tolerance ${REPLACE_REGION_CONTEXT_TOLERANCE} — refusing rather than risk erasing something that crosses non-uniform artwork.`,
+    sampledPx: sampled,
+    mismatchedPx: mismatched,
+  };
+}
+
+/**
+ * Operator-authorized removal of an unwanted artifact — mechanically a
+ * bounded flat fill (identical pixel loop to `applyFillRect`), but gated
+ * on an independent re-measurement of the surrounding context FIRST (see
+ * `verifyReplaceRegionSurroundingContext`). Never generative, never a
+ * brush, never a freehand mask — exactly one rectangle, exactly one
+ * already-measured colour.
+ */
+export function applyReplaceRegionWithBackground(
+  working: Buffer,
+  canvasWidthPx: number,
+  canvasHeightPx: number,
+  step: SignRepairStep,
+): { status: "refused"; reason: "unsupported_step_kind"; detail: string } | null {
+  const p = decodeReplaceRegionWithBackgroundParams(step.params);
+  if (!p) return refuse(`Step "replace_region_with_background" is missing valid parameters.`);
+  if (p.xPx + p.widthPx > canvasWidthPx || p.yPx + p.heightPx > canvasHeightPx) {
+    return refuse(
+      `Step "replace_region_with_background" rectangle [${p.xPx},${p.yPx},${p.widthPx}x${p.heightPx}] exceeds the ` +
+        `${canvasWidthPx}x${canvasHeightPx}px canvas.`,
+    );
+  }
+  const context = verifyReplaceRegionSurroundingContext(working, canvasWidthPx, canvasHeightPx, p);
+  if (!context.uniform) {
+    return refuse(`Step "replace_region_with_background" refused: ${context.detail}`);
+  }
+  for (let y = 0; y < p.heightPx; y++) {
+    const rowStart = ((p.yPx + y) * canvasWidthPx + p.xPx) * 4;
+    for (let x = 0; x < p.widthPx; x++) {
+      const i = rowStart + x * 4;
+      working[i] = p.colorR;
+      working[i + 1] = p.colorG;
+      working[i + 2] = p.colorB;
+      working[i + 3] = 255;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration — the single entry point `sign-transform-executor.ts`
 // delegates a whole composition-primitive step sequence to.
 // ---------------------------------------------------------------------------
@@ -447,6 +594,8 @@ export function executeCompositionSteps(
       refusal = applyMoveRegion(baseCanvas, working, step);
     } else if (step.kind === "fill_rect") {
       refusal = applyFillRect(working, baseCanvas.width, baseCanvas.height, step);
+    } else if (step.kind === "replace_region_with_background") {
+      refusal = applyReplaceRegionWithBackground(working, baseCanvas.width, baseCanvas.height, step);
     } else {
       refusal = refuse(`Step "${step.kind}" is not admitted inside a composition plan's move/fill stage.`);
     }

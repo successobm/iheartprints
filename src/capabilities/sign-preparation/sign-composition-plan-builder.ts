@@ -38,6 +38,7 @@ import {
   encodeFillRectParams,
   encodeFitArtworkToCanvasParams,
   encodeMoveRegionParams,
+  encodeReplaceRegionWithBackgroundParams,
 } from "./sign-composition-steps";
 
 export interface SignCompositionCropInput {
@@ -67,6 +68,16 @@ export interface SignCompositionFillInput {
   color: { r: number; g: number; b: number };
 }
 
+export interface SignCompositionReplacementInput {
+  xPx: number;
+  yPx: number;
+  widthPx: number;
+  heightPx: number;
+  color: { r: number; g: number; b: number };
+  /** How many px of surrounding context must independently re-verify as this same colour — see `verifyReplaceRegionSurroundingContext`'s own doc. */
+  contextDepthPx: number;
+}
+
 export interface SignCompositionPlanInput {
   spec: SignProductionSpec;
   policy: SignResolutionPolicy;
@@ -94,6 +105,14 @@ export interface SignCompositionPlanInput {
   moves: SignCompositionMoveInput[];
   /** Ordered, explicit bounded-rectangle fills, applied in this exact order, after every move. */
   fills: SignCompositionFillInput[];
+  /**
+   * Ordered, explicit artifact removals (Signs Phase 3B: Fit to
+   * Production), applied in this exact order, LAST — after every move and
+   * fill — so each removal's own independent surrounding-context
+   * verification sees the canvas exactly as it will actually be produced.
+   * Defaults to `[]` for a plan that needs none.
+   */
+  replacements: SignCompositionReplacementInput[];
 }
 
 export type SignCompositionPlanBuildResult =
@@ -235,6 +254,31 @@ export function buildSignCompositionPlan(input: SignCompositionPlanInput): SignC
       }),
       risk: "review_required",
       reasons: ["Operator-measured, bounded rectangle fill — never implicit full-width."],
+    });
+  }
+
+  for (const replacement of input.replacements) {
+    if (
+      replacement.xPx < 0 || replacement.yPx < 0 || replacement.widthPx <= 0 || replacement.heightPx <= 0 ||
+      replacement.xPx + replacement.widthPx > canvasWidthPx || replacement.yPx + replacement.heightPx > canvasHeightPx
+    ) {
+      return { status: "refused", reason: `replace_region_with_background [${replacement.xPx},${replacement.yPx},${replacement.widthPx}x${replacement.heightPx}] does not fit within the ${canvasWidthPx}x${canvasHeightPx}px canvas.` };
+    }
+    if (replacement.contextDepthPx <= 0) {
+      return { status: "refused", reason: "replace_region_with_background requires a positive contextDepthPx to verify against." };
+    }
+    steps.push({
+      kind: "replace_region_with_background",
+      params: encodeReplaceRegionWithBackgroundParams({
+        xPx: replacement.xPx, yPx: replacement.yPx, widthPx: replacement.widthPx, heightPx: replacement.heightPx,
+        colorR: replacement.color.r, colorG: replacement.color.g, colorB: replacement.color.b,
+        contextDepthPx: replacement.contextDepthPx,
+      }),
+      risk: "review_required",
+      reasons: [
+        "Operator-authorized removal of an unwanted artifact (never a construction of new layout area) — " +
+          "independently re-verified against its own measured surrounding context before execution.",
+      ],
     });
   }
 

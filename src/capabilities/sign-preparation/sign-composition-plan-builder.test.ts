@@ -35,6 +35,7 @@ function baseInput(overrides: Partial<SignCompositionPlanInput> = {}): SignCompo
     fitPlacement: null,
     moves: [],
     fills: [],
+    replacements: [],
     ...overrides,
   };
 }
@@ -138,5 +139,49 @@ describe("buildSignCompositionPlan: fail-closed refusals", () => {
   it("refuses a fill rectangle outside the canvas", () => {
     const result = buildSignCompositionPlan(baseInput({ fills: [{ xPx: 0, yPx: 0, widthPx: 99999999, heightPx: 10, color: { r: 0, g: 0, b: 0 } }] }));
     assert.equal(result.status, "refused");
+  });
+
+  it("refuses a replace_region_with_background rectangle outside the canvas", () => {
+    const result = buildSignCompositionPlan(baseInput({ replacements: [{ xPx: 0, yPx: 0, widthPx: 99999999, heightPx: 10, color: { r: 0, g: 0, b: 0 }, contextDepthPx: 5 }] }));
+    assert.equal(result.status, "refused");
+  });
+
+  it("refuses a replace_region_with_background with a non-positive contextDepthPx", () => {
+    const result = buildSignCompositionPlan(baseInput({ replacements: [{ xPx: 0, yPx: 0, widthPx: 10, heightPx: 10, color: { r: 0, g: 0, b: 0 }, contextDepthPx: 0 }] }));
+    assert.equal(result.status, "refused");
+  });
+});
+
+describe("buildSignCompositionPlan: replace_region_with_background governance", () => {
+  it("changing a replacement's rectangle changes the planKey", () => {
+    const a = buildSignCompositionPlan(baseInput({ replacements: [{ xPx: 10, yPx: 10, widthPx: 50, heightPx: 50, color: { r: 200, g: 10, b: 10 }, contextDepthPx: 5 }] }));
+    const b = buildSignCompositionPlan(baseInput({ replacements: [{ xPx: 20, yPx: 10, widthPx: 50, heightPx: 50, color: { r: 200, g: 10, b: 10 }, contextDepthPx: 5 }] }));
+    assert.equal(a.status, "built");
+    assert.equal(b.status, "built");
+    if (a.status !== "built" || b.status !== "built") return;
+    assert.notEqual(a.plan.planKey, b.plan.planKey);
+  });
+
+  it("a plan with a replacement differs in planKey from an otherwise-identical plan without one — stale authorization is never silently reused", () => {
+    const withoutReplacement = buildSignCompositionPlan(baseInput());
+    const withReplacement = buildSignCompositionPlan(baseInput({ replacements: [{ xPx: 10, yPx: 10, widthPx: 50, heightPx: 50, color: { r: 200, g: 10, b: 10 }, contextDepthPx: 5 }] }));
+    assert.equal(withoutReplacement.status, "built");
+    assert.equal(withReplacement.status, "built");
+    if (withoutReplacement.status !== "built" || withReplacement.status !== "built") return;
+    assert.notEqual(withoutReplacement.plan.planKey, withReplacement.plan.planKey);
+  });
+
+  it("replace_region_with_background steps are ordered LAST, after every move and fill", () => {
+    const result = buildSignCompositionPlan(baseInput({
+      moves: [{ sourceStartYPx: 0, heightPx: 100, destStartYPx: 50 }],
+      fills: [{ xPx: 0, yPx: 0, widthPx: 10, heightPx: 10, color: { r: 255, g: 255, b: 255 } }],
+      replacements: [{ xPx: 20, yPx: 20, widthPx: 30, heightPx: 30, color: { r: 200, g: 10, b: 10 }, contextDepthPx: 5 }],
+    }));
+    assert.equal(result.status, "built");
+    if (result.status !== "built") return;
+    const kinds = result.plan.steps.map((s) => s.kind);
+    const lastMoveOrFillIndex = Math.max(kinds.lastIndexOf("move_region"), kinds.lastIndexOf("fill_rect"));
+    const replacementIndex = kinds.indexOf("replace_region_with_background");
+    assert.ok(replacementIndex > lastMoveOrFillIndex);
   });
 });

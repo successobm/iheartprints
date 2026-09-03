@@ -237,6 +237,7 @@ describe("loadSignPlanOperatorReview — production status", () => {
       blockedCandidateAssetId: null,
       blockedValidationId: null,
       blockedValidationStatus: null,
+      fitToProduction: null,
     });
   });
 

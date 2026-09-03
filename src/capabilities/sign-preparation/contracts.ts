@@ -436,7 +436,25 @@ export type SignRepairStepKind =
    * impossible: no parameter here can ever cover more than the exact
    * rectangle the operator chose.
    */
-  | "fill_rect";
+  | "fill_rect"
+  /**
+   * Signs Phase 3B (Fit to Production): operator-authorized REMOVAL of an
+   * unwanted artifact (a decorative rounded-corner arc, a mounting-hole
+   * graphic, a stray mark) by replacing an exact, bounded rectangle with an
+   * affirmatively measured flat background colour — distinct in PRODUCTION
+   * SEMANTICS from `fill_rect` (which constructs a known background/layout
+   * area this composition itself introduced, e.g. a redistribution gap)
+   * even though the two are mechanically similar. This step additionally
+   * requires the immediate surrounding context (just outside the replaced
+   * rectangle) to independently measure as the SAME uniform colour being
+   * applied — refusing (never silently clamping or blending) when that
+   * context is not itself uniform, which is exactly what stops an operator
+   * from using this to erase something that turns out to cross meaningful,
+   * multi-coloured artwork. Never generative, never a brush, never a
+   * freehand mask — one exact rectangle, one measured colour, always
+   * plan-bound and independently re-verifiable.
+   */
+  | "replace_region_with_background";
 
 /**
  * One planned operation, with enough structured parameters to replay it

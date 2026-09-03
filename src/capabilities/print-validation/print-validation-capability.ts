@@ -29,6 +29,8 @@ import type {
   PrintValidationStatus,
   ProductionNormalizationSummary,
   ProductionRequirements,
+  RigidSignFitToProductionEdgeEvidence,
+  RigidSignFitToProductionEvidence,
   RigidSignGeometryStepEvidence,
   RigidSignPlanEvidence,
   UploadedPreserveEvidence,
@@ -945,8 +947,65 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
     requiredTransformations.add("require_human_review");
   }
 
+  // Signs Phase 3B (Fit to Production, Section J — "the most important
+  // requirement"): PROTECTED content must never be permitted within the
+  // physical SAFE inset from any CUT edge. `null` (never analysed) and
+  // `"unknown"` (an edge with no provable bleed baseline) both fail closed
+  // — this check is the one place "ambiguous content must not silently
+  // receive bleed permission" becomes an actual blocking gate, not merely
+  // a UI label. A BLEED field genuinely reaching the cut edge (the
+  // overwhelming common case — a banner background) is never itself a
+  // failure; only non-bleed content found too close to an edge is.
+  const fitToProduction = sign.fitToProduction;
+  const safeInsetOk = fitToProduction !== null && fitToProduction.overallResult === "pass";
+  const failingEdges = fitToProduction?.edges.filter((e) => e.result !== "pass") ?? [];
+  const protectedContentSafeInsetReason = describeFitToProductionResult(fitToProduction, safeInsetOk, failingEdges);
+  checks.push({
+    check: "protected_content_safe_inset",
+    status: safeInsetOk ? "pass" : "fail",
+    severity: "blocking",
+    reason: protectedContentSafeInsetReason,
+  });
+  if (!safeInsetOk) {
+    requiredTransformations.add("require_human_review");
+  }
+
   const status = aggregateStatus(checks);
   return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, status);
+}
+
+/** One edge's own clearance, formatted as "top 94px/0.607in" or "top no content found within scan depth". */
+function formatFitToProductionEdgeClearance(edge: RigidSignFitToProductionEdgeEvidence): string {
+  if (edge.nearestNonBleedPx === null || edge.nearestNonBleedIn === null) {
+    return `${edge.edge} no content found within scan depth`;
+  }
+  return `${edge.edge} ${edge.nearestNonBleedPx}px/${edge.nearestNonBleedIn.toFixed(3)}in`;
+}
+
+/** One failing edge, formatted as "bottom (fail, 15px/0.094in)" or "left (unknown)". */
+function formatFitToProductionFailingEdge(edge: RigidSignFitToProductionEdgeEvidence): string {
+  const clearance = edge.nearestNonBleedPx === null ? "" : `, ${edge.nearestNonBleedPx}px/${edge.nearestNonBleedIn!.toFixed(3)}in`;
+  return `${edge.edge} (${edge.result}${clearance})`;
+}
+
+function describeFitToProductionResult(
+  fitToProduction: RigidSignFitToProductionEvidence | null,
+  safeInsetOk: boolean,
+  failingEdges: RigidSignFitToProductionEdgeEvidence[],
+): string {
+  if (fitToProduction === null) {
+    return "No Fit to Production safe-inset analysis was recorded for this plate — it cannot certify as ready until protected-content clearance from every cut edge is affirmatively measured.";
+  }
+  if (safeInsetOk) {
+    const clearances = fitToProduction.edges.map(formatFitToProductionEdgeClearance).join(", ");
+    return `Every edge affirmatively clears the ${fitToProduction.safeInsetIn}in safe inset — nearest protected content: ${clearances}.`;
+  }
+  const failures = failingEdges.map(formatFitToProductionFailingEdge).join(", ");
+  return (
+    `${failingEdges.length} edge(s) do not clear the ${fitToProduction.safeInsetIn}in safe inset or could not be ` +
+    `affirmatively measured: ${failures} — a BLEED field reaching the cut edge is never itself a failure; this means ` +
+    "non-bleed (protected or ambiguous) content was found too close, or the edge could not be proven safe at all."
+  );
 }
 
 /** Placeholder requirements object for the hard-block case where none were provided — never returned as `"ready"`. */

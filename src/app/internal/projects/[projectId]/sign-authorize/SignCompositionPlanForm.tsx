@@ -36,6 +36,17 @@ interface FillRow {
   b: string;
 }
 
+interface ReplacementRow {
+  xPx: string;
+  yPx: string;
+  widthPx: string;
+  heightPx: string;
+  r: string;
+  g: string;
+  b: string;
+  contextDepthPx: string;
+}
+
 export function SignCompositionPlanForm({ projectId }: { projectId: string }) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
@@ -63,6 +74,7 @@ export function SignCompositionPlanForm({ projectId }: { projectId: string }) {
 
   const [moves, setMoves] = useState<MoveRow[]>([]);
   const [fills, setFills] = useState<FillRow[]>([]);
+  const [replacements, setReplacements] = useState<ReplacementRow[]>([]);
 
   function num(s: string): number {
     const n = Number(s);
@@ -84,6 +96,7 @@ export function SignCompositionPlanForm({ projectId }: { projectId: string }) {
         fitPlacement: usePlacement ? { xPx: num(placeX), yPx: num(placeY) } : null,
         moves: moves.map((m) => ({ sourceStartYPx: num(m.sourceStartYPx), heightPx: num(m.heightPx), destStartYPx: num(m.destStartYPx) })),
         fills: fills.map((f) => ({ xPx: num(f.xPx), yPx: num(f.yPx), widthPx: num(f.widthPx), heightPx: num(f.heightPx), color: { r: num(f.r), g: num(f.g), b: num(f.b) } })),
+        replacements: replacements.map((r) => ({ xPx: num(r.xPx), yPx: num(r.yPx), widthPx: num(r.widthPx), heightPx: num(r.heightPx), color: { r: num(r.r), g: num(r.g), b: num(r.b) }, contextDepthPx: num(r.contextDepthPx) })),
       };
       const res = await fetch(`/api/internal/projects/${projectId}/sign-artwork/composition-plan`, {
         method: "POST",
@@ -204,6 +217,31 @@ export function SignCompositionPlanForm({ projectId }: { projectId: string }) {
         ))}
         <button type="button" onClick={() => setFills((prev) => [...prev, { xPx: "", yPx: "", widthPx: "", heightPx: "", r: "", g: "", b: "" }])} className="self-start text-sm text-ink/70 underline">
           + add fill
+        </button>
+      </fieldset>
+
+      <fieldset className="flex flex-col gap-2 rounded border border-ink/10 p-2 text-sm">
+        <span className="font-medium text-ink/60">Remove unwanted artifacts (Fit to Production — e.g. a stray hole/circle graphic), applied last:</span>
+        <p className="text-xs text-muted">
+          Replaces an exact rectangle with a measured background colour. The system independently re-verifies the
+          surrounding context (out to &quot;context&quot; px) genuinely matches that colour before applying — it
+          refuses rather than risk erasing anything that crosses non-uniform artwork.
+        </p>
+        {replacements.map((r, i) => (
+          <div key={i} className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1">x <input className="w-16 rounded border border-ink/20 px-1.5 py-0.5" value={r.xPx} onChange={(e) => setReplacements((prev) => prev.map((row, j) => (j === i ? { ...row, xPx: e.target.value } : row)))} /></label>
+            <label className="flex items-center gap-1">y <input className="w-16 rounded border border-ink/20 px-1.5 py-0.5" value={r.yPx} onChange={(e) => setReplacements((prev) => prev.map((row, j) => (j === i ? { ...row, yPx: e.target.value } : row)))} /></label>
+            <label className="flex items-center gap-1">w <input className="w-16 rounded border border-ink/20 px-1.5 py-0.5" value={r.widthPx} onChange={(e) => setReplacements((prev) => prev.map((row, j) => (j === i ? { ...row, widthPx: e.target.value } : row)))} /></label>
+            <label className="flex items-center gap-1">h <input className="w-16 rounded border border-ink/20 px-1.5 py-0.5" value={r.heightPx} onChange={(e) => setReplacements((prev) => prev.map((row, j) => (j === i ? { ...row, heightPx: e.target.value } : row)))} /></label>
+            <label className="flex items-center gap-1">R <input className="w-14 rounded border border-ink/20 px-1.5 py-0.5" value={r.r} onChange={(e) => setReplacements((prev) => prev.map((row, j) => (j === i ? { ...row, r: e.target.value } : row)))} /></label>
+            <label className="flex items-center gap-1">G <input className="w-14 rounded border border-ink/20 px-1.5 py-0.5" value={r.g} onChange={(e) => setReplacements((prev) => prev.map((row, j) => (j === i ? { ...row, g: e.target.value } : row)))} /></label>
+            <label className="flex items-center gap-1">B <input className="w-14 rounded border border-ink/20 px-1.5 py-0.5" value={r.b} onChange={(e) => setReplacements((prev) => prev.map((row, j) => (j === i ? { ...row, b: e.target.value } : row)))} /></label>
+            <label className="flex items-center gap-1">context <input className="w-14 rounded border border-ink/20 px-1.5 py-0.5" value={r.contextDepthPx} onChange={(e) => setReplacements((prev) => prev.map((row, j) => (j === i ? { ...row, contextDepthPx: e.target.value } : row)))} /></label>
+            <button type="button" onClick={() => setReplacements((prev) => prev.filter((_, j) => j !== i))} className="text-xs text-red-600 underline">remove</button>
+          </div>
+        ))}
+        <button type="button" onClick={() => setReplacements((prev) => [...prev, { xPx: "", yPx: "", widthPx: "", heightPx: "", r: "", g: "", b: "", contextDepthPx: "5" }])} className="self-start text-sm text-ink/70 underline">
+          + add artifact removal
         </button>
       </fieldset>
 

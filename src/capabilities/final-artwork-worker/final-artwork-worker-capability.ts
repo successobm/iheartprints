@@ -131,12 +131,14 @@ import {
   withPhysicalPixelDensity,
 } from "@/capabilities/final-artwork/production-png";
 import type {
+  RigidSignFitToProductionEvidence,
   RigidSignPlanEvidence,
   RigidSignSubstrateBoundaryEvidence,
 } from "@/capabilities/print-validation/contracts";
 import {
   adaptGeometryStepsToActualReconstruction,
   affectedEdgesForAxis,
+  analyzeSignFitToProduction,
   anyEdgeIsEdgeDependent,
   buildSignExecutionGeometryEvidence,
   computeSignPlanKey,
@@ -2772,6 +2774,46 @@ export function createFinalArtworkWorkerCapability(
       perimeterAlignmentAnswer,
     };
 
+    // Signs Phase 3B (Fit to Production, Section J — "the most important
+    // requirement"): measured against the plate's OWN actual final pixels,
+    // not derived from plan metadata — downloaded/decoded fresh here
+    // (rather than threading a decoded image through both the "just
+    // executed" and "recovered from an existing asset" branches above)
+    // so this evidence is honest and up to date regardless of which path
+    // produced `productionAsset`. A read failure fails closed to `null`
+    // (never fabricated as "safe") — `protected_content_safe_inset`
+    // already treats `null` as blocking.
+    let fitToProduction: RigidSignFitToProductionEvidence | null = null;
+    try {
+      const finalBytesForFit = await assets.downloadAssetBytes(productionAsset.id);
+      if (finalBytesForFit) {
+        const decodedFinal = decodePngUpload(finalBytesForFit.bytes);
+        const analysis = analyzeSignFitToProduction(
+          decodedFinal.image,
+          plan.orderedWidthIn,
+          plan.orderedHeightIn,
+          policy.minimumSafeInsetIn,
+        );
+        fitToProduction = {
+          safeInsetIn: analysis.safeInsetIn,
+          achievedPpiX: analysis.achievedPpiX,
+          achievedPpiY: analysis.achievedPpiY,
+          overallResult: analysis.overallResult,
+          edges: analysis.edges.map((e) => ({
+            edge: e.edge,
+            requiredSafeInsetIn: e.requiredSafeInsetIn,
+            requiredSafeInsetPx: e.requiredSafeInsetPx,
+            nearestNonBleedPx: e.nearestNonBleedPx,
+            nearestNonBleedIn: e.nearestNonBleedIn,
+            result: e.result,
+            reason: e.reason,
+          })),
+        };
+      }
+    } catch {
+      fitToProduction = null;
+    }
+
     const rigidSign: RigidSignPlanEvidence = {
       sourceAssetId: preparation.originalAssetId,
       sourceSha256,
@@ -2835,6 +2877,7 @@ export function createFinalArtworkWorkerCapability(
           ? { planKey: preparation.authorizedPlanKey, authorizedBy: preparation.authorizedBy }
           : null,
       substrateBoundary,
+      fitToProduction,
     };
 
     const validationInput: PrintValidationInput = {

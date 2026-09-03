@@ -91,6 +91,26 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
     // explicitly overrides it (see the "Signs substrate boundary →
     // print_ready" suite below).
     substrateBoundary: { edgeDependentStructureOnAffectedEdge: false, perimeterAlignmentAnswer: null },
+    // Signs Phase 3B (Fit to Production): the default fixture's plate
+    // clears every edge's safe inset with generous, affirmatively measured
+    // clearance, so this stays trivially passing unless a test explicitly
+    // overrides it (see the "Signs Fit to Production -> print_ready" suite
+    // below).
+    fitToProduction: {
+      safeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+      achievedPpiX: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      achievedPpiY: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      overallResult: "pass" as const,
+      edges: (["top", "right", "bottom", "left"] as const).map((edge) => ({
+        edge,
+        requiredSafeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+        requiredSafeInsetPx: 20,
+        nearestNonBleedPx: 200,
+        nearestNonBleedIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+        result: "pass" as const,
+        reason: "test fixture default — comfortably clear",
+      })),
+    },
     ...overrides,
   };
 }
@@ -1156,6 +1176,139 @@ describe("Signs substrate boundary → print_ready (Perimeter Safety Phase)", ()
         }),
       }),
     );
+    assert.equal(report.status, "ready");
+  });
+});
+
+/**
+ * Signs Phase 3B (Fit to Production, Section J — "the most important
+ * requirement"): `protected_content_safe_inset` — the blocking gate that
+ * makes Print Ready impossible when protected content violates the
+ * physical SAFE inset from any CUT edge, and confirms a BLEED field
+ * genuinely reaching the cut edge is never itself a failure.
+ */
+describe("Signs Fit to Production → print_ready (Section J)", () => {
+  function checkOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "protected_content_safe_inset");
+  }
+
+  function passingEdge(edge: "top" | "right" | "bottom" | "left") {
+    return {
+      edge,
+      requiredSafeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+      requiredSafeInsetPx: 20,
+      nearestNonBleedPx: 200,
+      nearestNonBleedIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      result: "pass" as const,
+      reason: "comfortably clear",
+    };
+  }
+
+  function failingEdge(edge: "top" | "right" | "bottom" | "left", nearestNonBleedPx: number) {
+    return {
+      edge,
+      requiredSafeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+      requiredSafeInsetPx: 20,
+      nearestNonBleedPx,
+      nearestNonBleedIn: nearestNonBleedPx / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      result: "fail" as const,
+      reason: "too close to the cut edge",
+    };
+  }
+
+  function unknownEdge(edge: "top" | "right" | "bottom" | "left") {
+    return {
+      edge,
+      requiredSafeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+      requiredSafeInsetPx: 20,
+      nearestNonBleedPx: null,
+      nearestNonBleedIn: null,
+      result: "unknown" as const,
+      reason: "no provable bleed colour",
+    };
+  }
+
+  it("every edge clears the safe inset — passes, compliant candidate reaches ready", () => {
+    const report = printValidation.validateArtwork(baseInput());
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("READY is impossible when protected content violates the safe inset on even one edge — every other check still passing", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          fitToProduction: {
+            safeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+            achievedPpiX: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            achievedPpiY: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            overallResult: "fail",
+            edges: [passingEdge("top"), passingEdge("right"), failingEdge("bottom", 5), passingEdge("left")],
+          },
+        }),
+      }),
+    );
+    for (const other of [
+      "exact_physical_dimensions",
+      "effective_resolution",
+      "no_unintended_transparency",
+      "content_within_bounds",
+      "executed_plan_matches_recorded_plan",
+    ]) {
+      const check = report.checks.find((c) => c.check === other);
+      assert.equal(check!.status, "pass", `"${other}" was expected to pass in this control scenario`);
+    }
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /bottom/);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("READY is impossible when an edge could not be affirmatively measured at all ('unknown' fails closed, never silently treated as safe)", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          fitToProduction: {
+            safeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+            achievedPpiX: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            achievedPpiY: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            overallResult: "unknown",
+            edges: [passingEdge("top"), passingEdge("right"), passingEdge("bottom"), unknownEdge("left")],
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("no Fit to Production evidence at all (never measured) fails closed — never silently treated as pass", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({ rigidSign: evidence({ fitToProduction: null }) }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.match(checkOf(report)!.reason, /No Fit to Production/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("a BLEED field genuinely reaching the cut edge is never itself a failure — only non-bleed content too close is", () => {
+    // nearestNonBleedPx comfortably beyond the required inset on every
+    // edge, even though the field itself (bleed) touches row/column 0 —
+    // this evidence shape is exactly what a correctly-composed banner
+    // background produces; it must read as pass, not as a violation.
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          fitToProduction: {
+            safeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+            achievedPpiX: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            achievedPpiY: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            overallResult: "pass",
+            edges: [passingEdge("top"), passingEdge("right"), passingEdge("bottom"), passingEdge("left")],
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
     assert.equal(report.status, "ready");
   });
 });

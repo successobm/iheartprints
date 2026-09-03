@@ -354,6 +354,9 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-composition-steps.test.ts",
   "src/capabilities/sign-preparation/sign-composition-plan-builder.test.ts",
   "src/capabilities/sign-preparation/sign-composition-verification.test.ts",
+  // Signs Phase 3B (Fit to Production): CUT/SAFE/BLEED/PROTECTED analysis
+  // and the replace_region_with_background artifact-removal primitive.
+  "src/capabilities/sign-preparation/sign-fit-to-production.test.ts",
   // Signs Phase 3A: cross-plan Topaz intermediate reconstruction adoption —
   // a re-plan for the SAME sign preparation reuses a sufficient, already-
   // paid-for intermediate from a PRIOR job rather than dispatching a

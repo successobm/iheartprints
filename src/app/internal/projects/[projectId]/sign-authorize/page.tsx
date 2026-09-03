@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 
-import { loadSignPlanOperatorReview } from "@/capabilities/sign-preparation";
+import { loadSignPlanOperatorReview, type SignFitToProductionSummary } from "@/capabilities/sign-preparation";
 import { isInternalAccessConfigured } from "@/lib/config/internal-access-config";
 import { ACQUISITION_SESSION_COOKIE } from "@/lib/http/acquisition-session-cookie";
 import { getProjectRepository } from "@/lib/db";
@@ -135,6 +135,10 @@ function SignPlanReview({
           assetId={review.production.blockedCandidateAssetId}
           validationStatus={review.production.blockedValidationStatus}
         />
+      ) : null}
+
+      {review.production.fitToProduction ? (
+        <FitToProductionSummary summary={review.production.fitToProduction} />
       ) : null}
 
       <section className="flex flex-col gap-1">
@@ -295,6 +299,39 @@ function BlockedProductionCandidate({
       >
         Download blocked candidate for review
       </a>
+    </section>
+  );
+}
+
+/**
+ * Signs Phase 3B (Fit to Production, Section G): the operator's own
+ * CUT/SAFE/BLEED/PROTECTED summary for the current production candidate —
+ * reads the SAME `protected_content_safe_inset` PrintValidation check the
+ * governed workflow itself blocks Print Ready on, never a second,
+ * independent measurement. Accessible labels (not colour alone) so the
+ * distinction reads correctly with assistive tech or in monochrome print.
+ */
+function FitToProductionSummary({ summary }: { summary: SignFitToProductionSummary }) {
+  const isPass = summary.status === "pass";
+  return (
+    <section
+      className={`flex flex-col gap-2 rounded-lg border p-3 ${isPass ? "border-emerald-400 bg-emerald-50" : "border-red-400 bg-red-50"}`}
+      data-sign-authorize-fit-to-production
+    >
+      <h2 className="text-sm font-semibold text-ink">Fit to Production — safe inset</h2>
+      <p
+        className={`text-sm font-semibold ${isPass ? "text-emerald-800" : "text-red-800"}`}
+        data-sign-authorize-fit-to-production-label
+      >
+        {isPass ? "SAFE — protected content clears the cut edge on every side" : "WARNING — protected content is too close to the cut edge (or could not be proven safe)"}
+      </p>
+      <p className="text-xs text-muted">
+        BLEED backgrounds (banner colour fields) are expected to reach the physical cut edge — that is not a
+        violation. This checks only that meaningful/protected content stays inside the safe margin.
+      </p>
+      <p className="text-sm text-ink" data-sign-authorize-fit-to-production-reason>
+        {summary.reason}
+      </p>
     </section>
   );
 }

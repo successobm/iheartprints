@@ -545,22 +545,48 @@ describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4C): customer-shaped non
     // --- 8. PrintValidation: the plan-integrity check genuinely passes ---
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
     assert.ok(validation);
-    assert.equal(validation!.status, "ready");
     const check = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks.find(
       (c) => c.check === "executed_plan_matches_recorded_plan",
     );
     assert.equal(check?.status, "pass");
+    // Signs Phase 3B (Fit to Production, Section J): `customerShapedLowRes
+    // Artwork`'s own top/bottom bands are deliberately NOISY pixel-noise
+    // right at the cut edge (no single dominant colour) — exactly the
+    // AMBIGUOUS edge content Section F/J requires to fail closed rather
+    // than silently receive bleed permission. The plan-integrity fix this
+    // test exists to prove (above) is genuinely unaffected; PrintValidation
+    // overall correctly still withholds `ready` on this new, independent
+    // ground.
+    const fitToProductionCheck = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks.find(
+      (c) => c.check === "protected_content_safe_inset",
+    );
+    assert.equal(fitToProductionCheck?.status, "fail", "the ONLY new blocker is Fit to Production (noisy edge bands), not a regression in plan-integrity");
+    assert.equal(validation!.status, "finalization_required");
 
-    // --- 9. Project reaches print_ready -----------------------------------
+    // --- 9. Project status reflects the same Fit to Production block -----
     const project = await repo.getProject(projectId);
-    assert.equal(project!.project.status, "print_ready");
+    assert.equal(project!.project.status, "finalization_required");
 
-    // --- 10. Production-delivery resolver + real download bytes ----------
+    // --- 10. Customer-delivery authority correctly WITHHOLDS while blocked
+    // Signs Phase 3B: `resolveCurrentSignProductionDelivery` is the ONLY
+    // path that can ever say "this is print-ready" and explicitly refuses
+    // unless the latest validation IS `"ready"` — so it correctly returns
+    // null now that Fit to Production blocks this exact candidate.
     const delivery = await finalArtwork.resolveCurrentSignProductionDelivery(projectId);
-    assert.ok(delivery, "the authoritative delivery resolver finds this exact asset");
-    assert.equal(delivery!.assetId, asset!.id);
+    assert.equal(delivery, null, "the customer-delivery authority never serves a Fit-to-Production-blocked candidate");
 
-    const downloaded = await assets.downloadAssetBytes(delivery!.assetId);
+    // --- 11. The corrected asset itself still genuinely exists and is
+    // downloadable for operator inspection via the dedicated blocked-
+    // candidate resolver (never the customer-delivery authority) — proving
+    // the plan-integrity + adaptation fix this test exists for really did
+    // produce a real, correctly-sized file, independent of the separate
+    // Fit to Production block just proven above. -----------------------
+    const blocked = await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    assert.ok(blocked, "the blocked-candidate resolver surfaces this exact asset for operator inspection");
+    assert.equal(blocked!.assetId, asset!.id);
+    assert.equal(blocked!.validationStatus, "finalization_required");
+
+    const downloaded = await assets.downloadAssetBytes(blocked!.assetId);
     assert.ok(downloaded, "the actual corrected PNG bytes are downloadable");
     const { PNG } = await import("pngjs");
     const decoded = PNG.sync.read(downloaded!.bytes);
@@ -724,22 +750,41 @@ describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4D): real-customer-shape
     // proportionality + step-identity check admits it) --------------------
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
     assert.ok(validation);
-    assert.equal(validation!.status, "ready");
     const check = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks.find(
       (c) => c.check === "executed_plan_matches_recorded_plan",
     );
     assert.equal(check?.status, "pass");
+    // Signs Phase 3B (Fit to Production, Section J): `customerShapedLowRes
+    // Artwork`'s own top/bottom bands are deliberately NOISY pixel-noise
+    // right at the cut edge (no single dominant colour) — exactly the
+    // AMBIGUOUS edge content Section F/J requires to fail closed rather
+    // than silently receive bleed permission. The adaptive-equivalence fix
+    // this test exists to prove (above) is genuinely unaffected;
+    // PrintValidation overall correctly still withholds `ready` on this
+    // new, independent ground.
+    const fitToProductionCheck = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks.find(
+      (c) => c.check === "protected_content_safe_inset",
+    );
+    assert.equal(fitToProductionCheck?.status, "fail", "the ONLY new blocker is Fit to Production (noisy edge bands), not a regression in plan-integrity/adaptation");
+    assert.equal(validation!.status, "finalization_required");
 
-    // --- 9. Project reaches print_ready -----------------------------------
+    // --- 9. Project status reflects the same Fit to Production block -----
     const project = await repo.getProject(projectId);
-    assert.equal(project!.project.status, "print_ready");
+    assert.equal(project!.project.status, "finalization_required");
 
-    // --- 10. Production-delivery resolver + real download bytes ----------
+    // --- 10. Customer-delivery authority correctly WITHHOLDS while blocked
     const delivery = await finalArtwork.resolveCurrentSignProductionDelivery(projectId);
-    assert.ok(delivery);
-    assert.equal(delivery!.assetId, asset!.id);
+    assert.equal(delivery, null, "the customer-delivery authority never serves a Fit-to-Production-blocked candidate");
 
-    const downloaded = await assets.downloadAssetBytes(delivery!.assetId);
+    // --- 11. The adapted asset itself still genuinely exists, at the
+    // correct ADAPTED (not plan-predicted) geometry, and is downloadable
+    // for operator inspection via the dedicated blocked-candidate resolver.
+    const blocked = await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    assert.ok(blocked, "the blocked-candidate resolver surfaces this exact asset for operator inspection");
+    assert.equal(blocked!.assetId, asset!.id);
+    assert.equal(blocked!.validationStatus, "finalization_required");
+
+    const downloaded = await assets.downloadAssetBytes(blocked!.assetId);
     assert.ok(downloaded, "the actual corrected PNG bytes are downloadable");
     const { PNG } = await import("pngjs");
     const decoded = PNG.sync.read(downloaded!.bytes);

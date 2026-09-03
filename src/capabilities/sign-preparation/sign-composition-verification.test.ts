@@ -44,6 +44,7 @@ function buildAndExecute() {
     fitPlacement: null,
     moves: [{ sourceStartYPx: 20, heightPx: 40, destStartYPx: 0 }],
     fills: [{ xPx: 0, yPx: 190, widthPx: 200, heightPx: 10, color: { r: 10, g: 10, b: 10 } }],
+    replacements: [],
   });
   if (planResult.status !== "built") throw new Error("test setup: plan build failed");
   const plan = planResult.plan;
@@ -108,5 +109,43 @@ describe("verifySignCompositionExecution", () => {
     const result = verifySignCompositionExecution(artwork, plan, wrongDims);
     assert.equal(result.status, "fail");
     assert.ok(result.checks.some((c) => c.check === "exact_final_dimensions" && c.status === "fail"));
+  });
+
+  it("a plan using replace_region_with_background passes when correct, and detects tampering with the replaced region", () => {
+    const artwork = makeImage(200, 200, { r: 200, g: 0, b: 0 }); // uniform red, with a small black artifact
+    fillRect(artwork, 20, 20, 40, 40, { r: 10, g: 10, b: 10 });
+
+    const planResult = buildSignCompositionPlan({
+      spec: testSpec(),
+      policy: RIGID_RECT_UP_TO_24X36_V1,
+      sourceAssetId: "asset-1",
+      sourceSha256: "c".repeat(64),
+      sourceWidthPx: 200,
+      sourceHeightPx: 200,
+      reconstruction: null,
+      crop: null,
+      fitBackground: { r: 200, g: 0, b: 0 },
+      fitPlacement: null,
+      moves: [],
+      fills: [],
+      replacements: [{ xPx: 15, yPx: 15, widthPx: 30, heightPx: 30, color: { r: 200, g: 0, b: 0 }, contextDepthPx: 4 }],
+    });
+    if (planResult.status !== "built") throw new Error("test setup: plan build failed");
+    const plan = planResult.plan;
+    const bounds = { x: 0, y: 0, width: artwork.width, height: artwork.height };
+    const executed = executeCompositionSteps(artwork, bounds, plan.steps);
+    if (executed.status !== "executed") throw new Error("test setup: execution failed");
+
+    const correct = verifySignCompositionExecution(artwork, plan, executed.image);
+    assert.equal(correct.status, "pass");
+    assert.ok(correct.checks.some((c) => c.check === "replace_region_with_background_bounded" && c.status === "pass"));
+
+    const tampered = cloneImage(executed.image);
+    // Re-introduce a black pixel inside the region that was supposed to be
+    // cleanly replaced with red.
+    const i = (25 * tampered.width + 25) * 4;
+    tampered.data[i] = 10; tampered.data[i + 1] = 10; tampered.data[i + 2] = 10;
+    const tamperedResult = verifySignCompositionExecution(artwork, plan, tampered);
+    assert.equal(tamperedResult.status, "fail");
   });
 });

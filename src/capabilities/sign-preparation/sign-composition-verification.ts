@@ -37,6 +37,7 @@ import {
   decodeFillRectParams,
   decodeFitArtworkToCanvasParams,
   decodeMoveRegionParams,
+  decodeReplaceRegionWithBackgroundParams,
   deriveUniformFitDimensions,
   executeCompositionSteps,
   executeCropRegion,
@@ -172,6 +173,17 @@ export function verifySignCompositionExecution(
         detail: ok
           ? `Rectangle [${p!.xPx},${p!.yPx},${p!.widthPx}x${p!.heightPx}] filled with measured colour rgb(${p!.colorR},${p!.colorG},${p!.colorB}) — bounded, never implicit full-width.`
           : "fill_rect step has invalid parameters or exceeds the canvas.",
+      });
+      if (!ok) return fail(checks);
+    } else if (step.kind === "replace_region_with_background") {
+      const p = decodeReplaceRegionWithBackgroundParams(step.params);
+      const ok = p !== null && p.xPx + p.widthPx <= baseCanvas.width && p.yPx + p.heightPx <= baseCanvas.height;
+      checks.push({
+        check: "replace_region_with_background_bounded",
+        status: ok ? "pass" : "fail",
+        detail: ok
+          ? `Rectangle [${p!.xPx},${p!.yPx},${p!.widthPx}x${p!.heightPx}] replaced with measured colour rgb(${p!.colorR},${p!.colorG},${p!.colorB}) — the full recomputation below independently re-proves its surrounding-context verification.`
+          : "replace_region_with_background step has invalid parameters or exceeds the canvas.",
       });
       if (!ok) return fail(checks);
     } else {

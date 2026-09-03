@@ -586,7 +586,8 @@ async function resolvePreservationContextUnsafe(
       s.kind === "crop_region" ||
       s.kind === "fit_artwork_to_canvas" ||
       s.kind === "move_region" ||
-      s.kind === "fill_rect",
+      s.kind === "fill_rect" ||
+      s.kind === "replace_region_with_background",
   );
   if (!usesProviderReconstruction && !usesPerimeterReconstruction && !usesParametricFrameReconstruction) {
     throw new SignPreservationStateError(

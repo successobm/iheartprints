@@ -82,8 +82,18 @@ import { COMPOSITION_STEP_KINDS, executeCompositionSteps, isCompositionStepKind 
  * asset as v4 — those assets, their plans, and their own executor code
  * paths remain fully intact and auditable; this bump only changes what
  * the CURRENT build stamps onto and requires of NEW production assets.
+ *
+ * `"sign-execution-v5"` (Signs Phase 3B, Fit to Production): a fifth
+ * composition primitive, `replace_region_with_background`
+ * (`sign-composition-steps.ts`), is now admitted and executed —
+ * operator-authorized removal of an unwanted artifact (a decorative
+ * rounded-corner arc, a mounting-hole graphic) by replacing an exact
+ * rectangle with an affirmatively measured, independently-re-verified
+ * flat colour. A final asset produced under v1-v4 never satisfies a
+ * v5-scoped consumer's identity check; nothing about v1-v4's own admitted
+ * step outputs changes.
  */
-export const SIGN_EXECUTION_IMPLEMENTATION_VERSION = "sign-execution-v4";
+export const SIGN_EXECUTION_IMPLEMENTATION_VERSION = "sign-execution-v5";
 
 export interface SignExecutionBounds {
   x: number;

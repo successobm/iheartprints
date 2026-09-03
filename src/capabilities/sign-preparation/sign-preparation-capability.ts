@@ -64,6 +64,7 @@ import {
   type SignCompositionFillInput,
   type SignCompositionMoveInput,
   type SignCompositionReconstructionInput,
+  type SignCompositionReplacementInput,
 } from "./sign-composition-plan-builder";
 
 const ALL_SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
@@ -180,6 +181,7 @@ export interface SignCompositionOperatorInput {
   fitPlacement: { xPx: number; yPx: number } | null;
   moves: SignCompositionMoveInput[];
   fills: SignCompositionFillInput[];
+  replacements: SignCompositionReplacementInput[];
 }
 
 export function createSignPreparationCapability(
@@ -603,6 +605,7 @@ export function createSignPreparationCapability(
         fitPlacement: input.fitPlacement,
         moves: input.moves,
         fills: input.fills,
+        replacements: input.replacements,
       });
 
       if (buildResult.status === "refused") {

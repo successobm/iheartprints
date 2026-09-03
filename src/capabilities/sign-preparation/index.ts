@@ -90,29 +90,36 @@ export {
   loadSignPlanOperatorReview,
   type SignPlanOperatorReview,
   type SignPlanOperatorProductionStatus,
+  type SignFitToProductionSummary,
 } from "./sign-plan-operator-review";
 // Signs Phase 3B (Canvas-First Correction).
 export {
   COMPOSITION_STEP_KINDS,
+  REPLACE_REGION_CONTEXT_TOLERANCE,
   applyFillRect,
   applyMoveRegion,
+  applyReplaceRegionWithBackground,
   decodeCropRegionParams,
   decodeFillRectParams,
   decodeFitArtworkToCanvasParams,
   decodeMoveRegionParams,
+  decodeReplaceRegionWithBackgroundParams,
   deriveUniformFitDimensions,
   encodeCropRegionParams,
   encodeFillRectParams,
   encodeFitArtworkToCanvasParams,
   encodeMoveRegionParams,
+  encodeReplaceRegionWithBackgroundParams,
   executeCompositionSteps,
   executeCropRegion,
   executeFitArtworkToCanvas,
   isCompositionStepKind,
+  verifyReplaceRegionSurroundingContext,
   type CropRegionParams,
   type FillRectParams,
   type FitArtworkToCanvasParams,
   type MoveRegionParams,
+  type ReplaceRegionWithBackgroundParams,
 } from "./sign-composition-steps";
 export {
   buildSignCompositionPlan,
@@ -122,6 +129,7 @@ export {
   type SignCompositionPlanBuildResult,
   type SignCompositionPlanInput,
   type SignCompositionReconstructionInput,
+  type SignCompositionReplacementInput,
 } from "./sign-composition-plan-builder";
 export {
   isSignCompositionPlan,
@@ -129,3 +137,11 @@ export {
   type SignCompositionVerificationCheck,
   type SignCompositionVerificationResult,
 } from "./sign-composition-verification";
+export {
+  FIT_TO_PRODUCTION_MIN_EDGE_DOMINANT_COVERAGE,
+  FIT_TO_PRODUCTION_TOLERANCE,
+  analyzeSignFitToProduction,
+  signSafeInsetPxForAxis,
+  type SignFitToProductionEdgeResult,
+  type SignFitToProductionResult,
+} from "./sign-fit-to-production";

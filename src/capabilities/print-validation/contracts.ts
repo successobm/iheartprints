@@ -409,6 +409,16 @@ export const PRINT_VALIDATION_CHECK_CODES = [
    * other check here. See `validateRigidSign`'s own reasoning.
    */
   "substrate_boundary_semantics",
+  /**
+   * Signs Phase 3B (Fit to Production, Section J — "the most important
+   * requirement"): blocking whenever any edge's measured PROTECTED-content
+   * clearance from the physical CUT edge is short of the SAFE inset, or
+   * could not be affirmatively measured at all (`"unknown"` fails closed,
+   * exactly like every other unproven-safety case in this profile). A
+   * BLEED field genuinely reaching the cut edge is never itself a failure
+   * — only non-bleed (protected or ambiguous) content found too close is.
+   */
+  "protected_content_safe_inset",
   /** A repair plan was actually persisted and recorded for this preparation — the plan the executed job claims to have replayed. */
   "repair_plan_recorded",
   /** The plan actually executed is provably the plan that was recorded: its canonical key recomputes identically and only S2-admitted, content-preserving steps were replayed. Also where the print-ready risk boundary is enforced — see this check's own reason text on a `review_required`/`blocked` plan. */
@@ -1017,6 +1027,43 @@ export interface RigidSignPlanEvidence {
    * whether its finished-edge relationship was verified.
    */
   substrateBoundary: RigidSignSubstrateBoundaryEvidence;
+  /**
+   * Signs Phase 3B (Fit to Production): CUT/SAFE/BLEED/PROTECTED evidence
+   * for the actual produced plate, measured by the worker (`sign-
+   * preparation/sign-fit-to-production.ts`'s own `analyzeSignFitToProduction`
+   * — this module never imports that function; the caller re-derives the
+   * facts and hands over a plain, already-computed result, the same
+   * discipline every other cross-capability fact in this evidence object
+   * already follows). `null` means the analysis was never run for this
+   * plate (a historical asset produced before this phase, or an
+   * infrastructure failure) — fails closed exactly like every other
+   * missing-evidence case in this profile, never silently treated as safe.
+   */
+  fitToProduction: RigidSignFitToProductionEvidence | null;
+}
+
+/**
+ * Signs Phase 3B (Fit to Production): this module's own narrow copy of
+ * `sign-preparation/sign-fit-to-production.ts`'s `SignFitToProductionResult`
+ * shape — never imported, mirroring every other cross-capability evidence
+ * type in this file. `edge` values are plain strings, never `SignEdge`.
+ */
+export interface RigidSignFitToProductionEdgeEvidence {
+  edge: "top" | "right" | "bottom" | "left";
+  requiredSafeInsetIn: number;
+  requiredSafeInsetPx: number;
+  nearestNonBleedPx: number | null;
+  nearestNonBleedIn: number | null;
+  result: "pass" | "fail" | "unknown";
+  reason: string;
+}
+
+export interface RigidSignFitToProductionEvidence {
+  safeInsetIn: number;
+  achievedPpiX: number;
+  achievedPpiY: number;
+  edges: RigidSignFitToProductionEdgeEvidence[];
+  overallResult: "pass" | "fail" | "unknown";
 }
 
 /**
