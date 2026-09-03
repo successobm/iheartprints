@@ -77,6 +77,31 @@
  * — only that it is the first region THIS scan measured. A future
  * planner/executor decides how these structural facts relate to the
  * ordered production template; this module has no opinion.
+ *
+ * PHASE 2D — BOUNDED TRANSITION RUNS: two directly adjacent fill runs of
+ * genuinely different measured colours are, by default, exactly the
+ * ambiguity described above. Before that check runs, a short candidate
+ * fill run may be reclassified as TRANSITION EVIDENCE (an anti-aliased
+ * blend row, not independent structure) and folded into a neighbouring
+ * run — but ONLY when both (a) it is bounded in height
+ * (`MAX_TRANSITION_RUN_HEIGHT_PX`) AND (b) its own measured colour is
+ * affirmatively explained by a neighbouring run's colour (close to one
+ * substantial neighbour, or a genuine channel-wise blend between two) —
+ * see `decideTransitionAbsorption`'s own doc. Shortness ALONE is never
+ * sufficient: a deliberate thin stripe, separator, or accent line whose
+ * colour is not so explained is left exactly as measured, and remains
+ * its own run — including remaining part of a genuine ambiguity when it
+ * sits directly against another fill run. This module deliberately does
+ * NOT reuse `frame-structure-model.ts`'s `MAX_TRANSITION_RUN_PX` /
+ * `MIN_STROKE_RUN_PX` — those bound consecutive LOW-COVERAGE (internally
+ * non-uniform, blurry) scan lines within one edge-band depth scan, a
+ * different measurement entirely from a row that IS individually
+ * confidently uniform (this module's own `classifyRow` already requires
+ * that) but differs in colour from its neighbour. Reclassifying a run as
+ * transition evidence changes ONLY this module's structural topology —
+ * it never touches, deletes, or reinterprets a single source pixel; the
+ * original bytes remain fully authoritative for any future preservation
+ * or executor layer.
  */
 
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
@@ -176,15 +201,48 @@ export type SignStructuralLayoutSegmentationResult =
   /** A genuine ambiguity this module refuses to resolve by guessing — see `reason`. */
   | { status: "ambiguous"; reason: string };
 
+/** `tolerance` defaults to `EDGE_BACKGROUND_TOLERANCE` — every pre-Phase-2D caller passing no third argument gets byte-identical behaviour to before. */
 function colorsMatch(
   a: { r: number; g: number; b: number },
   b: { r: number; g: number; b: number },
+  tolerance: number = EDGE_BACKGROUND_TOLERANCE,
 ): boolean {
   return (
-    Math.abs(a.r - b.r) <= EDGE_BACKGROUND_TOLERANCE &&
-    Math.abs(a.g - b.g) <= EDGE_BACKGROUND_TOLERANCE &&
-    Math.abs(a.b - b.b) <= EDGE_BACKGROUND_TOLERANCE
+    Math.abs(a.r - b.r) <= tolerance &&
+    Math.abs(a.g - b.g) <= tolerance &&
+    Math.abs(a.b - b.b) <= tolerance
   );
+}
+
+/** Chebyshev (max-channel) colour distance — the same per-channel metric `colorsMatch` already thresholds, used here only for a deterministic closer-neighbour tie-break, never as a new matching rule. */
+function colorDistanceChebyshev(
+  a: { r: number; g: number; b: number },
+  b: { r: number; g: number; b: number },
+): number {
+  return Math.max(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b));
+}
+
+/**
+ * True iff `candidate` lies, on every channel independently, within the
+ * range spanned by `a` and `b` (plus `EDGE_BACKGROUND_TOLERANCE` slack per
+ * channel for ordinary measurement noise) — a genuine channel-wise blend
+ * between the two, not merely "close to one of them" (that case is
+ * handled separately by `colorsMatch`). A colour outside that span on any
+ * channel is never a blend of `a` and `b`, however close it happens to be
+ * to either one alone.
+ */
+function isChannelwiseBetween(
+  candidate: { r: number; g: number; b: number },
+  a: { r: number; g: number; b: number },
+  b: { r: number; g: number; b: number },
+): boolean {
+  const slack = EDGE_BACKGROUND_TOLERANCE;
+  const channels: Array<"r" | "g" | "b"> = ["r", "g", "b"];
+  return channels.every((ch) => {
+    const lo = Math.min(a[ch], b[ch]) - slack;
+    const hi = Math.max(a[ch], b[ch]) + slack;
+    return candidate[ch] >= lo && candidate[ch] <= hi;
+  });
 }
 
 type RowClassification =
@@ -253,6 +311,148 @@ function runLengthEncode(
     });
   }
   return runs;
+}
+
+/**
+ * Phase 2D — bounded transition-run tolerance: a candidate fill run this
+ * tall OR shorter may be considered anti-aliasing/measurement-transition
+ * evidence — NEVER merely because it is short; see
+ * `decideTransitionAbsorption` for the additional, REQUIRED colour and
+ * neighbour evidence a candidate must also satisfy. Independently
+ * justified for THIS module (deliberately not imported from
+ * `frame-structure-model.ts`'s differently-scoped `MAX_TRANSITION_RUN_PX`
+ * — see the module doc above for why those semantics do not transfer):
+ * genuine anti-aliased blending in exported raster artwork is
+ * conventionally 1-2 pixels; a deliberately designed visual element (a
+ * stripe, an accent line, a banner) is essentially always taller.
+ */
+const MAX_TRANSITION_RUN_HEIGHT_PX = 2;
+
+/**
+ * A neighbouring fill run must be at least this tall to be trusted as the
+ * genuine, stable structural colour a short candidate might be blending
+ * toward — never itself another borderline-short run (which is exactly
+ * how a genuine multi-run gradient or pattern of several short, distinct
+ * runs correctly fails to resolve — see the synthetic test matrix).
+ * Derived, not arbitrary: four times the largest tolerated transition, so
+ * a trusted anchor is unambiguously larger than anything this module
+ * would ever consider absorbing.
+ */
+const MIN_TRANSITION_ANCHOR_HEIGHT_PX = MAX_TRANSITION_RUN_HEIGHT_PX * 4;
+
+/**
+ * The looser, inter-run colour-continuity tolerance a transition
+ * candidate's own colour is compared against when checking closeness to a
+ * single anchor — the same "wider than per-line membership" allowance
+ * `frame-structure-model.ts` already established for judging whether two
+ * nearby measurements are close enough to be the same underlying colour
+ * (its own `EDGE_BACKGROUND_TOLERANCE * 2`, used for cross-depth band
+ * continuity). Reused here because the underlying colour-perception
+ * reasoning is genuinely the same ("is this plausibly the same colour,
+ * measured slightly differently"), not because the two modules' own
+ * scanning mechanisms are related — they are not.
+ */
+const TRANSITION_COLOR_TOLERANCE = EDGE_BACKGROUND_TOLERANCE * 2;
+
+type TransitionAbsorptionDecision = "before" | "after" | null;
+
+/**
+ * Decides whether `candidate` (a short fill run) is bounded transition
+ * evidence that should be folded into its `before` or `after` neighbour,
+ * or must remain its own independent run. Returns `null` — never absorb —
+ * unless AFFIRMATIVE colour/neighbour evidence proves it:
+ *
+ *   - `candidate` must itself be a fill run no taller than
+ *     `MAX_TRANSITION_RUN_HEIGHT_PX` (necessary, never sufficient).
+ *   - At least one neighbour must be a substantial fill run
+ *     (`MIN_TRANSITION_ANCHOR_HEIGHT_PX` or taller) — content, the domain
+ *     edge (no neighbour), or another short run never counts as an
+ *     anchor.
+ *   - AND EITHER: `candidate`'s colour is within `TRANSITION_COLOR_
+ *     TOLERANCE` of one anchor's colour (a trailing/leading anti-alias of
+ *     that one anchor — Examples A/B: fill -> short transition -> content,
+ *     or the reverse); OR, when BOTH neighbours are substantial fills of
+ *     differing colours, `candidate`'s colour lies channel-wise BETWEEN
+ *     them (`isChannelwiseBetween`) — a genuine cross-fade (Example C) —
+ *     never merely "close to one side" when the other side is also a
+ *     substantial, differently-coloured fill (that would let a
+ *     deliberate, strongly distinct accent colour near one neighbour pass
+ *     as a transition of the far one too).
+ *
+ * When both sides qualify, absorption picks whichever neighbour the
+ * candidate's colour is genuinely closer to (Chebyshev distance) — a
+ * deterministic tie-break, not a preference for either direction.
+ *
+ * A short run flanked by content on both sides, or by two OTHER short
+ * runs (no substantial anchor either side), or whose colour is not
+ * affirmatively explained by any neighbour, returns `null` and is left
+ * exactly as measured — including remaining part of a genuine adjacent-
+ * fill ambiguity, and including a genuine multi-run sequence of several
+ * short, distinct runs (no single run in such a sequence has a
+ * substantial immediate neighbour to anchor against, so none resolve —
+ * fail closed).
+ */
+function decideTransitionAbsorption(
+  candidate: RunSegment,
+  before: RunSegment | null,
+  after: RunSegment | null,
+): TransitionAbsorptionDecision {
+  if (candidate.kind !== "fill" || candidate.heightPx > MAX_TRANSITION_RUN_HEIGHT_PX) return null;
+
+  const beforeAnchor = before && before.kind === "fill" && before.heightPx >= MIN_TRANSITION_ANCHOR_HEIGHT_PX ? before : null;
+  const afterAnchor = after && after.kind === "fill" && after.heightPx >= MIN_TRANSITION_ANCHOR_HEIGHT_PX ? after : null;
+  if (!beforeAnchor && !afterAnchor) return null;
+
+  const beforeClose = beforeAnchor !== null && colorsMatch(candidate.color!, beforeAnchor.color!, TRANSITION_COLOR_TOLERANCE);
+  const afterClose = afterAnchor !== null && colorsMatch(candidate.color!, afterAnchor.color!, TRANSITION_COLOR_TOLERANCE);
+  const between =
+    beforeAnchor !== null &&
+    afterAnchor !== null &&
+    isChannelwiseBetween(candidate.color!, beforeAnchor.color!, afterAnchor.color!);
+
+  if (!beforeClose && !afterClose && !between) return null;
+
+  const distBefore = beforeAnchor ? colorDistanceChebyshev(candidate.color!, beforeAnchor.color!) : Number.POSITIVE_INFINITY;
+  const distAfter = afterAnchor ? colorDistanceChebyshev(candidate.color!, afterAnchor.color!) : Number.POSITIVE_INFINITY;
+  return distBefore <= distAfter ? "before" : "after";
+}
+
+/**
+ * Applies `decideTransitionAbsorption` across the full run sequence,
+ * folding each absorbed run's rows into its target neighbour. All
+ * decisions are computed FIRST against the ORIGINAL, unmodified `runs`
+ * array (each run's own immediate original neighbours only) — never
+ * against a neighbour already modified by an earlier fold in the same
+ * pass — so results never depend on scan direction or the order runs
+ * happen to appear in, only on each run's own original, independent
+ * evidence (determinism; no cascading re-evaluation).
+ *
+ * An absorbed run's rows are folded into its target's existing
+ * `startYPx`/`heightPx` span; the target keeps ITS OWN already-measured
+ * colour (an absorbed row is considered part of the neighbouring fill,
+ * never averaged or recoloured) — this changes only this module's
+ * structural interpretation, never a source pixel.
+ */
+function normalizeTransitionRuns(runs: RunSegment[]): RunSegment[] {
+  const decisions: TransitionAbsorptionDecision[] = runs.map((run, i) =>
+    decideTransitionAbsorption(run, i > 0 ? runs[i - 1]! : null, i < runs.length - 1 ? runs[i + 1]! : null),
+  );
+
+  const normalized: RunSegment[] = [];
+  for (let i = 0; i < runs.length; i++) {
+    const decision = decisions[i];
+    if (decision === "before" && normalized.length > 0) {
+      normalized[normalized.length - 1]!.heightPx += runs[i]!.heightPx;
+      continue;
+    }
+    if (decision === "after" && i < runs.length - 1) {
+      const next = runs[i + 1]!;
+      runs[i + 1] = { ...next, startYPx: runs[i]!.startYPx, heightPx: runs[i]!.heightPx + next.heightPx };
+      continue;
+    }
+    normalized.push({ ...runs[i]! });
+  }
+  return normalized;
 }
 
 /**
@@ -422,7 +622,11 @@ export function segmentStructuralLayout(
   const domainStartY = domain.y;
   const domainEndY = domain.y + domain.height;
 
-  const runs = runLengthEncode(image, domainStartY, domainEndY, domain.x, domain.width);
+  const rawRuns = runLengthEncode(image, domainStartY, domainEndY, domain.x, domain.width);
+  // Phase 2D: resolve bounded transition evidence BEFORE any ambiguity
+  // check or region/gap construction ever sees the run sequence — see
+  // `normalizeTransitionRuns`'s own doc.
+  const runs = normalizeTransitionRuns(rawRuns);
 
   for (let i = 0; i < runs.length - 1; i++) {
     if (runs[i]!.kind === "fill" && runs[i + 1]!.kind === "fill") {

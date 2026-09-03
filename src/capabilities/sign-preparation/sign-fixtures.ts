@@ -622,12 +622,22 @@ export function framedBannerSignArtwork(options: {
    * layout below, for the "framed ambiguous interior" fixture.
    */
   ambiguousInterior?: boolean;
+  /**
+   * Structural Layout Reflow Phase 2D: inserts a single bounded, plausibly
+   * -transitional row (colour close to `bannerGapColor`, but outside the
+   * default per-row match tolerance — so it would, before Phase 2D,
+   * measure as its OWN distinct fill run) directly before "gap 2" — proves
+   * the SAME bounded transition-run normalization applies under a Phase 2C
+   * analysis window, not only on an unwindowed full-image scan.
+   */
+  transitionBeforeGap2?: boolean;
 }): RgbaImage {
   const width = options.width ?? 1086;
   const height = options.height ?? 1448;
   const rounded = options.rounded ?? false;
   const withHoles = options.withHoles ?? false;
   const ambiguousInterior = options.ambiguousInterior ?? false;
+  const transitionBeforeGap2 = options.transitionBeforeGap2 ?? false;
 
   const outerStroke: Rgba = { r: 4, g: 4, b: 4 };
   const gapColor: Rgba = { r: 253, g: 253, b: 253 };
@@ -679,7 +689,16 @@ export function framedBannerSignArtwork(options: {
     stripeContentBlock(image, iy + 99, iy + 159, CONTENT_A, CONTENT_B);
     fillRect(image, ix, iy + 159, ix + iw, iy + 199, bannerGapColor); // gap 1.
     stripeContentBlock(image, iy + 199, iy + 299, CONTENT_A, CONTENT_C); // middle content 1.
-    fillRect(image, ix, iy + 299, ix + iw, iy + 1019, bannerGapColor); // gap 2 — spans the image's own middle third.
+    if (transitionBeforeGap2) {
+      // Close to `bannerGapColor` ({120,120,120}) but outside the default
+      // per-row match tolerance (diffs 15/13/8, all >12) — before Phase
+      // 2D this measured as its own distinct fill run, directly adjacent
+      // to gap 2's own fill run, and tripped the adjacent-fill ambiguity.
+      fillRect(image, ix, iy + 299, ix + iw, iy + 300, { r: 135, g: 133, b: 128 });
+      fillRect(image, ix, iy + 300, ix + iw, iy + 1019, bannerGapColor); // gap 2 — spans the image's own middle third.
+    } else {
+      fillRect(image, ix, iy + 299, ix + iw, iy + 1019, bannerGapColor); // gap 2 — spans the image's own middle third.
+    }
     stripeContentBlock(image, iy + 1019, iy + 1119, CONTENT_D, CONTENT_C); // middle content 2.
     fillRect(image, ix, iy + 1119, ix + iw, iy + 1159, bannerGapColor); // gap 3.
     stripeContentBlock(image, iy + 1159, iy + 1219, CONTENT_A, CONTENT_B);
@@ -734,6 +753,35 @@ export function framedBannerSignArtwork(options: {
     }
   }
 
+  return image;
+}
+
+/**
+ * Structural Layout Reflow Phase 2D (Bounded Transition-Run Segmentation):
+ * a generic helper building an image from an explicit, ordered sequence of
+ * row blocks — either a flat fill (`content: false`, one solid colour, the
+ * shape `classifyRow` measures as `"fill"`) or a genuinely non-uniform
+ * "content" block (`content: true`, via `stripeContentRow`, the shape
+ * `classifyRow` measures as `"content"`). Exists so the Phase 2D synthetic
+ * transition-run matrix can express each case as a short, explicit,
+ * self-describing row sequence instead of hand-deriving `fillRect` bounds
+ * per test — never customer-specific, purely a sequencing primitive.
+ */
+export function verticalRunsArtwork(
+  width: number,
+  blocks: Array<{ heightPx: number; color: Rgba; content?: boolean }>,
+): RgbaImage {
+  const height = blocks.reduce((sum, b) => sum + b.heightPx, 0);
+  const image = makeImage(width, height, { r: 0, g: 0, b: 0 });
+  let y = 0;
+  for (const block of blocks) {
+    if (block.content) {
+      stripeContentBlock(image, y, y + block.heightPx, block.color, { r: 255 - block.color.r, g: 255 - block.color.g, b: 255 - block.color.b });
+    } else {
+      fillRect(image, 0, y, width, y + block.heightPx, block.color);
+    }
+    y += block.heightPx;
+  }
   return image;
 }
 

@@ -311,6 +311,11 @@ export const TEST_FILES = [
   // reflow_structural_layout through the REAL SignPreparationCapability
   // path for a continuously-framed, multi-region banner sign.
   "src/capabilities/sign-preparation/sign-preparation-capability-frame-interior.test.ts",
+  // Structural Layout Reflow Phase 2D (Bounded Transition-Run Segmentation):
+  // reflow_structural_layout through the REAL SignPreparationCapability path
+  // for a framed banner sign whose interior contains a bounded transition
+  // row that, pre-Phase-2D, would have left segmentation ambiguous.
+  "src/capabilities/sign-preparation/sign-preparation-capability-transition-runs.test.ts",
   "src/capabilities/sign-preparation/rigid-sign-category.test.ts",
   // Structural Layout Reflow Phase 1 (Foundations): dormant reflow_
   // structural_layout contract, SignProductionTemplate, the 0.125in safe
@@ -322,6 +327,10 @@ export const TEST_FILES = [
   // the optional analysisWindow parameter, resolveFrameAnalysisWindow's
   // own validation, and frame-interior-windowed structural results.
   "src/capabilities/sign-preparation/sign-layout-segmentation-analysis-window.test.ts",
+  // Structural Layout Reflow Phase 2D (Bounded Transition-Run Segmentation):
+  // the deterministic bounded transition-run model — synthetic matrix (A-K,
+  // plus the N/N+1 run-length boundary) and framed/windowed compatibility.
+  "src/capabilities/sign-preparation/sign-layout-segmentation-transition-runs.test.ts",
   // Structural Layout Reflow Phase 2 (Planner Wiring): reflow_structural_
   // layout is now planner-emitted, but ONLY when a caller opts in by
   // supplying structuralLayoutSegmentation — still not executor-admitted.
