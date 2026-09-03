@@ -21,6 +21,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { fillRect, makeImage, toPngBytes } from "@/capabilities/sign-preparation/sign-fixtures";
+import { resetDecodedCandidateCacheForTests } from "@/lib/services/sign-wand-candidate-cache";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 describe("sign-artwork-service: Operator Production Correction UX (preview + commit)", () => {
@@ -40,6 +41,11 @@ describe("sign-artwork-service: Operator Production Correction UX (preview + com
   async function freshGraph() {
     const { resetCapabilityGraphForTests, getCapabilityGraph } = await import("@/capabilities/composition");
     resetCapabilityGraphForTests();
+    // Wand Performance Optimization Phase: the decoded-candidate cache is a
+    // module-level singleton, deliberately independent of the capability
+    // graph — reset it alongside the graph so every test starts from a
+    // known-empty cache, never trusting a previous test's asset ids.
+    resetDecodedCandidateCacheForTests();
     const graph = getCapabilityGraph();
     const { getProjectRepository } = await import("@/lib/db");
     return { graph, repo: getProjectRepository() };
@@ -328,6 +334,104 @@ describe("sign-artwork-service: Operator Production Correction UX (preview + com
     await graph.finalArtworkScheduler.runBatch();
     return { projectId, job };
   }
+
+  it("wand-select cache: a cache HIT produces an IDENTICAL selection to the original cache-MISS call (Section D — no approximation)", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithLShapeBlockedCandidate(graph, repo);
+    const { previewSignWandSelection } = await import("./sign-artwork-service");
+    const { decodedCandidateCacheKeysForTests } = await import("@/lib/services/sign-wand-candidate-cache");
+
+    assert.deepEqual(decodedCandidateCacheKeysForTests(), [], "cache starts empty for this test");
+    const first = await previewSignWandSelection(projectId, 8, 445, "default"); // cache MISS — downloads+decodes+caches
+    assert.equal(first.status, "selected");
+    assert.ok(decodedCandidateCacheKeysForTests().length > 0, "the candidate's decoded pixels are now cached");
+
+    const second = await previewSignWandSelection(projectId, 8, 445, "default"); // cache HIT — same seed/tolerance
+    assert.equal(second.status, "selected");
+
+    // Exact equality, not "close enough" — same pixelCount, bounds, mask, and safety flags.
+    assert.equal(second.pixelCount, first.pixelCount);
+    assert.deepEqual(second.bounds, first.bounds);
+    assert.equal(second.rectExact, first.rectExact);
+    assert.equal(second.eligibleForMaskedDelete, first.eligibleForMaskedDelete);
+    assert.deepEqual(second.touchedCanvasEdges, first.touchedCanvasEdges);
+    assert.equal(second.maskBase64, first.maskBase64, "the exact same mask bytes, not merely the same statistics");
+  });
+
+  it("wand-select cache: two DIFFERENT candidates (different projects) never contaminate each other's selection", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId: projectA } = await projectWithLShapeBlockedCandidate(graph, repo);
+    const { projectId: projectB } = await projectWithBlockedCandidate(graph, repo);
+    const { previewSignWandSelection } = await import("./sign-artwork-service");
+
+    // Populate the cache with project A's candidate first.
+    const fromA = await previewSignWandSelection(projectA, 8, 445, "default");
+    assert.equal(fromA.status, "selected");
+
+    // Project B's own, genuinely different candidate must resolve to ITS
+    // OWN pixels, never accidentally reusing A's cached decode.
+    const fromB = await previewSignWandSelection(projectB, 10, 450, "default");
+    assert.equal(fromB.status, "selected");
+    assert.notEqual(fromB.maskBase64, fromA.maskBase64, "different candidates must never share a cached mask");
+
+    // Re-querying A again (now that B is also cached) must still return
+    // exactly what A always returned — no cross-candidate bleed either way.
+    const fromAAgain = await previewSignWandSelection(projectA, 8, 445, "default");
+    assert.equal(fromAAgain.maskBase64, fromA.maskBase64);
+  });
+
+  /**
+   * 2400x3600px (16x24in at 150 PPI) — deliberately large enough that a
+   * single-colour click selects a bounding box (the whole canvas,
+   * 8,640,000px) that exceeds MAX_MASKED_REGION_PIXELS (4,000,000),
+   * mirroring the real acceptance finding: a broad/background click on the
+   * real ~20.7MP candidate produced a ~16M-pixel bounding box whose full
+   * mask/overlay transport dominated wall-clock time even after the
+   * decode/download cache made resolution itself fast.
+   */
+  function signAtLargeUniformCanvas() {
+    return makeImage(2400, 3600, { r: 80, g: 140, b: 220 });
+  }
+
+  async function projectWithLargeBlockedCandidate(
+    graph: Awaited<ReturnType<typeof freshGraph>>["graph"],
+    repo: Awaited<ReturnType<typeof freshGraph>>["repo"],
+  ) {
+    const created = await repo.createProject();
+    const projectId = created.project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(signAtLargeUniformCanvas()),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 16, 24);
+    await graph.signPreparation.confirmSignCompositionPlan(projectId, {
+      reconstruction: null, crop: null, fitBackground: { r: 80, g: 140, b: 220 }, fitPlacement: null,
+      moves: [], fills: [], replacements: [],
+    });
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    return { projectId, job };
+  }
+
+  it("wand-select transport optimization: a selection too large for masked Delete skips the heavy overlay/mask payload — stats remain exact", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithLargeBlockedCandidate(graph, repo);
+    const { previewSignWandSelection } = await import("./sign-artwork-service");
+
+    const selection = await previewSignWandSelection(projectId, 1200, 1800, "default");
+    assert.equal(selection.status, "selected");
+    assert.equal(selection.eligibleForMaskedDelete, false, "the whole-canvas bounding box exceeds MAX_MASKED_REGION_PIXELS");
+    // The heavy payloads are skipped...
+    assert.equal(selection.overlayPngBase64, null);
+    assert.equal(selection.maskBase64, null);
+    // ...but every STATISTIC the operator/UI needs remains exact, never approximated.
+    assert.equal(selection.pixelCount, 2400 * 3600);
+    assert.deepEqual(selection.bounds, { xPx: 0, yPx: 0, widthPx: 2400, heightPx: 3600 });
+    assert.equal(selection.touchesEdge, true);
+    assert.deepEqual([...selection.touchedCanvasEdges].sort(), ["bottom", "left", "right", "top"]);
+  });
 
   it("wand_delete: a real wand click on the L-shape selects a non-rectangular mask (rectExact: false)", async () => {
     const { graph, repo } = await freshGraph();

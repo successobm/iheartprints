@@ -311,10 +311,25 @@ export function SignFitToProductionCorrectionTool({
     // Wand selection overlay — the REAL selected mask shape (translucent
     // fill + marching-ants boundary), never a bounding-rectangle stand-in
     // (Section H). Cropped to the selection's own bounding rect for
-    // transport; drawn here at that exact offset/scale.
-    if (wandOverlayImg && wandSelection?.status === "selected" && wandSelection.bounds) {
+    // transport; drawn here at that exact offset/scale. For a selection too
+    // large to safely offer Delete on (`eligibleForMaskedDelete: false` —
+    // the server never renders/transports a pixel-accurate overlay for
+    // those; see `previewSignWandSelection`'s own doc), fall back to an
+    // honest dashed OUTLINE of the real, server-computed bounding box —
+    // never a fabricated or silently different shape, and the operator can
+    // still see exactly where the selection sits.
+    if (wandSelection?.status === "selected" && wandSelection.bounds) {
       const b = wandSelection.bounds;
-      ctx.drawImage(wandOverlayImg, b.xPx * zoom, b.yPx * zoom, b.widthPx * zoom, b.heightPx * zoom);
+      if (wandOverlayImg) {
+        ctx.drawImage(wandOverlayImg, b.xPx * zoom, b.yPx * zoom, b.widthPx * zoom, b.heightPx * zoom);
+      } else {
+        ctx.save();
+        ctx.strokeStyle = "rgba(0, 255, 255, 0.9)"; // cyan, matching the real overlay's own boundary colour
+        ctx.setLineDash([8, 5]);
+        ctx.lineWidth = 2;
+        ctx.strokeRect(b.xPx * zoom, b.yPx * zoom, b.widthPx * zoom, b.heightPx * zoom);
+        ctx.restore();
+      }
     }
   }, [naturalSize, zoom, selection, currentEdges, wandOverlayImg, wandSelection]);
 
@@ -821,7 +836,17 @@ export function SignFitToProductionCorrectionTool({
 
         <div className="flex flex-col gap-3" data-sign-context-panel>
           {interactionMode === "wand" ? (
-            wandSelection?.status === "selected" ? (
+            wandBusy && wandSelection?.status !== "selected" ? (
+              // Section N: a small, honest, non-blocking "still working"
+              // state — never a fake highlight, never freezing the page,
+              // and the operator can never reach Delete/Move/Keep (which
+              // all require `wandSelection?.status === "selected"`) until
+              // the real, authoritative selection has actually arrived.
+              <div className="flex items-center gap-2 rounded-lg border border-ink/15 p-3 text-sm text-muted" data-sign-wand-selecting role="status" aria-live="polite">
+                <span className="h-3 w-3 animate-pulse rounded-full bg-ink/40" aria-hidden="true" />
+                Selecting…
+              </div>
+            ) : wandSelection?.status === "selected" ? (
               <WandActionPanel
                 selection={wandSelection}
                 busy={wandBusy || busy}
@@ -1145,7 +1170,10 @@ function WandActionPanel({
       </div>
 
       {!selection.eligibleForMaskedDelete ? (
-        <p className="text-xs text-muted">This selection is too large for Delete here — try a smaller area, or use Advanced tools.</p>
+        <p className="text-xs text-muted">
+          This selection is too large for Delete here — try a smaller area, or use Advanced tools. Showing its outline
+          only, not the exact shape, to keep this responsive.
+        </p>
       ) : null}
 
       {moreOpen ? (

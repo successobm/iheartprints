@@ -62,6 +62,7 @@ import type { FinalArtworkJobStatus } from "@/lib/domain/types";
 import { getProjectRepository } from "@/lib/db";
 import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
 import { buildPrintReadyFilename } from "@/lib/services/print-ready-filename";
+import { cacheDecodedCandidate, getCachedDecodedCandidate } from "@/lib/services/sign-wand-candidate-cache";
 import {
   getConversation,
   type ApiProjectSnapshot,
@@ -457,6 +458,21 @@ function cropRgbaImage(image: RgbaImage, x0: number, y0: number, x1: number, y1:
   return { width, height, data };
 }
 
+/**
+ * Wand Performance Optimization Phase: `candidate` resolution and
+ * `preparation` lookup are fully independent of each other (neither's
+ * input depends on the other's output) — running them concurrently
+ * overlaps two real Supabase round trips instead of paying both in
+ * series, a safe, zero-semantic-risk win regardless of caching. WHICH
+ * asset id is the project's current blocked candidate is always resolved
+ * fresh, every call, exactly as before this phase — never cached, never
+ * approximated (see `sign-wand-candidate-cache.ts`'s own doc for why only
+ * the DECODED PIXELS behind an already-resolved, immutable asset id are
+ * safe to cache, and why that alone is the dominant cost here). A cache
+ * hit skips the download+decode entirely; a miss downloads+decodes once
+ * and populates the cache for every subsequent call against this exact
+ * asset id, in this request or any other.
+ */
 async function resolveCurrentCandidateImage(projectId: string): Promise<{
   image: RgbaImage;
   orderedWidthIn: number;
@@ -468,26 +484,32 @@ async function resolveCurrentCandidateImage(projectId: string): Promise<{
   existingClassifications: SignEdgeIntentClassification[];
 } | null> {
   const graph = getCapabilityGraph();
-  const candidate = await graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+  const [candidate, preparation] = await Promise.all([
+    graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId),
+    graph.signPreparation.getSignPreparation(projectId),
+  ]);
   if (!candidate) return null;
-  const downloaded = await graph.assets.downloadAssetBytes(candidate.assetId);
-  if (!downloaded) return null;
-
-  const preparation = await graph.signPreparation.getSignPreparation(projectId);
   if (!preparation || preparation.orderedWidthIn === null || preparation.orderedHeightIn === null || !preparation.resolutionPolicyId || !preparation.planKey) {
     return null;
   }
   const policy = getSignResolutionPolicyById(preparation.resolutionPolicyId);
   if (!policy) return null;
 
-  const decoded = decodePngUpload(downloaded.bytes);
+  let image = getCachedDecodedCandidate(candidate.assetId);
+  if (!image) {
+    const downloaded = await graph.assets.downloadAssetBytes(candidate.assetId);
+    if (!downloaded) return null;
+    image = decodePngUpload(downloaded.bytes).image;
+    cacheDecodedCandidate(candidate.assetId, image);
+  }
+
   const existingClassifications = resolveCurrentEdgeIntentClassifications(
     decodeEdgeIntentClassificationRecords(preparation.edgeIntentClassifications),
     candidate.assetId,
     preparation.planKey,
   );
   return {
-    image: decoded.image,
+    image,
     orderedWidthIn: preparation.orderedWidthIn,
     orderedHeightIn: preparation.orderedHeightIn,
     minimumSafeInsetIn: policy.minimumSafeInsetIn,
@@ -553,8 +575,29 @@ export async function previewSignWandSelection(
   }
 
   const selection = computeSignWandSelection(image, { x: seedXPx, y: seedYPx }, toleranceLevel);
-  const overlay = renderSignSelectionOverlayCrop(selection.mask, image.width, selection.bounds);
-  const maskBase64 = encodeSignWandMaskForBounds(selection.mask, image.width, selection.bounds);
+
+  // Wand Performance Optimization Phase (Section G/H): a selection whose
+  // bounding box exceeds `MAX_MASKED_REGION_PIXELS` is ALREADY
+  // `eligibleForMaskedDelete: false` — no cheaper transport is worth
+  // building for a mask the operator can never use for Delete regardless.
+  // Rendering/encoding a full-bounding-box overlay AND mask for a broad,
+  // near-canvas-sized selection (a real click on this candidate's own
+  // background measured a 3717x4321px bounding box — ~16M px, a ~21MB
+  // base64 mask) is exactly the transport cost Section C's real-candidate
+  // benchmark found dominating a click's wall-clock time once the fixed
+  // decode/download cost was cached away. Skipping both here changes
+  // nothing about what the selection MEANS or what Delete/Keep may act on
+  // — `eligibleForMaskedDelete`/`rectExact`/`touchedCanvasEdges` are still
+  // computed and returned exactly as before; only the (already-unusable)
+  // pixel payload is omitted. The client falls back to an outline-only
+  // visual for this case — never a silently different geometry.
+  const skipHeavyTransport = !selection.eligibleForMaskedDelete;
+  const overlayPngBase64 = skipHeavyTransport
+    ? null
+    : encodeSignPlate(renderSignSelectionOverlayCrop(selection.mask, image.width, selection.bounds)).toString("base64");
+  const maskBase64 = skipHeavyTransport
+    ? null
+    : encodeSignWandMaskForBounds(selection.mask, image.width, selection.bounds);
 
   return {
     status: "selected",
@@ -570,7 +613,7 @@ export async function previewSignWandSelection(
     rectExact: selection.rectExact,
     eligibleForMaskedDelete: selection.eligibleForMaskedDelete,
     touchedCanvasEdges: selection.touchedCanvasEdges,
-    overlayPngBase64: encodeSignPlate(overlay).toString("base64"),
+    overlayPngBase64,
     maskBase64,
   };
 }
