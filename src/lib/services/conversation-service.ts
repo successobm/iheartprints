@@ -73,6 +73,7 @@ import type {
   GarmentSizeClass,
   ProjectSnapshot,
   ProjectStatus,
+  SignPlanAuthorizationActor,
   StoredRequestedProductionOutput,
 } from "@/lib/domain/types";
 import { printPlacementLabel } from "@/lib/domain/print-placement";
@@ -899,6 +900,22 @@ export interface SignArtworkView {
    * every time) and will reach the identical blocked result again.
    */
   plan: SignPlanCustomerView | null;
+  /**
+   * LIVE PRODUCT BLOCKER #4: the durable production-risk authorization
+   * state for the CURRENT plan — mirrors the internal operator review's
+   * own `SignPlanOperatorReview.authorization` shape exactly (same field
+   * names, same semantics, same "matchesCurrentPlan" discipline), just
+   * exposed to the customer too. `deriveUploadedArtworkStep` reads
+   * `matchesCurrentPlan` to decide whether the customer still needs to
+   * act on `sign_plan_review` or has already authorized this exact plan
+   * (`sign_plan_authorized`) — a re-plan (different `planKey`) makes a
+   * prior authorization stale here exactly like it does internally.
+   */
+  authorization: {
+    authorizedBy: SignPlanAuthorizationActor | null;
+    authorizedAt: string | null;
+    matchesCurrentPlan: boolean;
+  };
 }
 
 /**
@@ -918,6 +935,13 @@ async function resolveSignArtworkView(
       orderedHeightIn: preparation.orderedHeightIn,
       specConfirmed: preparation.specConfirmedAt !== null,
       plan: durableSignPlanView(preparation),
+      authorization: {
+        authorizedBy: preparation.authorizedBy,
+        authorizedAt: preparation.authorizedAt,
+        matchesCurrentPlan:
+          preparation.authorizedPlanKey !== null &&
+          preparation.authorizedPlanKey === preparation.planKey,
+      },
     };
   } catch {
     return null;

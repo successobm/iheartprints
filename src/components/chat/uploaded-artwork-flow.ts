@@ -65,10 +65,25 @@ export type UploadedArtworkStep =
   /**
    * LIVE PRODUCT BLOCKER #3: a plan (safe, needs-review, or blocked — all
    * three are valid, durable results) has been formulated for this exact
-   * artwork and ordered size. Repair authorization/execution is a later,
-   * separately-approved Signs phase.
+   * artwork and ordered size, and has NOT yet been authorized for THIS
+   * exact plan (`authorization.matchesCurrentPlan === false`). For a
+   * `needs_review` plan this is a genuine terminal customer state — only
+   * an operator may authorize it (`sign-plan-authorization.ts`). For a
+   * `ready` (auto_safe) plan, the customer's own authorization is
+   * sufficient — LIVE PRODUCT BLOCKER #4's "Prepare artwork" action.
    */
   | "sign_plan_review"
+  /**
+   * LIVE PRODUCT BLOCKER #4: the customer has authorized THIS exact plan
+   * (`authorization.matchesCurrentPlan === true`) — production-risk
+   * consent is durably recorded. Actual execution (the provider-bounded
+   * reconstruction, preservation verification, Fit-to-Production,
+   * PrintValidation) is the internal operator's own "Prepare artwork"
+   * action on `/internal/projects/[projectId]/sign-authorize` — this step
+   * never duplicates that control surface; it only confirms the customer's
+   * own part of the lifecycle is done.
+   */
+  | "sign_plan_authorized"
   /** Analysis is done and has something to say before we touch a pixel. */
   | "review_analysis"
   /** Original vs Prepared, awaiting an explicit approval. */
@@ -91,6 +106,16 @@ export interface SignArtworkFlowState {
    * phase, see `SignArtworkView.plan`'s doc in `conversation-service.ts`).
    */
   hasPlan: boolean;
+  /**
+   * LIVE PRODUCT BLOCKER #4: whether the CURRENT plan (identified by
+   * `planKey`, never merely "a plan exists") has already been authorized —
+   * mirrors `SignArtworkView.authorization` (`conversation-service.ts`)
+   * exactly. A stale authorization bound to a SUPERSEDED plan (a re-plan
+   * changed `planKey`) reads as `false` here, same discipline as every
+   * other authorization check in this codebase — the customer is asked
+   * again rather than an old consent silently covering a new plan.
+   */
+  authorization: { matchesCurrentPlan: boolean };
 }
 
 /**
@@ -255,7 +280,14 @@ export function deriveUploadedArtworkStep(
   // re-asks "what are we printing" for a job already identified as a sign.
   if (signArtwork) {
     if (!signArtwork.specConfirmed) return "confirm_sign_size";
-    return signArtwork.hasPlan ? "sign_plan_review" : "sign_context_saved";
+    if (!signArtwork.hasPlan) return "sign_context_saved";
+    // LIVE PRODUCT BLOCKER #4: once the customer has authorized THIS exact
+    // plan, stop re-offering the same "prepare artwork" action — durable,
+    // never re-derived from a transient client flag (a re-plan changes
+    // `planKey`, which makes `matchesCurrentPlan` false again on its own).
+    return signArtwork.authorization.matchesCurrentPlan
+      ? "sign_plan_authorized"
+      : "sign_plan_review";
   }
 
   // Print location is what makes a print-size statement possible at all —

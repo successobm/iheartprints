@@ -1052,6 +1052,31 @@ export function ChatApp() {
     );
   }
 
+  /**
+   * LIVE PRODUCT BLOCKER #4: "Prepare artwork" at `sign_plan_review` — the
+   * customer's own self-service production-risk authorization
+   * (`POST .../sign-artwork/authorize`, the SAME existing route
+   * `SignAuthorizeButton.tsx` uses internally, just under the customer's own
+   * session identity server-side). No body: this route's own identity IS
+   * the `"customer"` actor. Only records consent — never touches a pixel or
+   * calls a provider; a SEPARATE, internal-operator-only action later does
+   * the actual preparation. A `needs_review` plan's server-side gate
+   * (`isAuthorizationSufficientForRisk`) refuses a customer actor outright
+   * regardless of this call existing, so this can never bypass that
+   * governance even if some future bug made the button render for the
+   * wrong plan status.
+   */
+  async function authorizeSignPlan() {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/sign-artwork/authorize`, {
+          method: "POST",
+        }),
+      "Failed to prepare your artwork",
+    );
+  }
+
   async function saveUploadedArtworkDetails(input: {
     productSummary: string | null;
     productColor: string | null;
@@ -1344,6 +1369,7 @@ export function ChatApp() {
       ? {
           specConfirmed: snapshot.signArtwork.specConfirmed,
           hasPlan: snapshot.signArtwork.plan !== null,
+          authorization: { matchesCurrentPlan: snapshot.signArtwork.authorization.matchesCurrentPlan },
         }
       : null,
     choice: workflowChoice,
@@ -1719,6 +1745,7 @@ export function ChatApp() {
                 onChooseArtworkType={(choice) => chooseArtworkType(choice)}
                 onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
                 onPlanSignArtwork={() => void planSignArtwork()}
+                onAuthorizeSignPlan={() => void authorizeSignPlan()}
                 signArtwork={snapshot?.signArtwork ?? null}
                 onSaveDetails={(input) => void saveUploadedArtworkDetails(input)}
                 onPrepare={() => void prepareUploadedArtwork()}

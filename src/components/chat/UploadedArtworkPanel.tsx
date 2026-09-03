@@ -97,6 +97,17 @@ export interface UploadedArtworkPanelProps {
    * inspection/diagnosis/planning capability.
    */
   onPlanSignArtwork?: () => void;
+  /**
+   * LIVE PRODUCT BLOCKER #4: the customer's own self-service production-risk
+   * authorization of the CURRENT plan — offered only when
+   * `signArtwork.plan.status === "ready"` (an `auto_safe` plan; a
+   * `needs_review` plan requires an operator, never a customer, to
+   * authorize it — `SignPlanReviewStep` never renders this action for that
+   * status). Only marks consent; the actual provider-bounded execution is a
+   * SEPARATE, internal-operator-only action on
+   * `/internal/projects/[projectId]/sign-authorize`.
+   */
+  onAuthorizeSignPlan?: () => void;
   /** The Signs authority's own state, once a Sign artwork type is chosen. */
   signArtwork?: SignArtworkView | null;
   onSaveDetails: (input: {
@@ -226,8 +237,14 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
       ) : null}
 
       {step === "sign_plan_review" && props.signArtwork?.plan ? (
-        <SignPlanReviewStep plan={props.signArtwork.plan} />
+        <SignPlanReviewStep
+          plan={props.signArtwork.plan}
+          busy={busy}
+          onAuthorize={props.onAuthorizeSignPlan}
+        />
       ) : null}
+
+      {step === "sign_plan_authorized" ? <SignPlanAuthorizedStep /> : null}
 
       {step === "confirm_details" && preparation ? (
         <DetailsStep
@@ -542,14 +559,36 @@ function SignContextSavedStep({
 }
 
 /**
- * LIVE PRODUCT BLOCKER #3: the customer-facing rendering of a real, already-
- * formulated Signs plan. Renders ONLY what `describeSignPlanForCustomer`
- * (`sign-preparation-copy.ts`) already translated — this component makes no
- * production decision of its own and never renders a raw defect code or
- * step kind. `plan.status` decides the framing; `plan.findings` and
- * `plan.proposedAction` are already full, customer-safe sentences.
+ * LIVE PRODUCT BLOCKER #3/#4: the customer-facing rendering of a real,
+ * already-formulated Signs plan. Renders ONLY what
+ * `describeSignPlanForCustomer` (`sign-preparation-copy.ts`) already
+ * translated — this component makes no production decision of its own and
+ * never renders a raw defect code or step kind. `plan.status` decides the
+ * framing; `plan.findings` and `plan.proposedAction` are already full,
+ * customer-safe sentences.
+ *
+ * The primary continuation action ("Prepare artwork") is offered ONLY for
+ * `status === "ready"` (an `auto_safe` plan — `isAuthorizationSufficientForRisk`
+ * accepts a customer's own consent for exactly this risk class,
+ * `sign-plan-authorization.ts`). A `needs_review` plan shows the existing
+ * "Review required" explanation and NO action — only an operator may
+ * authorize it, and this component never pretends otherwise. A `blocked`
+ * plan has no action to offer at all. Clicking "Prepare artwork" only
+ * records consent (`onAuthorizeSignPlan` → the customer's own
+ * self-service authorization route) — it does not itself touch a pixel or
+ * call any provider; `uploaded-artwork-flow.ts`'s routing moves this step
+ * to `sign_plan_authorized` once that consent is durably recorded, so this
+ * component is never asked to render the action a second time.
  */
-function SignPlanReviewStep({ plan }: { plan: SignPlanCustomerView }) {
+function SignPlanReviewStep({
+  plan,
+  busy,
+  onAuthorize,
+}: {
+  plan: SignPlanCustomerView;
+  busy: boolean;
+  onAuthorize?: () => void;
+}) {
   const headline =
     plan.status === "blocked"
       ? "This one needs a closer look"
@@ -594,6 +633,17 @@ function SignPlanReviewStep({ plan }: { plan: SignPlanCustomerView }) {
           <p className="mt-1 text-sm text-ink">
             {plan.proposedAction ?? "Nothing needs to change — it's ready as-is."}
           </p>
+          {plan.status === "ready" ? (
+            <button
+              type="button"
+              disabled={busy || !onAuthorize}
+              onClick={onAuthorize}
+              className="mt-3 rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+              data-testid="sign-authorize-plan-button"
+            >
+              {busy ? "Preparing…" : "Prepare artwork"}
+            </button>
+          ) : null}
         </div>
       ) : (
         <div className="mt-4 rounded-xl border border-black/8 bg-black/[0.02] p-3">
@@ -607,7 +657,9 @@ function SignPlanReviewStep({ plan }: { plan: SignPlanCustomerView }) {
       {/* LIVE PRODUCT BLOCKER #3A: ONE review explanation, in one place —
           previously this same idea also appeared as a translated finding
           (`repair_requires_review`), which read as the screen repeating
-          itself. No approval action here yet (Blocker #4). */}
+          itself. A `needs_review` plan's "approval" is an OPERATOR action
+          (`isAuthorizationSufficientForRisk`, `sign-plan-authorization.ts`)
+          — this component never offers a button here, only says why. */}
       {plan.reviewRequired ? (
         <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
           <p className="text-sm font-medium text-ink">Review required</p>
@@ -616,6 +668,31 @@ function SignPlanReviewStep({ plan }: { plan: SignPlanCustomerView }) {
           </p>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * LIVE PRODUCT BLOCKER #4: the customer's own part of the Signs lifecycle
+ * is done — their production-risk authorization is durably recorded
+ * (`SignArtworkView.authorization.matchesCurrentPlan`). Deliberately does
+ * NOT expose a "Prepare"/"Execute" control here: the actual provider-
+ * bounded reconstruction, preservation verification, Fit-to-Production,
+ * and PrintValidation are the internal operator's own next action on
+ * `/internal/projects/[projectId]/sign-authorize` — this is not a second
+ * implementation of that surface, only an honest "you're done, we've got
+ * it from here" for the customer. Never claims print readiness; that is
+ * a later, separately-earned state (see `describeApprovedPreparation`'s
+ * own equivalent discipline for the DTF path).
+ */
+function SignPlanAuthorizedStep() {
+  return (
+    <div>
+      <p className="text-sm font-semibold text-ink">You&apos;re all set</p>
+      <p className="mt-1 text-sm text-ink">
+        Thanks — we&apos;ve got what we need. Our team will finish preparing your
+        artwork for this sign.
+      </p>
     </div>
   );
 }

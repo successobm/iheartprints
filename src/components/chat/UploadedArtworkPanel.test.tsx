@@ -214,7 +214,11 @@ describe("WorkflowChoiceCard", () => {
 function renderSignStep(
   step: Extract<
     UploadedArtworkStep,
-    "choose_artwork_type" | "confirm_sign_size" | "sign_context_saved" | "sign_plan_review"
+    | "choose_artwork_type"
+    | "confirm_sign_size"
+    | "sign_context_saved"
+    | "sign_plan_review"
+    | "sign_plan_authorized"
   >,
   signArtwork: {
     orderedWidthIn: number | null;
@@ -222,16 +226,23 @@ function renderSignStep(
     specConfirmed: boolean;
     plan?: SignPlanCustomerView | null;
   } | null = null,
+  options: { busy?: boolean } = {},
 ) {
   return renderToString(
     createElement(UploadedArtworkPanel, {
       projectId: "test-project-id",
       step,
       preparation: preparation({ printPlacement: null }),
-      busy: false,
+      busy: options.busy ?? false,
       originalImageUrl: null,
       preparedImageUrl: null,
-      signArtwork: signArtwork ? { plan: null, ...signArtwork } : null,
+      signArtwork: signArtwork
+        ? {
+            plan: null,
+            authorization: { authorizedBy: null, authorizedAt: null, matchesCurrentPlan: false },
+            ...signArtwork,
+          }
+        : null,
       onUpload: () => {
         throw new Error("onUpload must never fire from rendering");
       },
@@ -255,6 +266,9 @@ function renderSignStep(
       },
       onPlanSignArtwork: () => {
         throw new Error("onPlanSignArtwork must never fire from rendering");
+      },
+      onAuthorizeSignPlan: () => {
+        throw new Error("onAuthorizeSignPlan must never fire from rendering");
       },
     }),
   );
@@ -469,7 +483,7 @@ describe("Sign plan review (LIVE PRODUCT BLOCKER #3)", () => {
     assertNoLeaks(html);
   });
 
-  it("never claims print readiness or offers an approval action at this step, for any status", () => {
+  it("never claims print readiness at this step, for any status", () => {
     for (const status of ["ready", "needs_review", "blocked"] as const) {
       const html = renderSignStep("sign_plan_review", {
         orderedWidthIn: 24,
@@ -479,11 +493,93 @@ describe("Sign plan review (LIVE PRODUCT BLOCKER #3)", () => {
       });
       const text = visibleText(html);
       assert.doesNotMatch(text, /print[- ]ready/i);
-      // "approval" (needs_review's informational copy) is intentional and
-      // distinct from an actual approve/finalize/download ACTION, which
-      // this phase must not add.
+      // No raw internal/technical action words, for ANY status — the
+      // "Prepare artwork" action (ready only) uses plain product language.
       assert.doesNotMatch(text, /\bapprove\b|finalize|download|authorize/i);
     }
+  });
+
+  /** The button's own opening tag, isolated — Tailwind's `disabled:` variant classes contain the literal substring "disabled" too, so asserting against the WHOLE html string is unreliable; this isolates just the tag itself. */
+  function extractAuthorizeButtonTag(html: string): string | null {
+    const match = html.match(/<button[^>]*data-testid="sign-authorize-plan-button"[^>]*>/);
+    return match ? match[0] : null;
+  }
+
+  describe("LIVE PRODUCT BLOCKER #4: the Prepare artwork action", () => {
+    it("ready: shows an enabled 'Prepare artwork' action — the resolution-only case is never stranded", () => {
+      const html = renderSignStep("sign_plan_review", {
+        orderedWidthIn: 24,
+        orderedHeightIn: 36,
+        specConfirmed: true,
+        plan: readyPlan({
+          proposedAction: "We can increase your artwork's resolution.",
+        }),
+      });
+      const buttonTag = extractAuthorizeButtonTag(html);
+      assert.ok(buttonTag, "the Prepare artwork button must render");
+      assert.doesNotMatch(buttonTag!, /\bdisabled=""/);
+      const text = visibleText(html);
+      assert.match(text, /Prepare artwork/);
+    });
+
+    it("ready with busy=true: the action is disabled and shows an in-progress label", () => {
+      const html = renderSignStep(
+        "sign_plan_review",
+        {
+          orderedWidthIn: 24,
+          orderedHeightIn: 36,
+          specConfirmed: true,
+          plan: readyPlan(),
+        },
+        { busy: true },
+      );
+      const buttonTag = extractAuthorizeButtonTag(html);
+      assert.ok(buttonTag, "the Prepare artwork button must still render while busy");
+      assert.match(buttonTag!, /\bdisabled=""/);
+      assert.match(visibleText(html), /Preparing…/);
+    });
+
+    it("needs_review: NEVER shows the Prepare artwork action — only an operator may authorize this plan", () => {
+      const html = renderSignStep("sign_plan_review", {
+        orderedWidthIn: 24,
+        orderedHeightIn: 36,
+        specConfirmed: true,
+        plan: readyPlan({ status: "needs_review", reviewRequired: true }),
+      });
+      assert.doesNotMatch(html, /data-testid="sign-authorize-plan-button"/);
+    });
+
+    it("blocked: NEVER shows the Prepare artwork action", () => {
+      const html = renderSignStep("sign_plan_review", {
+        orderedWidthIn: 24,
+        orderedHeightIn: 36,
+        specConfirmed: true,
+        plan: readyPlan({ status: "blocked", proposedAction: null, canProceed: false }),
+      });
+      assert.doesNotMatch(html, /data-testid="sign-authorize-plan-button"/);
+    });
+
+    it("the CTA is Signs-specific — no garment/apparel vocabulary anywhere near it", () => {
+      const html = renderSignStep("sign_plan_review", {
+        orderedWidthIn: 24,
+        orderedHeightIn: 36,
+        specConfirmed: true,
+        plan: readyPlan({
+          proposedAction: "We can increase your artwork's resolution.",
+        }),
+      });
+      assert.doesNotMatch(html, /Garment colour|garment color|Full Front|Full Back|Left Chest|Sleeve/i);
+    });
+  });
+});
+
+describe("Sign plan authorized (LIVE PRODUCT BLOCKER #4)", () => {
+  it("confirms the customer's part is done without exposing internal execution/provider terms", () => {
+    const html = renderSignStep("sign_plan_authorized");
+    const text = visibleText(html);
+    assert.match(text, /you.re all set/i);
+    assert.doesNotMatch(html, /reconstruct_resolution|providerKey|planKey|Topaz|transition.?run/i);
+    assert.doesNotMatch(text, /print[- ]ready/i);
   });
 });
 

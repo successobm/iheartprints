@@ -183,7 +183,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: false, hasPlan: false },
+        signArtwork: { specConfirmed: false, hasPlan: false, authorization: { matchesCurrentPlan: false } },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -195,7 +195,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: false },
+        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false } },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -208,7 +208,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: true },
+        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false } },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -223,12 +223,39 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: false },
+        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false } },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
       }),
       "sign_context_saved",
+    );
+  });
+
+  it("LIVE PRODUCT BLOCKER #4: a plan authorized for THIS exact plan routes to sign_plan_authorized, never re-offering the same action", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: true } },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_plan_authorized",
+    );
+  });
+
+  it("LIVE PRODUCT BLOCKER #4: a STALE authorization (bound to a superseded plan) is never trusted — routes back to sign_plan_review", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false } },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_plan_review",
+      "matchesCurrentPlan: false means the plan changed since authorization (or nothing was ever authorized) — the customer must be asked again",
     );
   });
 
@@ -251,7 +278,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation({ printPlacement: null }),
-        signArtwork: { specConfirmed: true, hasPlan: false },
+        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false } },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -331,6 +358,7 @@ describe("uploadedArtworkOwnsSurface", () => {
       "confirm_sign_size",
       "sign_context_saved",
       "sign_plan_review",
+      "sign_plan_authorized",
       "review_analysis",
       "compare",
       "approved",
