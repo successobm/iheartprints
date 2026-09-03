@@ -439,6 +439,8 @@ export type UpdateSignPreparationInput = Partial<{
   operatorStructuralOverride: Record<string, unknown> | null;
   operatorStructuralOverrideCreatedAt: string | null;
   operatorStructuralOverrideCreatedBy: "operator" | null;
+  /** Edge-Intent Correction Phase: see `SignPreparation.edgeIntentClassifications`'s own doc. */
+  edgeIntentClassifications: Record<string, unknown>[] | null;
 }>;
 
 /**

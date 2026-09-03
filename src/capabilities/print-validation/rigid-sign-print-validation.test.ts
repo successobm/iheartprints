@@ -103,12 +103,16 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
       overallResult: "pass" as const,
       edges: (["top", "right", "bottom", "left"] as const).map((edge) => ({
         edge,
-        requiredSafeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
-        requiredSafeInsetPx: 20,
-        nearestNonBleedPx: 200,
-        nearestNonBleedIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+        requiredProtectedInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+        requiredProtectedInsetPx: 20,
+        nearestProtectedContentPx: 200,
+        nearestProtectedContentIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
         violatingPositionPx: null,
-        result: "pass" as const,
+        protectedResult: "pass" as const,
+        edgeIntentPresent: false,
+        edgeIntentNearestCutPx: null,
+        edgeIntentAdvisory: false,
+        unresolvedAmbiguousPresent: false,
         reason: "test fixture default — comfortably clear",
       })),
     },
@@ -1196,25 +1200,33 @@ describe("Signs Fit to Production → print_ready (Section J)", () => {
   function passingEdge(edge: "top" | "right" | "bottom" | "left") {
     return {
       edge,
-      requiredSafeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
-      requiredSafeInsetPx: 20,
-      nearestNonBleedPx: 200,
-      nearestNonBleedIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      requiredProtectedInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+      requiredProtectedInsetPx: 20,
+      nearestProtectedContentPx: 200,
+      nearestProtectedContentIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
       violatingPositionPx: null,
-      result: "pass" as const,
+      protectedResult: "pass" as const,
+      edgeIntentPresent: false,
+      edgeIntentNearestCutPx: null,
+      edgeIntentAdvisory: false,
+      unresolvedAmbiguousPresent: false,
       reason: "comfortably clear",
     };
   }
 
-  function failingEdge(edge: "top" | "right" | "bottom" | "left", nearestNonBleedPx: number) {
+  function failingEdge(edge: "top" | "right" | "bottom" | "left", nearestProtectedContentPx: number) {
     return {
       edge,
-      requiredSafeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
-      requiredSafeInsetPx: 20,
-      nearestNonBleedPx,
-      nearestNonBleedIn: nearestNonBleedPx / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      requiredProtectedInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+      requiredProtectedInsetPx: 20,
+      nearestProtectedContentPx,
+      nearestProtectedContentIn: nearestProtectedContentPx / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
       violatingPositionPx: 42,
-      result: "fail" as const,
+      protectedResult: "fail" as const,
+      edgeIntentPresent: false,
+      edgeIntentNearestCutPx: null,
+      edgeIntentAdvisory: false,
+      unresolvedAmbiguousPresent: true,
       reason: "too close to the cut edge",
     };
   }
@@ -1222,12 +1234,16 @@ describe("Signs Fit to Production → print_ready (Section J)", () => {
   function unknownEdge(edge: "top" | "right" | "bottom" | "left") {
     return {
       edge,
-      requiredSafeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
-      requiredSafeInsetPx: 20,
-      nearestNonBleedPx: null,
-      nearestNonBleedIn: null,
+      requiredProtectedInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+      requiredProtectedInsetPx: 20,
+      nearestProtectedContentPx: null,
+      nearestProtectedContentIn: null,
       violatingPositionPx: null,
-      result: "unknown" as const,
+      protectedResult: "unknown" as const,
+      edgeIntentPresent: false,
+      edgeIntentNearestCutPx: null,
+      edgeIntentAdvisory: false,
+      unresolvedAmbiguousPresent: false,
       reason: "no provable bleed colour",
     };
   }
@@ -1295,7 +1311,7 @@ describe("Signs Fit to Production → print_ready (Section J)", () => {
   });
 
   it("a BLEED field genuinely reaching the cut edge is never itself a failure — only non-bleed content too close is", () => {
-    // nearestNonBleedPx comfortably beyond the required inset on every
+    // nearestProtectedContentPx comfortably beyond the required inset on every
     // edge, even though the field itself (bleed) touches row/column 0 —
     // this evidence shape is exactly what a correctly-composed banner
     // background produces; it must read as pass, not as a violation.
@@ -1314,5 +1330,143 @@ describe("Signs Fit to Production → print_ready (Section J)", () => {
     );
     assert.equal(checkOf(report)?.status, "pass");
     assert.equal(report.status, "ready");
+  });
+});
+
+describe("Edge-Intent Correction Phase: edge_intent_advisory (Section I) + protected/ambiguous distinction (Section D/M)", () => {
+  function advisoryCheckOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "edge_intent_advisory");
+  }
+  function safeInsetCheckOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "protected_content_safe_inset");
+  }
+
+  function passingEdgeNoIntent(edge: "top" | "right" | "bottom" | "left") {
+    return {
+      edge,
+      requiredProtectedInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+      requiredProtectedInsetPx: 20,
+      nearestProtectedContentPx: 200,
+      nearestProtectedContentIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      violatingPositionPx: null,
+      protectedResult: "pass" as const,
+      edgeIntentPresent: false,
+      edgeIntentNearestCutPx: null,
+      edgeIntentAdvisory: false,
+      unresolvedAmbiguousPresent: false,
+      reason: "comfortably clear, no edge artwork",
+    };
+  }
+
+  function passingEdgeWithIntent(edge: "top" | "right" | "bottom" | "left") {
+    return {
+      ...passingEdgeNoIntent(edge),
+      edgeIntentPresent: true,
+      edgeIntentNearestCutPx: 0,
+      edgeIntentAdvisory: true,
+      reason: "clears the inset; a governed edge-intent border was present and excluded from measurement",
+    };
+  }
+
+  it("edge_intent_advisory is always present, status pass/info, and never contributes to overall status", () => {
+    const report = printValidation.validateArtwork(baseInput());
+    const advisory = advisoryCheckOf(report);
+    assert.ok(advisory);
+    assert.equal(advisory?.status, "pass");
+    assert.equal(advisory?.severity, "info");
+  });
+
+  it("no edge-intent artwork present -> advisory reports none, plate still reaches ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          fitToProduction: {
+            safeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+            achievedPpiX: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            achievedPpiY: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            overallResult: "pass",
+            edges: [passingEdgeNoIntent("top"), passingEdgeNoIntent("right"), passingEdgeNoIntent("bottom"), passingEdgeNoIntent("left")],
+          },
+        }),
+      }),
+    );
+    assert.match(advisoryCheckOf(report)!.reason, /No governed edge-intent artwork/i);
+    assert.equal(report.status, "ready");
+  });
+
+  it("EDGE_INTENT alone (present, but clearance still passes) does NOT block READY — the advisory is informational only", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          fitToProduction: {
+            safeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+            achievedPpiX: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            achievedPpiY: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            overallResult: "pass",
+            edges: [passingEdgeWithIntent("top"), passingEdgeWithIntent("right"), passingEdgeNoIntent("bottom"), passingEdgeNoIntent("left")],
+          },
+        }),
+      }),
+    );
+    assert.equal(safeInsetCheckOf(report)?.status, "pass");
+    assert.equal(advisoryCheckOf(report)?.status, "pass");
+    assert.match(advisoryCheckOf(report)!.reason, /top, right/);
+    assert.equal(report.status, "ready", "edge-intent presence alone must never block READY");
+  });
+
+  it("unresolved AMBIGUOUS_REVIEW content (unclassified, too close) still blocks READY exactly like PROTECTED_CONTENT", () => {
+    const ambiguousEdge = {
+      ...passingEdgeNoIntent("left"),
+      protectedResult: "fail" as const,
+      nearestProtectedContentPx: 5,
+      nearestProtectedContentIn: 5 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      violatingPositionPx: 10,
+      unresolvedAmbiguousPresent: true,
+      reason: "too close, never classified",
+    };
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          fitToProduction: {
+            safeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+            achievedPpiX: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            achievedPpiY: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            overallResult: "fail",
+            edges: [passingEdgeNoIntent("top"), passingEdgeNoIntent("right"), passingEdgeNoIntent("bottom"), ambiguousEdge],
+          },
+        }),
+      }),
+    );
+    assert.equal(safeInsetCheckOf(report)?.status, "fail");
+    assert.match(safeInsetCheckOf(report)!.reason, /unresolved ambiguous review/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("acknowledged PROTECTED_CONTENT too close ALSO blocks READY — an operator acknowledgment is not a pass", () => {
+    const protectedEdge = {
+      ...passingEdgeNoIntent("left"),
+      protectedResult: "fail" as const,
+      nearestProtectedContentPx: 5,
+      nearestProtectedContentIn: 5 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      violatingPositionPx: 10,
+      unresolvedAmbiguousPresent: false,
+      reason: "too close, explicitly acknowledged as protected content",
+    };
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          fitToProduction: {
+            safeInsetIn: RIGID_RECT_UP_TO_24X36_V1.minimumSafeInsetIn,
+            achievedPpiX: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            achievedPpiY: RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+            overallResult: "fail",
+            edges: [passingEdgeNoIntent("top"), passingEdgeNoIntent("right"), passingEdgeNoIntent("bottom"), protectedEdge],
+          },
+        }),
+      }),
+    );
+    assert.equal(safeInsetCheckOf(report)?.status, "fail");
+    assert.match(safeInsetCheckOf(report)!.reason, /acknowledged protected content/i);
+    assert.notEqual(report.status, "ready");
   });
 });

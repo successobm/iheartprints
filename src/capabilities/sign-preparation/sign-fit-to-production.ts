@@ -1,66 +1,82 @@
 /**
- * Signs Phase 3B (Fit to Production): the missing universal Signs
- * production-fit capability — CUT / SAFE / BLEED / PROTECTED, made
- * explicit and measured, for the actual prepared candidate (never merely
- * the original upload).
+ * Signs Phase 3B (Fit to Production) / Edge-Intent Correction Phase: the
+ * universal Signs production-fit capability — CUT / SAFE / BLEED /
+ * EDGE_INTENT_ARTWORK / PROTECTED_CONTENT / AMBIGUOUS_REVIEW, made explicit
+ * and measured, for the actual prepared candidate (never merely the
+ * original upload).
  *
  * Pure, deterministic, no I/O, no provider, no AI — mirrors `edge-
  * inspection.ts`'s own discipline exactly (dominant-colour + Chebyshev
  * tolerance membership, "unknown never becomes safe"), reused rather than
  * reinvented, but at PER-PIXEL depth granularity along each edge instead
- * of one whole-band verdict: `edge-inspection.ts` answers "may an
- * extension along this edge be automatic?"; this module answers "how
- * close does non-bleed content actually get to the physical cut edge, at
- * the single worst point along it?" — a different, finer question the
- * SAFE-inset gate needs.
+ * of one whole-band verdict.
  *
- * THE MODEL (Section D-G of the governing task):
- *   CUT       — the ordered physical canvas alone (`SignProductionTemplate`
- *               — never a pixel of artwork). Not this module's concern;
- *               this module operates ON a canvas whose CUT size the caller
- *               already knows.
- *   SAFE      — a fixed physical inset (`safeInsetIn`) from every CUT edge.
- *               Converted to pixels HERE, at analysis time, from the
- *               candidate's own achieved density — never stored as a bare
- *               pixel count anywhere upstream.
- *   BLEED     — background/colour fields affirmatively proven (dominant-
- *               colour + tolerance membership, exactly `edge-inspection
- *               .ts`'s own bar) to be the SAME flat colour as the true
- *               physical edge itself — permitted to reach CUT.
- *   PROTECTED / AMBIGUOUS — anything that is NOT proven BLEED. This module
- *               deliberately does not attempt to tell "genuinely meaningful
- *               content" apart from "an ambiguous decorative artifact" —
- *               that distinction is an OPERATOR judgment (Section E/H of
- *               the governing task); this module's own job is narrower and
- *               fail-closed: prove bleed affirmatively, or block. A hole
- *               graphic and a warning-triangle icon are treated identically
- *               here — both are "not proven bleed," both block SAFE — the
- *               operator decides, from the flagged evidence, whether to
- *               remove one (`replace_region_with_background`) or leave the
- *               composition as-is because the other is genuinely protected.
+ * THE MODEL (Edge-Intent Correction Phase, Section D):
+ *   CUT                 — the ordered physical canvas alone. Not this
+ *                          module's concern; it operates ON a canvas whose
+ *                          CUT size the caller already knows.
+ *   SAFE (0.125in) GUIDE — the required physical inset PROTECTED_CONTENT
+ *                          must clear. It is NOT a blanket "no artwork"
+ *                          zone — BLEED and (governed) EDGE_INTENT_ARTWORK
+ *                          may legitimately exist inside it, or reach CUT.
+ *   BLEED_BACKGROUND    — background/colour fields affirmatively proven
+ *                          (dominant-colour + tolerance membership) to be
+ *                          the SAME flat colour as the true physical edge
+ *                          itself — may reach CUT, never blocks.
+ *   EDGE_INTENT_ARTWORK — intentional artwork (a decorative border,
+ *                          perimeter frame, edge stripe) whose design
+ *                          purpose is to exist at or near CUT. NEVER
+ *                          inferred from pixels alone — only from an
+ *                          explicit, spatially-bounded, operator-governed
+ *                          `SignEdgeIntentClassification` the caller
+ *                          supplies (`sign-preparation-capability.ts`'s own
+ *                          governance, never this module). Pixels inside a
+ *                          classified region are exempt from PROTECTED
+ *                          clearance measurement — scanning continues PAST
+ *                          them to find the actual nearest protected/
+ *                          ambiguous content — but the exemption is never
+ *                          a bare PASS: `edgeIntentPresent`/
+ *                          `edgeIntentAdvisory` still surface it.
+ *   PROTECTED_CONTENT   — meaningful content (text, logos, icons, warning
+ *                          triangles, customer-identifying artwork) that
+ *                          MUST clear the required inset. Anything not
+ *                          proven BLEED and not classified EDGE_INTENT
+ *                          blocks — whether or not an operator has also
+ *                          affirmatively acknowledged it as `"protected"`
+ *                          (a `SignEdgeIntentClassification` of that kind
+ *                          changes NO scan arithmetic; it only marks
+ *                          `unresolvedAmbiguousPresent: false`, an audit
+ *                          distinction between "known, acknowledged
+ *                          protected content that is simply too close" and
+ *                          "content nobody has looked at yet").
+ *   AMBIGUOUS_REVIEW    — the DEFAULT state for any non-bleed, non-
+ *                          edge-intent content nobody has classified
+ *                          `"protected"` — a hole/circle graphic, an
+ *                          unknown edge feature. Blocks exactly like
+ *                          PROTECTED_CONTENT (this module never silently
+ *                          waves it through), and is additionally surfaced
+ *                          via `unresolvedAmbiguousPresent: true` so an
+ *                          operator UI can say "this still needs a
+ *                          decision", not merely "this failed".
  *
  * PER-POSITION, WORST-CASE MEASUREMENT (not a whole-band average): for each
  * position along an edge (one column per x, for top/bottom; one row per y,
- * for left/right), the edge-adjacent pixel itself must match the edge's own
- * ONE globally-measured dominant colour, and scanning inward from it must
- * stay within tolerance for at least `requiredSafeInsetPx` — otherwise that
- * position's own clearance is short. `nearestNonBleedPx` for the whole edge
- * is the MINIMUM clearance across every position — the single worst point,
- * never an average — because a safety margin that most of an edge respects
- * is not "safe" if even one place (a corner hole, a stray mark) violates it.
+ * for left/right), scanning inward from the physical edge classifies each
+ * pixel as BLEED (matches the edge's own dominant colour — keep scanning),
+ * EDGE_INTENT (inside a classified region for this edge — keep scanning,
+ * but record the exemption), or neither (STOP — this position's own
+ * protected/ambiguous clearance is this depth). `nearestProtectedContentPx`
+ * for the whole edge is the MINIMUM clearance across every position — the
+ * single worst point, never an average.
  *
  * Deliberately ONE dominant colour per edge, never a per-position local
- * baseline or a run-length band segmenter — Section E's own instruction
- * ("a production tool, not perfect semantic segmentation… do not build a
- * new segmentation architecture"). The direct consequence: a genuinely
- * multi-coloured edge (e.g. a red band directly above a white content
- * field, both legitimately reaching the SAME left/right cut edge) reports
- * whichever colour is NOT dominant as a SAFE-inset violation at that
- * position — a conservative false alarm, not a false pass, and exactly
- * the fail-closed behaviour Section E asks for ("ambiguous content must
- * not silently receive bleed permission"). An operator reviewing that
- * finding sees a real, correctly-bounded rectangle to judge; nothing here
- * ever silently waves a second background colour through.
+ * baseline or a run-length band segmenter, and edge-intent regions are
+ * NEVER inferred — both are Section N's own instruction ("a production
+ * tool, not perfect semantic segmentation… do not build a new segmentation
+ * architecture, a new AI classifier, or an automatic border/grommet
+ * detector"). A genuinely multi-coloured edge with NO governing
+ * classification still reports the non-dominant colour as a violation at
+ * that position — a conservative false alarm, not a false pass.
  */
 
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
@@ -72,32 +88,85 @@ export const FIT_TO_PRODUCTION_TOLERANCE = 12;
 /** Below this dominant-colour coverage of the outermost line, no bleed baseline is trusted at all for that edge — `unknown`, never guessed. */
 export const FIT_TO_PRODUCTION_MIN_EDGE_DOMINANT_COVERAGE = 0.5;
 
-/** Hard cap on how far inward a single position is scanned — bounds cost; comfortably deep for any real sign's own safe-inset margins. */
-const MAX_SCAN_DEPTH_PX = 500;
+/**
+ * Hard cap on how far inward a single position is scanned — bounds cost.
+ * Deliberately deeper than the pre-Edge-Intent-Phase 500px: scanning must
+ * now continue PAST a governed edge-intent region to find the actual
+ * nearest protected/ambiguous content, which may legitimately sit well
+ * beyond the region itself.
+ */
+const MAX_SCAN_DEPTH_PX = 1000;
+
+/**
+ * Edge-Intent Correction Phase: a single governed, spatially-bounded
+ * classification this module's caller supplies — never inferred here. Pure
+ * geometry + a fixed-vocabulary `kind`, deliberately NOT a free-text
+ * override (Section F: "Do not use a free-text override").
+ *
+ *   `"edge_intent"` — pixels inside `[xPx,yPx,widthPx,heightPx]`, on any
+ *     edge named in `edges`, are exempt from PROTECTED clearance
+ *     measurement for THOSE edges only (Section G: the exemption is
+ *     spatially bounded — an adjacent, unclassified pixel one column over
+ *     is never exempt merely because it is near a classified region).
+ *   `"protected"` — an explicit operator acknowledgment that content in
+ *     this region IS meaningful protected content. Changes no scan
+ *     arithmetic (it still blocks if too close) — only marks a resulting
+ *     violation there as "acknowledged", not "unresolved ambiguous".
+ *
+ * The durable, audit-bound version of this record (id, candidate/plan
+ * identity, timestamp, operator) lives in `sign-preparation-capability.ts`
+ * governance — this module only ever sees the plain geometry + kind at
+ * analysis time, the same "caller resolves identity, this module only
+ * measures" discipline every function here already follows.
+ */
+export interface SignEdgeIntentClassification {
+  kind: "edge_intent" | "protected";
+  /** Which edge(s) this EXACT region's classification applies to — never inferred from proximity. */
+  edges: SignEdge[];
+  xPx: number;
+  yPx: number;
+  widthPx: number;
+  heightPx: number;
+}
 
 export interface SignFitToProductionEdgeResult {
   edge: SignEdge;
-  requiredSafeInsetIn: number;
-  requiredSafeInsetPx: number;
-  /** The edge's own globally-measured dominant colour — `null` only when `result === "unknown"`. */
+  requiredProtectedInsetIn: number;
+  requiredProtectedInsetPx: number;
+  /** The edge's own globally-measured dominant (BLEED_BACKGROUND) colour — `null` only when `protectedResult === "unknown"`. */
   bleedColor: { r: number; g: number; b: number } | null;
-  /** Distance (px) from the physical edge to the nearest non-bleed pixel, at the single worst position along the edge — `null` when no violation was found within `MAX_SCAN_DEPTH_PX`. */
-  nearestNonBleedPx: number | null;
-  nearestNonBleedIn: number | null;
-  result: "pass" | "fail" | "unknown";
+  /** Distance (px) from the physical edge to the nearest PROTECTED/AMBIGUOUS (non-bleed, non-edge-intent-exempt) pixel, at the single worst position along the edge — `null` when none was found within `MAX_SCAN_DEPTH_PX`. */
+  nearestProtectedContentPx: number | null;
+  nearestProtectedContentIn: number | null;
+  protectedResult: "pass" | "fail" | "unknown";
   reason: string;
   /**
    * Operator Production Correction UX: the along-edge position (column
    * index for top/bottom, row index for left/right) at which
-   * `nearestNonBleedPx` was measured — i.e. WHERE along the edge the worst
-   * clearance occurs, never WHAT is there (this module still proves no
-   * object identity — see the module doc). `null` whenever `nearestNonBleedPx`
-   * is `null` (pass-by-absence, or `unknown`). Exists solely so an operator
-   * UI can point a highlight at the actionable region of an edge instead of
-   * the edge's entire length — actionable production evidence, not
-   * semantic segmentation.
+   * `nearestProtectedContentPx` was measured — WHERE along the edge the
+   * worst clearance occurs, never WHAT is there. `null` whenever
+   * `nearestProtectedContentPx` is `null`.
    */
   violatingPositionPx: number | null;
+  /** True iff at least one `"edge_intent"`-classified region (applicable to this edge) was encountered anywhere along it during the scan. */
+  edgeIntentPresent: boolean;
+  /** Nearest point (px from the physical edge) any edge-intent-exempt pixel was found at, across the whole edge — `null` when `edgeIntentPresent` is `false`. Informational only. */
+  edgeIntentNearestCutPx: number | null;
+  /**
+   * Non-blocking production advisory: true whenever `edgeIntentPresent` is
+   * true — "intentional edge artwork is within the cutting tolerance area
+   * and may vary slightly after trimming." Never itself a reason to fail;
+   * `protectedResult` alone determines pass/fail.
+   */
+  edgeIntentAdvisory: boolean;
+  /**
+   * True when `protectedResult !== "pass"` AND the worst violation's own
+   * position was NOT covered by an explicit `"protected"` classification —
+   * i.e. genuinely unresolved AMBIGUOUS_REVIEW content nobody has looked
+   * at, as distinct from acknowledged PROTECTED_CONTENT that is simply too
+   * close. Always `false` when `protectedResult === "pass"`.
+   */
+  unresolvedAmbiguousPresent: boolean;
 }
 
 export interface SignFitToProductionResult {
@@ -165,13 +234,33 @@ function measureOutermostDominantColor(
 
 /** Reads the pixel at scan-depth `d` from `edge`, at along-edge position `i`. */
 function pixelAtDepth(image: RgbaImage, edge: SignEdge, i: number, d: number): [number, number, number] {
-  const [x, y] =
-    edge === "top" ? [i, d]
+  const [x, y] = positionAtDepth(image, edge, i, d);
+  const idx = (y * image.width + x) * 4;
+  return [image.data[idx]!, image.data[idx + 1]!, image.data[idx + 2]!];
+}
+
+/** The actual canvas [x,y] at scan-depth `d` from `edge`, at along-edge position `i` — the same coordinate mapping `pixelAtDepth` uses, exposed separately for spatial classification lookups. */
+function positionAtDepth(image: RgbaImage, edge: SignEdge, i: number, d: number): [number, number] {
+  return edge === "top" ? [i, d]
     : edge === "bottom" ? [i, image.height - 1 - d]
     : edge === "left" ? [d, i]
     : [image.width - 1 - d, i];
-  const idx = (y * image.width + x) * 4;
-  return [image.data[idx]!, image.data[idx + 1]!, image.data[idx + 2]!];
+}
+
+/** True iff `(x,y)` falls inside a region classified `kind`, applicable to `edge`. Spatially exact — never widened, never inferred from proximity (Section G). */
+function isClassified(
+  kind: SignEdgeIntentClassification["kind"],
+  edge: SignEdge,
+  x: number,
+  y: number,
+  classifications: SignEdgeIntentClassification[],
+): boolean {
+  for (const c of classifications) {
+    if (c.kind !== kind) continue;
+    if (!c.edges.includes(edge)) continue;
+    if (x >= c.xPx && x < c.xPx + c.widthPx && y >= c.yPx && y < c.yPx + c.heightPx) return true;
+  }
+  return false;
 }
 
 function analyzeEdge(
@@ -179,8 +268,9 @@ function analyzeEdge(
   edge: SignEdge,
   safeInsetIn: number,
   achievedPpi: number,
+  classifications: SignEdgeIntentClassification[],
 ): SignFitToProductionEdgeResult {
-  const requiredSafeInsetPx = signSafeInsetPxForAxis(safeInsetIn, achievedPpi);
+  const requiredProtectedInsetPx = signSafeInsetPxForAxis(safeInsetIn, achievedPpi);
   const length = edge === "top" || edge === "bottom" ? image.width : image.height;
   const perpendicular = edge === "top" || edge === "bottom" ? image.height : image.width;
   const maxDepth = Math.min(MAX_SCAN_DEPTH_PX, perpendicular);
@@ -188,50 +278,65 @@ function analyzeEdge(
   const { color: bleedColor, coverage } = measureOutermostDominantColor(image, edge);
   if (!bleedColor || coverage < FIT_TO_PRODUCTION_MIN_EDGE_DOMINANT_COVERAGE) {
     return {
-      edge, requiredSafeInsetIn: safeInsetIn, requiredSafeInsetPx,
-      bleedColor: null, nearestNonBleedPx: null, nearestNonBleedIn: null,
-      result: "unknown", violatingPositionPx: null,
+      edge, requiredProtectedInsetIn: safeInsetIn, requiredProtectedInsetPx,
+      bleedColor: null, nearestProtectedContentPx: null, nearestProtectedContentIn: null,
+      protectedResult: "unknown", violatingPositionPx: null,
+      edgeIntentPresent: false, edgeIntentNearestCutPx: null, edgeIntentAdvisory: false,
+      unresolvedAmbiguousPresent: false,
       reason: `No provable bleed colour along this edge (dominant-colour coverage ${coverage.toFixed(3)}, below the ${FIT_TO_PRODUCTION_MIN_EDGE_DOMINANT_COVERAGE} minimum) — unknown never becomes safe.`,
     };
   }
 
   let worstClearancePx: number | null = null;
   let worstPosition: number | null = null;
+  let worstAcknowledgedProtected = false;
+  let edgeIntentPresent = false;
+  let edgeIntentNearestCutPx: number | null = null;
+
   for (let i = 0; i < length; i++) {
-    const [r0, g0, b0] = pixelAtDepth(image, edge, i, 0);
-    if (chebyshev(r0, g0, b0, bleedColor.r, bleedColor.g, bleedColor.b) > FIT_TO_PRODUCTION_TOLERANCE) {
-      worstClearancePx = 0;
-      worstPosition = i;
-      break; // Already the worst possible clearance — no need to scan further.
-    }
-    let clearance: number | null = null;
-    for (let d = 1; d < maxDepth; d++) {
+    let violationDepth: number | null = null;
+    for (let d = 0; d < maxDepth; d++) {
       const [r, g, b] = pixelAtDepth(image, edge, i, d);
-      if (chebyshev(r, g, b, bleedColor.r, bleedColor.g, bleedColor.b) > FIT_TO_PRODUCTION_TOLERANCE) {
-        clearance = d;
-        break;
+      if (chebyshev(r, g, b, bleedColor.r, bleedColor.g, bleedColor.b) <= FIT_TO_PRODUCTION_TOLERANCE) {
+        continue; // BLEED_BACKGROUND — keep scanning inward.
       }
+      const [x, y] = positionAtDepth(image, edge, i, d);
+      if (isClassified("edge_intent", edge, x, y, classifications)) {
+        edgeIntentPresent = true;
+        if (edgeIntentNearestCutPx === null || d < edgeIntentNearestCutPx) edgeIntentNearestCutPx = d;
+        continue; // EDGE_INTENT_ARTWORK — exempt, keep scanning inward past it.
+      }
+      violationDepth = d;
+      break; // PROTECTED_CONTENT or AMBIGUOUS_REVIEW — this position's own clearance.
     }
-    if (clearance !== null && (worstClearancePx === null || clearance < worstClearancePx)) {
-      worstClearancePx = clearance;
+    if (violationDepth !== null && (worstClearancePx === null || violationDepth < worstClearancePx)) {
+      worstClearancePx = violationDepth;
       worstPosition = i;
-      if (worstClearancePx === 0) break;
+      const [x, y] = positionAtDepth(image, edge, i, violationDepth);
+      worstAcknowledgedProtected = isClassified("protected", edge, x, y, classifications);
+      if (worstClearancePx === 0) break; // Already the worst possible clearance — no need to scan further.
     }
   }
 
-  const nearestNonBleedPx = worstClearancePx;
-  const nearestNonBleedIn = nearestNonBleedPx === null ? null : nearestNonBleedPx / achievedPpi;
-  const violatingPositionPx = nearestNonBleedPx === null ? null : worstPosition;
-  const result: SignFitToProductionEdgeResult["result"] =
-    nearestNonBleedPx === null || nearestNonBleedPx >= requiredSafeInsetPx ? "pass" : "fail";
+  const nearestProtectedContentPx = worstClearancePx;
+  const nearestProtectedContentIn = nearestProtectedContentPx === null ? null : nearestProtectedContentPx / achievedPpi;
+  const violatingPositionPx = nearestProtectedContentPx === null ? null : worstPosition;
+  const protectedResult: SignFitToProductionEdgeResult["protectedResult"] =
+    nearestProtectedContentPx === null || nearestProtectedContentPx >= requiredProtectedInsetPx ? "pass" : "fail";
+  const unresolvedAmbiguousPresent = protectedResult === "fail" && !worstAcknowledgedProtected;
+  const edgeIntentAdvisory = edgeIntentPresent;
   const reason =
-    nearestNonBleedPx === null
-      ? `Bleed colour rgb(${bleedColor.r},${bleedColor.g},${bleedColor.b}) holds uniformly for at least ${maxDepth}px inward at every position along this edge — no non-bleed content found within the scanned depth.`
-      : result === "pass"
-        ? `Nearest non-bleed content is ${nearestNonBleedPx}px (${nearestNonBleedIn!.toFixed(3)}in) from the cut edge, at or beyond the required ${requiredSafeInsetPx}px (${safeInsetIn}in) safe inset.`
-        : `Nearest non-bleed content is only ${nearestNonBleedPx}px (${nearestNonBleedIn!.toFixed(3)}in) from the cut edge, short of the required ${requiredSafeInsetPx}px (${safeInsetIn}in) safe inset.`;
+    nearestProtectedContentPx === null
+      ? `Bleed colour rgb(${bleedColor.r},${bleedColor.g},${bleedColor.b}) (and any classified edge-intent artwork) holds for at least ${maxDepth}px inward at every position along this edge — no protected/ambiguous content found within the scanned depth.${edgeIntentPresent ? ` Edge-intent artwork was present, nearest ${edgeIntentNearestCutPx}px from the cut edge.` : ""}`
+      : protectedResult === "pass"
+        ? `Nearest protected/ambiguous content is ${nearestProtectedContentPx}px (${nearestProtectedContentIn!.toFixed(3)}in) from the cut edge, at or beyond the required ${requiredProtectedInsetPx}px (${safeInsetIn}in) inset.${edgeIntentPresent ? ` Edge-intent artwork was present nearer the edge, nearest ${edgeIntentNearestCutPx}px from the cut edge — excluded from this measurement.` : ""}`
+        : `Nearest ${unresolvedAmbiguousPresent ? "unresolved ambiguous" : "acknowledged protected"} content is only ${nearestProtectedContentPx}px (${nearestProtectedContentIn!.toFixed(3)}in) from the cut edge, short of the required ${requiredProtectedInsetPx}px (${safeInsetIn}in) inset.${edgeIntentPresent ? ` Edge-intent artwork was also present, nearest ${edgeIntentNearestCutPx}px from the cut edge — excluded from this measurement.` : ""}`;
 
-  return { edge, requiredSafeInsetIn: safeInsetIn, requiredSafeInsetPx, bleedColor, nearestNonBleedPx, nearestNonBleedIn, violatingPositionPx, result, reason };
+  return {
+    edge, requiredProtectedInsetIn: safeInsetIn, requiredProtectedInsetPx, bleedColor,
+    nearestProtectedContentPx, nearestProtectedContentIn, protectedResult, violatingPositionPx,
+    edgeIntentPresent, edgeIntentNearestCutPx, edgeIntentAdvisory, unresolvedAmbiguousPresent, reason,
+  };
 }
 
 /**
@@ -240,24 +345,30 @@ function analyzeEdge(
  * `SignProductionTemplate`/the confirmed spec — never re-derived from the
  * image); `image.width`/`image.height` are the candidate's own actual
  * pixel dimensions, from which achieved density is honestly computed.
+ * `classifications` — governed `SignEdgeIntentClassification[]` the caller
+ * resolves and validates against the current candidate/plan identity
+ * BEFORE calling this (this module trusts geometry only, never identity —
+ * see `SignEdgeIntentClassification`'s own doc). Defaults to `[]` for a
+ * candidate with no governed classifications yet.
  */
 export function analyzeSignFitToProduction(
   image: RgbaImage,
   orderedWidthIn: number,
   orderedHeightIn: number,
   safeInsetIn: number,
+  classifications: SignEdgeIntentClassification[] = [],
 ): SignFitToProductionResult {
   const achievedPpiX = image.width / orderedWidthIn;
   const achievedPpiY = image.height / orderedHeightIn;
   const edges: SignFitToProductionEdgeResult[] = [
-    analyzeEdge(image, "top", safeInsetIn, achievedPpiY),
-    analyzeEdge(image, "right", safeInsetIn, achievedPpiX),
-    analyzeEdge(image, "bottom", safeInsetIn, achievedPpiY),
-    analyzeEdge(image, "left", safeInsetIn, achievedPpiX),
+    analyzeEdge(image, "top", safeInsetIn, achievedPpiY, classifications),
+    analyzeEdge(image, "right", safeInsetIn, achievedPpiX, classifications),
+    analyzeEdge(image, "bottom", safeInsetIn, achievedPpiY, classifications),
+    analyzeEdge(image, "left", safeInsetIn, achievedPpiX, classifications),
   ];
-  const overallResult: SignFitToProductionResult["overallResult"] = edges.some((e) => e.result === "fail")
+  const overallResult: SignFitToProductionResult["overallResult"] = edges.some((e) => e.protectedResult === "fail")
     ? "fail"
-    : edges.some((e) => e.result === "unknown")
+    : edges.some((e) => e.protectedResult === "unknown")
       ? "unknown"
       : "pass";
   return { orderedWidthIn, orderedHeightIn, widthPx: image.width, heightPx: image.height, achievedPpiX, achievedPpiY, safeInsetIn, edges, overallResult };

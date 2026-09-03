@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import type { SignEdge } from "@/capabilities/sign-preparation";
 import { getProjectRepository } from "@/lib/db";
 import { readAcquisitionSessionTokenFromRequest } from "@/lib/http/acquisition-session-cookie";
 import { previewSignCorrections, type PendingSignCorrection } from "@/lib/services/sign-artwork-service";
@@ -7,6 +8,11 @@ import { previewSignCorrections, type PendingSignCorrection } from "@/lib/servic
 type RouteContext = {
   params: Promise<{ projectId: string }>;
 };
+
+const SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
+function isSignEdge(value: unknown): value is SignEdge {
+  return typeof value === "string" && (SIGN_EDGES as readonly string[]).includes(value);
+}
 
 function parseCorrections(body: unknown): PendingSignCorrection[] | null {
   if (!Array.isArray(body)) return null;
@@ -29,6 +35,17 @@ function parseCorrections(body: unknown): PendingSignCorrection[] | null {
         return null;
       }
       corrections.push({ kind: "move", sourceStartYPx, heightPx, destStartYPx });
+    } else if (raw.kind === "classify") {
+      const { classificationKind, edges, xPx, yPx, widthPx, heightPx } = raw;
+      if (
+        (classificationKind !== "edge_intent" && classificationKind !== "protected") ||
+        !Array.isArray(edges) || edges.length === 0 || !edges.every(isSignEdge) ||
+        typeof xPx !== "number" || typeof yPx !== "number" ||
+        typeof widthPx !== "number" || typeof heightPx !== "number"
+      ) {
+        return null;
+      }
+      corrections.push({ kind: "classify", classificationKind, edges: edges as SignEdge[], xPx, yPx, widthPx, heightPx });
     } else {
       return null;
     }
@@ -39,15 +56,17 @@ function parseCorrections(body: unknown): PendingSignCorrection[] | null {
 /**
  * Operator Production Correction UX: fast, in-memory, NEVER-persisted
  * preview of one or more operator-selected corrections (Smart Remove /
- * Move) applied on top of the current blocked production candidate —
- * `previewSignCorrections`'s own doc has the full contract. Zero writes,
- * zero Topaz calls. Same session gate as every other internal sign-artwork
- * route: the REQUESTER'S OWN session must be verified internal right now.
+ * Move / Classify) applied on top of the current blocked production
+ * candidate — `previewSignCorrections`'s own doc has the full contract.
+ * Zero writes, zero Topaz calls. Same session gate as every other internal
+ * sign-artwork route: the REQUESTER'S OWN session must be verified
+ * internal right now.
  *
  * `POST` body: a JSON array of
- * `{kind:"remove",xPx,yPx,widthPx,heightPx,contextDepthPx}` or
- * `{kind:"move",sourceStartYPx,heightPx,destStartYPx}` entries, in the
- * production candidate's own pixel coordinate space.
+ * `{kind:"remove",xPx,yPx,widthPx,heightPx,contextDepthPx}`,
+ * `{kind:"move",sourceStartYPx,heightPx,destStartYPx}`, or
+ * `{kind:"classify",classificationKind:"edge_intent"|"protected",edges,xPx,yPx,widthPx,heightPx}`
+ * entries, in the production candidate's own pixel coordinate space.
  */
 export async function POST(request: Request, context: RouteContext) {
   try {

@@ -2633,6 +2633,27 @@ export interface SignPreparation {
   operatorStructuralOverrideCreatedAt: string | null;
   /** WHO recorded it — always `"operator"` (this evidence is never customer-authored). `null` means never recorded. */
   operatorStructuralOverrideCreatedBy: "operator" | null;
+  /**
+   * Edge-Intent Correction Phase: operator-governed classifications of
+   * exact rectangular regions as `"edge_intent"` (intentional border/
+   * perimeter/edge artwork, exempt from PROTECTED_CONTENT clearance
+   * measurement on the edges named) or `"protected"` (an explicit
+   * acknowledgment that a region IS meaningful content, changing no scan
+   * arithmetic — only audit clarity between "unresolved ambiguous" and
+   * "known protected content that is simply too close").
+   *
+   * An array of self-describing `Record<string, unknown>` entries (never a
+   * typed shape at this layer — mirrors `plan`/`inspection`/
+   * `operatorStructuralOverride`'s own loosely-typed-JSON discipline),
+   * narrowed to `SignEdgeIntentClassificationRecord` at the capability
+   * boundary. Each entry embeds ITS OWN binding facts (candidate asset id,
+   * plan key, created-at/-by) — the same "never trust a stored fact
+   * without re-checking it against current state" discipline
+   * `operatorStructuralOverride` already established: a classification
+   * drawn against a stale candidate/plan must never silently keep
+   * governing a materially different one. `null` means none recorded yet.
+   */
+  edgeIntentClassifications: Record<string, unknown>[] | null;
   createdAt: string;
   updatedAt: string;
 }

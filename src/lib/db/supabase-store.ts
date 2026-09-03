@@ -478,6 +478,7 @@ type DbSignPreparation = {
   operator_structural_override: Record<string, unknown> | null;
   operator_structural_override_created_at: string | null;
   operator_structural_override_created_by: "operator" | null;
+  edge_intent_classifications: Record<string, unknown>[] | null;
   created_at: string;
   updated_at: string;
 };
@@ -935,6 +936,7 @@ function mapSignPreparation(row: DbSignPreparation): SignPreparation {
     operatorStructuralOverride: row.operator_structural_override ?? null,
     operatorStructuralOverrideCreatedAt: row.operator_structural_override_created_at,
     operatorStructuralOverrideCreatedBy: row.operator_structural_override_created_by,
+    edgeIntentClassifications: row.edge_intent_classifications ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3041,6 +3043,8 @@ export class SupabaseProjectRepository implements ProjectRepository {
       update.operator_structural_override_created_at = patch.operatorStructuralOverrideCreatedAt;
     if (patch.operatorStructuralOverrideCreatedBy !== undefined)
       update.operator_structural_override_created_by = patch.operatorStructuralOverrideCreatedBy;
+    if (patch.edgeIntentClassifications !== undefined)
+      update.edge_intent_classifications = patch.edgeIntentClassifications;
 
     const { data, error } = await this.client
       .from("sign_preparations")

@@ -3,19 +3,20 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { SignFitToProductionSummary } from "@/capabilities/sign-preparation";
+import type { SignEdge, SignFitToProductionSummary } from "@/capabilities/sign-preparation";
 
 import { mapDisplayPointToSourcePx, normalizeSelection } from "./correction-coordinate-mapping";
 
 /**
- * Operator Production Correction UX: the interactive canvas correction tool
- * — Fit to Production identifies a violation, the operator zooms in, selects
- * the exact offending artwork with a rectangle, previews a deterministic
- * correction (Smart Remove, or the existing Move capability), and applies it
- * as a governed plan operation. Deliberately NOT Photoshop (Section D): one
- * rectangular selection tool, two operations (remove/move), a before/after
- * preview, nothing else — no brushes, no freehand masks, no polygons, no
- * generative fill.
+ * Operator Production Correction UX / Edge-Intent Correction Phase: the
+ * interactive canvas correction tool — Fit to Production identifies a
+ * violation, the operator zooms in, selects the exact offending artwork
+ * with a rectangle, and either previews a deterministic correction (Smart
+ * Remove, the existing Move capability) or GOVERNS a classification (Mark
+ * as Edge Artwork / Border, Mark as Protected, Leave for Review). Applies
+ * either as a governed action. Deliberately NOT Photoshop (Section D/N):
+ * one rectangular selection tool, a small closed set of actions, a
+ * before/after preview, nothing else.
  *
  * Coordinate discipline (Section G/L): every selection is tracked and sent
  * in the production candidate's own NATIVE pixel space. The on-screen
@@ -25,13 +26,21 @@ import { mapDisplayPointToSourcePx, normalizeSelection } from "./correction-coor
  * identical source pixels.
  *
  * Preview/execution equivalence (Section L): `/correction-preview` runs the
- * SAME `measureUniformSurroundingBackground`/`applyCorrectionsToCanvas`
- * primitives real commit/execution uses — this component never computes
- * pixel colours or applies a correction itself, it only sends the operator's
- * selection and renders back what the server actually did.
+ * SAME `measureUniformSurroundingBackground`/`applyCorrectionsToCanvas`/
+ * `analyzeSignFitToProduction` primitives real commit/execution use — this
+ * component never computes pixel colours, applies a correction, or measures
+ * safe-inset clearance itself; it only sends the operator's selection and
+ * renders back what the server actually did.
+ *
+ * The 0.125in SAFE guide (Section E) is drawn from the SERVER's own
+ * already-computed `requiredProtectedInsetPx` per edge — it is a guide for
+ * where PROTECTED content must stay, never a blanket "no artwork" zone:
+ * BLEED_BACKGROUND and governed EDGE_INTENT_ARTWORK may legitimately sit
+ * inside it or reach CUT.
  */
 
-type Mode = "remove" | "move";
+type Mode = "remove" | "move" | "classify";
+type ClassificationKind = "edge_intent" | "protected";
 
 interface Rect {
   xPx: number;
@@ -42,16 +51,21 @@ interface Rect {
 
 type PendingCorrection =
   | { kind: "remove"; xPx: number; yPx: number; widthPx: number; heightPx: number; contextDepthPx: number }
-  | { kind: "move"; sourceStartYPx: number; heightPx: number; destStartYPx: number };
+  | { kind: "move"; sourceStartYPx: number; heightPx: number; destStartYPx: number }
+  | { kind: "classify"; classificationKind: ClassificationKind; edges: SignEdge[]; xPx: number; yPx: number; widthPx: number; heightPx: number };
 
 interface PreviewEdge {
-  edge: "top" | "right" | "bottom" | "left";
-  requiredSafeInsetPx: number;
-  requiredSafeInsetIn: number;
-  nearestNonBleedPx: number | null;
-  nearestNonBleedIn: number | null;
-  result: "pass" | "fail" | "unknown";
+  edge: SignEdge;
+  requiredProtectedInsetPx: number;
+  requiredProtectedInsetIn: number;
+  nearestProtectedContentPx: number | null;
+  nearestProtectedContentIn: number | null;
+  protectedResult: "pass" | "fail" | "unknown";
   reason: string;
+  edgeIntentPresent: boolean;
+  edgeIntentNearestCutPx: number | null;
+  edgeIntentAdvisory: boolean;
+  unresolvedAmbiguousPresent: boolean;
 }
 
 interface PreviewResponse {
@@ -69,6 +83,7 @@ interface PreviewResponse {
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 3;
 const DEFAULT_CONTEXT_DEPTH_PX = 24;
+const ALL_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
 
 export function SignFitToProductionCorrectionTool({
   projectId,
@@ -90,6 +105,8 @@ export function SignFitToProductionCorrectionTool({
   const [mode, setMode] = useState<Mode>("remove");
   const [contextDepthPx, setContextDepthPx] = useState(DEFAULT_CONTEXT_DEPTH_PX);
   const [moveDestStartYPx, setMoveDestStartYPx] = useState("");
+  const [classificationKind, setClassificationKind] = useState<ClassificationKind>("edge_intent");
+  const [classificationEdges, setClassificationEdges] = useState<Set<SignEdge>>(new Set());
 
   const [queue, setQueue] = useState<PendingCorrection[]>([]);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
@@ -100,9 +117,11 @@ export function SignFitToProductionCorrectionTool({
   const displayHeight = naturalSize ? Math.round(naturalSize.height * zoom) : 0;
 
   // Overlay: CUT boundary (implicit — the canvas edge itself), SAFE guide
-  // per axis (from the SERVER's own already-computed requiredSafeInsetPx —
-  // never a client-side re-derivation of the 0.125in conversion), a
-  // highlight band for each failing/unknown edge, and the current selection.
+  // per axis (from the SERVER's own already-computed
+  // requiredProtectedInsetPx — never a client-side re-derivation), a
+  // highlight band coloured by that edge's OWN protectedResult (never a
+  // blanket "artwork present = violation" — pass is never highlighted),
+  // and the current selection.
   const drawOverlay = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !naturalSize) return;
@@ -110,45 +129,53 @@ export function SignFitToProductionCorrectionTool({
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const edgeByName = new Map(fitToProduction.edges.map((e) => [e.edge, e]));
+    const source = preview?.fitToProduction?.edges ?? fitToProduction.edges;
+    const edgeByName = new Map(source.map((e) => [e.edge, e]));
     const top = edgeByName.get("top");
     const right = edgeByName.get("right");
     const bottom = edgeByName.get("bottom");
     const left = edgeByName.get("left");
 
     // SAFE guide — a thin dashed line inset from each edge by that edge's
-    // own requiredSafeInsetPx, scaled to the current display size.
+    // own requiredProtectedInsetPx, scaled to the current display size.
     ctx.save();
     ctx.strokeStyle = "rgba(16, 185, 129, 0.9)"; // emerald
     ctx.setLineDash([6, 4]);
     ctx.lineWidth = 1.5;
     if (top) {
-      const y = top.requiredSafeInsetPx * zoom;
+      const y = top.requiredProtectedInsetPx * zoom;
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
     }
     if (bottom) {
-      const y = canvas.height - bottom.requiredSafeInsetPx * zoom;
+      const y = canvas.height - bottom.requiredProtectedInsetPx * zoom;
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
     }
     if (left) {
-      const x = left.requiredSafeInsetPx * zoom;
+      const x = left.requiredProtectedInsetPx * zoom;
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
     }
     if (right) {
-      const x = canvas.width - right.requiredSafeInsetPx * zoom;
+      const x = canvas.width - right.requiredProtectedInsetPx * zoom;
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
     }
     ctx.restore();
 
-    // Violation highlight bands — the full unsafe-depth band along each
-    // failing/unknown edge (never a claim of exact object identity — see
-    // Section F: "actionable production evidence", not segmentation).
+    // Violation highlight bands — the full required-inset-depth band along
+    // each failing/unknown edge, coloured by WHY: red for unresolved
+    // ambiguous review, orange for acknowledged protected content still
+    // too close, amber for unknown (no provable bleed baseline). A PASS
+    // edge (including one whose only near-cut content is governed
+    // EDGE_INTENT_ARTWORK or BLEED_BACKGROUND) is never highlighted — the
+    // guide is not a blanket no-artwork zone (Section E).
     ctx.save();
     ctx.setLineDash([]);
     for (const [edge, e] of [["top", top], ["right", right], ["bottom", bottom], ["left", left]] as const) {
-      if (!e || e.result === "pass") continue;
-      ctx.fillStyle = e.result === "unknown" ? "rgba(234, 179, 8, 0.18)" : "rgba(239, 68, 68, 0.18)";
-      const depth = e.requiredSafeInsetPx * zoom;
+      if (!e || e.protectedResult === "pass") continue;
+      ctx.fillStyle =
+        e.protectedResult === "unknown" ? "rgba(234, 179, 8, 0.18)"
+        : e.unresolvedAmbiguousPresent ? "rgba(239, 68, 68, 0.18)"
+        : "rgba(249, 115, 22, 0.18)"; // acknowledged protected, still too close
+      const depth = e.requiredProtectedInsetPx * zoom;
       if (edge === "top") ctx.fillRect(0, 0, canvas.width, depth);
       else if (edge === "bottom") ctx.fillRect(0, canvas.height - depth, canvas.width, depth);
       else if (edge === "left") ctx.fillRect(0, 0, depth, canvas.height);
@@ -164,7 +191,7 @@ export function SignFitToProductionCorrectionTool({
       ctx.strokeRect(selection.xPx * zoom, selection.yPx * zoom, selection.widthPx * zoom, selection.heightPx * zoom);
       ctx.restore();
     }
-  }, [naturalSize, zoom, selection, fitToProduction]);
+  }, [naturalSize, zoom, selection, fitToProduction, preview]);
 
   useEffect(() => {
     drawOverlay();
@@ -255,6 +282,30 @@ export function SignFitToProductionCorrectionTool({
     void runPreview([...queue, correction]);
   }
 
+  function queueClassify() {
+    if (!selection || !selectionValid) return;
+    if (classificationEdges.size === 0) {
+      setError("Choose at least one edge this classification applies to.");
+      return;
+    }
+    const correction: PendingCorrection = {
+      kind: "classify",
+      classificationKind,
+      edges: Array.from(classificationEdges),
+      xPx: selection.xPx, yPx: selection.yPx, widthPx: selection.widthPx, heightPx: selection.heightPx,
+    };
+    void runPreview([...queue, correction]);
+  }
+
+  function toggleClassificationEdge(edge: SignEdge) {
+    setClassificationEdges((prev) => {
+      const next = new Set(prev);
+      if (next.has(edge)) next.delete(edge);
+      else next.add(edge);
+      return next;
+    });
+  }
+
   function undoLast() {
     const next = queue.slice(0, -1);
     if (next.length === 0) {
@@ -298,10 +349,10 @@ export function SignFitToProductionCorrectionTool({
   const edgeStatusLine = useMemo(() => {
     const source = preview?.fitToProduction?.edges ?? fitToProduction.edges;
     if (source.length === 0) return null;
-    return (["top", "right", "bottom", "left"] as const).map((edge) => {
+    return ALL_EDGES.map((edge) => {
       const e = source.find((x) => x.edge === edge);
-      const label = e ? e.result.toUpperCase() : "—";
-      return { edge, label, pass: e?.result === "pass" };
+      const label = e ? e.protectedResult.toUpperCase() : "—";
+      return { edge, label, pass: e?.protectedResult === "pass", edgeIntent: e?.edgeIntentPresent ?? false };
     });
   }, [preview, fitToProduction]);
 
@@ -310,9 +361,13 @@ export function SignFitToProductionCorrectionTool({
       <div>
         <h2 className="text-sm font-semibold text-ink">Fix production violations</h2>
         <p className="text-xs text-muted">
-          Zoom in, drag a rectangle around the exact unwanted artwork, then Remove or Move it. Nothing here changes
-          production artwork until you click &quot;Apply to production plan&quot; below — corrections preview
-          instantly, with zero Topaz calls.
+          Zoom in, drag a rectangle around the exact artwork, then Remove, Move, or classify it. Nothing here changes
+          production artwork or its safe-zone classification until you click &quot;Apply to production plan&quot;
+          below — corrections preview instantly, with zero Topaz calls.
+        </p>
+        <p className="mt-1 text-xs text-muted">
+          <span className="font-medium text-emerald-700">SAFE guide</span> — where PROTECTED content must stay clear
+          of CUT. It is not a no-artwork zone: BLEED backgrounds and governed EDGE ARTWORK may cross it or reach CUT.
         </p>
       </div>
 
@@ -409,6 +464,9 @@ export function SignFitToProductionCorrectionTool({
         <label className="flex items-center gap-1">
           <input type="radio" checked={mode === "move"} onChange={() => setMode("move")} /> Move (existing capability)
         </label>
+        <label className="flex items-center gap-1">
+          <input type="radio" checked={mode === "classify"} onChange={() => setMode("classify")} /> Classify
+        </label>
 
         {mode === "remove" ? (
           <>
@@ -431,7 +489,7 @@ export function SignFitToProductionCorrectionTool({
               Remove Artifact
             </button>
           </>
-        ) : (
+        ) : mode === "move" ? (
           <>
             <span className="text-xs text-muted">source y {selection?.yPx ?? "—"}, height {selection?.heightPx ?? "—"}</span>
             <label className="flex items-center gap-1">
@@ -453,8 +511,56 @@ export function SignFitToProductionCorrectionTool({
               Preview move
             </button>
           </>
+        ) : (
+          <>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                checked={classificationKind === "edge_intent"}
+                onChange={() => setClassificationKind("edge_intent")}
+              />
+              Edge Artwork / Border
+            </label>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                checked={classificationKind === "protected"}
+                onChange={() => setClassificationKind("protected")}
+              />
+              Protected
+            </label>
+            <span className="font-medium text-ink/60">applies to:</span>
+            {ALL_EDGES.map((edge) => (
+              <label key={edge} className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={classificationEdges.has(edge)}
+                  onChange={() => toggleClassificationEdge(edge)}
+                  data-testid={`sign-correction-classify-edge-${edge}`}
+                />
+                {edge}
+              </label>
+            ))}
+            <button
+              type="button"
+              onClick={queueClassify}
+              disabled={!selectionValid || busy || classificationEdges.size === 0}
+              className="rounded-full bg-ink px-3 py-1.5 text-sm font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+              data-testid="sign-correction-classify"
+            >
+              {classificationKind === "edge_intent" ? "Mark as Edge Artwork / Border" : "Mark as Protected"}
+            </button>
+          </>
         )}
       </div>
+      {mode === "classify" ? (
+        <p className="text-xs text-muted">
+          Edge Artwork / Border exempts ONLY the selected rectangle, on the edges checked, from safe-inset
+          measurement — Fit to Production keeps scanning past it for genuinely protected/ambiguous content. It is
+          never inferred automatically; leave hole/circle graphics unclassified (AMBIGUOUS — REVIEW REQUIRED) unless
+          you have a specific reason to classify them.
+        </p>
+      ) : null}
 
       {error ? (
         <p className="text-sm text-red-600" role="alert" data-sign-correction-error>
@@ -497,9 +603,10 @@ export function SignFitToProductionCorrectionTool({
 
           {edgeStatusLine ? (
             <div className="flex flex-wrap gap-3 text-sm" data-sign-correction-fit-recheck>
-              {edgeStatusLine.map(({ edge, label, pass }) => (
+              {edgeStatusLine.map(({ edge, label, pass, edgeIntent }) => (
                 <span key={edge} className={pass ? "text-emerald-700" : "text-red-700"}>
                   {edge.toUpperCase()}: {label}
+                  {edgeIntent ? " (edge artwork present)" : ""}
                 </span>
               ))}
             </div>
@@ -523,8 +630,10 @@ export function SignFitToProductionCorrectionTool({
             </button>
           </div>
           <p className="text-xs text-muted">
-            Applying builds a new production plan from these corrections and requires re-authorization before it can
-            be prepared again — the previous authorization no longer applies.
+            Applying a Remove/Move builds a new production plan and requires re-authorization before it can be
+            prepared again. Applying a Classification records a governed decision bound to this exact candidate —
+            it never authorizes anything on its own, and a Remove/Move in the SAME batch will make it stale for the
+            plan that produces.
           </p>
         </div>
       ) : null}

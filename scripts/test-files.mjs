@@ -361,6 +361,9 @@ export const TEST_FILES = [
   // — governed plan appending, preview/execution equivalence, Fit to
   // Production immediate recheck.
   "src/lib/services/sign-artwork-service.test.ts",
+  // Edge-Intent Correction Phase: governed classification record decode/
+  // encode/re-validation against current candidate/plan identity.
+  "src/capabilities/sign-preparation/sign-edge-intent-classification.test.ts",
   // Signs Phase 3A: cross-plan Topaz intermediate reconstruction adoption —
   // a re-plan for the SAME sign preparation reuses a sufficient, already-
   // paid-for intermediate from a PRIOR job rather than dispatching a

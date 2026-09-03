@@ -102,13 +102,18 @@ export interface SignFitToProductionSummary {
 
 export interface SignFitToProductionEdgeSummary {
   edge: "top" | "right" | "bottom" | "left";
-  requiredSafeInsetIn: number;
-  requiredSafeInsetPx: number;
-  nearestNonBleedPx: number | null;
-  nearestNonBleedIn: number | null;
+  requiredProtectedInsetIn: number;
+  requiredProtectedInsetPx: number;
+  nearestProtectedContentPx: number | null;
+  nearestProtectedContentIn: number | null;
   violatingPositionPx: number | null;
-  result: "pass" | "fail" | "unknown";
+  protectedResult: "pass" | "fail" | "unknown";
   reason: string;
+  /** Edge-Intent Correction Phase: see `sign-fit-to-production.ts`'s own doc — mirrored, never re-derived. */
+  edgeIntentPresent: boolean;
+  edgeIntentNearestCutPx: number | null;
+  edgeIntentAdvisory: boolean;
+  unresolvedAmbiguousPresent: boolean;
 }
 
 /**
@@ -134,20 +139,24 @@ function readFitToProductionSummary(report: Record<string, unknown> | null | und
     .filter(
       (e) =>
         (e.edge === "top" || e.edge === "right" || e.edge === "bottom" || e.edge === "left") &&
-        typeof e.requiredSafeInsetIn === "number" &&
-        typeof e.requiredSafeInsetPx === "number" &&
-        (e.result === "pass" || e.result === "fail" || e.result === "unknown") &&
+        typeof e.requiredProtectedInsetIn === "number" &&
+        typeof e.requiredProtectedInsetPx === "number" &&
+        (e.protectedResult === "pass" || e.protectedResult === "fail" || e.protectedResult === "unknown") &&
         typeof e.reason === "string",
     )
     .map((e) => ({
       edge: e.edge as SignFitToProductionEdgeSummary["edge"],
-      requiredSafeInsetIn: e.requiredSafeInsetIn as number,
-      requiredSafeInsetPx: e.requiredSafeInsetPx as number,
-      nearestNonBleedPx: typeof e.nearestNonBleedPx === "number" ? e.nearestNonBleedPx : null,
-      nearestNonBleedIn: typeof e.nearestNonBleedIn === "number" ? e.nearestNonBleedIn : null,
+      requiredProtectedInsetIn: e.requiredProtectedInsetIn as number,
+      requiredProtectedInsetPx: e.requiredProtectedInsetPx as number,
+      nearestProtectedContentPx: typeof e.nearestProtectedContentPx === "number" ? e.nearestProtectedContentPx : null,
+      nearestProtectedContentIn: typeof e.nearestProtectedContentIn === "number" ? e.nearestProtectedContentIn : null,
       violatingPositionPx: typeof e.violatingPositionPx === "number" ? e.violatingPositionPx : null,
-      result: e.result as SignFitToProductionEdgeSummary["result"],
+      protectedResult: e.protectedResult as SignFitToProductionEdgeSummary["protectedResult"],
       reason: e.reason as string,
+      edgeIntentPresent: e.edgeIntentPresent === true,
+      edgeIntentNearestCutPx: typeof e.edgeIntentNearestCutPx === "number" ? e.edgeIntentNearestCutPx : null,
+      edgeIntentAdvisory: e.edgeIntentAdvisory === true,
+      unresolvedAmbiguousPresent: e.unresolvedAmbiguousPresent === true,
     }));
 
   return {

@@ -1,0 +1,60 @@
+-- Edge-Intent Correction Phase: operator-governed classification of exact
+-- rectangular regions as EDGE_INTENT_ARTWORK (intentional border/perimeter/
+-- edge artwork, exempt from PROTECTED_CONTENT clearance measurement on the
+-- edges named) or PROTECTED (an explicit acknowledgment that a region IS
+-- meaningful content). Additive only — nullable, every existing
+-- `sign_preparations` row is untouched.
+--
+-- NOT APPLIED to any live database by this change. This repository's
+-- convention is to land migration + dependent code together and apply the
+-- migration only as part of an explicit, reviewed deploy step.
+--
+-- SCHEMA DISCIPLINE AUDIT
+--
+-- 1. WHY ONE COLUMN HOLDING AN ARRAY, NOT A NEW TABLE
+--
+--    A rigid-sign preparation can carry SEVERAL simultaneous classifications
+--    (e.g. a LEFT border region and a RIGHT border region, classified
+--    independently) — unlike `sign_plan_authorization`/
+--    `operator_structural_override`, which each hold exactly one current
+--    decision. A `jsonb` array on the existing row is still the smaller,
+--    more honest fit than a new table for V1: there is no cross-preparation
+--    query need, no independent lifecycle beyond "current classifications
+--    for this preparation's current candidate", and every reader already
+--    reads the whole `sign_preparations` row for this preparation regardless.
+--
+-- 2. WHY EACH ARRAY ENTRY EMBEDS ITS OWN BINDING FACTS
+--
+--    A classification drawn against a stale candidate (a corrected
+--    regeneration producing a NEW production asset) or a stale plan (a
+--    since-changed composition) must never silently keep governing a
+--    DIFFERENT rendered candidate than the operator actually looked at —
+--    the same "never trust a stored fact without re-checking it against
+--    current state" discipline `operator_structural_override` already
+--    established for its own `sourceAssetId`/`sourceSha256`. Each entry
+--    therefore embeds its own `candidateAssetId`/`planKey` inside the jsonb
+--    payload, re-validated against the preparation's CURRENT authoritative
+--    candidate/plan at every read — never trusted merely for existing.
+--    `sign-artwork-service.ts` is responsible for this re-validation; this
+--    migration only stores the data.
+--
+-- 3. WHY THIS DOES NOT NEED ITS OWN PLAN-KEY-LIKE IDENTITY COLUMN
+--
+--    A classification changes Fit to Production's OWN measurement, not the
+--    composition plan's steps — it never flows into `computeSignPlanKey`.
+--    Its effect is therefore recomputed fresh every time
+--    `analyzeSignFitToProduction` runs (the worker never caches a stale
+--    result), which is what "invalidates" a materially changed
+--    classification set in practice: the very next Fit-to-Production run
+--    reflects exactly whatever is currently stored and currently valid,
+--    never a cached prior verdict.
+--
+-- 4. WHY `jsonb`, LIKE `plan`/`inspection`/`operator_structural_override`
+--
+--    Loosely-typed, narrowed to `SignEdgeIntentClassificationRecord` at the
+--    capability boundary — internal production evidence, never rendered
+--    raw to a customer (this profile has no customer-facing surface at all,
+--    Constitution §16A.1).
+
+alter table public.sign_preparations
+  add column if not exists edge_intent_classifications jsonb null;

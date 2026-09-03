@@ -147,6 +147,16 @@ export {
   FIT_TO_PRODUCTION_TOLERANCE,
   analyzeSignFitToProduction,
   signSafeInsetPxForAxis,
+  type SignEdgeIntentClassification,
   type SignFitToProductionEdgeResult,
   type SignFitToProductionResult,
 } from "./sign-fit-to-production";
+export {
+  buildEdgeIntentClassificationRecord,
+  decodeEdgeIntentClassificationRecord,
+  decodeEdgeIntentClassificationRecords,
+  encodeEdgeIntentClassificationRecord,
+  resolveCurrentEdgeIntentClassifications,
+  type SignEdgeIntentClassificationKind,
+  type SignEdgeIntentClassificationRecord,
+} from "./sign-edge-intent-classification";

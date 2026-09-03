@@ -32,14 +32,20 @@ import type {
 import {
   analyzeSignFitToProduction,
   applyCorrectionsToCanvas,
+  buildEdgeIntentClassificationRecord,
+  decodeEdgeIntentClassificationRecords,
   decodeSignCompositionPlanToOperatorChoices,
   describeSignPlanForCustomer,
+  encodeEdgeIntentClassificationRecord,
   encodeMoveRegionParams,
   encodeReplaceRegionWithBackgroundParams,
   encodeSignPlate,
   getSignResolutionPolicyById,
   measureUniformSurroundingBackground,
+  resolveCurrentEdgeIntentClassifications,
   type SignCompositionOperatorInput,
+  type SignEdge,
+  type SignEdgeIntentClassification,
   type SignFitToProductionResult,
   type SignRepairPlan,
   type SignRepairStep,
@@ -382,11 +388,15 @@ export async function getSignProductionArtworkDownload(
  * (`measureUniformSurroundingBackground`), exactly the "system
  * independently examines surrounding background" requirement. `"move"`
  * mirrors the existing `SignCompositionPlanForm` numeric move fieldset
- * exactly (full canvas-width horizontal bands only, V1).
+ * exactly (full canvas-width horizontal bands only, V1). `"classify"`
+ * (Edge-Intent Correction Phase) marks an exact region EDGE_INTENT_ARTWORK
+ * or PROTECTED — a governance action, never a pixel modification: it
+ * changes what Fit to Production measures, not the artwork itself.
  */
 export type PendingSignCorrection =
   | { kind: "remove"; xPx: number; yPx: number; widthPx: number; heightPx: number; contextDepthPx: number }
-  | { kind: "move"; sourceStartYPx: number; heightPx: number; destStartYPx: number };
+  | { kind: "move"; sourceStartYPx: number; heightPx: number; destStartYPx: number }
+  | { kind: "classify"; classificationKind: "edge_intent" | "protected"; edges: SignEdge[]; xPx: number; yPx: number; widthPx: number; heightPx: number };
 
 export interface SignCorrectionPreviewResult {
   /**
@@ -431,9 +441,16 @@ function cropRgbaImage(image: RgbaImage, x0: number, y0: number, x1: number, y1:
   return { width, height, data };
 }
 
-async function resolveCurrentCandidateImage(
-  projectId: string,
-): Promise<{ image: RgbaImage; orderedWidthIn: number; orderedHeightIn: number; minimumSafeInsetIn: number } | null> {
+async function resolveCurrentCandidateImage(projectId: string): Promise<{
+  image: RgbaImage;
+  orderedWidthIn: number;
+  orderedHeightIn: number;
+  minimumSafeInsetIn: number;
+  candidateAssetId: string;
+  planKey: string;
+  /** Governed classifications ALREADY persisted for this exact candidate/plan — re-validated fresh, never trusted merely for existing. */
+  existingClassifications: SignEdgeIntentClassification[];
+} | null> {
   const graph = getCapabilityGraph();
   const candidate = await graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId);
   if (!candidate) return null;
@@ -441,22 +458,33 @@ async function resolveCurrentCandidateImage(
   if (!downloaded) return null;
 
   const preparation = await graph.signPreparation.getSignPreparation(projectId);
-  if (!preparation || preparation.orderedWidthIn === null || preparation.orderedHeightIn === null || !preparation.resolutionPolicyId) {
+  if (!preparation || preparation.orderedWidthIn === null || preparation.orderedHeightIn === null || !preparation.resolutionPolicyId || !preparation.planKey) {
     return null;
   }
   const policy = getSignResolutionPolicyById(preparation.resolutionPolicyId);
   if (!policy) return null;
 
   const decoded = decodePngUpload(downloaded.bytes);
+  const existingClassifications = resolveCurrentEdgeIntentClassifications(
+    decodeEdgeIntentClassificationRecords(preparation.edgeIntentClassifications),
+    candidate.assetId,
+    preparation.planKey,
+  );
   return {
     image: decoded.image,
     orderedWidthIn: preparation.orderedWidthIn,
     orderedHeightIn: preparation.orderedHeightIn,
     minimumSafeInsetIn: policy.minimumSafeInsetIn,
+    candidateAssetId: candidate.assetId,
+    planKey: preparation.planKey,
+    existingClassifications,
   };
 }
 
-function buildCorrectionStep(correction: PendingSignCorrection, measuredColor: { r: number; g: number; b: number } | null): SignRepairStep {
+function buildCorrectionStep(
+  correction: Extract<PendingSignCorrection, { kind: "remove" | "move" }>,
+  measuredColor: { r: number; g: number; b: number } | null,
+): SignRepairStep {
   if (correction.kind === "move") {
     return {
       kind: "move_region",
@@ -526,10 +554,11 @@ export async function previewSignCorrections(
 
   const resolved = await resolveCurrentCandidateImage(projectId);
   if (!resolved) return empty;
-  const { image: original, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn } = resolved;
+  const { image: original, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn, existingClassifications } = resolved;
 
   let workingImage: RgbaImage = original;
   const measuredColors: ({ r: number; g: number; b: number } | null)[] = [];
+  const queuedClassifications: SignEdgeIntentClassification[] = [];
   let appliedCount = 0;
   let failingIndex: number | null = null;
   let failingDetail: string | null = null;
@@ -541,6 +570,21 @@ export async function previewSignCorrections(
 
   for (let i = 0; i < corrections.length; i++) {
     const correction = corrections[i]!;
+
+    if (correction.kind === "classify") {
+      // Governance, not pixel modification — no `applyCorrectionsToCanvas`
+      // call, no colour measurement. Only affects the Fit to Production
+      // recheck below.
+      queuedClassifications.push({
+        kind: correction.classificationKind, edges: correction.edges,
+        xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx,
+      });
+      extend(correction.xPx, correction.yPx, correction.xPx + correction.widthPx, correction.yPx + correction.heightPx);
+      measuredColors.push(null);
+      appliedCount++;
+      continue;
+    }
+
     let measuredColor: { r: number; g: number; b: number } | null = null;
     if (correction.kind === "remove") {
       const measured = measureUniformSurroundingBackground(
@@ -572,7 +616,10 @@ export async function previewSignCorrections(
     appliedCount++;
   }
 
-  const fitToProduction = analyzeSignFitToProduction(workingImage, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn);
+  const fitToProduction = analyzeSignFitToProduction(
+    workingImage, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn,
+    [...existingClassifications, ...queuedClassifications],
+  );
 
   let beforeCropPngBase64: string | null = null;
   let afterCropPngBase64: string | null = null;
@@ -602,15 +649,29 @@ export async function previewSignCorrections(
 
 /**
  * Governed commit: reconstructs the CURRENT plan's own operator choices
- * (`decodeSignCompositionPlanToOperatorChoices`), appends the new
- * corrections to its `moves`/`replacements` arrays, and rebuilds through
- * the UNCHANGED `buildSignCompositionPlan`/`confirmSignCompositionPlan` —
- * producing a new, independently re-authorizable plan/planKey (Section K:
- * "changing... must change the appropriate plan identity"; old
- * authorization can never authorize this new plan). No direct final-image
- * mutation, no manual DB mutation — the ONLY persisted artifact is a new
- * canvas-first plan, replayed for real by the ordinary, unmodified worker
- * exactly like every other one.
+ * (`decodeSignCompositionPlanToOperatorChoices`), appends `"remove"`/
+ * `"move"` corrections to its `moves`/`replacements` arrays and rebuilds
+ * through the UNCHANGED `buildSignCompositionPlan`/`confirmSignCompositionPlan`
+ * — producing a new, independently re-authorizable plan/planKey (Section
+ * K: "changing... must change the appropriate plan identity"; old
+ * authorization can never authorize this new plan). `"classify"`
+ * corrections are a SEPARATE, parallel governance action — never a plan
+ * step — persisted as new `SignEdgeIntentClassificationRecord` entries,
+ * bound to the CURRENT candidate/plan identity at the moment of this call
+ * (Section F: candidate identity, region, applicable edges, operator
+ * decision, audit timestamp). No direct final-image mutation, no manual DB
+ * mutation — the only persisted artifacts are a (possibly unchanged) plan
+ * and/or a new classification record, both replayed/re-read for real by
+ * the ordinary, unmodified worker exactly like every other one.
+ *
+ * A batch mixing `"classify"` with `"remove"`/`"move"` is honoured, but
+ * note the classify record binds to the plan identity BEFORE this call's
+ * own plan rebuild — if the SAME batch also changes the plan, the
+ * classification becomes stale for the NEW plan/candidate the instant one
+ * exists (by the same "never trust a stale binding" discipline every other
+ * record here follows) and must be re-applied once the new candidate is
+ * produced. The real Section K workflow is deliberately sequential
+ * (classify, rerun Fit to Production, inspect) precisely to avoid this.
  */
 export async function commitSignCorrections(
   projectId: string,
@@ -640,8 +701,22 @@ export async function commitSignCorrections(
 
   const moves = [...choices.moves];
   const replacements = [...choices.replacements];
+  const newClassificationRecords = corrections
+    .filter((c): c is Extract<PendingSignCorrection, { kind: "classify" }> => c.kind === "classify")
+    .map((c) =>
+      buildEdgeIntentClassificationRecord({
+        kind: c.classificationKind,
+        edges: c.edges,
+        xPx: c.xPx, yPx: c.yPx, widthPx: c.widthPx, heightPx: c.heightPx,
+        candidateAssetId: resolved.candidateAssetId,
+        planKey: resolved.planKey,
+      }),
+    );
+  let planChanged = false;
 
   for (const correction of corrections) {
+    if (correction.kind === "classify") continue; // governance, handled separately above/below — never a plan step.
+
     let measuredColor: { r: number; g: number; b: number } | null = null;
     if (correction.kind === "remove") {
       const measured = measureUniformSurroundingBackground(
@@ -660,6 +735,7 @@ export async function commitSignCorrections(
     } else {
       moves.push({ sourceStartYPx: correction.sourceStartYPx, heightPx: correction.heightPx, destStartYPx: correction.destStartYPx });
     }
+    planChanged = true;
 
     const step = buildCorrectionStep(correction, measuredColor);
     const result = applyCorrectionsToCanvas(workingImage, [step]);
@@ -669,18 +745,28 @@ export async function commitSignCorrections(
     workingImage = result.image;
   }
 
-  const input: SignCompositionOperatorInput = {
-    reconstruction: choices.reconstruction,
-    crop: choices.crop,
-    fitBackground: choices.fitBackground,
-    fitPlacement: choices.fitPlacement,
-    moves,
-    fills: choices.fills,
-    replacements,
-  };
-
-  await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
   const repo = getProjectRepository();
+
+  if (newClassificationRecords.length > 0) {
+    const existingRaw = Array.isArray(preparation.edgeIntentClassifications) ? preparation.edgeIntentClassifications : [];
+    await repo.updateSignPreparation(preparation.id, {
+      edgeIntentClassifications: [...existingRaw, ...newClassificationRecords.map(encodeEdgeIntentClassificationRecord)],
+    });
+  }
+
+  if (planChanged) {
+    const input: SignCompositionOperatorInput = {
+      reconstruction: choices.reconstruction,
+      crop: choices.crop,
+      fitBackground: choices.fitBackground,
+      fitPlacement: choices.fitPlacement,
+      moves,
+      fills: choices.fills,
+      replacements,
+    };
+    await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
+  }
+
   return loadSignPlanOperatorReview(repo, projectId);
 }
 

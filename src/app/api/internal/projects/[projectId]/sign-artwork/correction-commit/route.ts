@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { SignPreparationStateError } from "@/capabilities/sign-preparation";
+import { SignPreparationStateError, type SignEdge } from "@/capabilities/sign-preparation";
 import { getProjectRepository } from "@/lib/db";
 import { readAcquisitionSessionTokenFromRequest } from "@/lib/http/acquisition-session-cookie";
 import {
@@ -12,6 +12,11 @@ import {
 type RouteContext = {
   params: Promise<{ projectId: string }>;
 };
+
+const SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
+function isSignEdge(value: unknown): value is SignEdge {
+  return typeof value === "string" && (SIGN_EDGES as readonly string[]).includes(value);
+}
 
 function parseCorrections(body: unknown): PendingSignCorrection[] | null {
   if (!Array.isArray(body)) return null;
@@ -34,6 +39,17 @@ function parseCorrections(body: unknown): PendingSignCorrection[] | null {
         return null;
       }
       corrections.push({ kind: "move", sourceStartYPx, heightPx, destStartYPx });
+    } else if (raw.kind === "classify") {
+      const { classificationKind, edges, xPx, yPx, widthPx, heightPx } = raw;
+      if (
+        (classificationKind !== "edge_intent" && classificationKind !== "protected") ||
+        !Array.isArray(edges) || edges.length === 0 || !edges.every(isSignEdge) ||
+        typeof xPx !== "number" || typeof yPx !== "number" ||
+        typeof widthPx !== "number" || typeof heightPx !== "number"
+      ) {
+        return null;
+      }
+      corrections.push({ kind: "classify", classificationKind, edges: edges as SignEdge[], xPx, yPx, widthPx, heightPx });
     } else {
       return null;
     }
@@ -43,14 +59,16 @@ function parseCorrections(body: unknown): PendingSignCorrection[] | null {
 
 /**
  * Operator Production Correction UX: the GOVERNED counterpart to
- * `correction-preview` — appends the supplied corrections to the current
- * plan's own moves/replacements and rebuilds through the unchanged
- * `buildSignCompositionPlan`/`confirmSignCompositionPlan` (`commitSign
- * Corrections`'s own doc has the full contract), producing a new,
- * independently re-authorizable plan/planKey. Old authorization can never
- * authorize the resulting plan — the operator must re-authorize afterward,
- * exactly like any other composition-plan change. Same session gate as
- * every other internal sign-artwork route.
+ * `correction-preview` — appends `"remove"`/`"move"` corrections to the
+ * current plan's own moves/replacements and rebuilds through the unchanged
+ * `buildSignCompositionPlan`/`confirmSignCompositionPlan`, and persists
+ * `"classify"` corrections as new edge-intent classification records
+ * (`commitSignCorrections`'s own doc has the full contract), producing a
+ * new, independently re-authorizable plan/planKey whenever the plan
+ * itself changes. Old authorization can never authorize a changed plan —
+ * the operator must re-authorize afterward, exactly like any other
+ * composition-plan change. Same session gate as every other internal
+ * sign-artwork route.
  *
  * `POST` body: identical shape to `correction-preview`.
  */

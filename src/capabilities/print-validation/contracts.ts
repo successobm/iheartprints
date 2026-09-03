@@ -419,6 +419,17 @@ export const PRINT_VALIDATION_CHECK_CODES = [
    * — only non-bleed (protected or ambiguous) content found too close is.
    */
   "protected_content_safe_inset",
+  /**
+   * Edge-Intent Correction Phase (Section I): a non-blocking production
+   * ADVISORY — present whenever any edge carries governed
+   * EDGE_INTENT_ARTWORK. Always `status: "pass"`, `severity: "info"`;
+   * never contributes to overall status. "Intentional edge artwork is
+   * within the cutting tolerance area and may vary slightly after
+   * trimming" is informational, never a false guarantee of identical
+   * trim behaviour, and never confused with `protected_content_safe_inset`
+   * itself.
+   */
+  "edge_intent_advisory",
   /** A repair plan was actually persisted and recorded for this preparation — the plan the executed job claims to have replayed. */
   "repair_plan_recorded",
   /** The plan actually executed is provably the plan that was recorded: its canonical key recomputes identically and only S2-admitted, content-preserving steps were replayed. Also where the print-ready risk boundary is enforced — see this check's own reason text on a `review_required`/`blocked` plan. */
@@ -1055,27 +1066,33 @@ export interface RigidSignPlanEvidence {
 }
 
 /**
- * Signs Phase 3B (Fit to Production): this module's own narrow copy of
- * `sign-preparation/sign-fit-to-production.ts`'s `SignFitToProductionResult`
- * shape — never imported, mirroring every other cross-capability evidence
- * type in this file. `edge` values are plain strings, never `SignEdge`.
+ * Signs Phase 3B (Fit to Production) / Edge-Intent Correction Phase: this
+ * module's own narrow copy of `sign-preparation/sign-fit-to-production.ts`'s
+ * `SignFitToProductionResult` shape — never imported, mirroring every other
+ * cross-capability evidence type in this file. `edge` values are plain
+ * strings, never `SignEdge`.
  */
 export interface RigidSignFitToProductionEdgeEvidence {
   edge: "top" | "right" | "bottom" | "left";
-  requiredSafeInsetIn: number;
-  requiredSafeInsetPx: number;
-  nearestNonBleedPx: number | null;
-  nearestNonBleedIn: number | null;
-  result: "pass" | "fail" | "unknown";
+  requiredProtectedInsetIn: number;
+  requiredProtectedInsetPx: number;
+  nearestProtectedContentPx: number | null;
+  nearestProtectedContentIn: number | null;
+  protectedResult: "pass" | "fail" | "unknown";
   reason: string;
   /**
    * Operator Production Correction UX: mirrors `sign-preparation/sign-fit-
    * to-production.ts`'s own `violatingPositionPx` — the along-edge column
-   * (top/bottom) or row (left/right) index where `nearestNonBleedPx` was
-   * measured, so an operator UI can highlight the actionable region of a
-   * failing edge. `null` whenever `nearestNonBleedPx` is `null`.
+   * (top/bottom) or row (left/right) index where `nearestProtectedContentPx`
+   * was measured, so an operator UI can highlight the actionable region of
+   * a failing edge. `null` whenever `nearestProtectedContentPx` is `null`.
    */
   violatingPositionPx: number | null;
+  /** Edge-Intent Correction Phase: see `SignFitToProductionEdgeResult`'s own doc — mirrored fields, never re-derived. */
+  edgeIntentPresent: boolean;
+  edgeIntentNearestCutPx: number | null;
+  edgeIntentAdvisory: boolean;
+  unresolvedAmbiguousPresent: boolean;
 }
 
 export interface RigidSignFitToProductionEvidence {

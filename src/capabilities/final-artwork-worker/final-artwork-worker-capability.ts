@@ -139,6 +139,8 @@ import {
   adaptGeometryStepsToActualReconstruction,
   affectedEdgesForAxis,
   analyzeSignFitToProduction,
+  decodeEdgeIntentClassificationRecords,
+  resolveCurrentEdgeIntentClassifications,
   anyEdgeIsEdgeDependent,
   buildSignExecutionGeometryEvidence,
   computeSignPlanKey,
@@ -2788,11 +2790,25 @@ export function createFinalArtworkWorkerCapability(
       const finalBytesForFit = await assets.downloadAssetBytes(productionAsset.id);
       if (finalBytesForFit) {
         const decodedFinal = decodePngUpload(finalBytesForFit.bytes);
+        // Edge-Intent Correction Phase: resolve the preparation's OWN
+        // governed classifications, re-validated fresh against THIS exact
+        // candidate asset + plan key — never trusted merely for existing.
+        // A classification bound to a superseded candidate/plan is
+        // silently excluded here, exactly as if it had never been
+        // recorded (see `resolveCurrentEdgeIntentClassifications`'s own
+        // doc).
+        const classificationRecords = decodeEdgeIntentClassificationRecords(preparation.edgeIntentClassifications);
+        const classifications = resolveCurrentEdgeIntentClassifications(
+          classificationRecords,
+          productionAsset.id,
+          plan.planKey,
+        );
         const analysis = analyzeSignFitToProduction(
           decodedFinal.image,
           plan.orderedWidthIn,
           plan.orderedHeightIn,
           policy.minimumSafeInsetIn,
+          classifications,
         );
         fitToProduction = {
           safeInsetIn: analysis.safeInsetIn,
@@ -2801,13 +2817,17 @@ export function createFinalArtworkWorkerCapability(
           overallResult: analysis.overallResult,
           edges: analysis.edges.map((e) => ({
             edge: e.edge,
-            requiredSafeInsetIn: e.requiredSafeInsetIn,
-            requiredSafeInsetPx: e.requiredSafeInsetPx,
-            nearestNonBleedPx: e.nearestNonBleedPx,
-            nearestNonBleedIn: e.nearestNonBleedIn,
-            result: e.result,
+            requiredProtectedInsetIn: e.requiredProtectedInsetIn,
+            requiredProtectedInsetPx: e.requiredProtectedInsetPx,
+            nearestProtectedContentPx: e.nearestProtectedContentPx,
+            nearestProtectedContentIn: e.nearestProtectedContentIn,
+            protectedResult: e.protectedResult,
             reason: e.reason,
             violatingPositionPx: e.violatingPositionPx,
+            edgeIntentPresent: e.edgeIntentPresent,
+            edgeIntentNearestCutPx: e.edgeIntentNearestCutPx,
+            edgeIntentAdvisory: e.edgeIntentAdvisory,
+            unresolvedAmbiguousPresent: e.unresolvedAmbiguousPresent,
           })),
         };
       }
