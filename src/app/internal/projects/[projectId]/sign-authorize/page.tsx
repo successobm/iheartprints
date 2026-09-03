@@ -9,6 +9,7 @@ import { getProjectRepository } from "@/lib/db";
 import { SignAuthorizeButton } from "./SignAuthorizeButton";
 import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
 import { SignProductionAction } from "./SignProductionAction";
+import { SignStructuralLayoutForm } from "./SignStructuralLayoutForm";
 import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
 
 type PageProps = {
@@ -182,6 +183,22 @@ function SignPlanReview({
               ) : null}
             </div>
           ))}
+        </section>
+      ) : null}
+
+      {!isAuthorized ? (
+        <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
+          <h2 className="text-sm font-semibold text-ink">Structural regions</h2>
+          <p className="text-sm text-muted">
+            When automatic segmentation can&apos;t measure a banner structure, confirm it manually here — this is
+            optional and only changes what the planner considers as evidence; it authorizes nothing on its own.
+          </p>
+          <SignStructuralLayoutForm
+            projectId={projectId}
+            artworkWidthPx={plan.artworkWidthPx}
+            artworkHeightPx={plan.artworkHeightPx}
+            hasExistingOverride={review.operatorStructuralOverridePresent}
+          />
         </section>
       ) : null}
 

@@ -435,6 +435,10 @@ export type UpdateSignPreparationInput = Partial<{
   authorizedPlanKey: string | null;
   authorizedAt: string | null;
   authorizedBy: SignPlanAuthorizationActor | null;
+  /** Signs Phase 3A: see `SignPreparation.operatorStructuralOverride`'s own doc. */
+  operatorStructuralOverride: Record<string, unknown> | null;
+  operatorStructuralOverrideCreatedAt: string | null;
+  operatorStructuralOverrideCreatedBy: "operator" | null;
 }>;
 
 /**

@@ -29,7 +29,10 @@ import type {
   SignPostProviderResumeResult,
 } from "@/capabilities/final-artwork-worker";
 import { describeSignPlanForCustomer } from "@/capabilities/sign-preparation";
+import type { SignOperatorRegionBoundary } from "@/capabilities/sign-preparation/sign-operator-structural-override";
+import { loadSignPlanOperatorReview, type SignPlanOperatorReview } from "@/capabilities/sign-preparation/sign-plan-operator-review";
 import type { FinalArtworkJobStatus } from "@/lib/domain/types";
+import { getProjectRepository } from "@/lib/db";
 import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
 import { buildPrintReadyFilename } from "@/lib/services/print-ready-filename";
 import {
@@ -138,6 +141,26 @@ export async function planSignArtwork(projectId: string): Promise<ApiProjectSnap
       }),
     },
   };
+}
+
+/**
+ * Signs Phase 3A: records (or clears, with `regions: null`) an internal
+ * production operator's own confirmed structural regions, then IMMEDIATELY
+ * re-plans — the override alone changes nothing an operator would see
+ * until `planSignRepair` actually consumes it; a caller that forgot to
+ * re-plan would show the operator a plan that does not yet reflect what
+ * they just confirmed. Returns the refreshed `SignPlanOperatorReview`
+ * (never the customer-facing snapshot — this route is internal-only).
+ */
+export async function confirmOperatorStructuralLayoutForSign(
+  projectId: string,
+  regions: SignOperatorRegionBoundary[] | null,
+): Promise<SignPlanOperatorReview> {
+  const graph = getCapabilityGraph();
+  await graph.signPreparation.confirmOperatorStructuralLayout(projectId, regions);
+  await graph.signPreparation.planSignRepair(projectId);
+  const repo = getProjectRepository();
+  return loadSignPlanOperatorReview(repo, projectId);
 }
 
 /**

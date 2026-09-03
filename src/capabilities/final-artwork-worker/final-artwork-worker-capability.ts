@@ -872,6 +872,134 @@ export function createFinalArtworkWorkerCapability(
     );
   }
 
+  /**
+   * Signs Phase 3A: CROSS-PLAN intermediate reconstruction adoption.
+   *
+   * Every existing intermediate lookup (`resolveExistingIntermediateReconstruction`,
+   * immediately above) is scoped to `asset.finalArtworkJobId === job.id` —
+   * built purely as SAME-JOB worker-crash recovery, never cross-job reuse
+   * (confirmed by full-repo audit: no prior phase, doc, or comment anywhere
+   * discusses adopting a paid Topaz result across two different
+   * `SignRepairPlan`s/jobs). A new operator-confirmed `reflow_structural_
+   * layout` plan is a genuinely NEW `planKey`/job — without this function,
+   * it would have no way to see an already-paid-for reconstruction sitting
+   * on a PRIOR job for the exact same sign, and would submit a second paid
+   * Topaz request purely because the plan's shape changed, never because
+   * the source needed re-reconstructing.
+   *
+   * Adoption requires ALL of the following, independently re-verified here
+   * (never trusted from the candidate's own claims):
+   *
+   *   1. SAME PROJECT — the candidate's own `projectId` matches.
+   *   2. SAME ORIGINAL SOURCE — the candidate's OWNING job (`finalArtworkJobId`)
+   *      is itself a `"sign_preparation"` job bound to the SAME
+   *      `signPreparationId` as `job`. A rigid-sign preparation is a
+   *      SINGLETON per project with an IMMUTABLE `originalAssetId`
+   *      (`uploadSignArtwork` refuses a second upload for the same
+   *      project) — same `signPreparationId` is therefore structural,
+   *      unconditional proof of the same immutable original, exactly the
+   *      way `productionTreatmentKey`/`signPlanKey` binding is trusted
+   *      elsewhere in this same function.
+   *   3. SAME PROVIDER PROVENANCE — `candidate.metadata.providerKey` equals
+   *      the CURRENTLY CONFIGURED provider's own `providerKey`. A provider
+   *      swap must never adopt a result from a different, no-longer-active
+   *      provider.
+   *   4. VALID PRODUCTION INTERMEDIATE — carries the `pass1_intermediate`
+   *      marker with a recorded `providerRequestId` (never a malformed/
+   *      legacy row with the marker but no request id — the SAME defensive
+   *      bar `resolveExistingIntermediateReconstruction` already applies).
+   *   5. SUFFICIENT AND PROPORTIONAL for THIS request — reuses
+   *      `validateReconstructedGeometry` UNCHANGED (the SAME "sufficiency,
+   *      not exact sizing" contract Signs Phase 28R already established):
+   *      the candidate's actual dimensions must be at least
+   *      `requestedWidthPx`x`requestedHeightPx` AND proportional to the
+   *      CURRENT source's own aspect. A candidate reconstructed at a
+   *      DIFFERENT (even larger) scale than this plan happens to request is
+   *      still adoptable — `executeReflowStructuralLayout` (and every other
+   *      admitted geometry step) already re-derives its own placement from
+   *      whatever actual image it receives, never from the plan's own
+   *      predicted scale (see `adaptGeometryStepsToActualReconstruction`).
+   *   6. NO BLOCKING EVIDENCE AGAINST THE INTERMEDIATE ITSELF — its bytes
+   *      must actually be readable back from storage, and the readback's
+   *      own decoded dimensions must match its recorded `widthPx`/
+   *      `heightPx` metadata exactly (never trusted from the row alone).
+   *
+   * NEVER resets `providerRecoveryAttempts` (that counter belongs to
+   * `job`'s own outstanding-request slot, which this function never
+   * touches — adoption bypasses provider dispatch entirely, so there is no
+   * outstanding request to recover) and NEVER calls the provider. Multiple
+   * qualifying candidates (realistically rare) prefer the most recently
+   * created — the freshest known-good evidence, mirroring the "Rejected-
+   * Final Regeneration Phase" preference for a current sibling asset
+   * elsewhere in this same function.
+   */
+  async function resolveCrossPlanSignIntermediateReconstruction(
+    job: FinalArtworkJob,
+    activeProvider: FinalArtworkProvider,
+    sourceWidthPx: number,
+    sourceHeightPx: number,
+    requestedWidthPx: number,
+    requestedHeightPx: number,
+  ): Promise<{ asset: AssetRecord; providerRequestId: string; bytes: Buffer; widthPx: number; heightPx: number } | null> {
+    if (job.signPreparationId === null) return null;
+
+    const projectAssets = await withOperationTiming(
+      "resolveCrossPlanSignIntermediateReconstruction.listAssets",
+      () => repo.listAssets(job.projectId),
+    );
+    const candidates = projectAssets.filter(
+      (asset) =>
+        asset.projectId === job.projectId &&
+        asset.productionRole === "production_png" &&
+        isReconstructionIntermediateAsset(asset) &&
+        asset.finalArtworkJobId !== null &&
+        asset.finalArtworkJobId !== job.id && // cross-plan specifically — the SAME-job case is `resolveExistingIntermediateReconstruction`'s own job.
+        typeof (asset.metadata as Record<string, unknown> | null | undefined)?.providerRequestId === "string" &&
+        (asset.metadata as Record<string, unknown>).providerKey === activeProvider.providerKey &&
+        asset.widthPx !== null &&
+        asset.heightPx !== null,
+    );
+    if (candidates.length === 0) return null;
+
+    // Verify provenance and sufficiency, most-recently-created first.
+    const ordered = [...candidates].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    for (const candidate of ordered) {
+      const owningJob = await repo.getFinalArtworkJob(candidate.finalArtworkJobId!);
+      if (
+        !owningJob ||
+        owningJob.projectId !== job.projectId ||
+        owningJob.sourceKind !== "sign_preparation" ||
+        owningJob.signPreparationId !== job.signPreparationId
+      ) {
+        continue;
+      }
+
+      const geometryCheck = validateReconstructedGeometry({
+        sourceWidthPx,
+        sourceHeightPx,
+        targetWidthPx: requestedWidthPx,
+        targetHeightPx: requestedHeightPx,
+        actualWidthPx: candidate.widthPx!,
+        actualHeightPx: candidate.heightPx!,
+      });
+      if (!geometryCheck.valid) continue;
+
+      const bytesRead = await assets.downloadAssetBytes(candidate.id);
+      if (!bytesRead) continue;
+      let decoded: ReturnType<typeof decodePngUpload>;
+      try {
+        decoded = decodePngUpload(bytesRead.bytes);
+      } catch {
+        continue;
+      }
+      if (decoded.image.width !== candidate.widthPx || decoded.image.height !== candidate.heightPx) continue;
+
+      const providerRequestId = (candidate.metadata as Record<string, unknown>).providerRequestId as string;
+      return { asset: candidate, providerRequestId, bytes: bytesRead.bytes, widthPx: candidate.widthPx!, heightPx: candidate.heightPx! };
+    }
+    return null;
+  }
+
   function provenanceFromExistingAsset(
     asset: AssetRecord,
     sizing: PlacementSizingPolicy,
@@ -1581,6 +1709,23 @@ export function createFinalArtworkWorkerCapability(
       };
     }
 
+    // --- Signs Phase 3A: CROSS-PLAN adoption — checked only when no
+    // SAME-job intermediate exists (same-job self-heal above is always
+    // preferred; it is a stronger, narrower proof). Never touches
+    // `providerRecoveryAttempts`, never calls the provider — see
+    // `resolveCrossPlanSignIntermediateReconstruction`'s own doc for the
+    // full provenance bar this must independently clear.
+    const crossPlanIntermediate = existingIntermediate
+      ? null
+      : await resolveCrossPlanSignIntermediateReconstruction(
+          effectiveJob,
+          signProvider,
+          preImage.width,
+          preImage.height,
+          requestedWidthPx,
+          requestedHeightPx,
+        );
+
     let reconstructedBytes: Buffer;
     let reconstructedWidthPx: number;
     let reconstructedHeightPx: number;
@@ -1605,6 +1750,42 @@ export function createFinalArtworkWorkerCapability(
       reconstructedWidthPx = existingIntermediate.asset.widthPx;
       reconstructedHeightPx = existingIntermediate.asset.heightPx;
       providerRequestId = existingIntermediate.providerRequestId;
+    } else if (crossPlanIntermediate) {
+      // Already independently re-verified (provenance, sufficiency,
+      // proportionality, readback integrity) inside
+      // `resolveCrossPlanSignIntermediateReconstruction` — nothing further
+      // to check here. `providerRequestId` is recorded verbatim (audit
+      // provenance — it names a DIFFERENT job's own paid request; this job
+      // never submitted one of its own for this pass).
+      reconstructedBytes = crossPlanIntermediate.bytes;
+      reconstructedWidthPx = crossPlanIntermediate.widthPx;
+      reconstructedHeightPx = crossPlanIntermediate.heightPx;
+      providerRequestId = crossPlanIntermediate.providerRequestId;
+
+      // `SignPreservationCapability.resolvePreservationContext` resolves
+      // its own intermediate via a JOB-SCOPED query
+      // (`listAssetsForFinalArtworkJob(projectId, job.id)`) — a deliberate
+      // narrowing that predates cross-plan adoption and stays correct for
+      // it: rather than teach preservation verification a second,
+      // cross-job lookup, THIS job gets its own local intermediate asset
+      // row too, via the SAME idempotent `persistIntermediateReconstruction`
+      // every fresh dispatch already uses — no second paid request, no
+      // second Topaz submission, just a durable local copy of bytes this
+      // job has already independently verified are sufficient and
+      // provenance-matched. `providerRequestId` is preserved verbatim in
+      // its metadata (audit provenance — it still names the ORIGINAL
+      // paying job's own request, never fabricated as this job's own).
+      try {
+        await persistIntermediateReconstruction(job, signProvider, `sign-${job.id}`, {
+          bytes: reconstructedBytes,
+          widthPx: reconstructedWidthPx,
+          heightPx: reconstructedHeightPx,
+          providerRequestId,
+        });
+      } catch (error) {
+        await failJob(job, describeFinalArtworkError(error));
+        return { outcome: "handled" };
+      }
     } else {
       const existingProviderRequest: FinalArtworkProviderResumeContext | null =
         effectiveJob.providerKey === signProvider.providerKey && effectiveJob.providerRequestId

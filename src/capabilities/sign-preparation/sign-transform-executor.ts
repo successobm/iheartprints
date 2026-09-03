@@ -61,8 +61,16 @@ import { frameDepthAt, type SignFrameBand } from "./frame-structure-model";
  * must land at a DIFFERENT deterministic object key than the stale final
  * it supersedes (create-only storage semantics; the historical object is
  * never overwritten).
+ *
+ * `"sign-execution-v3"` (Signs Phase 3A): `reflow_structural_layout` is now
+ * admitted and executed for the first time — a genuinely new pixel-
+ * producing behavior (every prior version refuses it outright as
+ * `unsupported_step_kind`), so a v3 bump is required by this module's own
+ * discipline above. A final asset produced under v1/v2 never satisfies a
+ * v3-scoped consumer's identity check; nothing about v1/v2's own admitted
+ * step outputs changes.
  */
-export const SIGN_EXECUTION_IMPLEMENTATION_VERSION = "sign-execution-v2";
+export const SIGN_EXECUTION_IMPLEMENTATION_VERSION = "sign-execution-v3";
 
 export interface SignExecutionBounds {
   x: number;
@@ -94,6 +102,7 @@ const ADMITTED_STEP_KINDS = new Set<SignRepairStep["kind"]>([
   "pad_uniform_background",
   "reconstruct_perimeter_structure",
   "reconstruct_parametric_frame",
+  "reflow_structural_layout",
   "proportional_resample",
   "downsample",
   "rotate_90",
@@ -157,7 +166,15 @@ export function planRequiresSemanticPreservationVerification(plan: SignRepairPla
     (step) =>
       step.kind === "reconstruct_resolution" ||
       step.kind === "reconstruct_perimeter_structure" ||
-      step.kind === "reconstruct_parametric_frame",
+      step.kind === "reconstruct_parametric_frame" ||
+      // Signs Phase 3A: reflow moves and redistributes real pixels (region
+      // translation, gap fill extension) — the identical "pixels moved, a
+      // human/semantic check must confirm the composition still means the
+      // same thing" reasoning every other entry here already answers "yes"
+      // to, even though — unlike the other three — it never touches a
+      // provider and its own deterministic checks are exact-match (never
+      // advisory-only), never merely a proxy for "provider touched this."
+      step.kind === "reflow_structural_layout",
   );
 }
 
@@ -371,7 +388,15 @@ export function adaptGeometryStepsToActualReconstruction(
     (step) =>
       step.kind === "extend_uniform_background" ||
       step.kind === "pad_uniform_background" ||
-      step.kind === "reconstruct_parametric_frame",
+      step.kind === "reconstruct_parametric_frame" ||
+      // Signs Phase 3A: recognized here so a divergent actual-vs-requested
+      // reconstruction is never mistaken for "no geometry step to adapt"
+      // (the branch below, which refuses outright) — but never rewritten
+      // like the others: `executeReflowStructuralLayout` re-derives every
+      // pixel amount itself, directly from whatever image it actually
+      // receives, using the step's own `sourceWidthPx`/`sourceHeightPx` —
+      // see the early return just below.
+      step.kind === "reflow_structural_layout",
   );
 
   if (geometryStepIndex === -1) {
@@ -421,6 +446,22 @@ export function adaptGeometryStepsToActualReconstruction(
         `(${actualReconstructedWidthPx}x${actualReconstructedHeightPx}px) requires ` +
         `${geometry.needsExtension ? `axis "${geometry.axis}"` : "no extension at all"} — refusing rather than ` +
         "silently reinterpreting the approved plan.",
+    };
+  }
+
+  if (geometryStep.kind === "reflow_structural_layout") {
+    // Self-adapting by construction — `executeReflowStructuralLayout`
+    // computes its own scale factor from the ACTUAL image it receives vs
+    // its own recorded `sourceHeightPx`, and its own total-added-height
+    // from the ACTUAL image vs the ordered template, exactly the same
+    // `deriveUniformBackgroundExtension` re-derivation this function just
+    // performed above. Nothing in the step's own params needs rewriting;
+    // only the expected output dimensions this caller needs are returned.
+    return {
+      status: "adapted",
+      steps: afterSteps,
+      expectedOutputWidthPx: geometry.plateWidthPx,
+      expectedOutputHeightPx: geometry.plateHeightPx,
     };
   }
 
@@ -570,6 +611,8 @@ function executeStep(
       return executeReconstructPerimeter(image, bounds, step);
     case "reconstruct_parametric_frame":
       return executeReconstructParametricFrame(image, bounds, step);
+    case "reflow_structural_layout":
+      return executeReflowStructuralLayout(image, step);
     default:
       return {
         status: "refused",
@@ -1142,6 +1185,274 @@ function fillRow(data: Buffer, width: number, y: number, color: SignPerimeterBan
     data[i + 2] = color.b;
     data[i + 3] = 255;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Signs Phase 3A: `reflow_structural_layout` — the first executable version.
+// ---------------------------------------------------------------------------
+
+interface DecodedReflowRegion {
+  role: "top_anchor" | "middle" | "bottom_anchor";
+  sourceStartYPx: number;
+  sourceHeightPx: number;
+  fillEdgeReaching: boolean;
+  fillColor: SignPerimeterBandRow | null;
+}
+
+interface DecodedReflowGap {
+  sourceHeightPx: number;
+  fillColor: SignPerimeterBandRow;
+}
+
+interface DecodedStructuralReflow {
+  sourceWidthPx: number;
+  sourceHeightPx: number;
+  templateWidthIn: number;
+  templateHeightIn: number;
+  templateShape: string;
+  regions: DecodedReflowRegion[];
+  gaps: DecodedReflowGap[];
+}
+
+/**
+ * The exact inverse of `sign-repair-planner.ts`'s own
+ * `encodeStructuralReflowParams` — `null` on any missing/malformed field, a
+ * region/gap count mismatch, or a `regionCount`/`gapCount` relationship
+ * other than `gapCount === regionCount - 1` (the same invariant
+ * `SignStructuralLayoutSegmentationResult`'s own `"measured"` variant
+ * documents). Never round-tripped through a shared type — planning and
+ * execution stay separate, the same discipline every other step kind
+ * already follows. `contentStartYPx`/`contentHeightPx`/`expandable` are
+ * NOT decoded here: this executor places and fills by REGION (source)
+ * bounds only, never by the narrower content bounds — see this section's
+ * own module doc for why translation-only placement never needs them.
+ */
+function decodeStructuralReflowParams(params: Record<string, number | string>): DecodedStructuralReflow | null {
+  const sourceWidthPx = requirePositiveInt(params.sourceWidthPx);
+  const sourceHeightPx = requirePositiveInt(params.sourceHeightPx);
+  const templateWidthIn = typeof params.templateWidthIn === "number" ? params.templateWidthIn : null;
+  const templateHeightIn = typeof params.templateHeightIn === "number" ? params.templateHeightIn : null;
+  const templateShape = typeof params.templateShape === "string" ? params.templateShape : null;
+  const scalingMode = params.scalingMode;
+  const regionCount = requirePositiveInt(params.regionCount);
+  const gapCount = requirePositiveIntOrZero(params.gapCount);
+  if (
+    sourceWidthPx === null ||
+    sourceHeightPx === null ||
+    templateWidthIn === null ||
+    templateHeightIn === null ||
+    templateShape === null ||
+    scalingMode !== "none" ||
+    regionCount === null ||
+    gapCount === null ||
+    gapCount !== regionCount - 1
+  ) {
+    return null;
+  }
+
+  const regions: DecodedReflowRegion[] = [];
+  for (let i = 0; i < regionCount; i++) {
+    const role = params[`region${i}Role`];
+    if (role !== "top_anchor" && role !== "middle" && role !== "bottom_anchor") return null;
+    const sourceStartYPx = requirePositiveIntOrZero(params[`region${i}SourceStartYPx`]);
+    const regionSourceHeightPx = requirePositiveInt(params[`region${i}SourceHeightPx`]);
+    const fillEdgeReachingRaw = params[`region${i}FillEdgeReaching`];
+    if (fillEdgeReachingRaw !== "true" && fillEdgeReachingRaw !== "false") return null;
+    const fillEdgeReaching = fillEdgeReachingRaw === "true";
+    if (sourceStartYPx === null || regionSourceHeightPx === null) return null;
+
+    let fillColor: SignPerimeterBandRow | null = null;
+    if (fillEdgeReaching) {
+      const r = requireByteChannel(params[`region${i}FillColorR`]);
+      const g = requireByteChannel(params[`region${i}FillColorG`]);
+      const b = requireByteChannel(params[`region${i}FillColorB`]);
+      if (r === null || g === null || b === null) return null;
+      fillColor = { r, g, b };
+    }
+    regions.push({ role, sourceStartYPx, sourceHeightPx: regionSourceHeightPx, fillEdgeReaching, fillColor });
+  }
+
+  const gaps: DecodedReflowGap[] = [];
+  for (let i = 0; i < gapCount; i++) {
+    const gapSourceHeightPx = requirePositiveInt(params[`gap${i}SourceHeightPx`]);
+    const r = requireByteChannel(params[`gap${i}FillColorR`]);
+    const g = requireByteChannel(params[`gap${i}FillColorG`]);
+    const b = requireByteChannel(params[`gap${i}FillColorB`]);
+    if (gapSourceHeightPx === null || r === null || g === null || b === null) return null;
+    gaps.push({ sourceHeightPx: gapSourceHeightPx, fillColor: { r, g, b } });
+  }
+
+  return { sourceWidthPx, sourceHeightPx, templateWidthIn, templateHeightIn, templateShape, regions, gaps };
+}
+
+type ReflowSequenceItem =
+  | { kind: "region"; region: DecodedReflowRegion }
+  | { kind: "gap"; gap: DecodedReflowGap };
+
+/**
+ * Executes an authorized, planner-proposed `reflow_structural_layout` step
+ * — the FIRST version of this step this codebase ever executes (Signs
+ * Phase 3A; every prior phase only ever planned it). Deliberately never
+ * receives `bounds`: like `reconstruct_parametric_frame`, this step's own
+ * placement is derived entirely from the CURRENT image and the plan's own
+ * measured evidence, never from an incoming padding-tracking rectangle a
+ * simpler step (extend/pad) would have produced — and reflow is never
+ * combined with those steps in the same plan (the planner's own
+ * `reflow_structural_layout` branch is exclusive of them for its axis).
+ *
+ * ALGORITHM (translation + gap redistribution only — see the step kind's
+ * own contract doc in `contracts.ts` for why this is never a redraw or a
+ * resample of meaningful content):
+ *
+ *   1. Decode the plan's measured regions/gaps, in SOURCE-image-absolute
+ *      pixel coordinates relative to the plan's own recorded
+ *      `sourceWidthPx`/`sourceHeightPx`.
+ *   2. Compute `scaleY = image.height / sourceHeightPx` — 1 when `image`
+ *      is still the untouched original, or the ACTUAL proportional
+ *      reconstruction scale a preceding `reconstruct_resolution` step
+ *      produced (never the plan's own PREDICTED scale — this executor
+ *      only ever trusts the image it was actually handed). Every region/
+ *      gap boundary is scaled via CUMULATIVE rounding (never independently
+ *      per-item) so the scaled sequence tiles `image`'s own height exactly,
+ *      with no rounding-drift gap or overlap.
+ *   3. Re-derive the OUTPUT canvas size from the CURRENT image's own actual
+ *      dimensions vs the ordered template (`deriveUniformBackgroundExtension`
+ *      — the SAME re-derivation `adaptGeometryStepsToActualReconstruction`
+ *      already applies for every other geometry step), never from the
+ *      plan's own predicted pad amount.
+ *   4. Redistribute the ACTUAL added height across gaps ONLY, weighted by
+ *      each gap's PLAN-TIME height as a RATIO of the total original gap
+ *      height (a stable proportion, immune to whatever the actual
+ *      reconstruction scale turned out to be) — mirroring
+ *      `reconstruct_parametric_frame`'s own `leadingShare`-ratio
+ *      precedent. A largest-remainder correction on the LAST gap keeps the
+ *      sum exactly equal to the added height.
+ *   5. Place: every REGION is copied byte-for-byte (a row-range `Buffer
+ *      .copy`, never resampled) from its scaled source position to its new
+ *      output position — translation only, meaningful content is never
+ *      independently stretched. Every GAP is filled flat with its own
+ *      independently measured colour, at its NEW (larger) height.
+ */
+function executeReflowStructuralLayout(image: RgbaImage, step: SignRepairStep): SignExecutionResult {
+  const decoded = decodeStructuralReflowParams(step.params);
+  if (!decoded) {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail: `Step "${step.kind}" has missing or malformed structural reflow parameters.`,
+    };
+  }
+  if (decoded.templateShape !== "straight_rectangle") {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail: 'Structural reflow requires a "straight_rectangle" production template — never a redraw of source perimeter geometry as substrate shape.',
+    };
+  }
+  if (decoded.regions.length === 0 || decoded.gaps.length !== decoded.regions.length - 1) {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail: "Structural reflow requires at least one region and exactly one gap fewer than regions.",
+    };
+  }
+
+  const scaleY = image.height / decoded.sourceHeightPx;
+
+  const sequence: ReflowSequenceItem[] = [];
+  for (let i = 0; i < decoded.regions.length; i++) {
+    sequence.push({ kind: "region", region: decoded.regions[i]! });
+    if (i < decoded.gaps.length) sequence.push({ kind: "gap", gap: decoded.gaps[i]! });
+  }
+
+  let cumulativeOriginal = 0;
+  const scaledBoundaries: number[] = [0];
+  for (const item of sequence) {
+    cumulativeOriginal += item.kind === "region" ? item.region.sourceHeightPx : item.gap.sourceHeightPx;
+    scaledBoundaries.push(Math.round(cumulativeOriginal * scaleY));
+  }
+  // The final boundary is authoritative as `image`'s own actual height —
+  // never a rounded approximation of it, since every source row below it
+  // is read relative to this exact value.
+  scaledBoundaries[scaledBoundaries.length - 1] = image.height;
+
+  const geometry = deriveUniformBackgroundExtension(image.width, image.height, decoded.templateWidthIn, decoded.templateHeightIn);
+  if (!geometry.needsExtension || geometry.axis !== "vertical") {
+    return {
+      status: "refused",
+      reason: "output_geometry_mismatch",
+      detail:
+        `The current image (${image.width}x${image.height}px) does not require vertical structural reflow against the ` +
+        `${decoded.templateWidthIn}x${decoded.templateHeightIn}in template.`,
+    };
+  }
+  const outputWidthPx = geometry.plateWidthPx;
+  const outputHeightPx = geometry.plateHeightPx;
+  const totalAddedPx = geometry.leadingPx + geometry.trailingPx;
+
+  const totalOriginalGapHeight = decoded.gaps.reduce((sum, g) => sum + g.sourceHeightPx, 0);
+  if (totalOriginalGapHeight <= 0) {
+    return {
+      status: "refused",
+      reason: "output_geometry_mismatch",
+      detail: "No measured gap height exists to redistribute the added space into.",
+    };
+  }
+  const gapExtraPx = decoded.gaps.map((g) => Math.round((g.sourceHeightPx / totalOriginalGapHeight) * totalAddedPx));
+  const assignedExtra = gapExtraPx.slice(0, -1).reduce((a, b) => a + b, 0);
+  gapExtraPx[gapExtraPx.length - 1] = totalAddedPx - assignedExtra;
+  if (gapExtraPx.some((extra) => extra < 0)) {
+    return {
+      status: "refused",
+      reason: "output_geometry_mismatch",
+      detail: "Structural reflow would require shrinking a gap below its own measured height — refusing rather than losing background pixels.",
+    };
+  }
+
+  const data = Buffer.alloc(outputWidthPx * outputHeightPx * 4);
+  let destY = 0;
+  let gapIndex = 0;
+  for (let i = 0; i < sequence.length; i++) {
+    const item = sequence[i]!;
+    const scaledStart = scaledBoundaries[i]!;
+    const scaledEnd = scaledBoundaries[i + 1]!;
+    const scaledHeight = scaledEnd - scaledStart;
+    if (item.kind === "region") {
+      for (let y = 0; y < scaledHeight; y++) {
+        const srcRowStart = (scaledStart + y) * image.width * 4;
+        const destRowStart = (destY + y) * outputWidthPx * 4;
+        image.data.copy(data, destRowStart, srcRowStart, srcRowStart + image.width * 4);
+      }
+      destY += scaledHeight;
+    } else {
+      const newGapHeight = scaledHeight + gapExtraPx[gapIndex]!;
+      for (let y = 0; y < newGapHeight; y++) {
+        fillRow(data, outputWidthPx, destY + y, item.gap.fillColor);
+      }
+      destY += newGapHeight;
+      gapIndex++;
+    }
+  }
+
+  if (destY !== outputHeightPx) {
+    return {
+      status: "refused",
+      reason: "output_geometry_mismatch",
+      detail: `Structural reflow placement produced ${destY}px of height, expected exactly ${outputHeightPx}px.`,
+    };
+  }
+
+  return {
+    status: "executed",
+    image: { width: outputWidthPx, height: outputHeightPx, data },
+    // The whole reflowed canvas is authoritative composition — unlike a
+    // simple pad/extend (which adds one clearly-synthetic band this field
+    // exists to distinguish from real content), every pixel here is either
+    // translated original content or a gap fill that already existed in
+    // the source, merely resized. There is no single contiguous "this part
+    // is fake" region to carve out — see this function's own module doc.
+    contentBounds: { x: 0, y: 0, width: outputWidthPx, height: outputHeightPx },
+  };
 }
 
 function fillColumn(data: Buffer, width: number, height: number, x: number, color: SignPerimeterBandRow): void {

@@ -150,6 +150,8 @@ export type SignPlanOperatorReview =
       orderedHeightIn: number;
       originalAssetId: string;
       plan: SignPlanOperatorView;
+      /** Signs Phase 3A: whether operator-confirmed structural evidence is currently recorded for this preparation (regardless of whether the CURRENT plan happened to use it). */
+      operatorStructuralOverridePresent: boolean;
       authorization: {
         authorizedBy: SignPlanAuthorizationActor | null;
         authorizedAt: string | null;
@@ -199,6 +201,7 @@ export async function loadSignPlanOperatorReview(
     orderedHeightIn,
     originalAssetId: preparation.originalAssetId,
     plan: operatorPlan,
+    operatorStructuralOverridePresent: preparation.operatorStructuralOverride !== null,
     authorization: {
       authorizedBy: preparation.authorizedBy,
       authorizedAt: preparation.authorizedAt,

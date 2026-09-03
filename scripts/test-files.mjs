@@ -331,6 +331,11 @@ export const TEST_FILES = [
   // the deterministic bounded transition-run model — synthetic matrix (A-K,
   // plus the N/N+1 run-length boundary) and framed/windowed compatibility.
   "src/capabilities/sign-preparation/sign-layout-segmentation-transition-runs.test.ts",
+  // Signs Phase 3A: operator-confirmed structural evidence — real
+  // orchestration-path proof (deterministic-fails -> operator unlocks
+  // reflow, staleness refused, planKey changes with the boundaries,
+  // unprovable boundaries refused before persistence).
+  "src/capabilities/sign-preparation/sign-operator-structural-override.test.ts",
   // Structural Layout Reflow Phase 2 (Planner Wiring): reflow_structural_
   // layout is now planner-emitted, but ONLY when a caller opts in by
   // supplying structuralLayoutSegmentation — still not executor-admitted.
@@ -338,6 +343,20 @@ export const TEST_FILES = [
   // Signs Phase S2 (Constitution §16A): deterministic repair execution +
   // authoritative rigid_sign_raster validation. Zero provider dispatch.
   "src/capabilities/sign-preparation/sign-transform-executor.test.ts",
+  // Signs Phase 3A: reflow_structural_layout execution — the first version
+  // of this step this codebase ever executes. Translation + gap
+  // redistribution, actual-vs-planned reconstruction scale reconciliation.
+  "src/capabilities/sign-preparation/sign-transform-executor-reflow.test.ts",
+  // Signs Phase 3A: cross-plan Topaz intermediate reconstruction adoption —
+  // a re-plan for the SAME sign preparation reuses a sufficient, already-
+  // paid-for intermediate from a PRIOR job rather than dispatching a
+  // second paid request; correctly refuses when insufficient.
+  "src/capabilities/final-artwork-worker/sign-cross-plan-intermediate-adoption.test.ts",
+  // Signs Phase 3A: end-to-end reflow_structural_layout execution through
+  // the real worker — source -> reconstruction -> deterministic
+  // segmentation -> planner -> authorize -> execute -> preservation ->
+  // PrintValidation, proving the full chain never crashes.
+  "src/capabilities/final-artwork-worker/sign-reflow-execution.test.ts",
   "src/capabilities/sign-preparation/sign-geometry.test.ts",
   "src/capabilities/sign-preparation/sign-provider-alpha-normalization.test.ts",
   "src/capabilities/sign-preservation/sign-preservation-deterministic-checks.test.ts",

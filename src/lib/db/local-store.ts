@@ -2379,6 +2379,9 @@ export class LocalProjectRepository implements ProjectRepository {
       authorizedPlanKey: null,
       authorizedAt: null,
       authorizedBy: null,
+      operatorStructuralOverride: null,
+      operatorStructuralOverrideCreatedAt: null,
+      operatorStructuralOverrideCreatedBy: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };

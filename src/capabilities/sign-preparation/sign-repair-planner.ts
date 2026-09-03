@@ -280,10 +280,22 @@ function encodeStructuralReflowParams(
   regions: SignStructuralRegion[],
   gaps: SignStructuralGap[],
   analysisWindow: SignStructuralAnalysisWindow | null,
+  sourceWidthPx: number,
+  sourceHeightPx: number,
 ): Record<string, number | string> {
   const params: Record<string, number | string> = {
     axis,
     totalAddedPx,
+    // Signs Phase 3A: the TRUE, unrotated original source pixel dimensions
+    // every region/gap Y-coordinate is relative to — identical to this
+    // plan's own top-level `sourceWidthPx`/`sourceHeightPx`, but encoded
+    // redundantly INTO the step's own params so the executor (which only
+    // ever receives one `SignRepairStep`, never the whole plan) can derive
+    // the actual-vs-planned reconstruction scale factor on its own,
+    // exactly like `reconstruct_parametric_frame`'s own `leadingShare`
+    // makes that step self-sufficient for execution-time adaptation.
+    sourceWidthPx,
+    sourceHeightPx,
     templateWidthIn: template.widthIn,
     templateHeightIn: template.heightIn,
     templateShape: template.shape,
@@ -702,6 +714,8 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
             reflowEvaluation.regions,
             reflowEvaluation.gaps,
             reflowEvaluation.analysisWindow,
+            inspection.source.widthPx,
+            inspection.source.heightPx,
           ),
           risk: "review_required",
           reasons: [

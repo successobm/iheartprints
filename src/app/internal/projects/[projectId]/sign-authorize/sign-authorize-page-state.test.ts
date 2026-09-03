@@ -70,6 +70,7 @@ describe("LIVE PRODUCT BLOCKER #4A — sign-authorize operator page state", () =
       orderedWidthIn: 18,
       orderedHeightIn: 24,
       originalAssetId: "asset-1",
+      operatorStructuralOverridePresent: false,
       plan: {
         riskLabel: "Needs production review",
         canAuthorize: true,

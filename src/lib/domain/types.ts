@@ -2607,6 +2607,32 @@ export interface SignPreparation {
   authorizedAt: string | null;
   /** WHO authorized it — see `SignPlanAuthorizationActor`. `null` means never authorized. */
   authorizedBy: SignPlanAuthorizationActor | null;
+  /**
+   * Signs Phase 3A: operator-confirmed structural evidence — the internal
+   * production operator's own confirmed top/bottom/middle horizontal
+   * bands, for a source image whose deterministic `sign-layout-
+   * segmentation.ts` scan cannot safely measure a banner structure (an
+   * `"ambiguous"` or `"not_present"` result). Loosely typed, narrowed to
+   * `SignOperatorStructuralLayoutOverride` at the `SignPreparationCapability`
+   * boundary that writes and reads it — exactly like `plan`/`inspection`.
+   * `null` means no override has ever been recorded.
+   *
+   * NEVER trusted as-is: every read re-validates the embedded
+   * `sourceAssetId`/`sourceSha256`/`sourceWidthPx`/`sourceHeightPx` against
+   * the preparation's CURRENT `originalAssetId` and a fresh decode/hash of
+   * the actual source bytes before it is ever used for planning — the same
+   * "never trust a caller-supplied window blindly" discipline
+   * `resolveFrameAnalysisWindow`/`validateAnalysisWindow` already
+   * established. It changes only PLANNING evidence; it authorizes nothing
+   * on its own — the resulting plan still requires its own explicit
+   * `authorizedBy: "operator"` authorization, bound to the exact
+   * resulting `planKey`, before anything may execute.
+   */
+  operatorStructuralOverride: Record<string, unknown> | null;
+  /** When the override was recorded. `null` means never. */
+  operatorStructuralOverrideCreatedAt: string | null;
+  /** WHO recorded it — always `"operator"` (this evidence is never customer-authored). `null` means never recorded. */
+  operatorStructuralOverrideCreatedBy: "operator" | null;
   createdAt: string;
   updatedAt: string;
 }

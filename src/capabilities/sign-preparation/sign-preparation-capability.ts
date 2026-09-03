@@ -52,6 +52,11 @@ import { planSignRepair } from "./sign-repair-planner";
 import { measurePerimeterBand } from "./perimeter-reconstruction";
 import { measureCleanFillRunPx, measureFrameStructuralModel } from "./frame-structure-model";
 import { resolveFrameAnalysisWindow, segmentStructuralLayout } from "./sign-layout-segmentation";
+import {
+  resolveOperatorStructuralOverride,
+  synthesizeSegmentationFromOperatorOverride,
+  type SignOperatorRegionBoundary,
+} from "./sign-operator-structural-override";
 import type { SignEdge } from "./contracts";
 
 const ALL_SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
@@ -123,6 +128,21 @@ export interface SignPreparationCapability {
   authorizeSignRepairPlan(
     designId: string,
     input: { authorizedBy: SignPlanAuthorizationActor },
+  ): Promise<SignPreparation>;
+  /**
+   * Signs Phase 3A: records (or clears, with `regions: null`) an internal
+   * production operator's own confirmed structural regions for the CURRENT
+   * source image — see `sign-operator-structural-override.ts`'s own doc.
+   * Independently re-validates the supplied boundaries against the actual
+   * current source pixels BEFORE persisting anything (never stores an
+   * override this module cannot itself already prove holds up) — throws
+   * `SignPreparationStateError` with the specific reason otherwise. Never
+   * plans, never authorizes anything on its own; a subsequent
+   * `planSignRepair` call is what actually consumes this evidence.
+   */
+  confirmOperatorStructuralLayout(
+    designId: string,
+    regions: SignOperatorRegionBoundary[] | null,
   ): Promise<SignPreparation>;
 }
 
@@ -356,7 +376,34 @@ export function createSignPreparationCapability(
         decoded.image.width,
         decoded.image.height,
       );
-      const structuralLayoutSegmentation = segmentStructuralLayout(decoded.image, structuralAnalysisWindow ?? undefined);
+      const deterministicSegmentation = segmentStructuralLayout(decoded.image, structuralAnalysisWindow ?? undefined);
+      // Signs Phase 3A: OPERATOR-CONFIRMED STRUCTURAL EVIDENCE — the
+      // precedence is deliberately narrow and one-directional. Deterministic
+      // segmentation, when it safely measures a banner structure, is ALWAYS
+      // preferred and this override is never even consulted. Only when
+      // deterministic evidence is `"ambiguous"` or `"not_present"` does a
+      // valid, source-bound operator override (see `resolveOperatorStructural
+      // Override`'s own doc — independently re-validated against the CURRENT
+      // source and re-measured against the actual pixels, never trusted as
+      // typed) become the evidence `evaluateStructuralReflow` judges instead.
+      // An operator override never silently supersedes ALREADY-VALID
+      // deterministic evidence, and a stale/invalid override never blocks
+      // anything beyond where the deterministic result would have blocked on
+      // its own — this call site only ever SUPPLIES evidence, exactly like
+      // `perimeterBands`/`frameStructuralModel` before it; `planSignRepair`'s
+      // own `evaluateStructuralReflow` remains the sole judge of eligibility.
+      let structuralLayoutSegmentation = deterministicSegmentation;
+      if (deterministicSegmentation.status !== "measured" && preparation.operatorStructuralOverride) {
+        const operatorResolution = resolveOperatorStructuralOverride(
+          decoded.image,
+          preparation.operatorStructuralOverride,
+          preparation.originalAssetId,
+          sha256,
+        );
+        if (operatorResolution.status === "usable") {
+          structuralLayoutSegmentation = operatorResolution.segmentation;
+        }
+      }
 
       const result = planSignRepair({
         spec: specResolution.spec,
@@ -431,6 +478,59 @@ export function createSignPreparationCapability(
         authorizedPlanKey: recomputedKey,
         authorizedAt: new Date().toISOString(),
         authorizedBy: input.authorizedBy,
+      });
+    },
+
+    async confirmOperatorStructuralLayout(designId, regions) {
+      const preparation = await loadOwned(designId);
+
+      if (regions === null) {
+        return repo.updateSignPreparation(preparation.id, {
+          operatorStructuralOverride: null,
+          operatorStructuralOverrideCreatedAt: null,
+          operatorStructuralOverrideCreatedBy: null,
+        });
+      }
+
+      const { decoded, sha256 } = await decodeOriginal(preparation);
+      const override = {
+        sourceAssetId: preparation.originalAssetId,
+        sourceSha256: sha256,
+        sourceWidthPx: decoded.image.width,
+        sourceHeightPx: decoded.image.height,
+        // Signs Phase 3A: the operator confirms boundaries against
+        // whatever analysis window `planSignRepair` would ITSELF derive
+        // from the current frame evidence at the SAME time (never a
+        // second, independent frame measurement, and never a window the
+        // operator invents) — recomputed fresh here so the persisted
+        // override is self-contained and re-validatable without ever
+        // reaching back into frame measurement again.
+        analysisWindow: resolveFrameAnalysisWindow(
+          measureFrameStructuralModel(decoded.image),
+          decoded.image.width,
+          decoded.image.height,
+        ),
+        regions,
+      };
+
+      const resolution = synthesizeSegmentationFromOperatorOverride(
+        decoded.image,
+        override,
+        preparation.originalAssetId,
+        sha256,
+      );
+      if (resolution.status !== "usable") {
+        throw new SignPreparationStateError(
+          resolution.status === "unusable"
+            ? resolution.reason
+            : "No confirmed regions were supplied.",
+        );
+      }
+
+      return repo.updateSignPreparation(preparation.id, {
+        operatorStructuralOverride: override as unknown as Record<string, unknown>,
+        operatorStructuralOverrideCreatedAt: new Date().toISOString(),
+        operatorStructuralOverrideCreatedBy: "operator",
       });
     },
   };
