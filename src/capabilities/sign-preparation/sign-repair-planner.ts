@@ -374,6 +374,22 @@ function evaluateStructuralReflow(
   policy: SignResolutionPolicy,
   effectivePpi: number,
   segmentation: SignStructuralLayoutSegmentationResult,
+  /**
+   * Structural Layout Reflow Phase 3A: the TRUE, unrotated original source
+   * height — needed ONLY for the safe-inset check below, to account for a
+   * Phase 2C analysis window's own leading/trailing margin (the SOURCE
+   * rows outside the windowed segmentation domain) as REAL, already-
+   * proven physical buffer. See that check's own doc for why this is
+   * sound: the only code path that ever produces a non-null
+   * `analysisWindow` is `resolveFrameAnalysisWindow`, which derives one
+   * exclusively from a MEASURED decorative frame band depth — so a
+   * window's own offset from the true source edge is never an assumption,
+   * always proven frame structure — and the executor
+   * (`executeReflowStructuralLayout`) preserves those SOURCE rows
+   * verbatim (Phase 3A's own leading/trailing band mechanism), so this
+   * buffer genuinely survives into the finished output.
+   */
+  sourceHeightPx: number,
 ): StructuralReflowEvaluation {
   if (segmentation.status === "not_present") return { status: "not_applicable" };
   if (segmentation.status === "ambiguous") return { status: "ambiguous", reason: segmentation.reason };
@@ -399,25 +415,45 @@ function evaluateStructuralReflow(
 
   const topRegion = regions[0];
   const bottomRegion = regions[regions.length - 1];
-  // A genuine banner's own defining trait is a MEASURED FILL an anchor's
-  // content sits inside of — never merely "content happens to be the
-  // first/last run." When NEITHER anchor has one, content touches BOTH
-  // outer edges directly with nothing but plain background between them
-  // (real orchestration wiring's own acceptance shape: noise/foreground
-  // reaching both edges, uniform interior) — the structural INVERSE of a
-  // banner, not partial evidence of one. That shape already has a
-  // dedicated, correct handler (`edge-dependence.ts`/`isEdgeDependentStructure`
-  // plus the perimeter-band reconstructability check below) — treated as
-  // `"not_applicable"` so it falls through to that, unaffected, rather
-  // than this evidence intercepting and blocking it. (At least one
-  // anchor's own fill — `bannerSignEdgeContentArtwork`'s own shape, e.g.
-  // — is genuine partial banner evidence and still fails closed below.)
-  if (!topRegion?.fillEdgeReaching && !bottomRegion?.fillEdgeReaching) {
-    return { status: "not_applicable" };
-  }
-
   const template = buildSignProductionTemplate(spec, policy);
   const gaps = segmentation.gaps;
+
+  // Structural Layout Reflow Phase 3A: a Phase 2C analysis window's own
+  // leading/trailing margin is real, already-PROVEN physical buffer — see
+  // this function's own `sourceHeightPx` parameter doc. Computed here,
+  // ahead of BOTH the "genuine banner evidence at all" gate immediately
+  // below and the per-anchor fill-evidence gate further down, since a
+  // MEASURED decorative frame border can independently substitute for an
+  // anchor's own missing internal fill margin in both places. Zero for an
+  // unwindowed (full-image) scan, reproducing the exact prior behaviour
+  // there.
+  const windowLeadingPx = segmentation.analysisWindow?.y ?? 0;
+  const windowTrailingPx = segmentation.analysisWindow
+    ? sourceHeightPx - (segmentation.analysisWindow.y + segmentation.analysisWindow.height)
+    : 0;
+  const topWindowBufferProvesSafety = windowLeadingPx / effectivePpi >= template.minimumSafeInsetIn;
+  const bottomWindowBufferProvesSafety = windowTrailingPx / effectivePpi >= template.minimumSafeInsetIn;
+  const topHasSafetyEvidence = !!topRegion?.fillEdgeReaching || topWindowBufferProvesSafety;
+  const bottomHasSafetyEvidence = !!bottomRegion?.fillEdgeReaching || bottomWindowBufferProvesSafety;
+
+  // A genuine banner's own defining trait is a MEASURED FILL an anchor's
+  // content sits inside of, OR a MEASURED FRAME border providing the same
+  // proof from outside the analysis window — never merely "content
+  // happens to be the first/last run." When NEITHER anchor has EITHER
+  // kind of evidence, content touches BOTH outer edges directly with
+  // nothing but plain background between them (real orchestration
+  // wiring's own acceptance shape: noise/foreground reaching both edges,
+  // uniform interior) — the structural INVERSE of a banner, not partial
+  // evidence of one. That shape already has a dedicated, correct handler
+  // (`edge-dependence.ts`/`isEdgeDependentStructure` plus the perimeter-
+  // band reconstructability check below) — treated as `"not_applicable"`
+  // so it falls through to that, unaffected, rather than this evidence
+  // intercepting and blocking it. (At least one anchor's own fill —
+  // `bannerSignEdgeContentArtwork`'s own shape, e.g. — is genuine partial
+  // banner evidence and still fails closed below.)
+  if (!topHasSafetyEvidence && !bottomHasSafetyEvidence) {
+    return { status: "not_applicable" };
+  }
 
   const failures: string[] = [];
   // Defensive, currently unreachable in V1 (the only admitted shape), kept
@@ -427,11 +463,40 @@ function evaluateStructuralReflow(
   if (template.shape !== "straight_rectangle") {
     failures.push(`the production template's shape (${template.shape}) is not a straight rectangle`);
   }
-  if (!topRegion?.fillEdgeReaching || !topRegion.fillColor) {
-    failures.push("the top anchor has no measured, edge-reaching fill to extend to the new cut edge");
+  // An anchor's own fill is the ordinary, always-sufficient proof this
+  // side is safe to translate against the new cut edge WITHOUT it (the
+  // original, UNCHANGED bar for an unwindowed scan — `bannerSignEdgeContentArtwork`'s
+  // own established "insufficient" shape, content touching the true
+  // canvas edge directly with nothing to measure, remains blocked exactly
+  // as before). The ONE exception: when the window's own leading/trailing
+  // margin ALONE already clears the minimum safe inset (`topWindow
+  // BufferProvesSafety`/`bottomWindowBufferProvesSafety`, computed above)
+  // — i.e. a MEASURED decorative frame border, preserved verbatim by the
+  // executor's own leading/trailing-band mechanism, already proves that
+  // side's own real buffer from the TRUE canvas edge — that anchor's own
+  // missing internal fill no longer needs to be independently proven; the
+  // frame already proved it. Proven directly against the real cc6cfc4b-...
+  // acceptance sign, whose "ATTENTION" banner text fills its own band
+  // edge-to-edge (no internal margin at all) but sits comfortably inside a
+  // ~27px measured frame border.
+  if (!topRegion?.fillEdgeReaching && !topWindowBufferProvesSafety) {
+    failures.push(
+      "the top anchor has no measured, edge-reaching fill, and no measured analysis-window frame border provides " +
+        "sufficient buffer on its own",
+    );
+  } else if (topRegion?.fillEdgeReaching && !topRegion.fillColor) {
+    // Structurally unreachable (fillEdgeReaching is only ever set
+    // alongside a measured fillColor, both here and in the deterministic
+    // segmenter) — kept as an explicit proof point, never an assumption.
+    failures.push("the top anchor is marked edge-reaching but carries no measured fill colour");
   }
-  if (!bottomRegion?.fillEdgeReaching || !bottomRegion.fillColor) {
-    failures.push("the bottom anchor has no measured, edge-reaching fill to extend to the new cut edge");
+  if (!bottomRegion?.fillEdgeReaching && !bottomWindowBufferProvesSafety) {
+    failures.push(
+      "the bottom anchor has no measured, edge-reaching fill, and no measured analysis-window frame border " +
+        "provides sufficient buffer on its own",
+    );
+  } else if (bottomRegion?.fillEdgeReaching && !bottomRegion.fillColor) {
+    failures.push("the bottom anchor is marked edge-reaching but carries no measured fill colour");
   }
   if (gaps.length === 0) {
     failures.push(
@@ -439,11 +504,28 @@ function evaluateStructuralReflow(
     );
   }
   if (topRegion && bottomRegion && topRegion !== bottomRegion) {
-    const topGapPx = topRegion.contentBounds.startYPx - topRegion.sourceBounds.startYPx;
-    const bottomGapPx =
-      bottomRegion.sourceBounds.startYPx +
-      bottomRegion.sourceBounds.heightPx -
-      (bottomRegion.contentBounds.startYPx + bottomRegion.contentBounds.heightPx);
+    // `windowLeadingPx`/`windowTrailingPx` (computed above, alongside the
+    // fill-evidence gate) count toward each anchor's own safe inset ONLY
+    // as a FALLBACK for an anchor with no measured fill of its own
+    // (`!fillEdgeReaching` — the real cc6cfc4b-... shape) — NEVER ADDED
+    // on top of a genuine internal margin an anchor already has. An
+    // anchor that DOES carry its own measured fill is judged by that
+    // fill's own internal margin alone, exactly as before this phase:
+    // a framed sign whose interior content happens to sit only 1px
+    // inside its own thin, genuinely-measured fill band (an artifact of
+    // the frame's own rounded-corner geometry, not a design margin) must
+    // remain exactly as insufficient as it always was — the window's own
+    // buffer is not a license to relax an anchor's OWN already-proven
+    // (if thin) internal evidence, only to substitute for evidence that
+    // does not exist at all.
+    const topGapPx = topRegion.fillEdgeReaching
+      ? topRegion.contentBounds.startYPx - topRegion.sourceBounds.startYPx
+      : windowLeadingPx;
+    const bottomGapPx = bottomRegion.fillEdgeReaching
+      ? bottomRegion.sourceBounds.startYPx +
+        bottomRegion.sourceBounds.heightPx -
+        (bottomRegion.contentBounds.startYPx + bottomRegion.contentBounds.heightPx)
+      : windowTrailingPx;
     const topGapIn = topGapPx / effectivePpi;
     const bottomGapIn = bottomGapPx / effectivePpi;
     // Full pixel-output enforcement belongs to later deterministic
@@ -689,7 +771,7 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
     // evidence exists.
     const reflowEvaluation: StructuralReflowEvaluation =
       !rotated && axis === "vertical" && input.structuralLayoutSegmentation !== undefined
-        ? evaluateStructuralReflow(spec, policy, effectivePpi, input.structuralLayoutSegmentation)
+        ? evaluateStructuralReflow(spec, policy, effectivePpi, input.structuralLayoutSegmentation, inspection.source.heightPx)
         : { status: "not_applicable" };
     if (edgeDependentEdges.length > 0 || hasFrameEvidence || reflowEvaluation.status !== "not_applicable") {
       if (reflowEvaluation.status === "eligible") {

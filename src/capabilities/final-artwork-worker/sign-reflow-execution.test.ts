@@ -22,6 +22,7 @@ import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
 import { createSignPreparationCapability } from "@/capabilities/sign-preparation";
 import { framedBannerSignArtwork, toPngBytes } from "@/capabilities/sign-preparation/sign-fixtures";
 import { SIGN_EXECUTION_IMPLEMENTATION_VERSION } from "@/capabilities/sign-preparation/sign-transform-executor";
+import { decodePngUpload } from "@/capabilities/artwork-preparation/image-decode";
 import type { ProjectRepository } from "@/lib/db/repository";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
@@ -96,6 +97,24 @@ describe("Signs Phase 3A: reflow_structural_layout execution (real orchestration
 
     const downloaded = await assets.downloadAssetBytes(finalAsset!.id);
     assert.ok(downloaded);
+
+    // The decorative frame border (analysis-window leading/trailing SOURCE
+    // rows outside the windowed segmentation domain) must be PRESERVED,
+    // never silently dropped — `framedBannerSignArtwork`'s own outer
+    // stroke is a near-black {4,4,4} band, depth 0-8, along every edge.
+    // Sampled well clear of the rounded corners (x=200, comfortably past
+    // the fixture's own radius) at the very first output row.
+    const decodedFinal = decodePngUpload(downloaded!.bytes);
+    const topRowIdx = (0 * decodedFinal.image.width + 200) * 4;
+    const topPixel = {
+      r: decodedFinal.image.data[topRowIdx]!,
+      g: decodedFinal.image.data[topRowIdx + 1]!,
+      b: decodedFinal.image.data[topRowIdx + 2]!,
+    };
+    assert.ok(
+      Math.abs(topPixel.r - 4) <= 12 && Math.abs(topPixel.g - 4) <= 12 && Math.abs(topPixel.b - 4) <= 12,
+      `expected the top row to still be the frame's own near-black outer stroke, got ${JSON.stringify(topPixel)}`,
+    );
 
     // Deterministic + (placeholder, never-preserved-by-default) semantic
     // preservation verification and PrintValidation both ran as PART OF

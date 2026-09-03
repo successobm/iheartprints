@@ -220,6 +220,68 @@ describe("sign repair planner — structural layout reflow (opt-in evidence)", (
     );
   });
 
+  it("9b: Phase 3A — a top anchor whose content touches the analysis window's own edge with ZERO internal fill is still eligible when the window's own leading margin alone clears the minimum safe inset (a measured decorative frame border, real cc6cfc4b-... acceptance shape) — but the unwindowed case (test 8) remains unaffected", () => {
+    // Hand-built: `analysisWindow.y = 200` — a substantial, MEASURED
+    // margin (e.g. a decorative frame border, preserved verbatim by the
+    // executor's own leading-band mechanism) sits between the true source
+    // edge and this analysis domain. The top anchor's own content starts
+    // EXACTLY at the domain's own edge (row 200) with no internal fill of
+    // its own at all (`fillEdgeReaching: false`, `fillColor: null`) —
+    // proven directly against the real acceptance sign's own "ATTENTION"
+    // banner, whose text reaches the frame interior's own top edge with
+    // zero internal margin.
+    const image = bannerSignArtwork(); // 900x800
+    const s = spec(12, 24);
+    const inspection = inspectSignArtwork(image, s, RIGID_RECT_UP_TO_24X36_V1);
+    const handBuilt: SignStructuralLayoutSegmentationResult = {
+      status: "measured",
+      regions: [
+        {
+          id: "r0",
+          sourceBounds: { startYPx: 200, heightPx: 100 },
+          contentBounds: { startYPx: 200, heightPx: 100 },
+          role: "top_anchor",
+          fillColor: null,
+          fillEdgeReaching: false,
+          expandable: false,
+        },
+        {
+          id: "r1",
+          sourceBounds: { startYPx: 500, heightPx: 300 },
+          contentBounds: { startYPx: 500, heightPx: 250 },
+          role: "bottom_anchor",
+          fillColor: { r: 10, g: 10, b: 10 },
+          fillEdgeReaching: true,
+          expandable: true,
+        },
+      ],
+      gaps: [{ sourceHeightPx: 200, fillColor: { r: 5, g: 5, b: 5 } }],
+      analysisWindow: { x: 0, y: 200, width: 900, height: 600 },
+    };
+    const result = planSignRepair({
+      spec: s,
+      policy: RIGID_RECT_UP_TO_24X36_V1,
+      inspection,
+      sourceAssetId: "asset-1",
+      sourceSha256: "a".repeat(64),
+      structuralLayoutSegmentation: handBuilt,
+    });
+    assert.equal(result.status, "planned");
+    const step = result.plan!.steps.find((st) => st.kind === "reflow_structural_layout");
+    assert.ok(step, "expected the window's own leading margin to substitute for the top anchor's own missing fill");
+    // The window's own y-offset is encoded so the executor can preserve
+    // it verbatim as a leading band.
+    assert.equal(step!.params.analysisWindowYPx, 200);
+
+    // The UNWINDOWED case (test 8, `bannerSignEdgeContentArtwork`, no
+    // analysis window at all) must remain blocked exactly as before —
+    // this relaxation is narrowly scoped to a MEASURED window's own
+    // proven margin, never a general exemption.
+    const unwindowedResult = planWithSegmentation(bannerSignEdgeContentArtwork(), 12, 24);
+    assert.equal(unwindowedResult.status, "blocked");
+    assert.doesNotMatch(JSON.stringify(unwindowedResult), /reflow_structural_layout/);
+  });
+
   it("10: the reflow step, and the resulting plan, are always review_required — never auto_safe, regardless of evidence strength", () => {
     const result = planWithSegmentation(bannerSignArtwork(), 12, 24);
     const step = result.plan!.steps.find((s) => s.kind === "reflow_structural_layout")!;

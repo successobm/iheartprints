@@ -244,4 +244,135 @@ describe("executeSignRepairPlan — reflow_structural_layout (Phase 3A)", () => 
     // region2's own fill reaches the very bottom.
     assert.deepEqual(pixelAt(result.image, 5, 399), { r: 0, g: 0, b: 200, a: 255 });
   });
+
+  it("D: redistributes added height EQUALLY across gaps of very different original sizes (never proportionally), and preserves analysis-window leading/trailing SOURCE bands verbatim — the real cc6cfc4b-... acceptance shape", () => {
+    // 100x140 source: leading band [0,10) — SOURCE rows outside the
+    // analysis window (a measured decorative frame border, on a real
+    // sign) — region0 [10,40) (fill+content), gap0 [40,70) (30px), region1
+    // (middle) [70,90) (20px), gap1 [90,100) (10px — deliberately
+    // asymmetric vs gap0), region2 [100,130) (content+fill), trailing band
+    // [130,140).
+    const source = makeImage(100, 140, { r: 0, g: 0, b: 0 });
+    fillRect(source, 0, 0, 100, 10, { r: 50, g: 50, b: 50 }); // leading band.
+    fillRect(source, 0, 10, 100, 20, { r: 200, g: 0, b: 0 }); // region0 fill.
+    fillRect(source, 0, 20, 100, 40, { r: 250, g: 100, b: 100 }); // region0 content.
+    fillRect(source, 0, 40, 100, 70, { r: 10, g: 10, b: 10 }); // gap0 (30px).
+    fillRect(source, 0, 70, 100, 90, { r: 50, g: 150, b: 50 }); // region1 (middle).
+    fillRect(source, 0, 90, 100, 100, { r: 20, g: 20, b: 20 }); // gap1 (10px — asymmetric).
+    fillRect(source, 0, 100, 100, 120, { r: 100, g: 100, b: 250 }); // region2 content.
+    fillRect(source, 0, 120, 100, 130, { r: 0, g: 0, b: 200 }); // region2 fill.
+    fillRect(source, 0, 130, 100, 140, { r: 80, g: 80, b: 80 }); // trailing band.
+
+    const step: SignRepairStep = {
+      kind: "reflow_structural_layout",
+      risk: "review_required",
+      reasons: ["test"],
+      params: {
+        axis: "vertical",
+        totalAddedPx: 60,
+        sourceWidthPx: 100,
+        sourceHeightPx: 140,
+        templateWidthIn: 10,
+        templateHeightIn: 20,
+        templateShape: "straight_rectangle",
+        templateMinimumSafeInsetIn: 0.125,
+        scalingMode: "none",
+        layoutTransform: "translate_and_redistribute_gaps",
+        regionCount: 3,
+        gapCount: 2,
+        analysisWindowXPx: 0,
+        analysisWindowYPx: 10,
+        analysisWindowWidthPx: 100,
+        analysisWindowHeightPx: 120,
+        region0Id: "region-0",
+        region0Role: "top_anchor",
+        region0SourceStartYPx: 10,
+        region0SourceHeightPx: 30,
+        region0ContentStartYPx: 20,
+        region0ContentHeightPx: 20,
+        region0FillEdgeReaching: "true",
+        region0Expandable: "true",
+        region0FillColorR: 200,
+        region0FillColorG: 0,
+        region0FillColorB: 0,
+        region1Id: "region-1",
+        region1Role: "middle",
+        region1SourceStartYPx: 70,
+        region1SourceHeightPx: 20,
+        region1ContentStartYPx: 70,
+        region1ContentHeightPx: 20,
+        region1FillEdgeReaching: "false",
+        region1Expandable: "false",
+        region2Id: "region-2",
+        region2Role: "bottom_anchor",
+        region2SourceStartYPx: 100,
+        region2SourceHeightPx: 30,
+        region2ContentStartYPx: 100,
+        region2ContentHeightPx: 20,
+        region2FillEdgeReaching: "true",
+        region2Expandable: "true",
+        region2FillColorR: 0,
+        region2FillColorG: 0,
+        region2FillColorB: 200,
+        gap0SourceHeightPx: 30,
+        gap0FillColorR: 10,
+        gap0FillColorG: 10,
+        gap0FillColorB: 10,
+        gap1SourceHeightPx: 10,
+        gap1FillColorR: 20,
+        gap1FillColorG: 20,
+        gap1FillColorB: 20,
+      },
+    };
+    const plan: SignRepairPlan = {
+      schemaVersion: SIGN_REPAIR_PLAN_SCHEMA_VERSION,
+      policyId: "test",
+      sourceAssetId: "test",
+      sourceSha256: "test",
+      sourceWidthPx: 100,
+      sourceHeightPx: 140,
+      orderedWidthIn: 10,
+      orderedHeightIn: 20,
+      steps: [step],
+      expectedOutputWidthPx: 100,
+      expectedOutputHeightPx: 200,
+      expectedEffectivePpi: 10,
+      overallRisk: "review_required",
+      defects: [],
+      reasons: [],
+      planKey: "test",
+    };
+
+    const result = executeSignRepairPlan(source, plan);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.equal(result.image.width, 100);
+    assert.equal(result.image.height, 200);
+
+    // Leading band [0,10) preserved verbatim at the very top.
+    assert.deepEqual(pixelAt(result.image, 5, 0), { r: 50, g: 50, b: 50, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 5, 9), { r: 50, g: 50, b: 50, a: 255 });
+    // region0, translated to [10,40).
+    assert.deepEqual(pixelAt(result.image, 5, 10), { r: 200, g: 0, b: 0, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 5, 39), { r: 250, g: 100, b: 100, a: 255 });
+    // gap0: EQUAL share (30 of the 60 added, split 2 ways = 30 extra),
+    // NOT proportional (which would give gap0 the 3x-larger 45px share
+    // since its own original height (30) is 3x gap1's (10)) — new height
+    // 30 (original) + 30 (equal share) = 60, at [40,100).
+    assert.deepEqual(pixelAt(result.image, 5, 40), { r: 10, g: 10, b: 10, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 5, 99), { r: 10, g: 10, b: 10, a: 255 });
+    // region1 (middle), translated to [100,120).
+    assert.deepEqual(pixelAt(result.image, 5, 100), { r: 50, g: 150, b: 50, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 5, 119), { r: 50, g: 150, b: 50, a: 255 });
+    // gap1: EQUAL share too — new height 10 (original) + 30 (equal share)
+    // = 40, at [120,160).
+    assert.deepEqual(pixelAt(result.image, 5, 120), { r: 20, g: 20, b: 20, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 5, 159), { r: 20, g: 20, b: 20, a: 255 });
+    // region2, translated to [160,190).
+    assert.deepEqual(pixelAt(result.image, 5, 160), { r: 100, g: 100, b: 250, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 5, 189), { r: 0, g: 0, b: 200, a: 255 });
+    // Trailing band [190,200) preserved verbatim at the very bottom.
+    assert.deepEqual(pixelAt(result.image, 5, 190), { r: 80, g: 80, b: 80, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 5, 199), { r: 80, g: 80, b: 80, a: 255 });
+  });
 });

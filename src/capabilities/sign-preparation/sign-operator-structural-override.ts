@@ -235,16 +235,25 @@ export function synthesizeSegmentationFromOperatorOverride(
     const role = isFirst ? "top_anchor" : isLast ? "bottom_anchor" : "middle";
 
     const sourceBounds = { startYPx: b.startYPx, heightPx: b.endYPx - b.startYPx };
-    // Edge-reaching is DERIVED from position, never trusted from operator
-    // input — exactly like the deterministic algorithm's own
-    // `owningFillBefore`/`owningFillAfter` never trust anything but the
-    // measured run's own start/end against the domain edge.
-    const touchesTop = isFirst && b.startYPx === domainStartY;
-    const touchesBottom = isLast && b.endYPx === domainEndY;
-    const fillEdgeReaching = touchesTop || touchesBottom;
+    // Positional touching alone (`sourceBounds` starting/ending at the
+    // domain's own edge) is NOT sufficient for `fillEdgeReaching` — that
+    // would conflate "this region's overall span happens to start at the
+    // edge" with "a genuine fill run reaches the edge", which are
+    // different claims: the deterministic algorithm's own `fillEdgeReaching`
+    // is true ONLY when an actual absorbed FILL run touches the domain
+    // edge (`owningFillBefore`/`owningFillAfter` in `sign-layout-
+    // segmentation.ts`) — content that itself touches the edge directly,
+    // with no fill before it, is explicitly NOT edge-reaching there
+    // either (`bannerSignEdgeContentArtwork`'s own established shape).
+    // This module must match that semantics exactly, not a looser one —
+    // computed below only once a genuine, non-empty, measured fill span
+    // is confirmed (or explicitly absent).
+    const positionTouchesTop = isFirst && b.startYPx === domainStartY;
+    const positionTouchesBottom = isLast && b.endYPx === domainEndY;
 
     let contentBounds = sourceBounds;
     let fillColor: { r: number; g: number; b: number } | null = null;
+    let fillEdgeReaching = false;
 
     if (role === "middle") {
       if (b.contentStartYPx !== null || b.contentEndYPx !== null) {
@@ -252,7 +261,7 @@ export function synthesizeSegmentationFromOperatorOverride(
       }
       // No owned fill for a middle region, exactly like the deterministic
       // V1 convention — contentBounds already equals sourceBounds.
-    } else if (fillEdgeReaching) {
+    } else if (positionTouchesTop || positionTouchesBottom) {
       if (b.contentStartYPx === null || b.contentEndYPx === null) {
         return {
           status: "unusable",
@@ -274,16 +283,31 @@ export function synthesizeSegmentationFromOperatorOverride(
       // strictly outside contentBounds but inside sourceBounds, on the
       // edge-touching side. Never trust the operator's own colour claim;
       // there isn't one — colour is always measured.
-      const fillStart = touchesTop ? b.startYPx : b.contentEndYPx;
-      const fillEnd = touchesTop ? b.contentStartYPx : b.endYPx;
-      const measured = measureUniformSpan(image, fillStart, fillEnd, domain.x, domain.width);
-      if (!measured) {
-        return {
-          status: "unusable",
-          reason: `Region ${i}'s (${role}) claimed fill span (rows ${fillStart}-${fillEnd - 1}) is not an affirmatively uniform colour in the actual source — the confirmed boundary does not hold up against the real pixels.`,
-        };
+      const fillStart = positionTouchesTop ? b.startYPx : b.contentEndYPx;
+      const fillEnd = positionTouchesTop ? b.contentStartYPx : b.endYPx;
+      // A ZERO-height claimed fill span (meaningful content sitting
+      // directly at this region's own edge, with no internal background
+      // margin at all) is a legitimate, real shape — proven directly
+      // against the real cc6cfc4b-... acceptance sign, whose top banner
+      // text fills its own band edge-to-edge. It is NEVER refused for
+      // being empty, but it also never counts as `fillEdgeReaching` —
+      // exactly matching the deterministic algorithm's own semantics
+      // (`bannerSignEdgeContentArtwork`'s established "insufficient"
+      // shape): content touching the edge directly, with nothing to
+      // measure as fill, is not proof this anchor's own background can be
+      // safely repositioned against the new cut edge. Only a NON-EMPTY
+      // claimed span, once proven uniform, sets `fillEdgeReaching: true`.
+      if (fillEnd > fillStart) {
+        const measured = measureUniformSpan(image, fillStart, fillEnd, domain.x, domain.width);
+        if (!measured) {
+          return {
+            status: "unusable",
+            reason: `Region ${i}'s (${role}) claimed fill span (rows ${fillStart}-${fillEnd - 1}) is not an affirmatively uniform colour in the actual source — the confirmed boundary does not hold up against the real pixels.`,
+          };
+        }
+        fillColor = measured;
+        fillEdgeReaching = true;
       }
-      fillColor = measured;
     } else if (b.contentStartYPx !== null || b.contentEndYPx !== null) {
       return {
         status: "unusable",

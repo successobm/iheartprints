@@ -1212,6 +1212,17 @@ interface DecodedStructuralReflow {
   templateShape: string;
   regions: DecodedReflowRegion[];
   gaps: DecodedReflowGap[];
+  /**
+   * Phase 2C: the SOURCE-image-absolute analysis window segmentation was
+   * restricted to, when one was used — `null` for an unwindowed (full-
+   * image) scan. Present here ONLY so this executor can preserve the
+   * SOURCE rows OUTSIDE it (typically a measured decorative frame border,
+   * on a framed sign) verbatim — see `executeReflowStructuralLayout`'s own
+   * doc. Never otherwise interpreted; this executor never reads frame
+   * band colours, corner radius, or hole geometry from it.
+   */
+  analysisWindowYPx: number | null;
+  analysisWindowHeightPx: number | null;
 }
 
 /**
@@ -1261,14 +1272,18 @@ function decodeStructuralReflowParams(params: Record<string, number | string>): 
     const fillEdgeReaching = fillEdgeReachingRaw === "true";
     if (sourceStartYPx === null || regionSourceHeightPx === null) return null;
 
-    let fillColor: SignPerimeterBandRow | null = null;
-    if (fillEdgeReaching) {
-      const r = requireByteChannel(params[`region${i}FillColorR`]);
-      const g = requireByteChannel(params[`region${i}FillColorG`]);
-      const b = requireByteChannel(params[`region${i}FillColorB`]);
-      if (r === null || g === null || b === null) return null;
-      fillColor = { r, g, b };
-    }
+    // `fillColor` is decoded on a best-effort basis ONLY (never required,
+    // never a decode failure when absent) — see `DecodedReflowRegion`'s
+    // own doc: this executor's translation-only placement never reads a
+    // region's own fill colour at all (unlike a gap's, which every gap
+    // genuinely needs to paint). A real anchor may legitimately have no
+    // internal fill margin of its own (proven against the real cc6cfc4b-...
+    // acceptance sign) — `fillEdgeReaching` alone is what this executor's
+    // own leading/trailing-band contiguity check (below) actually relies on.
+    const r = requireByteChannel(params[`region${i}FillColorR`]);
+    const g = requireByteChannel(params[`region${i}FillColorG`]);
+    const b = requireByteChannel(params[`region${i}FillColorB`]);
+    const fillColor: SignPerimeterBandRow | null = r !== null && g !== null && b !== null ? { r, g, b } : null;
     regions.push({ role, sourceStartYPx, sourceHeightPx: regionSourceHeightPx, fillEdgeReaching, fillColor });
   }
 
@@ -1282,12 +1297,47 @@ function decodeStructuralReflowParams(params: Record<string, number | string>): 
     gaps.push({ sourceHeightPx: gapSourceHeightPx, fillColor: { r, g, b } });
   }
 
-  return { sourceWidthPx, sourceHeightPx, templateWidthIn, templateHeightIn, templateShape, regions, gaps };
+  const analysisWindowYPxRaw = params.analysisWindowYPx;
+  const analysisWindowHeightPxRaw = params.analysisWindowHeightPx;
+  const analysisWindowYPx = typeof analysisWindowYPxRaw === "number" ? requirePositiveIntOrZero(analysisWindowYPxRaw) : null;
+  const analysisWindowHeightPx =
+    typeof analysisWindowHeightPxRaw === "number" ? requirePositiveInt(analysisWindowHeightPxRaw) : null;
+  // Both-or-neither — a plan carrying only one of the pair is malformed,
+  // never partially trusted.
+  if ((analysisWindowYPxRaw !== undefined) !== (analysisWindowHeightPxRaw !== undefined)) return null;
+  if (analysisWindowYPxRaw !== undefined && (analysisWindowYPx === null || analysisWindowHeightPx === null)) return null;
+
+  return {
+    sourceWidthPx,
+    sourceHeightPx,
+    templateWidthIn,
+    templateHeightIn,
+    templateShape,
+    regions,
+    gaps,
+    analysisWindowYPx,
+    analysisWindowHeightPx,
+  };
 }
 
 type ReflowSequenceItem =
   | { kind: "region"; region: DecodedReflowRegion }
-  | { kind: "gap"; gap: DecodedReflowGap };
+  | { kind: "gap"; gap: DecodedReflowGap }
+  /**
+   * Phase 2C analysis-window leading/trailing SOURCE rows OUTSIDE the
+   * windowed segmentation domain (on a framed sign, this is the measured
+   * decorative frame border itself, corner rounding and hole indicators
+   * included) — copied byte-for-byte, exactly like a region, at its own
+   * unchanged (scaled) height. Never independently colour-validated (this
+   * executor never asserts these rows are any particular colour or
+   * uniform at all — they are real pixels, preserved verbatim, not
+   * measured evidence) and NEVER resized: only declared regions/gaps ever
+   * absorb added height. Constitution §16A/§16A.3: the decorative frame
+   * is artwork, never redrawn as substrate geometry — this is what keeps
+   * it that way, rather than silently discarding it outside the analysis
+   * window's own bounds.
+   */
+  | { kind: "band"; sourceHeightPx: number };
 
 /**
  * Executes an authorized, planner-proposed `reflow_structural_layout` step
@@ -1320,18 +1370,42 @@ type ReflowSequenceItem =
  *      — the SAME re-derivation `adaptGeometryStepsToActualReconstruction`
  *      already applies for every other geometry step), never from the
  *      plan's own predicted pad amount.
- *   4. Redistribute the ACTUAL added height across gaps ONLY, weighted by
- *      each gap's PLAN-TIME height as a RATIO of the total original gap
- *      height (a stable proportion, immune to whatever the actual
- *      reconstruction scale turned out to be) — mirroring
- *      `reconstruct_parametric_frame`'s own `leadingShare`-ratio
- *      precedent. A largest-remainder correction on the LAST gap keeps the
+ *   4. Redistribute the ACTUAL added height EQUALLY across gaps ONLY —
+ *      never proportional to each gap's own original height (a short
+ *      original gap is not proof of a deliberately smaller design intent
+ *      there; see this function's own doc for why proportional
+ *      redistribution produces a visually wrong result on an asymmetric
+ *      gap pair, proven directly against the real cc6cfc4b-... acceptance
+ *      sign). A largest-remainder correction on the LAST gap keeps the
  *      sum exactly equal to the added height.
  *   5. Place: every REGION is copied byte-for-byte (a row-range `Buffer
  *      .copy`, never resampled) from its scaled source position to its new
  *      output position — translation only, meaningful content is never
  *      independently stretched. Every GAP is filled flat with its own
  *      independently measured colour, at its NEW (larger) height.
+ *
+ * LEADING/TRAILING BAND PRESERVATION (Phase 2C analysis window): when
+ * segmentation used a windowed domain narrower than the full source (a
+ * framed sign — `resolveFrameAnalysisWindow`'s own reason for existing),
+ * the SOURCE rows OUTSIDE that window (`[0, analysisWindowYPx)` and
+ * `[analysisWindowYPx + analysisWindowHeightPx, sourceHeightPx)`) are
+ * real image content this executor must never silently drop — a
+ * measured decorative frame border, corner rounding, and any corner-hole
+ * indicators live there. They are copied byte-for-byte at their own
+ * (scaled) height, exactly like a region, as the FIRST and LAST items of
+ * the placement sequence — never resized, never treated as fill needing
+ * independent colour validation (a frame border scanned across the FULL
+ * source width is essentially never a single uniform colour — narrow
+ * strokes near the edges, gaps/holes elsewhere — so it could not be
+ * validated as "fill" even if this executor tried). Before placing
+ * anything, this function verifies the FIRST region's own `sourceStartYPx`
+ * exactly equals the leading band's own height, and the LAST region's own
+ * end exactly equals the trailing band's own start — both are already
+ * structurally guaranteed by `evaluateStructuralReflow`'s own eligibility
+ * bar (an anchor must touch the analysis domain's own edge to qualify as
+ * `fillEdgeReaching`), but re-verified here rather than assumed, so a
+ * corrupted or hand-edited plan is refused rather than silently
+ * misplacing content.
  */
 function executeReflowStructuralLayout(image: RgbaImage, step: SignRepairStep): SignExecutionResult {
   const decoded = decodeStructuralReflowParams(step.params);
@@ -1359,16 +1433,56 @@ function executeReflowStructuralLayout(image: RgbaImage, step: SignRepairStep): 
 
   const scaleY = image.height / decoded.sourceHeightPx;
 
+  const leadingSourceHeight = decoded.analysisWindowYPx ?? 0;
+  const trailingSourceStart =
+    decoded.analysisWindowYPx !== null && decoded.analysisWindowHeightPx !== null
+      ? decoded.analysisWindowYPx + decoded.analysisWindowHeightPx
+      : decoded.sourceHeightPx;
+  const trailingSourceHeight = decoded.sourceHeightPx - trailingSourceStart;
+
+  const firstRegion = decoded.regions[0]!;
+  const lastRegion = decoded.regions[decoded.regions.length - 1]!;
+  if (firstRegion.sourceStartYPx !== leadingSourceHeight) {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail:
+        `The first region's own source start (${firstRegion.sourceStartYPx}px) does not match the analysis ` +
+        `window's own leading edge (${leadingSourceHeight}px) — refusing rather than risk dropping or ` +
+        "misplacing source pixels outside it.",
+    };
+  }
+  if (lastRegion.sourceStartYPx + lastRegion.sourceHeightPx !== trailingSourceStart) {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail:
+        `The last region's own source end (${lastRegion.sourceStartYPx + lastRegion.sourceHeightPx}px) does not ` +
+        `match the analysis window's own trailing edge (${trailingSourceStart}px) — refusing rather than risk ` +
+        "dropping or misplacing source pixels outside it.",
+    };
+  }
+  if (trailingSourceHeight < 0) {
+    return {
+      status: "refused",
+      reason: "unsupported_step_kind",
+      detail: "The analysis window's own recorded bounds extend past the plan's own recorded source height.",
+    };
+  }
+
   const sequence: ReflowSequenceItem[] = [];
+  if (leadingSourceHeight > 0) sequence.push({ kind: "band", sourceHeightPx: leadingSourceHeight });
   for (let i = 0; i < decoded.regions.length; i++) {
     sequence.push({ kind: "region", region: decoded.regions[i]! });
     if (i < decoded.gaps.length) sequence.push({ kind: "gap", gap: decoded.gaps[i]! });
   }
+  if (trailingSourceHeight > 0) sequence.push({ kind: "band", sourceHeightPx: trailingSourceHeight });
 
   let cumulativeOriginal = 0;
   const scaledBoundaries: number[] = [0];
   for (const item of sequence) {
-    cumulativeOriginal += item.kind === "region" ? item.region.sourceHeightPx : item.gap.sourceHeightPx;
+    cumulativeOriginal +=
+      item.kind === "region" ? item.region.sourceHeightPx : item.kind === "gap" ? item.gap.sourceHeightPx : item.sourceHeightPx;
     scaledBoundaries.push(Math.round(cumulativeOriginal * scaleY));
   }
   // The final boundary is authoritative as `image`'s own actual height —
@@ -1390,15 +1504,34 @@ function executeReflowStructuralLayout(image: RgbaImage, step: SignRepairStep): 
   const outputHeightPx = geometry.plateHeightPx;
   const totalAddedPx = geometry.leadingPx + geometry.trailingPx;
 
-  const totalOriginalGapHeight = decoded.gaps.reduce((sum, g) => sum + g.sourceHeightPx, 0);
-  if (totalOriginalGapHeight <= 0) {
+  // Signs Phase 3A: EQUAL distribution across gaps, never proportional to
+  // each gap's own original (pre-reflow) height. A short measured gap is
+  // not proof of a deliberately SMALLER design intent there — on a real
+  // banner, the space directly against an anchor's own edge-touching
+  // fill is very often incidentally thin (or, for operator-confirmed
+  // evidence, the smallest span that could be independently proven
+  // uniform at all — a technical necessity, never a design signal), while
+  // a background gap elsewhere happens to be much larger for unrelated
+  // reasons. Proportional-by-original-size, tried first in an earlier
+  // version of this executor, produces a visually wrong result on
+  // exactly that asymmetric — and common — shape: nearly all new height
+  // concentrates into whichever gap happened to already be largest,
+  // producing an obviously-wrong oversized band (proven directly against
+  // the real cc6cfc4b-... acceptance sign: a 19px-vs-1px original gap
+  // pair drove a 95%/5% split of 612px of new height — an unmistakably
+  // wrong result on inspection, not a subtle one). Equal distribution is
+  // also the task's own explicitly sanctioned, `review_required`-gated
+  // fallback, and the simplest defensible rule — never a bespoke layout
+  // optimizer.
+  const gapCount = decoded.gaps.length;
+  if (gapCount <= 0) {
     return {
       status: "refused",
       reason: "output_geometry_mismatch",
-      detail: "No measured gap height exists to redistribute the added space into.",
+      detail: "No measured gap exists to redistribute the added space into.",
     };
   }
-  const gapExtraPx = decoded.gaps.map((g) => Math.round((g.sourceHeightPx / totalOriginalGapHeight) * totalAddedPx));
+  const gapExtraPx = decoded.gaps.map(() => Math.floor(totalAddedPx / gapCount));
   const assignedExtra = gapExtraPx.slice(0, -1).reduce((a, b) => a + b, 0);
   gapExtraPx[gapExtraPx.length - 1] = totalAddedPx - assignedExtra;
   if (gapExtraPx.some((extra) => extra < 0)) {
@@ -1417,7 +1550,10 @@ function executeReflowStructuralLayout(image: RgbaImage, step: SignRepairStep): 
     const scaledStart = scaledBoundaries[i]!;
     const scaledEnd = scaledBoundaries[i + 1]!;
     const scaledHeight = scaledEnd - scaledStart;
-    if (item.kind === "region") {
+    if (item.kind === "region" || item.kind === "band") {
+      // Bands (analysis-window leading/trailing SOURCE rows — e.g. a
+      // measured decorative frame border) are copied byte-for-byte
+      // exactly like a region: never resized, never fill-coloured.
       for (let y = 0; y < scaledHeight; y++) {
         const srcRowStart = (scaledStart + y) * image.width * 4;
         const destRowStart = (destY + y) * outputWidthPx * 4;
