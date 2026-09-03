@@ -479,6 +479,18 @@ export interface PrintValidationReport {
   blockingIssues: string[];
   warnings: string[];
   evaluatedAt: string;
+  /**
+   * Operator Production Correction UX: the STRUCTURED, per-edge Fit to
+   * Production evidence the `protected_content_safe_inset` check was
+   * computed from — `checks[]` only ever carries that check's formatted
+   * summary string, which is enough to state pass/fail but not enough for
+   * an operator UI to draw a per-edge highlight. Present only under the
+   * `rigid_sign_raster` profile (mirroring `RigidSignPlanEvidence.fitToProduction`'s
+   * own scope); `null` otherwise, or when no analysis was ever recorded for
+   * this plate. A reader (`sign-plan-operator-review.ts`) reads this back
+   * exactly like it reads `checks[]` — never re-measures.
+   */
+  fitToProductionEvidence: RigidSignFitToProductionEvidence | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,6 +1068,14 @@ export interface RigidSignFitToProductionEdgeEvidence {
   nearestNonBleedIn: number | null;
   result: "pass" | "fail" | "unknown";
   reason: string;
+  /**
+   * Operator Production Correction UX: mirrors `sign-preparation/sign-fit-
+   * to-production.ts`'s own `violatingPositionPx` — the along-edge column
+   * (top/bottom) or row (left/right) index where `nearestNonBleedPx` was
+   * measured, so an operator UI can highlight the actionable region of a
+   * failing edge. `null` whenever `nearestNonBleedPx` is `null`.
+   */
+  violatingPositionPx: number | null;
 }
 
 export interface RigidSignFitToProductionEvidence {

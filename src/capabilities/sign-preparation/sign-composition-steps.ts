@@ -546,6 +546,129 @@ export function applyReplaceRegionWithBackground(
 }
 
 // ---------------------------------------------------------------------------
+// measureUniformSurroundingBackground — Operator Production Correction UX
+// (Smart Remove): auto-MEASURES a candidate replacement colour from the
+// context ring around an operator-selected rectangle, rather than requiring
+// the operator to type RGB values. Built strictly ON TOP of the existing,
+// unweakened `verifyReplaceRegionSurroundingContext` — this never
+// introduces a second tolerance or a looser membership rule; it only adds a
+// MEASUREMENT step in front of the SAME verifier every `replace_region_
+// with_background` step is already gated on.
+// ---------------------------------------------------------------------------
+
+/**
+ * Measures a candidate background colour from the ring immediately
+ * surrounding `[xPx,yPx,widthPx,heightPx]` (the mean of every ring pixel,
+ * out to `contextDepthPx`, clamped to canvas bounds — excluding the
+ * rectangle itself), then re-verifies EVERY ring pixel against that
+ * candidate via `verifyReplaceRegionSurroundingContext` unchanged. Returns
+ * the measured colour only when that verification genuinely passes —
+ * exactly the same "refuses ambiguous/nonuniform background" guarantee
+ * `applyReplaceRegionWithBackground` itself enforces at execution time, now
+ * available BEFORE the operator commits to a colour. Never invents a colour
+ * the surrounding pixels do not actually, uniformly have.
+ */
+export function measureUniformSurroundingBackground(
+  image: RgbaImage,
+  rect: { xPx: number; yPx: number; widthPx: number; heightPx: number },
+  contextDepthPx: number,
+):
+  | { status: "measured"; color: { r: number; g: number; b: number }; context: ReturnType<typeof verifyReplaceRegionSurroundingContext> }
+  | { status: "refused"; detail: string } {
+  const xPx = requireNonNegativeInt(rect.xPx);
+  const yPx = requireNonNegativeInt(rect.yPx);
+  const widthPx = requirePositiveInt(rect.widthPx);
+  const heightPx = requirePositiveInt(rect.heightPx);
+  const depth = requirePositiveInt(contextDepthPx);
+  if (xPx === null || yPx === null || widthPx === null || heightPx === null || depth === null) {
+    return { status: "refused", detail: "The selected rectangle or context depth is not a valid set of whole-pixel bounds." };
+  }
+  if (xPx + widthPx > image.width || yPx + heightPx > image.height) {
+    return { status: "refused", detail: `The selected rectangle [${xPx},${yPx},${widthPx}x${heightPx}] exceeds the ${image.width}x${image.height}px canvas.` };
+  }
+
+  const ringX0 = Math.max(0, xPx - depth);
+  const ringY0 = Math.max(0, yPx - depth);
+  const ringX1 = Math.min(image.width, xPx + widthPx + depth);
+  const ringY1 = Math.min(image.height, yPx + heightPx + depth);
+  let sumR = 0, sumG = 0, sumB = 0, count = 0;
+  for (let y = ringY0; y < ringY1; y++) {
+    const insideRectRow = y >= yPx && y < yPx + heightPx;
+    for (let x = ringX0; x < ringX1; x++) {
+      if (insideRectRow && x >= xPx && x < xPx + widthPx) continue; // inside the rect itself — not context.
+      const i = (y * image.width + x) * 4;
+      sumR += image.data[i]!;
+      sumG += image.data[i + 1]!;
+      sumB += image.data[i + 2]!;
+      count++;
+    }
+  }
+  if (count === 0) {
+    return { status: "refused", detail: "No surrounding context pixels were available to measure (contextDepthPx entirely clipped by canvas bounds)." };
+  }
+  const candidate = { r: Math.round(sumR / count), g: Math.round(sumG / count), b: Math.round(sumB / count) };
+
+  const params: ReplaceRegionWithBackgroundParams = {
+    xPx, yPx, widthPx, heightPx,
+    colorR: candidate.r, colorG: candidate.g, colorB: candidate.b,
+    contextDepthPx: depth,
+  };
+  const context = verifyReplaceRegionSurroundingContext(image.data, image.width, image.height, params);
+  if (!context.uniform) {
+    return {
+      status: "refused",
+      detail:
+        `Background is not uniform enough for safe automatic removal (measured mean rgb(${candidate.r},${candidate.g},${candidate.b}), ` +
+        `but ${context.detail}). Adjust the selection or leave this artwork for review.`,
+    };
+  }
+  return { status: "measured", color: candidate, context };
+}
+
+// ---------------------------------------------------------------------------
+// applyCorrectionsToCanvas — Operator Production Correction UX: applies an
+// ordered sequence of move_region/fill_rect/replace_region_with_background
+// steps directly on top of an ALREADY-COMPOSED canvas (e.g. the current
+// production candidate), reusing the IDENTICAL fold `executeCompositionSteps`
+// itself applies to its own move/fill/replace tail (`baseCanvas` — what
+// move_region's SOURCE band reads, immutable for the whole call — and
+// `working` — the mutable accumulator every step writes into — both start
+// as the SAME candidate pixels). This is not a second implementation of
+// that fold; it is the same functions (`applyMoveRegion`/`applyFillRect`/
+// `applyReplaceRegionWithBackground`), called the same way, so an operator
+// correction preview can never silently disagree with real plan execution
+// about what one of these steps does.
+// ---------------------------------------------------------------------------
+
+export function applyCorrectionsToCanvas(
+  candidate: RgbaImage,
+  steps: SignRepairStep[],
+): SignExecutionResult {
+  if (!steps.every((step) => step.kind === "move_region" || step.kind === "fill_rect" || step.kind === "replace_region_with_background")) {
+    return refuse("Only move_region, fill_rect, and replace_region_with_background may be applied on top of an existing production candidate.");
+  }
+  const baseCanvas = candidate;
+  const working = Buffer.from(candidate.data);
+  for (const step of steps) {
+    let refusal: { status: "refused"; reason: "unsupported_step_kind"; detail: string } | null;
+    if (step.kind === "move_region") {
+      refusal = applyMoveRegion(baseCanvas, working, step);
+    } else if (step.kind === "fill_rect") {
+      refusal = applyFillRect(working, baseCanvas.width, baseCanvas.height, step);
+    } else {
+      refusal = applyReplaceRegionWithBackground(working, baseCanvas.width, baseCanvas.height, step);
+    }
+    if (refusal) return refusal;
+  }
+  const outputImage: RgbaImage = { width: baseCanvas.width, height: baseCanvas.height, data: working };
+  return {
+    status: "executed",
+    image: outputImage,
+    contentBounds: { x: 0, y: 0, width: outputImage.width, height: outputImage.height },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration — the single entry point `sign-transform-executor.ts`
 // delegates a whole composition-primitive step sequence to.
 // ---------------------------------------------------------------------------

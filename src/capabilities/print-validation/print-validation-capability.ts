@@ -2396,5 +2396,10 @@ function buildReport(
     blockingIssues,
     warnings,
     evaluatedAt: new Date().toISOString(),
+    // Operator Production Correction UX: carried straight through from the
+    // caller's own `rigidSign` evidence (never re-measured here) — `null`
+    // outside the rigid_sign_raster profile, or when no analysis was ever
+    // recorded for this plate. See `PrintValidationReport.fitToProductionEvidence`'s own doc.
+    fitToProductionEvidence: input.rigidSign?.fitToProduction ?? null,
   };
 }

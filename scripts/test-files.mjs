@@ -357,6 +357,10 @@ export const TEST_FILES = [
   // Signs Phase 3B (Fit to Production): CUT/SAFE/BLEED/PROTECTED analysis
   // and the replace_region_with_background artifact-removal primitive.
   "src/capabilities/sign-preparation/sign-fit-to-production.test.ts",
+  // Operator Production Correction UX: Smart Remove preview/commit service
+  // — governed plan appending, preview/execution equivalence, Fit to
+  // Production immediate recheck.
+  "src/lib/services/sign-artwork-service.test.ts",
   // Signs Phase 3A: cross-plan Topaz intermediate reconstruction adoption —
   // a re-plan for the SAME sign preparation reuses a sufficient, already-
   // paid-for intermediate from a PRIOR job rather than dispatching a
@@ -400,6 +404,9 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-preparation-operator-copy.test.ts",
   "src/capabilities/sign-preparation/sign-plan-operator-review.test.ts",
   "src/app/internal/projects/[projectId]/sign-authorize/sign-authorize-page-state.test.ts",
+  // Operator Production Correction UX: pointer/CSS -> production-candidate
+  // native pixel coordinate mapping, zoom-invariant, DOM-free.
+  "src/app/internal/projects/[projectId]/sign-authorize/correction-coordinate-mapping.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/original-image/route.test.ts",
   "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",

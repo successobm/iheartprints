@@ -589,11 +589,28 @@ async function resolvePreservationContextUnsafe(
       s.kind === "fill_rect" ||
       s.kind === "replace_region_with_background",
   );
-  if (!usesProviderReconstruction && !usesPerimeterReconstruction && !usesParametricFrameReconstruction) {
+  // Operator Production Correction UX: `usesCompositionPlan` was already
+  // computed (and consumed further below, at `regionMapping`/the source-
+  // similarity check) for exactly this reason — a canvas-first composition
+  // plan needs this same preservation question asked whenever it composes
+  // DIRECTLY from the native source (`reconstruction: null`, a first-class,
+  // documented option on `SignCompositionPlanInput`), not only when it also
+  // happens to adopt a provider reconstruction. Omitting it here meant any
+  // such plan was refused outright before ever reaching the composition-
+  // aware content-region logic below that exists specifically to handle it
+  // — a latent gap `planRequiresSemanticPreservationVerification` (this
+  // module's own mirrored predicate) never had, now closed to match it.
+  if (
+    !usesProviderReconstruction &&
+    !usesPerimeterReconstruction &&
+    !usesParametricFrameReconstruction &&
+    !usesCompositionPlan
+  ) {
     throw new SignPreservationStateError(
       "not_a_reconstructed_sign_asset",
       "Preservation verification only ever applies to a plan whose steps actually require it " +
-        "(reconstruct_resolution, reconstruct_perimeter_structure, or reconstruct_parametric_frame).",
+        "(reconstruct_resolution, reconstruct_perimeter_structure, reconstruct_parametric_frame, " +
+        "or a canvas-first composition primitive).",
     );
   }
 

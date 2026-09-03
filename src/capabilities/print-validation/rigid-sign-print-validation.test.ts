@@ -107,6 +107,7 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
         requiredSafeInsetPx: 20,
         nearestNonBleedPx: 200,
         nearestNonBleedIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+        violatingPositionPx: null,
         result: "pass" as const,
         reason: "test fixture default — comfortably clear",
       })),
@@ -1199,6 +1200,7 @@ describe("Signs Fit to Production → print_ready (Section J)", () => {
       requiredSafeInsetPx: 20,
       nearestNonBleedPx: 200,
       nearestNonBleedIn: 200 / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      violatingPositionPx: null,
       result: "pass" as const,
       reason: "comfortably clear",
     };
@@ -1211,6 +1213,7 @@ describe("Signs Fit to Production → print_ready (Section J)", () => {
       requiredSafeInsetPx: 20,
       nearestNonBleedPx,
       nearestNonBleedIn: nearestNonBleedPx / RIGID_RECT_UP_TO_24X36_V1.targetPpi,
+      violatingPositionPx: 42,
       result: "fail" as const,
       reason: "too close to the cut edge",
     };
@@ -1223,6 +1226,7 @@ describe("Signs Fit to Production → print_ready (Section J)", () => {
       requiredSafeInsetPx: 20,
       nearestNonBleedPx: null,
       nearestNonBleedIn: null,
+      violatingPositionPx: null,
       result: "unknown" as const,
       reason: "no provable bleed colour",
     };

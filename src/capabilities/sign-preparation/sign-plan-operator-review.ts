@@ -82,26 +82,82 @@ export interface SignPlanOperatorProductionStatus {
  * sentence `print-validation-capability.ts`'s own `describeFitToProduction
  * Result` already composed (e.g. "top 94px/0.607in, right 30px/0.194in,
  * bottom (fail, 5px/0.032in)…"), never re-derived or re-measured here.
+ *
+ * Operator Production Correction UX: `edges`, when present, is this
+ * module's own narrow copy of `print-validation`'s `RigidSignFitToProduction
+ * Evidence.edges` — read back from the report's `fitToProductionEvidence`
+ * field (never re-measured; this module never imports `print-validation`,
+ * the same dependency-direction discipline every other field here already
+ * follows) — enough structured, per-edge data for an operator UI to draw a
+ * SAFE-guide/violation overlay without duplicating the analysis.
  */
 export interface SignFitToProductionSummary {
   status: string;
   reason: string;
+  safeInsetIn: number | null;
+  achievedPpiX: number | null;
+  achievedPpiY: number | null;
+  edges: SignFitToProductionEdgeSummary[];
+}
+
+export interface SignFitToProductionEdgeSummary {
+  edge: "top" | "right" | "bottom" | "left";
+  requiredSafeInsetIn: number;
+  requiredSafeInsetPx: number;
+  nearestNonBleedPx: number | null;
+  nearestNonBleedIn: number | null;
+  violatingPositionPx: number | null;
+  result: "pass" | "fail" | "unknown";
+  reason: string;
 }
 
 /**
- * Reads the `protected_content_safe_inset` check's own status/reason back
- * out of a persisted `PrintValidationReport`'s generic `Record<string,
- * unknown>` shape — this module never imports `print-validation` (the same
+ * Reads the `protected_content_safe_inset` check's own status/reason, plus
+ * the report's own `fitToProductionEvidence` structured field, back out of
+ * a persisted `PrintValidationReport`'s generic `Record<string, unknown>`
+ * shape — this module never imports `print-validation` (the same
  * dependency-direction discipline `sign-preservation`'s own duplicated
  * readers already follow). `null` on any malformed/missing shape, never
- * guessed.
+ * guessed; `edges: []` (never fabricated) when the check exists but the
+ * structured evidence does not (e.g. a report persisted before this field
+ * existed).
  */
 function readFitToProductionSummary(report: Record<string, unknown> | null | undefined): SignFitToProductionSummary | null {
   const checks = report?.checks;
   if (!Array.isArray(checks)) return null;
   const raw = (checks as Record<string, unknown>[]).find((c) => c.check === "protected_content_safe_inset");
   if (!raw || typeof raw.status !== "string" || typeof raw.reason !== "string") return null;
-  return { status: raw.status, reason: raw.reason };
+
+  const evidence = report?.fitToProductionEvidence as Record<string, unknown> | null | undefined;
+  const rawEdges = evidence && Array.isArray(evidence.edges) ? (evidence.edges as Record<string, unknown>[]) : [];
+  const edges: SignFitToProductionEdgeSummary[] = rawEdges
+    .filter(
+      (e) =>
+        (e.edge === "top" || e.edge === "right" || e.edge === "bottom" || e.edge === "left") &&
+        typeof e.requiredSafeInsetIn === "number" &&
+        typeof e.requiredSafeInsetPx === "number" &&
+        (e.result === "pass" || e.result === "fail" || e.result === "unknown") &&
+        typeof e.reason === "string",
+    )
+    .map((e) => ({
+      edge: e.edge as SignFitToProductionEdgeSummary["edge"],
+      requiredSafeInsetIn: e.requiredSafeInsetIn as number,
+      requiredSafeInsetPx: e.requiredSafeInsetPx as number,
+      nearestNonBleedPx: typeof e.nearestNonBleedPx === "number" ? e.nearestNonBleedPx : null,
+      nearestNonBleedIn: typeof e.nearestNonBleedIn === "number" ? e.nearestNonBleedIn : null,
+      violatingPositionPx: typeof e.violatingPositionPx === "number" ? e.violatingPositionPx : null,
+      result: e.result as SignFitToProductionEdgeSummary["result"],
+      reason: e.reason as string,
+    }));
+
+  return {
+    status: raw.status,
+    reason: raw.reason,
+    safeInsetIn: evidence && typeof evidence.safeInsetIn === "number" ? evidence.safeInsetIn : null,
+    achievedPpiX: evidence && typeof evidence.achievedPpiX === "number" ? evidence.achievedPpiX : null,
+    achievedPpiY: evidence && typeof evidence.achievedPpiY === "number" ? evidence.achievedPpiY : null,
+    edges,
+  };
 }
 
 async function resolveSignProductionStatus(

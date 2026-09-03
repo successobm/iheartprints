@@ -8,6 +8,7 @@ import { getProjectRepository } from "@/lib/db";
 
 import { SignAuthorizeButton } from "./SignAuthorizeButton";
 import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
+import { SignFitToProductionCorrectionTool } from "./SignFitToProductionCorrectionTool";
 import { SignProductionAction } from "./SignProductionAction";
 import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
 import { SignStructuralLayoutForm } from "./SignStructuralLayoutForm";
@@ -139,6 +140,10 @@ function SignPlanReview({
 
       {review.production.fitToProduction ? (
         <FitToProductionSummary summary={review.production.fitToProduction} />
+      ) : null}
+
+      {review.production.blockedCandidateAssetId && review.production.fitToProduction ? (
+        <SignFitToProductionCorrectionTool projectId={projectId} fitToProduction={review.production.fitToProduction} />
       ) : null}
 
       <section className="flex flex-col gap-1">

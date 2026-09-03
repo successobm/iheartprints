@@ -86,6 +86,18 @@ export interface SignFitToProductionEdgeResult {
   nearestNonBleedIn: number | null;
   result: "pass" | "fail" | "unknown";
   reason: string;
+  /**
+   * Operator Production Correction UX: the along-edge position (column
+   * index for top/bottom, row index for left/right) at which
+   * `nearestNonBleedPx` was measured — i.e. WHERE along the edge the worst
+   * clearance occurs, never WHAT is there (this module still proves no
+   * object identity — see the module doc). `null` whenever `nearestNonBleedPx`
+   * is `null` (pass-by-absence, or `unknown`). Exists solely so an operator
+   * UI can point a highlight at the actionable region of an edge instead of
+   * the edge's entire length — actionable production evidence, not
+   * semantic segmentation.
+   */
+  violatingPositionPx: number | null;
 }
 
 export interface SignFitToProductionResult {
@@ -178,16 +190,18 @@ function analyzeEdge(
     return {
       edge, requiredSafeInsetIn: safeInsetIn, requiredSafeInsetPx,
       bleedColor: null, nearestNonBleedPx: null, nearestNonBleedIn: null,
-      result: "unknown",
+      result: "unknown", violatingPositionPx: null,
       reason: `No provable bleed colour along this edge (dominant-colour coverage ${coverage.toFixed(3)}, below the ${FIT_TO_PRODUCTION_MIN_EDGE_DOMINANT_COVERAGE} minimum) — unknown never becomes safe.`,
     };
   }
 
   let worstClearancePx: number | null = null;
+  let worstPosition: number | null = null;
   for (let i = 0; i < length; i++) {
     const [r0, g0, b0] = pixelAtDepth(image, edge, i, 0);
     if (chebyshev(r0, g0, b0, bleedColor.r, bleedColor.g, bleedColor.b) > FIT_TO_PRODUCTION_TOLERANCE) {
       worstClearancePx = 0;
+      worstPosition = i;
       break; // Already the worst possible clearance — no need to scan further.
     }
     let clearance: number | null = null;
@@ -200,12 +214,14 @@ function analyzeEdge(
     }
     if (clearance !== null && (worstClearancePx === null || clearance < worstClearancePx)) {
       worstClearancePx = clearance;
+      worstPosition = i;
       if (worstClearancePx === 0) break;
     }
   }
 
   const nearestNonBleedPx = worstClearancePx;
   const nearestNonBleedIn = nearestNonBleedPx === null ? null : nearestNonBleedPx / achievedPpi;
+  const violatingPositionPx = nearestNonBleedPx === null ? null : worstPosition;
   const result: SignFitToProductionEdgeResult["result"] =
     nearestNonBleedPx === null || nearestNonBleedPx >= requiredSafeInsetPx ? "pass" : "fail";
   const reason =
@@ -215,7 +231,7 @@ function analyzeEdge(
         ? `Nearest non-bleed content is ${nearestNonBleedPx}px (${nearestNonBleedIn!.toFixed(3)}in) from the cut edge, at or beyond the required ${requiredSafeInsetPx}px (${safeInsetIn}in) safe inset.`
         : `Nearest non-bleed content is only ${nearestNonBleedPx}px (${nearestNonBleedIn!.toFixed(3)}in) from the cut edge, short of the required ${requiredSafeInsetPx}px (${safeInsetIn}in) safe inset.`;
 
-  return { edge, requiredSafeInsetIn: safeInsetIn, requiredSafeInsetPx, bleedColor, nearestNonBleedPx, nearestNonBleedIn, result, reason };
+  return { edge, requiredSafeInsetIn: safeInsetIn, requiredSafeInsetPx, bleedColor, nearestNonBleedPx, nearestNonBleedIn, violatingPositionPx, result, reason };
 }
 
 /**

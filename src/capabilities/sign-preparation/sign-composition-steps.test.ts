@@ -12,6 +12,7 @@ import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import type { SignRepairStep } from "./contracts";
 import { makeImage, fillRect } from "./sign-fixtures";
 import {
+  applyCorrectionsToCanvas,
   applyFillRect,
   applyMoveRegion,
   applyReplaceRegionWithBackground,
@@ -24,6 +25,7 @@ import {
   executeCompositionSteps,
   executeCropRegion,
   executeFitArtworkToCanvas,
+  measureUniformSurroundingBackground,
   verifyReplaceRegionSurroundingContext,
 } from "./sign-composition-steps";
 
@@ -339,5 +341,135 @@ describe("sign-composition-steps: replace_region_with_background (Fit to Product
     assert.equal(result.status, "executed");
     if (result.status !== "executed") return;
     assert.deepEqual(pixelAt(result.image, 20, 20), { r: 200, g: 10, b: 10, a: 255 });
+  });
+});
+
+describe("sign-composition-steps: measureUniformSurroundingBackground (Operator Production Correction UX, Section H)", () => {
+  function canvasWithArtifact(bg: { r: number; g: number; b: number }): RgbaImage {
+    const image = makeImage(100, 100, bg);
+    fillRect(image, 10, 10, 30, 30, { r: 20, g: 20, b: 20 }); // artifact
+    return image;
+  }
+
+  it("measures a uniform red background and proposes it", () => {
+    const image = canvasWithArtifact({ r: 200, g: 10, b: 10 });
+    const result = measureUniformSurroundingBackground(image, { xPx: 5, yPx: 5, widthPx: 30, heightPx: 30 }, 4);
+    assert.equal(result.status, "measured");
+    if (result.status !== "measured") return;
+    assert.deepEqual(result.color, { r: 200, g: 10, b: 10 });
+  });
+
+  it("measures a uniform white background and proposes it", () => {
+    const image = canvasWithArtifact({ r: 253, g: 253, b: 253 });
+    const result = measureUniformSurroundingBackground(image, { xPx: 5, yPx: 5, widthPx: 30, heightPx: 30 }, 4);
+    assert.equal(result.status, "measured");
+    if (result.status !== "measured") return;
+    assert.deepEqual(result.color, { r: 253, g: 253, b: 253 });
+  });
+
+  it("refuses when the selection is too tight and its own ring still straddles the artifact boundary (nonuniform context)", () => {
+    const image = canvasWithArtifact({ r: 200, g: 10, b: 10 });
+    // A tiny rect well inside the 20x20 artifact (10..29,10..29), with a
+    // context depth deep enough that the ring extends PAST the artifact's
+    // own edge into the genuine red background — mixing the artifact's own
+    // black with the true background, which is never uniform.
+    const result = measureUniformSurroundingBackground(image, { xPx: 12, yPx: 12, widthPx: 10, heightPx: 10 }, 10);
+    assert.equal(result.status, "refused");
+  });
+
+  it("refuses across a genuinely multi-colour structural boundary (never averages across it)", () => {
+    // Left half red, right half white — no single uniform colour exists in
+    // a ring straddling the boundary.
+    const image = makeImage(100, 100, { r: 200, g: 10, b: 10 });
+    fillRect(image, 50, 0, 100, 100, { r: 253, g: 253, b: 253 });
+    const result = measureUniformSurroundingBackground(image, { xPx: 40, yPx: 40, widthPx: 20, heightPx: 20 }, 10);
+    assert.equal(result.status, "refused");
+  });
+
+  it("never proposes a colour that would overwrite neighbouring protected artwork — exact rect bounds only", () => {
+    const image = canvasWithArtifact({ r: 200, g: 10, b: 10 });
+    // A second, separate artifact well away from the selection — must not
+    // affect measurement or be touched by it.
+    fillRect(image, 70, 70, 90, 90, { r: 30, g: 140, b: 30 });
+    const result = measureUniformSurroundingBackground(image, { xPx: 5, yPx: 5, widthPx: 30, heightPx: 30 }, 4);
+    assert.equal(result.status, "measured");
+    if (result.status !== "measured") return;
+    assert.deepEqual(result.color, { r: 200, g: 10, b: 10 });
+    assert.deepEqual(pixelAt(image, 80, 80), { r: 30, g: 140, b: 30, a: 255 }); // untouched — measurement never writes.
+  });
+
+  it("refuses an out-of-bounds selection", () => {
+    const image = makeImage(50, 50, { r: 0, g: 0, b: 0 });
+    const result = measureUniformSurroundingBackground(image, { xPx: 45, yPx: 45, widthPx: 20, heightPx: 20 }, 4);
+    assert.equal(result.status, "refused");
+  });
+});
+
+describe("sign-composition-steps: applyCorrectionsToCanvas (Operator Production Correction UX, Section L)", () => {
+  it("applies a single replace_region_with_background on top of an already-composed candidate", () => {
+    const candidate = makeImage(100, 100, { r: 200, g: 10, b: 10 });
+    fillRect(candidate, 10, 10, 30, 30, { r: 20, g: 20, b: 20 });
+    const s = step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+      xPx: 5, yPx: 5, widthPx: 30, heightPx: 30, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+    }));
+    const result = applyCorrectionsToCanvas(candidate, [s]);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.deepEqual(pixelAt(result.image, 20, 20), { r: 200, g: 10, b: 10, a: 255 });
+    // The ORIGINAL candidate buffer is never mutated in place.
+    assert.deepEqual(pixelAt(candidate, 20, 20), { r: 20, g: 20, b: 20, a: 255 });
+  });
+
+  it("applies a move_region on top of an already-composed candidate, reading its source band from the candidate itself", () => {
+    const candidate = makeImage(20, 40, { r: 0, g: 0, b: 0 });
+    fillRect(candidate, 0, 0, 20, 10, { r: 250, g: 0, b: 0 }); // band A: rows 0-9
+    const s = step("move_region", encodeMoveRegionParams({ sourceStartYPx: 0, heightPx: 10, destStartYPx: 20 }));
+    const result = applyCorrectionsToCanvas(candidate, [s]);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.deepEqual(pixelAt(result.image, 5, 25), { r: 250, g: 0, b: 0, a: 255 }); // moved to new destination.
+    assert.deepEqual(pixelAt(result.image, 5, 5), { r: 250, g: 0, b: 0, a: 255 }); // source band untouched (byte copy, not a cut).
+  });
+
+  it("chains multiple new corrections in order — a second replace sees the first's own already-applied result", () => {
+    const candidate = makeImage(100, 100, { r: 200, g: 10, b: 10 });
+    fillRect(candidate, 10, 10, 20, 20, { r: 20, g: 20, b: 20 }); // artifact 1
+    fillRect(candidate, 60, 60, 70, 70, { r: 20, g: 20, b: 20 }); // artifact 2
+    const steps: SignRepairStep[] = [
+      step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+        xPx: 8, yPx: 8, widthPx: 14, heightPx: 14, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      })),
+      step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+        xPx: 58, yPx: 58, widthPx: 14, heightPx: 14, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      })),
+    ];
+    const result = applyCorrectionsToCanvas(candidate, steps);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.deepEqual(pixelAt(result.image, 15, 15), { r: 200, g: 10, b: 10, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 65, 65), { r: 200, g: 10, b: 10, a: 255 });
+  });
+
+  it("refuses (never partially applies) when a later correction in the batch is unsafe", () => {
+    const candidate = makeImage(100, 100, { r: 200, g: 10, b: 10 });
+    fillRect(candidate, 10, 10, 30, 30, { r: 20, g: 20, b: 20 });
+    const steps: SignRepairStep[] = [
+      step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+        xPx: 5, yPx: 5, widthPx: 30, heightPx: 30, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      })),
+      // Bogus rectangle exceeding canvas bounds.
+      step("replace_region_with_background", encodeReplaceRegionWithBackgroundParams({
+        xPx: 95, yPx: 95, widthPx: 20, heightPx: 20, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      })),
+    ];
+    const result = applyCorrectionsToCanvas(candidate, steps);
+    assert.equal(result.status, "refused");
+  });
+
+  it("refuses a legacy (non-composition) step kind — only move/fill/replace are admitted on top of an existing candidate", () => {
+    const candidate = makeImage(50, 50, { r: 0, g: 0, b: 0 });
+    const s = step("extend_uniform_background", { axis: "vertical", leadingPx: 1, trailingPx: 1, colorR: 0, colorG: 0, colorB: 0 });
+    const result = applyCorrectionsToCanvas(candidate, [s]);
+    assert.equal(result.status, "refused");
   });
 });

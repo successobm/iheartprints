@@ -90,12 +90,14 @@ export {
   loadSignPlanOperatorReview,
   type SignPlanOperatorReview,
   type SignPlanOperatorProductionStatus,
+  type SignFitToProductionEdgeSummary,
   type SignFitToProductionSummary,
 } from "./sign-plan-operator-review";
 // Signs Phase 3B (Canvas-First Correction).
 export {
   COMPOSITION_STEP_KINDS,
   REPLACE_REGION_CONTEXT_TOLERANCE,
+  applyCorrectionsToCanvas,
   applyFillRect,
   applyMoveRegion,
   applyReplaceRegionWithBackground,
@@ -114,6 +116,7 @@ export {
   executeCropRegion,
   executeFitArtworkToCanvas,
   isCompositionStepKind,
+  measureUniformSurroundingBackground,
   verifyReplaceRegionSurroundingContext,
   type CropRegionParams,
   type FillRectParams,
@@ -123,7 +126,9 @@ export {
 } from "./sign-composition-steps";
 export {
   buildSignCompositionPlan,
+  decodeSignCompositionPlanToOperatorChoices,
   type SignCompositionCropInput,
+  type SignCompositionDecodedChoices,
   type SignCompositionFillInput,
   type SignCompositionMoveInput,
   type SignCompositionPlanBuildResult,

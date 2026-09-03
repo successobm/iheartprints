@@ -9,7 +9,11 @@ import { describe, it } from "node:test";
 
 import { RIGID_SIGN_CATEGORY, type SignProductionSpec } from "./contracts";
 import { RIGID_RECT_UP_TO_24X36_V1 } from "./resolution-policy";
-import { buildSignCompositionPlan, type SignCompositionPlanInput } from "./sign-composition-plan-builder";
+import {
+  buildSignCompositionPlan,
+  decodeSignCompositionPlanToOperatorChoices,
+  type SignCompositionPlanInput,
+} from "./sign-composition-plan-builder";
 
 function baseSpec(): SignProductionSpec {
   return {
@@ -183,5 +187,82 @@ describe("buildSignCompositionPlan: replace_region_with_background governance", 
     const lastMoveOrFillIndex = Math.max(kinds.lastIndexOf("move_region"), kinds.lastIndexOf("fill_rect"));
     const replacementIndex = kinds.indexOf("replace_region_with_background");
     assert.ok(replacementIndex > lastMoveOrFillIndex);
+  });
+});
+
+describe("decodeSignCompositionPlanToOperatorChoices (Operator Production Correction UX, Section K)", () => {
+  it("round-trips: decoding a built plan and rebuilding through buildSignCompositionPlan reproduces an identical planKey", () => {
+    const input = baseInput({
+      moves: [{ sourceStartYPx: 0, heightPx: 100, destStartYPx: 50 }],
+      fills: [{ xPx: 0, yPx: 0, widthPx: 10, heightPx: 10, color: { r: 255, g: 255, b: 255 } }],
+      replacements: [{ xPx: 20, yPx: 20, widthPx: 30, heightPx: 30, color: { r: 200, g: 10, b: 10 }, contextDepthPx: 5 }],
+    });
+    const built = buildSignCompositionPlan(input);
+    assert.equal(built.status, "built");
+    if (built.status !== "built") return;
+
+    const decoded = decodeSignCompositionPlanToOperatorChoices(built.plan);
+    assert.ok(decoded, "a canvas-first plan must always decode successfully");
+    if (!decoded) return;
+
+    const rebuilt = buildSignCompositionPlan(baseInput({
+      reconstruction: decoded.reconstruction,
+      crop: decoded.crop,
+      fitBackground: decoded.fitBackground,
+      fitPlacement: decoded.fitPlacement,
+      moves: decoded.moves,
+      fills: decoded.fills,
+      replacements: decoded.replacements,
+    }));
+    assert.equal(rebuilt.status, "built");
+    if (rebuilt.status !== "built") return;
+    assert.equal(rebuilt.plan.planKey, built.plan.planKey);
+  });
+
+  it("appending a NEW correction to decoded choices changes the planKey — governance (Section K)", () => {
+    const built = buildSignCompositionPlan(baseInput());
+    assert.equal(built.status, "built");
+    if (built.status !== "built") return;
+    const decoded = decodeSignCompositionPlanToOperatorChoices(built.plan);
+    assert.ok(decoded);
+    if (!decoded) return;
+
+    const corrected = buildSignCompositionPlan(baseInput({
+      reconstruction: decoded.reconstruction,
+      crop: decoded.crop,
+      fitBackground: decoded.fitBackground,
+      fitPlacement: decoded.fitPlacement,
+      moves: decoded.moves,
+      fills: decoded.fills,
+      replacements: [
+        ...decoded.replacements,
+        { xPx: 5, yPx: 5, widthPx: 20, heightPx: 20, color: { r: 250, g: 250, b: 250 }, contextDepthPx: 6 },
+      ],
+    }));
+    assert.equal(corrected.status, "built");
+    if (corrected.status !== "built") return;
+    assert.notEqual(corrected.plan.planKey, built.plan.planKey);
+  });
+
+  it("refuses to decode a plan that is not the canvas-first shape (e.g. legacy step vocabulary)", () => {
+    const plan = {
+      schemaVersion: "sign-repair-plan:v1" as const,
+      policyId: RIGID_RECT_UP_TO_24X36_V1.id,
+      sourceAssetId: "asset-1",
+      sourceSha256: "a".repeat(64),
+      sourceWidthPx: 1000,
+      sourceHeightPx: 1500,
+      orderedWidthIn: 24,
+      orderedHeightIn: 36,
+      steps: [{ kind: "extend_uniform_background" as const, params: { axis: "vertical", leadingPx: 1, trailingPx: 1, colorR: 0, colorG: 0, colorB: 0 }, risk: "review_required" as const, reasons: [] }],
+      expectedOutputWidthPx: 1000,
+      expectedOutputHeightPx: 1500,
+      expectedEffectivePpi: 41.6,
+      overallRisk: "review_required" as const,
+      defects: [],
+      reasons: [],
+      planKey: "irrelevant-for-this-test",
+    };
+    assert.equal(decodeSignCompositionPlanToOperatorChoices(plan), null);
   });
 });

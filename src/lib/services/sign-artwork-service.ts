@@ -23,14 +23,30 @@
  * as every other cross-capability orchestration in this file's siblings.
  */
 
+import { decodePngUpload } from "@/capabilities/artwork-preparation/image-decode";
 import { getCapabilityGraph } from "@/capabilities/composition";
 import type {
   ExhaustedSignProviderResultRecovery,
   SignPostProviderResumeResult,
 } from "@/capabilities/final-artwork-worker";
-import { describeSignPlanForCustomer, type SignCompositionOperatorInput } from "@/capabilities/sign-preparation";
+import {
+  analyzeSignFitToProduction,
+  applyCorrectionsToCanvas,
+  decodeSignCompositionPlanToOperatorChoices,
+  describeSignPlanForCustomer,
+  encodeMoveRegionParams,
+  encodeReplaceRegionWithBackgroundParams,
+  encodeSignPlate,
+  getSignResolutionPolicyById,
+  measureUniformSurroundingBackground,
+  type SignCompositionOperatorInput,
+  type SignFitToProductionResult,
+  type SignRepairPlan,
+  type SignRepairStep,
+} from "@/capabilities/sign-preparation";
 import type { SignOperatorRegionBoundary } from "@/capabilities/sign-preparation/sign-operator-structural-override";
 import { loadSignPlanOperatorReview, type SignPlanOperatorReview } from "@/capabilities/sign-preparation/sign-plan-operator-review";
+import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import type { FinalArtworkJobStatus } from "@/lib/domain/types";
 import { getProjectRepository } from "@/lib/db";
 import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
@@ -345,6 +361,327 @@ export async function getSignProductionArtworkDownload(
       mimeType,
     }),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Operator Production Correction UX: "Smart Remove" / "Move" corrections —
+// preview (fast, in-memory, never persisted, never dispatches Topaz) and
+// commit (governed: appends to the plan's own moves/replacements and
+// rebuilds through the SAME `buildSignCompositionPlan` every other
+// canvas-first plan uses, producing a new, independently re-authorizable
+// planKey — Section K governance).
+// ---------------------------------------------------------------------------
+
+/**
+ * One operator-selected correction, in the CURRENT production candidate's
+ * own pixel coordinate space (never browser/CSS coordinates — the client
+ * is responsible for that mapping before ever calling this service).
+ *
+ * `"remove"` colour is deliberately NOT supplied by the caller — the
+ * surrounding background is always independently MEASURED server-side
+ * (`measureUniformSurroundingBackground`), exactly the "system
+ * independently examines surrounding background" requirement. `"move"`
+ * mirrors the existing `SignCompositionPlanForm` numeric move fieldset
+ * exactly (full canvas-width horizontal bands only, V1).
+ */
+export type PendingSignCorrection =
+  | { kind: "remove"; xPx: number; yPx: number; widthPx: number; heightPx: number; contextDepthPx: number }
+  | { kind: "move"; sourceStartYPx: number; heightPx: number; destStartYPx: number };
+
+export interface SignCorrectionPreviewResult {
+  /**
+   * `"no_candidate"` — nothing to correct right now (no blocked candidate
+   * exists; e.g. the plan already reads `print_ready`, or no job has
+   * completed yet). `"refused"` — one correction (`failingIndex`) could not
+   * be safely applied; every correction BEFORE it was still applied and is
+   * reflected in the preview/`fitToProduction` below. `"previewed"` — every
+   * correction applied.
+   */
+  status: "no_candidate" | "refused" | "previewed";
+  appliedCount: number;
+  /** One entry per corrections[0..appliedCount), `null` for a "move" entry. */
+  measuredColors: ({ r: number; g: number; b: number } | null)[];
+  failingIndex: number | null;
+  failingDetail: string | null;
+  /** Base64 PNG (no data: prefix), cropped to the affected area at full native resolution — never the whole multi-megapixel canvas. `null` alongside `"no_candidate"`. */
+  beforeCropPngBase64: string | null;
+  afterCropPngBase64: string | null;
+  cropBounds: { xPx: number; yPx: number; widthPx: number; heightPx: number } | null;
+  /**
+   * Fit to Production, recomputed against the FULL corrected canvas (not
+   * merely the crop) — Section M's "immediate recheck" — reflecting exactly
+   * the corrections successfully applied (`appliedCount`), never the ones
+   * past a refusal. `null` alongside `"no_candidate"`.
+   */
+  fitToProduction: SignFitToProductionResult | null;
+}
+
+/** Padding (px), each side, around the corrections' own bounding box for the before/after preview crop — generous enough to show real surrounding context without transferring the whole canvas. */
+const CORRECTION_PREVIEW_CROP_PAD_PX = 150;
+
+function cropRgbaImage(image: RgbaImage, x0: number, y0: number, x1: number, y1: number): RgbaImage {
+  const width = Math.max(1, x1 - x0);
+  const height = Math.max(1, y1 - y0);
+  const data = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const srcStart = ((y0 + y) * image.width + x0) * 4;
+    const destStart = y * width * 4;
+    image.data.copy(data, destStart, srcStart, srcStart + width * 4);
+  }
+  return { width, height, data };
+}
+
+async function resolveCurrentCandidateImage(
+  projectId: string,
+): Promise<{ image: RgbaImage; orderedWidthIn: number; orderedHeightIn: number; minimumSafeInsetIn: number } | null> {
+  const graph = getCapabilityGraph();
+  const candidate = await graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+  if (!candidate) return null;
+  const downloaded = await graph.assets.downloadAssetBytes(candidate.assetId);
+  if (!downloaded) return null;
+
+  const preparation = await graph.signPreparation.getSignPreparation(projectId);
+  if (!preparation || preparation.orderedWidthIn === null || preparation.orderedHeightIn === null || !preparation.resolutionPolicyId) {
+    return null;
+  }
+  const policy = getSignResolutionPolicyById(preparation.resolutionPolicyId);
+  if (!policy) return null;
+
+  const decoded = decodePngUpload(downloaded.bytes);
+  return {
+    image: decoded.image,
+    orderedWidthIn: preparation.orderedWidthIn,
+    orderedHeightIn: preparation.orderedHeightIn,
+    minimumSafeInsetIn: policy.minimumSafeInsetIn,
+  };
+}
+
+function buildCorrectionStep(correction: PendingSignCorrection, measuredColor: { r: number; g: number; b: number } | null): SignRepairStep {
+  if (correction.kind === "move") {
+    return {
+      kind: "move_region",
+      params: encodeMoveRegionParams({
+        sourceStartYPx: correction.sourceStartYPx,
+        heightPx: correction.heightPx,
+        destStartYPx: correction.destStartYPx,
+      }),
+      risk: "review_required",
+      reasons: ["Operator Production Correction UX: operator-selected move, resolving a Fit to Production safe-inset violation."],
+    };
+  }
+  const color = measuredColor!;
+  return {
+    kind: "replace_region_with_background",
+    params: encodeReplaceRegionWithBackgroundParams({
+      xPx: correction.xPx,
+      yPx: correction.yPx,
+      widthPx: correction.widthPx,
+      heightPx: correction.heightPx,
+      colorR: color.r,
+      colorG: color.g,
+      colorB: color.b,
+      contextDepthPx: correction.contextDepthPx,
+    }),
+    risk: "review_required",
+    reasons: ["Operator Production Correction UX: operator-selected Smart Remove, background independently measured before removal."],
+  };
+}
+
+/**
+ * Fast, in-memory, NEVER-persisted preview of one or more operator
+ * corrections applied on top of the CURRENT blocked production candidate —
+ * zero writes, zero new assets, zero Topaz calls (no reconstruction step is
+ * ever touched; this operates on the already-produced candidate's own
+ * pixels). Applies each correction in order using the IDENTICAL primitives
+ * (`measureUniformSurroundingBackground`, `applyCorrectionsToCanvas`) real
+ * commit/execution uses — Section L: preview and execution never disagree
+ * about what a correction does.
+ *
+ * A `"move"` correction's SOURCE band is read from whatever the PRECEDING
+ * correction in this same batch already produced (never the ORIGINAL,
+ * pre-batch candidate) — a documented, narrow preview-only approximation
+ * that only matters if a second new move in the same batch targets a band
+ * an earlier new move/remove in the SAME batch already touched. It never
+ * affects the actual committed/executed result: `commitSignCorrections`
+ * rebuilds the plan and the real worker always replays the FULL step
+ * sequence from the TRUE original source, exactly as it already does for
+ * every other canvas-first plan.
+ */
+export async function previewSignCorrections(
+  projectId: string,
+  corrections: PendingSignCorrection[],
+): Promise<SignCorrectionPreviewResult> {
+  const empty: SignCorrectionPreviewResult = {
+    status: "no_candidate",
+    appliedCount: 0,
+    measuredColors: [],
+    failingIndex: null,
+    failingDetail: null,
+    beforeCropPngBase64: null,
+    afterCropPngBase64: null,
+    cropBounds: null,
+    fitToProduction: null,
+  };
+  if (corrections.length === 0) return empty;
+
+  const resolved = await resolveCurrentCandidateImage(projectId);
+  if (!resolved) return empty;
+  const { image: original, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn } = resolved;
+
+  let workingImage: RgbaImage = original;
+  const measuredColors: ({ r: number; g: number; b: number } | null)[] = [];
+  let appliedCount = 0;
+  let failingIndex: number | null = null;
+  let failingDetail: string | null = null;
+  let bx0 = original.width, by0 = original.height, bx1 = 0, by1 = 0;
+  const extend = (x0: number, y0: number, x1: number, y1: number) => {
+    bx0 = Math.min(bx0, x0); by0 = Math.min(by0, y0);
+    bx1 = Math.max(bx1, x1); by1 = Math.max(by1, y1);
+  };
+
+  for (let i = 0; i < corrections.length; i++) {
+    const correction = corrections[i]!;
+    let measuredColor: { r: number; g: number; b: number } | null = null;
+    if (correction.kind === "remove") {
+      const measured = measureUniformSurroundingBackground(
+        workingImage,
+        { xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx },
+        correction.contextDepthPx,
+      );
+      if (measured.status === "refused") {
+        failingIndex = i;
+        failingDetail = measured.detail;
+        break;
+      }
+      measuredColor = measured.color;
+      extend(correction.xPx, correction.yPx, correction.xPx + correction.widthPx, correction.yPx + correction.heightPx);
+    } else {
+      extend(0, correction.sourceStartYPx, original.width, correction.sourceStartYPx + correction.heightPx);
+      extend(0, correction.destStartYPx, original.width, correction.destStartYPx + correction.heightPx);
+    }
+
+    const step = buildCorrectionStep(correction, measuredColor);
+    const result = applyCorrectionsToCanvas(workingImage, [step]);
+    if (result.status === "refused") {
+      failingIndex = i;
+      failingDetail = result.detail;
+      break;
+    }
+    workingImage = result.image;
+    measuredColors.push(measuredColor);
+    appliedCount++;
+  }
+
+  const fitToProduction = analyzeSignFitToProduction(workingImage, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn);
+
+  let beforeCropPngBase64: string | null = null;
+  let afterCropPngBase64: string | null = null;
+  let cropBounds: SignCorrectionPreviewResult["cropBounds"] = null;
+  if (bx1 > bx0 && by1 > by0) {
+    const x0 = Math.max(0, bx0 - CORRECTION_PREVIEW_CROP_PAD_PX);
+    const y0 = Math.max(0, by0 - CORRECTION_PREVIEW_CROP_PAD_PX);
+    const x1 = Math.min(original.width, bx1 + CORRECTION_PREVIEW_CROP_PAD_PX);
+    const y1 = Math.min(original.height, by1 + CORRECTION_PREVIEW_CROP_PAD_PX);
+    beforeCropPngBase64 = encodeSignPlate(cropRgbaImage(original, x0, y0, x1, y1)).toString("base64");
+    afterCropPngBase64 = encodeSignPlate(cropRgbaImage(workingImage, x0, y0, x1, y1)).toString("base64");
+    cropBounds = { xPx: x0, yPx: y0, widthPx: x1 - x0, heightPx: y1 - y0 };
+  }
+
+  return {
+    status: failingIndex !== null ? "refused" : "previewed",
+    appliedCount,
+    measuredColors,
+    failingIndex,
+    failingDetail,
+    beforeCropPngBase64,
+    afterCropPngBase64,
+    cropBounds,
+    fitToProduction,
+  };
+}
+
+/**
+ * Governed commit: reconstructs the CURRENT plan's own operator choices
+ * (`decodeSignCompositionPlanToOperatorChoices`), appends the new
+ * corrections to its `moves`/`replacements` arrays, and rebuilds through
+ * the UNCHANGED `buildSignCompositionPlan`/`confirmSignCompositionPlan` —
+ * producing a new, independently re-authorizable plan/planKey (Section K:
+ * "changing... must change the appropriate plan identity"; old
+ * authorization can never authorize this new plan). No direct final-image
+ * mutation, no manual DB mutation — the ONLY persisted artifact is a new
+ * canvas-first plan, replayed for real by the ordinary, unmodified worker
+ * exactly like every other one.
+ */
+export async function commitSignCorrections(
+  projectId: string,
+  corrections: PendingSignCorrection[],
+): Promise<SignPlanOperatorReview> {
+  if (corrections.length === 0) {
+    throw new SignArtworkBridgeError("No corrections were supplied to commit.");
+  }
+  const graph = getCapabilityGraph();
+  const preparation = await graph.signPreparation.getSignPreparation(projectId);
+  if (!preparation || !preparation.plan) {
+    throw new SignArtworkBridgeError("This project has no current composition plan to correct.");
+  }
+  const currentPlan = preparation.plan as unknown as SignRepairPlan;
+  const choices = decodeSignCompositionPlanToOperatorChoices(currentPlan);
+  if (!choices) {
+    throw new SignArtworkBridgeError(
+      "This artwork's current plan is not in the canvas-first shape the correction tool can edit.",
+    );
+  }
+
+  const resolved = await resolveCurrentCandidateImage(projectId);
+  if (!resolved) {
+    throw new SignArtworkBridgeError("There is no current production candidate to correct.");
+  }
+  let workingImage: RgbaImage = resolved.image;
+
+  const moves = [...choices.moves];
+  const replacements = [...choices.replacements];
+
+  for (const correction of corrections) {
+    let measuredColor: { r: number; g: number; b: number } | null = null;
+    if (correction.kind === "remove") {
+      const measured = measureUniformSurroundingBackground(
+        workingImage,
+        { xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx },
+        correction.contextDepthPx,
+      );
+      if (measured.status === "refused") {
+        throw new SignArtworkBridgeError(measured.detail);
+      }
+      measuredColor = measured.color;
+      replacements.push({
+        xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx,
+        color: measuredColor, contextDepthPx: correction.contextDepthPx,
+      });
+    } else {
+      moves.push({ sourceStartYPx: correction.sourceStartYPx, heightPx: correction.heightPx, destStartYPx: correction.destStartYPx });
+    }
+
+    const step = buildCorrectionStep(correction, measuredColor);
+    const result = applyCorrectionsToCanvas(workingImage, [step]);
+    if (result.status === "refused") {
+      throw new SignArtworkBridgeError(result.detail);
+    }
+    workingImage = result.image;
+  }
+
+  const input: SignCompositionOperatorInput = {
+    reconstruction: choices.reconstruction,
+    crop: choices.crop,
+    fitBackground: choices.fitBackground,
+    fitPlacement: choices.fitPlacement,
+    moves,
+    fills: choices.fills,
+    replacements,
+  };
+
+  await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
+  const repo = getProjectRepository();
+  return loadSignPlanOperatorReview(repo, projectId);
 }
 
 export interface SignBlockedProductionCandidateDownload {

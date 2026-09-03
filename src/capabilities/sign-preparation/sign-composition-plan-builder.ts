@@ -33,6 +33,11 @@ import { buildSignProductionTemplate } from "./sign-production-template";
 import { computeSignPlanKey } from "./sign-plan-identity";
 import type { SignResolutionPolicy } from "./resolution-policy";
 import {
+  decodeCropRegionParams,
+  decodeFillRectParams,
+  decodeFitArtworkToCanvasParams,
+  decodeMoveRegionParams,
+  decodeReplaceRegionWithBackgroundParams,
   deriveUniformFitDimensions,
   encodeCropRegionParams,
   encodeFillRectParams,
@@ -304,4 +309,96 @@ export function buildSignCompositionPlan(input: SignCompositionPlanInput): SignC
   };
   const planKey = computeSignPlanKey(planWithoutKey);
   return { status: "built", plan: { ...planWithoutKey, planKey } };
+}
+
+/**
+ * Operator Production Correction UX: the exact inverse of the construction
+ * above — decodes an EXISTING canvas-first plan's own `steps[]` back into
+ * the operator-choice shape that built it (`reconstruction`/`crop`/
+ * `fitBackground`/`fitPlacement`/`moves`/`fills`/`replacements`). Exists so
+ * a NEW correction (an operator-selected `move_region`/
+ * `replace_region_with_background`) can be appended to a plan's EXISTING
+ * choices and the whole thing rebuilt through `buildSignCompositionPlan`
+ * again — producing a new, independently re-authorizable plan/planKey
+ * (Section K governance) — rather than requiring the operator to re-enter
+ * every crop/fit/move/fill decision from scratch.
+ *
+ * `null` when `plan.steps` is not in the canvas-first shape this decoder
+ * understands (`[reconstruct_resolution?] [crop_region?] fit_artwork_to_canvas
+ * (move_region|fill_rect)* (replace_region_with_background)*`) — e.g. a
+ * historical plan built by the automatic `planSignRepair`/`sign-repair-
+ * planner.ts` path, which uses an entirely different step vocabulary. Never
+ * guesses; the caller must treat `null` as "this plan cannot be edited by
+ * the correction tool", not as an empty set of choices.
+ */
+export interface SignCompositionDecodedChoices {
+  reconstruction: SignCompositionReconstructionInput | null;
+  crop: SignCompositionCropInput | null;
+  fitBackground: { r: number; g: number; b: number };
+  fitPlacement: { xPx: number; yPx: number } | null;
+  moves: SignCompositionMoveInput[];
+  fills: SignCompositionFillInput[];
+  replacements: SignCompositionReplacementInput[];
+}
+
+export function decodeSignCompositionPlanToOperatorChoices(
+  plan: SignRepairPlan,
+): SignCompositionDecodedChoices | null {
+  const steps = plan.steps;
+  let index = 0;
+
+  let reconstruction: SignCompositionReconstructionInput | null = null;
+  if (steps[index]?.kind === "reconstruct_resolution") {
+    const p = steps[index]!.params;
+    const requestedScale = p.requestedScale;
+    const requestedWidthPx = p.requestedWidthPx;
+    const requestedHeightPx = p.requestedHeightPx;
+    if (typeof requestedScale !== "number" || typeof requestedWidthPx !== "number" || typeof requestedHeightPx !== "number") {
+      return null;
+    }
+    reconstruction = { requestedScale, requestedWidthPx, requestedHeightPx };
+    index++;
+  }
+
+  let crop: SignCompositionCropInput | null = null;
+  if (steps[index]?.kind === "crop_region") {
+    const p = decodeCropRegionParams(steps[index]!.params);
+    if (!p) return null;
+    crop = { xPx: p.xPx, yPx: p.yPx, widthPx: p.widthPx, heightPx: p.heightPx };
+    index++;
+  }
+
+  if (steps[index]?.kind !== "fit_artwork_to_canvas") return null;
+  const fit = decodeFitArtworkToCanvasParams(steps[index]!.params);
+  if (!fit) return null;
+  const fitBackground = { r: fit.backgroundR, g: fit.backgroundG, b: fit.backgroundB };
+  const fitPlacement = { xPx: fit.placementXPx, yPx: fit.placementYPx };
+  index++;
+
+  const moves: SignCompositionMoveInput[] = [];
+  const fills: SignCompositionFillInput[] = [];
+  const replacements: SignCompositionReplacementInput[] = [];
+  for (; index < steps.length; index++) {
+    const step = steps[index]!;
+    if (step.kind === "move_region") {
+      const p = decodeMoveRegionParams(step.params);
+      if (!p) return null;
+      moves.push(p);
+    } else if (step.kind === "fill_rect") {
+      const p = decodeFillRectParams(step.params);
+      if (!p) return null;
+      fills.push({ xPx: p.xPx, yPx: p.yPx, widthPx: p.widthPx, heightPx: p.heightPx, color: { r: p.colorR, g: p.colorG, b: p.colorB } });
+    } else if (step.kind === "replace_region_with_background") {
+      const p = decodeReplaceRegionWithBackgroundParams(step.params);
+      if (!p) return null;
+      replacements.push({
+        xPx: p.xPx, yPx: p.yPx, widthPx: p.widthPx, heightPx: p.heightPx,
+        color: { r: p.colorR, g: p.colorG, b: p.colorB }, contextDepthPx: p.contextDepthPx,
+      });
+    } else {
+      return null; // Not the canvas-first vocabulary this decoder understands.
+    }
+  }
+
+  return { reconstruction, crop, fitBackground, fitPlacement, moves, fills, replacements };
 }

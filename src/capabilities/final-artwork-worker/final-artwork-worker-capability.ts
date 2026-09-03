@@ -2807,6 +2807,7 @@ export function createFinalArtworkWorkerCapability(
             nearestNonBleedIn: e.nearestNonBleedIn,
             result: e.result,
             reason: e.reason,
+            violatingPositionPx: e.violatingPositionPx,
           })),
         };
       }
