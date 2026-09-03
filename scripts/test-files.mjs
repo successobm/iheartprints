@@ -410,6 +410,11 @@ export const TEST_FILES = [
   // Operator Production Correction UX: pointer/CSS -> production-candidate
   // native pixel coordinate mapping, zoom-invariant, DOM-free.
   "src/app/internal/projects/[projectId]/sign-authorize/correction-coordinate-mapping.test.ts",
+  // Production Workspace Phase: Fit-zoom math and compact-status derivation
+  // — both pulled out of SignFitToProductionCorrectionTool.tsx as pure,
+  // DOM-free functions, same reasoning as coordinate-mapping above.
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-canvas-zoom.test.ts",
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-workspace-status.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/original-image/route.test.ts",
   "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",

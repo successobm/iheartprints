@@ -1,13 +1,14 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 
-import { loadSignPlanOperatorReview, type SignFitToProductionSummary } from "@/capabilities/sign-preparation";
+import { loadSignPlanOperatorReview } from "@/capabilities/sign-preparation";
 import { isInternalAccessConfigured } from "@/lib/config/internal-access-config";
 import { ACQUISITION_SESSION_COOKIE } from "@/lib/http/acquisition-session-cookie";
 import { getProjectRepository } from "@/lib/db";
 
 import { SignAuthorizeButton } from "./SignAuthorizeButton";
 import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
+import { SignCompareOriginal } from "./SignCompareOriginal";
 import { SignFitToProductionCorrectionTool } from "./SignFitToProductionCorrectionTool";
 import { SignProductionAction } from "./SignProductionAction";
 import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
@@ -41,6 +42,12 @@ type PageProps = {
  * Internal Replan Action Phase — "Check this artwork" in the `no_plan`
  * state, for a project not reachable through the original customer's own
  * browser session (see `SignCheckArtworkButton`'s own doc comment).
+ *
+ * Production Workspace Phase: this page's `ready` branch is a wide,
+ * desktop-first production workstation (Section E) — the working canvas is
+ * the dominant visual object, not one of several stacked artwork previews.
+ * The gated non-`ready` states below remain a narrow centered column
+ * deliberately — they are short status/action messages, not a workspace.
  */
 export default async function SignAuthorizePage({ params }: PageProps) {
   const { projectId } = await params;
@@ -61,6 +68,20 @@ export default async function SignAuthorizePage({ params }: PageProps) {
     configured && isInternal ? await loadSignPlanOperatorReview(getProjectRepository(), projectId) : null;
 
   const pageState = resolveSignAuthorizePageState({ configured, isInternal, review });
+
+  if (pageState.kind === "ready") {
+    return (
+      <div className="mx-auto flex max-w-[1680px] flex-col gap-4 px-4 py-6 lg:px-8">
+        <header>
+          <h1 className="text-lg font-semibold text-ink">Sign Production Review</h1>
+          <p className="mt-1 text-sm text-muted">
+            Review this customer&apos;s sign artwork and authorize its production plan.
+          </p>
+        </header>
+        <SignPlanReview projectId={projectId} review={pageState.review} />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-4 py-10">
@@ -95,7 +116,7 @@ export default async function SignAuthorizePage({ params }: PageProps) {
         <p className="text-sm text-ink" data-sign-authorize-no-preparation>
           This project has no sign artwork uploaded yet.
         </p>
-      ) : pageState.kind === "no_plan" ? (
+      ) : (
         <div className="flex flex-col gap-4">
           <p className="text-sm text-ink" data-sign-authorize-no-plan>
             This artwork doesn&apos;t currently have a production plan. Either it hasn&apos;t been planned yet, or the
@@ -103,8 +124,6 @@ export default async function SignAuthorizePage({ params }: PageProps) {
           </p>
           <SignCheckArtworkButton projectId={projectId} />
         </div>
-      ) : (
-        <SignPlanReview projectId={projectId} review={pageState.review} />
       )}
     </div>
   );
@@ -120,108 +139,149 @@ function SignPlanReview({
   const { plan, authorization } = review;
   const isAuthorized = authorization.matchesCurrentPlan && authorization.authorizedBy !== null;
   const canAuthorize = plan.canAuthorize;
+  const hasWorkspace = review.production.blockedCandidateAssetId !== null && review.production.fitToProduction !== null;
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* eslint-disable-next-line @next/next/no-img-element -- internal operator tool, not the customer image pipeline */}
-      <img
-        src={`/api/internal/projects/${projectId}/sign-artwork/original-image`}
-        alt="Customer's uploaded sign artwork"
-        className="w-full rounded-lg border border-ink/10"
-      />
-
-      {review.production.blockedCandidateAssetId ? (
-        <BlockedProductionCandidate
+    <div className="flex flex-col gap-4">
+      {/* Production Workspace Phase (Section F): ONE authoritative working
+          canvas — the current production candidate, with Fit to Production
+          evidence, tools, and actions all beside it. This replaces the
+          earlier permanently-stacked original/blocked-candidate previews;
+          "Compare Original" below covers that need compactly instead. */}
+      {hasWorkspace ? (
+        <SignFitToProductionCorrectionTool
           projectId={projectId}
-          assetId={review.production.blockedCandidateAssetId}
-          validationStatus={review.production.blockedValidationStatus}
+          fitToProduction={review.production.fitToProduction!}
+          orderedWidthIn={review.orderedWidthIn}
+          orderedHeightIn={review.orderedHeightIn}
+          artworkWidthPx={plan.artworkWidthPx}
+          artworkHeightPx={plan.artworkHeightPx}
         />
-      ) : null}
+      ) : (
+        // No blocked production candidate exists yet (nothing has been
+        // prepared, or the current candidate is already print-ready) — the
+        // correction workspace has nothing to operate on. Fall back to a
+        // compact (not full-width) view of the original artwork.
+        // eslint-disable-next-line @next/next/no-img-element -- internal operator tool, not the customer image pipeline
+        <img
+          src={`/api/internal/projects/${projectId}/sign-artwork/original-image`}
+          alt="Customer's uploaded sign artwork"
+          className="max-h-[60vh] w-full max-w-2xl rounded-lg border border-ink/10 object-contain"
+        />
+      )}
 
-      {review.production.fitToProduction ? (
-        <FitToProductionSummary summary={review.production.fitToProduction} />
-      ) : null}
+      <div className="flex flex-wrap items-center gap-3 border-t border-ink/10 pt-3">
+        <SignCompareOriginal projectId={projectId} />
+        {review.production.blockedCandidateAssetId ? (
+          <a
+            href={`/api/internal/projects/${projectId}/sign-artwork/production-candidate`}
+            className="text-sm font-medium text-ink underline"
+            data-sign-authorize-blocked-candidate-download
+          >
+            Download blocked candidate
+          </a>
+        ) : null}
+      </div>
 
-      {review.production.blockedCandidateAssetId && review.production.fitToProduction ? (
-        <SignFitToProductionCorrectionTool projectId={projectId} fitToProduction={review.production.fitToProduction} />
-      ) : null}
+      <details className="rounded-lg border border-ink/10 p-3" open={!hasWorkspace}>
+        <summary className="cursor-pointer select-none text-sm font-semibold text-ink">Production details</summary>
+        <div className="mt-3 flex flex-col gap-4">
+          {review.production.blockedCandidateAssetId ? (
+            <section className="flex flex-col gap-1" data-sign-authorize-blocked-candidate>
+              <h3 className="text-sm font-semibold text-ink">Blocked production candidate</h3>
+              <p className="text-sm font-semibold text-amber-800" data-sign-authorize-blocked-candidate-label>
+                NOT PRINT READY — requires review
+              </p>
+              <p className="text-sm text-ink" data-sign-authorize-blocked-candidate-status>
+                Validation status: {review.production.blockedValidationStatus ?? "unknown"}
+              </p>
+              <p className="text-xs text-muted" data-sign-authorize-blocked-candidate-asset-id>
+                Asset id (internal diagnostics): {review.production.blockedCandidateAssetId}
+              </p>
+            </section>
+          ) : null}
 
-      <section className="flex flex-col gap-1">
-        <h2 className="text-sm font-semibold text-ink">Ordered output</h2>
-        <p className="text-sm text-ink">
-          Sign size
-          <br />
-          {review.orderedWidthIn}&quot; × {review.orderedHeightIn}&quot;
-        </p>
-        <p className="text-sm text-ink">
-          Artwork
-          <br />
-          {plan.artworkWidthPx} × {plan.artworkHeightPx} pixels
-        </p>
-      </section>
+          <section className="flex flex-col gap-1">
+            <h3 className="text-sm font-semibold text-ink">Ordered output</h3>
+            <p className="text-sm text-ink">
+              Sign size
+              <br />
+              {review.orderedWidthIn}&quot; × {review.orderedHeightIn}&quot;
+            </p>
+            <p className="text-sm text-ink">
+              Source artwork (as planned, pre-composition)
+              <br />
+              {plan.artworkWidthPx} × {plan.artworkHeightPx} pixels
+            </p>
+          </section>
 
-      <section className="flex flex-col gap-1">
-        <h2 className="text-sm font-semibold text-ink">Status</h2>
-        <p className="text-sm text-ink" data-sign-authorize-risk-label>
-          {plan.riskLabel}
-        </p>
-      </section>
+          <section className="flex flex-col gap-1">
+            <h3 className="text-sm font-semibold text-ink">Status</h3>
+            <p className="text-sm text-ink" data-sign-authorize-risk-label>
+              {plan.riskLabel}
+            </p>
+          </section>
 
-      {plan.findings.length > 0 ? (
-        <section className="flex flex-col gap-1">
-          <h2 className="text-sm font-semibold text-ink">Production findings</h2>
-          <ul className="list-disc pl-5 text-sm text-ink">
-            {plan.findings.map((finding) => (
-              <li key={finding}>{finding}</li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
+          {plan.findings.length > 0 ? (
+            <section className="flex flex-col gap-1">
+              <h3 className="text-sm font-semibold text-ink">Production findings</h3>
+              <ul className="list-disc pl-5 text-sm text-ink">
+                {plan.findings.map((finding) => (
+                  <li key={finding}>{finding}</li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
 
-      {plan.steps.length > 0 ? (
-        <section className="flex flex-col gap-3">
-          <h2 className="text-sm font-semibold text-ink">Proposed preparation</h2>
-          {plan.steps.map((step, index) => (
-            // Steps carry no stable id; plan order is itself the identity.
-            <div key={index} className="flex flex-col gap-1 rounded-lg border border-ink/10 p-3">
-              <p className="text-sm text-ink">{step.summary}</p>
-              {step.detail ? <p className="text-sm text-muted">{step.detail}</p> : null}
-              {step.needsReview ? (
-                <p className="text-sm text-amber-700" data-sign-authorize-step-review-reason>
-                  Why review is required: {step.reviewReason}
-                </p>
-              ) : null}
-            </div>
-          ))}
-        </section>
-      ) : null}
+          {plan.steps.length > 0 ? (
+            <section className="flex flex-col gap-3">
+              <h3 className="text-sm font-semibold text-ink">Proposed preparation</h3>
+              {plan.steps.map((step, index) => (
+                // Steps carry no stable id; plan order is itself the identity.
+                <div key={index} className="flex flex-col gap-1 rounded-lg border border-ink/10 p-3">
+                  <p className="text-sm text-ink">{step.summary}</p>
+                  {step.detail ? <p className="text-sm text-muted">{step.detail}</p> : null}
+                  {step.needsReview ? (
+                    <p className="text-sm text-amber-700" data-sign-authorize-step-review-reason>
+                      Why review is required: {step.reviewReason}
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+            </section>
+          ) : null}
+        </div>
+      </details>
 
       {!isAuthorized ? (
-        <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
-          <h2 className="text-sm font-semibold text-ink">Structural regions</h2>
-          <p className="text-sm text-muted">
-            When automatic segmentation can&apos;t measure a banner structure, confirm it manually here — this is
-            optional and only changes what the planner considers as evidence; it authorizes nothing on its own.
-          </p>
-          <SignStructuralLayoutForm
-            projectId={projectId}
-            artworkWidthPx={plan.artworkWidthPx}
-            artworkHeightPx={plan.artworkHeightPx}
-            hasExistingOverride={review.operatorStructuralOverridePresent}
-          />
-        </section>
-      ) : null}
+        <details className="rounded-lg border border-ink/10 p-3">
+          <summary className="cursor-pointer select-none text-sm font-semibold text-ink">Plan details</summary>
+          <div className="mt-3 flex flex-col gap-6">
+            <section className="flex flex-col gap-3">
+              <h3 className="text-sm font-semibold text-ink">Structural regions</h3>
+              <p className="text-sm text-muted">
+                When automatic segmentation can&apos;t measure a banner structure, confirm it manually here — this is
+                optional and only changes what the planner considers as evidence; it authorizes nothing on its own.
+              </p>
+              <SignStructuralLayoutForm
+                projectId={projectId}
+                artworkWidthPx={plan.artworkWidthPx}
+                artworkHeightPx={plan.artworkHeightPx}
+                hasExistingOverride={review.operatorStructuralOverridePresent}
+              />
+            </section>
 
-      {!isAuthorized ? (
-        <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
-          <h2 className="text-sm font-semibold text-ink">Canvas-first composition (Phase 3B)</h2>
-          <p className="text-sm text-muted">
-            The ordered spec alone defines the production canvas. Choose an explicit crop, fit placement, band
-            moves, and fill rectangles — never inferred from the artwork&apos;s own perimeter. Building a plan here
-            replaces any existing plan for this artwork with a new, re-authorizable one.
-          </p>
-          <SignCompositionPlanForm projectId={projectId} />
-        </section>
+            <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
+              <h3 className="text-sm font-semibold text-ink">Canvas-first composition (Phase 3B)</h3>
+              <p className="text-sm text-muted">
+                The ordered spec alone defines the production canvas. Choose an explicit crop, fit placement, band
+                moves, and fill rectangles — never inferred from the artwork&apos;s own perimeter. Building a plan
+                here replaces any existing plan for this artwork with a new, re-authorizable one.
+              </p>
+              <SignCompositionPlanForm projectId={projectId} />
+            </section>
+          </div>
+        </details>
       ) : null}
 
       <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
@@ -249,94 +309,5 @@ function SignPlanReview({
         </section>
       ) : null}
     </div>
-  );
-}
-
-/**
- * Blocked Production Candidate Inspection Phase: operator-only visual
- * comparison surface — deliberately rendered ALONGSIDE the original
- * artwork preview above (never replacing it), so an operator can compare
- * ORIGINAL vs. the BLOCKED PRODUCTION CANDIDATE directly. Never claims or
- * implies Print Ready anywhere in its copy. The preview/download both go
- * through the SAME internal-session-gated route
- * (`/api/internal/projects/[projectId]/sign-artwork/production-candidate`)
- * that independently re-resolves and re-verifies the exact validation-
- * bound asset server-side — this component never trusts `assetId` for
- * anything beyond display; the route is the actual authority.
- */
-function BlockedProductionCandidate({
-  projectId,
-  assetId,
-  validationStatus,
-}: {
-  projectId: string;
-  assetId: string;
-  validationStatus: string | null;
-}) {
-  const candidateUrl = `/api/internal/projects/${projectId}/sign-artwork/production-candidate`;
-  return (
-    <section
-      className="flex flex-col gap-3 rounded-lg border border-amber-400 bg-amber-50 p-3"
-      data-sign-authorize-blocked-candidate
-    >
-      <div>
-        <h2 className="text-sm font-semibold text-amber-800">Blocked production candidate</h2>
-        <p className="text-sm font-semibold text-amber-800" data-sign-authorize-blocked-candidate-label>
-          NOT PRINT READY — requires review
-        </p>
-      </div>
-      {/* eslint-disable-next-line @next/next/no-img-element -- internal operator tool, not the customer image pipeline */}
-      <img
-        src={candidateUrl}
-        alt="Blocked production candidate — not print ready, requires review"
-        className="w-full rounded-lg border border-amber-400"
-      />
-      <p className="text-sm text-amber-800" data-sign-authorize-blocked-candidate-status>
-        Validation status: {validationStatus ?? "unknown"}
-      </p>
-      <p className="text-xs text-muted" data-sign-authorize-blocked-candidate-asset-id>
-        Asset id (internal diagnostics): {assetId}
-      </p>
-      <a
-        href={candidateUrl}
-        className="text-sm font-medium text-ink underline"
-        data-sign-authorize-blocked-candidate-download
-      >
-        Download blocked candidate for review
-      </a>
-    </section>
-  );
-}
-
-/**
- * Signs Phase 3B (Fit to Production, Section G): the operator's own
- * CUT/SAFE/BLEED/PROTECTED summary for the current production candidate —
- * reads the SAME `protected_content_safe_inset` PrintValidation check the
- * governed workflow itself blocks Print Ready on, never a second,
- * independent measurement. Accessible labels (not colour alone) so the
- * distinction reads correctly with assistive tech or in monochrome print.
- */
-function FitToProductionSummary({ summary }: { summary: SignFitToProductionSummary }) {
-  const isPass = summary.status === "pass";
-  return (
-    <section
-      className={`flex flex-col gap-2 rounded-lg border p-3 ${isPass ? "border-emerald-400 bg-emerald-50" : "border-red-400 bg-red-50"}`}
-      data-sign-authorize-fit-to-production
-    >
-      <h2 className="text-sm font-semibold text-ink">Fit to Production — safe inset</h2>
-      <p
-        className={`text-sm font-semibold ${isPass ? "text-emerald-800" : "text-red-800"}`}
-        data-sign-authorize-fit-to-production-label
-      >
-        {isPass ? "SAFE — protected content clears the cut edge on every side" : "WARNING — protected content is too close to the cut edge (or could not be proven safe)"}
-      </p>
-      <p className="text-xs text-muted">
-        BLEED backgrounds (banner colour fields) are expected to reach the physical cut edge — that is not a
-        violation. This checks only that meaningful/protected content stays inside the safe margin.
-      </p>
-      <p className="text-sm text-ink" data-sign-authorize-fit-to-production-reason>
-        {summary.reason}
-      </p>
-    </section>
   );
 }
