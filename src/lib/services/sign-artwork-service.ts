@@ -28,7 +28,7 @@ import type {
   ExhaustedSignProviderResultRecovery,
   SignPostProviderResumeResult,
 } from "@/capabilities/final-artwork-worker";
-import { describeSignPlanForCustomer } from "@/capabilities/sign-preparation";
+import { describeSignPlanForCustomer, type SignCompositionOperatorInput } from "@/capabilities/sign-preparation";
 import type { SignOperatorRegionBoundary } from "@/capabilities/sign-preparation/sign-operator-structural-override";
 import { loadSignPlanOperatorReview, type SignPlanOperatorReview } from "@/capabilities/sign-preparation/sign-plan-operator-review";
 import type { FinalArtworkJobStatus } from "@/lib/domain/types";
@@ -159,6 +159,28 @@ export async function confirmOperatorStructuralLayoutForSign(
   const graph = getCapabilityGraph();
   await graph.signPreparation.confirmOperatorStructuralLayout(projectId, regions);
   await graph.signPreparation.planSignRepair(projectId);
+  const repo = getProjectRepository();
+  return loadSignPlanOperatorReview(repo, projectId);
+}
+
+/**
+ * Signs Phase 3B (Canvas-First Correction): builds and persists an
+ * operator-driven canvas-first composition plan
+ * (`SignPreparationCapability.confirmSignCompositionPlan`) — the
+ * counterpart to `confirmOperatorStructuralLayoutForSign` above, but for
+ * the new crop/fit/move/fill vocabulary instead of the legacy automatic
+ * `planSignRepair`. Unlike that two-step (confirm evidence, then
+ * separately re-plan) pattern, `confirmSignCompositionPlan` itself already
+ * builds and persists the plan in one call — nothing further to re-plan.
+ * Returns the refreshed `SignPlanOperatorReview` (internal-only, never the
+ * customer-facing snapshot).
+ */
+export async function confirmSignCompositionPlanForSign(
+  projectId: string,
+  input: SignCompositionOperatorInput,
+): Promise<SignPlanOperatorReview> {
+  const graph = getCapabilityGraph();
+  await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
   const repo = getProjectRepository();
   return loadSignPlanOperatorReview(repo, projectId);
 }

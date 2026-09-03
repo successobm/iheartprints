@@ -146,6 +146,7 @@ import {
   executeSignRepairPlan,
   finalizeSignExecution,
   getSignResolutionPolicyById,
+  isSignCompositionPlan,
   normalizeProviderAlphaOnVerifiedOpaqueSource,
   planContainsOnlyAdmittedSteps,
   planRequiresBoundedReconstruction,
@@ -154,6 +155,7 @@ import {
   SIGN_RECONSTRUCTION_SCALE_CEILING,
   SIGN_REPAIR_PLAN_SCHEMA_VERSION,
   splitPlanAroundReconstruction,
+  verifySignCompositionExecution,
   type ProviderAlphaNormalizationEvidence,
   type SignExecutionBounds,
   type SignExecutionGeometryEvidence,
@@ -2099,6 +2101,28 @@ export function createFinalArtworkWorkerCapability(
       return { outcome: "handled" };
     }
 
+    // --- Signs Phase 3B (Canvas-First Correction): deterministic per-
+    // operation + global verification for a canvas-first composition plan
+    // (Section 15) — a fresh, independent recomputation of the exact same
+    // composition steps against `reconstructedImage` (the alpha-normalized,
+    // post-adoption artwork the steps actually ran against) must reproduce
+    // `finalized.image` byte-for-byte. STOPS here — never persists an
+    // asset, never calls semantic verification — on any failure. A no-op
+    // for every legacy (v1-v3) plan shape, which contains no composition
+    // primitive.
+    if (isSignCompositionPlan({ steps: adaptation.steps })) {
+      const verification = verifySignCompositionExecution(reconstructedImage, plan, finalized.image);
+      if (verification.status !== "pass") {
+        const failedCheck = verification.checks.find((check) => check.status === "fail");
+        await completeWithoutAsset(
+          job,
+          `Deterministic composition verification failed (${failedCheck?.check ?? "unknown"}): ` +
+            `${failedCheck?.detail ?? "no detail recorded"}`,
+        );
+        return { outcome: "handled" };
+      }
+    }
+
     return {
       outcome: "executed",
       image: finalized.image,
@@ -2375,6 +2399,23 @@ export function createFinalArtworkWorkerCapability(
         const execution = executeSignRepairPlan(decoded.image, plan);
         if (execution.status === "refused") {
           return { outcome: "refused" as const, detail: execution.detail };
+        }
+
+        // Signs Phase 3B: deterministic composition verification for a
+        // canvas-first plan that needed no bounded reconstruction (composes
+        // directly from the native source) — identical STOP discipline to
+        // the reconstruction-continued path in `runSignReconstructionAndContinue`.
+        if (isSignCompositionPlan(plan)) {
+          const verification = verifySignCompositionExecution(decoded.image, plan, execution.image);
+          if (verification.status !== "pass") {
+            const failedCheck = verification.checks.find((check) => check.status === "fail");
+            return {
+              outcome: "refused" as const,
+              detail:
+                `Deterministic composition verification failed (${failedCheck?.check ?? "unknown"}): ` +
+                `${failedCheck?.detail ?? "no detail recorded"}`,
+            };
+          }
         }
 
         return {

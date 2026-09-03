@@ -347,6 +347,13 @@ export const TEST_FILES = [
   // of this step this codebase ever executes. Translation + gap
   // redistribution, actual-vs-planned reconstruction scale reconciliation.
   "src/capabilities/sign-preparation/sign-transform-executor-reflow.test.ts",
+  // Signs Phase 3B (Canvas-First Correction): the four composition
+  // primitives (crop_region/fit_artwork_to_canvas/move_region/fill_rect),
+  // the operator-driven plan builder, and deterministic per-operation
+  // verification.
+  "src/capabilities/sign-preparation/sign-composition-steps.test.ts",
+  "src/capabilities/sign-preparation/sign-composition-plan-builder.test.ts",
+  "src/capabilities/sign-preparation/sign-composition-verification.test.ts",
   // Signs Phase 3A: cross-plan Topaz intermediate reconstruction adoption —
   // a re-plan for the SAME sign preparation reuses a sufficient, already-
   // paid-for intermediate from a PRIOR job rather than dispatching a

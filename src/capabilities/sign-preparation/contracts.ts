@@ -384,7 +384,59 @@ export type SignRepairStepKind =
   | "proportional_resample"
   | "downsample"
   | "approved_crop"
-  | "rotate_90";
+  | "rotate_90"
+  /**
+   * Signs Phase 3B (Canvas-First Correction). One of the four, and ONLY
+   * four, canonical composition primitives the canvas-first architecture
+   * admits (`crop_region`, `fit_artwork_to_canvas`, `move_region`,
+   * `fill_rect` — see `sign-composition-steps.ts`'s own module doc for the
+   * full architecture). Operator-authorized rectangular crop of the
+   * artwork (the reconstructed intermediate, or native source), exact
+   * source/intermediate identity binding, no automatic "frame interior"
+   * assumption — the operator chooses the rectangle. Replaces
+   * `reconstruct_parametric_frame`/`reconstruct_perimeter_structure`'s own
+   * "the artwork's own perimeter defines the finished substrate" premise
+   * for NEW straight-rectangle plans — see this field's own siblings below
+   * and `sign-production-template.ts`'s doc for why that premise was
+   * wrong. Never emitted by `sign-repair-planner.ts`'s automatic
+   * evidence-driven branches (those remain unchanged, historical-only);
+   * only `sign-composition-plan-builder.ts`'s operator-driven builder
+   * produces this step kind.
+   */
+  | "crop_region"
+  /**
+   * Signs Phase 3B (Canvas-First Correction). Creates the AUTHORITATIVE
+   * output canvas FIRST — exact pixel dimensions fixed at plan-build time
+   * from `buildSignProductionTemplate` (ordered spec + resolution policy
+   * ALONE, never a pixel of artwork) — then uniformly fits the (optionally
+   * cropped) artwork into it at an explicit X/Y placement, filling every
+   * uncovered canvas pixel with an explicit, operator-measured background
+   * colour. Uniform scale only, never stretched; never an accidental crop.
+   * This is the step that makes canvas-first true by construction: no
+   * later step (`move_region`/`fill_rect`) may ever resize this canvas.
+   */
+  | "fit_artwork_to_canvas"
+  /**
+   * Signs Phase 3B (Canvas-First Correction). V1: horizontal (full
+   * canvas-width) bands only. Translates a defined source Y-band of the
+   * post-`fit_artwork_to_canvas` canvas to a new destination Y position —
+   * byte-for-byte pixel copy, no resize, no warp, no independent
+   * OCR/text manipulation, no colour touched. This is how the operator
+   * moves ATTENTION upward, a bottom warning band downward, or
+   * redistributes middle sections — never algorithmic, always an explicit,
+   * operator-approved translation.
+   */
+  | "move_region"
+  /**
+   * Signs Phase 3B (Canvas-First Correction). Fills EXACTLY the plan's own
+   * explicit `[x,y,width,height]` rectangle with an explicit,
+   * operator-measured flat colour — NEVER implicit full-width. The real
+   * Phase 3A acceptance-sign defect ("large blank red extensions… broke
+   * the side rails") this primitive exists to make structurally
+   * impossible: no parameter here can ever cover more than the exact
+   * rectangle the operator chose.
+   */
+  | "fill_rect";
 
 /**
  * One planned operation, with enough structured parameters to replay it

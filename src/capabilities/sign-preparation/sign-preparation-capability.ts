@@ -58,6 +58,13 @@ import {
   type SignOperatorRegionBoundary,
 } from "./sign-operator-structural-override";
 import type { SignEdge } from "./contracts";
+import {
+  buildSignCompositionPlan,
+  type SignCompositionCropInput,
+  type SignCompositionFillInput,
+  type SignCompositionMoveInput,
+  type SignCompositionReconstructionInput,
+} from "./sign-composition-plan-builder";
 
 const ALL_SIGN_EDGES: readonly SignEdge[] = ["top", "right", "bottom", "left"];
 
@@ -144,6 +151,35 @@ export interface SignPreparationCapability {
     designId: string,
     regions: SignOperatorRegionBoundary[] | null,
   ): Promise<SignPreparation>;
+  /**
+   * Signs Phase 3B (Canvas-First Correction): the OPERATOR-DRIVEN
+   * counterpart to `planSignRepair` for a straight-rectangle canvas-first
+   * composition plan (`sign-composition-plan-builder.ts`). Deliberately
+   * never calls the automatic `planSignRepair`/`evaluateStructuralReflow`
+   * branches — a canvas-first composition's crop/fit/move/fill decisions
+   * are always an explicit operator choice, never a deterministic
+   * inference from the artwork's own perimeter. Fails closed (throws
+   * `SignPreparationStateError`) on an unconfirmed spec, an unsupported
+   * policy, or a geometrically invalid operator input (crop/move/fill
+   * outside bounds) — persists NO plan in that case. On success persists
+   * the built `SignRepairPlan` (reusing the exact same `plan`/`planKey`
+   * fields, `"planned"` status, and downstream authorize/finalize
+   * plumbing every other Signs plan uses) and moves status to `planned`.
+   */
+  confirmSignCompositionPlan(
+    designId: string,
+    input: SignCompositionOperatorInput,
+  ): Promise<SignPreparation>;
+}
+
+/** Signs Phase 3B: the operator's own composition choices — everything `confirmSignCompositionPlan` needs beyond what it resolves itself (spec/policy/source lineage). */
+export interface SignCompositionOperatorInput {
+  reconstruction: SignCompositionReconstructionInput | null;
+  crop: SignCompositionCropInput | null;
+  fitBackground: { r: number; g: number; b: number };
+  fitPlacement: { xPx: number; yPx: number } | null;
+  moves: SignCompositionMoveInput[];
+  fills: SignCompositionFillInput[];
 }
 
 export function createSignPreparationCapability(
@@ -531,6 +567,52 @@ export function createSignPreparationCapability(
         operatorStructuralOverride: override as unknown as Record<string, unknown>,
         operatorStructuralOverrideCreatedAt: new Date().toISOString(),
         operatorStructuralOverrideCreatedBy: "operator",
+      });
+    },
+
+    async confirmSignCompositionPlan(designId, input) {
+      const preparation = await loadOwned(designId);
+
+      const specResolution = resolveSignProductionSpec(preparation);
+      if (specResolution.status !== "confirmed") {
+        throw new SignPreparationStateError(
+          "The ordered sign size must be confirmed before a composition plan can be built.",
+        );
+      }
+      const policy = getSignResolutionPolicyById(specResolution.spec.resolutionPolicyId);
+      if (!policy) {
+        throw new SignPreparationStateError(
+          "That sign size isn't covered by a supported rigid-sign policy yet.",
+        );
+      }
+
+      // Recompute from the immutable original — never trusted from stored
+      // state — exactly like `planSignRepair`'s own discipline.
+      const { decoded, sha256 } = await decodeOriginal(preparation);
+
+      const buildResult = buildSignCompositionPlan({
+        spec: specResolution.spec,
+        policy,
+        sourceAssetId: preparation.originalAssetId,
+        sourceSha256: sha256,
+        sourceWidthPx: decoded.image.width,
+        sourceHeightPx: decoded.image.height,
+        reconstruction: input.reconstruction,
+        crop: input.crop,
+        fitBackground: input.fitBackground,
+        fitPlacement: input.fitPlacement,
+        moves: input.moves,
+        fills: input.fills,
+      });
+
+      if (buildResult.status === "refused") {
+        throw new SignPreparationStateError(buildResult.reason);
+      }
+
+      return repo.updateSignPreparation(preparation.id, {
+        status: "planned",
+        plan: buildResult.plan as unknown as Record<string, unknown>,
+        planKey: buildResult.plan.planKey,
       });
     },
   };

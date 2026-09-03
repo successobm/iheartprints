@@ -9,6 +9,7 @@ import { getProjectRepository } from "@/lib/db";
 import { SignAuthorizeButton } from "./SignAuthorizeButton";
 import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
 import { SignProductionAction } from "./SignProductionAction";
+import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
 import { SignStructuralLayoutForm } from "./SignStructuralLayoutForm";
 import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
 
@@ -199,6 +200,18 @@ function SignPlanReview({
             artworkHeightPx={plan.artworkHeightPx}
             hasExistingOverride={review.operatorStructuralOverridePresent}
           />
+        </section>
+      ) : null}
+
+      {!isAuthorized ? (
+        <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
+          <h2 className="text-sm font-semibold text-ink">Canvas-first composition (Phase 3B)</h2>
+          <p className="text-sm text-muted">
+            The ordered spec alone defines the production canvas. Choose an explicit crop, fit placement, band
+            moves, and fill rectangles — never inferred from the artwork&apos;s own perimeter. Building a plan here
+            replaces any existing plan for this artwork with a new, re-authorizable one.
+          </p>
+          <SignCompositionPlanForm projectId={projectId} />
         </section>
       ) : null}
 

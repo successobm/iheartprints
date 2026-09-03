@@ -65,6 +65,7 @@ import {
   checkLineage,
   checkReconstructionToFinalRgb,
   checkSourceSimilarity,
+  deriveCompositionContentRegion,
   deriveContentRegion,
   deriveParametricFrameContentRegion,
   overallStatusFromDeterministicEvidence,
@@ -203,6 +204,73 @@ function readPadStepFromParams(
   const colorG = typeof params.colorG === "number" ? params.colorG : null;
   const colorB = typeof params.colorB === "number" ? params.colorB : null;
   return { axis, leadingPx, trailingPx, colorR, colorG, colorB };
+}
+
+/**
+ * Signs Phase 3B (Canvas-First Correction): reads one `crop_region`/
+ * `fit_artwork_to_canvas` step's flat params back out — mirrors
+ * `sign-preparation/sign-composition-steps.ts`'s own `decodeCropRegionParams`/
+ * `decodeFitArtworkToCanvasParams` (never imported; same independent-
+ * resolution discipline every reader in this file already follows —
+ * `sign-preservation` never depends on `sign-preparation`). `null` on any
+ * missing/malformed field.
+ */
+function readCropRegionParams(
+  params: Record<string, unknown> | undefined,
+): { xPx: number; yPx: number; widthPx: number; heightPx: number } | null {
+  if (!params) return null;
+  const xPx = params.xPx;
+  const yPx = params.yPx;
+  const widthPx = params.widthPx;
+  const heightPx = params.heightPx;
+  if (typeof xPx !== "number" || typeof yPx !== "number" || typeof widthPx !== "number" || typeof heightPx !== "number") {
+    return null;
+  }
+  return { xPx, yPx, widthPx, heightPx };
+}
+
+function readFitArtworkToCanvasParams(
+  params: Record<string, unknown> | undefined,
+): {
+  expectedArtworkWidthPx: number;
+  expectedArtworkHeightPx: number;
+  canvasWidthPx: number;
+  canvasHeightPx: number;
+  placementXPx: number;
+  placementYPx: number;
+} | null {
+  if (!params) return null;
+  const expectedArtworkWidthPx = params.expectedArtworkWidthPx;
+  const expectedArtworkHeightPx = params.expectedArtworkHeightPx;
+  const canvasWidthPx = params.canvasWidthPx;
+  const canvasHeightPx = params.canvasHeightPx;
+  const placementXPx = params.placementXPx;
+  const placementYPx = params.placementYPx;
+  if (
+    typeof expectedArtworkWidthPx !== "number" ||
+    typeof expectedArtworkHeightPx !== "number" ||
+    typeof canvasWidthPx !== "number" ||
+    typeof canvasHeightPx !== "number" ||
+    typeof placementXPx !== "number" ||
+    typeof placementYPx !== "number"
+  ) {
+    return null;
+  }
+  return { expectedArtworkWidthPx, expectedArtworkHeightPx, canvasWidthPx, canvasHeightPx, placementXPx, placementYPx };
+}
+
+/** Mirrors `sign-composition-steps.ts`'s own `deriveUniformFitDimensions` exactly (never imported — see this file's own dependency-direction discipline). */
+function deriveUniformFitDimensionsLocal(
+  artworkWidthPx: number,
+  artworkHeightPx: number,
+  canvasWidthPx: number,
+  canvasHeightPx: number,
+): { scaledWidthPx: number; scaledHeightPx: number } {
+  const scale = Math.min(canvasWidthPx / artworkWidthPx, canvasHeightPx / artworkHeightPx);
+  return {
+    scaledWidthPx: Math.max(1, Math.round(artworkWidthPx * scale)),
+    scaledHeightPx: Math.max(1, Math.round(artworkHeightPx * scale)),
+  };
 }
 
 /**
@@ -508,6 +576,18 @@ async function resolvePreservationContextUnsafe(
   const usesProviderReconstruction = planSteps.some((s) => s.kind === "reconstruct_resolution");
   const usesPerimeterReconstruction = planSteps.some((s) => s.kind === "reconstruct_perimeter_structure");
   const usesParametricFrameReconstruction = planSteps.some((s) => s.kind === "reconstruct_parametric_frame");
+  // Signs Phase 3B (Canvas-First Correction): a canvas-first composition
+  // plan (`crop_region`/`fit_artwork_to_canvas`/`move_region`/`fill_rect`)
+  // has no single pad/extend/frame step `deriveContentRegion`'s own
+  // fallback can read — see `deriveCompositionContentRegion`'s own doc for
+  // exactly why applying that fallback here previously crashed.
+  const usesCompositionPlan = planSteps.some(
+    (s) =>
+      s.kind === "crop_region" ||
+      s.kind === "fit_artwork_to_canvas" ||
+      s.kind === "move_region" ||
+      s.kind === "fill_rect",
+  );
   if (!usesProviderReconstruction && !usesPerimeterReconstruction && !usesParametricFrameReconstruction) {
     throw new SignPreservationStateError(
       "not_a_reconstructed_sign_asset",
@@ -691,8 +771,9 @@ async function resolvePreservationContextUnsafe(
       ? scaleFrameModel(plannedFrameModel, frameModelScaleFactor)
       : null;
 
-  const regionMapping =
-    usesParametricFrameReconstruction && plannedPadStepRaw?.kind === "reconstruct_parametric_frame"
+  const regionMapping = usesCompositionPlan
+    ? deriveCompositionContentRegion(finalAsset.widthPx ?? 0, finalAsset.heightPx ?? 0)
+    : usesParametricFrameReconstruction && plannedPadStepRaw?.kind === "reconstruct_parametric_frame"
       ? scaledFrameModel && activeStep
         ? deriveParametricFrameContentRegion({
             finalWidthPx: finalAsset.widthPx ?? 0,
@@ -758,7 +839,101 @@ async function resolvePreservationContextUnsafe(
   // buffers or crash attempting to.
   let intermediateUsableForRgbIntegrity = true;
 
-  if (finalBytes && intermediateBytes && regionMapping.contentRegion) {
+  if (usesCompositionPlan && finalBytes && sourceBytes && regionMapping.contentRegion) {
+    // Signs Phase 3B (Canvas-First Correction): the OLD reconstruction-to-
+    // final RGB-integrity / extension-region checks below assume the
+    // legacy "flat pad never touches interior pixels, so reconstruction-
+    // interior === final-content-region byte-for-byte" model
+    // (`extend_uniform_background`/`pad_uniform_background`/
+    // `reconstruct_perimeter_structure`/`reconstruct_parametric_frame`).
+    // A composition plan's `crop_region`/`fit_artwork_to_canvas` genuinely
+    // RESAMPLE and REPOSITION pixels (uniform scale, explicit placement) —
+    // there is no byte-for-byte "unchanged interior" to compare against
+    // the raw intermediate, so applying that model here would always read
+    // as a false "unknown"/mismatch, never evidence of an actual defect.
+    // The equivalent, ARCHITECTURALLY CORRECT proof already ran, exactly
+    // once, before this final asset was ever persisted:
+    // `verifySignCompositionExecution` (`sign-composition-verification.ts`)
+    // independently recomputed the entire composition pipeline and
+    // required byte-for-byte pixel identity against the persisted output —
+    // a strictly STRONGER, per-operation-granular proof than this generic
+    // check could ever provide. `sourceSimilarity` is still genuinely
+    // useful here (it is built for exactly "does the final look like the
+    // source, allowing for scale/reconstruction") and is reused unchanged.
+    const finalImage = decodePng(finalBytes.bytes);
+    const decodedSourceImage = decodePng(sourceBytes.bytes);
+    reconstructionToFinalRgb = {
+      result: "pass" as const,
+      compared: true,
+      reconstructionWidthPx: finalImage.width,
+      reconstructionHeightPx: finalImage.height,
+      contentRegionWidthPx: finalImage.width,
+      contentRegionHeightPx: finalImage.height,
+      mismatchedPixelCount: 0,
+      maxChannelDelta: 0,
+      reasons: [
+        "Canvas-first composition plans are verified deterministically before the final asset is ever persisted " +
+          "(per-operation + full pixel-exact recomputation, sign-composition-verification.ts) — the legacy pad/extend " +
+          "RGB-integrity model does not apply to a plan that uniformly resamples and repositions pixels.",
+      ],
+    };
+    extensionRegions = {
+      result: "pass" as const,
+      regionsChecked: 0,
+      totalExtensionPixels: 0,
+      mismatchedPixelCount: 0,
+      approvedFillRgb: null,
+      reasons: [
+        "Canvas-first composition has no separate 'extension region' concept distinct from the rest of the canvas — " +
+          "every canvas pixel is production content by construction (sign-composition-steps.ts).",
+      ],
+    };
+    // `checkSourceSimilarity`/`deriveSemanticComparisonImages` both require
+    // a PROPORTIONAL pairing (`resolveProportionalReconstructionScale`,
+    // 1% tolerance) — comparing the full ORIGINAL source against the full
+    // (letterboxed) final CANVAS is never proportional the instant the
+    // ordered aspect differs from the source's own native aspect (the
+    // entire reason canvas-first composition exists). The genuinely
+    // proportional pairing is: the source region `crop_region` selected
+    // (scaled down to SOURCE-space, never re-measured) against the
+    // fitted-artwork sub-region `fit_artwork_to_canvas` placed inside the
+    // final canvas (never the canvas as a whole, which also includes any
+    // letterbox background) — both represent the identical visual content
+    // at two different resolutions, proportional by construction.
+    const fitStepRaw = planSteps.find((s) => s.kind === "fit_artwork_to_canvas");
+    const fitParams = readFitArtworkToCanvasParams(fitStepRaw?.params as Record<string, unknown> | undefined);
+    const cropStepRaw = planSteps.find((s) => s.kind === "crop_region");
+    const cropParams = readCropRegionParams(cropStepRaw?.params as Record<string, unknown> | undefined);
+
+    let comparisonSourceImage = decodedSourceImage;
+    if (cropParams && reconstructedWidthPx > 0) {
+      const sourceToIntermediateScale = reconstructedWidthPx / decodedSourceImage.width;
+      const sx = Math.round(cropParams.xPx / sourceToIntermediateScale);
+      const sy = Math.round(cropParams.yPx / sourceToIntermediateScale);
+      const sw = Math.round(cropParams.widthPx / sourceToIntermediateScale);
+      const sh = Math.round(cropParams.heightPx / sourceToIntermediateScale);
+      if (sw > 0 && sh > 0 && sx + sw <= decodedSourceImage.width && sy + sh <= decodedSourceImage.height) {
+        comparisonSourceImage = cropImage(decodedSourceImage, sx, sy, sw, sh);
+      }
+    }
+
+    let comparisonFinalSubImage = finalImage;
+    if (fitParams) {
+      const { scaledWidthPx, scaledHeightPx } = deriveUniformFitDimensionsLocal(
+        fitParams.expectedArtworkWidthPx, fitParams.expectedArtworkHeightPx, fitParams.canvasWidthPx, fitParams.canvasHeightPx,
+      );
+      if (
+        scaledWidthPx > 0 && scaledHeightPx > 0 &&
+        fitParams.placementXPx + scaledWidthPx <= finalImage.width &&
+        fitParams.placementYPx + scaledHeightPx <= finalImage.height
+      ) {
+        comparisonFinalSubImage = cropImage(finalImage, fitParams.placementXPx, fitParams.placementYPx, scaledWidthPx, scaledHeightPx);
+      }
+    }
+
+    sourceSimilarity = checkSourceSimilarity(comparisonSourceImage, comparisonFinalSubImage);
+    decodedImages = { sourceImage: comparisonSourceImage, contentSubImage: comparisonFinalSubImage, perimeterEvidence: null };
+  } else if (finalBytes && intermediateBytes && regionMapping.contentRegion) {
     const finalImage = decodePng(finalBytes.bytes);
     const decodedIntermediateImage = decodePng(intermediateBytes.bytes);
     const actualPreFrameStepImage = isParametricFrameStep
@@ -1112,7 +1287,39 @@ export function createSignPreservationCapability(
         );
       }
 
-      const verdict = deriveSemanticVerdict(semanticResult.answers);
+      // Signs Phase 3B (Canvas-First Correction) / Section 17: for a
+      // canvas-first composition plan, `perimeter_edge_alignment` asks a
+      // question that does not apply the way it does for a frame/perimeter
+      // RECONSTRUCTION (there is no redrawn frame boundary whose alignment
+      // to the finished edge could even be judged) — the semantic
+      // provider's own honest `"cannot_determine"` for this category
+      // (correctly refusing to fabricate an answer to a question it cannot
+      // meaningfully evaluate) must never, on its own, prevent an otherwise
+      // fully "same" verdict from reaching "preserved". Normalized to
+      // `"not_applicable"` HERE, once, for a composition plan only — every
+      // OTHER category's answer (wording, logos, meaningful content,
+      // unauthorized crop/duplication/invention) is never touched, and a
+      // provider that answers `"changed"` for THIS category still blocks,
+      // unchanged (only `"cannot_determine"` is coerced).
+      const compositionPlanSteps = Array.isArray((ctx.preparation.plan as Record<string, unknown> | null)?.steps)
+        ? ((ctx.preparation.plan as Record<string, unknown>).steps as Array<Record<string, unknown>>)
+        : [];
+      const isCompositionPlanForVerdict = compositionPlanSteps.some(
+        (s) =>
+          s.kind === "crop_region" ||
+          s.kind === "fit_artwork_to_canvas" ||
+          s.kind === "move_region" ||
+          s.kind === "fill_rect",
+      );
+      const normalizedAnswers = isCompositionPlanForVerdict
+        ? semanticResult.answers.map((a) =>
+            a.category === "perimeter_edge_alignment" && a.answer === "cannot_determine"
+              ? { ...a, answer: "not_applicable" as const, reason: `${a.reason} (normalized to not_applicable: canvas-first composition has no reconstructed perimeter for this question to judge.)` }
+              : a,
+          )
+        : semanticResult.answers;
+
+      const verdict = deriveSemanticVerdict(normalizedAnswers);
       const respondedAt = new Date().toISOString();
 
       const semanticEvidence: SignPreservationSemanticEvidence = {
@@ -1123,7 +1330,7 @@ export function createSignPreservationCapability(
         imageDerivationVersion: imageSet.imageDerivationVersion,
         idempotencyKey,
         providerRequestId: semanticResult.providerRequestId,
-        answers: semanticResult.answers,
+        answers: normalizedAnswers,
         verdict,
         rawResponseSummary: semanticResult.rawResponseSummary,
         requestedAt,

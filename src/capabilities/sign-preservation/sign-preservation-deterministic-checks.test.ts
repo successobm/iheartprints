@@ -12,6 +12,7 @@ import {
   checkLineage,
   checkReconstructionToFinalRgb,
   checkSourceSimilarity,
+  deriveCompositionContentRegion,
   deriveContentRegion,
   deriveParametricFrameContentRegion,
   overallStatusFromDeterministicEvidence,
@@ -731,5 +732,33 @@ describe("aggregateDeterministicEvidence / overallStatusFromDeterministicEvidenc
     });
     assert.equal(evidence.catastrophicAnomalyDetected, true);
     assert.equal(overallStatusFromDeterministicEvidence(evidence), "changed");
+  });
+});
+
+describe("deriveCompositionContentRegion (Signs Phase 3B: Canvas-First Correction)", () => {
+  it("is the whole final canvas, always fits, always passes — even when the final canvas is SMALLER than any 'reconstructed' dimension", () => {
+    // The real Signs acceptance incident this function fixes:
+    // `deriveContentRegion`'s own "no pad step" fallback assumed the final
+    // canvas is always >= the reconstructed intermediate (true for every
+    // extend/pad/frame step, never true in general for a composition plan
+    // that crops before fitting) — proven here with exactly the real
+    // project's own shape: a 4344x5792 intermediate, a 3717x5576 final
+    // canvas (smaller on both axes).
+    const region = deriveCompositionContentRegion(3717, 5576);
+    assert.equal(region.result, "pass");
+    assert.equal(region.regionFitsWithinFinalCanvas, true);
+    assert.equal(region.regionDimensionsMatchReconstruction, true);
+    assert.equal(region.derivedFrom, "composition_plan");
+    assert.deepEqual(region.contentRegion, { x: 0, y: 0, width: 3717, height: 5576 });
+  });
+
+  it("never depends on any reconstructed/intermediate dimension at all", () => {
+    // Deliberately no `reconstructedWidthPx`/`reconstructedHeightPx`
+    // parameter exists on this function's signature — the canvas-first
+    // invariant made structural: there is no argument through which an
+    // intermediate's own geometry could influence the content region.
+    const a = deriveCompositionContentRegion(100, 200);
+    const b = deriveCompositionContentRegion(100, 200);
+    assert.deepEqual(a, b);
   });
 });

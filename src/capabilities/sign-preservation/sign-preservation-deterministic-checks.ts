@@ -233,6 +233,40 @@ export function deriveContentRegion(
   };
 }
 
+/**
+ * Signs Phase 3B (Canvas-First Correction): the content-region mapping for
+ * a canvas-first composition plan (`crop_region`/`fit_artwork_to_canvas`/
+ * `move_region`/`fill_rect`). `deriveContentRegion`'s own "no pad/extend
+ * step" fallback assumes the final canvas is always >= the reconstructed
+ * intermediate's own dimensions (true for every extend/pad/frame step,
+ * which only ever GROWS the canvas) — a composition plan breaks that
+ * assumption by construction (crop_region can shrink the working image,
+ * and fit_artwork_to_canvas's own canvas dimensions come from the ordered
+ * spec, not from the reconstructed intermediate at all), so applying that
+ * fallback to a composition plan can derive a content region LARGER than
+ * the actual final asset and crash attempting to crop it (the real Signs
+ * acceptance incident this function fixes).
+ *
+ * Under the canvas-first model there is no separate "customer content vs
+ * added margin" distinction to derive in the first place — `sign-
+ * composition-steps.ts`'s own doc: "the entire canvas is meaningful
+ * production content" (crop/fit/reflow never leave a blank added margin
+ * the way the legacy extend/pad steps did) — so the content region is
+ * simply the whole final canvas, trivially valid by construction.
+ */
+export function deriveCompositionContentRegion(finalWidthPx: number, finalHeightPx: number): SignPreservationRegionMappingEvidence {
+  return {
+    result: "pass",
+    finalWidthPx,
+    finalHeightPx,
+    contentRegion: { x: 0, y: 0, width: finalWidthPx, height: finalHeightPx },
+    derivedFrom: "composition_plan",
+    regionFitsWithinFinalCanvas: true,
+    regionDimensionsMatchReconstruction: true,
+    reasons: [],
+  };
+}
+
 export interface ParametricFrameRegionMappingInputs {
   finalWidthPx: number;
   finalHeightPx: number;

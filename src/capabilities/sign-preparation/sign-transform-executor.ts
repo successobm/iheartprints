@@ -36,6 +36,7 @@ import type { SignRepairPlan, SignRepairStep, SignRepairStepKind } from "./contr
 import { deriveUniformBackgroundExtension } from "./sign-geometry";
 import { tiledRowColor, type SignPerimeterBandMeasurement, type SignPerimeterBandRow } from "./perimeter-reconstruction";
 import { frameDepthAt, type SignFrameBand } from "./frame-structure-model";
+import { COMPOSITION_STEP_KINDS, executeCompositionSteps, isCompositionStepKind } from "./sign-composition-steps";
 
 /**
  * Rejected-Final Regeneration Phase: the deterministic identity of THIS
@@ -69,8 +70,20 @@ import { frameDepthAt, type SignFrameBand } from "./frame-structure-model";
  * discipline above. A final asset produced under v1/v2 never satisfies a
  * v3-scoped consumer's identity check; nothing about v1/v2's own admitted
  * step outputs changes.
+ *
+ * `"sign-execution-v4"` (Signs Phase 3B, Canvas-First Correction): the
+ * four composition primitives (`crop_region`, `fit_artwork_to_canvas`,
+ * `move_region`, `fill_rect` — `sign-composition-steps.ts`) are now
+ * admitted and executed — a genuinely different pixel-producing engine
+ * (canvas created FIRST from the ordered spec alone, artwork fit into it,
+ * never the reverse) than every step kind v1-v3 ever admitted. A final
+ * asset produced under v1/v2/v3 never satisfies a v4-scoped consumer's
+ * identity check, and this bump never reinterprets a historical v1/v2/v3
+ * asset as v4 — those assets, their plans, and their own executor code
+ * paths remain fully intact and auditable; this bump only changes what
+ * the CURRENT build stamps onto and requires of NEW production assets.
  */
-export const SIGN_EXECUTION_IMPLEMENTATION_VERSION = "sign-execution-v3";
+export const SIGN_EXECUTION_IMPLEMENTATION_VERSION = "sign-execution-v4";
 
 export interface SignExecutionBounds {
   x: number;
@@ -106,6 +119,15 @@ const ADMITTED_STEP_KINDS = new Set<SignRepairStep["kind"]>([
   "proportional_resample",
   "downsample",
   "rotate_90",
+  // Signs Phase 3B: the four composition primitives — see
+  // `sign-composition-steps.ts`'s own module doc. Admitted here so
+  // `planContainsOnlyAdmittedSteps`/`planRequiresBoundedReconstruction`
+  // recognize a canvas-first plan as executable; actual dispatch for
+  // these kinds never goes through this module's own per-step `executeStep`
+  // switch (see `executeAdmittedSignSteps`'s composition-aware branch
+  // below) — they are executed as a single, order-sensitive segment by
+  // `executeCompositionSteps`, never individually.
+  ...COMPOSITION_STEP_KINDS,
 ]);
 
 /** True iff every step in the plan is one of S2's admitted, executable kinds. */
@@ -174,7 +196,15 @@ export function planRequiresSemanticPreservationVerification(plan: SignRepairPla
       // to, even though — unlike the other three — it never touches a
       // provider and its own deterministic checks are exact-match (never
       // advisory-only), never merely a proxy for "provider touched this."
-      step.kind === "reflow_structural_layout",
+      step.kind === "reflow_structural_layout" ||
+      // Signs Phase 3B: every composition primitive moves, crops, fits, or
+      // fills real pixels — the identical "a human/semantic check must
+      // confirm the composition still means the same thing" reasoning
+      // every entry above already answers "yes" to. Tolerant of the
+      // AUTHORIZED movement/cropping itself (Section 16's own semantic
+      // verification discipline); this predicate only decides whether the
+      // one-call check runs at all.
+      isCompositionStepKind(step.kind),
   );
 }
 
@@ -213,6 +243,27 @@ export function executeAdmittedSignSteps(
   bounds: SignExecutionBounds,
   steps: SignRepairStep[],
 ): SignExecutionResult {
+  // Signs Phase 3B: a segment containing ANY composition primitive is
+  // delegated WHOLESALE to `executeCompositionSteps` — never folded
+  // step-by-step through `executeStep` below, because `move_region`/
+  // `fill_rect` need a single fixed base-canvas snapshot shared across the
+  // whole segment (see `sign-composition-steps.ts`'s own doc for exactly
+  // why the ordinary fold would corrupt a genuine reflow). Mixing a
+  // composition primitive into the same segment as a legacy v1-v3 step
+  // kind is never an admitted shape — refused before any pixel is touched.
+  if (steps.some((step) => isCompositionStepKind(step.kind))) {
+    if (!steps.every((step) => isCompositionStepKind(step.kind))) {
+      return {
+        status: "refused",
+        reason: "unsupported_step_kind",
+        detail:
+          "Composition primitives (crop_region/fit_artwork_to_canvas/move_region/fill_rect) cannot be mixed " +
+          "with legacy geometry step kinds in the same execution segment.",
+      };
+    }
+    return executeCompositionSteps(image, bounds, steps);
+  }
+
   let currentImage = image;
   let currentBounds = bounds;
   for (const step of steps) {

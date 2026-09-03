@@ -41,6 +41,7 @@ export { deriveRigidSignProductionRequirements } from "./sign-production-require
 export {
   SignPreparationStateError,
   createSignPreparationCapability,
+  type SignCompositionOperatorInput,
   type SignPlanningOutcome,
   type SignPreparationCapability,
   type UploadSignArtworkInput,
@@ -90,3 +91,41 @@ export {
   type SignPlanOperatorReview,
   type SignPlanOperatorProductionStatus,
 } from "./sign-plan-operator-review";
+// Signs Phase 3B (Canvas-First Correction).
+export {
+  COMPOSITION_STEP_KINDS,
+  applyFillRect,
+  applyMoveRegion,
+  decodeCropRegionParams,
+  decodeFillRectParams,
+  decodeFitArtworkToCanvasParams,
+  decodeMoveRegionParams,
+  deriveUniformFitDimensions,
+  encodeCropRegionParams,
+  encodeFillRectParams,
+  encodeFitArtworkToCanvasParams,
+  encodeMoveRegionParams,
+  executeCompositionSteps,
+  executeCropRegion,
+  executeFitArtworkToCanvas,
+  isCompositionStepKind,
+  type CropRegionParams,
+  type FillRectParams,
+  type FitArtworkToCanvasParams,
+  type MoveRegionParams,
+} from "./sign-composition-steps";
+export {
+  buildSignCompositionPlan,
+  type SignCompositionCropInput,
+  type SignCompositionFillInput,
+  type SignCompositionMoveInput,
+  type SignCompositionPlanBuildResult,
+  type SignCompositionPlanInput,
+  type SignCompositionReconstructionInput,
+} from "./sign-composition-plan-builder";
+export {
+  isSignCompositionPlan,
+  verifySignCompositionExecution,
+  type SignCompositionVerificationCheck,
+  type SignCompositionVerificationResult,
+} from "./sign-composition-verification";

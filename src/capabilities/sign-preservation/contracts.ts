@@ -30,8 +30,41 @@
  * the corrected one — the identity bump is what forces a fresh
  * deterministic pass (and therefore a fresh combined semantic identity)
  * for any asset verified after the correction.
+ *
+ * Bumped to v4 at Signs Phase 3B (Canvas-First Correction): a canvas-first
+ * composition plan (`crop_region`/`fit_artwork_to_canvas`/`move_region`/
+ * `fill_rect`) has no single pad/extend/frame step for the OLD region-
+ * mapping/RGB-integrity/source-similarity model to read — applying that
+ * model unmodified either crashed (an oversized content region derived
+ * from a nonexistent pad step) or spuriously reported "unknown" (comparing
+ * the full original source against the full, possibly-letterboxed final
+ * CANVAS is never proportional the instant the ordered aspect differs from
+ * the source's own native aspect — exactly why canvas-first composition
+ * exists). `sign-preservation-capability.ts`'s own `usesCompositionPlan`
+ * branch now derives the content region as the whole final canvas
+ * (`deriveCompositionContentRegion`) and compares the SAME visual content
+ * at two resolutions (the `crop_region`-selected source region against the
+ * `fit_artwork_to_canvas`-placed sub-region of the final canvas — never
+ * the canvas as a whole) for `sourceSimilarity`/semantic image derivation.
+ * A verification recorded under v3 or earlier never exercised this branch
+ * and must never be silently treated as a verdict about it.
+ *
+ * Bumped to v5, same phase: `perimeter_edge_alignment` asks a question
+ * that does not apply to a canvas-first composition plan the way it does
+ * to a frame/perimeter RECONSTRUCTION (no redrawn frame boundary exists
+ * for the semantic provider to judge alignment of) — its own honest
+ * `"cannot_determine"` for that ONE category must never, by itself, sink
+ * an otherwise fully "same" verdict below "preserved". Normalized to
+ * `"not_applicable"` in `verifyPreservation` for a composition plan only,
+ * before the verdict is derived — every other category is untouched, and
+ * a genuine `"changed"` answer for this category still blocks. This is
+ * verdict-COMPUTATION logic, not a deterministic-check change, but shares
+ * this constant's own version slot (the combined identity's `det=`
+ * segment) because that is the lever that forces a fresh semantic dispatch
+ * — a verification recorded under v4 or earlier never exercised this
+ * normalization and must never be silently treated as a verdict about it.
  */
-export const SIGN_PRESERVATION_ALGORITHM_VERSION = "sign-preservation-deterministic:v3";
+export const SIGN_PRESERVATION_ALGORITHM_VERSION = "sign-preservation-deterministic:v5";
 
 /**
  * One deterministic check's own verdict, deliberately distinct from the
@@ -80,7 +113,7 @@ export interface SignPreservationRegionMappingEvidence {
   finalHeightPx: number;
   contentRegion: SignPreservationContentRegion | null;
   /** How the content region was derived — never a new persisted field, always re-derived from already-persisted evidence. */
-  derivedFrom: "execution_geometry" | "plan_step" | "no_extension_step" | "unavailable";
+  derivedFrom: "execution_geometry" | "plan_step" | "no_extension_step" | "unavailable" | "composition_plan";
   regionFitsWithinFinalCanvas: boolean;
   regionDimensionsMatchReconstruction: boolean;
   reasons: string[];

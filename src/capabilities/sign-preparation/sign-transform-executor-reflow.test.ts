@@ -156,7 +156,7 @@ describe("executeSignRepairPlan — reflow_structural_layout (Phase 3A)", () => 
     assert.equal(result.contentBounds.height, 200);
   });
 
-  it("B: is opaque, straight-rectangular, and admitted by the executor (SIGN_EXECUTION_IMPLEMENTATION_VERSION is v3)", () => {
+  it("B: is opaque, straight-rectangular, and admitted by the executor (SIGN_EXECUTION_IMPLEMENTATION_VERSION is at least v3)", () => {
     const plan: SignRepairPlan = {
       schemaVersion: SIGN_REPAIR_PLAN_SCHEMA_VERSION,
       policyId: "test",
@@ -176,7 +176,14 @@ describe("executeSignRepairPlan — reflow_structural_layout (Phase 3A)", () => 
       planKey: "test",
     };
     assert.equal(planContainsOnlyAdmittedSteps(plan), true);
-    assert.equal(SIGN_EXECUTION_IMPLEMENTATION_VERSION, "sign-execution-v3");
+    // Signs Phase 3B: SIGN_EXECUTION_IMPLEMENTATION_VERSION is a single,
+    // whole-build identity (bumped to "sign-execution-v4" for the new
+    // canvas-first composition engine) — it identifies which BUILD produced
+    // an asset, not which step kinds a given plan happened to use.
+    // reflow_structural_layout remains fully admitted/executed (historical
+    // compatibility); it is simply no longer the CURRENT version's own
+    // namesake step kind.
+    assert.equal(SIGN_EXECUTION_IMPLEMENTATION_VERSION, "sign-execution-v4");
   });
 
   it("C: adapts to an ACTUAL image taller than the plan's own recorded sourceHeightPx (simulating a Topaz reconstruction whose actual scale diverged from what was requested) — proportional translation, not a crash or silent misplacement", () => {
