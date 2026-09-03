@@ -3,6 +3,14 @@ import { describe, it } from "node:test";
 
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { fillRect, makeImage } from "@/capabilities/sign-preparation/sign-fixtures";
+import {
+  encodeFillRectParams,
+  encodeFitArtworkToCanvasParams,
+  encodeMoveRegionParams,
+  executeCompositionSteps,
+  executeFitArtworkToCanvas,
+} from "@/capabilities/sign-preparation/sign-composition-steps";
+import type { SignRepairStep } from "@/capabilities/sign-preparation/contracts";
 
 import {
   aggregateDeterministicEvidence,
@@ -760,5 +768,93 @@ describe("deriveCompositionContentRegion (Signs Phase 3B: Canvas-First Correctio
     const a = deriveCompositionContentRegion(100, 200);
     const b = deriveCompositionContentRegion(100, 200);
     assert.deepEqual(a, b);
+  });
+});
+
+function cropRgbaImage(image: RgbaImage, x: number, y: number, width: number, height: number): RgbaImage {
+  const data = Buffer.alloc(width * height * 4);
+  for (let row = 0; row < height; row++) {
+    const srcStart = ((y + row) * image.width + x) * 4;
+    data.set(image.data.subarray(srcStart, srcStart + width * 4), row * width * 4);
+  }
+  return { width, height, data };
+}
+
+describe("Signs Phase 3B V2 correction: preservation comparison image must survive move_region", () => {
+  /**
+   * Reproduces the real V2 acceptance-run bug (candidate #2 — the first
+   * composition plan to use move_region): a 100x100 source with a
+   * distinguishable red/white/blue band pattern, fit (letterboxed) into a
+   * canvas built from a 1x2in ordered spec — then the red band is moved to
+   * the canvas top edge and its old position is filled white, exactly
+   * mirroring the real plan's own "move a banner to the physical edge,
+   * fill the vacated area" shape.
+   */
+  it("re-deriving the canonical fit (never cropping the moved final canvas) reproduces the source; the old crop-of-final approach loses the moved band entirely", () => {
+    const source = makeImage(100, 100, { r: 255, g: 255, b: 255 });
+    fillRect(source, 0, 0, 100, 20, { r: 200, g: 0, b: 0 }); // red band, rows 0-19
+    fillRect(source, 0, 20, 100, 80, { r: 255, g: 255, b: 255 }); // white middle, rows 20-79
+    fillRect(source, 0, 80, 100, 100, { r: 0, g: 0, b: 200 }); // blue band, rows 80-99
+
+    // Canvas built from a 1x2in ordered spec at the source's own limiting
+    // density (50ppi) -> 50x100px canvas; fit scale 0.5 -> fitted 50x50,
+    // letterboxed, placementY=25 (matches deriveCanvasPixelDensity/
+    // deriveUniformFitDimensions exactly, verified by construction below).
+    const fitStep: SignRepairStep = {
+      kind: "fit_artwork_to_canvas",
+      risk: "review_required",
+      reasons: ["test"],
+      params: encodeFitArtworkToCanvasParams({
+        expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100,
+        canvasWidthPx: 50, canvasHeightPx: 100,
+        placementXPx: 0, placementYPx: 25,
+        backgroundR: 255, backgroundG: 255, backgroundB: 255,
+      }),
+    };
+    // Sanity: the fit step's own geometry matches what the test assumes.
+    const fitOnly = executeFitArtworkToCanvas(source, fitStep);
+    assert.equal(fitOnly.status, "executed");
+
+    const moveRedToTop: SignRepairStep = {
+      kind: "move_region", risk: "review_required", reasons: ["test"],
+      params: encodeMoveRegionParams({ sourceStartYPx: 25, heightPx: 10, destStartYPx: 0 }),
+    };
+    const eraseOldRedPosition: SignRepairStep = {
+      kind: "fill_rect", risk: "review_required", reasons: ["test"],
+      params: encodeFillRectParams({ xPx: 0, yPx: 25, widthPx: 50, heightPx: 10, colorR: 255, colorG: 255, colorB: 255 }),
+    };
+    const bounds = { x: 0, y: 0, width: source.width, height: source.height };
+    const movedResult = executeCompositionSteps(source, bounds, [fitStep, moveRedToTop, eraseOldRedPosition]);
+    assert.equal(movedResult.status, "executed");
+    if (movedResult.status !== "executed") return;
+    const finalCanvas = movedResult.image;
+    assert.equal(finalCanvas.width, 50);
+    assert.equal(finalCanvas.height, 100);
+
+    // THE BUG: cropping the ACTUAL (moved) final canvas at fit_artwork_to_
+    // canvas's own OLD placement window [0,25,50,50].
+    const buggyComparisonImage = cropRgbaImage(finalCanvas, 0, 25, 50, 50);
+    const buggyEvidence = checkSourceSimilarity(source, buggyComparisonImage);
+
+    // THE FIX: re-derive the canonical, pre-move fitted artwork fresh —
+    // never read from the (possibly rearranged) final canvas at all.
+    if (fitOnly.status !== "executed") return;
+    const fixedComparisonImage = fitOnly.image;
+    const fixedEvidence = checkSourceSimilarity(source, fixedComparisonImage);
+
+    // The fixed comparison is a clean, ordinary downsample -- low error,
+    // exactly like every other "concern, not catastrophic" clean-resample
+    // case elsewhere in this file.
+    assert.ok(
+      (fixedEvidence.globalMeanAbsoluteError as number) < 5,
+      `fixed comparison should closely match the source; got ${fixedEvidence.globalMeanAbsoluteError}`,
+    );
+    // The buggy comparison is missing the red band entirely at its
+    // expected position (real symptom: "visibly crops the top header") --
+    // a large, obvious error, strictly worse than the fix.
+    assert.ok(
+      (buggyEvidence.globalMeanAbsoluteError as number) > (fixedEvidence.globalMeanAbsoluteError as number) + 20,
+      `buggy comparison should be substantially worse than the fixed one; buggy=${buggyEvidence.globalMeanAbsoluteError} fixed=${fixedEvidence.globalMeanAbsoluteError}`,
+    );
   });
 });

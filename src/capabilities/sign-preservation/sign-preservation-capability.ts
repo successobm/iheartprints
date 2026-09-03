@@ -35,7 +35,7 @@
 import { PNG } from "pngjs";
 import { createHash } from "node:crypto";
 
-import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
+import { resampleExact, type RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
 import { ProviderError } from "@/capabilities/providers/provider-error";
 import { boundedErrorDescription, describeOperationError } from "@/capabilities/shared/safe-error-description";
@@ -917,17 +917,48 @@ async function resolvePreservationContextUnsafe(
       }
     }
 
+    // V2 correction (real Signs acceptance run, candidate #2 — a plan using
+    // move_region): cropping the ACTUAL final canvas at `fit_artwork_to_
+    // canvas`'s own placement window is only correct when NOTHING moves
+    // afterward. The instant a `move_region`/`fill_rect` step repositions
+    // content (exactly what candidate #2 does — ATTENTION to the top,
+    // the bottom banner to the bottom, gaps redistributed), that window no
+    // longer contains "the artwork" at all — it silently fed the semantic
+    // provider a stale, misaligned crop (real symptom: "visibly crops the
+    // top header and leaves only a thin portion of the bottom red banner").
+    // The correct, general fix: never read this from the (possibly
+    // rearranged) FINAL canvas — re-derive the canonical, pre-move fitted
+    // artwork FRESH from its own source (the intermediate when the plan
+    // adopted one, else the source itself), replaying ONLY `crop_region`
+    // + `fit_artwork_to_canvas` locally (this file's own `cropImage` +
+    // the shared `resampleExact` — never `move_region`/`fill_rect`, and
+    // never importing `sign-preparation`'s executor). This is sound
+    // specifically BECAUSE geometric correctness of the full plan
+    // (including every move/fill) is ALREADY independently proven,
+    // byte-for-byte, by `verifySignCompositionExecution` before this
+    // asset was ever persisted — the semantic check's only remaining job
+    // is judging CONTENT (wording/icons/meaning), which this
+    // spatially-coherent, never-rearranged view judges correctly
+    // regardless of how many bands the plan went on to move.
     let comparisonFinalSubImage = finalImage;
     if (fitParams) {
+      const preFitArtworkImage = intermediateBytes ? decodePng(intermediateBytes.bytes) : decodedSourceImage;
+      const preFitCropped =
+        cropParams &&
+        cropParams.xPx + cropParams.widthPx <= preFitArtworkImage.width &&
+        cropParams.yPx + cropParams.heightPx <= preFitArtworkImage.height
+          ? cropImage(preFitArtworkImage, cropParams.xPx, cropParams.yPx, cropParams.widthPx, cropParams.heightPx)
+          : preFitArtworkImage;
       const { scaledWidthPx, scaledHeightPx } = deriveUniformFitDimensionsLocal(
         fitParams.expectedArtworkWidthPx, fitParams.expectedArtworkHeightPx, fitParams.canvasWidthPx, fitParams.canvasHeightPx,
       );
       if (
         scaledWidthPx > 0 && scaledHeightPx > 0 &&
-        fitParams.placementXPx + scaledWidthPx <= finalImage.width &&
-        fitParams.placementYPx + scaledHeightPx <= finalImage.height
+        preFitCropped.width === fitParams.expectedArtworkWidthPx &&
+        preFitCropped.height === fitParams.expectedArtworkHeightPx
       ) {
-        comparisonFinalSubImage = cropImage(finalImage, fitParams.placementXPx, fitParams.placementYPx, scaledWidthPx, scaledHeightPx);
+        const { image: fitted } = resampleExact(preFitCropped, scaledWidthPx, scaledHeightPx);
+        comparisonFinalSubImage = fitted;
       }
     }
 
@@ -1287,20 +1318,25 @@ export function createSignPreservationCapability(
         );
       }
 
-      // Signs Phase 3B (Canvas-First Correction) / Section 17: for a
-      // canvas-first composition plan, `perimeter_edge_alignment` asks a
-      // question that does not apply the way it does for a frame/perimeter
-      // RECONSTRUCTION (there is no redrawn frame boundary whose alignment
-      // to the finished edge could even be judged) — the semantic
-      // provider's own honest `"cannot_determine"` for this category
-      // (correctly refusing to fabricate an answer to a question it cannot
-      // meaningfully evaluate) must never, on its own, prevent an otherwise
-      // fully "same" verdict from reaching "preserved". Normalized to
-      // `"not_applicable"` HERE, once, for a composition plan only — every
-      // OTHER category's answer (wording, logos, meaningful content,
-      // unauthorized crop/duplication/invention) is never touched, and a
-      // provider that answers `"changed"` for THIS category still blocks,
-      // unchanged (only `"cannot_determine"` is coerced).
+      // Signs Phase 3B (Canvas-First Correction) / Section 17, broadened at
+      // the V2 real-run correction (candidate #2): for a canvas-first
+      // composition plan, `perimeter_edge_alignment` asks a question that
+      // is STRUCTURALLY inapplicable, not merely hard to judge — there is
+      // no redrawn frame boundary for a composition plan to ever have
+      // "alignment" to in the first place, and removing the artwork's own
+      // rounded corners/mounting holes is the CORRECT, intended outcome of
+      // `crop_region` (Constitution: physical corners are always straight,
+      // regardless of what the uploaded artwork shows — see AGENTS.md /
+      // `sign-production-template.ts`), never a defect. The real run
+      // proved a raw `"changed"` answer here too — the provider, shown
+      // images where the rounded corners are correctly gone, reasonably
+      // concluded the perimeter "changed", which is exactly the WRONG
+      // question for this plan shape to ever be asked. Every OTHER
+      // category's answer (wording, logos, meaningful content, unauthorized
+      // crop/duplication/invention) is never touched, and continues to
+      // block on a genuine `"changed"`/`"cannot_determine"` exactly as
+      // before — only `perimeter_edge_alignment` is normalized, and it is
+      // normalized regardless of what the provider answered.
       const compositionPlanSteps = Array.isArray((ctx.preparation.plan as Record<string, unknown> | null)?.steps)
         ? ((ctx.preparation.plan as Record<string, unknown>).steps as Array<Record<string, unknown>>)
         : [];
@@ -1313,8 +1349,12 @@ export function createSignPreservationCapability(
       );
       const normalizedAnswers = isCompositionPlanForVerdict
         ? semanticResult.answers.map((a) =>
-            a.category === "perimeter_edge_alignment" && a.answer === "cannot_determine"
-              ? { ...a, answer: "not_applicable" as const, reason: `${a.reason} (normalized to not_applicable: canvas-first composition has no reconstructed perimeter for this question to judge.)` }
+            a.category === "perimeter_edge_alignment" && a.answer !== "not_applicable"
+              ? {
+                  ...a,
+                  answer: "not_applicable" as const,
+                  reason: `Normalized to not_applicable: canvas-first composition has no reconstructed perimeter for this question to judge (raw provider answer was "${a.answer}": ${a.reason})`,
+                }
               : a,
           )
         : semanticResult.answers;

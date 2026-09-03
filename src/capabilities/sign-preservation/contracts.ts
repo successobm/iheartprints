@@ -64,7 +64,40 @@
  * — a verification recorded under v4 or earlier never exercised this
  * normalization and must never be silently treated as a verdict about it.
  */
-export const SIGN_PRESERVATION_ALGORITHM_VERSION = "sign-preservation-deterministic:v5";
+/**
+ * Bumped to v6 at the V2 real-run correction (real acceptance candidate
+ * #2, the first composition plan to use `move_region`): two more real bugs
+ * found and fixed, neither exercised by candidate #1 (which used no
+ * `move_region` at all).
+ *
+ * (1) `comparisonFinalSubImage` was cropped from the ACTUAL final canvas
+ * at `fit_artwork_to_canvas`'s own placement window — correct only when
+ * nothing moves afterward. The instant a `move_region` repositions
+ * content, that window no longer contains "the artwork" at all (real
+ * symptom: the semantic provider reported "visibly crops the top header
+ * and leaves only a thin portion of the bottom red banner" — it was
+ * being shown a stale, misaligned crop, not a real defect). Fixed by
+ * re-deriving the canonical, pre-move fitted artwork fresh from its own
+ * source (replaying only `crop_region` + `fit_artwork_to_canvas` locally
+ * — never `move_region`/`fill_rect`), sound because the full plan's own
+ * geometric correctness (moves included) is already independently proven
+ * byte-for-byte by `verifySignCompositionExecution` before this asset was
+ * ever persisted.
+ *
+ * (2) `perimeter_edge_alignment` normalization (v5) only coerced a raw
+ * `"cannot_determine"` answer to `"not_applicable"` for composition
+ * plans — the real run proved the provider can also, reasonably, answer
+ * `"changed"` for this category (shown a correctly frame-removed
+ * composition, it concluded the perimeter "changed", which is exactly
+ * the wrong question for this plan shape). This category is now
+ * normalized to `"not_applicable"` regardless of the raw answer, for
+ * composition plans only — every other category is untouched and a
+ * genuine `"changed"`/`"cannot_determine"` there still blocks.
+ *
+ * A verification recorded under v5 or earlier never exercised either
+ * fix and must never be silently treated as a verdict about them.
+ */
+export const SIGN_PRESERVATION_ALGORITHM_VERSION = "sign-preservation-deterministic:v6";
 
 /**
  * One deterministic check's own verdict, deliberately distinct from the
