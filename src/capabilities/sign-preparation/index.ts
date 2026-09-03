@@ -96,21 +96,25 @@ export {
 // Signs Phase 3B (Canvas-First Correction).
 export {
   COMPOSITION_STEP_KINDS,
+  MAX_MASKED_REGION_PIXELS,
   REPLACE_REGION_CONTEXT_TOLERANCE,
   applyCorrectionsToCanvas,
   applyFillRect,
   applyMoveRegion,
+  applyReplaceMaskedRegionWithBackground,
   applyReplaceRegionWithBackground,
   decodeCropRegionParams,
   decodeFillRectParams,
   decodeFitArtworkToCanvasParams,
   decodeMoveRegionParams,
+  decodeReplaceMaskedRegionWithBackgroundParams,
   decodeReplaceRegionWithBackgroundParams,
   deriveUniformFitDimensions,
   encodeCropRegionParams,
   encodeFillRectParams,
   encodeFitArtworkToCanvasParams,
   encodeMoveRegionParams,
+  encodeReplaceMaskedRegionWithBackgroundParams,
   encodeReplaceRegionWithBackgroundParams,
   executeCompositionSteps,
   executeCropRegion,
@@ -122,6 +126,7 @@ export {
   type FillRectParams,
   type FitArtworkToCanvasParams,
   type MoveRegionParams,
+  type ReplaceMaskedRegionWithBackgroundParams,
   type ReplaceRegionWithBackgroundParams,
 } from "./sign-composition-steps";
 export {
@@ -130,12 +135,19 @@ export {
   type SignCompositionCropInput,
   type SignCompositionDecodedChoices,
   type SignCompositionFillInput,
+  type SignCompositionMaskedReplacementInput,
   type SignCompositionMoveInput,
   type SignCompositionPlanBuildResult,
   type SignCompositionPlanInput,
   type SignCompositionReconstructionInput,
   type SignCompositionReplacementInput,
 } from "./sign-composition-plan-builder";
+export {
+  computeSignWandSelection,
+  encodeSignWandMaskForBounds,
+  renderSignSelectionOverlayCrop,
+  type SignWandSelection,
+} from "./sign-wand-selection";
 export {
   isSignCompositionPlan,
   verifySignCompositionExecution,

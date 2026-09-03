@@ -37,12 +37,14 @@ import {
   decodeFillRectParams,
   decodeFitArtworkToCanvasParams,
   decodeMoveRegionParams,
+  decodeReplaceMaskedRegionWithBackgroundParams,
   decodeReplaceRegionWithBackgroundParams,
   deriveUniformFitDimensions,
   encodeCropRegionParams,
   encodeFillRectParams,
   encodeFitArtworkToCanvasParams,
   encodeMoveRegionParams,
+  encodeReplaceMaskedRegionWithBackgroundParams,
   encodeReplaceRegionWithBackgroundParams,
 } from "./sign-composition-steps";
 
@@ -83,6 +85,23 @@ export interface SignCompositionReplacementInput {
   contextDepthPx: number;
 }
 
+/**
+ * Wand-First Correction UX Phase: the mask-shaped sibling of
+ * `SignCompositionReplacementInput` — an operator wand (flood-fill)
+ * selection that is not itself a filled rectangle. `maskBase64` is the
+ * exact persisted selection (`widthPx * heightPx` bytes, row-major, 1 =
+ * selected), sized to this bounding rectangle, never the full canvas.
+ */
+export interface SignCompositionMaskedReplacementInput {
+  xPx: number;
+  yPx: number;
+  widthPx: number;
+  heightPx: number;
+  color: { r: number; g: number; b: number };
+  contextDepthPx: number;
+  maskBase64: string;
+}
+
 export interface SignCompositionPlanInput {
   spec: SignProductionSpec;
   policy: SignResolutionPolicy;
@@ -118,6 +137,15 @@ export interface SignCompositionPlanInput {
    * Defaults to `[]` for a plan that needs none.
    */
   replacements: SignCompositionReplacementInput[];
+  /**
+   * Wand-First Correction UX Phase: mask-shaped removals, applied in this
+   * exact order, LAST — after every move, fill, and rectangle replacement —
+   * for the identical "each removal's own context verification sees the
+   * canvas exactly as it will actually be produced" reasoning `replacements`
+   * already follows. Optional/defaults to `[]` — every existing caller that
+   * predates this phase needs no change.
+   */
+  maskedReplacements?: SignCompositionMaskedReplacementInput[];
 }
 
 export type SignCompositionPlanBuildResult =
@@ -287,6 +315,31 @@ export function buildSignCompositionPlan(input: SignCompositionPlanInput): SignC
     });
   }
 
+  for (const masked of input.maskedReplacements ?? []) {
+    if (
+      masked.xPx < 0 || masked.yPx < 0 || masked.widthPx <= 0 || masked.heightPx <= 0 ||
+      masked.xPx + masked.widthPx > canvasWidthPx || masked.yPx + masked.heightPx > canvasHeightPx
+    ) {
+      return { status: "refused", reason: `replace_masked_region_with_background [${masked.xPx},${masked.yPx},${masked.widthPx}x${masked.heightPx}] does not fit within the ${canvasWidthPx}x${canvasHeightPx}px canvas.` };
+    }
+    if (masked.contextDepthPx <= 0) {
+      return { status: "refused", reason: "replace_masked_region_with_background requires a positive contextDepthPx to verify against." };
+    }
+    steps.push({
+      kind: "replace_masked_region_with_background",
+      params: encodeReplaceMaskedRegionWithBackgroundParams({
+        xPx: masked.xPx, yPx: masked.yPx, widthPx: masked.widthPx, heightPx: masked.heightPx,
+        colorR: masked.color.r, colorG: masked.color.g, colorB: masked.color.b,
+        contextDepthPx: masked.contextDepthPx, maskBase64: masked.maskBase64,
+      }),
+      risk: "review_required",
+      reasons: [
+        "Operator wand selection: removal of an unwanted artifact restricted to the exact selected shape — " +
+          "independently re-verified against its own measured surrounding context before execution.",
+      ],
+    });
+  }
+
   const planWithoutKey: Omit<SignRepairPlan, "planKey"> = {
     schemaVersion: SIGN_REPAIR_PLAN_SCHEMA_VERSION,
     policyId: input.policy.id,
@@ -339,6 +392,7 @@ export interface SignCompositionDecodedChoices {
   moves: SignCompositionMoveInput[];
   fills: SignCompositionFillInput[];
   replacements: SignCompositionReplacementInput[];
+  maskedReplacements: SignCompositionMaskedReplacementInput[];
 }
 
 export function decodeSignCompositionPlanToOperatorChoices(
@@ -378,6 +432,7 @@ export function decodeSignCompositionPlanToOperatorChoices(
   const moves: SignCompositionMoveInput[] = [];
   const fills: SignCompositionFillInput[] = [];
   const replacements: SignCompositionReplacementInput[] = [];
+  const maskedReplacements: SignCompositionMaskedReplacementInput[] = [];
   for (; index < steps.length; index++) {
     const step = steps[index]!;
     if (step.kind === "move_region") {
@@ -395,10 +450,17 @@ export function decodeSignCompositionPlanToOperatorChoices(
         xPx: p.xPx, yPx: p.yPx, widthPx: p.widthPx, heightPx: p.heightPx,
         color: { r: p.colorR, g: p.colorG, b: p.colorB }, contextDepthPx: p.contextDepthPx,
       });
+    } else if (step.kind === "replace_masked_region_with_background") {
+      const p = decodeReplaceMaskedRegionWithBackgroundParams(step.params);
+      if (!p) return null;
+      maskedReplacements.push({
+        xPx: p.xPx, yPx: p.yPx, widthPx: p.widthPx, heightPx: p.heightPx,
+        color: { r: p.colorR, g: p.colorG, b: p.colorB }, contextDepthPx: p.contextDepthPx, maskBase64: p.maskBase64,
+      });
     } else {
       return null; // Not the canvas-first vocabulary this decoder understands.
     }
   }
 
-  return { reconstruction, crop, fitBackground, fitPlacement, moves, fills, replacements };
+  return { reconstruction, crop, fitBackground, fitPlacement, moves, fills, replacements, maskedReplacements };
 }

@@ -454,7 +454,24 @@ export type SignRepairStepKind =
    * freehand mask — one exact rectangle, one measured colour, always
    * plan-bound and independently re-verifiable.
    */
-  | "replace_region_with_background";
+  | "replace_region_with_background"
+  /**
+   * Wand-First Correction UX Phase: the mask-shaped sibling of
+   * `replace_region_with_background`, for an operator wand selection that is
+   * NOT itself a filled rectangle (a hole, a stray mark, an irregular
+   * artifact). Gated by the IDENTICAL surrounding-context verification
+   * (`verifyReplaceRegionSurroundingContext`, unchanged) against the
+   * selection's own bounding rectangle — what differs is the WRITE: only
+   * pixels the operator's own flood-fill selection actually covers (a
+   * persisted boolean mask, sized to the bounding rectangle) are ever
+   * overwritten; every other pixel inside the bounding rectangle is left
+   * byte-identical, exactly so a non-rectangular selection can never be
+   * silently widened into deleting unrelated artwork merely because it sits
+   * inside the same bounding box. Never generative, never inpainted — a
+   * bounded, deterministic, already-measured flat fill restricted to an
+   * exact persisted mask.
+   */
+  | "replace_masked_region_with_background";
 
 /**
  * One planned operation, with enough structured parameters to replay it

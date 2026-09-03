@@ -37,6 +37,7 @@ import {
   decodeFillRectParams,
   decodeFitArtworkToCanvasParams,
   decodeMoveRegionParams,
+  decodeReplaceMaskedRegionWithBackgroundParams,
   decodeReplaceRegionWithBackgroundParams,
   deriveUniformFitDimensions,
   executeCompositionSteps,
@@ -184,6 +185,17 @@ export function verifySignCompositionExecution(
         detail: ok
           ? `Rectangle [${p!.xPx},${p!.yPx},${p!.widthPx}x${p!.heightPx}] replaced with measured colour rgb(${p!.colorR},${p!.colorG},${p!.colorB}) — the full recomputation below independently re-proves its surrounding-context verification.`
           : "replace_region_with_background step has invalid parameters or exceeds the canvas.",
+      });
+      if (!ok) return fail(checks);
+    } else if (step.kind === "replace_masked_region_with_background") {
+      const p = decodeReplaceMaskedRegionWithBackgroundParams(step.params);
+      const ok = p !== null && p.xPx + p.widthPx <= baseCanvas.width && p.yPx + p.heightPx <= baseCanvas.height;
+      checks.push({
+        check: "replace_masked_region_with_background_bounded",
+        status: ok ? "pass" : "fail",
+        detail: ok
+          ? `Mask-shaped selection within [${p!.xPx},${p!.yPx},${p!.widthPx}x${p!.heightPx}] replaced with measured colour rgb(${p!.colorR},${p!.colorG},${p!.colorB}) — the full recomputation below independently re-proves its surrounding-context verification and its exact mask shape.`
+          : "replace_masked_region_with_background step has invalid parameters, a mask that does not match its own rectangle, or exceeds the canvas.",
       });
       if (!ok) return fail(checks);
     } else {

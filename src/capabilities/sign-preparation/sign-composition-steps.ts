@@ -61,6 +61,7 @@ export const COMPOSITION_STEP_KINDS = new Set<SignRepairStep["kind"]>([
   "move_region",
   "fill_rect",
   "replace_region_with_background",
+  "replace_masked_region_with_background",
 ]);
 
 /** True iff `kind` is one of the four Phase 3B composition primitives. */
@@ -546,6 +547,128 @@ export function applyReplaceRegionWithBackground(
 }
 
 // ---------------------------------------------------------------------------
+// replace_masked_region_with_background — Wand-First Correction UX Phase:
+// the mask-shaped sibling of replace_region_with_background, for a wand
+// (flood-fill) selection that is not itself rectangular. Reuses
+// `verifyReplaceRegionSurroundingContext` UNCHANGED for the gate (measured
+// against the selection's own bounding rectangle — what's AROUND the
+// selection, never the selection's own interior shape); only the WRITE
+// differs, honoring the persisted mask pixel-for-pixel so a non-rectangular
+// selection can never silently widen into deleting unrelated artwork that
+// merely shares its bounding box.
+// ---------------------------------------------------------------------------
+
+/**
+ * A bounding-rectangle area ceiling for a persisted wand-selection mask —
+ * generous enough for any localized artifact (a hole, a mark, a border
+ * segment) at real production resolution, far short of the full ~20.7MP
+ * canvas. Exists only to keep a plan step's own persisted size bounded and
+ * predictable; it is never silently raised by truncating or resampling a
+ * larger mask — a selection over this ceiling is refused outright, with the
+ * operator directed to select a smaller area or use the rectangle-based
+ * tool instead.
+ */
+export const MAX_MASKED_REGION_PIXELS = 4_000_000;
+
+export interface ReplaceMaskedRegionWithBackgroundParams {
+  xPx: number;
+  yPx: number;
+  widthPx: number;
+  heightPx: number;
+  colorR: number;
+  colorG: number;
+  colorB: number;
+  /** How many px of surrounding context (outside the bounding rect, clamped to canvas bounds) must independently verify as the same uniform colour before this step is allowed to run. */
+  contextDepthPx: number;
+  /** `widthPx * heightPx` bytes (1 = selected), row-major, base64-encoded — the exact persisted selection mask, sized to the bounding rectangle above, never the full canvas. */
+  maskBase64: string;
+}
+
+export function encodeReplaceMaskedRegionWithBackgroundParams(
+  p: ReplaceMaskedRegionWithBackgroundParams,
+): Record<string, number | string> {
+  return { ...p };
+}
+
+export function decodeReplaceMaskedRegionWithBackgroundParams(
+  params: Record<string, number | string>,
+): ReplaceMaskedRegionWithBackgroundParams | null {
+  const xPx = requireNonNegativeInt(params.xPx);
+  const yPx = requireNonNegativeInt(params.yPx);
+  const widthPx = requirePositiveInt(params.widthPx);
+  const heightPx = requirePositiveInt(params.heightPx);
+  const colorR = requireByteChannel(params.colorR);
+  const colorG = requireByteChannel(params.colorG);
+  const colorB = requireByteChannel(params.colorB);
+  const contextDepthPx = requirePositiveInt(params.contextDepthPx);
+  const maskBase64 = typeof params.maskBase64 === "string" ? params.maskBase64 : null;
+  if (
+    xPx === null || yPx === null || widthPx === null || heightPx === null ||
+    colorR === null || colorG === null || colorB === null || contextDepthPx === null ||
+    maskBase64 === null
+  ) {
+    return null;
+  }
+  if (widthPx * heightPx > MAX_MASKED_REGION_PIXELS) return null;
+  let maskBytes: Buffer;
+  try {
+    maskBytes = Buffer.from(maskBase64, "base64");
+  } catch {
+    return null;
+  }
+  // Fail closed on any mismatch between the declared rectangle and the
+  // actual decoded mask length — a corrupted/tampered/short mask must never
+  // be silently padded, truncated, or reinterpreted at a different shape.
+  if (maskBytes.length !== widthPx * heightPx) return null;
+  return { xPx, yPx, widthPx, heightPx, colorR, colorG, colorB, contextDepthPx, maskBase64 };
+}
+
+/**
+ * Mechanically identical gate to `applyReplaceRegionWithBackground` (same
+ * `verifyReplaceRegionSurroundingContext` call, against the SAME bounding
+ * rectangle) — the only difference is the write loop below, which touches
+ * ONLY pixels the persisted mask marks selected. Every other pixel inside
+ * `[xPx,yPx,widthPx,heightPx]` — anything the operator's wand click did NOT
+ * actually select — is left byte-identical to `working`.
+ */
+export function applyReplaceMaskedRegionWithBackground(
+  working: Buffer,
+  canvasWidthPx: number,
+  canvasHeightPx: number,
+  step: SignRepairStep,
+): { status: "refused"; reason: "unsupported_step_kind"; detail: string } | null {
+  const p = decodeReplaceMaskedRegionWithBackgroundParams(step.params);
+  if (!p) return refuse(`Step "replace_masked_region_with_background" is missing valid parameters, or its mask does not match its own declared rectangle.`);
+  if (p.xPx + p.widthPx > canvasWidthPx || p.yPx + p.heightPx > canvasHeightPx) {
+    return refuse(
+      `Step "replace_masked_region_with_background" rectangle [${p.xPx},${p.yPx},${p.widthPx}x${p.heightPx}] exceeds the ` +
+        `${canvasWidthPx}x${canvasHeightPx}px canvas.`,
+    );
+  }
+  const context = verifyReplaceRegionSurroundingContext(working, canvasWidthPx, canvasHeightPx, {
+    xPx: p.xPx, yPx: p.yPx, widthPx: p.widthPx, heightPx: p.heightPx,
+    colorR: p.colorR, colorG: p.colorG, colorB: p.colorB, contextDepthPx: p.contextDepthPx,
+  });
+  if (!context.uniform) {
+    return refuse(`Step "replace_masked_region_with_background" refused: ${context.detail}`);
+  }
+  const mask = Buffer.from(p.maskBase64, "base64");
+  for (let y = 0; y < p.heightPx; y++) {
+    const rowStart = ((p.yPx + y) * canvasWidthPx + p.xPx) * 4;
+    const maskRowStart = y * p.widthPx;
+    for (let x = 0; x < p.widthPx; x++) {
+      if (!mask[maskRowStart + x]) continue; // not part of the persisted selection — untouched
+      const i = rowStart + x * 4;
+      working[i] = p.colorR;
+      working[i + 1] = p.colorG;
+      working[i + 2] = p.colorB;
+      working[i + 3] = 255;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // measureUniformSurroundingBackground — Operator Production Correction UX
 // (Smart Remove): auto-MEASURES a candidate replacement colour from the
 // context ring around an operator-selected rectangle, rather than requiring
@@ -553,7 +676,10 @@ export function applyReplaceRegionWithBackground(
 // unweakened `verifyReplaceRegionSurroundingContext` — this never
 // introduces a second tolerance or a looser membership rule; it only adds a
 // MEASUREMENT step in front of the SAME verifier every `replace_region_
-// with_background` step is already gated on.
+// with_background` step is already gated on. Reused UNCHANGED for a wand
+// (masked) selection's own background measurement too — measurement is
+// always against the selection's bounding rectangle, exactly like the
+// rectangle tool, regardless of what shape the interior selection is.
 // ---------------------------------------------------------------------------
 
 /**
@@ -644,8 +770,18 @@ export function applyCorrectionsToCanvas(
   candidate: RgbaImage,
   steps: SignRepairStep[],
 ): SignExecutionResult {
-  if (!steps.every((step) => step.kind === "move_region" || step.kind === "fill_rect" || step.kind === "replace_region_with_background")) {
-    return refuse("Only move_region, fill_rect, and replace_region_with_background may be applied on top of an existing production candidate.");
+  if (
+    !steps.every(
+      (step) =>
+        step.kind === "move_region" ||
+        step.kind === "fill_rect" ||
+        step.kind === "replace_region_with_background" ||
+        step.kind === "replace_masked_region_with_background",
+    )
+  ) {
+    return refuse(
+      "Only move_region, fill_rect, replace_region_with_background, and replace_masked_region_with_background may be applied on top of an existing production candidate.",
+    );
   }
   const baseCanvas = candidate;
   const working = Buffer.from(candidate.data);
@@ -655,8 +791,10 @@ export function applyCorrectionsToCanvas(
       refusal = applyMoveRegion(baseCanvas, working, step);
     } else if (step.kind === "fill_rect") {
       refusal = applyFillRect(working, baseCanvas.width, baseCanvas.height, step);
-    } else {
+    } else if (step.kind === "replace_region_with_background") {
       refusal = applyReplaceRegionWithBackground(working, baseCanvas.width, baseCanvas.height, step);
+    } else {
+      refusal = applyReplaceMaskedRegionWithBackground(working, baseCanvas.width, baseCanvas.height, step);
     }
     if (refusal) return refusal;
   }
@@ -719,6 +857,8 @@ export function executeCompositionSteps(
       refusal = applyFillRect(working, baseCanvas.width, baseCanvas.height, step);
     } else if (step.kind === "replace_region_with_background") {
       refusal = applyReplaceRegionWithBackground(working, baseCanvas.width, baseCanvas.height, step);
+    } else if (step.kind === "replace_masked_region_with_background") {
+      refusal = applyReplaceMaskedRegionWithBackground(working, baseCanvas.width, baseCanvas.height, step);
     } else {
       refusal = refuse(`Step "${step.kind}" is not admitted inside a composition plan's move/fill stage.`);
     }

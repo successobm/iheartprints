@@ -354,6 +354,11 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-composition-steps.test.ts",
   "src/capabilities/sign-preparation/sign-composition-plan-builder.test.ts",
   "src/capabilities/sign-preparation/sign-composition-verification.test.ts",
+  // Wand-First Correction UX Phase: the shared, DTF-and-Signs flood-fill
+  // selection primitive, and Signs' own wand-selection wrapper (rectExact
+  // safety gate, overlay-crop rendering, mask transport encoding).
+  "src/capabilities/shared/flood-fill-selection.test.ts",
+  "src/capabilities/sign-preparation/sign-wand-selection.test.ts",
   // Signs Phase 3B (Fit to Production): CUT/SAFE/BLEED/PROTECTED analysis
   // and the replace_region_with_background artifact-removal primitive.
   "src/capabilities/sign-preparation/sign-fit-to-production.test.ts",

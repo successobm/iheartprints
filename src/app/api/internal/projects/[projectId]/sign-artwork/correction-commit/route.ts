@@ -50,6 +50,17 @@ function parseCorrections(body: unknown): PendingSignCorrection[] | null {
         return null;
       }
       corrections.push({ kind: "classify", classificationKind, edges: edges as SignEdge[], xPx, yPx, widthPx, heightPx });
+    } else if (raw.kind === "wand_delete") {
+      const { xPx, yPx, widthPx, heightPx, maskBase64, contextDepthPx } = raw;
+      if (
+        typeof xPx !== "number" || typeof yPx !== "number" ||
+        typeof widthPx !== "number" || typeof heightPx !== "number" ||
+        typeof maskBase64 !== "string" || maskBase64.length === 0 ||
+        typeof contextDepthPx !== "number"
+      ) {
+        return null;
+      }
+      corrections.push({ kind: "wand_delete", xPx, yPx, widthPx, heightPx, maskBase64, contextDepthPx });
     } else {
       return null;
     }

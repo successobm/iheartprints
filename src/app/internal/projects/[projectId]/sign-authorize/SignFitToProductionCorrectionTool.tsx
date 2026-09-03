@@ -4,55 +4,52 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { SignEdge, SignFitToProductionSummary } from "@/capabilities/sign-preparation";
+import type { ToleranceLevel } from "@/capabilities/shared/flood-fill-selection";
 
 import { mapDisplayPointToSourcePx, normalizeSelection } from "./correction-coordinate-mapping";
 import { clampZoom, computeFitZoom } from "./sign-canvas-zoom";
 import { computeDisplayPpi, deriveEdgeChips, deriveOverallFitLabel } from "./sign-workspace-status";
 
 /**
- * Production Workspace Phase: this component IS the operator's production
- * workstation — one authoritative working canvas, a compact status bar
- * above it, a small tool rail beside it, and a contextual action panel that
- * shows only what applies to the current selection. It replaces the
- * earlier stacked-preview layout entirely; nothing here is a second
- * artwork-intelligence implementation, only a recomposition of the
- * capabilities the Operator Production Correction UX and Edge-Intent
- * Correction phases already built (Sections A/F/M).
+ * Production Workspace Phase / Wand-First Correction UX Phase: this
+ * component IS the operator's production workstation. The PRIMARY,
+ * default interaction is a wand: click the suspicious artwork, see exactly
+ * what got selected, then Delete / Move / Keep — the same click-select-act
+ * model DTF's own proven Magic Wand already uses (Section A/F), built on
+ * the IDENTICAL flood-fill algorithm (`@/capabilities/shared/flood-fill-
+ * selection`, extracted from DTF's own `magic-wand-algorithm.ts` this
+ * phase — see that module's own doc for the reuse boundary). The earlier
+ * rectangle-drag toolbox (Select/Move/Remove/Edge Artwork/Protected/
+ * Review, precise X/Y/W/H) still exists, unchanged in behavior, one click
+ * away under "Advanced tools" — never the default, never required for the
+ * ordinary case.
  *
- * Fit to Production identifies a violation, the operator zooms in, selects
- * the exact offending artwork with a rectangle, and either previews a
- * deterministic correction (Smart Remove, the existing Move capability) or
- * GOVERNS a classification (Mark as Edge Artwork / Border, Mark as
- * Protected). Applies either as a governed action. Deliberately NOT
- * Photoshop (Section C/M): one rectangular selection tool, a small closed
- * set of actions, a before/after preview, nothing else.
+ * The operator never needs to think in terms of EDGE_INTENT_ARTWORK,
+ * PROTECTED_CONTENT, replace_region_with_background, or pixel coordinates
+ * to use the wand: "Delete" means "this shouldn't be here," "Keep" means
+ * "this is intentional," and the governed semantics happen underneath
+ * (Section B/N). "Delete" is NEVER DTF's alpha-zero transparency — Signs
+ * has no meaningful transparent production state; it is a masked,
+ * deterministic background replacement restricted to the EXACT selected
+ * pixels, gated by the SAME surrounding-context proof the rectangle tool
+ * already required (`replace_masked_region_with_background`, Section J/K).
+ * "Keep" only ever becomes a governed EDGE_INTENT_ARTWORK classification
+ * when the selection's own bounding rectangle is PROVABLY identical to
+ * what was actually selected (`rectExact` — Section N); otherwise Keep is
+ * refused, with the operator directed to Advanced, rather than risk
+ * silently exempting neighboring content the operator never looked at.
  *
- * Coordinate discipline (unchanged): every selection is tracked and sent in
- * the production candidate's own NATIVE pixel space. The on-screen canvas
- * may be zoomed to any CSS size; every pointer event is converted via
+ * Coordinate discipline (unchanged): every selection/click is converted via
  * `naturalWidth / canvas.getBoundingClientRect().width` at THAT moment,
- * never a cached scale — so a selection made at any zoom level maps to the
- * identical source pixels (`correction-coordinate-mapping.ts`, untouched
- * this phase). "Fit" zoom is likewise a pure, testable computation
- * (`sign-canvas-zoom.ts`) over the actual viewport container size, never a
- * value guessed for one particular sign.
- *
- * Preview/execution equivalence (unchanged): `/correction-preview` runs the
- * SAME `measureUniformSurroundingBackground`/`applyCorrectionsToCanvas`/
- * `analyzeSignFitToProduction` primitives real commit/execution use — this
- * component never computes pixel colours, applies a correction, or measures
- * safe-inset clearance itself; it only sends the operator's selection and
- * renders back what the server actually did.
- *
- * The 0.125in SAFE guide is drawn from the SERVER's own already-computed
- * `requiredProtectedInsetPx` per edge — it is a guide for where PROTECTED
- * content must stay, never a blanket "no artwork" zone: BLEED_BACKGROUND
- * and governed EDGE_INTENT_ARTWORK may legitimately sit inside it or reach
- * CUT (Section J).
+ * never a cached scale (`correction-coordinate-mapping.ts`). Zero provider
+ * calls anywhere in this file — wand selection is one same-origin server
+ * round trip per click (mirroring DTF's own proven request pattern, never
+ * per pointer-move), never Topaz, never OpenAI.
  */
 
 type Tool = "select" | "move" | "remove" | "edge_intent" | "protected";
 type ClassificationKind = "edge_intent" | "protected";
+type InteractionMode = "wand" | "advanced";
 
 interface Rect {
   xPx: number;
@@ -64,7 +61,22 @@ interface Rect {
 type PendingCorrection =
   | { kind: "remove"; xPx: number; yPx: number; widthPx: number; heightPx: number; contextDepthPx: number }
   | { kind: "move"; sourceStartYPx: number; heightPx: number; destStartYPx: number }
-  | { kind: "classify"; classificationKind: ClassificationKind; edges: SignEdge[]; xPx: number; yPx: number; widthPx: number; heightPx: number };
+  | { kind: "classify"; classificationKind: ClassificationKind; edges: SignEdge[]; xPx: number; yPx: number; widthPx: number; heightPx: number }
+  | { kind: "wand_delete"; xPx: number; yPx: number; widthPx: number; heightPx: number; maskBase64: string; contextDepthPx: number };
+
+/** Wire shape of `POST .../sign-artwork/wand-select` — mirrors `SignWandSelectionPreview` in `sign-artwork-service.ts` without importing that server-only module client-side (same pattern `PreviewResponse`/`PreviewEdge` below already use for `/correction-preview`). */
+interface WandSelectionResponse {
+  status: "no_candidate" | "out_of_bounds" | "selected";
+  pixelCount: number;
+  bounds: Rect | null;
+  touchesEdge: boolean;
+  broad: boolean;
+  rectExact: boolean;
+  eligibleForMaskedDelete: boolean;
+  touchedCanvasEdges: SignEdge[];
+  overlayPngBase64: string | null;
+  maskBase64: string | null;
+}
 
 interface PreviewEdge {
   edge: SignEdge;
@@ -108,6 +120,20 @@ const TOOL_LABEL: Record<Tool, string> = {
   protected: "Protected",
 };
 
+const TOLERANCE_LABEL: Record<ToleranceLevel, string> = { less: "Less", default: "Normal", more: "More" };
+/** A tap/click that moved less than this many CSS px is a wand click, not a drag/pan gesture. */
+const WAND_CLICK_MOVE_TOLERANCE_PX = 6;
+
+/** Same pattern `CorrectionWorkspace.tsx` (DTF's own wand client) already uses — image decode happens as part of the triggering async action, never inside a `useEffect`. */
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
 export function SignFitToProductionCorrectionTool({
   projectId,
   fitToProduction,
@@ -138,6 +164,19 @@ export function SignFitToProductionCorrectionTool({
   const [contextDepthPx, setContextDepthPx] = useState(DEFAULT_CONTEXT_DEPTH_PX);
   const [moveDestStartYPx, setMoveDestStartYPx] = useState("");
   const [classificationEdges, setClassificationEdges] = useState<Set<SignEdge>>(new Set());
+
+  // Wand-First Correction UX Phase: WAND is the default interaction mode
+  // (Section F) — the rectangle-drag toolbox above remains fully intact,
+  // reachable via "Advanced tools", never the starting experience.
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("wand");
+  const [wandTolerance, setWandTolerance] = useState<ToleranceLevel>("default");
+  const [wandSelection, setWandSelection] = useState<WandSelectionResponse | null>(null);
+  const [wandSeed, setWandSeed] = useState<{ xPx: number; yPx: number } | null>(null);
+  const [wandOverlayImg, setWandOverlayImg] = useState<HTMLImageElement | null>(null);
+  const [wandBusy, setWandBusy] = useState(false);
+  const [wandError, setWandError] = useState<string | null>(null);
+  const [wandMoreOpen, setWandMoreOpen] = useState(false);
+  const wandClickStartRef = useRef<{ clientX: number; clientY: number } | null>(null);
 
   const [queue, setQueue] = useState<PendingCorrection[]>([]);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
@@ -260,7 +299,7 @@ export function SignFitToProductionCorrectionTool({
     }
     ctx.restore();
 
-    // Current selection rectangle.
+    // Current selection rectangle (Advanced/rectangle-drag mode).
     if (selection) {
       ctx.save();
       ctx.strokeStyle = "rgba(37, 99, 235, 0.95)"; // blue
@@ -268,7 +307,16 @@ export function SignFitToProductionCorrectionTool({
       ctx.strokeRect(selection.xPx * zoom, selection.yPx * zoom, selection.widthPx * zoom, selection.heightPx * zoom);
       ctx.restore();
     }
-  }, [naturalSize, zoom, selection, currentEdges]);
+
+    // Wand selection overlay — the REAL selected mask shape (translucent
+    // fill + marching-ants boundary), never a bounding-rectangle stand-in
+    // (Section H). Cropped to the selection's own bounding rect for
+    // transport; drawn here at that exact offset/scale.
+    if (wandOverlayImg && wandSelection?.status === "selected" && wandSelection.bounds) {
+      const b = wandSelection.bounds;
+      ctx.drawImage(wandOverlayImg, b.xPx * zoom, b.yPx * zoom, b.widthPx * zoom, b.heightPx * zoom);
+    }
+  }, [naturalSize, zoom, selection, currentEdges, wandOverlayImg, wandSelection]);
 
   useEffect(() => {
     drawOverlay();
@@ -290,6 +338,11 @@ export function SignFitToProductionCorrectionTool({
   }
 
   function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (interactionMode === "wand") {
+      wandClickStartRef.current = { clientX: e.clientX, clientY: e.clientY };
+      (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+      return;
+    }
     const p = toSourcePx(e.clientX, e.clientY);
     if (!p) return;
     draggingRef.current = { startXPx: p.xPx, startYPx: p.yPx };
@@ -297,6 +350,7 @@ export function SignFitToProductionCorrectionTool({
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (interactionMode === "wand") return; // wand mode is click-only, no drag preview
     if (!draggingRef.current) return;
     const p = toSourcePx(e.clientX, e.clientY);
     if (!p) return;
@@ -304,7 +358,18 @@ export function SignFitToProductionCorrectionTool({
     setSelection(normalizeSelection({ xPx: startXPx, yPx: startYPx }, p));
   }
 
-  function handlePointerUp() {
+  function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (interactionMode === "wand") {
+      const start = wandClickStartRef.current;
+      wandClickStartRef.current = null;
+      if (!start) return;
+      const movedPx = Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY);
+      if (movedPx > WAND_CLICK_MOVE_TOLERANCE_PX) return; // a drag/pan gesture, not a click — ignore
+      const p = toSourcePx(e.clientX, e.clientY);
+      if (!p) return;
+      void runWandSelect(p.xPx, p.yPx, wandTolerance);
+      return;
+    }
     draggingRef.current = null;
     setSelection((current) => (current && current.widthPx > 0 && current.heightPx > 0 ? current : null));
   }
@@ -315,6 +380,117 @@ export function SignFitToProductionCorrectionTool({
     const vp = viewportRef.current;
     if (!vp || !naturalSize) return;
     setZoom(computeFitZoom(naturalSize, { width: vp.clientWidth, height: vp.clientHeight }, ZOOM_BOUNDS));
+  }
+
+  async function runWandSelect(xPx: number, yPx: number, toleranceLevel: ToleranceLevel) {
+    setWandBusy(true);
+    setWandError(null);
+    try {
+      const res = await fetch(`/api/internal/projects/${projectId}/sign-artwork/wand-select`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ xPx, yPx, toleranceLevel }),
+      });
+      const body = (await res.json().catch(() => null)) as WandSelectionResponse | { error?: string } | null;
+      if (!res.ok || !body || "error" in body) {
+        setWandError((body as { error?: string } | null)?.error ?? "That didn't work. Please try again.");
+        setWandBusy(false);
+        return;
+      }
+      const result = body as WandSelectionResponse;
+      if (result.status !== "selected") {
+        setWandSelection(null);
+        setWandSeed(null);
+        setWandOverlayImg(null);
+        setWandError(
+          result.status === "out_of_bounds"
+            ? "That point is outside the artwork — click directly on the candidate image."
+            : "There's no current production candidate to select from.",
+        );
+        setWandBusy(false);
+        return;
+      }
+      setWandSelection(result);
+      setWandSeed({ xPx, yPx });
+      setWandMoreOpen(false);
+      if (result.overlayPngBase64) {
+        try {
+          const img = await loadImage(`data:image/png;base64,${result.overlayPngBase64}`);
+          setWandOverlayImg(img);
+        } catch {
+          setWandOverlayImg(null); // overlay decode failure — selection stats/actions still work, just no visual overlay
+        }
+      } else {
+        setWandOverlayImg(null);
+      }
+      setWandBusy(false);
+    } catch (err) {
+      setWandError(err instanceof Error ? err.message : "That didn't work. Please try again.");
+      setWandBusy(false);
+    }
+  }
+
+  function changeWandTolerance(level: ToleranceLevel) {
+    setWandTolerance(level);
+    if (wandSeed) void runWandSelect(wandSeed.xPx, wandSeed.yPx, level);
+  }
+
+  function clearWandSelection() {
+    setWandSelection(null);
+    setWandSeed(null);
+    setWandOverlayImg(null);
+    setWandError(null);
+    setWandMoreOpen(false);
+  }
+
+  function queueWandDelete() {
+    if (!wandSelection || wandSelection.status !== "selected" || !wandSelection.bounds || !wandSelection.maskBase64) return;
+    if (!wandSelection.eligibleForMaskedDelete) return;
+    const correction: PendingCorrection = {
+      kind: "wand_delete",
+      xPx: wandSelection.bounds.xPx, yPx: wandSelection.bounds.yPx,
+      widthPx: wandSelection.bounds.widthPx, heightPx: wandSelection.bounds.heightPx,
+      maskBase64: wandSelection.maskBase64,
+      contextDepthPx: DEFAULT_CONTEXT_DEPTH_PX,
+    };
+    void runPreview([...queue, correction]);
+  }
+
+  /**
+   * "Keep" (Section M): governed EDGE_INTENT_ARTWORK/PROTECTED
+   * classification from a wand selection. Edges are auto-derived from
+   * which canvas boundaries the selection's own bounding rectangle
+   * geometrically touches (`touchedCanvasEdges` — never inferred from
+   * pixel content) — the operator never checks edge boxes by hand for this
+   * path. Only offered (see `WandActionPanel` below) when `rectExact` is
+   * true and at least one edge is touched (Section N).
+   */
+  function queueWandKeep(classificationKind: ClassificationKind) {
+    if (!wandSelection || wandSelection.status !== "selected" || !wandSelection.bounds) return;
+    if (!wandSelection.rectExact || wandSelection.touchedCanvasEdges.length === 0) return;
+    const correction: PendingCorrection = {
+      kind: "classify",
+      classificationKind,
+      edges: wandSelection.touchedCanvasEdges,
+      xPx: wandSelection.bounds.xPx, yPx: wandSelection.bounds.yPx,
+      widthPx: wandSelection.bounds.widthPx, heightPx: wandSelection.bounds.heightPx,
+    };
+    void runPreview([...queue, correction]);
+  }
+
+  /**
+   * "Move" from a wand selection (Section L): arbitrary mask movement would
+   * need a new compositor this phase deliberately does not build — Move
+   * remains the EXISTING rectangle-band primitive, started here with the
+   * wand selection's own bounding rectangle as a precise starting point the
+   * operator can still adjust under Advanced tools.
+   */
+  function startWandMove() {
+    if (!wandSelection || wandSelection.status !== "selected" || !wandSelection.bounds) return;
+    setSelection({ xPx: wandSelection.bounds.xPx, yPx: wandSelection.bounds.yPx, widthPx: wandSelection.bounds.widthPx, heightPx: wandSelection.bounds.heightPx });
+    setTool("move");
+    setInteractionMode("advanced");
+    clearWandSelection();
   }
 
   async function runPreview(nextQueue: PendingCorrection[]) {
@@ -404,12 +580,24 @@ export function SignFitToProductionCorrectionTool({
     setPreview(null);
     setSelection(null);
     setError(null);
+    clearWandSelection();
   }
 
   function cancelSelection() {
     setSelection(null);
     setTool("select");
     setError(null);
+  }
+
+  function switchToAdvanced() {
+    clearWandSelection();
+    setInteractionMode("advanced");
+  }
+
+  function switchToWand() {
+    setSelection(null);
+    setTool("select");
+    setInteractionMode("wand");
   }
 
   async function applyToProduction() {
@@ -466,35 +654,85 @@ export function SignFitToProductionCorrectionTool({
 
       {/* Tool rail | canvas | context panel */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-[152px_minmax(0,1fr)_300px]">
-        <div
-          className="flex flex-row gap-1.5 overflow-x-auto lg:flex-col lg:overflow-visible"
-          role="toolbar"
-          aria-label="Correction tools"
-          data-sign-tool-rail
-        >
-          {(["select", "move", "remove", "edge_intent", "protected"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTool(t)}
-              aria-pressed={tool === t}
-              className={`shrink-0 rounded-md border px-2.5 py-1.5 text-left text-sm font-medium transition ${
-                tool === t ? "border-ink bg-ink text-white" : "border-ink/15 text-ink hover:border-ink/40"
-              }`}
-              data-testid={`sign-tool-${t}`}
-            >
-              {TOOL_LABEL[t]}
-            </button>
-          ))}
-          <button
-            type="button"
-            onClick={cancelSelection}
-            className="shrink-0 rounded-md border border-ink/15 px-2.5 py-1.5 text-left text-sm font-medium text-ink transition hover:border-ink/40"
-            data-testid="sign-tool-review"
+        {interactionMode === "wand" ? (
+          <div
+            className="flex flex-row items-start gap-1.5 overflow-x-auto lg:flex-col lg:overflow-visible"
+            role="toolbar"
+            aria-label="Correction tools"
+            data-sign-tool-rail
+            data-sign-interaction-mode="wand"
           >
-            Review
-          </button>
-        </div>
+            <div className="shrink-0 rounded-md border border-ink bg-ink px-2.5 py-1.5 text-left text-sm font-medium text-white" data-testid="sign-tool-wand">
+              Wand
+            </div>
+            <div className="flex shrink-0 flex-col gap-1">
+              <span className="text-xs font-medium text-ink/60">Tolerance</span>
+              <div className="flex gap-1">
+                {(["less", "default", "more"] as const).map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => changeWandTolerance(level)}
+                    aria-pressed={wandTolerance === level}
+                    className={`rounded border px-2 py-1 text-xs font-medium transition ${
+                      wandTolerance === level ? "border-ink bg-ink text-white" : "border-ink/15 text-ink hover:border-ink/40"
+                    }`}
+                    data-testid={`sign-wand-tolerance-${level}`}
+                  >
+                    {TOLERANCE_LABEL[level]}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={switchToAdvanced}
+              className="mt-1 shrink-0 text-left text-xs text-ink/60 underline"
+              data-testid="sign-switch-to-advanced"
+            >
+              Advanced tools →
+            </button>
+          </div>
+        ) : (
+          <div
+            className="flex flex-row gap-1.5 overflow-x-auto lg:flex-col lg:overflow-visible"
+            role="toolbar"
+            aria-label="Correction tools"
+            data-sign-tool-rail
+            data-sign-interaction-mode="advanced"
+          >
+            <button
+              type="button"
+              onClick={switchToWand}
+              className="shrink-0 text-left text-xs text-ink/60 underline"
+              data-testid="sign-switch-to-wand"
+            >
+              ← Back to Wand
+            </button>
+            {(["select", "move", "remove", "edge_intent", "protected"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setTool(t)}
+                aria-pressed={tool === t}
+                className={`shrink-0 rounded-md border px-2.5 py-1.5 text-left text-sm font-medium transition ${
+                  tool === t ? "border-ink bg-ink text-white" : "border-ink/15 text-ink hover:border-ink/40"
+                }`}
+                data-testid={`sign-tool-${t}`}
+              >
+                {TOOL_LABEL[t]}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={cancelSelection}
+              className="shrink-0 rounded-md border border-ink/15 px-2.5 py-1.5 text-left text-sm font-medium text-ink transition hover:border-ink/40"
+              data-testid="sign-tool-review"
+            >
+              Review
+            </button>
+          </div>
+        )}
 
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2 text-sm" data-sign-zoom-controls>
@@ -569,6 +807,11 @@ export function SignFitToProductionCorrectionTool({
             </div>
           </div>
           <p className="text-xs text-muted">
+            {interactionMode === "wand" ? (
+              <>Click directly on the artwork to select it — the exact connected shape, not just a box around it.</>
+            ) : (
+              <>Drag a rectangle on the canvas, then pick a tool from the rail to act on it.</>
+            )}{" "}
             <span className="font-medium text-emerald-700">Dashed guide</span> — where PROTECTED content must stay
             clear of CUT. Not a no-artwork zone: BLEED backgrounds and governed EDGE ARTWORK may cross it or reach
             CUT. Colored bands mark edges that still need attention; the bright tick marks the worst-measured point
@@ -577,7 +820,22 @@ export function SignFitToProductionCorrectionTool({
         </div>
 
         <div className="flex flex-col gap-3" data-sign-context-panel>
-          {selectionValid && selection ? (
+          {interactionMode === "wand" ? (
+            wandSelection?.status === "selected" ? (
+              <WandActionPanel
+                selection={wandSelection}
+                busy={wandBusy || busy}
+                moreOpen={wandMoreOpen}
+                setMoreOpen={setWandMoreOpen}
+                queueDelete={queueWandDelete}
+                startMove={startWandMove}
+                queueKeep={queueWandKeep}
+                clearSelection={clearWandSelection}
+              />
+            ) : (
+              <FitGuidancePanel edges={currentEdges} />
+            )
+          ) : selectionValid && selection ? (
             <ActionPanel
               tool={tool}
               selection={selection}
@@ -597,6 +855,12 @@ export function SignFitToProductionCorrectionTool({
           ) : (
             <FitGuidancePanel edges={currentEdges} />
           )}
+
+          {interactionMode === "wand" && wandError ? (
+            <p className="text-sm text-red-600" role="alert" data-sign-wand-error>
+              {wandError}
+            </p>
+          ) : null}
 
           {error ? (
             <p className="text-sm text-red-600" role="alert" data-sign-correction-error>
@@ -791,6 +1055,120 @@ function ActionPanel({
           </label>
         </div>
       </details>
+    </div>
+  );
+}
+
+/**
+ * The right-rail contextual action panel for a WAND selection (Section
+ * I/J/M): a small DELETE/MOVE/KEEP bar, never the six competing modes the
+ * rectangle toolbox exposes. Delete and Keep are only enabled when the
+ * selection actually qualifies (`eligibleForMaskedDelete`/`rectExact` +
+ * touching an edge) — disabled with a plain-language reason otherwise,
+ * never silently allowed to produce an unsafe correction. "Protected" and
+ * "Leave for review" live under MORE (Section O), never competing for
+ * primary attention.
+ */
+function WandActionPanel({
+  selection,
+  busy,
+  moreOpen,
+  setMoreOpen,
+  queueDelete,
+  startMove,
+  queueKeep,
+  clearSelection,
+}: {
+  selection: WandSelectionResponse;
+  busy: boolean;
+  moreOpen: boolean;
+  setMoreOpen: (open: boolean) => void;
+  queueDelete: () => void;
+  startMove: () => void;
+  queueKeep: (kind: ClassificationKind) => void;
+  clearSelection: () => void;
+}) {
+  const canKeep = selection.rectExact && selection.touchedCanvasEdges.length > 0;
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-ink/15 p-3" data-sign-wand-action-panel>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-ink">Selected artwork</h2>
+        <button type="button" onClick={clearSelection} className="text-xs text-ink/60 underline" data-testid="sign-wand-clear">
+          Clear selection
+        </button>
+      </div>
+
+      <p className="text-xs text-muted" data-sign-wand-selection-stats>
+        {selection.pixelCount.toLocaleString()} px selected
+        {selection.broad ? " — this is a large area; double-check before deleting." : ""}
+      </p>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={queueDelete}
+          disabled={busy || !selection.eligibleForMaskedDelete}
+          title={selection.eligibleForMaskedDelete ? undefined : "This selection is too large to safely delete here — try a smaller area, or use Advanced tools."}
+          className="rounded-full bg-red-600 px-3.5 py-2 text-sm font-medium text-white transition enabled:hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="sign-wand-delete"
+        >
+          Delete
+        </button>
+        <button
+          type="button"
+          onClick={startMove}
+          disabled={busy}
+          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="sign-wand-move"
+        >
+          Move
+        </button>
+        <button
+          type="button"
+          onClick={() => queueKeep("edge_intent")}
+          disabled={busy || !canKeep}
+          title={canKeep ? undefined : "This selection isn't rectangular enough (or doesn't reach an edge) to safely mark as intentional here — try Advanced tools."}
+          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="sign-wand-keep"
+        >
+          Keep
+        </button>
+        <button
+          type="button"
+          onClick={() => setMoreOpen(!moreOpen)}
+          aria-expanded={moreOpen}
+          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition hover:border-ink/40"
+          data-testid="sign-wand-more"
+        >
+          More
+        </button>
+      </div>
+
+      {!selection.eligibleForMaskedDelete ? (
+        <p className="text-xs text-muted">This selection is too large for Delete here — try a smaller area, or use Advanced tools.</p>
+      ) : null}
+
+      {moreOpen ? (
+        <div className="flex flex-col gap-2 border-t border-ink/10 pt-2">
+          <button
+            type="button"
+            onClick={() => queueKeep("protected")}
+            disabled={busy || !canKeep}
+            className="rounded-md border border-ink/20 px-3 py-1.5 text-left text-sm text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="sign-wand-protected"
+          >
+            Important content — keep safely inside
+          </button>
+          <button
+            type="button"
+            onClick={clearSelection}
+            className="rounded-md border border-ink/20 px-3 py-1.5 text-left text-sm text-ink transition hover:border-ink/40"
+            data-testid="sign-wand-leave-for-review"
+          >
+            Needs review / I&apos;m not sure
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

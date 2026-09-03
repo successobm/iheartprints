@@ -12,15 +12,19 @@ import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import type { SignRepairStep } from "./contracts";
 import { makeImage, fillRect } from "./sign-fixtures";
 import {
+  MAX_MASKED_REGION_PIXELS,
   applyCorrectionsToCanvas,
   applyFillRect,
   applyMoveRegion,
+  applyReplaceMaskedRegionWithBackground,
   applyReplaceRegionWithBackground,
+  decodeReplaceMaskedRegionWithBackgroundParams,
   deriveUniformFitDimensions,
   encodeCropRegionParams,
   encodeFillRectParams,
   encodeFitArtworkToCanvasParams,
   encodeMoveRegionParams,
+  encodeReplaceMaskedRegionWithBackgroundParams,
   encodeReplaceRegionWithBackgroundParams,
   executeCompositionSteps,
   executeCropRegion,
@@ -341,6 +345,147 @@ describe("sign-composition-steps: replace_region_with_background (Fit to Product
     assert.equal(result.status, "executed");
     if (result.status !== "executed") return;
     assert.deepEqual(pixelAt(result.image, 20, 20), { r: 200, g: 10, b: 10, a: 255 });
+  });
+});
+
+describe("sign-composition-steps: replace_masked_region_with_background (Wand-First Correction UX)", () => {
+  function canvasWithRingArtifact(): RgbaImage {
+    // 100x100 uniform red canvas with a RING artifact (10..30, 10..30
+    // bounding box) — a donut, not a filled square, so its bounding
+    // rectangle genuinely contains unselected interior pixels (the hole in
+    // the middle of the ring, which stays red/background already) — this
+    // is exactly the shape a rectangle-only tool cannot safely represent
+    // without risk (if the interior weren't already background colour, a
+    // naive rect-fill would have silently touched it).
+    const image = makeImage(100, 100, { r: 200, g: 10, b: 10 });
+    fillRect(image, 10, 10, 30, 30, { r: 20, g: 20, b: 20 }); // 20x20 solid black square (10..30)
+    fillRect(image, 15, 15, 25, 25, { r: 200, g: 10, b: 10 }); // 10x10 red "hole" carved out of the middle -> a ring
+    return image;
+  }
+
+  /** A boolean mask (1 byte/px) for exactly the black ring pixels within [10,10,20,20]. */
+  function ringMaskBase64(): string {
+    const mask = Buffer.alloc(20 * 20);
+    for (let y = 0; y < 20; y++) {
+      for (let x = 0; x < 20; x++) {
+        const isHole = x >= 5 && x < 15 && y >= 5 && y < 15; // the 10x10 carved-out middle, in rect-local coords
+        mask[y * 20 + x] = isHole ? 0 : 1;
+      }
+    }
+    return mask.toString("base64");
+  }
+
+  it("removes only the masked (ring) pixels — the already-background interior hole is left untouched, never silently rewritten", () => {
+    const canvas = canvasWithRingArtifact();
+    const working = Buffer.from(canvas.data);
+    const s = step("replace_masked_region_with_background", encodeReplaceMaskedRegionWithBackgroundParams({
+      xPx: 10, yPx: 10, widthPx: 20, heightPx: 20, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      maskBase64: ringMaskBase64(),
+    }));
+    const refusal = applyReplaceMaskedRegionWithBackground(working, 100, 100, s);
+    assert.equal(refusal, null);
+    const result: RgbaImage = { width: 100, height: 100, data: working };
+    // Ring pixels (e.g. corner of the black band) -> now red.
+    assert.deepEqual(pixelAt(result, 12, 12), { r: 200, g: 10, b: 10, a: 255 });
+    // Interior hole pixel -> was ALREADY red, still red (never "touched" by this op either way, but critically not corrupted).
+    assert.deepEqual(pixelAt(result, 20, 20), { r: 200, g: 10, b: 10, a: 255 });
+    // Elsewhere on the canvas -> untouched.
+    assert.deepEqual(pixelAt(result, 60, 60), { r: 200, g: 10, b: 10, a: 255 });
+  });
+
+  it("a mask that leaves a non-mask pixel inside its own rectangle DIFFERENT from surrounding red proves the write is mask-restricted, not rect-wide", () => {
+    const canvas = canvasWithRingArtifact();
+    // Overwrite the ring's own middle "hole" (already red) with a THIRD,
+    // distinctive colour the operator never selected — simulating some
+    // other real content sitting inside the same bounding box that must
+    // NEVER be touched by this masked op.
+    fillRect(canvas, 15, 15, 25, 25, { r: 30, g: 200, b: 30 }); // green "unrelated content"
+    const working = Buffer.from(canvas.data);
+    const s = step("replace_masked_region_with_background", encodeReplaceMaskedRegionWithBackgroundParams({
+      xPx: 10, yPx: 10, widthPx: 20, heightPx: 20, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      maskBase64: ringMaskBase64(),
+    }));
+    const refusal = applyReplaceMaskedRegionWithBackground(working, 100, 100, s);
+    assert.equal(refusal, null);
+    const result: RgbaImage = { width: 100, height: 100, data: working };
+    // The unrelated green content the operator never selected is COMPLETELY UNTOUCHED.
+    assert.deepEqual(pixelAt(result, 20, 20), { r: 30, g: 200, b: 30, a: 255 });
+    // But the actually-selected ring is still correctly removed.
+    assert.deepEqual(pixelAt(result, 12, 12), { r: 200, g: 10, b: 10, a: 255 });
+  });
+
+  it("refuses when the surrounding context is NOT uniform — identical gate to the rectangle sibling", () => {
+    const canvas = canvasWithRingArtifact();
+    const working = Buffer.from(canvas.data);
+    // Deliberately claim the WRONG colour so the context ring fails to verify.
+    const s = step("replace_masked_region_with_background", encodeReplaceMaskedRegionWithBackgroundParams({
+      xPx: 10, yPx: 10, widthPx: 20, heightPx: 20, colorR: 0, colorG: 0, colorB: 0, contextDepthPx: 4,
+      maskBase64: ringMaskBase64(),
+    }));
+    const refusal = applyReplaceMaskedRegionWithBackground(working, 100, 100, s);
+    assert.notEqual(refusal, null);
+    assert.deepEqual(working, canvas.data); // never partially applied
+  });
+
+  it("decode fails closed when the mask length does not match its own declared rectangle", () => {
+    const badMask = Buffer.alloc(5).toString("base64"); // 5 bytes, not 20*20=400
+    const decoded = decodeReplaceMaskedRegionWithBackgroundParams({
+      xPx: 10, yPx: 10, widthPx: 20, heightPx: 20, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      maskBase64: badMask,
+    });
+    assert.equal(decoded, null);
+  });
+
+  it("decode fails closed when the bounding rectangle exceeds MAX_MASKED_REGION_PIXELS", () => {
+    const side = Math.ceil(Math.sqrt(MAX_MASKED_REGION_PIXELS)) + 10;
+    const oversized = Buffer.alloc(side * side).toString("base64");
+    const decoded = decodeReplaceMaskedRegionWithBackgroundParams({
+      xPx: 0, yPx: 0, widthPx: side, heightPx: side, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      maskBase64: oversized,
+    });
+    assert.equal(decoded, null);
+  });
+
+  it("refuses a rectangle exceeding the canvas bounds", () => {
+    const canvas = makeImage(50, 50, { r: 0, g: 0, b: 0 });
+    const working = Buffer.from(canvas.data);
+    const s = step("replace_masked_region_with_background", encodeReplaceMaskedRegionWithBackgroundParams({
+      xPx: 45, yPx: 45, widthPx: 10, heightPx: 10, colorR: 0, colorG: 0, colorB: 0, contextDepthPx: 2,
+      maskBase64: Buffer.alloc(100, 1).toString("base64"),
+    }));
+    const refusal = applyReplaceMaskedRegionWithBackground(working, 50, 50, s);
+    assert.notEqual(refusal, null);
+  });
+
+  it("applyCorrectionsToCanvas (the operator preview/commit path) admits replace_masked_region_with_background", () => {
+    const canvas = canvasWithRingArtifact();
+    const s = step("replace_masked_region_with_background", encodeReplaceMaskedRegionWithBackgroundParams({
+      xPx: 10, yPx: 10, widthPx: 20, heightPx: 20, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+      maskBase64: ringMaskBase64(),
+    }));
+    const result = applyCorrectionsToCanvas(canvas, [s]);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.deepEqual(pixelAt(result.image, 12, 12), { r: 200, g: 10, b: 10, a: 255 });
+  });
+
+  it("executeCompositionSteps (the real plan-execution path) admits replace_masked_region_with_background as the final move/fill-stage operation", () => {
+    const source = canvasWithRingArtifact();
+    const steps: SignRepairStep[] = [
+      step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+        expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100, canvasWidthPx: 100, canvasHeightPx: 100,
+        placementXPx: 0, placementYPx: 0, backgroundR: 200, backgroundG: 10, backgroundB: 10,
+      })),
+      step("replace_masked_region_with_background", encodeReplaceMaskedRegionWithBackgroundParams({
+        xPx: 10, yPx: 10, widthPx: 20, heightPx: 20, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 4,
+        maskBase64: ringMaskBase64(),
+      })),
+    ];
+    const bounds = { x: 0, y: 0, width: source.width, height: source.height };
+    const result = executeCompositionSteps(source, bounds, steps);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.deepEqual(pixelAt(result.image, 12, 12), { r: 200, g: 10, b: 10, a: 255 });
   });
 });
 

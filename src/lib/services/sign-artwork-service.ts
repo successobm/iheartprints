@@ -33,15 +33,19 @@ import {
   analyzeSignFitToProduction,
   applyCorrectionsToCanvas,
   buildEdgeIntentClassificationRecord,
+  computeSignWandSelection,
   decodeEdgeIntentClassificationRecords,
   decodeSignCompositionPlanToOperatorChoices,
   describeSignPlanForCustomer,
   encodeEdgeIntentClassificationRecord,
   encodeMoveRegionParams,
+  encodeReplaceMaskedRegionWithBackgroundParams,
   encodeReplaceRegionWithBackgroundParams,
   encodeSignPlate,
+  encodeSignWandMaskForBounds,
   getSignResolutionPolicyById,
   measureUniformSurroundingBackground,
+  renderSignSelectionOverlayCrop,
   resolveCurrentEdgeIntentClassifications,
   type SignCompositionOperatorInput,
   type SignEdge,
@@ -50,6 +54,7 @@ import {
   type SignRepairPlan,
   type SignRepairStep,
 } from "@/capabilities/sign-preparation";
+import type { ToleranceLevel } from "@/capabilities/shared/flood-fill-selection";
 import type { SignOperatorRegionBoundary } from "@/capabilities/sign-preparation/sign-operator-structural-override";
 import { loadSignPlanOperatorReview, type SignPlanOperatorReview } from "@/capabilities/sign-preparation/sign-plan-operator-review";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
@@ -396,7 +401,18 @@ export async function getSignProductionArtworkDownload(
 export type PendingSignCorrection =
   | { kind: "remove"; xPx: number; yPx: number; widthPx: number; heightPx: number; contextDepthPx: number }
   | { kind: "move"; sourceStartYPx: number; heightPx: number; destStartYPx: number }
-  | { kind: "classify"; classificationKind: "edge_intent" | "protected"; edges: SignEdge[]; xPx: number; yPx: number; widthPx: number; heightPx: number };
+  | { kind: "classify"; classificationKind: "edge_intent" | "protected"; edges: SignEdge[]; xPx: number; yPx: number; widthPx: number; heightPx: number }
+  /**
+   * Wand-First Correction UX Phase: the mask-shaped sibling of `"remove"` —
+   * an operator wand (flood-fill) selection, never widened to its bounding
+   * rectangle for the actual pixel write (see
+   * `replace_masked_region_with_background`'s own doc). `maskBase64` is the
+   * exact persisted selection, sized to `[xPx,yPx,widthPx,heightPx]`, as
+   * produced by `encodeSignWandMaskForBounds` from the SAME wand-select
+   * response the operator is looking at — never re-derived or re-clicked
+   * server-side.
+   */
+  | { kind: "wand_delete"; xPx: number; yPx: number; widthPx: number; heightPx: number; maskBase64: string; contextDepthPx: number };
 
 export interface SignCorrectionPreviewResult {
   /**
@@ -481,8 +497,86 @@ async function resolveCurrentCandidateImage(projectId: string): Promise<{
   };
 }
 
+/**
+ * Wand-First Correction UX Phase: the read-only, zero-provider-call
+ * response to one operator wand click. Reuses `computeSignWandSelection`
+ * (the SAME `floodFillSelect` DTF's own Magic Wand runs, extracted to
+ * `@/capabilities/shared/flood-fill-selection`) against the CURRENT blocked
+ * candidate's own pixels — never a second image, never re-derived from a
+ * stale copy. Returns everything the client needs to render the selection
+ * and decide which actions to offer, WITHOUT ever sending the (potentially
+ * ~20MB) full-image mask over the wire: the overlay is cropped to the
+ * selection's own bounding rectangle, and the persisted mask (for a
+ * subsequent Delete/Keep) is the SAME crop, base64-encoded — the exact
+ * shape `replace_masked_region_with_background`'s own params expect.
+ */
+export interface SignWandSelectionPreview {
+  status: "no_candidate" | "out_of_bounds" | "selected";
+  pixelCount: number;
+  bounds: { xPx: number; yPx: number; widthPx: number; heightPx: number } | null;
+  touchesEdge: boolean;
+  broad: boolean;
+  /** Section N safety gate — see `sign-wand-selection.ts`'s own doc. Only a `true` selection may become a governed edge-intent classification. */
+  rectExact: boolean;
+  /** Whether this selection is small enough to be persisted as a masked Delete (`MAX_MASKED_REGION_PIXELS`). */
+  eligibleForMaskedDelete: boolean;
+  touchedCanvasEdges: SignEdge[];
+  /** Base64 PNG (no data: prefix), alpha-transparent, cropped to `bounds` — draw at `(bounds.xPx, bounds.yPx)` on the workspace's overlay canvas. `null` alongside a non-`"selected"` status. */
+  overlayPngBase64: string | null;
+  /** Base64 of the raw selection mask, cropped to `bounds` (`widthPx*heightPx` bytes) — pass straight through as `maskBase64` on a subsequent `"wand_delete"`/classify correction referencing this exact selection. `null` alongside a non-`"selected"` status. */
+  maskBase64: string | null;
+}
+
+export async function previewSignWandSelection(
+  projectId: string,
+  seedXPx: number,
+  seedYPx: number,
+  toleranceLevel: ToleranceLevel,
+): Promise<SignWandSelectionPreview> {
+  const empty: SignWandSelectionPreview = {
+    status: "no_candidate",
+    pixelCount: 0,
+    bounds: null,
+    touchesEdge: false,
+    broad: false,
+    rectExact: false,
+    eligibleForMaskedDelete: false,
+    touchedCanvasEdges: [],
+    overlayPngBase64: null,
+    maskBase64: null,
+  };
+  const resolved = await resolveCurrentCandidateImage(projectId);
+  if (!resolved) return empty;
+  const { image } = resolved;
+  if (!Number.isInteger(seedXPx) || !Number.isInteger(seedYPx) || seedXPx < 0 || seedXPx >= image.width || seedYPx < 0 || seedYPx >= image.height) {
+    return { ...empty, status: "out_of_bounds" };
+  }
+
+  const selection = computeSignWandSelection(image, { x: seedXPx, y: seedYPx }, toleranceLevel);
+  const overlay = renderSignSelectionOverlayCrop(selection.mask, image.width, selection.bounds);
+  const maskBase64 = encodeSignWandMaskForBounds(selection.mask, image.width, selection.bounds);
+
+  return {
+    status: "selected",
+    pixelCount: selection.pixelCount,
+    bounds: {
+      xPx: selection.bounds.left,
+      yPx: selection.bounds.top,
+      widthPx: selection.bounds.width,
+      heightPx: selection.bounds.height,
+    },
+    touchesEdge: selection.touchesEdge,
+    broad: selection.broad,
+    rectExact: selection.rectExact,
+    eligibleForMaskedDelete: selection.eligibleForMaskedDelete,
+    touchedCanvasEdges: selection.touchedCanvasEdges,
+    overlayPngBase64: encodeSignPlate(overlay).toString("base64"),
+    maskBase64,
+  };
+}
+
 function buildCorrectionStep(
-  correction: Extract<PendingSignCorrection, { kind: "remove" | "move" }>,
+  correction: Extract<PendingSignCorrection, { kind: "remove" | "move" | "wand_delete" }>,
   measuredColor: { r: number; g: number; b: number } | null,
 ): SignRepairStep {
   if (correction.kind === "move") {
@@ -498,6 +592,24 @@ function buildCorrectionStep(
     };
   }
   const color = measuredColor!;
+  if (correction.kind === "wand_delete") {
+    return {
+      kind: "replace_masked_region_with_background",
+      params: encodeReplaceMaskedRegionWithBackgroundParams({
+        xPx: correction.xPx,
+        yPx: correction.yPx,
+        widthPx: correction.widthPx,
+        heightPx: correction.heightPx,
+        colorR: color.r,
+        colorG: color.g,
+        colorB: color.b,
+        contextDepthPx: correction.contextDepthPx,
+        maskBase64: correction.maskBase64,
+      }),
+      risk: "review_required",
+      reasons: ["Wand-First Correction UX: operator wand selection removed, background independently measured before removal, restricted to the exact selected shape."],
+    };
+  }
   return {
     kind: "replace_region_with_background",
     params: encodeReplaceRegionWithBackgroundParams({
@@ -586,7 +698,7 @@ export async function previewSignCorrections(
     }
 
     let measuredColor: { r: number; g: number; b: number } | null = null;
-    if (correction.kind === "remove") {
+    if (correction.kind === "remove" || correction.kind === "wand_delete") {
       const measured = measureUniformSurroundingBackground(
         workingImage,
         { xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx },
@@ -701,6 +813,7 @@ export async function commitSignCorrections(
 
   const moves = [...choices.moves];
   const replacements = [...choices.replacements];
+  const maskedReplacements = [...choices.maskedReplacements];
   const newClassificationRecords = corrections
     .filter((c): c is Extract<PendingSignCorrection, { kind: "classify" }> => c.kind === "classify")
     .map((c) =>
@@ -718,7 +831,7 @@ export async function commitSignCorrections(
     if (correction.kind === "classify") continue; // governance, handled separately above/below — never a plan step.
 
     let measuredColor: { r: number; g: number; b: number } | null = null;
-    if (correction.kind === "remove") {
+    if (correction.kind === "remove" || correction.kind === "wand_delete") {
       const measured = measureUniformSurroundingBackground(
         workingImage,
         { xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx },
@@ -728,10 +841,17 @@ export async function commitSignCorrections(
         throw new SignArtworkBridgeError(measured.detail);
       }
       measuredColor = measured.color;
-      replacements.push({
-        xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx,
-        color: measuredColor, contextDepthPx: correction.contextDepthPx,
-      });
+      if (correction.kind === "wand_delete") {
+        maskedReplacements.push({
+          xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx,
+          color: measuredColor, contextDepthPx: correction.contextDepthPx, maskBase64: correction.maskBase64,
+        });
+      } else {
+        replacements.push({
+          xPx: correction.xPx, yPx: correction.yPx, widthPx: correction.widthPx, heightPx: correction.heightPx,
+          color: measuredColor, contextDepthPx: correction.contextDepthPx,
+        });
+      }
     } else {
       moves.push({ sourceStartYPx: correction.sourceStartYPx, heightPx: correction.heightPx, destStartYPx: correction.destStartYPx });
     }
@@ -763,6 +883,7 @@ export async function commitSignCorrections(
       moves,
       fills: choices.fills,
       replacements,
+      maskedReplacements,
     };
     await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
   }

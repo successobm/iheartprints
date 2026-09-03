@@ -64,6 +64,7 @@ import {
   type SignCompositionFillInput,
   type SignCompositionMoveInput,
   type SignCompositionReconstructionInput,
+  type SignCompositionMaskedReplacementInput,
   type SignCompositionReplacementInput,
 } from "./sign-composition-plan-builder";
 
@@ -182,6 +183,8 @@ export interface SignCompositionOperatorInput {
   moves: SignCompositionMoveInput[];
   fills: SignCompositionFillInput[];
   replacements: SignCompositionReplacementInput[];
+  /** Wand-First Correction UX Phase — see `SignCompositionPlanInput`'s own doc. Optional/defaults to `[]`. */
+  maskedReplacements?: SignCompositionMaskedReplacementInput[];
 }
 
 export function createSignPreparationCapability(
@@ -606,6 +609,7 @@ export function createSignPreparationCapability(
         moves: input.moves,
         fills: input.fills,
         replacements: input.replacements,
+        maskedReplacements: input.maskedReplacements ?? [],
       });
 
       if (buildResult.status === "refused") {

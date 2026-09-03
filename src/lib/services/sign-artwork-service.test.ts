@@ -288,6 +288,122 @@ describe("sign-artwork-service: Operator Production Correction UX (preview + com
   });
 
   /**
+   * 600x900px, red background, an L-SHAPED (non-rectangular) black artifact
+   * near (not touching) the LEFT edge: a full-danger-zone-width top bar
+   * (x:[5,19) — 19px is the required safe inset at 150 PPI, so this bar
+   * alone is the entire real violation) plus a narrower bottom bar
+   * (x:[5,12)), leaving a genuine NOTCH at x:[12,19) y:[460,480) — within
+   * the shape's own bounding box, but never black, so a real wand click
+   * must NOT select it. That notch is already background red (never a
+   * violation itself), so deleting exactly the selected black pixels ought
+   * to leave the ENTIRE danger-zone width clean — proving mask-restricted
+   * delete is a real end-to-end property, not merely unit-tested at the
+   * primitive layer.
+   */
+  function signWithLeftEdgeLShapeArtifact() {
+    const image = makeImage(600, 900, { r: 200, g: 10, b: 10 });
+    fillRect(image, 5, 440, 19, 460, { r: 20, g: 20, b: 20 }); // top bar — full danger-zone width
+    fillRect(image, 5, 460, 12, 480, { r: 20, g: 20, b: 20 }); // narrower bottom bar — leaves a notch beside it
+    return image;
+  }
+
+  async function projectWithLShapeBlockedCandidate(
+    graph: Awaited<ReturnType<typeof freshGraph>>["graph"],
+    repo: Awaited<ReturnType<typeof freshGraph>>["repo"],
+  ) {
+    const created = await repo.createProject();
+    const projectId = created.project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(signWithLeftEdgeLShapeArtifact()),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 4, 6);
+    await graph.signPreparation.confirmSignCompositionPlan(projectId, {
+      reconstruction: null, crop: null, fitBackground: { r: 200, g: 10, b: 10 }, fitPlacement: null,
+      moves: [], fills: [], replacements: [],
+    });
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    return { projectId, job };
+  }
+
+  it("wand_delete: a real wand click on the L-shape selects a non-rectangular mask (rectExact: false)", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithLShapeBlockedCandidate(graph, repo);
+    const { previewSignWandSelection } = await import("./sign-artwork-service");
+
+    const selection = await previewSignWandSelection(projectId, 8, 445, "default");
+    assert.equal(selection.status, "selected");
+    assert.equal(selection.rectExact, false, "the L-shape's own bounding box contains an unselected notch");
+    assert.equal(selection.eligibleForMaskedDelete, true);
+    assert.deepEqual(selection.touchedCanvasEdges, [], "the artifact sits near, not touching, the physical cut edge");
+    assert.ok(selection.maskBase64);
+    assert.ok(selection.bounds);
+  });
+
+  it("wand_delete preview: the real wand selection's mask, applied as a correction, flips LEFT edge FAIL -> PASS", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithLShapeBlockedCandidate(graph, repo);
+    const { previewSignWandSelection, previewSignCorrections } = await import("./sign-artwork-service");
+
+    const selection = await previewSignWandSelection(projectId, 8, 445, "default");
+    assert.equal(selection.status, "selected");
+    if (selection.status !== "selected" || !selection.bounds || !selection.maskBase64) return;
+
+    const result = await previewSignCorrections(projectId, [
+      {
+        kind: "wand_delete",
+        xPx: selection.bounds.xPx, yPx: selection.bounds.yPx,
+        widthPx: selection.bounds.widthPx, heightPx: selection.bounds.heightPx,
+        maskBase64: selection.maskBase64, contextDepthPx: 8,
+      },
+    ]);
+    assert.equal(result.status, "previewed");
+    assert.equal(result.appliedCount, 1);
+    const leftEdge = result.fitToProduction!.edges.find((e) => e.edge === "left");
+    assert.equal(leftEdge?.protectedResult, "pass");
+  });
+
+  it("wand_delete commit: governed — produces a NEW planKey, persists a replace_masked_region_with_background step, and re-execution actually passes", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithLShapeBlockedCandidate(graph, repo);
+    const before = await repo.getSignPreparation(projectId);
+    const { previewSignWandSelection, commitSignCorrections } = await import("./sign-artwork-service");
+
+    const selection = await previewSignWandSelection(projectId, 8, 445, "default");
+    assert.equal(selection.status, "selected");
+    if (selection.status !== "selected" || !selection.bounds || !selection.maskBase64) return;
+
+    const review = await commitSignCorrections(projectId, [
+      {
+        kind: "wand_delete",
+        xPx: selection.bounds.xPx, yPx: selection.bounds.yPx,
+        widthPx: selection.bounds.widthPx, heightPx: selection.bounds.heightPx,
+        maskBase64: selection.maskBase64, contextDepthPx: 8,
+      },
+    ]);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+
+    const updated = await repo.getSignPreparation(projectId);
+    assert.notEqual(updated!.planKey, before!.planKey, "the correction genuinely changed plan identity");
+    const plan = updated!.plan as { steps: Array<{ kind: string }> };
+    assert.ok(plan.steps.some((s) => s.kind === "replace_masked_region_with_background"), "the correction became a real, mask-shaped plan step");
+
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    const completedJob = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completedJob!.status, "completed");
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
+    const fitCheck = checks.find((c) => c.check === "protected_content_safe_inset");
+    assert.equal(fitCheck?.status, "pass");
+  });
+
+  /**
    * 600x900px, uniform red background, a 9px BLACK border along the LEFT
    * edge for rows 0..399 (44% of the 900-row edge — a minority, keeping RED
    * the measured dominant baseline exactly like `sign-fit-to-production
