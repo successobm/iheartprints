@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
 
 import {
+  FRESH_UPLOADED_ARTWORK_UI_STATE,
   deriveUploadedArtworkStep,
   isRoutedToOperatorSeparationReview,
   needsAutomaticBackgroundReview,
@@ -256,6 +257,62 @@ describe("deriveUploadedArtworkStep", () => {
         atProjectStart: false,
       }),
       "sign_context_saved",
+    );
+  });
+});
+
+/**
+ * LIVE PRODUCT BLOCKER #1 fix: Sign-upload-routes-to-garment regression.
+ *
+ * `deriveUploadedArtworkStep` itself was never wrong — the tests above
+ * already prove BOTH directions correctly ("undecided" -> choose_artwork_type;
+ * "dtf"/"sign" -> the matching next step). The real bug lived entirely in
+ * `ChatApp.tsx`'s `startOver()`, which never reset `artworkTypeChoice` (or
+ * `workflowChoice`/`reconsideringUpload`) before bootstrapping a brand-new
+ * project — so a PRIOR project's committed "dtf" answer silently carried
+ * into the NEXT, freshly-uploaded (and never actually classified) artwork,
+ * skipping `choose_artwork_type` and landing straight on the garment
+ * `confirm_details` screen. This suite proves the two halves of the fix
+ * that ARE unit-testable in a no-DOM test tool: (1) the exact staleness
+ * mechanism the bug relied on, reproduced at the pure-function level, and
+ * (2) `FRESH_UPLOADED_ARTWORK_UI_STATE` — the single constant
+ * `ChatApp.tsx`'s `startOver()` now uses to reset that state — genuinely
+ * describes "no committed choice yet" for every field it covers. The
+ * actual `startOver()` wiring itself is proven by real browser acceptance
+ * (this repo's test tooling has no DOM/effects — see this file's own
+ * module doc).
+ */
+describe("Sign-upload-routes-to-garment regression (LIVE PRODUCT BLOCKER #1)", () => {
+  it("FRESH_UPLOADED_ARTWORK_UI_STATE genuinely means 'no committed choice yet' for every field it covers", () => {
+    assert.equal(FRESH_UPLOADED_ARTWORK_UI_STATE.workflowChoice, "undecided");
+    assert.equal(FRESH_UPLOADED_ARTWORK_UI_STATE.artworkTypeChoice, "undecided");
+    assert.equal(FRESH_UPLOADED_ARTWORK_UI_STATE.reconsideringUpload, false);
+  });
+
+  it("starting from FRESH_UPLOADED_ARTWORK_UI_STATE, a freshly uploaded (never-classified) preparation correctly asks choose_artwork_type — never a garment-only or sign-only step", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: null,
+        choice: FRESH_UPLOADED_ARTWORK_UI_STATE.workflowChoice,
+        artworkTypeChoice: FRESH_UPLOADED_ARTWORK_UI_STATE.artworkTypeChoice,
+        atProjectStart: false,
+      }),
+      "choose_artwork_type",
+    );
+  });
+
+  it("documents the exact bug: a STALE 'dtf' artworkTypeChoice against a freshly uploaded, never-classified preparation skips straight to the garment confirm_details step — this is precisely why startOver() must reset it before a new upload can happen", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(), // freshly uploaded: printPlacement is null, nothing chosen for THIS artwork
+        signArtwork: null,
+        choice: "undecided",
+        artworkTypeChoice: "dtf", // stale, left over from a PRIOR project — the exact bug condition
+        atProjectStart: false,
+      }),
+      "confirm_details",
+      "a real Sign upload landing here (garment 'What are we printing this on? / Garment colour') is the reported symptom",
     );
   });
 });

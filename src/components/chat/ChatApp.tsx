@@ -15,6 +15,7 @@ import type { ImagePoint } from "./artwork-click-mapping";
 import { deriveChatAffordances } from "./chat-affordances";
 import { isStalePreparedImageResponse } from "@/capabilities/artwork-preparation";
 import {
+  FRESH_UPLOADED_ARTWORK_UI_STATE,
   deriveUploadedArtworkStep,
   isAtProjectStart,
   uploadedArtworkOwnsSurface,
@@ -1207,10 +1208,37 @@ export function ChatApp() {
     }
   }
 
+  /**
+   * LIVE PRODUCT BLOCKER #1 (Sign-upload-routes-to-garment fix): a brand
+   * new project has nothing durable yet — precisely the state
+   * `workflowChoice`/`artworkTypeChoice`'s own doc comments already
+   * promise is "forgotten on reload... correctly returns them to the
+   * choice rather than trapping them in a workflow they never committed
+   * to." `startOver()` never actually reloads the page — it's the SAME
+   * `ChatApp` instance, so those `useState` values do not reinitialize on
+   * their own the way a real reload would. Without resetting them here, a
+   * customer who had earlier answered "DTF / Apparel" (or reached the
+   * upload-review/reconsider surface) in one project carried that stale
+   * answer straight into the NEXT, entirely unrelated project — e.g.
+   * uploading a Sign immediately after `startOver()` silently skipped
+   * `choose_artwork_type` and landed on the garment `confirm_details`
+   * screen ("What are we printing this on?" / "Garment colour"), because
+   * `deriveUploadedArtworkStep` correctly reads the stale `"dtf"`
+   * `artworkTypeChoice` — the routing logic was never wrong, the input to
+   * it was. `reconsideringUpload`/`cleanupMessage`/`cleanupPreview` are
+   * the identical class of bug (all per-project, ephemeral, and
+   * meaningless before any project/upload exists) and are reset for the
+   * same reason.
+   */
   async function startOver() {
     window.localStorage.removeItem(CHAT_PROJECT_STORAGE_KEY);
     setSnapshot(null);
     setLoading(true);
+    setWorkflowChoice(FRESH_UPLOADED_ARTWORK_UI_STATE.workflowChoice);
+    setArtworkTypeChoice(FRESH_UPLOADED_ARTWORK_UI_STATE.artworkTypeChoice);
+    setReconsideringUpload(FRESH_UPLOADED_ARTWORK_UI_STATE.reconsideringUpload);
+    setCleanupMessage(null);
+    setCleanupPreview(null);
     await bootstrap();
   }
 

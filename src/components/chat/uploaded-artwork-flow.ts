@@ -93,6 +93,30 @@ export interface SignArtworkFlowState {
   hasPlan: boolean;
 }
 
+/**
+ * LIVE PRODUCT BLOCKER #1 fix (Sign-upload-routes-to-garment): the single
+ * source of truth for what "no committed choice yet" looks like for every
+ * transient, client-only field this module reads (`WorkflowChoice`,
+ * `ArtworkTypeChoice`) plus the closely related "take me back a step"
+ * flag (`reconsideringUpload`, read by `ChatApp.tsx` alongside this
+ * module's own output — see that file's own doc). A genuine page reload
+ * gets these values for free (fresh `useState` initializers); a
+ * same-session "Start Over" does NOT reinitialize the component, so
+ * `ChatApp.tsx`'s `startOver()` must apply this explicitly before
+ * bootstrapping the new project — otherwise a customer's answer from a
+ * PRIOR project (e.g. `artworkTypeChoice: "dtf"`) silently carries into
+ * the next, unrelated upload, skipping `choose_artwork_type` entirely and
+ * landing on a garment-only step for artwork nobody ever classified as a
+ * garment. Exported as one object (not three independent literals) so
+ * there is exactly one place to update if a future phase adds another
+ * transient field this same invariant should cover.
+ */
+export const FRESH_UPLOADED_ARTWORK_UI_STATE = {
+  workflowChoice: "undecided" as WorkflowChoice,
+  artworkTypeChoice: "undecided" as ArtworkTypeChoice,
+  reconsideringUpload: false,
+} as const;
+
 export interface UploadedArtworkFlowInput {
   /** `null` for every Create New Artwork project. */
   preparation: ArtworkPreparationView | null;
