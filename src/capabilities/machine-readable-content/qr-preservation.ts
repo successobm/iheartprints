@@ -41,7 +41,7 @@ import type {
   MachineReadablePreservationInstance,
   MachineReadablePreservationReport,
 } from "./contracts";
-import { decodeQrCodes, scanForQrFinderPatterns, type RgbaImage } from "./qr-detect-decode";
+import { decodeQrCodes, scanForQrFinderCenters, scanForQrFinderPatterns, type RgbaImage } from "./qr-detect-decode";
 import { deriveRegionKey } from "./qr-resolution";
 
 function sha256Hex(value: string): string {
@@ -157,6 +157,13 @@ export function compareMachineReadableContent(
   // uses) purely as evidence — `qr-resolution.ts`'s `applyQrResolutions`
   // is what actually decides whether that happens to already match a
   // customer-confirmed destination; this function makes no such judgment.
+  // QR LOCALIZATION V3: `scanForQrFinderPatterns` only ever reports 0 or 1
+  // undecoded region per source image (an existing, pre-dating limitation
+  // — see that function's own doc), so the individual confirmed finder
+  // centers computed here always belong to `sourceUndecoded[0]` when it
+  // exists. Computed once per source, not per-instance.
+  const sourceFinderCenters = sourceUndecoded.length > 0 ? scanForQrFinderCenters(source) : [];
+
   for (const undecoded of sourceUndecoded) {
     ordinal += 1;
     const matchIndex = candidateDecoded.findIndex((_, i) => !claimedCandidateIndices.has(i));
@@ -175,6 +182,7 @@ export function compareMachineReadableContent(
       provenance: null,
       regionKey: deriveRegionKey(undecoded.bounds),
       sourceLocalizationConfidence: undecoded.localizationConfidence,
+      sourceFinderCenters,
     });
   }
 
@@ -208,5 +216,6 @@ function buildInstance(
     // corners — a fundamentally different, more trustworthy kind of
     // evidence the low/high confidence concept doesn't apply to.
     sourceLocalizationConfidence: null,
+    sourceFinderCenters: [],
   };
 }

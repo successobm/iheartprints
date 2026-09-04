@@ -35,6 +35,7 @@ import jsQR from "jsqr";
 import type {
   DecodedMachineReadableRegion,
   MachineReadableRegionBounds,
+  QrFinderCenterEvidence,
   QrLocalizationConfidence,
   UndecodedMachineReadableRegion,
 } from "./contracts";
@@ -336,12 +337,21 @@ function scanLineForFinderSignature(
  * minimum), so a stride finer than the smallest plausible module width
  * would only waste time, never find something a finer stride would miss.
  */
-export function scanForQrFinderPatterns(
+/**
+ * The shared row+column cross-checked scan and greedy proximity
+ * clustering both `scanForQrFinderPatterns` (bounds + confidence verdict)
+ * and `scanForQrFinderCenters` (QR LOCALIZATION V3: the individual
+ * centroids, uncollapsed) are built on — kept as ONE implementation so the
+ * two can never silently drift into disagreeing about what counts as a
+ * confirmed cluster. Returns every cluster with at least one confirmed
+ * hit; callers filter to `MIN_CLUSTER_HITS` (the false-positive guard)
+ * themselves.
+ */
+function computeConfirmedFinderClusters(
   image: RgbaImage,
-  options?: { stride?: number; binarizeThreshold?: number },
-): UndecodedMachineReadableRegion[] {
-  const stride = options?.stride ?? Math.max(1, Math.floor(Math.min(image.width, image.height) / 400));
-  const threshold = options?.binarizeThreshold ?? 128;
+  stride: number,
+  threshold: number,
+): { centerX: number; centerY: number; moduleWidthPx: number; hitCount: number }[] {
   const lum = luminanceBuffer(image);
   const isDark = (x: number, y: number) => lum[y * image.width + x] < threshold;
 
@@ -385,15 +395,27 @@ export function scanForQrFinderPatterns(
     else clusters.push([hit]);
   }
 
+  return clusters.map((group) => ({
+    centerX: group.reduce((sum, h) => sum + h.centerX, 0) / group.length,
+    centerY: group.reduce((sum, h) => sum + h.centerY, 0) / group.length,
+    moduleWidthPx: group.reduce((sum, h) => sum + h.moduleWidthPx, 0) / group.length,
+    hitCount: group.length,
+  }));
+}
+
+export function scanForQrFinderPatterns(
+  image: RgbaImage,
+  options?: { stride?: number; binarizeThreshold?: number },
+): UndecodedMachineReadableRegion[] {
+  const stride = options?.stride ?? Math.max(1, Math.floor(Math.min(image.width, image.height) / 400));
+  const threshold = options?.binarizeThreshold ?? 128;
+
+  const clusters = computeConfirmedFinderClusters(image, stride, threshold);
   // False-positive guard — see MIN_CLUSTER_HITS/MIN_CLUSTERS's own doc.
-  const strongClusters = clusters.filter((group) => group.length >= MIN_CLUSTER_HITS);
+  const strongClusters = clusters.filter((group) => group.hitCount >= MIN_CLUSTER_HITS);
   if (strongClusters.length < MIN_CLUSTERS) return [];
 
-  const centroids = strongClusters.map((group) => ({
-    x: group.reduce((sum, h) => sum + h.centerX, 0) / group.length,
-    y: group.reduce((sum, h) => sum + h.centerY, 0) / group.length,
-    moduleWidthPx: group.reduce((sum, h) => sum + h.moduleWidthPx, 0) / group.length,
-  }));
+  const centroids = strongClusters.map((c) => ({ x: c.centerX, y: c.centerY, moduleWidthPx: c.moduleWidthPx }));
 
   // A QR's overall symbol extent runs from the outer edge of one corner
   // finder pattern to the outer edge of the opposite one, roughly 7
@@ -404,8 +426,9 @@ export function scanForQrFinderPatterns(
   // is `"high"` (3 centroids AND an approximately square result) — see
   // that field's own doc and `qr-restore.ts`'s replacement safety gate,
   // which is the one place a `"low"`-confidence region is refused for
-  // replacement regardless of any confirmed destination recorded against
-  // it.
+  // replacement UNLESS its own confirmed finder centers (see
+  // `scanForQrFinderCenters`) can be independently corroborated against a
+  // high-confidence candidate detection (QR LOCALIZATION V3).
   const margin =
     (centroids.reduce((sum, c) => sum + c.moduleWidthPx, 0) / centroids.length) * 8;
   const minX = Math.max(0, Math.min(...centroids.map((c) => c.x)) - margin);
@@ -425,6 +448,49 @@ export function scanForQrFinderPatterns(
 }
 
 /**
+ * QR LOCALIZATION V3: the CONFIRMED finder-pattern cluster centroids
+ * (see `QrFinderCenterEvidence`'s own doc) — the SAME confirmed-cluster
+ * computation `scanForQrFinderPatterns` collapses into a single bounding
+ * box + confidence verdict, returned here uncollapsed. Used by the
+ * replacement safety gate's low-confidence-source rescue path
+ * (`qr-restore.ts`) to corroborate a source detection against a
+ * candidate's own confirmed centers directly, rather than relying on the
+ * (possibly badly-skewed, under-constrained) bounding box alone.
+ */
+export function scanForQrFinderCenters(
+  image: RgbaImage,
+  options?: { stride?: number; binarizeThreshold?: number },
+): QrFinderCenterEvidence[] {
+  const stride = options?.stride ?? Math.max(1, Math.floor(Math.min(image.width, image.height) / 400));
+  const threshold = options?.binarizeThreshold ?? 128;
+  return computeConfirmedFinderClusters(image, stride, threshold)
+    .filter((c) => c.hitCount >= MIN_CLUSTER_HITS)
+    .map((c) => ({ xPx: c.centerX, yPx: c.centerY, moduleWidthPx: c.moduleWidthPx }));
+}
+
+/** Shared by every windowed scan below — crops `image` to `window` (clamped to the image's own bounds), returning `null` for a degenerate (zero-area) window. */
+function cropToWindow(
+  image: RgbaImage,
+  window: MachineReadableRegionBounds,
+): { crop: RgbaImage; x0: number; y0: number } | null {
+  const x0 = Math.max(0, Math.floor(window.xPx));
+  const y0 = Math.max(0, Math.floor(window.yPx));
+  const x1 = Math.min(image.width, Math.ceil(window.xPx + window.widthPx));
+  const y1 = Math.min(image.height, Math.ceil(window.yPx + window.heightPx));
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w <= 0 || h <= 0) return null;
+
+  const cropped = Buffer.alloc(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const srcStart = ((y0 + y) * image.width + x0) * 4;
+    const destStart = y * w * 4;
+    image.data.copy(cropped, destStart, srcStart, srcStart + w * 4);
+  }
+  return { crop: { width: w, height: h, data: cropped }, x0, y0 };
+}
+
+/**
  * QR REPAIR V2: `scanForQrFinderPatterns`, restricted to a padded search
  * window and reported back in the ORIGINAL (uncropped) image's coordinate
  * space. Used by the replacement safety gate (`qr-restore.ts`) to
@@ -440,22 +506,11 @@ export function scanForQrFinderPatternsInWindow(
   window: MachineReadableRegionBounds,
   options?: { stride?: number; binarizeThreshold?: number },
 ): UndecodedMachineReadableRegion[] {
-  const x0 = Math.max(0, Math.floor(window.xPx));
-  const y0 = Math.max(0, Math.floor(window.yPx));
-  const x1 = Math.min(image.width, Math.ceil(window.xPx + window.widthPx));
-  const y1 = Math.min(image.height, Math.ceil(window.yPx + window.heightPx));
-  const w = x1 - x0;
-  const h = y1 - y0;
-  if (w <= 0 || h <= 0) return [];
+  const cropped = cropToWindow(image, window);
+  if (!cropped) return [];
+  const { crop, x0, y0 } = cropped;
 
-  const cropped = Buffer.alloc(w * h * 4);
-  for (let y = 0; y < h; y++) {
-    const srcStart = ((y0 + y) * image.width + x0) * 4;
-    const destStart = y * w * 4;
-    image.data.copy(cropped, destStart, srcStart, srcStart + w * 4);
-  }
-
-  const found = scanForQrFinderPatterns({ width: w, height: h, data: cropped }, options);
+  const found = scanForQrFinderPatterns(crop, options);
   return found.map((region) => ({
     kind: region.kind,
     bounds: {
@@ -465,5 +520,30 @@ export function scanForQrFinderPatternsInWindow(
       heightPx: region.bounds.heightPx,
     },
     localizationConfidence: region.localizationConfidence,
+  }));
+}
+
+/**
+ * QR LOCALIZATION V3: `scanForQrFinderCenters`, restricted to a padded
+ * search window and reported back in the ORIGINAL (uncropped) image's
+ * coordinate space — the windowed counterpart to
+ * `scanForQrFinderPatternsInWindow`, for the same reason
+ * (`scanForQrFinderCenters`'s own doc): the corroboration rescue path
+ * needs the candidate's own individual confirmed centers, not just its
+ * collapsed bounding box.
+ */
+export function scanForQrFinderCentersInWindow(
+  image: RgbaImage,
+  window: MachineReadableRegionBounds,
+  options?: { stride?: number; binarizeThreshold?: number },
+): QrFinderCenterEvidence[] {
+  const cropped = cropToWindow(image, window);
+  if (!cropped) return [];
+  const { crop, x0, y0 } = cropped;
+
+  return scanForQrFinderCenters(crop, options).map((center) => ({
+    xPx: center.xPx + x0,
+    yPx: center.yPx + y0,
+    moduleWidthPx: center.moduleWidthPx,
   }));
 }

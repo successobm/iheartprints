@@ -22,8 +22,13 @@
 
 import QRCode from "qrcode";
 
-import type { MachineReadableRegionBounds, QrLocalizationConfidence } from "./contracts";
-import { decodeQrCodes, scanForQrFinderPatternsInWindow, type RgbaImage } from "./qr-detect-decode";
+import type { MachineReadableRegionBounds, QrFinderCenterEvidence, QrLocalizationConfidence } from "./contracts";
+import {
+  decodeQrCodes,
+  scanForQrFinderCentersInWindow,
+  scanForQrFinderPatternsInWindow,
+  type RgbaImage,
+} from "./qr-detect-decode";
 
 /**
  * Recommended by the QR spec (ISO/IEC 18004 §5.3): at least 4 modules of
@@ -189,23 +194,133 @@ function regionsSubstantiallyOverlap(a: MachineReadableRegionBounds, b: MachineR
 /** See `regionsSubstantiallyOverlap`'s own doc — deliberately lenient (both boxes are independent estimates, not exact measurements of the same thing), but far above what two UNRELATED regions (e.g. the QR vs. a "FOLLOW US" text block sitting beside it) would ever produce. */
 const MIN_REGION_OVERLAP_IOU = 0.15;
 
-/** How far beyond the source-mapped region's own size to search the candidate for independent corroboration — generous enough to absorb the mapped region's own margin imprecision, bounded enough to never reach a genuinely separate, well-spaced second QR (Section I). */
+/** How far beyond the source-mapped region's own size to search the candidate for independent corroboration — generous enough to absorb the mapped region's own margin imprecision (including a LOW-confidence source estimate's own under-constrained skew — Section F/G of QR LOCALIZATION V3), bounded enough to never reach a genuinely separate, well-spaced second QR (Section I). */
 const CANDIDATE_WINDOW_PADDING_FACTOR = 1.5;
+
+function buildCandidateSearchWindow(mapped: MachineReadableRegionBounds): MachineReadableRegionBounds {
+  const padX = Math.round(mapped.widthPx * CANDIDATE_WINDOW_PADDING_FACTOR);
+  const padY = Math.round(mapped.heightPx * CANDIDATE_WINDOW_PADDING_FACTOR);
+  return {
+    xPx: mapped.xPx - padX,
+    yPx: mapped.yPx - padY,
+    widthPx: mapped.widthPx + padX * 2,
+    heightPx: mapped.heightPx + padY * 2,
+  };
+}
+
+/**
+ * QR LOCALIZATION V3: the low-confidence rescue path's OWN search window —
+ * deliberately NOT `buildCandidateSearchWindow`'s independent-per-axis
+ * padding. A low-confidence source's mapped box can be severely
+ * asymmetric (Section G: "horizontally over-wide" in the real Get Hibachi
+ * case — but just as plausibly vertically over-tall, depending on which 2
+ * corners survived), so padding each axis by a fraction of ITS OWN
+ * length can fail to reach far enough on the SHORT axis specifically —
+ * exactly the true QR's bottom-left corner sitting just outside a window
+ * whose height was padded relative to an already-too-short measured
+ * height. A SQUARE window, centered on the mapped box and sized from its
+ * LARGER dimension, is what actually "compensates for under-constrained
+ * source geometry" (Section F) regardless of which axis was
+ * short-changed.
+ */
+function buildLowConfidenceRescueSearchWindow(mapped: MachineReadableRegionBounds): MachineReadableRegionBounds {
+  const maxDim = Math.max(mapped.widthPx, mapped.heightPx);
+  const pad = Math.round(maxDim * CANDIDATE_WINDOW_PADDING_FACTOR);
+  const centerX = mapped.xPx + mapped.widthPx / 2;
+  const centerY = mapped.yPx + mapped.heightPx / 2;
+  const halfSpan = Math.round(maxDim / 2 + pad);
+  return {
+    xPx: Math.round(centerX - halfSpan),
+    yPx: Math.round(centerY - halfSpan),
+    widthPx: halfSpan * 2,
+    heightPx: halfSpan * 2,
+  };
+}
+
+/**
+ * QR LOCALIZATION V3: how many EXPECTED-module-widths (the source's own
+ * module measurement, scaled) a mapped SOURCE finder center may land from
+ * a candidate finder center and still count as the SAME physical corner.
+ * A genuine correspondence for the real Get Hibachi case landed within
+ * ~0.1 modules of the true candidate center — but that measurement came
+ * from production-quality QR generation/scanning; smaller or cruder
+ * synthetic QR rasters (and any real-world case with coarser stride
+ * sampling or genuine centroid imprecision on either side of the
+ * transform) can plausibly drift several modules while still being
+ * unambiguously the same physical corner. 10 modules remains tiny
+ * relative to the candidate image itself, and to the search window's own
+ * generous size — never mistakable for an unrelated, well-separated
+ * finder pattern elsewhere (see the dedicated "spatial disagreement"
+ * regression, which places unrelated content far outside even this
+ * tolerance).
+ */
+const FINDER_CENTER_CORRESPONDENCE_MODULES = 10;
+
+/**
+ * Section H: a single matching point is not multi-point corroboration.
+ * Requiring at least 2 independently-corresponding finder centers — never
+ * all of them, since a genuinely under-constrained source detection may
+ * legitimately include a weak/spurious extra cluster alongside its real
+ * ones (exactly the real Get Hibachi shape: 3 tightly-consistent real
+ * corners plus 1 unrelated borderline cluster) — is what makes this
+ * rescue robust rather than brittle.
+ */
+const MIN_CORROBORATING_FINDER_CENTERS = 2;
+
+/**
+ * Greedy nearest-DISTINCT-match: for each mapped source finder center,
+ * claims the closest still-unclaimed candidate finder center within
+ * `toleranceRadiusPx`. Two source centers can never both claim the same
+ * candidate center — that would count one point of evidence twice, not
+ * two independent corroborations. A source center with no candidate
+ * within tolerance simply contributes nothing (never treated as a
+ * contradiction — Section H/G: weak/spurious extra source evidence is
+ * tolerated, not held against the rescue).
+ */
+function countCorroboratingFinderCenters(
+  mappedSourceCenters: readonly { xPx: number; yPx: number }[],
+  candidateCenters: readonly QrFinderCenterEvidence[],
+  toleranceRadiusPx: number,
+): number {
+  const claimed = new Set<number>();
+  let count = 0;
+  for (const source of mappedSourceCenters) {
+    let bestIndex = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < candidateCenters.length; i++) {
+      if (claimed.has(i)) continue;
+      const candidate = candidateCenters[i];
+      const dist = Math.hypot(candidate.xPx - source.xPx, candidate.yPx - source.yPx);
+      if (dist <= toleranceRadiusPx && dist < bestDist) {
+        bestDist = dist;
+        bestIndex = i;
+      }
+    }
+    if (bestIndex >= 0) {
+      claimed.add(bestIndex);
+      count++;
+    }
+  }
+  return count;
+}
 
 export type ReplacementLocalizationFailureReason =
   | "region_mapping_not_trustworthy"
   | "source_localization_low_confidence"
   | "mapped_region_not_square"
   | "candidate_localization_missing"
-  | "candidate_localization_disagrees";
+  | "candidate_localization_disagrees"
+  | "insufficient_finder_corroboration";
 
 export interface LocalizedReplacementRegion {
   ok: true;
   /**
    * The validated CANDIDATE-space region to actually composite into —
    * the CANDIDATE's OWN independently-detected bounds, not the naive
-   * source-mapped estimate (Section G: "the artifact being modified
-   * should participate in proving the modification region").
+   * source-mapped estimate, and never the padded search window (Section
+   * L of QR LOCALIZATION V3: "candidate evidence defines the pixels
+   * allowed to change" — Section G of QR REPAIR V2: "the artifact being
+   * modified should participate in proving the modification region").
    */
   region: MachineReadableRegionBounds;
 }
@@ -229,39 +344,57 @@ export interface LocalizedReplacementRegionFailure {
  *
  * A CONFIRMED DESTINATION IS NOT THE SAME THING AS A CONFIRMED PLACEMENT
  * (Section J) — this function is what keeps those two authorities
- * separate: it refuses (fails closed) unless ALL of:
+ * separate. Two independent paths, chosen by the source's OWN reported
+ * `sourceLocalizationConfidence` — never a claim that "low" secretly
+ * means "high" (QR LOCALIZATION V3, Section E: that truth is preserved
+ * exactly as the detector reported it):
  *
- *   1. the source-side detection itself reported `"high"` localization
- *      confidence (see `QrLocalizationConfidence`'s own doc) — a `"low"`
- *      confidence region NEVER reaches replacement, no matter what has
- *      been confirmed against it.
- *   2. the naive proportional source->candidate mapping succeeds (same
- *      transform-trustworthiness rule `mapSourceRegionToProportional
- *      CandidateRegion` already enforced) AND the mapped region is itself
- *      approximately square.
- *   3. an INDEPENDENT scan of the CANDIDATE's own pixels — restricted to
- *      a padded window around the mapped region, NEVER the whole canvas,
- *      so a genuinely separate second QR elsewhere can never be
- *      mistaken for confirmation (Section I) — finds EXACTLY ONE
- *      high-confidence QR-shaped cluster.
- *   4. that candidate-detected region substantially overlaps the mapped
- *      region (Section G: source evidence and candidate evidence must be
- *      RECONCILED, not merely both exist somewhere).
+ *   `"high"` — `localizeFromHighConfidenceSource`: the naive proportional
+ *     source->candidate mapping must itself be approximately square, and
+ *     the ONE high-confidence candidate cluster in a padded search window
+ *     around it must substantially overlap that mapped estimate.
  *
- * On success, returns the CANDIDATE's own detected bounds — the artifact
- * actually being modified is what determines where it gets modified.
+ *   `"low"` — `localizeFromLowConfidenceSourceRescue` (QR LOCALIZATION
+ *     V3): existence authority (something QR-shaped is genuinely in the
+ *     source) is separated from placement authority (exactly where it is
+ *     in the candidate). A low-confidence source's own CONFIRMED finder
+ *     centers — not its unreliable, possibly badly-skewed bounding box —
+ *     are mapped into candidate space and required to independently
+ *     correspond (Section H: stronger evidence than a rectangle-overlap
+ *     heuristic) to at least `MIN_CORROBORATING_FINDER_CENTERS` of the
+ *     ONE high-confidence candidate cluster's own confirmed centers,
+ *     found in the same kind of bounded search window. Never "candidate
+ *     sees something QR-like, therefore replace it" (Section A/B): with
+ *     zero source finder evidence, or with a genuinely uncorroborated
+ *     high-confidence candidate detection, this path refuses exactly
+ *     like the high-confidence path does.
+ *
+ * Both paths refuse outright (Section I) unless the search window
+ * contains EXACTLY ONE high-confidence candidate cluster — never guessing
+ * among several. Both return the CANDIDATE's own detected bounds on
+ * success — the artifact actually being modified is what determines
+ * where it gets modified, in every case.
  */
 export function localizeConfirmedDestinationReplacementRegion(input: {
   sourceBounds: MachineReadableRegionBounds;
   sourceLocalizationConfidence: QrLocalizationConfidence;
+  sourceFinderCenters: readonly QrFinderCenterEvidence[];
   sourceImageWidthPx: number;
   sourceImageHeightPx: number;
   candidate: RgbaImage;
 }): LocalizedReplacementRegion | LocalizedReplacementRegionFailure {
-  if (input.sourceLocalizationConfidence !== "high") {
-    return { ok: false, reason: "source_localization_low_confidence" };
+  if (input.sourceLocalizationConfidence === "high") {
+    return localizeFromHighConfidenceSource(input);
   }
+  return localizeFromLowConfidenceSourceRescue(input);
+}
 
+function localizeFromHighConfidenceSource(input: {
+  sourceBounds: MachineReadableRegionBounds;
+  sourceImageWidthPx: number;
+  sourceImageHeightPx: number;
+  candidate: RgbaImage;
+}): LocalizedReplacementRegion | LocalizedReplacementRegionFailure {
   const mapped = mapSourceRegionToProportionalCandidateRegion(
     input.sourceBounds,
     input.sourceImageWidthPx,
@@ -276,14 +409,7 @@ export function localizeConfirmedDestinationReplacementRegion(input: {
     return { ok: false, reason: "mapped_region_not_square" };
   }
 
-  const padX = Math.round(mapped.widthPx * CANDIDATE_WINDOW_PADDING_FACTOR);
-  const padY = Math.round(mapped.heightPx * CANDIDATE_WINDOW_PADDING_FACTOR);
-  const window: MachineReadableRegionBounds = {
-    xPx: mapped.xPx - padX,
-    yPx: mapped.yPx - padY,
-    widthPx: mapped.widthPx + padX * 2,
-    heightPx: mapped.heightPx + padY * 2,
-  };
+  const window = buildCandidateSearchWindow(mapped);
 
   const candidateFound = scanForQrFinderPatternsInWindow(input.candidate, window).filter(
     (r) => r.localizationConfidence === "high",
@@ -301,6 +427,110 @@ export function localizeConfirmedDestinationReplacementRegion(input: {
   const candidateRegion = candidateFound[0].bounds;
   if (!regionsSubstantiallyOverlap(mapped, candidateRegion)) {
     return { ok: false, reason: "candidate_localization_disagrees" };
+  }
+
+  return { ok: true, region: candidateRegion };
+}
+
+/**
+ * QR LOCALIZATION V3: the low-confidence-source rescue. See
+ * `localizeConfirmedDestinationReplacementRegion`'s own doc for the full
+ * rationale — this is deliberately NOT the same square/overlap check the
+ * high-confidence path uses, because a low-confidence source's own
+ * bounding box is genuinely under-constrained (Section G: it may be
+ * "horizontally over-wide" purely because a third corner was never
+ * confirmed) and must never be required to already look like a trustworthy
+ * square on its own. The bounding box here is used ONLY to build a search
+ * window — reconciliation is entirely finder-center correspondence.
+ */
+function localizeFromLowConfidenceSourceRescue(input: {
+  sourceBounds: MachineReadableRegionBounds;
+  sourceFinderCenters: readonly QrFinderCenterEvidence[];
+  sourceImageWidthPx: number;
+  sourceImageHeightPx: number;
+  candidate: RgbaImage;
+}): LocalizedReplacementRegion | LocalizedReplacementRegionFailure {
+  if (input.sourceFinderCenters.length === 0) {
+    return { ok: false, reason: "source_localization_low_confidence" };
+  }
+
+  const mapped = mapSourceRegionToProportionalCandidateRegion(
+    input.sourceBounds,
+    input.sourceImageWidthPx,
+    input.sourceImageHeightPx,
+    input.candidate.width,
+    input.candidate.height,
+  );
+  if (!mapped) return { ok: false, reason: "region_mapping_not_trustworthy" };
+
+  const window = buildLowConfidenceRescueSearchWindow(mapped);
+
+  const candidateFound = scanForQrFinderPatternsInWindow(input.candidate, window).filter(
+    (r) => r.localizationConfidence === "high",
+  );
+  if (candidateFound.length === 0) {
+    return { ok: false, reason: "candidate_localization_missing" };
+  }
+  if (candidateFound.length > 1) {
+    // Exactly one high-confidence hypothesis required (Section I) — same
+    // rule as the high-confidence path, same reason.
+    return { ok: false, reason: "candidate_localization_disagrees" };
+  }
+  const candidateRegion = candidateFound[0].bounds;
+
+  // The candidate's OWN individual confirmed finder centers, scoped to the
+  // SAME bounded window (never the whole canvas — Section I/J: a second,
+  // unrelated QR elsewhere must never be unioned in).
+  const rawCandidateCenters = scanForQrFinderCentersInWindow(input.candidate, window);
+  if (rawCandidateCenters.length === 0) {
+    // Should not happen given candidateFound.length === 1 above (a
+    // high-confidence region requires >=3 confirmed centers by
+    // construction), but fail closed rather than divide by zero below.
+    return { ok: false, reason: "candidate_localization_missing" };
+  }
+
+  const scaleX = input.candidate.width / input.sourceImageWidthPx;
+  const scaleY = input.candidate.height / input.sourceImageHeightPx;
+  const mappedSourceCenters = input.sourceFinderCenters.map((c) => ({
+    xPx: c.xPx * scaleX,
+    yPx: c.yPx * scaleY,
+  }));
+
+  // Tolerance — and which candidate centers even count as plausible finder
+  // corners at all — is sized from the SOURCE's own measured module width,
+  // scaled by the known source->candidate transform, NEVER from an average
+  // over the candidate's own centers. A damaged/reconstructed candidate
+  // interior (the checkerboard-style damage this whole engagement's own
+  // fixtures use, and plausibly a real botched reconstruction) can produce
+  // a large volume of tiny, module-width-near-zero coincidental clusters
+  // deep inside the symbol — averaging module width over ALL candidate
+  // centers lets that noise collapse the tolerance to near-zero. The
+  // source measurement is not subject to this failure mode (it is
+  // measured directly from the source's OWN 2 confirmed corners, never
+  // from the candidate's damaged interior), and scaling it by the exact
+  // known transform is precisely the "scale/module estimates are
+  // plausible" check Section G asks for — a source measurement mapped
+  // with a badly wrong effective scale would simply land nowhere near any
+  // candidate center at all, regardless of which centers survive this
+  // filter.
+  const sourceModuleWidthAvg =
+    input.sourceFinderCenters.reduce((sum, c) => sum + c.moduleWidthPx, 0) / input.sourceFinderCenters.length;
+  const expectedCandidateModuleWidth = sourceModuleWidthAvg * Math.min(scaleX, scaleY);
+  const toleranceRadiusPx = expectedCandidateModuleWidth * FINDER_CENTER_CORRESPONDENCE_MODULES;
+
+  // Candidate centers whose own measured module width is wildly
+  // inconsistent with the expected scale are noise, not finder-pattern
+  // evidence — excluded before matching rather than merely tolerated,
+  // both for correctness (a coincidentally-nearby noise point could
+  // otherwise wrongly claim a real correspondence) and to keep the
+  // greedy match bounded.
+  const plausibleCandidateCenters = rawCandidateCenters.filter(
+    (c) => c.moduleWidthPx >= expectedCandidateModuleWidth / 3 && c.moduleWidthPx <= expectedCandidateModuleWidth * 3,
+  );
+
+  const corroborated = countCorroboratingFinderCenters(mappedSourceCenters, plausibleCandidateCenters, toleranceRadiusPx);
+  if (corroborated < MIN_CORROBORATING_FINDER_CENTERS) {
+    return { ok: false, reason: "insufficient_finder_corroboration" };
   }
 
   return { ok: true, region: candidateRegion };
@@ -477,6 +707,7 @@ export function restoreFromConfirmedDestinations(input: {
   corrections: {
     sourceBounds: MachineReadableRegionBounds;
     sourceLocalizationConfidence: QrLocalizationConfidence;
+    sourceFinderCenters: readonly QrFinderCenterEvidence[];
     payload: string;
   }[];
 }): RestoreAllResult {
@@ -488,6 +719,7 @@ export function restoreFromConfirmedDestinations(input: {
     const localized = localizeConfirmedDestinationReplacementRegion({
       sourceBounds: correction.sourceBounds,
       sourceLocalizationConfidence: correction.sourceLocalizationConfidence,
+      sourceFinderCenters: correction.sourceFinderCenters,
       sourceImageWidthPx: input.sourceImageWidthPx,
       sourceImageHeightPx: input.sourceImageHeightPx,
       candidate: working,

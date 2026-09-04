@@ -4,7 +4,8 @@ import { test } from "node:test";
 import { PNG } from "pngjs";
 import QRCode from "qrcode";
 
-import { decodeQrCodes, type RgbaImage } from "./qr-detect-decode";
+import { decodeQrCodes, scanForQrFinderCenters, scanForQrFinderPatterns, type RgbaImage } from "./qr-detect-decode";
+import { deriveRegionKey } from "./qr-resolution";
 import {
   compositeQrRaster,
   generateReplacementQrRaster,
@@ -56,6 +57,36 @@ function damagedQrLike(sizePx: number, payload = "https://example.com/damaged-fi
       image.data[i] = v;
       image.data[i + 1] = v;
       image.data[i + 2] = v;
+    }
+  }
+  return image;
+}
+
+/**
+ * QR LOCALIZATION V3: a clean QR raster with its ENTIRE bottom half erased
+ * — destroying the bottom-left finder pattern outright (a real QR has
+ * finder patterns at top-left, top-right, and bottom-left only), leaving
+ * exactly the top-left and top-right corners confirmable.
+ * `scanForQrFinderPatterns` reports this as `"low"` confidence, with a
+ * WIDE, SHORT detected box (both surviving corners share nearly the same
+ * Y) — structurally the SAME shape as the real Get Hibachi source
+ * detection (406×203px, width roughly 2× height), not merely a
+ * damaged-but-locatable interior like `damagedQrLike`. Erasing a
+ * same-side quadrant instead (destroying two ADJACENT corners into one
+ * narrow strip) would under-represent the real geometry and produce a
+ * search window too narrow to contain the true candidate region — this
+ * shape is deliberate, not incidental.
+ */
+function twoCornerQrLike(sizePx: number, payload = "https://example.com/two-corner-fixture"): RgbaImage {
+  const raster = generateReplacementQrRaster(payload, sizePx, sizePx);
+  const image: RgbaImage = { width: raster.width, height: raster.height, data: Buffer.from(raster.data) };
+  const halfH = Math.floor(image.height / 2);
+  for (let y = halfH; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const i = (y * image.width + x) * 4;
+      image.data[i] = 255;
+      image.data[i + 1] = 255;
+      image.data[i + 2] = 255;
     }
   }
   return image;
@@ -300,6 +331,7 @@ test("restoreFromConfirmedDestinations: composites an explicit confirmed payload
       {
         sourceBounds: { xPx: 1198, yPx: 700, widthPx: 300, heightPx: 300 },
         sourceLocalizationConfidence: "high",
+        sourceFinderCenters: [],
         payload: confirmedPayload,
       },
     ],
@@ -327,6 +359,7 @@ test("restoreFromConfirmedDestinations: low source localization confidence refus
       {
         sourceBounds: { xPx: 1198, yPx: 700, widthPx: 300, heightPx: 300 },
         sourceLocalizationConfidence: "low",
+        sourceFinderCenters: [],
         payload: "https://get-hibachi.com",
       },
     ],
@@ -350,6 +383,7 @@ test("restoreFromConfirmedDestinations: candidate has no corroborating QR-shaped
       {
         sourceBounds: { xPx: 1198, yPx: 700, widthPx: 300, heightPx: 300 },
         sourceLocalizationConfidence: "high",
+        sourceFinderCenters: [],
         payload: "https://get-hibachi.com",
       },
     ],
@@ -376,6 +410,7 @@ test("restoreFromConfirmedDestinations: candidate localization disagrees materia
       {
         sourceBounds: { xPx: 1198, yPx: 700, widthPx: 300, heightPx: 300 },
         sourceLocalizationConfidence: "high",
+        sourceFinderCenters: [],
         payload: "https://get-hibachi.com",
       },
     ],
@@ -385,15 +420,24 @@ test("restoreFromConfirmedDestinations: candidate localization disagrees materia
   assert.deepEqual(result.data, before, "the far-away QR-shaped content must never be treated as corroboration for an unrelated mapped region");
 });
 
-test("restoreFromConfirmedDestinations: a malformed 2:1 source region (the real Get Hibachi defect shape) can never itself reach replacement — localizeConfirmedDestinationReplacementRegion refuses on confidence alone before any candidate scan", () => {
-  // The exact real defect geometry: width = 2x height.
+test("QR LOCALIZATION V3: a low-confidence source region with ZERO confirmed finder centers can never reach replacement, even against a QR-shaped candidate — there is no evidence to corroborate anything from", () => {
+  // The exact real defect geometry: width = 2x height (the SAME malformed
+  // box the real Get Hibachi source produces) — but here representing the
+  // degenerate case where the detector could not even confirm a SINGLE
+  // finder-pattern cluster with sufficient confidence to report as a
+  // center (as distinct from the real Get Hibachi case itself, which DOES
+  // have confirmed centers — see the dedicated rescue tests below).
   const malformedBounds = { xPx: 982, yPx: 808, widthPx: 406, heightPx: 203 };
+  const candidateCanvas = blankCanvas(6144, 4096);
+  const damagedQr = damagedQrLike(1200);
+  paste(candidateCanvas, damagedQr, 3928, 3232); // even with a real QR sitting right where the mapped box says to look
   const localized = localizeConfirmedDestinationReplacementRegion({
     sourceBounds: malformedBounds,
-    sourceLocalizationConfidence: "low", // this is what the real detector actually reports for such a box
+    sourceLocalizationConfidence: "low",
+    sourceFinderCenters: [], // zero confirmed centers — nothing to corroborate with
     sourceImageWidthPx: 1536,
     sourceImageHeightPx: 1024,
-    candidate: blankCanvas(6144, 4096),
+    candidate: candidateCanvas,
   });
   assert.equal(localized.ok, false);
   if (localized.ok) return;
@@ -408,6 +452,7 @@ test("localizeConfirmedDestinationReplacementRegion: a high-confidence, square s
   const localized = localizeConfirmedDestinationReplacementRegion({
     sourceBounds: { xPx: 1198, yPx: 700, widthPx: 300, heightPx: 300 },
     sourceLocalizationConfidence: "high",
+    sourceFinderCenters: [],
     sourceImageWidthPx: 1536,
     sourceImageHeightPx: 1024,
     candidate: candidateCanvas,
@@ -436,11 +481,13 @@ test("two QR codes, well-separated: each corrects independently — corroboratio
       {
         sourceBounds: { xPx: 75, yPx: 75, widthPx: 225, heightPx: 225 }, // maps to ~(300,300) at x4
         sourceLocalizationConfidence: "high",
+        sourceFinderCenters: [],
         payload: "https://example.com/a",
       },
       {
         sourceBounds: { xPx: 1200, yPx: 725, widthPx: 225, heightPx: 225 }, // maps to ~(4800,2900) at x4
         sourceLocalizationConfidence: "high",
+        sourceFinderCenters: [],
         payload: "https://example.com/b",
       },
     ],
@@ -476,6 +523,7 @@ test("a QR-shaped region sitting beside an unrelated graphic (the real Get Hibac
       {
         sourceBounds: { xPx: 1200, yPx: 700, widthPx: 225, heightPx: 225 }, // maps to ~(4800,2800) at x4
         sourceLocalizationConfidence: "high",
+        sourceFinderCenters: [],
         payload: "https://example.com/beside-neighbor",
       },
     ],
@@ -504,6 +552,7 @@ test("the changed-pixel bounding box after a validated replacement is entirely c
   const localized = localizeConfirmedDestinationReplacementRegion({
     sourceBounds: { xPx: 1198, yPx: 700, widthPx: 300, heightPx: 300 },
     sourceLocalizationConfidence: "high",
+    sourceFinderCenters: [],
     sourceImageWidthPx: 1536,
     sourceImageHeightPx: 1024,
     candidate: candidateCanvas,
@@ -539,4 +588,342 @@ test("the changed-pixel bounding box after a validated replacement is entirely c
   assert.ok(minY >= region.yPx, `changed pixels extend above the validated region: minY=${minY}, region.yPx=${region.yPx}`);
   assert.ok(maxX < region.xPx + region.widthPx, `changed pixels extend right of the validated region`);
   assert.ok(maxY < region.yPx + region.heightPx, `changed pixels extend below the validated region`);
+});
+
+// ===========================================================================
+// QR LOCALIZATION V3: low-confidence-source / high-confidence-candidate
+// rescue (Section H of that phase — finder-center corroboration).
+// ===========================================================================
+
+test("QR LOCALIZATION V3: a low-confidence two-finder source region is corroborated by a high-confidence candidate detection — replacement is allowed, using the CANDIDATE's own high-confidence bounds, never the source's malformed rectangle", () => {
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 1198, 700);
+  const sourceDetected = scanForQrFinderPatterns(sourceCanvas);
+  assert.equal(sourceDetected.length, 1);
+  assert.equal(sourceDetected[0].localizationConfidence, "low", "sanity: this fixture must genuinely be low-confidence");
+  const sourceCenters = scanForQrFinderCenters(sourceCanvas);
+  assert.equal(sourceCenters.length, 2, "sanity: exactly 2 confirmed source finder centers");
+  const regionKeyBefore = deriveRegionKey(sourceDetected[0].bounds);
+
+  const candidateCanvas = blankCanvas(6144, 4096);
+  paste(candidateCanvas, damagedQrLike(1200), 1198 * 4, 700 * 4);
+
+  const localized = localizeConfirmedDestinationReplacementRegion({
+    sourceBounds: sourceDetected[0].bounds,
+    sourceLocalizationConfidence: sourceDetected[0].localizationConfidence,
+    sourceFinderCenters: sourceCenters,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    candidate: candidateCanvas,
+  });
+  assert.equal(localized.ok, true, `expected rescue to succeed; ${JSON.stringify(localized)}`);
+  if (!localized.ok) return;
+
+  // Item 11 (Section L): the compositing region must be the CANDIDATE's own
+  // detection — never a naive ×4 scaling of the source's malformed box.
+  const naiveMappedFromSourceBox = {
+    xPx: sourceDetected[0].bounds.xPx * 4,
+    yPx: sourceDetected[0].bounds.yPx * 4,
+    widthPx: sourceDetected[0].bounds.widthPx * 4,
+    heightPx: sourceDetected[0].bounds.heightPx * 4,
+  };
+  assert.notDeepEqual(localized.region, naiveMappedFromSourceBox);
+  const aspect = Math.max(localized.region.widthPx, localized.region.heightPx) / Math.min(localized.region.widthPx, localized.region.heightPx);
+  assert.ok(aspect < 1.35, `compositing region should be approximately square (the candidate's own high-confidence detection), got aspect ${aspect}`);
+
+  // Item 13: regionKey stability — this whole rescue mechanism never
+  // touches how source bounds/regionKey identity is computed.
+  assert.equal(deriveRegionKey(sourceDetected[0].bounds), regionKeyBefore);
+});
+
+test("QR LOCALIZATION V3: end-to-end rescue via restoreFromConfirmedDestinations — persisted result decodes exactly the confirmed payload at the candidate's own high-confidence location", () => {
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 1198, 700);
+  const sourceDetected = scanForQrFinderPatterns(sourceCanvas);
+  const sourceCenters = scanForQrFinderCenters(sourceCanvas);
+
+  const candidateCanvas = blankCanvas(6144, 4096);
+  paste(candidateCanvas, damagedQrLike(1200), 1198 * 4, 700 * 4);
+
+  const result = restoreFromConfirmedDestinations({
+    candidate: candidateCanvas,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    corrections: [
+      {
+        sourceBounds: sourceDetected[0].bounds,
+        sourceLocalizationConfidence: sourceDetected[0].localizationConfidence,
+        sourceFinderCenters: sourceCenters,
+        payload: "https://example.com/rescued-payload",
+      },
+    ],
+  });
+  assert.equal(result.restoredCount, 1, `expected rescue to succeed; unresolved=${JSON.stringify(result.unresolved)}`);
+  const decoded = decodeQrCodes({ width: candidateCanvas.width, height: candidateCanvas.height, data: result.data });
+  assert.equal(decoded.length, 1);
+  assert.equal(decoded[0].payload, "https://example.com/rescued-payload");
+});
+
+test("QR LOCALIZATION V3: source LOW + candidate LOW (candidate never reaches high confidence either) — refused, nothing composited", () => {
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 1198, 700);
+  const sourceDetected = scanForQrFinderPatterns(sourceCanvas);
+  const sourceCenters = scanForQrFinderCenters(sourceCanvas);
+
+  const candidateCanvas = blankCanvas(6144, 4096);
+  paste(candidateCanvas, twoCornerQrLike(1200), 1198 * 4, 700 * 4); // candidate ALSO only 2 confirmed corners
+  const before = Buffer.from(candidateCanvas.data);
+
+  const result = restoreFromConfirmedDestinations({
+    candidate: candidateCanvas,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    corrections: [
+      {
+        sourceBounds: sourceDetected[0].bounds,
+        sourceLocalizationConfidence: sourceDetected[0].localizationConfidence,
+        sourceFinderCenters: sourceCenters,
+        payload: "https://example.com/should-not-apply",
+      },
+    ],
+  });
+  assert.equal(result.restoredCount, 0);
+  assert.equal(result.unresolved[0].reason, "candidate_localization_missing");
+  assert.deepEqual(result.data, before);
+});
+
+test("QR LOCALIZATION V3: source LOW + candidate has no QR-shaped content at all — refused", () => {
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 1198, 700);
+  const sourceDetected = scanForQrFinderPatterns(sourceCanvas);
+  const sourceCenters = scanForQrFinderCenters(sourceCanvas);
+
+  const candidateCanvas = blankCanvas(6144, 4096); // nothing at all
+  const before = Buffer.from(candidateCanvas.data);
+
+  const result = restoreFromConfirmedDestinations({
+    candidate: candidateCanvas,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    corrections: [
+      {
+        sourceBounds: sourceDetected[0].bounds,
+        sourceLocalizationConfidence: sourceDetected[0].localizationConfidence,
+        sourceFinderCenters: sourceCenters,
+        payload: "https://example.com/should-not-apply",
+      },
+    ],
+  });
+  assert.equal(result.restoredCount, 0);
+  assert.equal(result.unresolved[0].reason, "candidate_localization_missing");
+  assert.deepEqual(result.data, before);
+});
+
+test("QR LOCALIZATION V3: source LOW + candidate HIGH but spatially disagreeing (a real QR sits inside the search window, but at a position whose own finder centers do not correspond) — refused", () => {
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 1198, 700);
+  const sourceDetected = scanForQrFinderPatterns(sourceCanvas);
+  const sourceCenters = scanForQrFinderCenters(sourceCanvas);
+
+  const candidateCanvas = blankCanvas(6144, 4096);
+  // Placed well inside the generously padded search window, but shifted far
+  // enough that this QR's own finder centers cannot correspond to the
+  // mapped source centers within tolerance.
+  paste(candidateCanvas, damagedQrLike(1000), 4300, 1300);
+  const before = Buffer.from(candidateCanvas.data);
+
+  const result = restoreFromConfirmedDestinations({
+    candidate: candidateCanvas,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    corrections: [
+      {
+        sourceBounds: sourceDetected[0].bounds,
+        sourceLocalizationConfidence: sourceDetected[0].localizationConfidence,
+        sourceFinderCenters: sourceCenters,
+        payload: "https://example.com/should-not-apply",
+      },
+    ],
+  });
+  assert.equal(result.restoredCount, 0, `expected refusal; got success at ${JSON.stringify(result)}`);
+  assert.equal(result.unresolved[0].reason, "insufficient_finder_corroboration");
+  assert.deepEqual(result.data, before);
+});
+
+test("QR LOCALIZATION V3: source LOW + TWO separate QR-like clusters both inside the search window — refused, never guesses which one corresponds", () => {
+  // scanForQrFinderPatterns only ever collapses ALL confirmed finder-
+  // pattern clusters in an image into a SINGLE region (it has no concept
+  // of "multiple symbols" — see that function's own doc). With two
+  // genuinely separate QRs both inside one search window, their combined
+  // 6 confirmed corners collapse into ONE non-square (or coincidentally
+  // square but spatially wrong) bounding box that practically never
+  // reaches "high" confidence on its own — so the actual, observed safe
+  // outcome here is `candidate_localization_missing` (nothing qualifies
+  // as a single trustworthy hypothesis), not a literal "found 2, refused"
+  // branch. Section I's own requirement — never guess which of several
+  // candidates corresponds to the source region — is satisfied either
+  // way: this still refuses, and still touches no pixels.
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 1198, 700);
+  const sourceDetected = scanForQrFinderPatterns(sourceCanvas);
+  const sourceCenters = scanForQrFinderCenters(sourceCanvas);
+
+  const candidateCanvas = blankCanvas(6144, 4096);
+  // The TRUE corroborating QR...
+  paste(candidateCanvas, damagedQrLike(1200), 1198 * 4, 700 * 4);
+  // ...plus a SECOND, unrelated QR also inside the same generously-padded search window.
+  paste(candidateCanvas, damagedQrLike(900), 4300, 1300);
+  const before = Buffer.from(candidateCanvas.data);
+
+  const result = restoreFromConfirmedDestinations({
+    candidate: candidateCanvas,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    corrections: [
+      {
+        sourceBounds: sourceDetected[0].bounds,
+        sourceLocalizationConfidence: sourceDetected[0].localizationConfidence,
+        sourceFinderCenters: sourceCenters,
+        payload: "https://example.com/should-not-apply",
+      },
+    ],
+  });
+  assert.equal(result.restoredCount, 0, `expected refusal; got success at ${JSON.stringify(result)}`);
+  assert.equal(result.unresolved[0].reason, "candidate_localization_missing");
+  assert.deepEqual(result.data, before);
+});
+
+test("QR LOCALIZATION V3: a QR-shaped region beside unrelated 'FOLLOW US'-like artwork, rescued via low-confidence-source corroboration, never touches the neighboring content", () => {
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 1198, 700);
+  const sourceDetected = scanForQrFinderPatterns(sourceCanvas);
+  const sourceCenters = scanForQrFinderCenters(sourceCanvas);
+
+  const candidateCanvas = blankCanvas(6144, 4096, [250, 250, 250]);
+  const neighborX0 = 3000, neighborY0 = 2800, neighborX1 = 4700, neighborY1 = 3600;
+  for (let y = neighborY0; y < neighborY1; y++) {
+    for (let x = neighborX0; x < neighborX1; x++) {
+      const i = (y * candidateCanvas.width + x) * 4;
+      candidateCanvas.data[i] = 20;
+      candidateCanvas.data[i + 1] = 120;
+      candidateCanvas.data[i + 2] = 20;
+    }
+  }
+  paste(candidateCanvas, damagedQrLike(1200), 1198 * 4, 700 * 4);
+  const before = Buffer.from(candidateCanvas.data);
+
+  const result = restoreFromConfirmedDestinations({
+    candidate: candidateCanvas,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    corrections: [
+      {
+        sourceBounds: sourceDetected[0].bounds,
+        sourceLocalizationConfidence: sourceDetected[0].localizationConfidence,
+        sourceFinderCenters: sourceCenters,
+        payload: "https://example.com/beside-neighbor",
+      },
+    ],
+  });
+  assert.equal(result.restoredCount, 1, `unresolved=${JSON.stringify(result.unresolved)}`);
+
+  for (let y = neighborY0; y < neighborY1; y++) {
+    for (let x = neighborX0; x < neighborX1; x++) {
+      const i = (y * candidateCanvas.width + x) * 4;
+      assert.equal(result.data[i], before[i], `neighbor pixel (${x},${y}) R channel changed`);
+      assert.equal(result.data[i + 1], before[i + 1], `neighbor pixel (${x},${y}) G channel changed`);
+      assert.equal(result.data[i + 2], before[i + 2], `neighbor pixel (${x},${y}) B channel changed`);
+    }
+  }
+  const decoded = decodeQrCodes({ width: candidateCanvas.width, height: candidateCanvas.height, data: result.data });
+  assert.equal(decoded[0]?.payload, "https://example.com/beside-neighbor");
+});
+
+test("QR LOCALIZATION V3: the changed-pixel bounding box after a rescued replacement is entirely contained within the candidate's own localized region", () => {
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 1198, 700);
+  const sourceDetected = scanForQrFinderPatterns(sourceCanvas);
+  const sourceCenters = scanForQrFinderCenters(sourceCanvas);
+
+  const candidateCanvas = blankCanvas(6144, 4096);
+  paste(candidateCanvas, damagedQrLike(1200), 1198 * 4, 700 * 4);
+  const before = Buffer.from(candidateCanvas.data);
+
+  const localized = localizeConfirmedDestinationReplacementRegion({
+    sourceBounds: sourceDetected[0].bounds,
+    sourceLocalizationConfidence: sourceDetected[0].localizationConfidence,
+    sourceFinderCenters: sourceCenters,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    candidate: candidateCanvas,
+  });
+  assert.equal(localized.ok, true);
+  if (!localized.ok) return;
+
+  const result = restoreQrInCandidate({
+    candidate: candidateCanvas,
+    sourceBounds: sourceDetected[0].bounds,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    verifiedPayload: "https://example.com/bounded-rescue",
+    regionOverride: localized.region,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let y = 0; y < candidateCanvas.height; y++) {
+    for (let x = 0; x < candidateCanvas.width; x++) {
+      const i = (y * candidateCanvas.width + x) * 4;
+      if (result.data[i] !== before[i] || result.data[i + 1] !== before[i + 1] || result.data[i + 2] !== before[i + 2]) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  const region = localized.region;
+  assert.ok(minX >= region.xPx, `changed pixels extend left of the validated region: minX=${minX}, region.xPx=${region.xPx}`);
+  assert.ok(minY >= region.yPx, `changed pixels extend above the validated region: minY=${minY}, region.yPx=${region.yPx}`);
+  assert.ok(maxX < region.xPx + region.widthPx, `changed pixels extend right of the validated region`);
+  assert.ok(maxY < region.yPx + region.heightPx, `changed pixels extend below the validated region`);
+});
+
+test("QR LOCALIZATION V3: two QR codes, one resolved via low-confidence rescue and one via ordinary high-confidence agreement, resolve independently — no cross-contamination", () => {
+  const sourceCanvas = blankCanvas(1536, 1024);
+  paste(sourceCanvas, twoCornerQrLike(300), 100, 100); // region A: low-confidence source
+  const sourceA = scanForQrFinderPatterns(sourceCanvas);
+  const centersA = scanForQrFinderCenters(sourceCanvas);
+  assert.equal(sourceA[0].localizationConfidence, "low");
+
+  const candidateCanvas = blankCanvas(6144, 4096);
+  paste(candidateCanvas, damagedQrLike(900), 400, 400); // region A's candidate content (corroborates)
+  paste(candidateCanvas, damagedQrLike(900), 4800, 2900); // region B's candidate content, well separated
+
+  const result = restoreFromConfirmedDestinations({
+    candidate: candidateCanvas,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    corrections: [
+      {
+        sourceBounds: sourceA[0].bounds,
+        sourceLocalizationConfidence: sourceA[0].localizationConfidence,
+        sourceFinderCenters: centersA,
+        payload: "https://example.com/region-a-rescued",
+      },
+      {
+        // Region B: an ordinary HIGH-confidence correction, entirely
+        // independent of region A's rescue — maps to ~(4800,2900) at x4.
+        sourceBounds: { xPx: 1200, yPx: 725, widthPx: 225, heightPx: 225 },
+        sourceLocalizationConfidence: "high",
+        sourceFinderCenters: [],
+        payload: "https://example.com/region-b-direct",
+      },
+    ],
+  });
+  assert.equal(result.restoredCount, 2, `expected both to resolve independently; unresolved=${JSON.stringify(result.unresolved)}`);
+  const decoded = decodeQrCodes({ width: candidateCanvas.width, height: candidateCanvas.height, data: result.data }, 4);
+  const payloads = decoded.map((d) => d.payload).sort();
+  assert.deepEqual(payloads, ["https://example.com/region-a-rescued", "https://example.com/region-b-direct"]);
 });

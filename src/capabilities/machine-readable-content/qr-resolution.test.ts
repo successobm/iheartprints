@@ -25,6 +25,7 @@ function reviewRequiredInstance(overrides: Partial<MachineReadablePreservationIn
     provenance: null,
     regionKey: deriveRegionKey({ xPx: 1200, yPx: 800, widthPx: 320, heightPx: 220 }),
     sourceLocalizationConfidence: "high",
+    sourceFinderCenters: [],
     ...overrides,
   };
 }
@@ -174,6 +175,7 @@ test("a pass/fail/hard_fail/not_applicable instance is never touched by resoluti
       provenance: result === "pass" ? "verified_from_source_qr" : null,
       regionKey: deriveRegionKey({ xPx: 0, yPx: 0, widthPx: 10, heightPx: 10 }),
       sourceLocalizationConfidence: null,
+      sourceFinderCenters: [],
     };
     const resolution: SignQrResolutionRecord = {
       sourceAssetId: SOURCE.assetId,

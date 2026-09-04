@@ -409,6 +409,7 @@ export async function restoreSignQrCode(projectId: string): Promise<SignQrRestor
           // instances (qr-preservation.ts always stamps a non-null
           // confidence for those) — never null here in practice.
           sourceLocalizationConfidence: p.instance.sourceLocalizationConfidence ?? "low",
+          sourceFinderCenters: p.instance.sourceFinderCenters,
           payload: p.resolution.confirmedPayload!,
         })),
     });

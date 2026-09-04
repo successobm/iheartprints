@@ -82,6 +82,30 @@ export interface DecodedMachineReadableRegion {
 export type QrLocalizationConfidence = "high" | "low";
 
 /**
+ * QR LOCALIZATION V3: one CONFIRMED finder-pattern cluster centroid — the
+ * same evidence `scanForQrFinderPatterns` already computes internally
+ * before collapsing every confirmed cluster into a single bounding box and
+ * a `QrLocalizationConfidence` verdict. Exposed as its own small, focused
+ * evidence shape (never folded into `UndecodedMachineReadableRegion`,
+ * which every other consumer in this codebase already treats as "one
+ * region, one box") because the replacement rescue path
+ * (`qr-restore.ts`'s `localizeConfirmedDestinationReplacementRegion`)
+ * specifically needs the INDIVIDUAL points, not their pre-collapsed
+ * summary: a mapped finder center landing within a few modules of one of
+ * the candidate's own confirmed centers is measurably stronger,
+ * independently-reconciled evidence that a low-confidence source
+ * detection and a high-confidence candidate detection describe the SAME
+ * physical QR than any rectangle-overlap heuristic on the (possibly
+ * badly-skewed) bounding boxes alone could ever be.
+ */
+export interface QrFinderCenterEvidence {
+  xPx: number;
+  yPx: number;
+  /** The scanline run-length unit this cluster's hits measured — used to size a physically-meaningful correspondence tolerance (a fixed multiple of module width), and as an independent scale-consistency check when mapped across a proportional transform. */
+  moduleWidthPx: number;
+}
+
+/**
  * A region that LOOKS machine-readable (matched the deterministic
  * finder-pattern signature — see `qr-detect-decode.ts`'s
  * `scanForQrFinderPatterns`) but did not successfully decode. This is the
@@ -206,6 +230,21 @@ export interface MachineReadablePreservationInstance {
    * (Section J: "CONFIRMED PAYLOAD DOES NOT EQUAL CONFIRMED PLACEMENT").
    */
   sourceLocalizationConfidence: QrLocalizationConfidence | null;
+  /**
+   * QR LOCALIZATION V3: the CONFIRMED finder-pattern cluster centroids
+   * behind `sourceLocalizationConfidence` — see `QrFinderCenterEvidence`'s
+   * own doc. `[]` under the exact same conditions
+   * `sourceLocalizationConfidence` is `null` (a decoded source, or no
+   * source bounds at all) — never used for anything when confidence is
+   * already `"high"` (the existing mapped-region-overlap check already
+   * suffices there), but the ONLY evidence available for the replacement
+   * safety gate's low-confidence-source rescue path (Section H of that
+   * phase): mapped against the candidate's own confirmed centers to prove
+   * a low-confidence source detection and a high-confidence candidate
+   * detection describe the SAME physical QR, never merely "the candidate
+   * has a QR-like thing somewhere nearby."
+   */
+  sourceFinderCenters: readonly QrFinderCenterEvidence[];
   /**
    * Deterministic, reproducible identity for this SOURCE region within its
    * one immutable source image — a digest of the region's own rounded
