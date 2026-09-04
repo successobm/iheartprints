@@ -443,6 +443,11 @@ export const TEST_FILES = [
   // DOM-free functions, same reasoning as coordinate-mapping above.
   "src/app/internal/projects/[projectId]/sign-authorize/sign-canvas-zoom.test.ts",
   "src/app/internal/projects/[projectId]/sign-authorize/sign-workspace-status.test.ts",
+  // Signs Workstation Visual Correction UX Phase: the main-canvas
+  // preview/Apply-gating decision logic pulled out of
+  // SignFitToProductionCorrectionTool.tsx, same reasoning as the other
+  // pure, DOM-free modules above.
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-correction-preview-view.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/original-image/route.test.ts",
   "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",

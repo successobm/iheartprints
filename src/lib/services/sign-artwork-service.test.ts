@@ -134,6 +134,85 @@ describe("sign-artwork-service: Operator Production Correction UX (preview + com
     assert.equal(after!.status, before!.status);
   });
 
+  it("Signs Workstation Visual Correction UX: a pixel-changing preview reports hasPixelChange and returns a full-canvas afterPngBase64 that actually shows the corrected result at working scale (Section E)", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithBlockedCandidate(graph, repo);
+    const { previewSignCorrections } = await import("./sign-artwork-service");
+    const { decodePngUpload } = await import("@/capabilities/artwork-preparation/image-decode");
+
+    const result = await previewSignCorrections(projectId, [
+      { kind: "remove", xPx: 0, yPx: 435, widthPx: 30, heightPx: 30, contextDepthPx: 8 },
+    ]);
+    assert.equal(result.status, "previewed");
+    assert.equal(result.hasPixelChange, true);
+    assert.ok(result.afterPngBase64);
+
+    const decoded = decodePngUpload(Buffer.from(result.afterPngBase64!, "base64")).image;
+    // The candidate is 600x900 — the full canvas, not merely the crop.
+    assert.equal(decoded.width, 600);
+    assert.equal(decoded.height, 900);
+    // The black artifact (20,20,20) at (10,445) must now read as the
+    // measured surrounding background (200,10,10) — the same pixel the
+    // small crop already proved, now visible on the FULL corrected canvas.
+    const offset = (445 * 600 + 10) * 4;
+    assert.equal(decoded.data[offset], 200);
+    assert.equal(decoded.data[offset + 1], 10);
+    assert.equal(decoded.data[offset + 2], 10);
+  });
+
+  it("Signs Workstation Visual Correction UX: a classification-only queue reports hasPixelChange: false and returns no afterPngBase64 — nothing to falsely present as a pixel diff (Section K)", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithBlockedCandidate(graph, repo);
+    const { previewSignCorrections } = await import("./sign-artwork-service");
+
+    const result = await previewSignCorrections(projectId, [
+      { kind: "classify", classificationKind: "edge_intent", edges: ["left"], xPx: 0, yPx: 25, widthPx: 9, heightPx: 400 },
+    ]);
+    assert.equal(result.status, "previewed");
+    assert.equal(result.appliedCount, 1);
+    assert.equal(result.hasPixelChange, false);
+    assert.equal(result.afterPngBase64, null);
+  });
+
+  it("Signs Workstation Visual Correction UX: multiple queued corrections combine into ONE afterPngBase64 reflecting all of them together (Section E — combined preview)", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithBlockedCandidate(graph, repo);
+    const { previewSignCorrections } = await import("./sign-artwork-service");
+    const { decodePngUpload } = await import("@/capabilities/artwork-preparation/image-decode");
+
+    // Move FIRST (reads the pristine original artifact band), Remove
+    // SECOND (fills the original artifact position from its own,
+    // untouched-by-the-move surrounding background) — an ordering that
+    // lets both effects be checked independently. (Preview's own
+    // documented approximation — a move reads its source from whatever
+    // the PRECEDING correction already produced, never the true original —
+    // only matters for a LATER move in the same batch; it does not apply
+    // here.)
+    const result = await previewSignCorrections(projectId, [
+      { kind: "move", sourceStartYPx: 435, heightPx: 30, destStartYPx: 700 },
+      { kind: "remove", xPx: 0, yPx: 435, widthPx: 30, heightPx: 30, contextDepthPx: 8 },
+    ]);
+    assert.equal(result.status, "previewed");
+    assert.equal(result.appliedCount, 2);
+    assert.equal(result.hasPixelChange, true);
+    assert.ok(result.afterPngBase64);
+
+    const decoded = decodePngUpload(Buffer.from(result.afterPngBase64!, "base64")).image;
+    // The MOVE's effect: the artifact's own colour, copied to its new
+    // destination. Source row 445 lands at destStartYPx(700) + 10 = 710.
+    const movedOffset = (710 * 600 + 10) * 4;
+    assert.equal(decoded.data[movedOffset], 20);
+    assert.equal(decoded.data[movedOffset + 1], 20);
+    assert.equal(decoded.data[movedOffset + 2], 20);
+    // ...AND the REMOVE's effect (background fill at the original artifact
+    // position) is ALSO present in the SAME returned canvas — proving
+    // corrections compose, not just apply one at a time.
+    const removedOffset = (445 * 600 + 10) * 4;
+    assert.equal(decoded.data[removedOffset], 200);
+    assert.equal(decoded.data[removedOffset + 1], 10);
+    assert.equal(decoded.data[removedOffset + 2], 10);
+  });
+
   it("preview refuses a selection whose own surrounding ring is not uniform, without applying anything", async () => {
     const { graph, repo } = await freshGraph();
     const { projectId } = await projectWithBlockedCandidate(graph, repo);
@@ -238,6 +317,28 @@ describe("sign-artwork-service: Operator Production Correction UX (preview + com
     await graph.finalArtworkScheduler.runBatch();
     const completedJob = await repo.getFinalArtworkJob(job.id);
     assert.equal(completedJob!.status, "completed");
+  });
+
+  it("Signs Workstation Visual Correction UX: a queued Move alone reports hasPixelChange and the full-canvas afterPngBase64 visibly shows the moved content at its new destination (Section I)", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId } = await projectWithBlockedCandidate(graph, repo);
+    const { previewSignCorrections } = await import("./sign-artwork-service");
+    const { decodePngUpload } = await import("@/capabilities/artwork-preparation/image-decode");
+
+    const result = await previewSignCorrections(projectId, [
+      { kind: "move", sourceStartYPx: 435, heightPx: 30, destStartYPx: 700 },
+    ]);
+    assert.equal(result.status, "previewed");
+    assert.equal(result.hasPixelChange, true);
+    assert.ok(result.afterPngBase64);
+
+    const decoded = decodePngUpload(Buffer.from(result.afterPngBase64!, "base64")).image;
+    // Source row 445 (10px into the moved band, and inside the artifact's
+    // own y:[440,460) range) lands at destStartYPx(700) + 10 = 710.
+    const destOffset = (710 * 600 + 10) * 4;
+    assert.equal(decoded.data[destOffset], 20);
+    assert.equal(decoded.data[destOffset + 1], 20);
+    assert.equal(decoded.data[destOffset + 2], 20);
   });
 
   it("preview and commit measure the IDENTICAL colour for the same selection — preview/execution equivalence (Section L)", async () => {

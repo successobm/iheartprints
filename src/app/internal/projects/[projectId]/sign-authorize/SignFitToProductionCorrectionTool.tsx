@@ -7,6 +7,13 @@ import type { SignEdge, SignFitToProductionSummary } from "@/capabilities/sign-p
 import type { ToleranceLevel } from "@/capabilities/shared/flood-fill-selection";
 
 import { mapDisplayPointToSourcePx, normalizeSelection } from "./correction-coordinate-mapping";
+import {
+  canApplyCorrectionQueue,
+  canShowPixelPreview,
+  isClassificationOnlyQueue,
+  resolveEffectiveViewMode,
+  resolveMainImageSrc,
+} from "./sign-correction-preview-view";
 import { clampZoom, computeFitZoom } from "./sign-canvas-zoom";
 import { computeDisplayPpi, deriveEdgeChips, deriveOverallFitLabel } from "./sign-workspace-status";
 
@@ -102,6 +109,10 @@ interface PreviewResponse {
   beforeCropPngBase64: string | null;
   afterCropPngBase64: string | null;
   cropBounds: Rect | null;
+  /** `false` for a classification-only (or empty) queue — nothing pixel-visible to compare. */
+  hasPixelChange: boolean;
+  /** Full-canvas corrected candidate, for the main workstation canvas — see `SignCorrectionPreviewResult`'s own doc. `null` whenever `hasPixelChange` is `false`. */
+  afterPngBase64: string | null;
   fitToProduction: { edges: PreviewEdge[]; overallResult: "pass" | "fail" | "unknown" } | null;
 }
 
@@ -180,8 +191,21 @@ export function SignFitToProductionCorrectionTool({
 
   const [queue, setQueue] = useState<PendingCorrection[]>([]);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
-  const [busy, setBusy] = useState(false);
+  // Signs Workstation Visual Correction UX Phase: distinguishes WHAT is
+  // in flight so the canvas loading overlay (Section M) can say something
+  // accurate, without adding a second source of truth for "is something
+  // happening" — every existing `busy` check below keeps working unchanged
+  // against the derived boolean immediately below.
+  const [busyKind, setBusyKind] = useState<"preview" | "apply" | null>(null);
+  const busy = busyKind !== null;
   const [error, setError] = useState<string | null>(null);
+  // Section E/G: which artwork the MAIN canvas shows. Only ever actually
+  // "preview" when a real, pixel-changing preview exists to show — see
+  // `canShowPreview`/`effectiveViewMode` below, which force "original"
+  // otherwise so this piece of state can never by itself imply a preview
+  // that isn't really there.
+  const [viewMode, setViewMode] = useState<"original" | "preview">("preview");
+  const initialImageLoadRef = useRef(false);
 
   const setZoom = useCallback((z: number) => setZoomState(clampZoom(z, ZOOM_BOUNDS)), []);
 
@@ -195,6 +219,19 @@ export function SignFitToProductionCorrectionTool({
   // with each other mid-correction.
   const currentEdges: PreviewEdge[] = preview?.fitToProduction?.edges ?? (fitToProduction.edges as PreviewEdge[]);
   const currentOverallStatus = preview?.fitToProduction ? preview.fitToProduction.overallResult : fitToProduction.status;
+
+  // Section E/F/G: the MAIN canvas is the correction preview. There is a
+  // real, pixel-changing result to show only when the current preview
+  // actually changed pixels (never true for a classification-only queue —
+  // Section K) and the server actually returned the full-canvas bytes for
+  // it. `effectiveViewMode` is what the canvas and toggle controls
+  // ACTUALLY use — it can never claim "preview" when there is nothing real
+  // to show, regardless of what `viewMode` itself remembers.
+  const canShowPreview = canShowPixelPreview(preview);
+  const effectiveViewMode = resolveEffectiveViewMode(viewMode, preview);
+  const mainImageSrc = resolveMainImageSrc(effectiveViewMode, preview, candidateUrl);
+  const classificationOnlyQueue = isClassificationOnlyQueue(preview, queue.length);
+  const canApply = canApplyCorrectionQueue({ busy, queueLength: queue.length, preview });
 
   const edgeChips = useMemo(
     () =>
@@ -509,7 +546,7 @@ export function SignFitToProductionCorrectionTool({
   }
 
   async function runPreview(nextQueue: PendingCorrection[]) {
-    setBusy(true);
+    setBusyKind("preview");
     setError(null);
     try {
       const res = await fetch(`/api/internal/projects/${projectId}/sign-artwork/correction-preview`, {
@@ -520,15 +557,19 @@ export function SignFitToProductionCorrectionTool({
       const body = (await res.json().catch(() => null)) as PreviewResponse | { error?: string } | null;
       if (!res.ok || !body || "error" in body) {
         setError((body as { error?: string } | null)?.error ?? "That didn't work. Please try again.");
-        setBusy(false);
+        setBusyKind(null);
         return;
       }
       setPreview(body as PreviewResponse);
       setQueue(nextQueue);
-      setBusy(false);
+      // Section E: the canvas leads with the just-computed proposed result
+      // by default. The operator can still switch to "Show original" at
+      // any time — this only decides what a NEW preview lands on.
+      setViewMode("preview");
+      setBusyKind(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't work. Please try again.");
-      setBusy(false);
+      setBusyKind(null);
     }
   }
 
@@ -616,8 +657,8 @@ export function SignFitToProductionCorrectionTool({
   }
 
   async function applyToProduction() {
-    if (queue.length === 0) return;
-    setBusy(true);
+    if (!canApply) return;
+    setBusyKind("apply");
     setError(null);
     try {
       const res = await fetch(`/api/internal/projects/${projectId}/sign-artwork/correction-commit`, {
@@ -628,13 +669,13 @@ export function SignFitToProductionCorrectionTool({
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         setError(body?.error ?? "That didn't work. Please try again.");
-        setBusy(false);
+        setBusyKind(null);
         return;
       }
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't work. Please try again.");
-      setBusy(false);
+      setBusyKind(null);
     }
   }
 
@@ -790,6 +831,54 @@ export function SignFitToProductionCorrectionTool({
             </button>
           </div>
 
+          {/* Section G/H: the comparison control and queued-correction
+              notice live directly above the canvas — never buried in the
+              sidebar, never the sole way to tell a preview is showing. */}
+          <div className="flex flex-wrap items-center gap-3 text-xs" data-sign-correction-canvas-status>
+            {canShowPreview ? (
+              <div
+                className="flex items-center gap-1 rounded-full border border-ink/20 p-0.5"
+                role="tablist"
+                aria-label="Compare original artwork and proposed correction"
+                data-sign-correction-view-toggle
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={effectiveViewMode === "original"}
+                  onClick={() => setViewMode("original")}
+                  className={`rounded-full px-2.5 py-1 font-medium transition ${
+                    effectiveViewMode === "original" ? "bg-ink text-white" : "text-ink hover:bg-ink/10"
+                  }`}
+                  data-testid="sign-correction-view-original"
+                >
+                  Show original
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={effectiveViewMode === "preview"}
+                  onClick={() => setViewMode("preview")}
+                  className={`rounded-full px-2.5 py-1 font-medium transition ${
+                    effectiveViewMode === "preview" ? "bg-ink text-white" : "text-ink hover:bg-ink/10"
+                  }`}
+                  data-testid="sign-correction-view-preview"
+                >
+                  Show preview
+                </button>
+              </div>
+            ) : classificationOnlyQueue ? (
+              <p className="text-ink/60" data-sign-correction-classification-only>
+                Classification only — artwork pixels are unchanged.
+              </p>
+            ) : null}
+            {queue.length > 0 ? (
+              <p className="text-ink/60" data-sign-correction-queue-status>
+                Previewing {queue.length} pending correction{queue.length === 1 ? "" : "s"}
+              </p>
+            ) : null}
+          </div>
+
           <div
             ref={viewportRef}
             className="relative h-[72vh] min-h-[420px] overflow-auto rounded border border-ink/10 bg-ink/5"
@@ -798,16 +887,31 @@ export function SignFitToProductionCorrectionTool({
               {/* eslint-disable-next-line @next/next/no-img-element -- internal operator tool, not the customer image pipeline */}
               <img
                 ref={imgRef}
-                src={candidateUrl}
-                alt="Current production candidate — select artwork to correct"
+                src={mainImageSrc}
+                alt={
+                  effectiveViewMode === "preview"
+                    ? "Proposed result with pending corrections applied"
+                    : "Current production candidate — select artwork to correct"
+                }
                 style={{ width: displayWidth || undefined, height: displayHeight || undefined, display: "block" }}
+                data-sign-correction-canvas-mode={effectiveViewMode}
                 onLoad={(e) => {
                   const el = e.currentTarget;
                   const natural = { width: el.naturalWidth, height: el.naturalHeight };
                   setNaturalSize(natural);
-                  const vp = viewportRef.current;
-                  if (vp && vp.clientWidth > 0 && vp.clientHeight > 0) {
-                    setZoom(computeFitZoom(natural, { width: vp.clientWidth, height: vp.clientHeight }, ZOOM_BOUNDS));
+                  // Auto-fit only the very first time an image loads.
+                  // Toggling Original/Preview, or a new preview arriving
+                  // after Undo/a new correction, must never yank the
+                  // operator's own zoom back to Fit — the same
+                  // preserve-the-viewport convention `CorrectionWorkspace.tsx`
+                  // (DTF's wand workstation) already documents for a result
+                  // refresh.
+                  if (!initialImageLoadRef.current) {
+                    initialImageLoadRef.current = true;
+                    const vp = viewportRef.current;
+                    if (vp && vp.clientWidth > 0 && vp.clientHeight > 0) {
+                      setZoom(computeFitZoom(natural, { width: vp.clientWidth, height: vp.clientHeight }, ZOOM_BOUNDS));
+                    }
                   }
                 }}
               />
@@ -819,6 +923,18 @@ export function SignFitToProductionCorrectionTool({
                 onPointerUp={handlePointerUp}
                 data-testid="sign-correction-canvas"
               />
+              {busyKind === "preview" ? (
+                <div
+                  className="absolute inset-0 flex items-center justify-center bg-white/70"
+                  role="status"
+                  aria-live="polite"
+                  data-sign-correction-preview-loading
+                >
+                  <span className="rounded-full bg-ink px-3 py-1.5 text-sm font-medium text-white">
+                    {preview === null ? "Generating preview…" : "Updating preview…"}
+                  </span>
+                </div>
+              ) : null}
             </div>
           </div>
           <p className="text-xs text-muted">
@@ -899,8 +1015,8 @@ export function SignFitToProductionCorrectionTool({
               undoLast={undoLast}
               clearAll={clearAll}
               applyToProduction={applyToProduction}
-              busy={busy}
-              queueLength={queue.length}
+              applying={busyKind === "apply"}
+              canApply={canApply}
             />
           ) : null}
         </div>
@@ -1250,15 +1366,15 @@ function PreviewPanel({
   undoLast,
   clearAll,
   applyToProduction,
-  busy,
-  queueLength,
+  applying,
+  canApply,
 }: {
   preview: PreviewResponse;
   undoLast: () => void;
   clearAll: () => void;
   applyToProduction: () => void;
-  busy: boolean;
-  queueLength: number;
+  applying: boolean;
+  canApply: boolean;
 }) {
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-ink/15 p-3">
@@ -1268,10 +1384,14 @@ function PreviewPanel({
           : `Preview reflects ${preview.appliedCount} queued correction(s).`}
       </p>
 
-      {preview.beforeCropPngBase64 && preview.afterCropPngBase64 ? (
+      {/* Secondary navigation aid only (Section G) — the main canvas above
+          is the primary way to inspect the result. Never shown for a
+          classification-only queue, where before/after would be pixel-
+          identical and imply a change that never happened (Section K). */}
+      {preview.hasPixelChange && preview.beforeCropPngBase64 && preview.afterCropPngBase64 ? (
         <div className="flex flex-wrap gap-3">
           <div>
-            <p className="text-xs font-medium text-ink/60">Before</p>
+            <p className="text-xs font-medium text-ink/60">Before (small)</p>
             {/* eslint-disable-next-line @next/next/no-img-element -- internal operator tool preview crop */}
             <img
               src={`data:image/png;base64,${preview.beforeCropPngBase64}`}
@@ -1281,7 +1401,7 @@ function PreviewPanel({
             />
           </div>
           <div>
-            <p className="text-xs font-medium text-ink/60">After</p>
+            <p className="text-xs font-medium text-ink/60">After (small)</p>
             {/* eslint-disable-next-line @next/next/no-img-element -- internal operator tool preview crop */}
             <img
               src={`data:image/png;base64,${preview.afterCropPngBase64}`}
@@ -1294,21 +1414,33 @@ function PreviewPanel({
       ) : null}
 
       <div className="flex items-center gap-3">
-        <button type="button" onClick={undoLast} className="text-sm text-ink/60 underline" data-testid="sign-correction-undo">
+        <button
+          type="button"
+          onClick={undoLast}
+          disabled={applying}
+          className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="sign-correction-undo"
+        >
           Undo last
         </button>
-        <button type="button" onClick={clearAll} className="text-sm text-ink/60 underline" data-testid="sign-correction-cancel">
+        <button
+          type="button"
+          onClick={clearAll}
+          disabled={applying}
+          className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="sign-correction-cancel"
+        >
           Cancel all
         </button>
       </div>
       <button
         type="button"
         onClick={applyToProduction}
-        disabled={busy || queueLength === 0}
+        disabled={!canApply}
         className="rounded-full bg-ink px-3.5 py-2 text-sm font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
         data-testid="sign-correction-apply"
       >
-        {busy ? "Applying…" : "Apply to production plan"}
+        {applying ? "Applying…" : "Apply to production plan"}
       </button>
       <p className="text-xs text-muted">
         Applying a Remove/Move builds a new production plan and requires re-authorization before it can be prepared

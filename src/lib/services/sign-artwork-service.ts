@@ -435,6 +435,28 @@ export interface SignCorrectionPreviewResult {
   afterCropPngBase64: string | null;
   cropBounds: { xPx: number; yPx: number; widthPx: number; heightPx: number } | null;
   /**
+   * Signs Workstation Visual Correction UX Phase: whether at least one
+   * QUEUED correction (through `appliedCount`) actually changed pixels —
+   * `remove` / `wand_delete` / `move`, never `classify`, which is
+   * governance metadata only (Section K's own doc on
+   * `buildCorrectionStep`/the `"classify"` branch below). `false` for a
+   * classification-only queue (or an empty one), in which case
+   * `afterPngBase64` is intentionally `null`: there is no new pixel state
+   * to show, and the workstation UI must say so rather than imply a diff
+   * exists.
+   */
+  hasPixelChange: boolean;
+  /**
+   * Full-canvas (uncropped) PNG of the corrected candidate at its real
+   * production resolution — the exact same pixels `afterCropPngBase64`
+   * crops from, encoded once more at full size so the MAIN workstation
+   * canvas can render the true proposed result at normal inspection scale
+   * (Section E: the main canvas is the correction preview, not a ~140px
+   * thumbnail). `null` whenever `hasPixelChange` is `false`, or alongside
+   * `"no_candidate"`.
+   */
+  afterPngBase64: string | null;
+  /**
    * Fit to Production, recomputed against the FULL corrected canvas (not
    * merely the crop) — Section M's "immediate recheck" — reflecting exactly
    * the corrections successfully applied (`appliedCount`), never the ones
@@ -708,6 +730,8 @@ export async function previewSignCorrections(
     beforeCropPngBase64: null,
     afterCropPngBase64: null,
     cropBounds: null,
+    hasPixelChange: false,
+    afterPngBase64: null,
     fitToProduction: null,
   };
   if (corrections.length === 0) return empty;
@@ -794,6 +818,17 @@ export async function previewSignCorrections(
     cropBounds = { xPx: x0, yPx: y0, widthPx: x1 - x0, heightPx: y1 - y0 };
   }
 
+  // Signs Workstation Visual Correction UX Phase: `applyCorrectionsToCanvas`
+  // returns a NEW image object on every successful pixel-changing step
+  // (never mutates its input in place — see that function's own doc), and
+  // `workingImage` only ever advances past `original` inside the
+  // remove/wand_delete/move branch above — a `"classify"`-only (or empty)
+  // queue leaves it pointing at the exact same object. Reference identity
+  // is therefore an exact, zero-cost proxy for "did anything actually
+  // change pixels", with no separate bookkeeping to keep in sync.
+  const hasPixelChange = workingImage !== original;
+  const afterPngBase64 = hasPixelChange ? encodeSignPlate(workingImage).toString("base64") : null;
+
   return {
     status: failingIndex !== null ? "refused" : "previewed",
     appliedCount,
@@ -803,6 +838,8 @@ export async function previewSignCorrections(
     beforeCropPngBase64,
     afterCropPngBase64,
     cropBounds,
+    hasPixelChange,
+    afterPngBase64,
     fitToProduction,
   };
 }
