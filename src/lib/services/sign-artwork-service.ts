@@ -34,6 +34,7 @@ import {
   applyCorrectionsToCanvas,
   buildEdgeIntentClassificationRecord,
   computeSignWandSelection,
+  decodeCropRegionParams,
   decodeEdgeIntentClassificationRecords,
   decodeSignCompositionPlanToOperatorChoices,
   describeSignPlanForCustomer,
@@ -46,12 +47,19 @@ import {
   encodeSignPlate,
   encodeSignWandMaskForBounds,
   executeFitArtworkToCanvas,
+  FIT_TO_PRODUCTION_TOLERANCE,
   getSignResolutionPolicyById,
   measureUniformSurroundingBackground,
   renderSignSelectionOverlayCrop,
   resolveCurrentEdgeIntentClassifications,
   signSafeInsetPxForAxis,
+  type SignCompositionCropInput,
+  type SignCompositionFillInput,
+  type SignCompositionMaskedReplacementInput,
+  type SignCompositionMoveInput,
   type SignCompositionOperatorInput,
+  type SignCompositionReconstructionInput,
+  type SignCompositionReplacementInput,
   type SignEdge,
   type SignEdgeIntentClassification,
   type SignFitToProductionResult,
@@ -992,14 +1000,139 @@ export async function commitSignCorrections(
 // ---------------------------------------------------------------------------
 
 export interface SignSafeAreaFitPreviewResult {
-  /** `"no_candidate"` — nothing to correct right now. `"no_area"` — the safe inset would consume the entire canvas (never reachable for any real ordered sign size; a defensive fail-closed case). `"previewed"` — a real preview was computed. */
-  status: "no_candidate" | "no_area" | "previewed";
+  /**
+   * `"no_candidate"` — nothing to correct right now. `"unsupported_plan_shape"`
+   * — the current plan's own steps aren't a shape this correction knows how
+   * to rebuild from (never guessed — see `resolveFitInputChoices`'s own
+   * doc). `"background_not_determinable"` — no operator-confirmed
+   * background is on record AND live measurement against the candidate's
+   * own edges couldn't confidently establish one either (fail closed,
+   * never a fabricated/guessed fill colour). `"no_area"` — the safe inset
+   * would consume the entire canvas (never reachable for any real ordered
+   * sign size; a defensive fail-closed case). `"previewed"` — a real
+   * preview was computed.
+   */
+  status: "no_candidate" | "unsupported_plan_shape" | "background_not_determinable" | "no_area" | "previewed";
   /** Full-canvas PNG (base64, no `data:` prefix) of the approximate result. See this function's own doc for why it is an approximation. `null` alongside anything but `"previewed"`. */
   previewPngBase64: string | null;
   /** Fit to Production, recomputed against the preview canvas — reflects the SAME governed classifications already on record for this candidate/plan; never invents new ones. `null` alongside anything but `"previewed"`. */
   fitToProduction: SignFitToProductionResult | null;
   insetPxX: number | null;
   insetPxY: number | null;
+  /** The uniform scale actually applied (e.g. 0.992 = 99.2%) — derived from the real plan, never fabricated. `null` alongside anything but `"previewed"`. */
+  scale: number | null;
+}
+
+interface ResolvedFitInputChoices {
+  reconstruction: SignCompositionReconstructionInput | null;
+  crop: SignCompositionCropInput | null;
+  /** `null` means "not on record" — the caller must live-measure via `measureLiveFitBackground` rather than treat this as a hard failure. */
+  fitBackground: { r: number; g: number; b: number } | null;
+  moves: SignCompositionMoveInput[];
+  fills: SignCompositionFillInput[];
+  replacements: SignCompositionReplacementInput[];
+  maskedReplacements: SignCompositionMaskedReplacementInput[];
+}
+
+/**
+ * Signs Flat-Raster Production Workflow Correction (Section B/C — real
+ * blocker fix): `decodeSignCompositionPlanToOperatorChoices` only decodes
+ * the canonical canvas-first shape (`[reconstruct_resolution?]
+ * [crop_region?] fit_artwork_to_canvas (...)`). A real production plan can
+ * predate the canvas-first composition-plan-builder entirely — `sign-
+ * repair-planner.ts`'s own doc: "`planSignRepair` remains fully intact for
+ * historical plans" — and such a plan may be JUST `[reconstruct_resolution]`
+ * (or `[reconstruct_resolution, crop_region]`), with no `fit_artwork_to_
+ * canvas` step ever recorded, because that legacy path never separated
+ * "reconstruct" from "fit" the way the canvas-first builder does. This
+ * resolver accepts BOTH: the canonical shape (delegating entirely to the
+ * existing, unchanged decoder) and this ONE additional legacy shape —
+ * `[reconstruct_resolution?] [crop_region?]` and NOTHING ELSE. Any other
+ * shape (extra steps, a `fit_artwork_to_canvas` in an unexpected position,
+ * anything unrecognized) still returns `null` — fails closed, never
+ * silently guessed. The legacy shape can never carry recorded
+ * moves/fills/replacements/maskedReplacements or a confirmed
+ * `fitBackground` (there was never a fitted canvas for them to reference
+ * against) — callers must treat `fitBackground: null` as "measure it live
+ * from the candidate's own edges," never as an error by itself.
+ */
+function resolveFitInputChoices(plan: SignRepairPlan): ResolvedFitInputChoices | null {
+  const canonical = decodeSignCompositionPlanToOperatorChoices(plan);
+  if (canonical) {
+    return {
+      reconstruction: canonical.reconstruction,
+      crop: canonical.crop,
+      fitBackground: canonical.fitBackground,
+      moves: canonical.moves,
+      fills: canonical.fills,
+      replacements: canonical.replacements,
+      maskedReplacements: canonical.maskedReplacements,
+    };
+  }
+
+  const steps = plan.steps;
+  let index = 0;
+  let reconstruction: SignCompositionReconstructionInput | null = null;
+  if (steps[index]?.kind === "reconstruct_resolution") {
+    const p = steps[index]!.params;
+    const requestedScale = p.requestedScale;
+    const requestedWidthPx = p.requestedWidthPx;
+    const requestedHeightPx = p.requestedHeightPx;
+    if (typeof requestedScale !== "number" || typeof requestedWidthPx !== "number" || typeof requestedHeightPx !== "number") {
+      return null;
+    }
+    reconstruction = { requestedScale, requestedWidthPx, requestedHeightPx };
+    index++;
+  }
+  let crop: SignCompositionCropInput | null = null;
+  if (steps[index]?.kind === "crop_region") {
+    const p = decodeCropRegionParams(steps[index]!.params);
+    if (!p) return null;
+    crop = { xPx: p.xPx, yPx: p.yPx, widthPx: p.widthPx, heightPx: p.heightPx };
+    index++;
+  }
+  if (index !== steps.length) return null; // anything else present -> an unrecognized shape, refuse.
+  if (!reconstruction && !crop) return null; // nothing at all to build the artwork identity from.
+
+  return {
+    reconstruction, crop, fitBackground: null,
+    moves: [], fills: [], replacements: [], maskedReplacements: [],
+  };
+}
+
+/**
+ * Signs Flat-Raster Production Workflow Correction (Section C/D): "the
+ * existing physical SAFE measurement machinery as authority" — reuses
+ * `analyzeSignFitToProduction`'s own per-edge `bleedColor` (the SAME
+ * dominant-colour measurement the validator itself already trusts,
+ * requiring >=50% coverage on that edge's own outermost line — see
+ * `sign-fit-to-production.ts`'s own doc) rather than inventing a second
+ * background-measurement primitive. Used ONLY when no operator-confirmed
+ * `fitBackground` is already on record (a legacy, reconstruction-only
+ * plan — `resolveFitInputChoices`'s own doc). Requires every edge that DID
+ * produce a confident colour to mutually AGREE (within the validator's own
+ * `FIT_TO_PRODUCTION_TOLERANCE`) before trusting a single fill colour —
+ * fails closed (`null`) on disagreement or when no edge produced one at
+ * all, never averages away a genuine discrepancy or guesses.
+ */
+function measureLiveFitBackground(
+  image: RgbaImage,
+  orderedWidthIn: number,
+  orderedHeightIn: number,
+  minimumSafeInsetIn: number,
+  existingClassifications: SignEdgeIntentClassification[],
+): { r: number; g: number; b: number } | null {
+  const analysis = analyzeSignFitToProduction(image, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn, existingClassifications);
+  const colors = analysis.edges
+    .map((e) => e.bleedColor)
+    .filter((c): c is { r: number; g: number; b: number } => c !== null);
+  if (colors.length === 0) return null;
+  const [first, ...rest] = colors;
+  for (const c of rest) {
+    const dist = Math.max(Math.abs(c.r - first!.r), Math.abs(c.g - first!.g), Math.abs(c.b - first!.b));
+    if (dist > FIT_TO_PRODUCTION_TOLERANCE) return null;
+  }
+  return first!;
 }
 
 /**
@@ -1026,7 +1159,7 @@ export interface SignSafeAreaFitPreviewResult {
  */
 export async function previewSignSafeAreaFit(projectId: string): Promise<SignSafeAreaFitPreviewResult> {
   const empty: SignSafeAreaFitPreviewResult = {
-    status: "no_candidate", previewPngBase64: null, fitToProduction: null, insetPxX: null, insetPxY: null,
+    status: "no_candidate", previewPngBase64: null, fitToProduction: null, insetPxX: null, insetPxY: null, scale: null,
   };
   const graph = getCapabilityGraph();
   const [resolved, preparation] = await Promise.all([
@@ -1034,10 +1167,15 @@ export async function previewSignSafeAreaFit(projectId: string): Promise<SignSaf
     graph.signPreparation.getSignPreparation(projectId),
   ]);
   if (!resolved || !preparation || !preparation.plan) return empty;
-  const choices = decodeSignCompositionPlanToOperatorChoices(preparation.plan as unknown as SignRepairPlan);
-  if (!choices) return empty;
+  const choices = resolveFitInputChoices(preparation.plan as unknown as SignRepairPlan);
+  if (!choices) return { ...empty, status: "unsupported_plan_shape" };
 
   const { image, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn, existingClassifications } = resolved;
+
+  const fitBackground =
+    choices.fitBackground ??
+    measureLiveFitBackground(image, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn, existingClassifications);
+  if (!fitBackground) return { ...empty, status: "background_not_determinable" };
 
   const insetPxX = signSafeInsetPxForAxis(minimumSafeInsetIn, image.width / orderedWidthIn);
   const insetPxY = signSafeInsetPxForAxis(minimumSafeInsetIn, image.height / orderedHeightIn);
@@ -1047,7 +1185,7 @@ export async function previewSignSafeAreaFit(projectId: string): Promise<SignSaf
     return { ...empty, status: "no_area" };
   }
 
-  const { scaledWidthPx, scaledHeightPx } = deriveUniformFitDimensions(
+  const { scale, scaledWidthPx, scaledHeightPx } = deriveUniformFitDimensions(
     image.width, image.height, scaleTargetWidthPx, scaleTargetHeightPx,
   );
   const placementXPx = Math.floor((image.width - scaledWidthPx) / 2);
@@ -1064,9 +1202,9 @@ export async function previewSignSafeAreaFit(projectId: string): Promise<SignSaf
       scaleTargetHeightPx,
       placementXPx,
       placementYPx,
-      backgroundR: choices.fitBackground.r,
-      backgroundG: choices.fitBackground.g,
-      backgroundB: choices.fitBackground.b,
+      backgroundR: fitBackground.r,
+      backgroundG: fitBackground.g,
+      backgroundB: fitBackground.b,
     }),
     risk: "review_required",
     reasons: ["Signs Flat-Raster Production Workflow Correction: preview-only whole-composition safe-area fit."],
@@ -1084,6 +1222,7 @@ export async function previewSignSafeAreaFit(projectId: string): Promise<SignSaf
     fitToProduction,
     insetPxX,
     insetPxY,
+    scale,
   };
 }
 
@@ -1116,17 +1255,39 @@ export async function applySignSafeAreaFit(projectId: string): Promise<SignPlanO
     throw new SignArtworkBridgeError("That sign size isn't covered by a supported rigid-sign policy yet.");
   }
   const currentPlan = preparation.plan as unknown as SignRepairPlan;
-  const choices = decodeSignCompositionPlanToOperatorChoices(currentPlan);
+  const choices = resolveFitInputChoices(currentPlan);
   if (!choices) {
     throw new SignArtworkBridgeError(
-      "This artwork's current plan is not in the canvas-first shape the correction tool can edit.",
+      "This artwork's current plan is not in a shape this correction knows how to rebuild from.",
     );
+  }
+
+  let fitBackground = choices.fitBackground;
+  if (!fitBackground) {
+    // Legacy (reconstruction-only) plan — no operator-confirmed background
+    // on record. Live-measure against the CURRENT candidate's own edges,
+    // the exact same evidence `previewSignSafeAreaFit` already used for
+    // this project, so Apply's actual fill colour matches what the
+    // operator previewed.
+    const resolved = await resolveCurrentCandidateImage(projectId);
+    if (!resolved) {
+      throw new SignArtworkBridgeError("There is no current production candidate to correct.");
+    }
+    fitBackground = measureLiveFitBackground(
+      resolved.image, resolved.orderedWidthIn, resolved.orderedHeightIn,
+      resolved.minimumSafeInsetIn, resolved.existingClassifications,
+    );
+    if (!fitBackground) {
+      throw new SignArtworkBridgeError(
+        "This artwork's background could not be confidently measured for a safe-area fit — refusing rather than guessing.",
+      );
+    }
   }
 
   const input: SignCompositionOperatorInput = {
     reconstruction: choices.reconstruction,
     crop: choices.crop,
-    fitBackground: choices.fitBackground,
+    fitBackground,
     fitPlacement: null,
     moves: choices.moves,
     fills: choices.fills,

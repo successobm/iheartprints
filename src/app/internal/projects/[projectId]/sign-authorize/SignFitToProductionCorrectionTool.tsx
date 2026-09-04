@@ -119,11 +119,13 @@ interface PreviewResponse {
 
 /** Wire shape of `POST .../sign-artwork/safe-area-fit-preview` — mirrors `SignSafeAreaFitPreviewResult` in `sign-artwork-service.ts`, same pattern `PreviewResponse` above already uses. */
 interface FitPreviewResponse {
-  status: "no_candidate" | "no_area" | "previewed";
+  status: "no_candidate" | "unsupported_plan_shape" | "background_not_determinable" | "no_area" | "previewed";
   previewPngBase64: string | null;
   fitToProduction: { edges: PreviewEdge[]; overallResult: "pass" | "fail" | "unknown" } | null;
   insetPxX: number | null;
   insetPxY: number | null;
+  /** The uniform scale actually applied (0.989 = 98.9%) — derived from the real plan, never fabricated. */
+  scale: number | null;
 }
 
 const MIN_ZOOM = 0.1;
@@ -1522,7 +1524,13 @@ function ProductionFitPanel({
       {fitPreview && fitPreview.status === "previewed" ? (
         <div className="flex flex-col gap-3 border-t border-ink/10 pt-3">
           <p className="text-sm text-ink" data-sign-fit-preview-status>
-            Previewing the whole composition fit to safe area.
+            Fit will slightly reduce the complete artwork so important content stays inside the 0.125&quot; safe
+            area. The background will extend to the cut edge.
+            {fitPreview.scale !== null ? (
+              <span className="block font-medium" data-sign-fit-preview-scale>
+                Artwork will be reduced to {(fitPreview.scale * 100).toFixed(1)}%.
+              </span>
+            ) : null}
           </p>
           <div className="flex items-center gap-3">
             <button type="button" onClick={cancelFitPreview} disabled={busyKind === "fit-apply"} className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-40" data-testid="sign-fit-safe-area-cancel">
@@ -1546,6 +1554,16 @@ function ProductionFitPanel({
       ) : fitPreview && fitPreview.status === "no_area" ? (
         <p className="text-sm text-red-600" role="alert">
           The safe-area inset would consume the entire canvas — this needs human review, not an automatic fit.
+        </p>
+      ) : fitPreview && fitPreview.status === "background_not_determinable" ? (
+        <p className="text-sm text-red-600" role="alert">
+          The artwork&apos;s background couldn&apos;t be confidently measured for a safe automatic fit — this needs
+          human review rather than a guessed fill colour.
+        </p>
+      ) : fitPreview && fitPreview.status === "unsupported_plan_shape" ? (
+        <p className="text-sm text-red-600" role="alert">
+          This artwork&apos;s current production plan isn&apos;t in a shape Fit to Safe Area recognizes — this needs
+          human review.
         </p>
       ) : null}
 

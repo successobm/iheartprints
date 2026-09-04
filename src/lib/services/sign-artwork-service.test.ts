@@ -525,6 +525,154 @@ describe("sign-artwork-service: Operator Production Correction UX (preview + com
       const { applySignSafeAreaFit, SignArtworkBridgeError } = await import("./sign-artwork-service");
       await assert.rejects(() => applySignSafeAreaFit(created.project.id), SignArtworkBridgeError);
     });
+
+    describe("real Get Hibachi blocker (Section B/C): a legacy, reconstruction-only plan — no fit_artwork_to_canvas step ever recorded", () => {
+      /**
+       * Simulates the REAL Get Hibachi plan shape (confirmed via the real
+       * safe-area-fit-preview route against the real project:
+       * `plan.steps kinds: ['reconstruct_resolution']`, nothing else) —
+       * `sign-repair-planner.ts`'s own doc: "planSignRepair remains fully
+       * intact for historical plans", predating the canvas-first
+       * composition-plan-builder entirely.
+       */
+      async function makeLegacyReconstructionOnlyPlan(
+        repo: Awaited<ReturnType<typeof freshGraph>>["repo"],
+        projectId: string,
+      ) {
+        const preparation = await repo.getSignPreparation(projectId);
+        const plan = preparation!.plan as { steps: unknown[]; sourceWidthPx: number; sourceHeightPx: number };
+        // Uses crop_region (never reconstruct_resolution) so the end-to-end
+        // real-worker test below needs zero provider adoption/dispatch —
+        // the point under test is the PLAN SHAPE (no fit_artwork_to_canvas
+        // step recorded), not which legacy step produced the artwork. An
+        // identity crop of the true source is a legitimate, deterministic
+        // "artwork = the whole source" declaration.
+        const legacyPlan = {
+          ...(preparation!.plan as Record<string, unknown>),
+          steps: [
+            {
+              kind: "crop_region",
+              params: {
+                expectedInputWidthPx: plan.sourceWidthPx,
+                expectedInputHeightPx: plan.sourceHeightPx,
+                xPx: 0, yPx: 0, widthPx: plan.sourceWidthPx, heightPx: plan.sourceHeightPx,
+              },
+              risk: "auto_safe",
+              reasons: ["test: simulates a real, historical, pre-canvas-first plan (no fit_artwork_to_canvas step)"],
+            },
+          ],
+        };
+        assert.ok(plan.steps.length > 0, "sanity: the fixture's own real plan has steps to replace");
+        await repo.updateSignPreparation(preparation!.id, { plan: legacyPlan as unknown as Record<string, unknown> });
+      }
+
+      it("preview: succeeds against a legacy plan by live-measuring the background from the candidate's own edges", async () => {
+        const { graph, repo } = await freshGraph();
+        const { projectId } = await projectWithBlockedCandidate(graph, repo);
+        await makeLegacyReconstructionOnlyPlan(repo, projectId);
+
+        const { previewSignSafeAreaFit } = await import("./sign-artwork-service");
+        const result = await previewSignSafeAreaFit(projectId);
+        assert.equal(result.status, "previewed");
+        assert.ok(result.previewPngBase64);
+        assert.ok(result.scale !== null && result.scale > 0 && result.scale < 1);
+        const leftEdge = result.fitToProduction!.edges.find((e) => e.edge === "left");
+        assert.equal(leftEdge?.protectedResult, "pass");
+      });
+
+      it("preview: the live-measured background matches the fixture's actual red background, never a fabricated colour", async () => {
+        const { graph, repo } = await freshGraph();
+        const { projectId } = await projectWithBlockedCandidate(graph, repo);
+        await makeLegacyReconstructionOnlyPlan(repo, projectId);
+
+        const { previewSignSafeAreaFit } = await import("./sign-artwork-service");
+        const result = await previewSignSafeAreaFit(projectId);
+        assert.equal(result.status, "previewed");
+        const { decodePngUpload } = await import("@/capabilities/artwork-preparation/image-decode");
+        const decoded = decodePngUpload(Buffer.from(result.previewPngBase64!, "base64")).image;
+        // A corner of the canvas — always newly-exposed background after any inset fit.
+        const i = (5 * decoded.width + 5) * 4;
+        assert.equal(decoded.data[i], 200);
+        assert.equal(decoded.data[i + 1], 10);
+        assert.equal(decoded.data[i + 2], 10);
+        assert.equal(decoded.data[i + 3], 255, "no transparency introduced");
+      });
+
+      it("apply: succeeds against a legacy plan, persisting a NEW canonical (fit_artwork_to_canvas-bearing) plan with the same live-measured background", async () => {
+        const { graph, repo } = await freshGraph();
+        const { projectId } = await projectWithBlockedCandidate(graph, repo);
+        await makeLegacyReconstructionOnlyPlan(repo, projectId);
+        const before = await repo.getSignPreparation(projectId);
+
+        const { applySignSafeAreaFit } = await import("./sign-artwork-service");
+        await applySignSafeAreaFit(projectId);
+        const after = await repo.getSignPreparation(projectId);
+        assert.notEqual(after!.planKey, before!.planKey);
+        const plan = after!.plan as { steps: Array<{ kind: string; params: Record<string, number> }> };
+        const fitStep = plan.steps.find((s) => s.kind === "fit_artwork_to_canvas")!;
+        assert.ok(fitStep, "the rebuilt plan now has a real fit_artwork_to_canvas step");
+        assert.equal(fitStep.params.backgroundR, 200);
+        assert.equal(fitStep.params.backgroundG, 10);
+        assert.equal(fitStep.params.backgroundB, 10);
+      });
+
+      it("end to end: apply, re-authorize, and real re-execution through the unmodified worker resolves the violation from a legacy plan too", async () => {
+        const { graph, repo } = await freshGraph();
+        const { projectId } = await projectWithBlockedCandidate(graph, repo);
+        await makeLegacyReconstructionOnlyPlan(repo, projectId);
+
+        const { applySignSafeAreaFit } = await import("./sign-artwork-service");
+        await applySignSafeAreaFit(projectId);
+        await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+        const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+        await graph.finalArtworkScheduler.runBatch();
+
+        const completedJob = await repo.getFinalArtworkJob(job.id);
+        assert.equal(completedJob!.status, "completed");
+        const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+        const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
+        const fitCheck = checks.find((c) => c.check === "protected_content_safe_inset");
+        assert.equal(fitCheck?.status, "pass");
+      });
+
+      it("preview refuses (background_not_determinable) rather than guessing when live measurement can't confidently establish a colour", async () => {
+        const { graph, repo } = await freshGraph();
+        // A noisy, multi-coloured perimeter on EVERY edge — no edge can
+        // produce a confident (>=50% coverage) dominant colour, so
+        // measureOutermostDominantColor itself already returns bleedColor:
+        // null for each edge — the exact real fail-closed path.
+        const noisyImage = makeImage(600, 900, { r: 128, g: 128, b: 128 });
+        for (let y = 0; y < 900; y++) {
+          for (let x = 0; x < 600; x++) {
+            if (x < 30 || x >= 570 || y < 30 || y >= 870) {
+              fillRect(noisyImage, x, y, x + 1, y + 1, { r: (x * 37) % 255, g: (y * 53) % 255, b: (x + y * 7) % 255 });
+            }
+          }
+        }
+        const created = await repo.createProject();
+        const projectId = created.project.id;
+        await graph.signPreparation.uploadSignArtwork(projectId, {
+          bytes: toPngBytes(noisyImage),
+          declaredContentType: "image/png",
+          filename: "noisy.png",
+        });
+        await graph.signPreparation.confirmSignProductionSpec(projectId, 4, 6);
+        await graph.signPreparation.confirmSignCompositionPlan(projectId, {
+          reconstruction: null, crop: null, fitBackground: { r: 128, g: 128, b: 128 }, fitPlacement: null,
+          moves: [], fills: [], replacements: [],
+        });
+        await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+        await graph.finalArtwork.requestSignFinalArtwork(projectId);
+        await graph.finalArtworkScheduler.runBatch();
+
+        await makeLegacyReconstructionOnlyPlan(repo, projectId);
+
+        const { previewSignSafeAreaFit } = await import("./sign-artwork-service");
+        const result = await previewSignSafeAreaFit(projectId);
+        assert.equal(result.status, "background_not_determinable");
+        assert.equal(result.previewPngBase64, null);
+      });
+    });
   });
 
   /**
