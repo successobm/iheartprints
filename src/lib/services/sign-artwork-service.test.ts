@@ -394,6 +394,139 @@ describe("sign-artwork-service: Operator Production Correction UX (preview + com
     assert.equal(fitCheck?.status, "pass");
   });
 
+  describe("Signs Flat-Raster Production Workflow Correction: previewSignSafeAreaFit / applySignSafeAreaFit (Section E/I/J)", () => {
+    it("preview: a real, in-memory, never-persisted preview whose fitToProduction shows the LEFT violation resolved", async () => {
+      const { graph, repo } = await freshGraph();
+      const { projectId } = await projectWithBlockedCandidate(graph, repo);
+      const before = await repo.getSignPreparation(projectId);
+      const { previewSignSafeAreaFit } = await import("./sign-artwork-service");
+
+      const result = await previewSignSafeAreaFit(projectId);
+      assert.equal(result.status, "previewed");
+      assert.ok(result.previewPngBase64);
+      assert.ok(result.insetPxX! > 0);
+      assert.ok(result.insetPxY! > 0);
+      const leftEdge = result.fitToProduction!.edges.find((e) => e.edge === "left");
+      assert.equal(leftEdge?.protectedResult, "pass");
+
+      const { decodePngUpload } = await import("@/capabilities/artwork-preparation/image-decode");
+      const decoded = decodePngUpload(Buffer.from(result.previewPngBase64!, "base64")).image;
+      assert.equal(decoded.width, 600);
+      assert.equal(decoded.height, 900);
+
+      // Never persisted anything — same plan/planKey as before the preview.
+      const after = await repo.getSignPreparation(projectId);
+      assert.equal(after!.planKey, before!.planKey);
+      assert.equal(after!.status, before!.status);
+    });
+
+    it("preview: the whole composition is preserved — the artifact itself is still present in the preview, just moved off the edge, never deleted/redrawn", async () => {
+      const { graph, repo } = await freshGraph();
+      const { projectId } = await projectWithBlockedCandidate(graph, repo);
+      const { previewSignSafeAreaFit } = await import("./sign-artwork-service");
+      const result = await previewSignSafeAreaFit(projectId);
+      assert.equal(result.status, "previewed");
+      const { decodePngUpload } = await import("@/capabilities/artwork-preparation/image-decode");
+      const decoded = decodePngUpload(Buffer.from(result.previewPngBase64!, "base64")).image;
+      // The artifact (black, 20,20,20) must still exist SOMEWHERE in the
+      // preview — proving this is a reposition, never a deletion.
+      let foundArtifact = false;
+      for (let y = 0; y < decoded.height && !foundArtifact; y++) {
+        for (let x = 0; x < decoded.width; x++) {
+          const i = (y * decoded.width + x) * 4;
+          if (decoded.data[i] === 20 && decoded.data[i + 1] === 20 && decoded.data[i + 2] === 20) {
+            foundArtifact = true;
+            break;
+          }
+        }
+      }
+      assert.equal(foundArtifact, true);
+    });
+
+    it("preview reports no_candidate once nothing is blocked", async () => {
+      const { graph, repo } = await freshGraph();
+      const created = await repo.createProject();
+      const projectId = created.project.id;
+      await graph.signPreparation.uploadSignArtwork(projectId, {
+        bytes: toPngBytes(signWithLeftEdgeArtifact()),
+        declaredContentType: "image/png",
+        filename: "sign.png",
+      });
+      const { previewSignSafeAreaFit } = await import("./sign-artwork-service");
+      const result = await previewSignSafeAreaFit(projectId);
+      assert.equal(result.status, "no_candidate");
+      assert.equal(result.previewPngBase64, null);
+    });
+
+    it("apply: rebuilds the plan with a smaller scaleTarget and a freshly re-centered placement, producing a NEW planKey and invalidating the old authorization", async () => {
+      const { graph, repo } = await freshGraph();
+      const { projectId } = await projectWithBlockedCandidate(graph, repo);
+      const before = await repo.getSignPreparation(projectId);
+      const { applySignSafeAreaFit } = await import("./sign-artwork-service");
+
+      await applySignSafeAreaFit(projectId);
+      const after = await repo.getSignPreparation(projectId);
+      assert.notEqual(after!.planKey, before!.planKey);
+      assert.notEqual(after!.authorizedPlanKey, after!.planKey, "a new plan must require fresh authorization");
+
+      const plan = after!.plan as { steps: Array<{ kind: string; params: Record<string, number> }> };
+      const fitStep = plan.steps.find((s) => s.kind === "fit_artwork_to_canvas")!;
+      assert.ok(Number(fitStep.params.scaleTargetWidthPx) < Number(fitStep.params.canvasWidthPx));
+      assert.ok(Number(fitStep.params.scaleTargetHeightPx) < Number(fitStep.params.canvasHeightPx));
+    });
+
+    it("apply: preserves the reconstruction/crop identity and any prior region corrections already on the plan — a whole-composition fit never discards prior legitimate fixes", async () => {
+      const { graph, repo } = await freshGraph();
+      const { projectId } = await projectWithBlockedCandidate(graph, repo);
+      const { commitSignCorrections, applySignSafeAreaFit } = await import("./sign-artwork-service");
+
+      // A prior, unrelated Remove correction, already committed.
+      await commitSignCorrections(projectId, [
+        { kind: "remove", xPx: 500, yPx: 5, widthPx: 20, heightPx: 20, contextDepthPx: 5 },
+      ]);
+      const midway = await repo.getSignPreparation(projectId);
+      const midwayPlan = midway!.plan as { steps: Array<{ kind: string }> };
+      assert.ok(midwayPlan.steps.some((s) => s.kind === "replace_region_with_background"));
+
+      await applySignSafeAreaFit(projectId);
+      const after = await repo.getSignPreparation(projectId);
+      const afterPlan = after!.plan as { steps: Array<{ kind: string }> };
+      // The prior Remove step is still present in the rebuilt plan.
+      assert.ok(afterPlan.steps.some((s) => s.kind === "replace_region_with_background"));
+      const fitStep = afterPlan.steps.find((s) => s.kind === "fit_artwork_to_canvas")!;
+      assert.ok((fitStep as unknown as { params: Record<string, number> }).params.scaleTargetWidthPx !== undefined);
+    });
+
+    it("end to end: apply, re-authorize, and real re-execution through the unmodified worker actually resolves the LEFT violation — same governed pipeline every other plan change uses", async () => {
+      const { graph, repo } = await freshGraph();
+      const { projectId } = await projectWithBlockedCandidate(graph, repo);
+      const { applySignSafeAreaFit } = await import("./sign-artwork-service");
+
+      await applySignSafeAreaFit(projectId);
+      await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+      const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+      await graph.finalArtworkScheduler.runBatch();
+
+      const completedJob = await repo.getFinalArtworkJob(job.id);
+      assert.equal(completedJob!.status, "completed");
+      const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
+      const fitCheck = checks.find((c) => c.check === "protected_content_safe_inset");
+      assert.equal(fitCheck?.status, "pass");
+      // The canvas SHAPE (physical ordered size) is completely unaffected —
+      // this is a repositioning correction, never a resize.
+      const sizeCheck = checks.find((c) => c.check === "exact_physical_dimensions");
+      assert.equal(sizeCheck?.status, "pass");
+    });
+
+    it("apply refuses when there is no current plan to correct", async () => {
+      const { repo } = await freshGraph();
+      const created = await repo.createProject();
+      const { applySignSafeAreaFit, SignArtworkBridgeError } = await import("./sign-artwork-service");
+      await assert.rejects(() => applySignSafeAreaFit(created.project.id), SignArtworkBridgeError);
+    });
+  });
+
   /**
    * 600x900px, red background, an L-SHAPED (non-rectangular) black artifact
    * near (not touching) the LEFT edge: a full-danger-zone-width top bar

@@ -15,6 +15,7 @@ import {
   resolveMainImageSrc,
 } from "./sign-correction-preview-view";
 import { clampZoom, computeFitZoom } from "./sign-canvas-zoom";
+import { resolveSignProductionFitState, SIGN_PRODUCTION_FIT_COPY } from "./sign-production-fit-state";
 import { computeDisplayPpi, deriveEdgeChips, deriveOverallFitLabel } from "./sign-workspace-status";
 
 /**
@@ -116,6 +117,15 @@ interface PreviewResponse {
   fitToProduction: { edges: PreviewEdge[]; overallResult: "pass" | "fail" | "unknown" } | null;
 }
 
+/** Wire shape of `POST .../sign-artwork/safe-area-fit-preview` — mirrors `SignSafeAreaFitPreviewResult` in `sign-artwork-service.ts`, same pattern `PreviewResponse` above already uses. */
+interface FitPreviewResponse {
+  status: "no_candidate" | "no_area" | "previewed";
+  previewPngBase64: string | null;
+  fitToProduction: { edges: PreviewEdge[]; overallResult: "pass" | "fail" | "unknown" } | null;
+  insetPxX: number | null;
+  insetPxY: number | null;
+}
+
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 0.1;
@@ -196,9 +206,15 @@ export function SignFitToProductionCorrectionTool({
   // accurate, without adding a second source of truth for "is something
   // happening" — every existing `busy` check below keeps working unchanged
   // against the derived boolean immediately below.
-  const [busyKind, setBusyKind] = useState<"preview" | "apply" | null>(null);
+  const [busyKind, setBusyKind] = useState<"preview" | "apply" | "fit-preview" | "fit-apply" | null>(null);
   const busy = busyKind !== null;
   const [error, setError] = useState<string | null>(null);
+  // Signs Flat-Raster Production Workflow Correction: the whole-composition
+  // "Fit artwork to safe area" preview — a SEPARATE family from the
+  // pixel-correction `queue`/`preview` above (Section G: this is the
+  // PRIMARY normal action; region corrections are secondary/Advanced).
+  // Mutually exclusive with `queue` by construction — see `canOfferFit`.
+  const [fitPreview, setFitPreview] = useState<FitPreviewResponse | null>(null);
   // Section E/G: which artwork the MAIN canvas shows. Only ever actually
   // "preview" when a real, pixel-changing preview exists to show — see
   // `canShowPreview`/`effectiveViewMode` below, which force "original"
@@ -212,13 +228,34 @@ export function SignFitToProductionCorrectionTool({
   const displayWidth = naturalSize ? Math.round(naturalSize.width * zoom) : 0;
   const displayHeight = naturalSize ? Math.round(naturalSize.height * zoom) : 0;
 
+  // Signs Flat-Raster Production Workflow Correction: the whole-composition
+  // Fit preview, normalized into the SAME shape the pixel-correction
+  // `preview` already uses — lets the main canvas reuse the identical,
+  // already-tested `canShowPixelPreview`/`resolveEffectiveViewMode`/
+  // `resolveMainImageSrc` functions for BOTH preview families, with no
+  // changes to those pure functions themselves.
+  const normalizedFitPreview =
+    fitPreview && fitPreview.status === "previewed" && fitPreview.previewPngBase64
+      ? { status: "previewed" as const, appliedCount: 1, hasPixelChange: true, afterPngBase64: fitPreview.previewPngBase64 }
+      : null;
+  // `queue`/`preview` (region corrections) and `fitPreview` (whole-
+  // composition) are mutually exclusive by construction (Section G/O — see
+  // `canOfferFit` below); at most one is ever non-null at a time, so
+  // precedence between them never actually matters in practice.
+  const effectivePreviewForCanvas = preview ?? normalizedFitPreview;
+
   // The single current source of truth for Fit to Production evidence: the
   // latest queued preview's recheck once one exists, otherwise the plan's
   // last authoritative evidence — the SAME precedence the status bar, the
   // canvas overlay, and the context panel all read, so they never disagree
   // with each other mid-correction.
-  const currentEdges: PreviewEdge[] = preview?.fitToProduction?.edges ?? (fitToProduction.edges as PreviewEdge[]);
-  const currentOverallStatus = preview?.fitToProduction ? preview.fitToProduction.overallResult : fitToProduction.status;
+  const currentEdges: PreviewEdge[] =
+    preview?.fitToProduction?.edges ?? fitPreview?.fitToProduction?.edges ?? (fitToProduction.edges as PreviewEdge[]);
+  const currentOverallStatus = preview?.fitToProduction
+    ? preview.fitToProduction.overallResult
+    : fitPreview?.fitToProduction
+      ? fitPreview.fitToProduction.overallResult
+      : fitToProduction.status;
 
   // Section E/F/G: the MAIN canvas is the correction preview. There is a
   // real, pixel-changing result to show only when the current preview
@@ -227,11 +264,17 @@ export function SignFitToProductionCorrectionTool({
   // it. `effectiveViewMode` is what the canvas and toggle controls
   // ACTUALLY use — it can never claim "preview" when there is nothing real
   // to show, regardless of what `viewMode` itself remembers.
-  const canShowPreview = canShowPixelPreview(preview);
-  const effectiveViewMode = resolveEffectiveViewMode(viewMode, preview);
-  const mainImageSrc = resolveMainImageSrc(effectiveViewMode, preview, candidateUrl);
+  const canShowPreview = canShowPixelPreview(effectivePreviewForCanvas);
+  const effectiveViewMode = resolveEffectiveViewMode(viewMode, effectivePreviewForCanvas);
+  const mainImageSrc = resolveMainImageSrc(effectiveViewMode, effectivePreviewForCanvas, candidateUrl);
   const classificationOnlyQueue = isClassificationOnlyQueue(preview, queue.length);
   const canApply = canApplyCorrectionQueue({ busy, queueLength: queue.length, preview });
+  // Section G/O: the whole-composition Fit action is the PRIMARY normal
+  // path — offered only while no region-correction queue is pending (the
+  // two families never run concurrently) and no wand selection is active.
+  const canOfferFit = queue.length === 0 && wandSelection === null;
+  const fitProductionState = resolveSignProductionFitState(currentEdges);
+  const canApplyFit = !busy && fitPreview !== null && fitPreview.status === "previewed";
 
   const edgeChips = useMemo(
     () =>
@@ -639,6 +682,56 @@ export function SignFitToProductionCorrectionTool({
     clearWandSelection();
   }
 
+  async function runFitPreview() {
+    setBusyKind("fit-preview");
+    setError(null);
+    try {
+      const res = await fetch(`/api/internal/projects/${projectId}/sign-artwork/safe-area-fit-preview`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      const body = (await res.json().catch(() => null)) as FitPreviewResponse | { error?: string } | null;
+      if (!res.ok || !body || "error" in body) {
+        setError((body as { error?: string } | null)?.error ?? "That didn't work. Please try again.");
+        setBusyKind(null);
+        return;
+      }
+      setFitPreview(body as FitPreviewResponse);
+      setViewMode("preview");
+      setBusyKind(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That didn't work. Please try again.");
+      setBusyKind(null);
+    }
+  }
+
+  function cancelFitPreview() {
+    setFitPreview(null);
+    setError(null);
+  }
+
+  async function applyFitToSafeArea() {
+    if (!canApplyFit) return;
+    setBusyKind("fit-apply");
+    setError(null);
+    try {
+      const res = await fetch(`/api/internal/projects/${projectId}/sign-artwork/safe-area-fit-apply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(body?.error ?? "That didn't work. Please try again.");
+        setBusyKind(null);
+        return;
+      }
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That didn't work. Please try again.");
+      setBusyKind(null);
+    }
+  }
+
   function cancelSelection() {
     setSelection(null);
     setTool("select");
@@ -708,6 +801,17 @@ export function SignFitToProductionCorrectionTool({
         </span>
       </div>
 
+      {interactionMode === "advanced" ? (
+        // Section O: advanced pixel correction is never the recommended
+        // path for ordinary flattened sign artwork — a customer's supplied
+        // sign is one composited raster, not separable layers/objects.
+        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900" role="note" data-sign-advanced-warning>
+          Advanced pixel correction — this changes pixels in a flattened image directly and is intended for
+          exceptional production cleanup, not everyday use. For ordinary artwork, use Fit artwork to safe area or
+          classify edge content instead.
+        </p>
+      ) : null}
+
       {/* Tool rail | canvas | context panel */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-[152px_minmax(0,1fr)_300px]">
         {interactionMode === "wand" ? (
@@ -745,8 +849,9 @@ export function SignFitToProductionCorrectionTool({
               onClick={switchToAdvanced}
               className="mt-1 shrink-0 text-left text-xs text-ink/60 underline"
               data-testid="sign-switch-to-advanced"
+              title="Advanced pixel correction — changes pixels in this flattened image directly and is intended for exceptional production cleanup, not the normal fit/classify workflow."
             >
-              Advanced tools →
+              Advanced pixel correction →
             </button>
           </div>
         ) : (
@@ -923,7 +1028,7 @@ export function SignFitToProductionCorrectionTool({
                 onPointerUp={handlePointerUp}
                 data-testid="sign-correction-canvas"
               />
-              {busyKind === "preview" ? (
+              {busyKind === "preview" || busyKind === "fit-preview" ? (
                 <div
                   className="absolute inset-0 flex items-center justify-center bg-white/70"
                   role="status"
@@ -931,7 +1036,7 @@ export function SignFitToProductionCorrectionTool({
                   data-sign-correction-preview-loading
                 >
                   <span className="rounded-full bg-ink px-3 py-1.5 text-sm font-medium text-white">
-                    {preview === null ? "Generating preview…" : "Updating preview…"}
+                    {effectivePreviewForCanvas === null ? "Generating preview…" : "Updating preview…"}
                   </span>
                 </div>
               ) : null}
@@ -974,7 +1079,17 @@ export function SignFitToProductionCorrectionTool({
                 clearSelection={clearWandSelection}
               />
             ) : (
-              <FitGuidancePanel edges={currentEdges} />
+              <ProductionFitPanel
+                edges={currentEdges}
+                fitState={fitProductionState}
+                canOfferFit={canOfferFit}
+                fitPreview={fitPreview}
+                busyKind={busyKind}
+                canApplyFit={canApplyFit}
+                runFitPreview={runFitPreview}
+                cancelFitPreview={cancelFitPreview}
+                applyFitToSafeArea={applyFitToSafeArea}
+              />
             )
           ) : selectionValid && selection ? (
             <ActionPanel
@@ -994,7 +1109,17 @@ export function SignFitToProductionCorrectionTool({
               setSelection={setSelection}
             />
           ) : (
-            <FitGuidancePanel edges={currentEdges} />
+            <ProductionFitPanel
+              edges={currentEdges}
+              fitState={fitProductionState}
+              canOfferFit={canOfferFit}
+              fitPreview={fitPreview}
+              busyKind={busyKind}
+              canApplyFit={canApplyFit}
+              runFitPreview={runFitPreview}
+              cancelFitPreview={cancelFitPreview}
+              applyFitToSafeArea={applyFitToSafeArea}
+            />
           )}
 
           {interactionMode === "wand" && wandError ? (
@@ -1233,7 +1358,7 @@ function WandActionPanel({
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-ink/15 p-3" data-sign-wand-action-panel>
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-ink">Selected artwork</h2>
+        <h2 className="text-sm font-semibold text-ink">Selected edge content</h2>
         <button type="button" onClick={clearSelection} className="text-xs text-ink/60 underline" data-testid="sign-wand-clear">
           Clear selection
         </button>
@@ -1241,75 +1366,90 @@ function WandActionPanel({
 
       <p className="text-xs text-muted" data-sign-wand-selection-stats>
         {selection.pixelCount.toLocaleString()} px selected
-        {selection.broad ? " — this is a large area; double-check before deleting." : ""}
       </p>
 
+      {/* Signs Flat-Raster Production Workflow Correction (Section H): the
+          wand's job for ordinary flattened sign artwork is answering "is
+          this intentional edge/background artwork, or protected content
+          that needs to stay clear of CUT?" — never "you selected an
+          object, now move or delete it." These three ARE the normal
+          actions. */}
       <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={queueDelete}
-          disabled={busy || !selection.eligibleForMaskedDelete}
-          title={selection.eligibleForMaskedDelete ? undefined : "This selection is too large to safely delete here — try a smaller area, or use Advanced tools."}
-          className="rounded-full bg-red-600 px-3.5 py-2 text-sm font-medium text-white transition enabled:hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
-          data-testid="sign-wand-delete"
-        >
-          Delete
-        </button>
-        <button
-          type="button"
-          onClick={startMove}
-          disabled={busy}
-          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40"
-          data-testid="sign-wand-move"
-        >
-          Move
-        </button>
         <button
           type="button"
           onClick={() => queueKeep("edge_intent")}
           disabled={busy || !canKeep}
-          title={canKeep ? undefined : "This selection isn't rectangular enough (or doesn't reach an edge) to safely mark as intentional here — try Advanced tools."}
-          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40"
+          title={canKeep ? undefined : "This selection isn't rectangular enough (or doesn't reach an edge) to classify here — try Advanced pixel correction."}
+          className="rounded-full bg-ink px-3.5 py-2 text-sm font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
           data-testid="sign-wand-keep"
         >
-          Keep
+          Allow at edge
+        </button>
+        <button
+          type="button"
+          onClick={() => queueKeep("protected")}
+          disabled={busy || !canKeep}
+          title={canKeep ? undefined : "This selection isn't rectangular enough (or doesn't reach an edge) to classify here — try Advanced pixel correction."}
+          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="sign-wand-protected"
+        >
+          Keep inside safe area
+        </button>
+        <button
+          type="button"
+          onClick={clearSelection}
+          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition hover:border-ink/40"
+          data-testid="sign-wand-leave-for-review"
+        >
+          Review
         </button>
         <button
           type="button"
           onClick={() => setMoreOpen(!moreOpen)}
           aria-expanded={moreOpen}
-          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition hover:border-ink/40"
+          className="rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink/60 transition hover:border-ink/40"
           data-testid="sign-wand-more"
         >
-          More
+          Advanced
         </button>
       </div>
 
-      {!selection.eligibleForMaskedDelete ? (
-        <p className="text-xs text-muted">
-          This selection is too large for Delete here — try a smaller area, or use Advanced tools. Showing its outline
-          only, not the exact shape, to keep this responsive.
-        </p>
-      ) : null}
+      <p className="text-xs text-muted">
+        <span className="font-medium">Allow at edge</span> — this is intentional edge/background artwork; Fit to
+        Production keeps scanning past it. <span className="font-medium">Keep inside safe area</span> — this is
+        protected content that must clear the safe margin.
+      </p>
 
       {moreOpen ? (
         <div className="flex flex-col gap-2 border-t border-ink/10 pt-2">
+          <p className="text-xs text-muted">
+            Advanced: performs a pixel-region correction on this flattened artwork directly, for exceptional
+            production cleanup — not the normal fit/classify workflow.
+          </p>
           <button
             type="button"
-            onClick={() => queueKeep("protected")}
-            disabled={busy || !canKeep}
-            className="rounded-md border border-ink/20 px-3 py-1.5 text-left text-sm text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40"
-            data-testid="sign-wand-protected"
+            onClick={queueDelete}
+            disabled={busy || !selection.eligibleForMaskedDelete}
+            title={selection.eligibleForMaskedDelete ? undefined : "This selection is too large to safely delete here — try a smaller area, or use Advanced pixel correction."}
+            className="rounded-md border border-red-200 px-3 py-1.5 text-left text-sm text-red-700 transition enabled:hover:border-red-400 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="sign-wand-delete"
           >
-            Important content — keep safely inside
+            Delete this selection
           </button>
+          {!selection.eligibleForMaskedDelete ? (
+            <p className="text-xs text-muted">
+              This selection is too large for Delete here — try a smaller area, or use Advanced pixel correction.
+              Showing its outline only, not the exact shape, to keep this responsive.
+            </p>
+          ) : null}
           <button
             type="button"
-            onClick={clearSelection}
-            className="rounded-md border border-ink/20 px-3 py-1.5 text-left text-sm text-ink transition hover:border-ink/40"
-            data-testid="sign-wand-leave-for-review"
+            onClick={startMove}
+            disabled={busy}
+            className="rounded-md border border-ink/20 px-3 py-1.5 text-left text-sm text-ink transition enabled:hover:border-ink/40 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="sign-wand-move"
           >
-            Needs review / I&apos;m not sure
+            Move this selection
           </button>
         </div>
       ) : null}
@@ -1318,45 +1458,128 @@ function WandActionPanel({
 }
 
 /**
- * The right-rail default state (Section K/L): concise Fit guidance per
- * edge, shown whenever nothing is selected. Replaces the old page-level
- * `FitToProductionSummary` block — the evidence now lives directly beside
- * the artwork it describes instead of being separated from it.
+ * Signs Flat-Raster Production Workflow Correction (Section E/F/M): the
+ * workstation's PRIMARY panel — "Production Fit". Leads with the operator
+ * state (Ready as supplied / Protected content needs more clearance / Edge
+ * content needs classification — `resolveSignProductionFitState`'s own
+ * doc), offers "Fit artwork to safe area" as the ONE normal remedy for a
+ * whole flattened composition (never per-object Move/Remove), and — once a
+ * preview exists — the SAME Undo/Cancel/Apply shape `PreviewPanel` already
+ * uses for region corrections, so the operator experience is consistent
+ * across both correction families.
  */
-function FitGuidancePanel({ edges }: { edges: PreviewEdge[] }) {
+function ProductionFitPanel({
+  edges,
+  fitState,
+  canOfferFit,
+  fitPreview,
+  busyKind,
+  canApplyFit,
+  runFitPreview,
+  cancelFitPreview,
+  applyFitToSafeArea,
+}: {
+  edges: PreviewEdge[];
+  fitState: ReturnType<typeof resolveSignProductionFitState>;
+  canOfferFit: boolean;
+  fitPreview: FitPreviewResponse | null;
+  busyKind: "preview" | "apply" | "fit-preview" | "fit-apply" | null;
+  canApplyFit: boolean;
+  runFitPreview: () => void;
+  cancelFitPreview: () => void;
+  applyFitToSafeArea: () => void;
+}) {
   const byEdge = new Map(edges.map((e) => [e.edge, e]));
+  const copy = SIGN_PRODUCTION_FIT_COPY[fitState];
+  const fitBusy = busyKind === "fit-preview" || busyKind === "fit-apply";
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-ink/15 p-3" data-sign-fit-guidance>
-      <h2 className="text-sm font-semibold text-ink">Fit to Production</h2>
-      <p className="text-xs text-muted">
-        Drag a rectangle on the canvas, then pick a tool from the rail to act on it.
-      </p>
-      {ALL_EDGES.map((edge) => {
-        const e = byEdge.get(edge);
-        if (!e) {
-          return (
-            <p key={edge} className="text-xs text-muted">
-              {edge.toUpperCase()}: no evidence yet.
-            </p>
-          );
-        }
-        const pass = e.protectedResult === "pass";
-        return (
-          <div key={edge} className="border-t border-ink/10 pt-2 first:border-t-0 first:pt-0">
-            <p className={`text-sm font-medium ${pass ? "text-emerald-700" : "text-red-700"}`}>
-              {edge.toUpperCase()}: {e.protectedResult.toUpperCase()}
-              {e.edgeIntentPresent ? " (edge artwork present)" : ""}
-            </p>
-            <p className="text-xs text-muted">
-              Requires {e.requiredProtectedInsetIn}in ({e.requiredProtectedInsetPx}px) clear.{" "}
-              {e.nearestProtectedContentIn !== null
-                ? `Nearest protected content: ${e.nearestProtectedContentIn}in (${e.nearestProtectedContentPx}px).`
-                : "No protected content measured."}
-            </p>
-            <p className="text-xs text-muted">{e.reason}</p>
+    <div className="flex flex-col gap-3 rounded-lg border border-ink/15 p-3" data-sign-production-fit-panel>
+      <div>
+        <h2 className="text-sm font-semibold text-ink" data-sign-production-fit-status>
+          {copy.status}
+        </h2>
+        <p className="mt-1 text-sm text-ink">{copy.detail}</p>
+      </div>
+
+      {fitState === "fit_adjustment_required" && !fitPreview ? (
+        canOfferFit ? (
+          <button
+            type="button"
+            onClick={runFitPreview}
+            disabled={fitBusy}
+            className="rounded-full bg-ink px-3.5 py-2 text-sm font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="sign-fit-safe-area-preview"
+          >
+            {busyKind === "fit-preview" ? "Generating preview…" : "Fit artwork to safe area"}
+          </button>
+        ) : (
+          <p className="text-xs text-muted">
+            Cancel your pending region correction(s) below to use Fit artwork to safe area.
+          </p>
+        )
+      ) : null}
+
+      {fitPreview && fitPreview.status === "previewed" ? (
+        <div className="flex flex-col gap-3 border-t border-ink/10 pt-3">
+          <p className="text-sm text-ink" data-sign-fit-preview-status>
+            Previewing the whole composition fit to safe area.
+          </p>
+          <div className="flex items-center gap-3">
+            <button type="button" onClick={cancelFitPreview} disabled={busyKind === "fit-apply"} className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-40" data-testid="sign-fit-safe-area-cancel">
+              Cancel
+            </button>
           </div>
-        );
-      })}
+          <button
+            type="button"
+            onClick={applyFitToSafeArea}
+            disabled={!canApplyFit}
+            className="rounded-full bg-ink px-3.5 py-2 text-sm font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="sign-fit-safe-area-apply"
+          >
+            {busyKind === "fit-apply" ? "Applying…" : "Apply fit to safe area"}
+          </button>
+          <p className="text-xs text-muted">
+            Applying builds a new production plan from your original artwork and requires re-authorization before it
+            can be prepared again — the same as any other production plan change.
+          </p>
+        </div>
+      ) : fitPreview && fitPreview.status === "no_area" ? (
+        <p className="text-sm text-red-600" role="alert">
+          The safe-area inset would consume the entire canvas — this needs human review, not an automatic fit.
+        </p>
+      ) : null}
+
+      <details className="text-xs text-muted">
+        <summary className="cursor-pointer select-none">Edge-by-edge detail</summary>
+        <div className="mt-2 flex flex-col gap-2">
+          {ALL_EDGES.map((edge) => {
+            const e = byEdge.get(edge);
+            if (!e) {
+              return (
+                <p key={edge} className="text-xs text-muted">
+                  {edge.toUpperCase()}: no evidence yet.
+                </p>
+              );
+            }
+            const pass = e.protectedResult === "pass";
+            return (
+              <div key={edge} className="border-t border-ink/10 pt-2 first:border-t-0 first:pt-0">
+                <p className={`text-sm font-medium ${pass ? "text-emerald-700" : "text-red-700"}`}>
+                  {edge.toUpperCase()}: {e.protectedResult.toUpperCase()}
+                  {e.edgeIntentPresent ? " (edge artwork present)" : ""}
+                </p>
+                <p className="text-xs text-muted">
+                  Requires {e.requiredProtectedInsetIn}in ({e.requiredProtectedInsetPx}px) clear.{" "}
+                  {e.nearestProtectedContentIn !== null
+                    ? `Nearest protected content: ${e.nearestProtectedContentIn}in (${e.nearestProtectedContentPx}px).`
+                    : "No protected content measured."}
+                </p>
+                <p className="text-xs text-muted">{e.reason}</p>
+              </div>
+            );
+          })}
+        </div>
+      </details>
     </div>
   );
 }

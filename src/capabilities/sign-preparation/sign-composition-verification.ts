@@ -141,7 +141,16 @@ export function verifySignCompositionExecution(
     });
     return fail(checks);
   }
-  const expectedFit = deriveUniformFitDimensions(stageImage.width, stageImage.height, fitParams.canvasWidthPx, fitParams.canvasHeightPx);
+  // Mirrors executeFitArtworkToCanvas's own scale-target resolution exactly
+  // (Signs Flat-Raster Production Workflow Correction) — this call is only
+  // ever used for the audit detail text below; `fitResult` above already
+  // independently re-executed the step (using the same resolution
+  // internally) to decide pass/fail.
+  const expectedFit = deriveUniformFitDimensions(
+    stageImage.width, stageImage.height,
+    fitParams.scaleTargetWidthPx ?? fitParams.canvasWidthPx,
+    fitParams.scaleTargetHeightPx ?? fitParams.canvasHeightPx,
+  );
   checks.push({
     check: "fit_artwork_to_canvas_uniform_scale",
     status: "pass",

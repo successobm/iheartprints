@@ -448,6 +448,11 @@ export const TEST_FILES = [
   // SignFitToProductionCorrectionTool.tsx, same reasoning as the other
   // pure, DOM-free modules above.
   "src/app/internal/projects/[projectId]/sign-authorize/sign-correction-preview-view.test.ts",
+  // Signs Flat-Raster Production Workflow Correction: the four-state
+  // (ready/fit-adjustment/edge-classification) decision logic pulled out
+  // of SignFitToProductionCorrectionTool.tsx, same reasoning as the other
+  // pure, DOM-free modules above.
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-production-fit-state.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/original-image/route.test.ts",
   "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",

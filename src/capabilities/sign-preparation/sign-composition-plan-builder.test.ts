@@ -84,6 +84,88 @@ describe("buildSignCompositionPlan: canvas-first invariant", () => {
   });
 });
 
+describe("buildSignCompositionPlan: fitSafeInsetIn (Signs Flat-Raster Production Workflow Correction, Section I/J)", () => {
+  it("omitted reproduces the exact ordinary fit-to-fill plan — 100% backward compatible", () => {
+    const withField = buildSignCompositionPlan(baseInput({ fitSafeInsetIn: undefined }));
+    const without = buildSignCompositionPlan(baseInput());
+    assert.equal(withField.status, "built");
+    assert.equal(without.status, "built");
+    if (withField.status !== "built" || without.status !== "built") return;
+    assert.deepEqual(withField.plan.steps, without.plan.steps);
+  });
+
+  it("a positive inset produces a scaleTarget smaller than the canvas, centered by construction, never touching the ordered canvas SHAPE", () => {
+    const result = buildSignCompositionPlan(baseInput({ fitSafeInsetIn: 0.125, fitPlacement: null }));
+    assert.equal(result.status, "built");
+    if (result.status !== "built") return;
+    const fitStep = result.plan.steps.find((s) => s.kind === "fit_artwork_to_canvas")!;
+    const canvasWidthPx = Number(fitStep.params.canvasWidthPx);
+    const canvasHeightPx = Number(fitStep.params.canvasHeightPx);
+    const scaleTargetWidthPx = Number(fitStep.params.scaleTargetWidthPx);
+    const scaleTargetHeightPx = Number(fitStep.params.scaleTargetHeightPx);
+    assert.ok(scaleTargetWidthPx > 0 && scaleTargetWidthPx < canvasWidthPx);
+    assert.ok(scaleTargetHeightPx > 0 && scaleTargetHeightPx < canvasHeightPx);
+    // Canvas SHAPE (physical ordered size) is completely unaffected by the inset.
+    assert.equal(canvasWidthPx / canvasHeightPx > 0, true);
+    const canvasAspect = canvasWidthPx / canvasHeightPx;
+    assert.ok(Math.abs(canvasAspect - 24 / 36) < 0.001);
+    // Placement is centered within the FULL canvas (leaving equal margin
+    // on each axis — the inset frame), not touching either edge.
+    const placementXPx = Number(fitStep.params.placementXPx);
+    const placementYPx = Number(fitStep.params.placementYPx);
+    assert.ok(placementXPx > 0);
+    assert.ok(placementYPx > 0);
+  });
+
+  it("centered placement (fitPlacement: null) lands the fitted artwork ENTIRELY within the inset rectangle on every axis — never merely 'some positive margin'", () => {
+    const result = buildSignCompositionPlan(baseInput({ fitSafeInsetIn: 0.125, fitPlacement: null }));
+    assert.equal(result.status, "built");
+    if (result.status !== "built") return;
+    const fitStep = result.plan.steps.find((s) => s.kind === "fit_artwork_to_canvas")!;
+    const canvasWidthPx = Number(fitStep.params.canvasWidthPx);
+    const canvasHeightPx = Number(fitStep.params.canvasHeightPx);
+    const scaleTargetWidthPx = Number(fitStep.params.scaleTargetWidthPx);
+    const scaleTargetHeightPx = Number(fitStep.params.scaleTargetHeightPx);
+    const insetPxX = (canvasWidthPx - scaleTargetWidthPx) / 2;
+    const insetPxY = (canvasHeightPx - scaleTargetHeightPx) / 2;
+    const placementXPx = Number(fitStep.params.placementXPx);
+    const placementYPx = Number(fitStep.params.placementYPx);
+    // The fitted artwork's own footprint must sit at-or-inside the inset
+    // boundary on every side (the fitted size itself is <= the scale
+    // target by construction, so a placement inside [insetPx, canvas -
+    // insetPx] on each axis guarantees the whole footprint clears it).
+    assert.ok(placementXPx >= insetPxX - 1); // -1: deriveUniformFitDimensions rounds the fitted size
+    assert.ok(placementYPx >= insetPxY - 1);
+    assert.ok(placementXPx <= canvasWidthPx - insetPxX + 1);
+    assert.ok(placementYPx <= canvasHeightPx - insetPxY + 1);
+  });
+
+  it("refuses when the inset consumes the entire canvas (fails closed, never inverts/negatively-fits)", () => {
+    // minimumSafeInsetIn cannot realistically consume a 24x36in canvas, so
+    // force it with a deliberately absurd inset.
+    const result = buildSignCompositionPlan(baseInput({ fitSafeInsetIn: 30 }));
+    assert.equal(result.status, "refused");
+  });
+
+  it("the inset is derived per-axis via the SAME signSafeInsetPxForAxis the validator itself uses — guaranteed to land inside the validator's own SAFE guide", () => {
+    const result = buildSignCompositionPlan(baseInput({ fitSafeInsetIn: 0.125, fitPlacement: null }));
+    assert.equal(result.status, "built");
+    if (result.status !== "built") return;
+    const fitStep = result.plan.steps.find((s) => s.kind === "fit_artwork_to_canvas")!;
+    const canvasWidthPx = Number(fitStep.params.canvasWidthPx);
+    const canvasHeightPx = Number(fitStep.params.canvasHeightPx);
+    const scaleTargetWidthPx = Number(fitStep.params.scaleTargetWidthPx);
+    const scaleTargetHeightPx = Number(fitStep.params.scaleTargetHeightPx);
+    const insetPxX = (canvasWidthPx - scaleTargetWidthPx) / 2;
+    const insetPxY = (canvasHeightPx - scaleTargetHeightPx) / 2;
+    // ceil(0.125in * achievedPpi) per axis, matching signSafeInsetPxForAxis exactly.
+    const expectedInsetPxX = Math.ceil(0.125 * (canvasWidthPx / 24));
+    const expectedInsetPxY = Math.ceil(0.125 * (canvasHeightPx / 36));
+    assert.equal(insetPxX, expectedInsetPxX);
+    assert.equal(insetPxY, expectedInsetPxY);
+  });
+});
+
 describe("buildSignCompositionPlan: governance", () => {
   it("identical inputs produce the identical planKey (exact authorization accepted)", () => {
     const a = buildSignCompositionPlan(baseInput());

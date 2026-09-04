@@ -135,6 +135,108 @@ describe("sign-composition-steps: fit_artwork_to_canvas", () => {
   });
 });
 
+describe("sign-composition-steps: fit_artwork_to_canvas — scaleTargetWidthPx/HeightPx (Signs Flat-Raster Production Workflow Correction, Section I/J)", () => {
+  it("omitted scaleTarget reproduces the exact ordinary fit-to-fill behavior — 100% backward compatible", () => {
+    const artwork = makeImage(100, 100, { r: 10, g: 200, b: 10 });
+    const withoutTarget = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100,
+      canvasWidthPx: 200, canvasHeightPx: 200, placementXPx: 0, placementYPx: 0,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+    const withExplicitEqualTarget = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100,
+      canvasWidthPx: 200, canvasHeightPx: 200,
+      scaleTargetWidthPx: 200, scaleTargetHeightPx: 200,
+      placementXPx: 0, placementYPx: 0,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+    const a = executeFitArtworkToCanvas(artwork, withoutTarget);
+    const b = executeFitArtworkToCanvas(artwork, withExplicitEqualTarget);
+    assert.equal(a.status, "executed");
+    assert.equal(b.status, "executed");
+    if (a.status !== "executed" || b.status !== "executed") return;
+    assert.deepEqual(a.image.data, b.image.data);
+    assert.equal(a.image.width, 200);
+    assert.equal(a.image.height, 200);
+  });
+
+  it("a smaller scaleTarget fits the artwork INSIDE an inset rectangle, centered by the caller, background-filling the newly-exposed frame — no stretch", () => {
+    // 100x100 square artwork, 300x300 canvas, scale target 200x200 (a 50px
+    // inset on every side) -> scale = min(200/100,200/100) = 2.0 ->
+    // fitted 200x200, centered at (50,50)..(249,249).
+    const artwork = makeImage(100, 100, { r: 10, g: 200, b: 10 });
+    const s = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100,
+      canvasWidthPx: 300, canvasHeightPx: 300,
+      scaleTargetWidthPx: 200, scaleTargetHeightPx: 200,
+      placementXPx: 50, placementYPx: 50,
+      backgroundR: 255, backgroundG: 255, backgroundB: 255,
+    }));
+    const result = executeFitArtworkToCanvas(artwork, s);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    assert.equal(result.image.width, 300);
+    assert.equal(result.image.height, 300);
+    // The 50px frame all the way around is background — the newly-exposed
+    // inset area, filled exactly like any other uncovered canvas pixel.
+    assert.deepEqual(pixelAt(result.image, 25, 150), { r: 255, g: 255, b: 255, a: 255 }); // left frame
+    assert.deepEqual(pixelAt(result.image, 275, 150), { r: 255, g: 255, b: 255, a: 255 }); // right frame
+    assert.deepEqual(pixelAt(result.image, 150, 25), { r: 255, g: 255, b: 255, a: 255 }); // top frame
+    assert.deepEqual(pixelAt(result.image, 150, 275), { r: 255, g: 255, b: 255, a: 255 }); // bottom frame
+    // The fitted artwork occupies exactly [50,50]..[249,249].
+    assert.deepEqual(pixelAt(result.image, 50, 50), { r: 10, g: 200, b: 10, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 249, 249), { r: 10, g: 200, b: 10, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 49, 49), { r: 255, g: 255, b: 255, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 250, 250), { r: 255, g: 255, b: 255, a: 255 });
+  });
+
+  it("a non-uniform-aspect scaleTarget still derives ONE uniform scale from the limiting axis — never stretches", () => {
+    // 100x50 (2:1) artwork, scaleTarget 60x60 -> scale = min(60/100,60/50) = 0.6
+    // -> fitted 60x30, never 60x60 (which would stretch it to 1:1).
+    const artwork = makeImage(100, 50, { r: 10, g: 200, b: 10 });
+    const s = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 50,
+      canvasWidthPx: 200, canvasHeightPx: 200,
+      scaleTargetWidthPx: 60, scaleTargetHeightPx: 60,
+      placementXPx: 70, placementYPx: 85,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+    const result = executeFitArtworkToCanvas(artwork, s);
+    assert.equal(result.status, "executed");
+    if (result.status !== "executed") return;
+    // Fitted artwork spans x:[70,130), y:[85,115) — 60x30, not 60x60.
+    assert.deepEqual(pixelAt(result.image, 129, 100), { r: 10, g: 200, b: 10, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 129, 114), { r: 10, g: 200, b: 10, a: 255 });
+    assert.deepEqual(pixelAt(result.image, 129, 115), { r: 0, g: 0, b: 0, a: 255 }); // one row past the fitted height -> background
+  });
+
+  it("refuses a scaleTarget larger than the canvas itself, rather than scaling past the canvas bounds", () => {
+    const artwork = makeImage(100, 100, { r: 0, g: 0, b: 0 });
+    const s = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100,
+      canvasWidthPx: 100, canvasHeightPx: 100,
+      scaleTargetWidthPx: 150, scaleTargetHeightPx: 100,
+      placementXPx: 0, placementYPx: 0,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+    const result = executeFitArtworkToCanvas(artwork, s);
+    assert.equal(result.status, "refused");
+  });
+
+  it("decode rejects a present-but-invalid scaleTargetWidthPx rather than silently falling back to fit-to-fill", () => {
+    const artwork = makeImage(100, 100, { r: 0, g: 0, b: 0 });
+    const s = step("fit_artwork_to_canvas", {
+      expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100,
+      canvasWidthPx: 100, canvasHeightPx: 100,
+      scaleTargetWidthPx: -5, // invalid
+      placementXPx: 0, placementYPx: 0,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    });
+    const result = executeFitArtworkToCanvas(artwork, s);
+    assert.equal(result.status, "refused");
+  });
+});
+
 describe("sign-composition-steps: move_region", () => {
   function baseCanvas(): RgbaImage {
     const image = makeImage(10, 100, { r: 0, g: 0, b: 0 });

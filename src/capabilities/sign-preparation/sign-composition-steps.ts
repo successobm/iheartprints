@@ -176,6 +176,19 @@ export interface FitArtworkToCanvasParams {
   expectedArtworkHeightPx: number;
   canvasWidthPx: number;
   canvasHeightPx: number;
+  /**
+   * Signs Flat-Raster Production Workflow Correction: the rectangle the
+   * artwork's uniform scale is derived AGAINST, when smaller than the full
+   * canvas — e.g. a safe-inset rectangle for a "Fit artwork to safe area"
+   * correction (Section I/J). Buffer allocation and the placement bounds
+   * check always still use `canvasWidthPx`/`canvasHeightPx` — only the
+   * SCALE calculation reads this pair instead, when present. Omitted (or
+   * equal to the canvas) reproduces the ordinary "fit to fill the whole
+   * canvas" behavior every plan built before this phase already uses —
+   * 100% backward compatible; every existing caller is unaffected.
+   */
+  scaleTargetWidthPx?: number;
+  scaleTargetHeightPx?: number;
   placementXPx: number;
   placementYPx: number;
   backgroundR: number;
@@ -184,7 +197,22 @@ export interface FitArtworkToCanvasParams {
 }
 
 export function encodeFitArtworkToCanvasParams(p: FitArtworkToCanvasParams): Record<string, number | string> {
-  return { ...p };
+  const encoded: Record<string, number | string> = {
+    expectedArtworkWidthPx: p.expectedArtworkWidthPx,
+    expectedArtworkHeightPx: p.expectedArtworkHeightPx,
+    canvasWidthPx: p.canvasWidthPx,
+    canvasHeightPx: p.canvasHeightPx,
+    placementXPx: p.placementXPx,
+    placementYPx: p.placementYPx,
+    backgroundR: p.backgroundR,
+    backgroundG: p.backgroundG,
+    backgroundB: p.backgroundB,
+  };
+  // Only ever persisted when genuinely smaller than the canvas — keeps
+  // every plan built before this phase byte-identical in shape.
+  if (p.scaleTargetWidthPx !== undefined) encoded.scaleTargetWidthPx = p.scaleTargetWidthPx;
+  if (p.scaleTargetHeightPx !== undefined) encoded.scaleTargetHeightPx = p.scaleTargetHeightPx;
+  return encoded;
 }
 
 export function decodeFitArtworkToCanvasParams(params: Record<string, number | string>): FitArtworkToCanvasParams | null {
@@ -205,8 +233,25 @@ export function decodeFitArtworkToCanvasParams(params: Record<string, number | s
   ) {
     return null;
   }
+  // Optional: absent for every plan built before this phase. Present but
+  // invalid (e.g. non-positive) is a genuine decode failure, never
+  // silently ignored — a malformed inset must never fall back to "fit to
+  // fill" behind the operator's back.
+  let scaleTargetWidthPx: number | undefined;
+  let scaleTargetHeightPx: number | undefined;
+  if (params.scaleTargetWidthPx !== undefined) {
+    const v = requirePositiveInt(params.scaleTargetWidthPx);
+    if (v === null) return null;
+    scaleTargetWidthPx = v;
+  }
+  if (params.scaleTargetHeightPx !== undefined) {
+    const v = requirePositiveInt(params.scaleTargetHeightPx);
+    if (v === null) return null;
+    scaleTargetHeightPx = v;
+  }
   return {
     expectedArtworkWidthPx, expectedArtworkHeightPx, canvasWidthPx, canvasHeightPx,
+    scaleTargetWidthPx, scaleTargetHeightPx,
     placementXPx, placementYPx, backgroundR, backgroundG, backgroundB,
   };
 }
@@ -247,8 +292,16 @@ export function executeFitArtworkToCanvas(
         `but received ${artwork.width}x${artwork.height}px — refusing rather than fitting the wrong source identity.`,
     );
   }
+  const scaleTargetWidthPx = p.scaleTargetWidthPx ?? p.canvasWidthPx;
+  const scaleTargetHeightPx = p.scaleTargetHeightPx ?? p.canvasHeightPx;
+  if (scaleTargetWidthPx > p.canvasWidthPx || scaleTargetHeightPx > p.canvasHeightPx) {
+    return refuse(
+      `Step "fit_artwork_to_canvas" scale target ${scaleTargetWidthPx}x${scaleTargetHeightPx}px exceeds the ` +
+        `${p.canvasWidthPx}x${p.canvasHeightPx}px canvas — refusing rather than scaling past the canvas bounds.`,
+    );
+  }
   const { scaledWidthPx, scaledHeightPx } = deriveUniformFitDimensions(
-    artwork.width, artwork.height, p.canvasWidthPx, p.canvasHeightPx,
+    artwork.width, artwork.height, scaleTargetWidthPx, scaleTargetHeightPx,
   );
   if (p.placementXPx + scaledWidthPx > p.canvasWidthPx || p.placementYPx + scaledHeightPx > p.canvasHeightPx) {
     return refuse(

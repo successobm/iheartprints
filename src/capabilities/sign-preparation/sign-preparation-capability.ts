@@ -185,6 +185,8 @@ export interface SignCompositionOperatorInput {
   replacements: SignCompositionReplacementInput[];
   /** Wand-First Correction UX Phase — see `SignCompositionPlanInput`'s own doc. Optional/defaults to `[]`. */
   maskedReplacements?: SignCompositionMaskedReplacementInput[];
+  /** Signs Flat-Raster Production Workflow Correction — see `SignCompositionPlanInput`'s own doc (Section I/J). Optional/defaults to the ordinary fit-to-fill behavior when omitted. */
+  fitSafeInsetIn?: number;
 }
 
 export function createSignPreparationCapability(
@@ -610,6 +612,7 @@ export function createSignPreparationCapability(
         fills: input.fills,
         replacements: input.replacements,
         maskedReplacements: input.maskedReplacements ?? [],
+        fitSafeInsetIn: input.fitSafeInsetIn,
       });
 
       if (buildResult.status === "refused") {

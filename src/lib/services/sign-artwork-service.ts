@@ -37,16 +37,20 @@ import {
   decodeEdgeIntentClassificationRecords,
   decodeSignCompositionPlanToOperatorChoices,
   describeSignPlanForCustomer,
+  deriveUniformFitDimensions,
   encodeEdgeIntentClassificationRecord,
+  encodeFitArtworkToCanvasParams,
   encodeMoveRegionParams,
   encodeReplaceMaskedRegionWithBackgroundParams,
   encodeReplaceRegionWithBackgroundParams,
   encodeSignPlate,
   encodeSignWandMaskForBounds,
+  executeFitArtworkToCanvas,
   getSignResolutionPolicyById,
   measureUniformSurroundingBackground,
   renderSignSelectionOverlayCrop,
   resolveCurrentEdgeIntentClassifications,
+  signSafeInsetPxForAxis,
   type SignCompositionOperatorInput,
   type SignEdge,
   type SignEdgeIntentClassification,
@@ -973,6 +977,166 @@ export async function commitSignCorrections(
     await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
   }
 
+  return loadSignPlanOperatorReview(repo, projectId);
+}
+
+// ---------------------------------------------------------------------------
+// Signs Flat-Raster Production Workflow Correction (Section E/I/J): the
+// WHOLE-COMPOSITION alternative to region-scoped Remove/Move — appropriate
+// for ordinary flattened sign artwork, where "the chef" or "the logo" is not
+// a separable object. Preserves the entire supplied composition; only its
+// SCALE/PLACEMENT within the canvas changes, so PROTECTED_CONTENT clears the
+// SAFE inset. Newly-exposed canvas area is filled with the SAME
+// operator-confirmed background `fit_artwork_to_canvas` already uses for
+// every uncovered pixel — never a fabricated extension.
+// ---------------------------------------------------------------------------
+
+export interface SignSafeAreaFitPreviewResult {
+  /** `"no_candidate"` — nothing to correct right now. `"no_area"` — the safe inset would consume the entire canvas (never reachable for any real ordered sign size; a defensive fail-closed case). `"previewed"` — a real preview was computed. */
+  status: "no_candidate" | "no_area" | "previewed";
+  /** Full-canvas PNG (base64, no `data:` prefix) of the approximate result. See this function's own doc for why it is an approximation. `null` alongside anything but `"previewed"`. */
+  previewPngBase64: string | null;
+  /** Fit to Production, recomputed against the preview canvas — reflects the SAME governed classifications already on record for this candidate/plan; never invents new ones. `null` alongside anything but `"previewed"`. */
+  fitToProduction: SignFitToProductionResult | null;
+  insetPxX: number | null;
+  insetPxY: number | null;
+}
+
+/**
+ * Fast, in-memory, NEVER-persisted preview of "Fit artwork to safe area" —
+ * the whole-composition counterpart to `previewSignCorrections` above.
+ *
+ * APPROXIMATION, clearly scoped: this re-fits the CURRENT (already-
+ * composited, already full-resolution) blocked candidate itself — never the
+ * true original source — into the inset rectangle. A true from-source
+ * preview would need to replicate the WORKER's own reconstruction-adoption
+ * lookup (which asset holds the already-produced, cached upscale bytes for
+ * THIS plan) just to preview, a second execution path this phase
+ * deliberately does not build (Section T: "applying and previewing are
+ * inseparably coupled" is exactly the failure mode this file's own
+ * `previewSignCorrections` avoids for Remove/Move by using the IDENTICAL
+ * primitives execution uses — that guarantee is not cheaply available for a
+ * from-source fit; re-fitting the already-final-resolution candidate is a
+ * second, minor resample, visually indistinguishable from the true result
+ * at the scale a safe-inset actually operates at). The REAL, PERSISTED
+ * result — produced only by `applySignSafeAreaFit` below, through the
+ * SAME governed re-plan + re-authorize + prepare pipeline every other
+ * Signs plan change already uses — always renders fresh from the TRUE
+ * original source, exactly like every other Signs plan.
+ */
+export async function previewSignSafeAreaFit(projectId: string): Promise<SignSafeAreaFitPreviewResult> {
+  const empty: SignSafeAreaFitPreviewResult = {
+    status: "no_candidate", previewPngBase64: null, fitToProduction: null, insetPxX: null, insetPxY: null,
+  };
+  const graph = getCapabilityGraph();
+  const [resolved, preparation] = await Promise.all([
+    resolveCurrentCandidateImage(projectId),
+    graph.signPreparation.getSignPreparation(projectId),
+  ]);
+  if (!resolved || !preparation || !preparation.plan) return empty;
+  const choices = decodeSignCompositionPlanToOperatorChoices(preparation.plan as unknown as SignRepairPlan);
+  if (!choices) return empty;
+
+  const { image, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn, existingClassifications } = resolved;
+
+  const insetPxX = signSafeInsetPxForAxis(minimumSafeInsetIn, image.width / orderedWidthIn);
+  const insetPxY = signSafeInsetPxForAxis(minimumSafeInsetIn, image.height / orderedHeightIn);
+  const scaleTargetWidthPx = image.width - 2 * insetPxX;
+  const scaleTargetHeightPx = image.height - 2 * insetPxY;
+  if (scaleTargetWidthPx <= 0 || scaleTargetHeightPx <= 0) {
+    return { ...empty, status: "no_area" };
+  }
+
+  const { scaledWidthPx, scaledHeightPx } = deriveUniformFitDimensions(
+    image.width, image.height, scaleTargetWidthPx, scaleTargetHeightPx,
+  );
+  const placementXPx = Math.floor((image.width - scaledWidthPx) / 2);
+  const placementYPx = Math.floor((image.height - scaledHeightPx) / 2);
+
+  const fitStep: SignRepairStep = {
+    kind: "fit_artwork_to_canvas",
+    params: encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: image.width,
+      expectedArtworkHeightPx: image.height,
+      canvasWidthPx: image.width,
+      canvasHeightPx: image.height,
+      scaleTargetWidthPx,
+      scaleTargetHeightPx,
+      placementXPx,
+      placementYPx,
+      backgroundR: choices.fitBackground.r,
+      backgroundG: choices.fitBackground.g,
+      backgroundB: choices.fitBackground.b,
+    }),
+    risk: "review_required",
+    reasons: ["Signs Flat-Raster Production Workflow Correction: preview-only whole-composition safe-area fit."],
+  };
+  const fitResult = executeFitArtworkToCanvas(image, fitStep);
+  if (fitResult.status === "refused") return empty;
+
+  const fitToProduction = analyzeSignFitToProduction(
+    fitResult.image, orderedWidthIn, orderedHeightIn, minimumSafeInsetIn, existingClassifications,
+  );
+
+  return {
+    status: "previewed",
+    previewPngBase64: encodeSignPlate(fitResult.image).toString("base64"),
+    fitToProduction,
+    insetPxX,
+    insetPxY,
+  };
+}
+
+/**
+ * Applies "Fit artwork to safe area": rebuilds the CURRENT plan's exact same
+ * operator choices (reconstruction adoption, crop, background, existing
+ * moves/fills/replacements) through the governed
+ * `SignPreparationCapability.confirmSignCompositionPlan` — the SAME re-plan
+ * mechanism `commitSignCorrections` above already uses for Remove/Move —
+ * with ONE addition: `fitSafeInsetIn`, and `fitPlacement` explicitly reset
+ * to `null` (never the current plan's own placement, which by definition
+ * may already be touching CUT — the whole point of this correction is to
+ * move away from it, so it must always be freshly re-centered against the
+ * new, smaller scale target).
+ *
+ * Metadata-only, like `commitSignCorrections`: persists a NEW plan (new
+ * planKey, invalidating the prior authorization) and returns. Producing the
+ * actual pixels requires the SAME re-authorize + prepare steps every other
+ * plan change already requires — this function does not skip or shortcut
+ * that governance.
+ */
+export async function applySignSafeAreaFit(projectId: string): Promise<SignPlanOperatorReview> {
+  const graph = getCapabilityGraph();
+  const preparation = await graph.signPreparation.getSignPreparation(projectId);
+  if (!preparation || !preparation.plan || !preparation.resolutionPolicyId) {
+    throw new SignArtworkBridgeError("This project has no current composition plan to correct.");
+  }
+  const policy = getSignResolutionPolicyById(preparation.resolutionPolicyId);
+  if (!policy) {
+    throw new SignArtworkBridgeError("That sign size isn't covered by a supported rigid-sign policy yet.");
+  }
+  const currentPlan = preparation.plan as unknown as SignRepairPlan;
+  const choices = decodeSignCompositionPlanToOperatorChoices(currentPlan);
+  if (!choices) {
+    throw new SignArtworkBridgeError(
+      "This artwork's current plan is not in the canvas-first shape the correction tool can edit.",
+    );
+  }
+
+  const input: SignCompositionOperatorInput = {
+    reconstruction: choices.reconstruction,
+    crop: choices.crop,
+    fitBackground: choices.fitBackground,
+    fitPlacement: null,
+    moves: choices.moves,
+    fills: choices.fills,
+    replacements: choices.replacements,
+    maskedReplacements: choices.maskedReplacements,
+    fitSafeInsetIn: policy.minimumSafeInsetIn,
+  };
+  await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
+
+  const repo = getProjectRepository();
   return loadSignPlanOperatorReview(repo, projectId);
 }
 

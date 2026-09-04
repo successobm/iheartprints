@@ -31,6 +31,7 @@ import type { SignProductionSpec } from "./contracts";
 import { SIGN_REPAIR_PLAN_SCHEMA_VERSION, type SignRepairPlan, type SignRepairStep } from "./contracts";
 import { buildSignProductionTemplate } from "./sign-production-template";
 import { computeSignPlanKey } from "./sign-plan-identity";
+import { signSafeInsetPxForAxis } from "./sign-fit-to-production";
 import type { SignResolutionPolicy } from "./resolution-policy";
 import {
   decodeCropRegionParams,
@@ -125,6 +126,19 @@ export interface SignCompositionPlanInput {
   fitBackground: { r: number; g: number; b: number };
   /** Explicit placement override; centered (contain) placement when omitted. */
   fitPlacement: { xPx: number; yPx: number } | null;
+  /**
+   * Signs Flat-Raster Production Workflow Correction (Section I/J): when
+   * present, the artwork is uniformly fit to a rectangle inset by this many
+   * INCHES from every edge of the true canvas — a "fit artwork to safe
+   * area" correction — rather than to the full canvas (the ordinary "fit
+   * to fill" case every plan built before this phase used, and the default
+   * when this field is omitted/undefined; 100% unaffected). Converted to
+   * pixels per axis via `signSafeInsetPxForAxis`, the SAME function
+   * `analyzeSignFitToProduction` uses for its own SAFE-inset math, so a
+   * correction built with this field is guaranteed to land inside the
+   * validator's own SAFE guide, never a client-approximated one.
+   */
+  fitSafeInsetIn?: number;
   /** Ordered, explicit horizontal-band translations, applied in this exact order. */
   moves: SignCompositionMoveInput[];
   /** Ordered, explicit bounded-rectangle fills, applied in this exact order, after every move. */
@@ -231,8 +245,21 @@ export function buildSignCompositionPlan(input: SignCompositionPlanInput): SignC
   const canvasWidthPx = Math.max(1, Math.round(template.widthIn * canvasPpi));
   const canvasHeightPx = Math.max(1, Math.round(template.heightIn * canvasPpi));
 
+  // Signs Flat-Raster Production Workflow Correction: a "fit to safe area"
+  // correction derives scale against a rectangle inset by fitSafeInsetIn on
+  // every side — per axis, exactly like the validator's own SAFE-inset math
+  // (Section I/J doc above). Absent entirely reproduces today's "fit to
+  // fill the canvas" behavior byte-for-byte (insetPx 0 on both axes).
+  const insetPxX = input.fitSafeInsetIn ? signSafeInsetPxForAxis(input.fitSafeInsetIn, canvasWidthPx / template.widthIn) : 0;
+  const insetPxY = input.fitSafeInsetIn ? signSafeInsetPxForAxis(input.fitSafeInsetIn, canvasHeightPx / template.heightIn) : 0;
+  const scaleTargetWidthPx = canvasWidthPx - 2 * insetPxX;
+  const scaleTargetHeightPx = canvasHeightPx - 2 * insetPxY;
+  if (scaleTargetWidthPx <= 0 || scaleTargetHeightPx <= 0) {
+    return { status: "refused", reason: `The safe-area inset (${insetPxX}px x / ${insetPxY}px y) leaves no positive area to fit artwork into on the ${canvasWidthPx}x${canvasHeightPx}px canvas.` };
+  }
+
   const { scaledWidthPx, scaledHeightPx } = deriveUniformFitDimensions(
-    artworkWidthPx, artworkHeightPx, canvasWidthPx, canvasHeightPx,
+    artworkWidthPx, artworkHeightPx, scaleTargetWidthPx, scaleTargetHeightPx,
   );
   const placementXPx = input.fitPlacement?.xPx ?? Math.floor((canvasWidthPx - scaledWidthPx) / 2);
   const placementYPx = input.fitPlacement?.yPx ?? Math.floor((canvasHeightPx - scaledHeightPx) / 2);
@@ -247,6 +274,8 @@ export function buildSignCompositionPlan(input: SignCompositionPlanInput): SignC
       expectedArtworkHeightPx: artworkHeightPx,
       canvasWidthPx,
       canvasHeightPx,
+      scaleTargetWidthPx: input.fitSafeInsetIn ? scaleTargetWidthPx : undefined,
+      scaleTargetHeightPx: input.fitSafeInsetIn ? scaleTargetHeightPx : undefined,
       placementXPx,
       placementYPx,
       backgroundR: input.fitBackground.r,
