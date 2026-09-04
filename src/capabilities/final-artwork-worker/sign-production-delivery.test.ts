@@ -1113,3 +1113,310 @@ describe("resolveBlockedSignProductionCandidate", () => {
     assert.equal(certified, null, "the certified download route must remain refused for a blocked state");
   });
 });
+
+/**
+ * SIGNS CANDIDATE AUTHORITY: `FinalArtworkCapability.resolveTrustworthySignRepairParent`
+ * — the real Get Hibachi acceptance incident this phase closes: a QR
+ * replacement whose placement was visibly wrong (decoded correctly,
+ * composited over unrelated artwork) persisted a NEW validation for
+ * itself, and being newest, `resolveBlockedSignProductionCandidate` would
+ * then have handed it to the NEXT correction as its base image — silently
+ * building on already-damaged artwork. NEWER != AUTHORITATIVE.
+ *
+ * Deliberately never calls a provider — every fixture here is hand-seeded,
+ * exactly like this file's own `resolveBlockedSignProductionCandidate`
+ * suite immediately above.
+ *
+ * Ordering note: `waitForDistinctTimestamp` inserts a tiny real delay
+ * between hand-seeded asset creations specifically where these tests
+ * depend on genuine chronological ordering (`createdAt` has millisecond
+ * precision) — real production writes are always genuinely
+ * human/network-paced apart, so this has no bearing on the resolver's own
+ * correctness, only on making a fast synthetic test fixture deterministic.
+ */
+describe("resolveTrustworthySignRepairParent (SIGNS CANDIDATE AUTHORITY)", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-trustworthy-repair-parent-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function build() {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const assets = createAssetCapability(repo, new DataUriAssetStorageProvider(), new PngThumbnailGenerator());
+    const signPreparation = createSignPreparationCapability(repo, assets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const project = await repo.createProject();
+    return { repo, assets, signPreparation, finalArtwork, projectId: project.project.id };
+  }
+
+  async function planAndAuthorize(
+    signPreparation: Awaited<ReturnType<typeof build>>["signPreparation"],
+    finalArtwork: Awaited<ReturnType<typeof build>>["finalArtwork"],
+    projectId: string,
+  ) {
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await signPreparation.planSignRepair(projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    return job;
+  }
+
+  function waitForDistinctTimestamp(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 3));
+  }
+
+  async function uploadCandidate(
+    assets: Awaited<ReturnType<typeof build>>["assets"],
+    projectId: string,
+    jobId: string,
+    label: string,
+    metadata: Record<string, unknown>,
+  ) {
+    return assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${jobId}-${label}`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: jobId,
+      productionRole: "production_png",
+      metadata,
+    });
+  }
+
+  it("no job / in-flight / no validation / ready validation: resolves null exactly like resolveBlockedSignProductionCandidate", async () => {
+    const { finalArtwork, projectId } = await build();
+    assert.equal(await finalArtwork.resolveTrustworthySignRepairParent(projectId), null);
+  });
+
+  it("a single WORKER-produced candidate (no qrRestoration metadata) with a blocking validation: trusted unconditionally", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const asset = await uploadCandidate(assets, projectId, job.id, "worker", { rigidSign: { planKey: "x" } });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const candidate = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.ok(candidate);
+    assert.equal(candidate!.assetId, asset.id);
+  });
+
+  // --- Section M: simple bad-derivative-supersedes-good-parent regression ---
+
+  it("GOOD PARENT -> BAD DERIVATIVE (newer validation, no placementValidated): resolver selects the GOOD PARENT, never the bad derivative", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const goodParent = await uploadCandidate(assets, projectId, job.id, "good-parent", { rigidSign: { planKey: "x" } });
+    await waitForDistinctTimestamp();
+    const badDerivative = await uploadCandidate(assets, projectId, job.id, "bad-derivative", {
+      qrRestoration: { restoredFromAssetId: goodParent.id, sourceAssetId: "src-1", planKey: "x", restoredCount: 1 },
+      // no placementValidated field at all — the exact real historical shape.
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: badDerivative.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.ok(trustworthy);
+    assert.equal(trustworthy!.assetId, goodParent.id, "must select the good parent");
+    assert.notEqual(trustworthy!.assetId, badDerivative.id, "must never select the bad derivative merely because its validation is newer");
+
+    // The blocked-candidate (operator inspection) resolver's own semantics remain UNCHANGED — it still shows the actual latest attempt.
+    const blocked = await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    assert.equal(blocked!.assetId, badDerivative.id, "operator visual inspection must still see the actual failed attempt");
+  });
+
+  it("GOOD PARENT -> VERIFIED GOOD DERIVATIVE (newer validation, placementValidated: true): resolver selects the verified good derivative", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const goodParent = await uploadCandidate(assets, projectId, job.id, "good-parent", { rigidSign: { planKey: "x" } });
+    await waitForDistinctTimestamp();
+    const goodDerivative = await uploadCandidate(assets, projectId, job.id, "good-derivative", {
+      qrRestoration: { restoredFromAssetId: goodParent.id, sourceAssetId: "src-1", planKey: "x", restoredCount: 1, placementValidated: true },
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: goodDerivative.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.ok(trustworthy);
+    assert.equal(trustworthy!.assetId, goodDerivative.id, "a verified-placement derivative IS eligible to supersede its parent");
+  });
+
+  // --- Section N: multi-stage iterative repair ---
+
+  it("multi-stage iterative repair: A -> successful resolution repair B -> successful QR repair C (still finalization_required for an unrelated reason) — authority progresses A -> B -> C; a failed D derived from C never supersedes C", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+
+    const A = await uploadCandidate(assets, projectId, job.id, "A", { rigidSign: { planKey: "x", stage: "first-attempt" } });
+    await waitForDistinctTimestamp();
+
+    // B: a second, corrected WORKER regeneration under the same job (the
+    // established "rejected-final-regeneration" pattern this file already
+    // tests above) — still trustworthy unconditionally, no qrRestoration.
+    const B = await uploadCandidate(assets, projectId, job.id, "B", { rigidSign: { planKey: "x", stage: "resolution-corrected" } });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: B.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    let trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.equal(trustworthy!.assetId, B.id, "authority progresses to B");
+
+    await waitForDistinctTimestamp();
+    // C: a successful QR repair derived from B — still finalization_required overall (an independent, unrelated safe-zone issue remains).
+    const C = await uploadCandidate(assets, projectId, job.id, "C", {
+      qrRestoration: { restoredFromAssetId: B.id, sourceAssetId: "src-1", planKey: "x", restoredCount: 1, placementValidated: true },
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: C.id,
+      status: "finalization_required",
+      report: {},
+    });
+
+    trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.equal(trustworthy!.assetId, C.id, "authority progresses to C even though overall status is still finalization_required");
+
+    await waitForDistinctTimestamp();
+    // D: a FAILED further derivative of C (hand-seeded to prove the authority MODEL itself is robust, independent of whether the replacement safety gate would also have prevented D from ever being persisted in the first place).
+    const D = await uploadCandidate(assets, projectId, job.id, "D", {
+      qrRestoration: { restoredFromAssetId: C.id, sourceAssetId: "src-1", planKey: "x", restoredCount: 1, placementValidated: false },
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: D.id,
+      status: "finalization_required",
+      report: {},
+    });
+
+    trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.equal(trustworthy!.assetId, C.id, "a failed D derived from C must NOT supersede C");
+    assert.notEqual(trustworthy!.assetId, D.id);
+    void A;
+  });
+
+  // --- Section O: branching lineage ---
+
+  it("branching lineage: A -> failed sibling B, A -> successful sibling C (C newer) — resolver chooses C", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const A = await uploadCandidate(assets, projectId, job.id, "A", { rigidSign: { planKey: "x" } });
+    await waitForDistinctTimestamp();
+    const B = await uploadCandidate(assets, projectId, job.id, "B-failed-sibling", {
+      qrRestoration: { restoredFromAssetId: A.id, sourceAssetId: "src-1", planKey: "x", restoredCount: 1, placementValidated: false },
+    });
+    await waitForDistinctTimestamp();
+    const C = await uploadCandidate(assets, projectId, job.id, "C-successful-sibling", {
+      qrRestoration: { restoredFromAssetId: A.id, sourceAssetId: "src-1", planKey: "x", restoredCount: 1, placementValidated: true },
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: C.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.equal(trustworthy!.assetId, C.id);
+    void B;
+  });
+
+  it("branching lineage: A -> successful OLDER sibling B, A -> failed NEWER sibling C — resolver chooses B, not merely 'walk back one step' from C (which would land on A)", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const A = await uploadCandidate(assets, projectId, job.id, "A", { rigidSign: { planKey: "x" } });
+    await waitForDistinctTimestamp();
+    const B = await uploadCandidate(assets, projectId, job.id, "B-successful-older-sibling", {
+      qrRestoration: { restoredFromAssetId: A.id, sourceAssetId: "src-1", planKey: "x", restoredCount: 1, placementValidated: true },
+    });
+    await waitForDistinctTimestamp();
+    // C's OWN restoredFromAssetId points to A (a sibling of B, NOT a child of B) — proving the resolver does not need correct ancestry metadata to find B; it just needs B to independently qualify as trustworthy on its own.
+    const C = await uploadCandidate(assets, projectId, job.id, "C-failed-newer-sibling", {
+      qrRestoration: { restoredFromAssetId: A.id, sourceAssetId: "src-1", planKey: "x", restoredCount: 1, placementValidated: false },
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: C.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.equal(trustworthy!.assetId, B.id, "must choose B, the successful older sibling — not A, and not C");
+  });
+
+  // --- Section J: historical compatibility ---
+
+  it("a historical resolution-only (non-QR-derived) asset lacking qrRestoration metadata is never invalidated merely for lacking placement evidence that was never relevant to it", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    // No qrRestoration key anywhere — a plain historical Topaz/worker candidate, exactly like the real project's own 2e8a45b7 asset shape.
+    const asset = await uploadCandidate(assets, projectId, job.id, "historical-topaz-only", {
+      rigidSign: { planKey: "x", providerKey: "topaz_transparency_upscale" },
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.ok(trustworthy, "a historical non-QR-derived asset must remain a valid repair parent");
+    assert.equal(trustworthy!.assetId, asset.id);
+  });
+
+  it("exhausted lineage (every candidate untrustworthy): fails closed to null, never guesses", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const onlyAsset = await uploadCandidate(assets, projectId, job.id, "only-bad", {
+      qrRestoration: { restoredFromAssetId: "nonexistent", sourceAssetId: "src-1", planKey: "x", restoredCount: 1, placementValidated: false },
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: onlyAsset.id,
+      status: "finalization_required",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.equal(trustworthy, null, "no trustworthy candidate exists — must fail closed, never fabricate one");
+  });
+});

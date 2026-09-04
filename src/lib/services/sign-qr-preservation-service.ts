@@ -119,13 +119,29 @@ interface CurrentSignCandidate {
   assetId: string;
 }
 
-/** The current candidate for the preparation's CURRENT plan — whichever of the two existing resolvers has one (ready, or blocked-awaiting-review). Neither existing resolver's own certified/blocked semantics are altered; this just tries both in order. */
+/**
+ * The current candidate to REPAIR — whichever of two resolvers has one
+ * (a certified-ready delivery, or the current TRUSTWORTHY repair parent).
+ * Neither existing resolver's own certified/trustworthy semantics are
+ * altered; this just tries both in order.
+ *
+ * SIGNS CANDIDATE AUTHORITY: deliberately `resolveTrustworthySignRepair
+ * Parent`, never `resolveBlockedSignProductionCandidate` — this function's
+ * ENTIRE purpose is selecting the base image a WRITE (a new QR
+ * correction) derives from, which is exactly the "repair parent" question,
+ * never the "what should an operator visually inspect" question
+ * `resolveBlockedSignProductionCandidate` answers. Using the wrong one
+ * here is precisely the real defect a genuine Get Hibachi repair attempt
+ * exposed: a QR replacement whose placement was visibly wrong became,
+ * being newest, the candidate the NEXT correction would have derived
+ * from.
+ */
 async function resolveCurrentSignCandidate(projectId: string): Promise<CurrentSignCandidate | null> {
   const graph = getCapabilityGraph();
   const ready = await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId);
   if (ready) return ready;
-  const blocked = await graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId);
-  if (blocked) return { job: blocked.job, assetId: blocked.assetId };
+  const trustworthy = await graph.finalArtwork.resolveTrustworthySignRepairParent(projectId);
+  if (trustworthy) return { job: trustworthy.job, assetId: trustworthy.assetId };
   return null;
 }
 
@@ -424,6 +440,21 @@ export async function restoreSignQrCode(projectId: string): Promise<SignQrRestor
         sourceAssetId: preparation.originalAssetId,
         planKey: preparation.planKey,
         restoredCount,
+        // SIGNS CANDIDATE AUTHORITY: durable proof this exact asset's QR
+        // content was placement-validated before ever being composited —
+        // every correction that reaches this point already passed
+        // `restoreQrInCandidate`'s own payload+location verification
+        // (source-verified fixes) and/or `localizeConfirmedDestination
+        // ReplacementRegion`'s replacement safety gate (confirmed-
+        // destination fixes, commit 444f431) — a correction that failed
+        // either check is never composited and therefore never reaches
+        // this upload at all. This is what lets
+        // `isAssetTrustworthyAsSignRepairParent` (final-artwork-
+        // capability.ts) recognize a FUTURE QR derivative as a trustworthy
+        // repair parent, and — just as importantly — recognize a
+        // HISTORICAL one created before this field existed as NOT
+        // trustworthy, without any project- or asset-specific logic.
+        placementValidated: true,
       },
     },
   });

@@ -320,6 +320,53 @@ export interface FinalArtworkCapability {
     projectId: string,
   ): Promise<BlockedSignProductionCandidate | null>;
   /**
+   * SIGNS CANDIDATE AUTHORITY: the TRUSTWORTHY-REPAIR-PARENT counterpart of
+   * `resolveBlockedSignProductionCandidate` above — a categorically
+   * different question from either delivery resolver. Real Signs
+   * acceptance incident: `resolveBlockedSignProductionCandidate`'s own
+   * "latest validation for the job wins" selection let a QR-replacement
+   * whose placement was visibly wrong (decoded correctly, composited over
+   * unrelated artwork) become, being newest, the candidate a SUBSEQUENT
+   * production correction would have derived from — silently building the
+   * next repair on top of already-damaged artwork.
+   *
+   * NEWER IS NOT AUTOMATICALLY AUTHORITATIVE. This resolver scans every
+   * `production_png` candidate under the project's current-plan job,
+   * newest first, and returns the FIRST one that is trustworthy as a
+   * repair parent — see `isAssetTrustworthyAsSignRepairParent`'s own doc
+   * for exactly what that means (in short: an asset the FULL governed
+   * worker pipeline produced is trustworthy unconditionally; a QR-
+   * restoration derivative is trustworthy only when its own durable
+   * metadata records that its specific placement was independently
+   * validated — commit 444f431's replacement safety gate). A derivative
+   * whose operation failed, was refused, or predates that evidence
+   * requirement is skipped, walking back to whichever earlier candidate
+   * (not necessarily its own immediate predecessor — a FAILED sibling
+   * derivative never disqualifies an EARLIER successful one) is actually
+   * trustworthy.
+   *
+   * Deliberately a SEPARATE resolver, never a replacement for
+   * `resolveBlockedSignProductionCandidate` — that resolver's own
+   * unconditional "latest, whatever it is" behavior remains correct and
+   * UNCHANGED for operator visual inspection of a failed attempt (an
+   * operator diagnosing what went wrong needs to see the actual failed
+   * attempt, not a safer ancestor) and is never used to select the base
+   * image for a subsequent WRITE.
+   *
+   * Trustworthiness here is deliberately independent of overall
+   * `ProductionAssetValidation.status` — an asset can be the correct
+   * repair parent for one operation (e.g. QR correction) while its own
+   * validation remains `finalization_required` for a wholly unrelated,
+   * independent production issue (e.g. a protected-content safe-inset
+   * violation on a different edge). Requiring every check to pass before
+   * an asset can be a repair parent would make iterative production
+   * repair impossible. Read-only: never creates, mutates, or deletes
+   * anything.
+   */
+  resolveTrustworthySignRepairParent(
+    projectId: string,
+  ): Promise<BlockedSignProductionCandidate | null>;
+  /**
    * Print'em All Phase 3 (V1 multi-variant package): the same job-resolution
    * logic `resolveCurrentMatchingProductionJob` uses, generalized to an
    * EXPLICIT treatment key instead of the project's current one — so a
@@ -820,6 +867,10 @@ export function createFinalArtworkCapability(
       return resolveBlockedSignProductionCandidateFor(repo, projectId);
     },
 
+    async resolveTrustworthySignRepairParent(projectId) {
+      return resolveTrustworthySignRepairParentFor(repo, projectId);
+    },
+
     async resolveProductionVariantState(projectId, treatmentKey) {
       const nothing: ProductionVariantJobState = {
         job: null,
@@ -1144,6 +1195,104 @@ async function resolveBlockedSignProductionCandidateFor(
   if (!asset) return null;
 
   return { job, assetId: asset.id, validationId: validation.id, validationStatus: validation.status };
+}
+
+/**
+ * SIGNS CANDIDATE AUTHORITY: whether `asset` is trustworthy as the PARENT
+ * for a subsequent production correction — a different question from
+ * overall Print Ready (Section C of that phase: a candidate can be the
+ * correct repair parent while its OWN validation is `finalization_
+ * required` for an unrelated, independent reason — the RIGHT-edge
+ * protected-content failure never disqualifies a candidate as the QR
+ * repair's parent).
+ *
+ * Authority is OPERATION-AWARE, not a blanket check-count requirement
+ * (Section L): every asset the FULL GOVERNED WORKER PIPELINE produces
+ * (`metadata.rigidSign` present) is trustworthy unconditionally — that
+ * pipeline's own existing, independently-audited invariants
+ * (`executed_plan_matches_recorded_plan`, `repair_plan_recorded`, source
+ * lineage, etc.) already prove it, and this function adds no additional
+ * requirement for that asset kind. A QR-restoration derivative
+ * (`metadata.qrRestoration` present — created OUTSIDE the worker pipeline
+ * by `sign-qr-preservation-service.ts`, by design never baked into a
+ * plan) is trustworthy only when its own metadata records
+ * `placementValidated: true` — durable proof its specific compositing
+ * operation passed the replacement safety gate (`qr-restore.ts`, commit
+ * 444f431: source localization confidence, candidate-pixel corroboration,
+ * and a redecoded-location cross-check). A derivative created before that
+ * gate existed carries no such field and is therefore, correctly and
+ * automatically, NOT trusted — no asset-id check, no project-specific
+ * logic, just the honest absence of evidence that operation was never
+ * required to record before.
+ *
+ * Scoped deliberately: an asset kind this function has never heard of
+ * (neither `rigidSign` nor `qrRestoration` metadata) is trusted by
+ * default — Section J's own explicit historical-compatibility rule, so a
+ * future derivative operation this function doesn't yet recognize is
+ * never silently invalidated either.
+ */
+function isAssetTrustworthyAsSignRepairParent(asset: AssetRecord): boolean {
+  const qrRestoration = asset.metadata?.qrRestoration as Record<string, unknown> | undefined;
+  if (!qrRestoration) return true;
+  return qrRestoration.placementValidated === true;
+}
+
+/**
+ * SIGNS CANDIDATE AUTHORITY: the trustworthy-repair-parent counterpart of
+ * `resolveBlockedSignProductionCandidateFor` above — see `FinalArtwork
+ * Capability.resolveTrustworthySignRepairParent`'s own doc for the full
+ * rationale. Same current-plan job resolution and same "anything other
+ * than ready" blocked-scoping as that resolver, but instead of trusting
+ * whichever asset the job's single latest validation happens to name, it
+ * scans every `production_png` candidate under the job — newest first —
+ * and returns the first one `isAssetTrustworthyAsSignRepairParent` deems
+ * trustworthy.
+ *
+ * This deliberately does NOT simply walk one asset's own `restoredFrom
+ * AssetId` chain: Section O's branching-lineage requirement (a FAILED
+ * sibling derivative, even if chronologically newer, must never hide an
+ * EARLIER successful one that shares the same parent) is what a plain
+ * candidate-by-candidate, newest-first scan gets right for free — no
+ * asset needs to know or reconstruct the full shape of the lineage graph,
+ * each just answers "am I, myself, trustworthy?" and the newest one that
+ * says yes wins.
+ */
+async function resolveTrustworthySignRepairParentFor(
+  repo: ProjectRepository,
+  projectId: string,
+): Promise<BlockedSignProductionCandidate | null> {
+  const preparation = await repo.getSignPreparation(projectId);
+  if (!preparation || preparation.projectId !== projectId) return null;
+  if (preparation.status !== "planned" || !preparation.planKey) return null;
+
+  const jobs = await repo.listFinalArtworkJobsForSignPreparation(
+    projectId,
+    preparation.id,
+  );
+  const job = jobs.find((candidate) => candidate.signPlanKey === preparation.planKey);
+  if (!job || job.status !== "completed") return null;
+
+  const validation = await repo.getLatestProductionAssetValidationForJob(
+    projectId,
+    job.id,
+  );
+  if (!validation || validation.status === "ready") return null;
+
+  const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
+  const candidates = jobAssets
+    .filter(
+      (candidate) =>
+        candidate.projectId === projectId &&
+        candidate.finalArtworkJobId === job.id &&
+        candidate.productionRole === "production_png" &&
+        !isReconstructionIntermediateAsset(candidate),
+    )
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const trustworthy = candidates.find(isAssetTrustworthyAsSignRepairParent);
+  if (!trustworthy) return null;
+
+  return { job, assetId: trustworthy.id, validationId: validation.id, validationStatus: validation.status };
 }
 
 /**

@@ -484,8 +484,13 @@ async function resolveCurrentCandidateImage(projectId: string): Promise<{
   existingClassifications: SignEdgeIntentClassification[];
 } | null> {
   const graph = getCapabilityGraph();
+  // SIGNS CANDIDATE AUTHORITY: this correction (Smart Remove / edge-intent
+  // classification) is a WRITE deriving from whichever candidate is
+  // returned — the trustworthy-repair-parent question, never "what should
+  // an operator merely look at" (`resolveBlockedSignProductionCandidate`,
+  // deliberately left alone for that separate purpose).
   const [candidate, preparation] = await Promise.all([
-    graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId),
+    graph.finalArtwork.resolveTrustworthySignRepairParent(projectId),
     graph.signPreparation.getSignPreparation(projectId),
   ]);
   if (!candidate) return null;
