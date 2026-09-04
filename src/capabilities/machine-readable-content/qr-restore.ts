@@ -22,8 +22,8 @@
 
 import QRCode from "qrcode";
 
-import type { MachineReadableRegionBounds } from "./contracts";
-import { decodeQrCodes, type RgbaImage } from "./qr-detect-decode";
+import type { MachineReadableRegionBounds, QrLocalizationConfidence } from "./contracts";
+import { decodeQrCodes, scanForQrFinderPatternsInWindow, type RgbaImage } from "./qr-detect-decode";
 
 /**
  * Recommended by the QR spec (ISO/IEC 18004 §5.3): at least 4 modules of
@@ -167,6 +167,145 @@ export function mapSourceRegionToProportionalCandidateRegion(
   };
 }
 
+/**
+ * Intersection-over-union of two bounding boxes. Both inputs here are
+ * independent ESTIMATES of the same physical QR (a source-mapped guess and
+ * a candidate-detected measurement), never pixel-exact — so this is a
+ * "clearly the same object" check, not a precision comparison.
+ */
+function regionsSubstantiallyOverlap(a: MachineReadableRegionBounds, b: MachineReadableRegionBounds): boolean {
+  const ix0 = Math.max(a.xPx, b.xPx);
+  const iy0 = Math.max(a.yPx, b.yPx);
+  const ix1 = Math.min(a.xPx + a.widthPx, b.xPx + b.widthPx);
+  const iy1 = Math.min(a.yPx + a.heightPx, b.yPx + b.heightPx);
+  const iw = Math.max(0, ix1 - ix0);
+  const ih = Math.max(0, iy1 - iy0);
+  const intersection = iw * ih;
+  if (intersection <= 0) return false;
+  const union = a.widthPx * a.heightPx + b.widthPx * b.heightPx - intersection;
+  return union > 0 && intersection / union >= MIN_REGION_OVERLAP_IOU;
+}
+
+/** See `regionsSubstantiallyOverlap`'s own doc — deliberately lenient (both boxes are independent estimates, not exact measurements of the same thing), but far above what two UNRELATED regions (e.g. the QR vs. a "FOLLOW US" text block sitting beside it) would ever produce. */
+const MIN_REGION_OVERLAP_IOU = 0.15;
+
+/** How far beyond the source-mapped region's own size to search the candidate for independent corroboration — generous enough to absorb the mapped region's own margin imprecision, bounded enough to never reach a genuinely separate, well-spaced second QR (Section I). */
+const CANDIDATE_WINDOW_PADDING_FACTOR = 1.5;
+
+export type ReplacementLocalizationFailureReason =
+  | "region_mapping_not_trustworthy"
+  | "source_localization_low_confidence"
+  | "mapped_region_not_square"
+  | "candidate_localization_missing"
+  | "candidate_localization_disagrees";
+
+export interface LocalizedReplacementRegion {
+  ok: true;
+  /**
+   * The validated CANDIDATE-space region to actually composite into —
+   * the CANDIDATE's OWN independently-detected bounds, not the naive
+   * source-mapped estimate (Section G: "the artifact being modified
+   * should participate in proving the modification region").
+   */
+  region: MachineReadableRegionBounds;
+}
+
+export interface LocalizedReplacementRegionFailure {
+  ok: false;
+  reason: ReplacementLocalizationFailureReason;
+}
+
+/**
+ * QR REPAIR V2 — THE REPLACEMENT SAFETY GATE.
+ *
+ * Detection (proving Print Ready must stay blocked) is deliberately
+ * permissive — even weak, 2-of-3-corner evidence is enough to correctly
+ * flag "something QR-shaped is here, needs attention." Automatic
+ * REPLACEMENT — writing new pixels over a customer's real production
+ * artwork — is a categorically higher bar, enforced here, and here only,
+ * for the confirmed-destination correction path (the only path whose
+ * source bounds come from the heuristic finder-pattern scanner rather
+ * than a `decodeQrCodes` precise location).
+ *
+ * A CONFIRMED DESTINATION IS NOT THE SAME THING AS A CONFIRMED PLACEMENT
+ * (Section J) — this function is what keeps those two authorities
+ * separate: it refuses (fails closed) unless ALL of:
+ *
+ *   1. the source-side detection itself reported `"high"` localization
+ *      confidence (see `QrLocalizationConfidence`'s own doc) — a `"low"`
+ *      confidence region NEVER reaches replacement, no matter what has
+ *      been confirmed against it.
+ *   2. the naive proportional source->candidate mapping succeeds (same
+ *      transform-trustworthiness rule `mapSourceRegionToProportional
+ *      CandidateRegion` already enforced) AND the mapped region is itself
+ *      approximately square.
+ *   3. an INDEPENDENT scan of the CANDIDATE's own pixels — restricted to
+ *      a padded window around the mapped region, NEVER the whole canvas,
+ *      so a genuinely separate second QR elsewhere can never be
+ *      mistaken for confirmation (Section I) — finds EXACTLY ONE
+ *      high-confidence QR-shaped cluster.
+ *   4. that candidate-detected region substantially overlaps the mapped
+ *      region (Section G: source evidence and candidate evidence must be
+ *      RECONCILED, not merely both exist somewhere).
+ *
+ * On success, returns the CANDIDATE's own detected bounds — the artifact
+ * actually being modified is what determines where it gets modified.
+ */
+export function localizeConfirmedDestinationReplacementRegion(input: {
+  sourceBounds: MachineReadableRegionBounds;
+  sourceLocalizationConfidence: QrLocalizationConfidence;
+  sourceImageWidthPx: number;
+  sourceImageHeightPx: number;
+  candidate: RgbaImage;
+}): LocalizedReplacementRegion | LocalizedReplacementRegionFailure {
+  if (input.sourceLocalizationConfidence !== "high") {
+    return { ok: false, reason: "source_localization_low_confidence" };
+  }
+
+  const mapped = mapSourceRegionToProportionalCandidateRegion(
+    input.sourceBounds,
+    input.sourceImageWidthPx,
+    input.sourceImageHeightPx,
+    input.candidate.width,
+    input.candidate.height,
+  );
+  if (!mapped) return { ok: false, reason: "region_mapping_not_trustworthy" };
+
+  const mappedAspect = Math.max(mapped.widthPx, mapped.heightPx) / Math.max(1, Math.min(mapped.widthPx, mapped.heightPx));
+  if (mapped.widthPx <= 0 || mapped.heightPx <= 0 || mappedAspect > 1.35) {
+    return { ok: false, reason: "mapped_region_not_square" };
+  }
+
+  const padX = Math.round(mapped.widthPx * CANDIDATE_WINDOW_PADDING_FACTOR);
+  const padY = Math.round(mapped.heightPx * CANDIDATE_WINDOW_PADDING_FACTOR);
+  const window: MachineReadableRegionBounds = {
+    xPx: mapped.xPx - padX,
+    yPx: mapped.yPx - padY,
+    widthPx: mapped.widthPx + padX * 2,
+    heightPx: mapped.heightPx + padY * 2,
+  };
+
+  const candidateFound = scanForQrFinderPatternsInWindow(input.candidate, window).filter(
+    (r) => r.localizationConfidence === "high",
+  );
+  if (candidateFound.length === 0) {
+    return { ok: false, reason: "candidate_localization_missing" };
+  }
+  if (candidateFound.length > 1) {
+    // More than one independently-confident cluster in the search window —
+    // never guess which one corresponds to the source region being
+    // corrected (Section I).
+    return { ok: false, reason: "candidate_localization_disagrees" };
+  }
+
+  const candidateRegion = candidateFound[0].bounds;
+  if (!regionsSubstantiallyOverlap(mapped, candidateRegion)) {
+    return { ok: false, reason: "candidate_localization_disagrees" };
+  }
+
+  return { ok: true, region: candidateRegion };
+}
+
 export interface QrRestorationResult {
   ok: true;
   /** The composited working buffer — same dimensions as the input candidate, only the QR region's pixels differ. */
@@ -178,17 +317,26 @@ export interface QrRestorationFailure {
   ok: false;
   reason:
     | "region_mapping_not_trustworthy"
-    | "verification_failed_after_composite";
+    | "verification_failed_after_composite"
+    | "decoded_location_outside_region";
 }
 
 /**
  * The full deterministic restoration: maps the source region into
- * candidate coordinates, generates a crisp QR from `verifiedPayload`,
- * composites it, and — Section Q's own explicit requirement — DECODES THE
- * ACTUAL COMPOSITED PIXELS before ever reporting success. A generator
- * that ran without error is not proof of anything; only a fresh decode of
- * the literal bytes this function is about to hand back, matching
- * `verifiedPayload` exactly, is.
+ * candidate coordinates (or uses `regionOverride` directly when the
+ * caller has already independently validated one — see
+ * `localizeConfirmedDestinationReplacementRegion`), generates a crisp QR
+ * from `verifiedPayload`, composites it, and — Section Q's own explicit
+ * requirement — DECODES THE ACTUAL COMPOSITED PIXELS before ever
+ * reporting success. A generator that ran without error is not proof of
+ * anything; only a fresh decode of the literal bytes this function is
+ * about to hand back is.
+ *
+ * QR REPAIR V2 (Section M/P): decoding the right PAYLOAD somewhere in the
+ * image is not, by itself, proof placement was correct — this function
+ * additionally requires the redecoded QR's OWN location (jsQR's precise
+ * corners) to substantially overlap the region actually composited into.
+ * A decodable QR in the wrong place must never report success.
  */
 export function restoreQrInCandidate(input: {
   candidate: RgbaImage;
@@ -196,27 +344,42 @@ export function restoreQrInCandidate(input: {
   sourceImageWidthPx: number;
   sourceImageHeightPx: number;
   verifiedPayload: string;
+  /** When provided, composite into this CANDIDATE-space region directly instead of computing one via `mapSourceRegionToProportionalCandidateRegion` — used by the confirmed-destination path once its own safety gate has independently validated a region against the candidate's own pixels. */
+  regionOverride?: MachineReadableRegionBounds;
 }): QrRestorationResult | QrRestorationFailure {
-  const region = mapSourceRegionToProportionalCandidateRegion(
-    input.sourceBounds,
-    input.sourceImageWidthPx,
-    input.sourceImageHeightPx,
-    input.candidate.width,
-    input.candidate.height,
-  );
+  const region =
+    input.regionOverride ??
+    mapSourceRegionToProportionalCandidateRegion(
+      input.sourceBounds,
+      input.sourceImageWidthPx,
+      input.sourceImageHeightPx,
+      input.candidate.width,
+      input.candidate.height,
+    );
   if (!region) return { ok: false, reason: "region_mapping_not_trustworthy" };
 
   const raster = generateReplacementQrRaster(input.verifiedPayload, region.widthPx, region.heightPx);
   const working = Buffer.from(input.candidate.data);
   compositeQrRaster(working, input.candidate.width, input.candidate.height, region, raster);
 
-  const [redecoded] = decodeQrCodes({
+  // Section I: the candidate may legitimately already contain OTHER real,
+  // decodable QR codes (a different instance's own already-composited
+  // replacement, or an unrelated pre-existing valid QR elsewhere on the
+  // sign) — searching for the ONE decoded result matching this specific
+  // `verifiedPayload`, rather than trusting whichever `decodeQrCodes`
+  // happens to report first, is what keeps multiple simultaneous QR
+  // corrections independent of each other.
+  const allDecoded = decodeQrCodes({
     width: input.candidate.width,
     height: input.candidate.height,
     data: working,
   });
-  if (!redecoded || redecoded.payload !== input.verifiedPayload) {
+  const redecoded = allDecoded.find((d) => d.payload === input.verifiedPayload);
+  if (!redecoded) {
     return { ok: false, reason: "verification_failed_after_composite" };
+  }
+  if (!regionsSubstantiallyOverlap(region, redecoded.bounds)) {
+    return { ok: false, reason: "decoded_location_outside_region" };
   }
 
   return { ok: true, data: working, region };
@@ -227,8 +390,11 @@ export interface RestoreAllResult {
   changed: boolean;
   data: Buffer;
   restoredCount: number;
-  /** Source instances that decoded but could NOT be restored (region mapping untrustworthy, or the composited result failed re-verification) — fail-closed, never silently skipped without being reported. */
-  unresolved: { sourceBounds: MachineReadableRegionBounds; reason: QrRestorationFailure["reason"] }[];
+  /** Source instances that decoded but could NOT be restored (region mapping untrustworthy, the composited result failed re-verification, or — confirmed-destination corrections only — the replacement safety gate refused an untrustworthy region) — fail-closed, never silently skipped without being reported. */
+  unresolved: {
+    sourceBounds: MachineReadableRegionBounds;
+    reason: QrRestorationFailure["reason"] | ReplacementLocalizationFailureReason;
+  }[];
 }
 
 /**
@@ -287,31 +453,57 @@ export function restoreAllFixableQrInstances(input: {
  * be decoded, but whose intended payload a customer/operator has explicitly
  * confirmed (Section J: "confirmed_by_user" is a DIFFERENT authority than
  * a decoded source payload, never silently merged with it). Composites each
- * given `payload` at its own `sourceBounds`' proportionally-mapped region,
- * sequentially into one working buffer, exactly like
+ * given `payload` sequentially into one working buffer, exactly like
  * `restoreAllFixableQrInstances`'s own loop — the only difference is WHERE
  * the payload comes from (an explicit caller-supplied value here, a
  * source decode there). Never decodes the source itself — the caller
  * (`sign-qr-preservation-service.ts`) is the one place that already knows
  * which instances have a governing `confirmed_destination` resolution.
+ *
+ * QR REPAIR V2: unlike `restoreAllFixableQrInstances` (whose `sourceBounds`
+ * come from a precise `decodeQrCodes` location), a `confirmed_destination`
+ * correction's `sourceBounds` come from the heuristic finder-pattern
+ * scanner — so EVERY correction is first run through
+ * `localizeConfirmedDestinationReplacementRegion` (Section J: "CONFIRMED
+ * PAYLOAD DOES NOT EQUAL CONFIRMED PLACEMENT"). A correction whose region
+ * cannot be independently validated is reported in `unresolved` with the
+ * gate's own specific reason and is NEVER composited — no pixels are
+ * touched for it at all.
  */
 export function restoreFromConfirmedDestinations(input: {
   candidate: RgbaImage;
   sourceImageWidthPx: number;
   sourceImageHeightPx: number;
-  corrections: { sourceBounds: MachineReadableRegionBounds; payload: string }[];
+  corrections: {
+    sourceBounds: MachineReadableRegionBounds;
+    sourceLocalizationConfidence: QrLocalizationConfidence;
+    payload: string;
+  }[];
 }): RestoreAllResult {
   let working: RgbaImage = input.candidate;
   let restoredCount = 0;
   const unresolved: RestoreAllResult["unresolved"] = [];
 
   for (const correction of input.corrections) {
+    const localized = localizeConfirmedDestinationReplacementRegion({
+      sourceBounds: correction.sourceBounds,
+      sourceLocalizationConfidence: correction.sourceLocalizationConfidence,
+      sourceImageWidthPx: input.sourceImageWidthPx,
+      sourceImageHeightPx: input.sourceImageHeightPx,
+      candidate: working,
+    });
+    if (!localized.ok) {
+      unresolved.push({ sourceBounds: correction.sourceBounds, reason: localized.reason });
+      continue;
+    }
+
     const result = restoreQrInCandidate({
       candidate: working,
       sourceBounds: correction.sourceBounds,
       sourceImageWidthPx: input.sourceImageWidthPx,
       sourceImageHeightPx: input.sourceImageHeightPx,
       verifiedPayload: correction.payload,
+      regionOverride: localized.region,
     });
 
     if (!result.ok) {

@@ -52,6 +52,36 @@ export interface DecodedMachineReadableRegion {
 }
 
 /**
+ * QR REPAIR V2 (region localization safety): whether a detected-but-
+ * undecoded region's OWN bounds are trustworthy enough to drive automatic
+ * pixel replacement, as distinct from merely being enough to prove
+ * "something QR-shaped is here" (which blocking Print Ready only ever
+ * needs — see Section M of the QR Repair V2 task).
+ *
+ *   `"high"` — built from at least 3 independently-confirmed finder-
+ *     pattern clusters (a real QR has exactly 3 corners) AND the resulting
+ *     bounding box is approximately square, the way every real QR symbol
+ *     is. Two real corners plus a genuinely uncertain guess at the third
+ *     region shape is NOT enough to trust for placement.
+ *   `"low"` — built from only 2 confirmed clusters (the detector's own
+ *     minimum to report anything at all — see `MIN_CLUSTERS`), or the
+ *     resulting box is not square. With only 2 of 3 true corners, the
+ *     bounding box is mathematically an under-estimate on whichever axis
+ *     the missing corner would have constrained — this is EXACTLY the
+ *     real defect a genuine Get Hibachi repair exposed (a 2:1,
+ *     406x203px box from a real QR that should have been ~squarish).
+ *
+ * Detection (proving Print Ready must stay blocked) remains correct and
+ * useful at EITHER confidence level — a `"low"`-confidence region is still
+ * real evidence that something undecodable is there. Automatic
+ * REPLACEMENT is a categorically higher bar and must refuse a `"low"`
+ * region outright (see `qr-restore.ts`'s replacement safety gate) —
+ * detection and replacement confidence are deliberately different
+ * concepts, never conflated.
+ */
+export type QrLocalizationConfidence = "high" | "low";
+
+/**
  * A region that LOOKS machine-readable (matched the deterministic
  * finder-pattern signature — see `qr-detect-decode.ts`'s
  * `scanForQrFinderPatterns`) but did not successfully decode. This is the
@@ -62,6 +92,8 @@ export interface DecodedMachineReadableRegion {
 export interface UndecodedMachineReadableRegion {
   kind: MachineReadableRegionKind;
   bounds: MachineReadableRegionBounds;
+  /** See `QrLocalizationConfidence`'s own doc. */
+  localizationConfidence: QrLocalizationConfidence;
 }
 
 /**
@@ -162,6 +194,18 @@ export interface MachineReadablePreservationInstance {
   result: MachineReadablePreservationCase;
   /** See `MachineReadablePreservationProvenance`'s own doc. `null` unless `result` is `"pass"` or `"accepted_as_supplied"`. */
   provenance: MachineReadablePreservationProvenance;
+  /**
+   * QR REPAIR V2: `null` when `sourceDecodable` is `true` (a DECODED
+   * source's bounds come from `jsQR`'s own precise located corners, a
+   * fundamentally different and more trustworthy kind of evidence this
+   * concept does not apply to) or when `sourceBounds` is `null`. Otherwise
+   * `QrLocalizationConfidence` from `scanForQrFinderPatterns` — see that
+   * type's own doc. Carried through so the replacement safety gate
+   * (`qr-restore.ts`) can refuse a `"low"`-confidence region even after it
+   * has been matched to a durable `confirmed_destination` resolution
+   * (Section J: "CONFIRMED PAYLOAD DOES NOT EQUAL CONFIRMED PLACEMENT").
+   */
+  sourceLocalizationConfidence: QrLocalizationConfidence | null;
   /**
    * Deterministic, reproducible identity for this SOURCE region within its
    * one immutable source image — a digest of the region's own rounded

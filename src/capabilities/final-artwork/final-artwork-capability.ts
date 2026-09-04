@@ -1093,6 +1093,23 @@ async function resolveSatisfiedSignProductionDelivery(
  * `"ready"`. A completed job with NO validation at all (a
  * `completeWithoutAsset` determination — nothing was ever produced) has
  * no candidate to show and correctly resolves `null` here too.
+ *
+ * QR REPAIR V2 AUDIT NOTE: this "latest validation for the job wins"
+ * selection is only as trustworthy as every writer of a `Production
+ * AssetValidation`. A real defect once let `sign-qr-preservation-
+ * service.ts`'s confirmed-destination correction path persist a NEW
+ * validation for a candidate whose QR replacement was visibly
+ * mispositioned (decoded correctly, placed wrong) — which, being the
+ * newest, this function would then have preferred over its own safer
+ * parent. That specific defect is now closed at its source (the
+ * replacement safety gate in `qr-restore.ts` refuses to composite, and
+ * therefore never persists a new asset/validation, when a region cannot
+ * be independently validated against the candidate's own pixels) — but
+ * this function's own "latest wins" selection remains correct only
+ * because every writer is now trusted to never persist a worse candidate
+ * as though it were newer/better. If a future writer breaks that
+ * invariant again, this function will silently prefer its output exactly
+ * the same way.
  */
 async function resolveBlockedSignProductionCandidateFor(
   repo: ProjectRepository,

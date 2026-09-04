@@ -35,6 +35,7 @@ import jsQR from "jsqr";
 import type {
   DecodedMachineReadableRegion,
   MachineReadableRegionBounds,
+  QrLocalizationConfidence,
   UndecodedMachineReadableRegion,
 } from "./contracts";
 
@@ -224,8 +225,41 @@ const MIN_CLUSTER_HITS = 4;
  * square-ish region in ordinary artwork is unremarkable; two independent
  * ones in a consistent relative arrangement essentially never occur by
  * chance.
+ *
+ * This is the DETECTION floor only — "enough evidence to say something
+ * QR-shaped is here, so Print Ready must stay blocked until a human
+ * resolves it." It is deliberately NOT enough evidence to trust for
+ * automatic pixel REPLACEMENT — see `QR_HIGH_CONFIDENCE_MIN_CLUSTERS` and
+ * `QrLocalizationConfidence`'s own doc in `contracts.ts` for why 2 of 3
+ * corners cannot safely determine a placement region.
  */
 const MIN_CLUSTERS = 2;
+
+/**
+ * QR REPAIR V2: the localization-confidence floor. With all 3 real finder
+ * patterns independently confirmed, the bounding box spans genuine
+ * evidence on every side and is trustworthy for automatic replacement
+ * (subject to the additional square-aspect check below). With only 2, one
+ * axis of the box is unconstrained by real evidence — see
+ * `QrLocalizationConfidence`'s own doc.
+ */
+const QR_HIGH_CONFIDENCE_MIN_CLUSTERS = 3;
+
+/**
+ * A genuine QR symbol is always exactly square. Even with 3 confirmed
+ * clusters, noisy centroids could in principle still yield a skewed box;
+ * this is a cheap, independent sanity check on the box's own shape,
+ * applied regardless of cluster count. Generous enough to tolerate the
+ * centroid/margin estimate's own imprecision, but a 2:1 box (the real
+ * Get Hibachi failure) fails it by a wide margin.
+ */
+const SQUARE_ASPECT_TOLERANCE = 0.35;
+
+function isApproximatelySquare(bounds: MachineReadableRegionBounds): boolean {
+  if (bounds.widthPx <= 0 || bounds.heightPx <= 0) return false;
+  const ratio = Math.max(bounds.widthPx, bounds.heightPx) / Math.min(bounds.widthPx, bounds.heightPx);
+  return ratio <= 1 + SQUARE_ASPECT_TOLERANCE;
+}
 
 /**
  * Scans one binarized scanline (a row or a column, caller's choice — this
@@ -280,9 +314,21 @@ function scanLineForFinderSignature(
  * QR locator uses to reject stray 1D-only matches), clusters nearby hits
  * into distinct finder-pattern candidates, and returns a bounding box
  * enclosing however many were found — 0 candidates means "no QR-shaped
- * structure detected at all" (CASE 5 evidence); 1 or 2 (a real QR has
- * exactly 3, but occlusion/blur can easily cost one or two) means
- * "something is here" (CASE 2 evidence when decoding failed).
+ * structure detected at all" (CASE 5 evidence); 2 (a real QR has exactly
+ * 3, but occlusion/blur can easily cost one) means "something is here"
+ * (CASE 2 evidence when decoding failed).
+ *
+ * QR REPAIR V2: the returned bounds are ALWAYS enough for detection (CASE
+ * 2 vs CASE 5), but are only sometimes enough to trust for automatic
+ * pixel REPLACEMENT — see the returned `localizationConfidence` and
+ * `QrLocalizationConfidence`'s own doc in `contracts.ts`. With only 2 of
+ * the 3 true corners confirmed, the box is a genuine UNDER-estimate on
+ * whichever axis the missing corner would have constrained (this is
+ * exactly the real defect a genuine repair attempt exposed — a 2:1 box
+ * from a real, roughly-square QR) — `qr-restore.ts`'s replacement safety
+ * gate refuses to composite from a `"low"`-confidence region for exactly
+ * this reason, regardless of any confirmed destination recorded against
+ * it.
  *
  * Deliberately samples on a coarse row/column stride for bounded runtime
  * on a large candidate image (thousands of pixels per axis) — the
@@ -352,10 +398,14 @@ export function scanForQrFinderPatterns(
   // A QR's overall symbol extent runs from the outer edge of one corner
   // finder pattern to the outer edge of the opposite one, roughly 7
   // modules beyond each detected center. With fewer than 3 centroids the
-  // true opposite corner is unknown, so the box is only ever an ESTIMATE
-  // (evidence for "something is here", never used for pixel-exact
-  // placement — see `qr-preservation.ts`'s own doc on why automatic
-  // restoration requires a `decodeQrCodes` location, never this one).
+  // true opposite corner is unknown, so the box is only ever an ESTIMATE —
+  // always sufficient evidence for "something is here" (CASE 2), but only
+  // trustworthy for automatic pixel placement when `localizationConfidence`
+  // is `"high"` (3 centroids AND an approximately square result) — see
+  // that field's own doc and `qr-restore.ts`'s replacement safety gate,
+  // which is the one place a `"low"`-confidence region is refused for
+  // replacement regardless of any confirmed destination recorded against
+  // it.
   const margin =
     (centroids.reduce((sum, c) => sum + c.moduleWidthPx, 0) / centroids.length) * 8;
   const minX = Math.max(0, Math.min(...centroids.map((c) => c.x)) - margin);
@@ -369,5 +419,51 @@ export function scanForQrFinderPatterns(
     widthPx: Math.round(maxX - minX),
     heightPx: Math.round(maxY - minY),
   };
-  return [{ kind: "qr", bounds }];
+  const localizationConfidence: QrLocalizationConfidence =
+    strongClusters.length >= QR_HIGH_CONFIDENCE_MIN_CLUSTERS && isApproximatelySquare(bounds) ? "high" : "low";
+  return [{ kind: "qr", bounds, localizationConfidence }];
+}
+
+/**
+ * QR REPAIR V2: `scanForQrFinderPatterns`, restricted to a padded search
+ * window and reported back in the ORIGINAL (uncropped) image's coordinate
+ * space. Used by the replacement safety gate (`qr-restore.ts`) to
+ * independently corroborate a source-mapped candidate region against the
+ * CANDIDATE's own pixels — restricted to a window (never the whole
+ * canvas) specifically so a large candidate with a SECOND, unrelated
+ * QR-like region elsewhere can never be accidentally picked up as
+ * "confirming" a completely different region (Section I: multiple QR
+ * codes must remain independently localized, never unioned).
+ */
+export function scanForQrFinderPatternsInWindow(
+  image: RgbaImage,
+  window: MachineReadableRegionBounds,
+  options?: { stride?: number; binarizeThreshold?: number },
+): UndecodedMachineReadableRegion[] {
+  const x0 = Math.max(0, Math.floor(window.xPx));
+  const y0 = Math.max(0, Math.floor(window.yPx));
+  const x1 = Math.min(image.width, Math.ceil(window.xPx + window.widthPx));
+  const y1 = Math.min(image.height, Math.ceil(window.yPx + window.heightPx));
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w <= 0 || h <= 0) return [];
+
+  const cropped = Buffer.alloc(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const srcStart = ((y0 + y) * image.width + x0) * 4;
+    const destStart = y * w * 4;
+    image.data.copy(cropped, destStart, srcStart, srcStart + w * 4);
+  }
+
+  const found = scanForQrFinderPatterns({ width: w, height: h, data: cropped }, options);
+  return found.map((region) => ({
+    kind: region.kind,
+    bounds: {
+      xPx: region.bounds.xPx + x0,
+      yPx: region.bounds.yPx + y0,
+      widthPx: region.bounds.widthPx,
+      heightPx: region.bounds.heightPx,
+    },
+    localizationConfidence: region.localizationConfidence,
+  }));
 }

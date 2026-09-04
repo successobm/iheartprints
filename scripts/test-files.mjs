@@ -373,6 +373,10 @@ export const TEST_FILES = [
   // acceptSignQrPrintAsSupplied service-layer integration, run against a
   // real local-store sign pipeline (no live-DB migration dependency).
   "src/lib/services/sign-qr-preservation-service.test.ts",
+  // QR REPAIR V2: actor provenance for confirmSignQrDestination is entirely
+  // server-derived per route — proves customer/internal routes each stamp
+  // their own actor and a client-submitted confirmedBy is never trusted.
+  "src/app/api/projects/[projectId]/sign-artwork/qr-destination/route.test.ts",
   // Edge-Intent Correction Phase: governed classification record decode/
   // encode/re-validation against current candidate/plan identity.
   "src/capabilities/sign-preparation/sign-edge-intent-classification.test.ts",

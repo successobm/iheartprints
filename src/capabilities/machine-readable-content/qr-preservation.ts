@@ -174,6 +174,7 @@ export function compareMachineReadableContent(
       result: "review_required",
       provenance: null,
       regionKey: deriveRegionKey(undecoded.bounds),
+      sourceLocalizationConfidence: undecoded.localizationConfidence,
     });
   }
 
@@ -203,5 +204,9 @@ function buildInstance(
     // (a confirmed destination, applied downstream of this function).
     provenance: result === "pass" ? "verified_from_source_qr" : null,
     regionKey: deriveRegionKey(source.bounds),
+    // A DECODED source's bounds come from jsQR's own precise located
+    // corners — a fundamentally different, more trustworthy kind of
+    // evidence the low/high confidence concept doesn't apply to.
+    sourceLocalizationConfidence: null,
   };
 }

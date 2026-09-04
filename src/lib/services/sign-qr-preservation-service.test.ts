@@ -113,6 +113,72 @@ describe("sign-qr-preservation-service: SIGNS QR DESTINATION RESOLUTION", () => 
     return { image, qrBoundsPx: { xPx: atX, yPx: atY, widthPx: damagedQr.width, heightPx: damagedQr.height } };
   }
 
+  /**
+   * QR REPAIR V2: erases the ENTIRE top-right quadrant of a real QR raster
+   * — destroying that corner's finder pattern outright — leaving only 2 of
+   * the 3 real finder patterns detectable. This is the real-world shape of
+   * the actual Get Hibachi defect: with only 2 confirmed corners, the
+   * detector's own bounding-box estimate is a genuine UNDER-estimate on
+   * one axis, never trustworthy for automatic placement (`"low"`
+   * localization confidence) — even though it is still perfectly good
+   * evidence that "something QR-shaped is here" for detection/blocking
+   * purposes.
+   */
+  async function synthesizePoorlyLocalizedQr(payload: string, sizePx: number): Promise<RgbaImage> {
+    const buf = await QRCode.toBuffer(payload, { errorCorrectionLevel: "H", margin: 4, width: sizePx });
+    const png = PNG.sync.read(buf);
+    const halfW = Math.floor(png.width / 2);
+    const halfH = Math.floor(png.height / 2);
+    for (let y = 0; y < halfH; y++) {
+      for (let x = halfW; x < png.width; x++) {
+        const i = (y * png.width + x) * 4;
+        png.data[i] = 255;
+        png.data[i + 1] = 255;
+        png.data[i + 2] = 255;
+      }
+    }
+    return { width: png.width, height: png.height, data: Buffer.from(png.data) };
+  }
+
+  async function signWithPoorlyLocalizedQr(payload: string): Promise<{ image: RgbaImage }> {
+    const image = makeImage(600, 900, { r: 250, g: 250, b: 250 });
+    fillRect(image, 20, 20, 580, 100, { r: 30, g: 30, b: 30 });
+    const badQr = await synthesizePoorlyLocalizedQr(payload, 150);
+    paste(image, badQr, 400, 700);
+    return { image };
+  }
+
+  async function projectWithPoorlyLocalizedQrCandidate(
+    graph: Awaited<ReturnType<typeof freshGraph>>["graph"],
+    repo: Awaited<ReturnType<typeof freshGraph>>["repo"],
+    payload: string,
+  ) {
+    const { image } = await signWithPoorlyLocalizedQr(payload);
+    const created = await repo.createProject();
+    const projectId = created.project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(image),
+      declaredContentType: "image/png",
+      filename: "sign-with-poorly-localized-qr.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 4, 6);
+    await graph.signPreparation.confirmSignCompositionPlan(projectId, {
+      reconstruction: null,
+      crop: null,
+      fitBackground: { r: 250, g: 250, b: 250 },
+      fitPlacement: null,
+      moves: [],
+      fills: [],
+      replacements: [],
+    });
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    const completedJob = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completedJob!.status, "completed", "sanity: the worker run must complete for this fixture");
+    return { projectId, job };
+  }
+
   async function projectWithBrokenQrCandidate(
     graph: Awaited<ReturnType<typeof freshGraph>>["graph"],
     repo: Awaited<ReturnType<typeof freshGraph>>["repo"],
@@ -233,6 +299,50 @@ describe("sign-qr-preservation-service: SIGNS QR DESTINATION RESOLUTION", () => 
     assert.equal(resolutions[0].confirmedPayload, destination);
     assert.equal(resolutions[0].confirmedBy, "customer");
     assert.equal(resolutions[0].regionKey, regionKey);
+  });
+
+  it("QR REPAIR V2: a genuinely low-confidence (poorly-localized) region refuses automatic replacement — the destination is durably recorded, but no asset is created and the region stays needs_attention", async () => {
+    const { graph, repo } = await freshGraph();
+    const { checkSignQrPreservation, confirmSignQrDestination } = await import("./sign-qr-preservation-service");
+    const { projectId, job } = await projectWithPoorlyLocalizedQrCandidate(
+      graph,
+      repo,
+      "https://example-test-business.com/poorly-localized-case",
+    );
+
+    const before = await checkSignQrPreservation(projectId);
+    assert.equal(before.report.overall, "review_required");
+    assert.equal(
+      before.report.instances[0].sourceLocalizationConfidence,
+      "low",
+      "sanity: this fixture must actually produce low localization confidence (only 2 of 3 finder patterns present)",
+    );
+    const regionKey = before.report.instances[0].regionKey!;
+    const assetsBefore = (await repo.listAssetsForFinalArtworkJob(projectId, job.id)).length;
+
+    const result = await confirmSignQrDestination(projectId, {
+      regionKey,
+      destination: "https://example-test-business.com/poorly-localized-destination",
+      confirmedBy: "customer",
+    });
+    assert.equal(result.appliedImmediately, false, "a low-confidence region must never be automatically composited into, even with a confirmed destination");
+
+    // The destination IS durably recorded regardless (Section J: confirming
+    // a destination and being able to safely place it are separate
+    // authorities) — never lost merely because placement isn't safe yet.
+    const preparation = await repo.getSignPreparation(projectId);
+    const resolutions = (preparation?.qrResolutions ?? []) as Array<Record<string, unknown>>;
+    assert.equal(resolutions.length, 1);
+    assert.equal(resolutions[0].state, "confirmed_destination");
+    assert.equal(resolutions[0].confirmedPayload, "https://example-test-business.com/poorly-localized-destination");
+
+    // No new asset/validation was created — nothing was composited.
+    const assetsAfter = (await repo.listAssetsForFinalArtworkJob(projectId, job.id)).length;
+    assert.equal(assetsAfter, assetsBefore, "a refused placement must never create a derived asset");
+
+    const after = await checkSignQrPreservation(projectId);
+    assert.equal(after.report.overall, "review_required", "still genuinely unresolved — never silently promoted to pass");
+    assert.equal(after.validationStatus, "finalization_required");
   });
 
   it("confirmSignQrDestination: re-checking from scratch afterwards still reports pass/confirmed_by_user — the resolution is durable, not just returned once", async () => {

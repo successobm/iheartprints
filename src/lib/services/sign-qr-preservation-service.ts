@@ -67,6 +67,24 @@
  * Destination` only ever governs a region that genuinely failed to decode
  * from the source — it can never override an already-decodable source QR
  * (see `resolveUndecodedSourceRegion`'s own fail-closed check).
+ *
+ * QR REPAIR V2 — CONFIRMED PAYLOAD DOES NOT EQUAL CONFIRMED PLACEMENT
+ * (Section J of that phase): a confirmed destination alone never
+ * authorizes overwriting candidate pixels. `restoreFromConfirmedDestinations`
+ * (`qr-restore.ts`) runs every correction through
+ * `localizeConfirmedDestinationReplacementRegion` first — a region whose
+ * SOURCE localization confidence is `"low"` (fewer than 3 confirmed
+ * finder-pattern corners — see `MachineReadablePreservationInstance
+ * .sourceLocalizationConfidence`), or whose mapped candidate region cannot
+ * be independently corroborated by the CANDIDATE's own pixels, is REFUSED
+ * — no composite, no new asset, no new validation. The destination remains
+ * durably recorded regardless (this function's own existing resilience:
+ * `SignQrPreservationError` from `restoreSignQrCode` is caught and reported
+ * as `appliedImmediately: false`, never a lost confirmation) — this is
+ * exactly what closed the real, production-exposed defect where a
+ * malformed 2:1 source detection caused a replacement QR to be composited
+ * over unrelated artwork ("FOLLOW US" / social-icon graphics) on the real
+ * Get Hibachi project.
  */
 
 import { createHash } from "node:crypto";
@@ -369,7 +387,14 @@ export async function restoreSignQrCode(projectId: string): Promise<SignQrRestor
       sourceImageHeightPx: source.image.height,
       corrections: pendingCorrections
         .filter((p) => p.resolution.confirmedPayload !== null)
-        .map((p) => ({ sourceBounds: p.instance.sourceBounds!, payload: p.resolution.confirmedPayload! })),
+        .map((p) => ({
+          sourceBounds: p.instance.sourceBounds!,
+          // review_required instances are always undecoded-source
+          // instances (qr-preservation.ts always stamps a non-null
+          // confidence for those) — never null here in practice.
+          sourceLocalizationConfidence: p.instance.sourceLocalizationConfidence ?? "low",
+          payload: p.resolution.confirmedPayload!,
+        })),
     });
     working = { width: working.width, height: working.height, data: restoration.data };
     restoredCount += restoration.restoredCount;
