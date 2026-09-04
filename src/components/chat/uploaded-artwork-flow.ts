@@ -84,6 +84,21 @@ export type UploadedArtworkStep =
    * own part of the lifecycle is done.
    */
   | "sign_plan_authorized"
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: at least one detected-but-undecodable
+   * machine-readable region exists in the source artwork with no recorded
+   * resolution yet (`SignArtworkView.qrResolutions` has an entry whose
+   * `status === "needs_attention"`). An UNRESOLVED PRODUCTION ISSUE —
+   * shown regardless of where plan review/authorization currently stands,
+   * since a customer who already authorized their repair plan (or one
+   * whose plan needed no review at all) can still have an unresolved QR
+   * to address. Never shown for a source QR that already decodes
+   * (`conversation-service.ts`'s `resolveSignQrDestinationViews` never
+   * asks for a destination it can already verify) and never before a plan
+   * exists (Section V: only asked once "Check my artwork" has actually
+   * run).
+   */
+  | "sign_qr_needs_attention"
   /** Analysis is done and has something to say before we touch a pixel. */
   | "review_analysis"
   /** Original vs Prepared, awaiting an explicit approval. */
@@ -116,6 +131,14 @@ export interface SignArtworkFlowState {
    * again rather than an old consent silently covering a new plan.
    */
   authorization: { matchesCurrentPlan: boolean };
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: mirrors `SignArtworkView.qrResolutions`
+   * exactly — `null` until a plan exists, otherwise 0..N detected regions
+   * each with their own `status`. `deriveUploadedArtworkStep` only checks
+   * whether ANY entry is still `"needs_attention"`; the panel itself reads
+   * the full list to render each region's own resolution UI.
+   */
+  qrResolutions: { regionKey: string; status: "needs_attention" | "confirmed_destination" | "print_as_supplied" }[] | null;
 }
 
 /**
@@ -281,6 +304,16 @@ export function deriveUploadedArtworkStep(
   if (signArtwork) {
     if (!signArtwork.specConfirmed) return "confirm_sign_size";
     if (!signArtwork.hasPlan) return "sign_context_saved";
+    // SIGNS QR DESTINATION RESOLUTION: an unresolved detected-but-
+    // undecodable QR takes priority over plan review/authorization —
+    // whether the repair plan itself needed authorization or not, this is
+    // now a genuinely UNRESOLVED PRODUCTION ISSUE (Section A) the customer
+    // has not yet addressed. Never gates the plan flow itself (that stays
+    // exactly as it always was); this only decides which single step is
+    // shown next.
+    if (signArtwork.qrResolutions?.some((r) => r.status === "needs_attention")) {
+      return "sign_qr_needs_attention";
+    }
     // LIVE PRODUCT BLOCKER #4: once the customer has authorized THIS exact
     // plan, stop re-offering the same "prepare artwork" action — durable,
     // never re-derived from a transient client flag (a re-plan changes

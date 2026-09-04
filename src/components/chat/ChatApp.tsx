@@ -1120,6 +1120,46 @@ export function ChatApp() {
     if (target) window.location.assign(target);
   }
 
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: "Fix QR code" — the customer's own
+   * confirmation of a detected-but-undecodable QR's intended destination.
+   * `regionKey` is passed through verbatim from `signArtwork.qrResolutions`
+   * (never invented client-side). If a production candidate already
+   * exists, the server attempts the deterministic correction immediately
+   * and the refreshed snapshot reflects it; no candidate creation or
+   * provider call happens client-side either way.
+   */
+  async function confirmQrDestination(input: { regionKey: string; destination: string }) {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/sign-artwork/qr-destination`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        }),
+      "Failed to save that destination",
+    );
+  }
+
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: "Print as supplied" — the customer's
+   * own explicit acknowledgment that no functioning QR is required for
+   * this region. Never claims the QR is verified.
+   */
+  async function acceptQrPrintAsSupplied(input: { regionKey: string }) {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/sign-artwork/qr-print-as-supplied`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        }),
+      "Failed to save that choice",
+    );
+  }
+
   async function saveUploadedArtworkDetails(input: {
     productSummary: string | null;
     productColor: string | null;
@@ -1413,6 +1453,7 @@ export function ChatApp() {
           specConfirmed: snapshot.signArtwork.specConfirmed,
           hasPlan: snapshot.signArtwork.plan !== null,
           authorization: { matchesCurrentPlan: snapshot.signArtwork.authorization.matchesCurrentPlan },
+          qrResolutions: snapshot.signArtwork.qrResolutions,
         }
       : null,
     choice: workflowChoice,
@@ -1790,6 +1831,8 @@ export function ChatApp() {
                 onPlanSignArtwork={() => void planSignArtwork()}
                 onAuthorizeSignPlan={() => void authorizeSignPlan()}
                 onContinueToProduction={() => continueToSignProduction()}
+                onConfirmQrDestination={(input) => void confirmQrDestination(input)}
+                onAcceptQrPrintAsSupplied={(input) => void acceptQrPrintAsSupplied(input)}
                 signArtwork={snapshot?.signArtwork ?? null}
                 onSaveDetails={(input) => void saveUploadedArtworkDetails(input)}
                 onPrepare={() => void prepareUploadedArtwork()}

@@ -280,3 +280,48 @@ export function restoreAllFixableQrInstances(input: {
 
   return { changed: restoredCount > 0, data: working.data, restoredCount, unresolved };
 }
+
+/**
+ * SIGNS QR DESTINATION RESOLUTION: the sibling of `restoreAllFixableQrInstances`
+ * for CONFIRMED-DESTINATION corrections — a source instance that could not
+ * be decoded, but whose intended payload a customer/operator has explicitly
+ * confirmed (Section J: "confirmed_by_user" is a DIFFERENT authority than
+ * a decoded source payload, never silently merged with it). Composites each
+ * given `payload` at its own `sourceBounds`' proportionally-mapped region,
+ * sequentially into one working buffer, exactly like
+ * `restoreAllFixableQrInstances`'s own loop — the only difference is WHERE
+ * the payload comes from (an explicit caller-supplied value here, a
+ * source decode there). Never decodes the source itself — the caller
+ * (`sign-qr-preservation-service.ts`) is the one place that already knows
+ * which instances have a governing `confirmed_destination` resolution.
+ */
+export function restoreFromConfirmedDestinations(input: {
+  candidate: RgbaImage;
+  sourceImageWidthPx: number;
+  sourceImageHeightPx: number;
+  corrections: { sourceBounds: MachineReadableRegionBounds; payload: string }[];
+}): RestoreAllResult {
+  let working: RgbaImage = input.candidate;
+  let restoredCount = 0;
+  const unresolved: RestoreAllResult["unresolved"] = [];
+
+  for (const correction of input.corrections) {
+    const result = restoreQrInCandidate({
+      candidate: working,
+      sourceBounds: correction.sourceBounds,
+      sourceImageWidthPx: input.sourceImageWidthPx,
+      sourceImageHeightPx: input.sourceImageHeightPx,
+      verifiedPayload: correction.payload,
+    });
+
+    if (!result.ok) {
+      unresolved.push({ sourceBounds: correction.sourceBounds, reason: result.reason });
+      continue;
+    }
+
+    working = { width: working.width, height: working.height, data: result.data };
+    restoredCount += 1;
+  }
+
+  return { changed: restoredCount > 0, data: working.data, restoredCount, unresolved };
+}

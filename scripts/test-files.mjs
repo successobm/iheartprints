@@ -369,6 +369,10 @@ export const TEST_FILES = [
   // — governed plan appending, preview/execution equivalence, Fit to
   // Production immediate recheck.
   "src/lib/services/sign-artwork-service.test.ts",
+  // SIGNS QR DESTINATION RESOLUTION: confirmSignQrDestination /
+  // acceptSignQrPrintAsSupplied service-layer integration, run against a
+  // real local-store sign pipeline (no live-DB migration dependency).
+  "src/lib/services/sign-qr-preservation-service.test.ts",
   // Edge-Intent Correction Phase: governed classification record decode/
   // encode/re-validation against current candidate/plan identity.
   "src/capabilities/sign-preparation/sign-edge-intent-classification.test.ts",
@@ -418,6 +422,9 @@ export const TEST_FILES = [
   "src/capabilities/machine-readable-content/qr-detect-decode.test.ts",
   "src/capabilities/machine-readable-content/qr-preservation.test.ts",
   "src/capabilities/machine-readable-content/qr-restore.test.ts",
+  // SIGNS QR DESTINATION RESOLUTION.
+  "src/capabilities/machine-readable-content/qr-resolution.test.ts",
+  "src/capabilities/machine-readable-content/qr-destination-validation.test.ts",
   "src/app/internal/projects/[projectId]/sign-authorize/sign-authorize-page-state.test.ts",
   // FIX AUTHORIZED SIGN PRODUCTION WORKSPACE CTA: the CTA-label state
   // machine (print-ready / in-flight / prepare vs. try-again), pulled out

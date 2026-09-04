@@ -120,6 +120,20 @@ export interface UploadedArtworkPanelProps {
    * pixel or calls a provider.
    */
   onContinueToProduction?: () => void;
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: the customer's own "Fix QR code" —
+   * confirms the intended destination for a detected-but-undecodable QR
+   * region. `regionKey` is opaque, taken verbatim from
+   * `signArtwork.qrResolutions` — never a coordinate, never invented
+   * client-side.
+   */
+  onConfirmQrDestination?: (input: { regionKey: string; destination: string }) => void;
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: the customer's own explicit "Print as
+   * supplied" — no functioning QR is required for this region. Never
+   * claims the QR is verified.
+   */
+  onAcceptQrPrintAsSupplied?: (input: { regionKey: string }) => void;
   /** The Signs authority's own state, once a Sign artwork type is chosen. */
   signArtwork?: SignArtworkView | null;
   onSaveDetails: (input: {
@@ -260,6 +274,15 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
         <SignPlanAuthorizedStep
           busy={busy}
           onContinueToProduction={props.onContinueToProduction}
+        />
+      ) : null}
+
+      {step === "sign_qr_needs_attention" ? (
+        <SignQrNeedsAttentionStep
+          busy={busy}
+          regions={(props.signArtwork?.qrResolutions ?? []).filter((r) => r.status === "needs_attention")}
+          onConfirmDestination={props.onConfirmQrDestination}
+          onAcceptPrintAsSupplied={props.onAcceptQrPrintAsSupplied}
         />
       ) : null}
 
@@ -734,6 +757,111 @@ function SignPlanAuthorizedStep({
       >
         Continue to production
       </button>
+    </div>
+  );
+}
+
+/**
+ * SIGNS QR DESTINATION RESOLUTION: the customer's own resolution surface
+ * for a detected-but-undecodable QR — "we found a QR code, but it doesn't
+ * scan." Deliberately narrow: no jargon (`jsQR`, "finder pattern",
+ * "payload hash", `machine_readable_content_preserved`, "candidate
+ * coordinates", "decoder"), no raw internal identifiers beyond the opaque
+ * `regionKey` this component receives and returns verbatim (never
+ * constructs or infers one itself). Renders one card per unresolved
+ * region (Section W: 0..N regions resolve independently — a customer with
+ * two separate broken QR codes on one sign sees two separate cards, each
+ * with its own destination/decision).
+ *
+ * Two explicit actions per region, matching Section D/Q exactly:
+ *   "Fix QR code"        — confirms the typed destination.
+ *   "Print as supplied"  — explicit override; the warning copy is always
+ *                           shown beside it so the consequence is never a
+ *                           surprise.
+ */
+function SignQrNeedsAttentionStep({
+  busy,
+  regions,
+  onConfirmDestination,
+  onAcceptPrintAsSupplied,
+}: {
+  busy: boolean;
+  regions: { regionKey: string }[];
+  onConfirmDestination?: (input: { regionKey: string; destination: string }) => void;
+  onAcceptPrintAsSupplied?: (input: { regionKey: string }) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      {regions.map((region) => (
+        <SignQrNeedsAttentionRegion
+          key={region.regionKey}
+          regionKey={region.regionKey}
+          busy={busy}
+          onConfirmDestination={onConfirmDestination}
+          onAcceptPrintAsSupplied={onAcceptPrintAsSupplied}
+        />
+      ))}
+    </div>
+  );
+}
+
+function SignQrNeedsAttentionRegion({
+  regionKey,
+  busy,
+  onConfirmDestination,
+  onAcceptPrintAsSupplied,
+}: {
+  regionKey: string;
+  busy: boolean;
+  onConfirmDestination?: (input: { regionKey: string; destination: string }) => void;
+  onAcceptPrintAsSupplied?: (input: { regionKey: string }) => void;
+}) {
+  const [destination, setDestination] = useState("");
+  const canFix = destination.trim().length > 0;
+
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3" data-testid="sign-qr-needs-attention">
+      <p className="text-sm font-semibold text-ink">QR code needs attention</p>
+      <p className="mt-1 text-sm text-ink">
+        We found a QR code in your artwork, but it doesn&apos;t scan. Enter the link or destination this QR should
+        open and we&apos;ll replace it with a working QR before creating your print-ready file.
+      </p>
+
+      <label className="mt-3 block">
+        <span className="text-xs font-medium text-ink">Destination</span>
+        <input
+          type="text"
+          value={destination}
+          disabled={busy}
+          maxLength={500}
+          placeholder="e.g. https://your-website.com/book"
+          onChange={(event) => setDestination(event.target.value)}
+          className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm text-ink outline-none focus:border-ink/40 disabled:opacity-50"
+          data-testid="sign-qr-destination-input"
+        />
+      </label>
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          disabled={busy || !canFix || !onConfirmDestination}
+          onClick={() => onConfirmDestination?.({ regionKey, destination: destination.trim() })}
+          className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="sign-qr-fix-button"
+        >
+          {busy ? "Working…" : "Fix QR code"}
+        </button>
+        <button
+          type="button"
+          disabled={busy || !onAcceptPrintAsSupplied}
+          onClick={() => onAcceptPrintAsSupplied?.({ regionKey })}
+          className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          data-testid="sign-qr-print-as-supplied-button"
+        >
+          Print as supplied
+        </button>
+      </div>
+      <p className="mt-1.5 text-xs text-muted">The QR code may not scan in the printed artwork.</p>
     </div>
   );
 }

@@ -100,12 +100,24 @@ export interface SignMachineReadableContentRegionSummary {
   sourcePayloadSha256: string | null;
   candidateDecodable: boolean;
   candidatePayloadSha256: string | null;
-  result: "pass" | "fail" | "hard_fail" | "review_required" | "not_applicable";
+  result: "pass" | "fail" | "hard_fail" | "review_required" | "accepted_as_supplied" | "not_applicable";
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: how a `"pass"`/`"accepted_as_supplied"`
+   * result was actually established — mirrors `print-validation/contracts
+   * .ts`'s `RigidSignMachineReadableRegionEvidence.provenance` exactly
+   * (this module never imports that capability directly). Truthfully
+   * distinguishes the automatic preservation path from an explicit
+   * customer/operator decision — never blurred (Section AC: "Destination
+   * confirmed" rather than "Verified from original QR").
+   */
+  provenance: "verified_from_source_qr" | "confirmed_by_user" | "print_as_supplied" | null;
+  /** SIGNS QR DESTINATION RESOLUTION: this region's stable source-bound identity — see `machine-readable-content/qr-resolution.ts`'s `deriveRegionKey`. `null` when nothing was detected in the source for this instance. */
+  regionKey: string | null;
 }
 
 export interface SignMachineReadableContentSummary {
   regions: SignMachineReadableContentRegionSummary[];
-  overall: "pass" | "fail" | "hard_fail" | "review_required" | "not_applicable";
+  overall: "pass" | "fail" | "hard_fail" | "review_required" | "accepted_as_supplied" | "not_applicable";
 }
 
 /**
@@ -213,8 +225,9 @@ function readMachineReadableContentSummary(
   const evidence = report?.machineReadableContentEvidence as Record<string, unknown> | null | undefined;
   if (!evidence || !Array.isArray(evidence.instances) || typeof evidence.overall !== "string") return null;
 
-  const VALID_RESULTS = new Set(["pass", "fail", "hard_fail", "review_required", "not_applicable"]);
+  const VALID_RESULTS = new Set(["pass", "fail", "hard_fail", "review_required", "accepted_as_supplied", "not_applicable"]);
   if (!VALID_RESULTS.has(evidence.overall)) return null;
+  const VALID_PROVENANCE = new Set(["verified_from_source_qr", "confirmed_by_user", "print_as_supplied"]);
 
   const regions: SignMachineReadableContentRegionSummary[] = (evidence.instances as Record<string, unknown>[])
     .filter(
@@ -234,6 +247,11 @@ function readMachineReadableContentSummary(
       candidateDecodable: r.candidateDecodable as boolean,
       candidatePayloadSha256: typeof r.candidatePayloadSha256 === "string" ? r.candidatePayloadSha256 : null,
       result: r.result as SignMachineReadableContentRegionSummary["result"],
+      provenance:
+        typeof r.provenance === "string" && VALID_PROVENANCE.has(r.provenance)
+          ? (r.provenance as SignMachineReadableContentRegionSummary["provenance"])
+          : null,
+      regionKey: typeof r.regionKey === "string" ? r.regionKey : null,
     }));
 
   return { regions, overall: evidence.overall as SignMachineReadableContentSummary["overall"] };

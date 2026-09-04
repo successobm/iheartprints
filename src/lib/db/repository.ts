@@ -441,6 +441,8 @@ export type UpdateSignPreparationInput = Partial<{
   operatorStructuralOverrideCreatedBy: "operator" | null;
   /** Edge-Intent Correction Phase: see `SignPreparation.edgeIntentClassifications`'s own doc. */
   edgeIntentClassifications: Record<string, unknown>[] | null;
+  /** SIGNS QR DESTINATION RESOLUTION: see `SignPreparation.qrResolutions`'s own doc. */
+  qrResolutions: Record<string, unknown>[] | null;
 }>;
 
 /**

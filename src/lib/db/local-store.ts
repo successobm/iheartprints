@@ -2383,6 +2383,7 @@ export class LocalProjectRepository implements ProjectRepository {
       operatorStructuralOverrideCreatedAt: null,
       operatorStructuralOverrideCreatedBy: null,
       edgeIntentClassifications: null,
+      qrResolutions: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };

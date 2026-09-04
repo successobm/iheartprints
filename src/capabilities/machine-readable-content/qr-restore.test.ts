@@ -10,6 +10,7 @@ import {
   generateReplacementQrRaster,
   mapSourceRegionToProportionalCandidateRegion,
   restoreAllFixableQrInstances,
+  restoreFromConfirmedDestinations,
   restoreQrInCandidate,
 } from "./qr-restore";
 
@@ -244,4 +245,23 @@ test("restoreAllFixableQrInstances: an undecodable source is never touched — n
   assert.equal(changed, false);
   assert.equal(restoredCount, 0);
   assert.deepEqual(unresolved, []);
+});
+
+// --- restoreFromConfirmedDestinations (SIGNS QR DESTINATION RESOLUTION) ---
+test("restoreFromConfirmedDestinations: composites an explicit confirmed payload (never source-decoded) and the result decodes exactly that payload", () => {
+  const confirmedPayload = "https://get-hibachi.com/book-now";
+  const candidateCanvas = blankCanvas(6144, 4096);
+  const result = restoreFromConfirmedDestinations({
+    candidate: candidateCanvas,
+    sourceImageWidthPx: 1536,
+    sourceImageHeightPx: 1024,
+    corrections: [
+      { sourceBounds: { xPx: 1198, yPx: 700, widthPx: 300, heightPx: 300 }, payload: confirmedPayload },
+    ],
+  });
+  assert.equal(result.changed, true);
+  assert.equal(result.restoredCount, 1);
+  const decoded = decodeQrCodes({ width: candidateCanvas.width, height: candidateCanvas.height, data: result.data });
+  assert.equal(decoded.length, 1);
+  assert.equal(decoded[0].payload, confirmedPayload);
 });

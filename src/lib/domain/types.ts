@@ -2654,6 +2654,24 @@ export interface SignPreparation {
    * governing a materially different one. `null` means none recorded yet.
    */
   edgeIntentClassifications: Record<string, unknown>[] | null;
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: durable resolutions for detected-but-
+   * undecodable machine-readable (QR) source regions — either a customer/
+   * operator `"confirmed_destination"` (the exact intended payload,
+   * established through explicit confirmation, never inferred) or an
+   * explicit `"print_as_supplied"` override (an acknowledgment that no
+   * functioning QR is required). Mirrors `edgeIntentClassifications`'s own
+   * discipline exactly: an array of self-describing `Record<string,
+   * unknown>` entries (never a typed shape at this layer), narrowed to
+   * `SignQrResolutionRecord` at the capability boundary
+   * (`machine-readable-content/qr-resolution.ts`). Each entry embeds its
+   * own binding facts (`sourceAssetId`/`sourceSha256`/`regionKey`) — a
+   * resolution recorded against a stale/different source must never
+   * silently keep governing a different one. `null` means none recorded
+   * yet — every detected-but-undecodable region remains unresolved
+   * (blocking) until an entry exists for it.
+   */
+  qrResolutions: Record<string, unknown>[] | null;
   createdAt: string;
   updatedAt: string;
 }

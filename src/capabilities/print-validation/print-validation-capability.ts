@@ -990,28 +990,28 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
         : "No governed edge-intent artwork was found on this plate.",
   });
 
-  // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: see
-  // `RigidSignPlanEvidence.machineReadableContent`'s own doc for why
-  // `null` here pushes NOTHING (never a manufactured failure) — this
-  // evidence is opt-in (computed only when an operator explicitly runs
-  // the check/restoration), unlike `fitToProduction` above.
+  // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION / DESTINATION
+  // RESOLUTION: see `RigidSignPlanEvidence.machineReadableContent`'s own
+  // doc for why `null` here pushes NOTHING (never a manufactured
+  // failure) — this evidence is opt-in (computed when a candidate
+  // completes, or an operator explicitly runs the check/restoration),
+  // unlike `fitToProduction` above.
   const machineReadableContent = sign.machineReadableContent;
   if (machineReadableContent !== null) {
     const result = machineReadableContent.overallResult;
-    const blocking = result === "fail" || result === "hard_fail";
-    const status: PrintValidationCheckStatus =
-      result === "review_required" ? "warning" : blocking ? "fail" : "pass";
+    // `review_required` is now BLOCKING alongside `fail`/`hard_fail` — a
+    // detected-but-undecodable QR is an UNRESOLVED PRODUCTION ISSUE
+    // (SIGNS QR DESTINATION RESOLUTION's own rule), not a mere advisory.
+    // `accepted_as_supplied` is the ONLY way past it without a verified
+    // payload, and it is deliberately non-blocking (`severity: "warning"`)
+    // while remaining a distinct, truthful, never-"pass" status.
+    const blocking = result === "fail" || result === "hard_fail" || result === "review_required";
+    const acceptedAsSupplied = result === "accepted_as_supplied";
+    const status: PrintValidationCheckStatus = blocking ? "fail" : acceptedAsSupplied ? "warning" : "pass";
     checks.push({
       check: "machine_readable_content_preserved",
       status,
-      // `severity` marks whether this check's outcome is PROVEN (pass,
-      // not_applicable, fail, hard_fail — blocking-class, exactly like
-      // `protected_content_safe_inset`'s own fixed severity) versus
-      // genuinely UNPROVEN (review_required: the source itself was never
-      // verified, so neither a pass nor a fail can be claimed — Section
-      // R's own exact scoping keeps this out of the blocking aggregation
-      // entirely, never silently upgraded to a failure).
-      severity: result === "review_required" ? "warning" : "blocking",
+      severity: acceptedAsSupplied ? "warning" : "blocking",
       reason: describeMachineReadableContentResult(machineReadableContent),
     });
     if (blocking) requiredTransformations.add("require_human_review");
@@ -1028,17 +1028,23 @@ function describeMachineReadableContentResult(evidence: RigidSignMachineReadable
     return "No machine-readable (QR) region was detected in the source artwork.";
   }
   const counts = {
-    pass: regions.filter((r) => r.result === "pass").length,
+    pass: regions.filter((r) => r.result === "pass" && r.provenance === "verified_from_source_qr").length,
+    confirmed: regions.filter((r) => r.result === "pass" && r.provenance === "confirmed_by_user").length,
     fail: regions.filter((r) => r.result === "fail").length,
     hard_fail: regions.filter((r) => r.result === "hard_fail").length,
     review_required: regions.filter((r) => r.result === "review_required").length,
+    accepted_as_supplied: regions.filter((r) => r.result === "accepted_as_supplied").length,
   };
   const parts: string[] = [];
   if (counts.pass > 0) parts.push(`${counts.pass} verified preserved`);
+  if (counts.confirmed > 0) parts.push(`${counts.confirmed} resolved with a confirmed destination`);
   if (counts.fail > 0) parts.push(`${counts.fail} lost decodability during preparation`);
   if (counts.hard_fail > 0) parts.push(`${counts.hard_fail} now decode a DIFFERENT payload than the source`);
   if (counts.review_required > 0) {
-    parts.push(`${counts.review_required} could not be verified from the original source artwork`);
+    parts.push(`${counts.review_required} could not be verified from the original source artwork and remain unresolved`);
+  }
+  if (counts.accepted_as_supplied > 0) {
+    parts.push(`${counts.accepted_as_supplied} explicitly accepted as supplied, without a verified functioning QR`);
   }
   return `${regions.length} machine-readable region(s) found in the source: ${parts.join("; ")}.`;
 }

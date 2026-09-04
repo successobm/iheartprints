@@ -1,0 +1,64 @@
+-- SIGNS QR DESTINATION RESOLUTION: durable per-QR-instance resolution of a
+-- detected-but-undecodable source QR region — either a customer/operator
+-- CONFIRMED_DESTINATION (the exact intended payload, established through
+-- explicit confirmation, never inferred) or an explicit PRINT_AS_SUPPLIED
+-- override (an acknowledgment that no functioning QR is required).
+-- Additive only — nullable, every existing `sign_preparations` row is
+-- untouched.
+--
+-- NOT APPLIED to any live database by this change. This repository's
+-- convention is to land migration + dependent code together and apply the
+-- migration only as part of an explicit, reviewed deploy step.
+--
+-- SCHEMA DISCIPLINE AUDIT (mirrors `20260903173830_sign_edge_intent_
+-- classifications.sql`'s own audit exactly — same shape, same reasoning)
+--
+-- 1. WHY ONE COLUMN HOLDING AN ARRAY, NOT A NEW TABLE
+--
+--    A rigid-sign preparation can carry SEVERAL simultaneous machine-
+--    readable regions (Section W: "the infrastructure already supports 0..N
+--    conceptual QR regions... do not break this"), each independently
+--    resolved. A `jsonb` array on the existing row is the smaller, more
+--    honest fit than a new table for V1: there is no cross-preparation
+--    query need, no independent lifecycle beyond "current resolutions for
+--    this preparation's current source", and every reader already reads the
+--    whole `sign_preparations` row for this preparation regardless.
+--
+-- 2. WHY EACH ARRAY ENTRY EMBEDS ITS OWN BINDING FACTS
+--
+--    A resolution recorded against a stale/different source asset (a
+--    re-upload replacing the original) must never silently keep governing a
+--    DIFFERENT source's QR region — the same "never trust a stored fact
+--    without re-checking it against current state" discipline
+--    `edge_intent_classifications`/`operator_structural_override` already
+--    established. Each entry therefore embeds its own `sourceAssetId`/
+--    `sourceSha256` inside the jsonb payload, re-validated against the
+--    preparation's CURRENT immutable source at every read — never trusted
+--    merely for existing. `regionKey` (a deterministic digest of the
+--    detected region's own rounded bounds) is the per-instance identity
+--    within that one source — reproducible across repeated detection runs
+--    against the SAME immutable source image, so a confirmation recorded
+--    once continues to bind correctly to "the same QR-like region" without
+--    needing a persisted detection-run identity.
+--
+-- 3. WHY THIS DOES NOT NEED ITS OWN PLAN-KEY-LIKE IDENTITY COLUMN
+--
+--    A QR resolution changes machine-readable-content evidence, not the
+--    composition plan's steps — it never flows into `computeSignPlanKey`.
+--    Its effect is recomputed fresh every time machine-readable content is
+--    evaluated (worker completion, or an operator's "Check QR code"), which
+--    is what "invalidates" a materially changed resolution set in practice.
+--
+-- 4. WHY `jsonb`, LIKE `plan`/`inspection`/`edge_intent_classifications`
+--
+--    Loosely-typed, narrowed to `SignQrResolutionRecord` at the capability
+--    boundary. UNLIKE `edge_intent_classifications` (internal-operator-only
+--    production evidence), this column CAN be written and read through a
+--    customer-facing route — `confirmedPayload` is customer-supplied
+--    untrusted input, stored verbatim (never executed, fetched, or
+--    resolved anywhere downstream — see the capability layer's own
+--    security discipline) and never rendered as anything other than
+--    escaped text.
+
+alter table public.sign_preparations
+  add column if not exists qr_resolutions jsonb null;

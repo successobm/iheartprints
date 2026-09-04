@@ -183,7 +183,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: false, hasPlan: false, authorization: { matchesCurrentPlan: false } },
+        signArtwork: { specConfirmed: false, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -195,7 +195,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false } },
+        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -208,7 +208,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false } },
+        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -223,7 +223,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false } },
+        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -236,7 +236,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: true } },
+        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: true }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -249,7 +249,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false } },
+        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -278,7 +278,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation({ printPlacement: null }),
-        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false } },
+        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -449,5 +449,139 @@ describe("isRoutedToOperatorSeparationReview (Phase 16)", () => {
         );
       }
     }
+  });
+});
+
+describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () => {
+  it("an unresolved detected QR takes priority over an ALREADY-AUTHORIZED plan (the real Get Hibachi case)", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: true,
+          hasPlan: true,
+          authorization: { matchesCurrentPlan: true },
+          qrResolutions: [{ regionKey: "abc123", status: "needs_attention" }],
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_qr_needs_attention",
+    );
+  });
+
+  it("an unresolved detected QR takes priority over an UNAUTHORIZED plan review too", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: true,
+          hasPlan: true,
+          authorization: { matchesCurrentPlan: false },
+          qrResolutions: [{ regionKey: "abc123", status: "needs_attention" }],
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_qr_needs_attention",
+    );
+  });
+
+  it("once every region is resolved (confirmed_destination or print_as_supplied), routing falls through to the normal plan step", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: true,
+          hasPlan: true,
+          authorization: { matchesCurrentPlan: true },
+          qrResolutions: [
+            { regionKey: "abc123", status: "confirmed_destination" },
+            { regionKey: "def456", status: "print_as_supplied" },
+          ],
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_plan_authorized",
+    );
+  });
+
+  it("null qrResolutions (no plan yet, or detection unavailable) never routes to the QR step", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: true,
+          hasPlan: true,
+          authorization: { matchesCurrentPlan: true },
+          qrResolutions: null,
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_plan_authorized",
+    );
+  });
+
+  it("an empty qrResolutions array (no QR detected at all) never routes to the QR step", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: true,
+          hasPlan: true,
+          authorization: { matchesCurrentPlan: true },
+          qrResolutions: [],
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_plan_authorized",
+    );
+  });
+
+  it("multiple regions: even ONE still needs_attention is enough to route to the QR step, regardless of the others", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: true,
+          hasPlan: true,
+          authorization: { matchesCurrentPlan: true },
+          qrResolutions: [
+            { regionKey: "abc123", status: "confirmed_destination" },
+            { regionKey: "def456", status: "needs_attention" },
+          ],
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_qr_needs_attention",
+    );
+  });
+
+  it("QR step is never reached before spec is confirmed or a plan exists — the existing prerequisite steps still take priority", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: false,
+          hasPlan: false,
+          authorization: { matchesCurrentPlan: false },
+          qrResolutions: null,
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "confirm_sign_size",
+    );
   });
 });

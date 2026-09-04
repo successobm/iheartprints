@@ -240,6 +240,7 @@ function renderSignStep(
         ? {
             plan: null,
             authorization: { authorizedBy: null, authorizedAt: null, matchesCurrentPlan: false },
+            qrResolutions: null,
             ...signArtwork,
           }
         : null,

@@ -42,18 +42,28 @@ import type {
   MachineReadablePreservationReport,
 } from "./contracts";
 import { decodeQrCodes, scanForQrFinderPatterns, type RgbaImage } from "./qr-detect-decode";
+import { deriveRegionKey } from "./qr-resolution";
 
 function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-/** Worst-case ordering, used both to pick one instance's result and to fold multiple instances into `overall`. Index = severity rank, higher = worse. */
+/**
+ * Worst-case ordering, used both to pick one instance's result and to fold
+ * multiple instances into `overall`. Index = severity rank, higher = worse.
+ * `accepted_as_supplied` never appears in this function's OWN output (it
+ * is a resolution-time transform — see `qr-resolution.ts`'s own copy of
+ * this ordering) but must still be listed for TypeScript's exhaustiveness
+ * check over `MachineReadablePreservationCase`; its rank matches the
+ * shared ordering exactly (worse than `pass`, better than `review_required`).
+ */
 const CASE_SEVERITY: Record<MachineReadablePreservationCase, number> = {
   not_applicable: 0,
   pass: 1,
-  review_required: 2,
-  fail: 3,
-  hard_fail: 4,
+  accepted_as_supplied: 2,
+  review_required: 3,
+  fail: 4,
+  hard_fail: 5,
 };
 
 function worstCase(cases: readonly MachineReadablePreservationCase[]): MachineReadablePreservationCase {
@@ -139,20 +149,31 @@ export function compareMachineReadableContent(
   }
 
   // Source instances that were DETECTED (finder-pattern signature) but not
-  // decoded at all — CASE 4/review_required, regardless of the
-  // candidate's own state, per this module's own doc above.
+  // decoded at all — review_required regardless of the candidate's own
+  // state, per this module's own doc above (the SOURCE was never verified,
+  // so nothing about the candidate can prove preservation here). Candidate
+  // decode info is still recorded on the instance (position-blind, same
+  // "claim from the remaining pool" pattern the decoded-source loop above
+  // uses) purely as evidence — `qr-resolution.ts`'s `applyQrResolutions`
+  // is what actually decides whether that happens to already match a
+  // customer-confirmed destination; this function makes no such judgment.
   for (const undecoded of sourceUndecoded) {
     ordinal += 1;
+    const matchIndex = candidateDecoded.findIndex((_, i) => !claimedCandidateIndices.has(i));
+    const candidateMatch = matchIndex >= 0 ? candidateDecoded[matchIndex] : null;
+    if (matchIndex >= 0) claimedCandidateIndices.add(matchIndex);
     instances.push({
       id: `qr-${ordinal}`,
       kind: undecoded.kind,
       sourceBounds: undecoded.bounds,
       sourceDecodable: false,
       sourcePayloadSha256: null,
-      candidateBounds: null,
-      candidateDecodable: false,
-      candidatePayloadSha256: null,
+      candidateBounds: candidateMatch?.bounds ?? null,
+      candidateDecodable: candidateMatch !== null,
+      candidatePayloadSha256: candidateMatch ? sha256Hex(candidateMatch.payload) : null,
       result: "review_required",
+      provenance: null,
+      regionKey: deriveRegionKey(undecoded.bounds),
     });
   }
 
@@ -175,5 +196,12 @@ function buildInstance(
     candidateDecodable: candidate !== null,
     candidatePayloadSha256: candidate ? sha256Hex(candidate.payload) : null,
     result,
+    // A decoded SOURCE (this function is only ever called for one) is the
+    // only path `compareMachineReadableContent` itself produces `"pass"`
+    // through — always the automatic, verified-from-source path. See
+    // `qr-resolution.ts`'s own doc for the OTHER way `"pass"` can arise
+    // (a confirmed destination, applied downstream of this function).
+    provenance: result === "pass" ? "verified_from_source_qr" : null,
+    regionKey: deriveRegionKey(source.bounds),
   };
 }

@@ -1493,7 +1493,16 @@ describe("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION → print_ready", () 
       baseInput({
         rigidSign: evidence({
           machineReadableContent: {
-            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: true, result: "pass" }],
+            regions: [
+              {
+                id: "qr-1",
+                kind: "qr",
+                sourceDecodable: true,
+                candidateDecodable: true,
+                result: "pass",
+                provenance: "verified_from_source_qr",
+              },
+            ],
             overallResult: "pass",
           },
         }),
@@ -1521,7 +1530,9 @@ describe("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION → print_ready", () 
       baseInput({
         rigidSign: evidence({
           machineReadableContent: {
-            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: false, result: "fail" }],
+            regions: [
+              { id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: false, result: "fail", provenance: null },
+            ],
             overallResult: "fail",
           },
         }),
@@ -1548,7 +1559,9 @@ describe("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION → print_ready", () 
       baseInput({
         rigidSign: evidence({
           machineReadableContent: {
-            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: true, result: "hard_fail" }],
+            regions: [
+              { id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: true, result: "hard_fail", provenance: null },
+            ],
             overallResult: "hard_fail",
           },
         }),
@@ -1559,20 +1572,59 @@ describe("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION → print_ready", () 
     assert.notEqual(report.status, "ready");
   });
 
-  it("overallResult 'review_required' (source not reliably decodable): surfaced, but does NOT block ready by itself — Section R's own exact scoping", () => {
+  it("overallResult 'review_required' (source not reliably decodable, unresolved): SIGNS QR DESTINATION RESOLUTION's own rule — this is now an UNRESOLVED PRODUCTION ISSUE and BLOCKS ready", () => {
     const report = printValidation.validateArtwork(
       baseInput({
         rigidSign: evidence({
           machineReadableContent: {
-            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: false, candidateDecodable: false, result: "review_required" }],
+            regions: [
+              { id: "qr-1", kind: "qr", sourceDecodable: false, candidateDecodable: false, result: "review_required", provenance: null },
+            ],
             overallResult: "review_required",
           },
         }),
       }),
     );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.notEqual(report.status, "ready", "an unresolved detected-but-undecodable QR must block ready until confirmed or explicitly accepted as supplied");
+  });
+
+  it("overallResult 'pass' with provenance 'confirmed_by_user': a customer-confirmed destination, once the candidate provably encodes it, is a genuine (non-blocking) pass", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          machineReadableContent: {
+            regions: [
+              { id: "qr-1", kind: "qr", sourceDecodable: false, candidateDecodable: true, result: "pass", provenance: "confirmed_by_user" },
+            ],
+            overallResult: "pass",
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.equal(report.status, "ready");
+  });
+
+  it("overallResult 'accepted_as_supplied': non-blocking, but explicitly NOT a pass — never claims the QR is verified", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          machineReadableContent: {
+            regions: [
+              { id: "qr-1", kind: "qr", sourceDecodable: false, candidateDecodable: false, result: "accepted_as_supplied", provenance: "print_as_supplied" },
+            ],
+            overallResult: "accepted_as_supplied",
+          },
+        }),
+      }),
+    );
     assert.equal(checkOf(report)?.status, "warning");
+    assert.notEqual(checkOf(report)?.status, "pass", "print-as-supplied must never be reported as a verified pass");
     assert.equal(checkOf(report)?.severity, "warning");
-    // A non-blocking severity must not, by itself, prevent ready when every blocking check passes.
+    // Non-blocking: does not by itself prevent ready when every blocking check passes.
     assert.equal(report.status, "ready");
   });
 
@@ -1581,7 +1633,9 @@ describe("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION → print_ready", () 
       baseInput({
         rigidSign: evidence({
           machineReadableContent: {
-            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: true, result: "hard_fail" }],
+            regions: [
+              { id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: true, result: "hard_fail", provenance: null },
+            ],
             overallResult: "hard_fail",
           },
         }),

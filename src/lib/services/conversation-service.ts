@@ -12,6 +12,9 @@ import {
 } from "@/capabilities/sign-preparation";
 import type { CustomerPaymentView } from "@/capabilities/payment";
 import { getCapabilityGraph } from "@/capabilities/composition";
+import { decodeQrCodes, scanForQrFinderPatterns } from "@/capabilities/machine-readable-content/qr-detect-decode";
+import { deriveRegionKey } from "@/capabilities/machine-readable-content/qr-resolution";
+import { PNG } from "pngjs";
 import type {
   DesignBriefDecisionAction,
   ProductionTreatmentRequest,
@@ -74,6 +77,7 @@ import type {
   ProjectSnapshot,
   ProjectStatus,
   SignPlanAuthorizationActor,
+  SignPreparation,
   StoredRequestedProductionOutput,
 } from "@/lib/domain/types";
 import { printPlacementLabel } from "@/lib/domain/print-placement";
@@ -916,12 +920,40 @@ export interface SignArtworkView {
     authorizedAt: string | null;
     matchesCurrentPlan: boolean;
   };
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: 0..N detected-but-undecodable
+   * machine-readable regions in the source artwork, each needing an
+   * explicit customer decision before Print Ready — empty whenever
+   * nothing was detected, or every detected region already has a
+   * verified/resolved state. Computed from the SOURCE image only (never
+   * the production candidate — this view exists before/independent of
+   * production, and stays cheap: the immutable original, not a
+   * multi-megapixel reconstructed plate). `null` until a plan exists
+   * (Section V: only asked once the customer has requested "Check my
+   * artwork" — never before, and never for a source QR that already
+   * decodes).
+   */
+  qrResolutions: SignQrDestinationView[] | null;
+}
+
+/**
+ * SIGNS QR DESTINATION RESOLUTION: one detected-but-undecodable region's
+ * customer-safe state. `regionKey` is opaque to the customer but required
+ * verbatim on `.../sign-artwork/qr-destination`
+ * `.../sign-artwork/qr-print-as-supplied` — never a raw pixel coordinate,
+ * never a decoded payload (there isn't one to leak here by construction).
+ */
+export interface SignQrDestinationView {
+  regionKey: string;
+  status: "needs_attention" | "confirmed_destination" | "print_as_supplied";
 }
 
 /**
  * Same advisory-not-a-gate rule as `resolveArtworkPreparation`: a lookup
  * failure degrades to "no sign artwork" rather than taking down the
- * snapshot the customer is waiting on.
+ * snapshot the customer is waiting on. QR detection specifically degrades
+ * to `qrResolutions: null` on any failure (decode error, asset unreadable)
+ * — never blocks the rest of the view, never guessed.
  */
 async function resolveSignArtworkView(
   projectId: string,
@@ -942,7 +974,48 @@ async function resolveSignArtworkView(
           preparation.authorizedPlanKey !== null &&
           preparation.authorizedPlanKey === preparation.planKey,
       },
+      qrResolutions: preparation.plan ? await resolveSignQrDestinationViews(preparation) : null,
     };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decodes the immutable source once (Section V: SOURCE only, never the
+ * candidate — this stays cheap and runs on every snapshot fetch, unlike
+ * the internal operator's own candidate-aware evidence). Deliberately its
+ * own try/catch, separate from the outer one, so a QR-decode failure
+ * degrades to `null` without discarding the rest of the (already
+ * successfully resolved) sign artwork view.
+ */
+async function resolveSignQrDestinationViews(
+  preparation: SignPreparation,
+): Promise<SignQrDestinationView[] | null> {
+  try {
+    const downloaded = await getCapabilityGraph().assets.downloadAssetBytes(preparation.originalAssetId);
+    if (!downloaded) return null;
+    const png = PNG.sync.read(downloaded.bytes);
+    const source = { width: png.width, height: png.height, data: Buffer.from(png.data) };
+
+    if (decodeQrCodes(source).length > 0) return []; // Already decodable — never asked for a destination (Section V).
+    const undecoded = scanForQrFinderPatterns(source);
+    if (undecoded.length === 0) return [];
+
+    const resolutions = Array.isArray(preparation.qrResolutions) ? preparation.qrResolutions : [];
+    return undecoded.map((region) => {
+      const regionKey = deriveRegionKey(region.bounds);
+      const record = resolutions.find(
+        (r) => r.regionKey === regionKey && r.sourceAssetId === preparation.originalAssetId,
+      ) as { state?: string } | undefined;
+      const status: SignQrDestinationView["status"] =
+        record?.state === "confirmed_destination"
+          ? "confirmed_destination"
+          : record?.state === "print_as_supplied"
+            ? "print_as_supplied"
+            : "needs_attention";
+      return { regionKey, status };
+    });
   } catch {
     return null;
   }

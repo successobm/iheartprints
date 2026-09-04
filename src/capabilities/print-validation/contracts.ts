@@ -435,21 +435,35 @@ export const PRINT_VALIDATION_CHECK_CODES = [
   /** The plan actually executed is provably the plan that was recorded: its canonical key recomputes identically and only S2-admitted, content-preserving steps were replayed. Also where the print-ready risk boundary is enforced — see this check's own reason text on a `review_required`/`blocked` plan. */
   "executed_plan_matches_recorded_plan",
   /**
-   * SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: a QR (or future
-   * machine-readable) code is semantic content, not an ordinary decorative
-   * region — visual similarity is not equivalent to functional
-   * equivalence. Emitted ONLY when `RigidSignPlanEvidence
-   * .machineReadableContent` is non-null (the caller actually ran the
-   * comparison — see that field's own doc for why `null` is never treated
-   * as a failure the way `fitToProduction: null` is: this evidence is not
-   * yet computed automatically for every plate, only when an operator
-   * explicitly requests the check/restoration, so `null` must mean
-   * "not evaluated for this plate", never "evaluated and unsafe"). Blocks
-   * (`severity: "blocking"`) only when a SOURCE QR was positively decoded
-   * and the candidate cannot reproduce that exact payload — an
-   * undecodable source can never prove a regression, so it is surfaced
-   * (`severity: "warning"`) but never itself blocks (Section R's own
-   * exact scoping).
+   * SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION / DESTINATION
+   * RESOLUTION: a QR (or future machine-readable) code is semantic
+   * content, not an ordinary decorative region — visual similarity is not
+   * equivalent to functional equivalence. Emitted ONLY when
+   * `RigidSignPlanEvidence.machineReadableContent` is non-null (the caller
+   * actually ran the evaluation — see that field's own doc for why `null`
+   * is never treated as a failure the way `fitToProduction: null` is:
+   * `null` means "not evaluated for this plate", never "evaluated and
+   * unsafe").
+   *
+   * BLOCKING (`severity: "blocking"`) for:
+   *   - `"fail"`/`"hard_fail"` — a SOURCE QR was positively decoded and the
+   *     candidate cannot reproduce that exact payload — a proven
+   *     regression.
+   *   - `"review_required"` — a detected QR-like region whose source could
+   *     not be reliably decoded AND no resolution has been recorded yet.
+   *     SIGNS QR DESTINATION RESOLUTION's own rule: a detected-but-
+   *     undecodable QR is an UNRESOLVED PRODUCTION ISSUE, not a mere
+   *     advisory — it blocks until a customer or operator either confirms
+   *     the intended destination (and the candidate provably encodes it —
+   *     `"pass"`, `provenance: "confirmed_by_user"`) or explicitly accepts
+   *     the artwork as supplied (`"accepted_as_supplied"`).
+   *
+   * NON-BLOCKING (`severity: "warning"`) for `"accepted_as_supplied"` — an
+   * explicit, recorded acknowledgment that no functioning QR is required.
+   * This status is deliberately NEVER `"pass"`: it never claims the
+   * artwork's QR (if any) actually scans.
+   *
+   * `"pass"`/`"not_applicable"` are non-blocking passes.
    */
   "machine_readable_content_preserved",
 ] as const;
@@ -1112,13 +1126,21 @@ export interface RigidSignMachineReadableRegionEvidence {
   kind: "qr";
   sourceDecodable: boolean;
   candidateDecodable: boolean;
-  result: "pass" | "fail" | "hard_fail" | "review_required" | "not_applicable";
+  result: "pass" | "fail" | "hard_fail" | "review_required" | "accepted_as_supplied" | "not_applicable";
+  /**
+   * SIGNS QR DESTINATION RESOLUTION: how a `"pass"`/`"accepted_as_supplied"`
+   * result was actually established — mirrors `machine-readable-content
+   * /contracts.ts`'s `MachineReadablePreservationProvenance` exactly.
+   * `null` for every other result. Never blurred: a customer-confirmed
+   * destination is never described as "verified from the original QR".
+   */
+  provenance: "verified_from_source_qr" | "confirmed_by_user" | "print_as_supplied" | null;
 }
 
 export interface RigidSignMachineReadableContentEvidence {
   regions: RigidSignMachineReadableRegionEvidence[];
   /** The worst case across `regions` — `"not_applicable"` iff `regions` is empty (no machine-readable content detected in the source at all). */
-  overallResult: "pass" | "fail" | "hard_fail" | "review_required" | "not_applicable";
+  overallResult: "pass" | "fail" | "hard_fail" | "review_required" | "accepted_as_supplied" | "not_applicable";
 }
 
 /**
