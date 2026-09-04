@@ -270,6 +270,9 @@ function renderSignStep(
       onAuthorizeSignPlan: () => {
         throw new Error("onAuthorizeSignPlan must never fire from rendering");
       },
+      onContinueToProduction: () => {
+        throw new Error("onContinueToProduction must never fire from rendering");
+      },
     }),
   );
 }
@@ -573,13 +576,48 @@ describe("Sign plan review (LIVE PRODUCT BLOCKER #3)", () => {
   });
 });
 
-describe("Sign plan authorized (LIVE PRODUCT BLOCKER #4)", () => {
-  it("confirms the customer's part is done without exposing internal execution/provider terms", () => {
+describe("Sign plan authorized / Production Workspace Bridge (LIVE PRODUCT BLOCKER #4)", () => {
+  /** Isolates just the button's own opening tag — see the identical helper above. */
+  function extractContinueButtonTag(html: string): string | null {
+    const match = html.match(
+      /<button[^>]*data-testid="sign-continue-to-production-button"[^>]*>/,
+    );
+    return match ? match[0] : null;
+  }
+
+  it("truthfully says the PLAN is approved — never claims the artwork itself is prepared or print-ready", () => {
     const html = renderSignStep("sign_plan_authorized");
     const text = visibleText(html);
-    assert.match(text, /you.re all set/i);
+    assert.match(text, /preparation plan is approved/i);
     assert.doesNotMatch(html, /reconstruct_resolution|providerKey|planKey|Topaz|transition.?run/i);
     assert.doesNotMatch(text, /print[- ]ready/i);
+    // The old dead-end phrasing is gone entirely (Section J: "avoid 'You're
+    // all set' as the only terminal message when production work has not
+    // actually happened").
+    assert.doesNotMatch(text, /you.re all set/i);
+  });
+
+  it("offers an enabled 'Continue to production' action — never a dead end for an already-authorized Sign", () => {
+    const html = renderSignStep("sign_plan_authorized");
+    const buttonTag = extractContinueButtonTag(html);
+    assert.ok(buttonTag, "the Continue to production button must render");
+    assert.doesNotMatch(buttonTag!, /\bdisabled=""/);
+    assert.match(visibleText(html), /Continue to production/);
+  });
+
+  it("busy=true: the action is disabled", () => {
+    const html = renderSignStep("sign_plan_authorized", null, { busy: true });
+    const buttonTag = extractContinueButtonTag(html);
+    assert.ok(buttonTag, "the Continue to production button must still render while busy");
+    assert.match(buttonTag!, /\bdisabled=""/);
+  });
+
+  it("never exposes internal execution/provider vocabulary near the continuation action", () => {
+    const html = renderSignStep("sign_plan_authorized");
+    assert.doesNotMatch(
+      html,
+      /reconstruct_resolution|providerKey|planKey|Topaz|transition.?run|FinalArtworkJob/i,
+    );
   });
 });
 

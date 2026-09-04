@@ -105,9 +105,21 @@ export interface UploadedArtworkPanelProps {
    * authorize it — `SignPlanReviewStep` never renders this action for that
    * status). Only marks consent; the actual provider-bounded execution is a
    * SEPARATE, internal-operator-only action on
-   * `/internal/projects/[projectId]/sign-authorize`.
+   * `/internal/projects/[projectId]/sign-authorize`. Production Workspace
+   * Bridge: on success, `ChatApp.tsx` navigates the browser there — this
+   * prop itself still only performs the authorization request.
    */
   onAuthorizeSignPlan?: () => void;
+  /**
+   * Production Workspace Bridge: "Continue to production" — navigates the
+   * operator from the `sign_plan_authorized` step into the existing
+   * internal production workspace (`/internal/projects/[projectId]
+   * /sign-authorize`). Offered once the customer's own authorization of
+   * the CURRENT plan is already durably recorded — see
+   * `sign-production-bridge.ts`. Pure navigation: never itself touches a
+   * pixel or calls a provider.
+   */
+  onContinueToProduction?: () => void;
   /** The Signs authority's own state, once a Sign artwork type is chosen. */
   signArtwork?: SignArtworkView | null;
   onSaveDetails: (input: {
@@ -244,7 +256,12 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
         />
       ) : null}
 
-      {step === "sign_plan_authorized" ? <SignPlanAuthorizedStep /> : null}
+      {step === "sign_plan_authorized" ? (
+        <SignPlanAuthorizedStep
+          busy={busy}
+          onContinueToProduction={props.onContinueToProduction}
+        />
+      ) : null}
 
       {step === "confirm_details" && preparation ? (
         <DetailsStep
@@ -673,26 +690,50 @@ function SignPlanReviewStep({
 }
 
 /**
- * LIVE PRODUCT BLOCKER #4: the customer's own part of the Signs lifecycle
- * is done — their production-risk authorization is durably recorded
- * (`SignArtworkView.authorization.matchesCurrentPlan`). Deliberately does
- * NOT expose a "Prepare"/"Execute" control here: the actual provider-
- * bounded reconstruction, preservation verification, Fit-to-Production,
- * and PrintValidation are the internal operator's own next action on
- * `/internal/projects/[projectId]/sign-authorize` — this is not a second
- * implementation of that surface, only an honest "you're done, we've got
- * it from here" for the customer. Never claims print readiness; that is
- * a later, separately-earned state (see `describeApprovedPreparation`'s
- * own equivalent discipline for the DTF path).
+ * LIVE PRODUCT BLOCKER #4 / Production Workspace Bridge: the customer's own
+ * part of the Signs lifecycle is done — their production-risk authorization
+ * is durably recorded (`SignArtworkView.authorization.matchesCurrentPlan`).
+ *
+ * This step used to be a genuine dead end ("You're all set" and nothing
+ * else) — accurate about authorization, but silent about what happens next,
+ * for a current operating model where Eric IS both the person submitting
+ * this artwork and the production operator (`AGENTS.md`'s "current user
+ * model": this is deliberately not a customer-vs-staff role system yet).
+ * "Continue to production" bridges directly into the existing internal
+ * production workspace (`/internal/projects/[projectId]/sign-authorize`) —
+ * this component still does NOT expose a "Prepare"/"Execute" control
+ * itself: the actual provider-bounded reconstruction, preservation
+ * verification, Fit-to-Production, and PrintValidation remain that
+ * workspace's own next action, reached by navigating there rather than by
+ * duplicating any of its controls here. Never claims print readiness or
+ * that preparation has happened; the copy says only that the PLAN is
+ * approved (see `describeApprovedPreparation`'s own equivalent discipline
+ * for the DTF path).
  */
-function SignPlanAuthorizedStep() {
+function SignPlanAuthorizedStep({
+  busy,
+  onContinueToProduction,
+}: {
+  busy: boolean;
+  onContinueToProduction?: () => void;
+}) {
   return (
     <div>
-      <p className="text-sm font-semibold text-ink">You&apos;re all set</p>
-      <p className="mt-1 text-sm text-ink">
-        Thanks — we&apos;ve got what we need. Our team will finish preparing your
-        artwork for this sign.
+      <p className="text-sm font-semibold text-ink">
+        Your preparation plan is approved
       </p>
+      <p className="mt-1 text-sm text-ink">
+        Continue to production to prepare and review the artwork for this sign.
+      </p>
+      <button
+        type="button"
+        disabled={busy || !onContinueToProduction}
+        onClick={onContinueToProduction}
+        className="mt-3 rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+        data-testid="sign-continue-to-production-button"
+      >
+        Continue to production
+      </button>
     </div>
   );
 }

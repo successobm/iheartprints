@@ -23,6 +23,7 @@ import {
   type WorkflowChoice,
 } from "./uploaded-artwork-flow";
 import { UploadedArtworkPanel } from "./UploadedArtworkPanel";
+import { resolveSignProductionWorkspaceUrl } from "./sign-production-bridge";
 import { WorkflowChoiceCard } from "./WorkflowChoiceCard";
 import {
   CHAT_PROJECT_STORAGE_KEY,
@@ -926,12 +927,22 @@ export function ChatApp() {
    * other action in this component and all are idempotent server-side, so a
    * double click is always safe.
    */
+  /**
+   * Returns the resulting snapshot on success, or `null` on any failure (or
+   * when there was nothing to submit against). Most callers ignore the
+   * return value, exactly as before this was added — but a caller that must
+   * decide something from the AUTHORITATIVE response itself (Production
+   * Workspace Bridge's `authorizeSignPlan`: whether to navigate) needs it,
+   * and re-reading the `snapshot` closure variable after this `await` would
+   * not work — React state updates do not appear in an already-captured
+   * closure, only in the next render.
+   */
   async function submitPreparationAction(
     request: () => Promise<Response>,
     failureMessage: string,
     options?: { preserveCleanupPreview?: boolean },
-  ) {
-    if (!snapshot || sending) return;
+  ): Promise<ApiSnapshot | null> {
+    if (!snapshot || sending) return null;
     setSending(true);
     setError(null);
 
@@ -982,8 +993,10 @@ export function ChatApp() {
           setCleanupPreview(null);
         }
       }
+      return data as ApiSnapshot;
     } catch (err) {
       setError(err instanceof Error ? err.message : failureMessage);
+      return null;
     } finally {
       setSending(false);
     }
@@ -1065,16 +1078,46 @@ export function ChatApp() {
    * regardless of this call existing, so this can never bypass that
    * governance even if some future bug made the button render for the
    * wrong plan status.
+   *
+   * Production Workspace Bridge: on a successful response whose
+   * authorization durably matches the CURRENT plan, immediately navigates
+   * the operator into the existing internal production workspace
+   * (`/internal/projects/[projectId]/sign-authorize`) — see
+   * `sign-production-bridge.ts` for the shared, pure eligibility gate and
+   * why it is safe (never weakens the workspace's own internal-access gate,
+   * never navigates on failure or a stale plan, never itself calls a
+   * provider). `submitPreparationAction` returns `null` on any failure, so
+   * a refused/errored authorization simply leaves the customer on the
+   * current screen with the existing error UI — exactly Section H's
+   * requirement.
    */
   async function authorizeSignPlan() {
     if (!snapshot) return;
-    await submitPreparationAction(
+    const updated = await submitPreparationAction(
       () =>
         fetch(`/api/projects/${snapshot.project.id}/sign-artwork/authorize`, {
           method: "POST",
         }),
       "Failed to prepare your artwork",
     );
+    const target = resolveSignProductionWorkspaceUrl(updated);
+    if (target) window.location.assign(target);
+  }
+
+  /**
+   * Production Workspace Bridge: "Continue to production" — offered once
+   * the customer's own authorization of the CURRENT plan is ALREADY
+   * durably recorded, reached either on reload of a previously-authorized
+   * Sign (the real dead-end case this fixes) or immediately after
+   * `authorizeSignPlan` above records a fresh one. Pure client-side
+   * navigation from the CURRENT snapshot — performs no request of its own,
+   * so it cannot fail server-side, and (like `authorizeSignPlan`) never
+   * renders/enables unless `resolveSignProductionWorkspaceUrl` says the
+   * durable authorization genuinely matches the current plan.
+   */
+  function continueToSignProduction() {
+    const target = resolveSignProductionWorkspaceUrl(snapshot ?? null);
+    if (target) window.location.assign(target);
   }
 
   async function saveUploadedArtworkDetails(input: {
@@ -1746,6 +1789,7 @@ export function ChatApp() {
                 onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
                 onPlanSignArtwork={() => void planSignArtwork()}
                 onAuthorizeSignPlan={() => void authorizeSignPlan()}
+                onContinueToProduction={() => continueToSignProduction()}
                 signArtwork={snapshot?.signArtwork ?? null}
                 onSaveDetails={(input) => void saveUploadedArtworkDetails(input)}
                 onPrepare={() => void prepareUploadedArtwork()}
