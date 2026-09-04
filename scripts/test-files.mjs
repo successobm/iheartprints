@@ -415,6 +415,11 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-preparation-operator-copy.test.ts",
   "src/capabilities/sign-preparation/sign-plan-operator-review.test.ts",
   "src/app/internal/projects/[projectId]/sign-authorize/sign-authorize-page-state.test.ts",
+  // FIX AUTHORIZED SIGN PRODUCTION WORKSPACE CTA: the CTA-label state
+  // machine (print-ready / in-flight / prepare vs. try-again), pulled out
+  // of SignProductionAction.tsx as a pure, router-free function — same
+  // reasoning as sign-canvas-zoom/correction-coordinate-mapping below.
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-production-cta-state.test.ts",
   // Operator Production Correction UX: pointer/CSS -> production-candidate
   // native pixel coordinate mapping, zoom-invariant, DOM-free.
   "src/app/internal/projects/[projectId]/sign-authorize/correction-coordinate-mapping.test.ts",
@@ -469,6 +474,11 @@ export const TEST_FILES = [
   "src/components/chat/PreviewBackgroundControl.test.tsx",
   "src/components/chat/uploaded-artwork-flow.test.ts",
   "src/components/chat/UploadedArtworkPanel.test.tsx",
+  // Production Workspace Bridge: the pure resolveSignProductionWorkspaceUrl
+  // gate — registered late (it was added the phase before this one and
+  // missed registration then; fixed here alongside this phase's own new
+  // sign-production-cta-state.test.ts).
+  "src/components/chat/sign-production-bridge.test.ts",
   // Phase 27H: same "existed but was never registered" gap as the preview-
   // background inspection surface above -- the entire Magic Wand manual
   // correction system (Phase 27D-27H: session authority, the frozen

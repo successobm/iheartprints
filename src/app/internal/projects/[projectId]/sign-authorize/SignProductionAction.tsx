@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import type { SignPlanOperatorProductionStatus } from "@/capabilities/sign-preparation";
+import { resolveSignProductionCtaState } from "./sign-production-cta-state";
 
 /**
  * LIVE PRODUCT BLOCKER #4B: "Prepare artwork" — deliberately separate from
@@ -17,6 +18,15 @@ import type { SignPlanOperatorProductionStatus } from "@/capabilities/sign-prepa
  * re-fetch-authoritative-state approach `SignAuthorizeButton` uses after a
  * click, just on a timer instead of once. The interval clears the moment
  * the server reports the job is no longer in flight.
+ *
+ * FIX AUTHORIZED SIGN PRODUCTION WORKSPACE CTA: the "what to show" decision
+ * (print-ready / in-flight / prepare-vs-retry) is now `resolveSignProduction
+ * CtaState` (`sign-production-cta-state.ts`) — a pure, byte-for-byte
+ * behavior-preserving extraction, moved out purely so it can be tested
+ * without a mounted `next/navigation` router. See that module's own doc
+ * for the real investigation finding behind this task: the reported real
+ * project was already showing the CORRECT "Try again" for a genuinely
+ * failed job, not a misclassification.
  */
 export function SignProductionAction({
   projectId,
@@ -58,7 +68,9 @@ export function SignProductionAction({
     }
   }
 
-  if (production.printReady) {
+  const cta = resolveSignProductionCtaState(production);
+
+  if (cta.kind === "print_ready") {
     return (
       <div className="flex flex-col gap-2" data-sign-production-ready>
         <p className="text-sm font-semibold text-ink">Print-ready</p>
@@ -73,7 +85,7 @@ export function SignProductionAction({
     );
   }
 
-  if (production.inFlight) {
+  if (cta.kind === "in_flight") {
     return (
       <p className="text-sm text-muted" aria-busy="true" data-sign-production-processing>
         Preparing artwork…
@@ -83,7 +95,7 @@ export function SignProductionAction({
 
   return (
     <div className="flex flex-col gap-3">
-      {production.needsAttention ? (
+      {cta.needsAttentionNotice ? (
         <p className="text-sm text-ink" data-sign-production-needs-attention>
           This artwork needs further review before it can be finalized.
         </p>
@@ -96,7 +108,7 @@ export function SignProductionAction({
         className="rounded-full bg-ink px-3.5 py-2 text-sm font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
         data-testid="sign-prepare-button"
       >
-        {submitting ? "Preparing…" : production.failed || production.needsAttention ? "Try again" : "Prepare artwork"}
+        {submitting ? "Preparing…" : cta.label === "try_again" ? "Try again" : "Prepare artwork"}
       </button>
       {error ? (
         <p className="text-sm text-red-600" role="alert" data-sign-production-error>
