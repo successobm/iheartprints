@@ -23,6 +23,7 @@ import type {
   DtfFeatureIntegritySummary,
   FinalizationTransformation,
   PrintValidationCheck,
+  PrintValidationCheckStatus,
   PrintValidationInput,
   PrintValidationProfile,
   PrintValidationReport,
@@ -32,6 +33,7 @@ import type {
   RigidSignFitToProductionEdgeEvidence,
   RigidSignFitToProductionEvidence,
   RigidSignGeometryStepEvidence,
+  RigidSignMachineReadableContentEvidence,
   RigidSignPlanEvidence,
   UploadedPreserveEvidence,
 } from "./contracts";
@@ -988,8 +990,57 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
         : "No governed edge-intent artwork was found on this plate.",
   });
 
+  // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: see
+  // `RigidSignPlanEvidence.machineReadableContent`'s own doc for why
+  // `null` here pushes NOTHING (never a manufactured failure) — this
+  // evidence is opt-in (computed only when an operator explicitly runs
+  // the check/restoration), unlike `fitToProduction` above.
+  const machineReadableContent = sign.machineReadableContent;
+  if (machineReadableContent !== null) {
+    const result = machineReadableContent.overallResult;
+    const blocking = result === "fail" || result === "hard_fail";
+    const status: PrintValidationCheckStatus =
+      result === "review_required" ? "warning" : blocking ? "fail" : "pass";
+    checks.push({
+      check: "machine_readable_content_preserved",
+      status,
+      // `severity` marks whether this check's outcome is PROVEN (pass,
+      // not_applicable, fail, hard_fail — blocking-class, exactly like
+      // `protected_content_safe_inset`'s own fixed severity) versus
+      // genuinely UNPROVEN (review_required: the source itself was never
+      // verified, so neither a pass nor a fail can be claimed — Section
+      // R's own exact scoping keeps this out of the blocking aggregation
+      // entirely, never silently upgraded to a failure).
+      severity: result === "review_required" ? "warning" : "blocking",
+      reason: describeMachineReadableContentResult(machineReadableContent),
+    });
+    if (blocking) requiredTransformations.add("require_human_review");
+  }
+
   const status = aggregateStatus(checks);
   return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, status);
+}
+
+/** Internal rationale text for the `machine_readable_content_preserved` check — never customer-facing (mirrors every other check's own `reason` discipline in this file). Never includes the decoded payload itself (Section T). */
+function describeMachineReadableContentResult(evidence: RigidSignMachineReadableContentEvidence): string {
+  const { regions, overallResult } = evidence;
+  if (overallResult === "not_applicable") {
+    return "No machine-readable (QR) region was detected in the source artwork.";
+  }
+  const counts = {
+    pass: regions.filter((r) => r.result === "pass").length,
+    fail: regions.filter((r) => r.result === "fail").length,
+    hard_fail: regions.filter((r) => r.result === "hard_fail").length,
+    review_required: regions.filter((r) => r.result === "review_required").length,
+  };
+  const parts: string[] = [];
+  if (counts.pass > 0) parts.push(`${counts.pass} verified preserved`);
+  if (counts.fail > 0) parts.push(`${counts.fail} lost decodability during preparation`);
+  if (counts.hard_fail > 0) parts.push(`${counts.hard_fail} now decode a DIFFERENT payload than the source`);
+  if (counts.review_required > 0) {
+    parts.push(`${counts.review_required} could not be verified from the original source artwork`);
+  }
+  return `${regions.length} machine-readable region(s) found in the source: ${parts.join("; ")}.`;
 }
 
 /** One edge's own clearance, formatted as "top 94px/0.607in" or "top no content found within scan depth". */

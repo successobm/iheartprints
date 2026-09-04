@@ -25,6 +25,7 @@ function production(
     blockedValidationId: null,
     blockedValidationStatus: null,
     fitToProduction: null,
+    machineReadableContent: null,
     ...overrides,
   };
 }

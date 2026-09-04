@@ -2899,6 +2899,17 @@ export function createFinalArtworkWorkerCapability(
           : null,
       substrateBoundary,
       fitToProduction,
+      // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: not yet computed
+      // automatically as part of ordinary job completion — see
+      // `RigidSignPlanEvidence.machineReadableContent`'s own doc for why
+      // `null` here is correct and non-regressive (never treated as a
+      // failure). An operator's explicit "Check QR code"/"Restore QR
+      // code" action (`sign-artwork-service.ts`) computes and persists
+      // this evidence in its own, separate `ProductionAssetValidation`
+      // run for the SAME job/asset — deliberately scoped this phase to an
+      // explicit operator action rather than every job's own automatic
+      // completion path.
+      machineReadableContent: null,
     };
 
     const validationInput: PrintValidationInput = {

@@ -116,6 +116,11 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
         reason: "test fixture default — comfortably clear",
       })),
     },
+    // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: the default
+    // fixture never ran the QR check, so this stays `null` (never
+    // evaluated — never a manufactured failure) unless a test explicitly
+    // overrides it.
+    machineReadableContent: null,
     ...overrides,
   };
 }
@@ -1468,5 +1473,120 @@ describe("Edge-Intent Correction Phase: edge_intent_advisory (Section I) + prote
     assert.equal(safeInsetCheckOf(report)?.status, "fail");
     assert.match(safeInsetCheckOf(report)!.reason, /acknowledged protected content/i);
     assert.notEqual(report.status, "ready");
+  });
+});
+
+describe("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION → print_ready", () => {
+  function checkOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "machine_readable_content_preserved");
+  }
+
+  it("machineReadableContent: null (never evaluated) pushes NO check at all — never a manufactured failure", () => {
+    const report = printValidation.validateArtwork(baseInput());
+    assert.equal(checkOf(report), undefined);
+    // Every other control check still passes, and the run still reaches ready.
+    assert.equal(report.status, "ready");
+  });
+
+  it("overallResult 'pass': the check passes, ready is reachable", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          machineReadableContent: {
+            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: true, result: "pass" }],
+            overallResult: "pass",
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.equal(report.status, "ready");
+  });
+
+  it("overallResult 'not_applicable' (no QR at all): the check passes trivially, never treated as a failure", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          machineReadableContent: { regions: [], overallResult: "not_applicable" },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("overallResult 'fail' (source decoded, candidate unreadable): BLOCKS ready — every other check still passing", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          machineReadableContent: {
+            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: false, result: "fail" }],
+            overallResult: "fail",
+          },
+        }),
+      }),
+    );
+    for (const other of [
+      "exact_physical_dimensions",
+      "effective_resolution",
+      "no_unintended_transparency",
+      "content_within_bounds",
+      "protected_content_safe_inset",
+      "executed_plan_matches_recorded_plan",
+    ]) {
+      const check = report.checks.find((c) => c.check === other);
+      assert.equal(check!.status, "pass", `"${other}" was expected to pass in this control scenario`);
+    }
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("overallResult 'hard_fail' (candidate decodes a DIFFERENT payload): BLOCKS ready", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          machineReadableContent: {
+            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: true, result: "hard_fail" }],
+            overallResult: "hard_fail",
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("overallResult 'review_required' (source not reliably decodable): surfaced, but does NOT block ready by itself — Section R's own exact scoping", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          machineReadableContent: {
+            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: false, candidateDecodable: false, result: "review_required" }],
+            overallResult: "review_required",
+          },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "warning");
+    assert.equal(checkOf(report)?.severity, "warning");
+    // A non-blocking severity must not, by itself, prevent ready when every blocking check passes.
+    assert.equal(report.status, "ready");
+  });
+
+  it("the check's reason never includes a decoded payload — internal rationale only, never the raw QR content", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        rigidSign: evidence({
+          machineReadableContent: {
+            regions: [{ id: "qr-1", kind: "qr", sourceDecodable: true, candidateDecodable: true, result: "hard_fail" }],
+            overallResult: "hard_fail",
+          },
+        }),
+      }),
+    );
+    assert.doesNotMatch(checkOf(report)!.reason, /https?:\/\//);
   });
 });

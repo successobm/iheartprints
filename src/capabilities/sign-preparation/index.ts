@@ -92,6 +92,8 @@ export {
   type SignPlanOperatorProductionStatus,
   type SignFitToProductionEdgeSummary,
   type SignFitToProductionSummary,
+  type SignMachineReadableContentRegionSummary,
+  type SignMachineReadableContentSummary,
 } from "./sign-plan-operator-review";
 // Signs Phase 3B (Canvas-First Correction).
 export {

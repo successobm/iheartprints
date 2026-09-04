@@ -11,6 +11,7 @@ import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
 import { SignCompareOriginal } from "./SignCompareOriginal";
 import { SignFitToProductionCorrectionTool } from "./SignFitToProductionCorrectionTool";
 import { SignProductionAction } from "./SignProductionAction";
+import { SignQrPreservationPanel } from "./SignQrPreservationPanel";
 import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
 import { SignStructuralLayoutForm } from "./SignStructuralLayoutForm";
 import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
@@ -306,6 +307,22 @@ function SignPlanReview({
       {isAuthorized ? (
         <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
           <SignProductionAction projectId={projectId} production={review.production} />
+        </section>
+      ) : null}
+
+      {/* SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: only meaningful
+          once a production candidate actually exists — there is nothing
+          to compare the source against before that. Independent of the
+          right-edge/Fit-to-Production workspace above (Section AB: never
+          conflated); a passing QR check never manufactures Print Ready on
+          its own, and a failing one blocks it through the same existing
+          validation architecture every other check here already uses. */}
+      {review.production.jobStatus === "completed" ? (
+        <section className="border-t border-ink/10 pt-4">
+          <SignQrPreservationPanel
+            projectId={projectId}
+            machineReadableContent={review.production.machineReadableContent}
+          />
         </section>
       ) : null}
     </div>

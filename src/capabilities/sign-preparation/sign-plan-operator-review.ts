@@ -74,6 +74,38 @@ export interface SignPlanOperatorProductionStatus {
    * `null` when no completed job/validation exists yet to read from.
    */
   fitToProduction: SignFitToProductionSummary | null;
+  /**
+   * SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: read back from the
+   * SAME `report.machineReadableContentEvidence` field
+   * `sign-qr-preservation-service.ts`'s "Check QR code"/"Restore QR code"
+   * actions persist — never re-computed here (this module stays
+   * read-only, exactly like `readFitToProductionSummary`'s sibling read
+   * above). `null` means the check has never been run for the CURRENT
+   * validation on this job — never treated as "no QR" or "passed".
+   */
+  machineReadableContent: SignMachineReadableContentSummary | null;
+}
+
+/**
+ * Presentation-only mirror of `machine-readable-content/contracts.ts`'s
+ * `MachineReadablePreservationReport` — this module never imports that
+ * capability directly (same cross-capability discipline
+ * `SignFitToProductionSummary` above already follows). SHA-256 hashes
+ * only, exactly as persisted — never a raw decoded payload (Section T).
+ */
+export interface SignMachineReadableContentRegionSummary {
+  id: string;
+  kind: string;
+  sourceDecodable: boolean;
+  sourcePayloadSha256: string | null;
+  candidateDecodable: boolean;
+  candidatePayloadSha256: string | null;
+  result: "pass" | "fail" | "hard_fail" | "review_required" | "not_applicable";
+}
+
+export interface SignMachineReadableContentSummary {
+  regions: SignMachineReadableContentRegionSummary[];
+  overall: "pass" | "fail" | "hard_fail" | "review_required" | "not_applicable";
 }
 
 /**
@@ -169,6 +201,44 @@ function readFitToProductionSummary(report: Record<string, unknown> | null | und
   };
 }
 
+/**
+ * Reads `report.machineReadableContentEvidence` back out of a persisted
+ * `PrintValidationReport`'s generic `Record<string, unknown>` shape —
+ * mirrors `readFitToProductionSummary`'s own discipline exactly (never
+ * re-measured, `null` on any malformed/missing shape, never guessed).
+ */
+function readMachineReadableContentSummary(
+  report: Record<string, unknown> | null | undefined,
+): SignMachineReadableContentSummary | null {
+  const evidence = report?.machineReadableContentEvidence as Record<string, unknown> | null | undefined;
+  if (!evidence || !Array.isArray(evidence.instances) || typeof evidence.overall !== "string") return null;
+
+  const VALID_RESULTS = new Set(["pass", "fail", "hard_fail", "review_required", "not_applicable"]);
+  if (!VALID_RESULTS.has(evidence.overall)) return null;
+
+  const regions: SignMachineReadableContentRegionSummary[] = (evidence.instances as Record<string, unknown>[])
+    .filter(
+      (r) =>
+        typeof r.id === "string" &&
+        typeof r.kind === "string" &&
+        typeof r.sourceDecodable === "boolean" &&
+        typeof r.candidateDecodable === "boolean" &&
+        typeof r.result === "string" &&
+        VALID_RESULTS.has(r.result),
+    )
+    .map((r) => ({
+      id: r.id as string,
+      kind: r.kind as string,
+      sourceDecodable: r.sourceDecodable as boolean,
+      sourcePayloadSha256: typeof r.sourcePayloadSha256 === "string" ? r.sourcePayloadSha256 : null,
+      candidateDecodable: r.candidateDecodable as boolean,
+      candidatePayloadSha256: typeof r.candidatePayloadSha256 === "string" ? r.candidatePayloadSha256 : null,
+      result: r.result as SignMachineReadableContentRegionSummary["result"],
+    }));
+
+  return { regions, overall: evidence.overall as SignMachineReadableContentSummary["overall"] };
+}
+
 async function resolveSignProductionStatus(
   repo: ProjectRepository,
   projectId: string,
@@ -184,6 +254,7 @@ async function resolveSignProductionStatus(
     blockedValidationId: null,
     blockedValidationStatus: null,
     fitToProduction: null,
+    machineReadableContent: null,
   };
 
   const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
@@ -199,10 +270,14 @@ async function resolveSignProductionStatus(
   let blockedValidationId: string | null = null;
   let blockedValidationStatus: string | null = null;
   let fitToProduction: SignFitToProductionSummary | null = null;
+  let machineReadableContent: SignMachineReadableContentSummary | null = null;
   if (job.status === "completed") {
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
     printReady = validation?.status === "ready";
     fitToProduction = readFitToProductionSummary(validation?.report as Record<string, unknown> | null | undefined);
+    machineReadableContent = readMachineReadableContentSummary(
+      validation?.report as Record<string, unknown> | null | undefined,
+    );
     if (validation && !printReady) {
       // Blocked Production Candidate Inspection Phase: the SAME
       // validation-bound (never positional) asset check
@@ -236,6 +311,7 @@ async function resolveSignProductionStatus(
     blockedValidationId,
     blockedValidationStatus,
     fitToProduction,
+    machineReadableContent,
   };
 }
 

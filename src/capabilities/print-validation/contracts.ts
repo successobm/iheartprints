@@ -434,6 +434,24 @@ export const PRINT_VALIDATION_CHECK_CODES = [
   "repair_plan_recorded",
   /** The plan actually executed is provably the plan that was recorded: its canonical key recomputes identically and only S2-admitted, content-preserving steps were replayed. Also where the print-ready risk boundary is enforced — see this check's own reason text on a `review_required`/`blocked` plan. */
   "executed_plan_matches_recorded_plan",
+  /**
+   * SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: a QR (or future
+   * machine-readable) code is semantic content, not an ordinary decorative
+   * region — visual similarity is not equivalent to functional
+   * equivalence. Emitted ONLY when `RigidSignPlanEvidence
+   * .machineReadableContent` is non-null (the caller actually ran the
+   * comparison — see that field's own doc for why `null` is never treated
+   * as a failure the way `fitToProduction: null` is: this evidence is not
+   * yet computed automatically for every plate, only when an operator
+   * explicitly requests the check/restoration, so `null` must mean
+   * "not evaluated for this plate", never "evaluated and unsafe"). Blocks
+   * (`severity: "blocking"`) only when a SOURCE QR was positively decoded
+   * and the candidate cannot reproduce that exact payload — an
+   * undecodable source can never prove a regression, so it is surfaced
+   * (`severity: "warning"`) but never itself blocks (Section R's own
+   * exact scoping).
+   */
+  "machine_readable_content_preserved",
 ] as const;
 
 export type PrintValidationCheckCode =
@@ -1063,6 +1081,44 @@ export interface RigidSignPlanEvidence {
    * missing-evidence case in this profile, never silently treated as safe.
    */
   fitToProduction: RigidSignFitToProductionEvidence | null;
+  /**
+   * SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: this module's own
+   * narrow copy of `machine-readable-content/contracts.ts`'s
+   * `MachineReadablePreservationReport` — never imported, mirroring every
+   * other cross-capability evidence type in this file.
+   *
+   * `null` means "this comparison has never been run for this plate" —
+   * DELIBERATELY NOT fail-closed the way `fitToProduction: null` is.
+   * Fit-to-production is computed automatically for every rigid-sign job
+   * completion; QR preservation, in this phase, is computed only when an
+   * operator explicitly runs the check (or restoration) — every plate
+   * produced before this evidence existed, and every plate whose operator
+   * has not yet run the check, correctly reads `null` here and gets NO
+   * check pushed at all (never a manufactured "unknown" blocking failure)
+   * — see `validateRigidSign`'s own handling.
+   */
+  machineReadableContent: RigidSignMachineReadableContentEvidence | null;
+}
+
+/**
+ * SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: narrow mirror of
+ * `machine-readable-content/contracts.ts`'s own result/instance shapes —
+ * this module never imports that capability directly (the same
+ * cross-capability discipline every other evidence type here already
+ * follows).
+ */
+export interface RigidSignMachineReadableRegionEvidence {
+  id: string;
+  kind: "qr";
+  sourceDecodable: boolean;
+  candidateDecodable: boolean;
+  result: "pass" | "fail" | "hard_fail" | "review_required" | "not_applicable";
+}
+
+export interface RigidSignMachineReadableContentEvidence {
+  regions: RigidSignMachineReadableRegionEvidence[];
+  /** The worst case across `regions` — `"not_applicable"` iff `regions` is empty (no machine-readable content detected in the source at all). */
+  overallResult: "pass" | "fail" | "hard_fail" | "review_required" | "not_applicable";
 }
 
 /**

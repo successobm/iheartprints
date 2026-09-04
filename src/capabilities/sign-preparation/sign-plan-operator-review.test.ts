@@ -238,6 +238,7 @@ describe("loadSignPlanOperatorReview — production status", () => {
       blockedValidationId: null,
       blockedValidationStatus: null,
       fitToProduction: null,
+      machineReadableContent: null,
     });
   });
 
@@ -414,5 +415,103 @@ describe("loadSignPlanOperatorReview — production status", () => {
     if (review.status !== "ready") return;
     assert.equal(review.production.printReady, true);
     assert.equal(review.production.blockedCandidateAssetId, null);
+  });
+
+  it("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: reads machineReadableContent back from the SAME report.machineReadableContentEvidence field the QR check/restore actions persist — never re-computed here", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const asset = await graph.assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-qr-test`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "finalization_required",
+      report: {
+        checks: [{ check: "machine_readable_content_preserved", status: "fail", severity: "blocking", reason: "test" }],
+        machineReadableContentEvidence: {
+          instances: [
+            {
+              id: "qr-1",
+              kind: "qr",
+              sourceBounds: { xPx: 1, yPx: 1, widthPx: 2, heightPx: 2 },
+              sourceDecodable: true,
+              sourcePayloadSha256: "a".repeat(64),
+              candidateBounds: null,
+              candidateDecodable: false,
+              candidatePayloadSha256: null,
+              result: "fail",
+            },
+          ],
+          overall: "fail",
+        },
+      },
+    });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.machineReadableContent?.overall, "fail");
+    assert.equal(review.production.machineReadableContent?.regions.length, 1);
+    assert.equal(review.production.machineReadableContent?.regions[0].sourceDecodable, true);
+    assert.equal(review.production.machineReadableContent?.regions[0].candidateDecodable, false);
+    // Never the raw payload — only the hash, exactly as persisted.
+    assert.equal(review.production.machineReadableContent?.regions[0].sourcePayloadSha256, "a".repeat(64));
+  });
+
+  it("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: a malformed/missing evidence shape reads back as null, never guessed", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+    const asset = await graph.assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-qr-missing-test`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "ready",
+      report: { checks: [] }, // no machineReadableContentEvidence at all — the pre-this-feature shape
+    });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.machineReadableContent, null);
   });
 });

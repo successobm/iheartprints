@@ -414,6 +414,10 @@ export const TEST_FILES = [
   "src/app/api/internal/projects/[projectId]/sign-artwork/plan/route.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-operator-copy.test.ts",
   "src/capabilities/sign-preparation/sign-plan-operator-review.test.ts",
+  // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION.
+  "src/capabilities/machine-readable-content/qr-detect-decode.test.ts",
+  "src/capabilities/machine-readable-content/qr-preservation.test.ts",
+  "src/capabilities/machine-readable-content/qr-restore.test.ts",
   "src/app/internal/projects/[projectId]/sign-authorize/sign-authorize-page-state.test.ts",
   // FIX AUTHORIZED SIGN PRODUCTION WORKSPACE CTA: the CTA-label state
   // machine (print-ready / in-flight / prepare vs. try-again), pulled out
