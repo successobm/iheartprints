@@ -126,6 +126,14 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
     // behavior stays fully isolated to the dedicated suite below, which
     // overrides this per-case.
     machineReadableContent: { regions: [], overallResult: "not_applicable" },
+    // Fix Final PNG Physical Size / PPI Metadata Integrity Phase: `null` is
+    // now BLOCKING (mirrors the machine-readable precedent immediately
+    // above), so every test in this file NOT specifically about physical-
+    // resolution metadata needs a baseline that PASSES — 153 PPI, matching
+    // the default `primaryAsset` (2754x3672px @ 18x24in = 153 PPI exactly)
+    // — computed via THIS test file's own arithmetic, never copied from
+    // the implementation under test: round(153 * 39.3700787402) = 6024.
+    deliveredPhysicalDensity: { pixelsPerMetreX: 6024, pixelsPerMetreY: 6024 },
     ...overrides,
   };
 }
@@ -196,6 +204,13 @@ describe("rigid_sign_raster print validation profile", () => {
           nativeWidthPx: null,
           nativeHeightPx: null,
         },
+        // Fix Final PNG Physical Size / PPI Metadata Integrity Phase: this
+        // test's own pixel dimensions changed the expected density (130
+        // PPI, not the default fixture's 153) — the delivered density must
+        // match THIS test's own geometry, or the new
+        // physical_resolution_metadata check would spuriously block a
+        // scenario this test isn't about. round(130 * 39.3700787402) = 5118.
+        rigidSign: evidence({ deliveredPhysicalDensity: { pixelsPerMetreX: 5118, pixelsPerMetreY: 5118 } }),
       }),
     );
     const check = report.checks.find((c) => c.check === "effective_resolution");
@@ -1654,5 +1669,115 @@ describe("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION → print_ready", () 
       }),
     );
     assert.doesNotMatch(checkOf(report)!.reason, /https?:\/\//);
+  });
+});
+
+describe("Fix Final PNG Physical Size / PPI Metadata Integrity Phase — physical_resolution_metadata → print_ready (real Get Hibachi production incident)", () => {
+  function checkOf(report: ReturnType<typeof printValidation.validateArtwork>) {
+    return report.checks.find((c) => c.check === "physical_resolution_metadata");
+  }
+
+  // The exact real Get Hibachi geometry: 6144x4096px ordered at 36x24in.
+  const HIBACHI_WIDTH_PX = 6144;
+  const HIBACHI_HEIGHT_PX = 4096;
+  const HIBACHI_ORDERED_WIDTH_IN = 36;
+  const HIBACHI_ORDERED_HEIGHT_IN = 24;
+
+  function hibachiInput(deliveredPhysicalDensity: { pixelsPerMetreX: number; pixelsPerMetreY: number } | null) {
+    return baseInput({
+      primaryAsset: {
+        contentType: "image/png",
+        widthPx: HIBACHI_WIDTH_PX,
+        heightPx: HIBACHI_HEIGHT_PX,
+        hasTransparency: false,
+        vectorAssetId: null,
+        resolutionProvenance: "reconstructed",
+        nativeWidthPx: 1536,
+        nativeHeightPx: 1024,
+      },
+      rigidSign: evidence({
+        orderedWidthIn: HIBACHI_ORDERED_WIDTH_IN,
+        orderedHeightIn: HIBACHI_ORDERED_HEIGHT_IN,
+        deliveredPhysicalDensity,
+      }),
+    });
+  }
+
+  it("CASE 1 — correct pHYs matching ordered size: PASS, Print Ready allowed (real Get Hibachi geometry: round(170.6667 * 39.3700787402) = 6719)", () => {
+    const report = printValidation.validateArtwork(hibachiInput({ pixelsPerMetreX: 6719, pixelsPerMetreY: 6719 }));
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.match(checkOf(report)!.reason, /171 PPI|170 PPI/);
+    assert.equal(report.status, "ready");
+  });
+
+  it("CASE 2 — missing pHYs (the real QR-repair defect, pre-fix): finalization_required, Print Ready NO", () => {
+    const report = printValidation.validateArtwork(hibachiInput(null));
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.match(checkOf(report)!.reason, /no embedded physical-resolution/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("CASE 3 — 72 DPI metadata inconsistent with the ordered size (the exact real Corel symptom: ~85.33x56.89in instead of ~36x24in): finalization_required, Print Ready NO", () => {
+    // round(72 * 39.3700787402) = 2835.
+    const report = printValidation.validateArtwork(hibachiInput({ pixelsPerMetreX: 2835, pixelsPerMetreY: 2835 }));
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.match(checkOf(report)!.reason, /disagreeing with the ordered/i);
+    assert.notEqual(report.status, "ready");
+  });
+
+  it("CASE 4 — metadata differs only by normal integer pixels-per-metre rounding: PASS", () => {
+    // 6718 and 6720 (±1 unit from the exact 6719) — well within the 1% relative tolerance.
+    const report = printValidation.validateArtwork(hibachiInput({ pixelsPerMetreX: 6718, pixelsPerMetreY: 6720 }));
+    assert.equal(checkOf(report)?.status, "pass");
+    assert.equal(report.status, "ready");
+  });
+
+  it("incomplete production geometry (dimensions unknown): unknown, never fabricated as safe or unsafe", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: {
+          contentType: "image/png",
+          widthPx: null,
+          heightPx: null,
+          hasTransparency: false,
+          vectorAssetId: null,
+          resolutionProvenance: "native",
+          nativeWidthPx: null,
+          nativeHeightPx: null,
+        },
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "unknown");
+    assert.equal(checkOf(report)?.severity, "blocking");
+  });
+
+  it("the check's reason never fabricates a hardcoded density (72/96/150 DPI) — it is always derived from actual pixels ÷ ordered inches", () => {
+    // A completely different ordered size/pixel geometry — the check must
+    // still correctly PASS when density matches THAT geometry, proving it
+    // is genuinely derived per-candidate, never a fixed default.
+    const report = printValidation.validateArtwork(
+      baseInput({
+        primaryAsset: {
+          contentType: "image/png",
+          widthPx: 1800,
+          heightPx: 2400,
+          hasTransparency: false,
+          vectorAssetId: null,
+          resolutionProvenance: "native",
+          nativeWidthPx: null,
+          nativeHeightPx: null,
+        },
+        rigidSign: evidence({
+          orderedWidthIn: 12,
+          orderedHeightIn: 16,
+          // 1800/12 = 150 PPI exactly -> round(150 * 39.3700787402) = 5906.
+          deliveredPhysicalDensity: { pixelsPerMetreX: 5906, pixelsPerMetreY: 5906 },
+        }),
+      }),
+    );
+    assert.equal(checkOf(report)?.status, "pass");
   });
 });

@@ -101,7 +101,7 @@ describe("Signs Phase S2: rigid-sign finalization", () => {
   }
 
   it("1/21: exact-aspect, sufficient resolution — no unnecessary repair, reaches print_ready", async () => {
-    const { repo, signPreparation, finalArtwork, worker, projectId } = await build();
+    const { repo, assets, signPreparation, finalArtwork, worker, projectId } = await build();
     // 1800x2400 @ 12x16in = exactly 150 PPI, exact 3:4 aspect.
     const outcome = await uploadConfirmPlan(
       signPreparation,
@@ -125,6 +125,28 @@ describe("Signs Phase S2: rigid-sign finalization", () => {
 
     const validations = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
     assert.equal(validations!.status, "ready");
+
+    // Fix Final PNG Physical Size / PPI Metadata Integrity Phase: the
+    // MAIN worker composition output already wrote correct pHYs before
+    // this phase — this test locks that in with an explicit byte-level
+    // proof (never merely an in-memory metadata object), so a future
+    // regression here is caught the same way the real QR-repair defect
+    // was. 1800x2400px @ 12x16in = 150 PPI exactly -> round(150 *
+    // 39.3700787402) = 5906.
+    const { readPhysicalPixelDensity } = await import("@/capabilities/final-artwork/production-png");
+    const producedAssets = await repo.listAssets(projectId);
+    const finalAsset = producedAssets.find(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
+    );
+    assert.ok(finalAsset);
+    const finalBytes = await assets.downloadAssetBytes(finalAsset!.id);
+    assert.ok(finalBytes);
+    const density = readPhysicalPixelDensity(finalBytes!.bytes);
+    assert.ok(density, "the main production candidate's ACTUAL persisted bytes must carry a pHYs chunk");
+    assert.equal(density!.pixelsPerMetreX, 5906);
+    assert.equal(density!.pixelsPerMetreY, 5906);
+    const checks = (validations!.report as { checks: Array<{ check: string; status: string }> }).checks;
+    assert.equal(checks.find((c) => c.check === "physical_resolution_metadata")?.status, "pass");
   });
 
   it("2: uniform-background aspect mismatch, resolvable without provider — AUTO_SAFE, reaches print_ready", async () => {

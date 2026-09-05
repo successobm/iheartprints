@@ -129,11 +129,13 @@ import {
 import { decodePngUpload } from "@/capabilities/artwork-preparation/image-decode";
 import {
   pixelsPerMetreForPpi,
+  readPhysicalPixelDensity,
   withPhysicalPixelDensity,
 } from "@/capabilities/final-artwork/production-png";
 import type {
   RigidSignFitToProductionEvidence,
   RigidSignMachineReadableContentEvidence,
+  RigidSignPhysicalDensityEvidence,
   RigidSignPlanEvidence,
   RigidSignSubstrateBoundaryEvidence,
 } from "@/capabilities/print-validation/contracts";
@@ -2913,9 +2915,21 @@ export function createFinalArtworkWorkerCapability(
     // (never fabricated as "safe") — `protected_content_safe_inset`
     // already treats `null` as blocking.
     let fitToProduction: RigidSignFitToProductionEvidence | null = null;
+    // Fix Final PNG Physical Size / PPI Metadata Integrity Phase (real Get
+    // Hibachi production incident): read back from the SAME already-
+    // downloaded final bytes below — never merely "we called the encoder,
+    // so it must be right" (a real derived-candidate writer, QR
+    // restoration, proved that assumption false). `null` (no pHYs chunk at
+    // all) on any read/decode failure — never fabricated as safe,
+    // `validateRigidSign` already treats it as blocking.
+    let deliveredPhysicalDensity: RigidSignPhysicalDensityEvidence | null = null;
     try {
       const finalBytesForFit = await assets.downloadAssetBytes(productionAsset.id);
       if (finalBytesForFit) {
+        const density = readPhysicalPixelDensity(finalBytesForFit.bytes);
+        deliveredPhysicalDensity = density
+          ? { pixelsPerMetreX: density.pixelsPerMetreX, pixelsPerMetreY: density.pixelsPerMetreY }
+          : null;
         const decodedFinal = decodePngUpload(finalBytesForFit.bytes);
         // Edge-Intent Correction Phase: resolve the preparation's OWN
         // governed classifications, re-validated fresh against THIS exact
@@ -2960,6 +2974,7 @@ export function createFinalArtworkWorkerCapability(
       }
     } catch {
       fitToProduction = null;
+      deliveredPhysicalDensity = null;
     }
 
     // Fix "Machine-Readable Verification Is a Required Pre-Finalization
@@ -3051,6 +3066,7 @@ export function createFinalArtworkWorkerCapability(
       // blocking, exactly like `fitToProduction: null`. See that field's
       // own doc in `contracts.ts` for the full history of this decision.
       machineReadableContent,
+      deliveredPhysicalDensity,
     };
 
     const validationInput: PrintValidationInput = {

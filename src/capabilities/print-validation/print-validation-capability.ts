@@ -34,6 +34,7 @@ import type {
   RigidSignFitToProductionEvidence,
   RigidSignGeometryStepEvidence,
   RigidSignMachineReadableContentEvidence,
+  RigidSignPhysicalDensityEvidence,
   RigidSignPlanEvidence,
   UploadedPreserveEvidence,
 } from "./contracts";
@@ -567,6 +568,19 @@ function describeValidationProfile(
 const RIGID_SIGN_ASPECT_TOLERANCE = 0.01;
 /** PPI comparison tolerance, mirroring `EFFECTIVE_PPI_TOLERANCE`. */
 const RIGID_SIGN_PPI_TOLERANCE = 0.5;
+/**
+ * Fix Final PNG Physical Size / PPI Metadata Integrity Phase: relative
+ * deviation allowed between the delivered PNG's embedded `pHYs` density and
+ * the expected density derived from actual pixel dimensions ÷ ordered
+ * inches — mirrors `DENSITY_METADATA_TOLERANCE` (apparel's own, deliberately
+ * kept separate per this file's own discipline: `pHYs` is an integer
+ * pixels-per-metre field, so it can never be exactly exact). Unlike
+ * apparel's tolerance, this one is BLOCKING here — see
+ * `RigidSignPlanEvidence.deliveredPhysicalDensity`'s own doc for why.
+ */
+const RIGID_SIGN_DENSITY_METADATA_TOLERANCE = 0.01;
+/** PNG's `pHYs` unit is pixels per metre; 1 metre = this many inches. Mirrors `production-png.ts`'s own constant — never imported (Print Validation never depends on the Final Artwork capability). */
+const RIGID_SIGN_INCHES_PER_METRE = 39.3700787402;
 
 /**
  * LIVE PRODUCT BLOCKER #4D: independently re-derives whether a
@@ -1044,8 +1058,82 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
     if (blocking) requiredTransformations.add("require_human_review");
   }
 
+  // Fix Final PNG Physical Size / PPI Metadata Integrity Phase (real Get
+  // Hibachi production incident): see
+  // `RigidSignPlanEvidence.deliveredPhysicalDensity`'s own doc for why this
+  // is BLOCKING for rigid signs specifically, unlike apparel's info-only
+  // `density_metadata` check.
+  checks.push(
+    checkRigidSignPhysicalResolutionMetadata(sign.deliveredPhysicalDensity, asset.widthPx, asset.heightPx, sign.orderedWidthIn, sign.orderedHeightIn),
+  );
+  if (checks[checks.length - 1]!.status === "fail") requiredTransformations.add("require_human_review");
+
   const status = aggregateStatus(checks);
   return buildReport(input, requirements, checks, requiredTransformations, profile, productionTreatment, status);
+}
+
+/**
+ * Fix Final PNG Physical Size / PPI Metadata Integrity Phase: BLOCKING for
+ * rigid signs (see `RigidSignPlanEvidence.deliveredPhysicalDensity`'s own
+ * doc for why this diverges from apparel's info-only `density_metadata`
+ * check). Compares the delivered PNG's ACTUAL embedded `pHYs` density
+ * against the ONLY authoritative expectation for a rigid sign: its own
+ * actual pixel dimensions ÷ the ordered physical inches — never a fixed
+ * default like 72/96/150 DPI, and never merely "was the encoder called"
+ * (the worker reads this back from the real persisted bytes). `widthPx`/
+ * `heightPx` may be `null` (dimensions not yet known) — that case is
+ * handled by `raster_dimensions_known` elsewhere and this check reports
+ * `unknown` rather than fabricating a comparison.
+ */
+function checkRigidSignPhysicalResolutionMetadata(
+  deliveredPhysicalDensity: RigidSignPhysicalDensityEvidence | null,
+  widthPx: number | null,
+  heightPx: number | null,
+  orderedWidthIn: number,
+  orderedHeightIn: number,
+): PrintValidationCheck {
+  if (widthPx === null || heightPx === null || !(orderedWidthIn > 0) || !(orderedHeightIn > 0)) {
+    return {
+      check: "physical_resolution_metadata",
+      status: "unknown",
+      severity: "blocking",
+      reason: "Physical-resolution metadata could not be compared — production geometry is incomplete.",
+    };
+  }
+  if (deliveredPhysicalDensity === null) {
+    return {
+      check: "physical_resolution_metadata",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "The delivered production PNG carries no embedded physical-resolution (pHYs) metadata — production " +
+        "software would interpret its pixel dimensions at an arbitrary default density instead of the ordered " +
+        "physical size.",
+    };
+  }
+
+  const expectedPpiX = widthPx / orderedWidthIn;
+  const expectedPpiY = heightPx / orderedHeightIn;
+  const declaredPpiX = deliveredPhysicalDensity.pixelsPerMetreX / RIGID_SIGN_INCHES_PER_METRE;
+  const declaredPpiY = deliveredPhysicalDensity.pixelsPerMetreY / RIGID_SIGN_INCHES_PER_METRE;
+  const agreesX = Math.abs(declaredPpiX - expectedPpiX) / expectedPpiX <= RIGID_SIGN_DENSITY_METADATA_TOLERANCE;
+  const agreesY = Math.abs(declaredPpiY - expectedPpiY) / expectedPpiY <= RIGID_SIGN_DENSITY_METADATA_TOLERANCE;
+  const agrees = agreesX && agreesY;
+
+  const declaredWidthIn = widthPx / declaredPpiX;
+  const declaredHeightIn = heightPx / declaredPpiY;
+
+  return {
+    check: "physical_resolution_metadata",
+    status: agrees ? "pass" : "fail",
+    severity: "blocking",
+    reason: agrees
+      ? `Embedded physical-resolution metadata declares ~${Math.round(declaredPpiX)}x${Math.round(declaredPpiY)} PPI, ` +
+        `agreeing with the ordered ${formatIn(orderedWidthIn)}x${formatIn(orderedHeightIn)}in production size.`
+      : `Embedded physical-resolution metadata declares ~${Math.round(declaredPpiX)}x${Math.round(declaredPpiY)} PPI ` +
+        `(production software would interpret this file as approximately ${declaredWidthIn.toFixed(2)}x${declaredHeightIn.toFixed(2)}in), ` +
+        `disagreeing with the ordered ${formatIn(orderedWidthIn)}x${formatIn(orderedHeightIn)}in production size — this must be corrected before the file can be finalized.`,
+  };
 }
 
 /** Internal rationale text for the `machine_readable_content_preserved` check — never customer-facing (mirrors every other check's own `reason` discipline in this file). Never includes the decoded payload itself (Section T). */

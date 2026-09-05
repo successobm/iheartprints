@@ -407,6 +407,7 @@ describe("sign-qr-preservation-service: SIGNS QR DESTINATION RESOLUTION", () => 
     const { graph, repo } = await freshGraph();
     const { checkSignQrPreservation, confirmSignQrDestination } = await import("./sign-qr-preservation-service");
     const { decodeQrCodes } = await import("@/capabilities/machine-readable-content/qr-detect-decode");
+    const { readPhysicalPixelDensity } = await import("@/capabilities/final-artwork/production-png");
     const { projectId, job } = await projectWithBrokenQrCandidate(graph, repo, "https://example-test-business.com/derived-asset-case");
 
     const before = await checkSignQrPreservation(projectId);
@@ -427,6 +428,28 @@ describe("sign-qr-preservation-service: SIGNS QR DESTINATION RESOLUTION", () => 
     const decoded = decodeQrCodes({ width: png.width, height: png.height, data: Buffer.from(png.data) });
     assert.equal(decoded.length, 1, "the persisted derived asset itself must decode a QR");
     assert.equal(decoded[0].payload, destination, "the ACTUAL persisted bytes must decode to EXACTLY the confirmed destination");
+
+    // Fix Final PNG Physical Size / PPI Metadata Integrity Phase (real Get
+    // Hibachi production incident): the ACTUAL persisted bytes of a
+    // QR-corrected candidate must carry correct pHYs — parsed directly
+    // from the real PNG chunk data (`downloaded!.bytes`), never an
+    // in-memory metadata object, exactly reproducing the real defect
+    // (`PNG.sync.write` with no density wrap) and proving it is fixed.
+    // This fixture's own composition (600x900px, ordered 4x6in,
+    // reconstruction: null, exact-aspect 1:1 fit) is exactly 150 PPI.
+    const density = readPhysicalPixelDensity(downloaded!.bytes);
+    assert.ok(density, "the QR-corrected candidate's ACTUAL bytes must carry a pHYs chunk — this is the exact real defect (missing pHYs -> 72 DPI in production software)");
+    assert.equal(density!.pixelsPerMetreX, 5906, "round(150 * 39.3700787402) = 5906");
+    assert.equal(density!.pixelsPerMetreY, 5906);
+    assert.ok(Math.abs(density!.ppiX - 150) < 0.1, `declared PPI (${density!.ppiX}) must match the ordered 4x6in @ 150 PPI geometry, never a default like 72 DPI`);
+    assert.ok(Math.abs(density!.ppiY - 150) < 0.1);
+    // Independent confirmation via the same authoritative check the worker
+    // and PrintValidation both use — the merged validation's OWN
+    // physical_resolution_metadata check for this NEW asset (never carried
+    // forward stale from the OLD asset's validation).
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string }> }).checks;
+    const physicalCheck = checks.find((c) => c.check === "physical_resolution_metadata");
+    assert.equal(physicalCheck?.status, "pass");
   });
 
   it("multiple projects (independent regions): resolving one project's QR never affects another project's evidence", async () => {

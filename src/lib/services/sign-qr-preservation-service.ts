@@ -92,6 +92,7 @@ import { createHash } from "node:crypto";
 import { PNG } from "pngjs";
 
 import { getCapabilityGraph } from "@/capabilities/composition";
+import { pixelsPerMetreForPpi, readPhysicalPixelDensity, withPhysicalPixelDensity } from "@/capabilities/final-artwork/production-png";
 import { hasAnyTransparentPixel } from "@/capabilities/final-artwork/raster-transform";
 import type { MachineReadablePreservationReport } from "@/capabilities/machine-readable-content/contracts";
 import { compareMachineReadableContent } from "@/capabilities/machine-readable-content/qr-preservation";
@@ -221,17 +222,76 @@ function buildMachineReadableCheck(report: MachineReadablePreservationReport): P
   };
 }
 
+/**
+ * Fix Final PNG Physical Size / PPI Metadata Integrity Phase: generalized
+ * from the original single-check `mergeMachineReadableCheck` (still the
+ * name every existing caller uses for the QR-only case; `replacementChecks`
+ * lets `restoreSignQrCode` ALSO refresh `physical_resolution_metadata` in
+ * the SAME merge, since restoration composites a genuinely NEW asset whose
+ * own delivered density must never be assumed identical to the prior
+ * asset's — even though today it always mathematically is, for the reason
+ * `restoreSignQrCode`'s own comment gives). Every OTHER existing check
+ * (`exact_physical_dimensions`, `effective_resolution`, etc.) is carried
+ * forward verbatim, unchanged from `mergeMachineReadableCheck`'s original
+ * behavior — none of those genuinely change from a QR-only restoration.
+ */
+function mergeChecks(
+  priorReport: Record<string, unknown> | null | undefined,
+  replacementChecks: PersistedCheck[],
+  extraReportFields: Record<string, unknown>,
+): { report: Record<string, unknown>; status: "ready" | "finalization_required" } {
+  const priorChecks = Array.isArray(priorReport?.checks) ? (priorReport!.checks as PersistedCheck[]) : [];
+  const replacedNames = new Set(replacementChecks.map((c) => c.check));
+  const checks = [...priorChecks.filter((c) => !replacedNames.has(c.check)), ...replacementChecks];
+  const status = recomputeAggregateStatus(checks);
+  return {
+    report: { ...(priorReport ?? {}), checks, status, ...extraReportFields },
+    status,
+  };
+}
+
 function mergeMachineReadableCheck(
   priorReport: Record<string, unknown> | null | undefined,
   newCheck: PersistedCheck,
   evidence: MachineReadablePreservationReport,
 ): { report: Record<string, unknown>; status: "ready" | "finalization_required" } {
-  const priorChecks = Array.isArray(priorReport?.checks) ? (priorReport!.checks as PersistedCheck[]) : [];
-  const checks = [...priorChecks.filter((c) => c.check !== "machine_readable_content_preserved"), newCheck];
-  const status = recomputeAggregateStatus(checks);
+  return mergeChecks(priorReport, [newCheck], { machineReadableContentEvidence: evidence });
+}
+
+/**
+ * Fix Final PNG Physical Size / PPI Metadata Integrity Phase: this file's
+ * own small, deliberately-duplicated copy of `print-validation-capability
+ * .ts`'s `checkRigidSignPhysicalResolutionMetadata` — mirrors it exactly
+ * (same tolerance, same blocking severity), never imported (this file
+ * already duplicates `describeMachineReadableCheck`/`buildMachineReadable
+ * Check` for the identical cross-capability-boundary reason). Used ONLY by
+ * `restoreSignQrCode`, which is the one place in this file that actually
+ * composites a NEW asset whose own delivered density must be re-verified
+ * rather than assumed.
+ */
+const PHYSICAL_RESOLUTION_METADATA_TOLERANCE = 0.01;
+const INCHES_PER_METRE = 39.3700787402;
+
+function buildPhysicalResolutionCheck(
+  pixelsPerMetre: number,
+  actualWidthPx: number,
+  actualHeightPx: number,
+  orderedWidthIn: number,
+  orderedHeightIn: number,
+): PersistedCheck {
+  const expectedPpiX = actualWidthPx / orderedWidthIn;
+  const expectedPpiY = actualHeightPx / orderedHeightIn;
+  const declaredPpi = pixelsPerMetre / INCHES_PER_METRE;
+  const agreesX = Math.abs(declaredPpi - expectedPpiX) / expectedPpiX <= PHYSICAL_RESOLUTION_METADATA_TOLERANCE;
+  const agreesY = Math.abs(declaredPpi - expectedPpiY) / expectedPpiY <= PHYSICAL_RESOLUTION_METADATA_TOLERANCE;
+  const agrees = agreesX && agreesY;
   return {
-    report: { ...(priorReport ?? {}), checks, status, machineReadableContentEvidence: evidence },
-    status,
+    check: "physical_resolution_metadata",
+    status: agrees ? "pass" : "fail",
+    severity: "blocking",
+    reason: agrees
+      ? `Embedded physical-resolution metadata declares ~${Math.round(declaredPpi)} PPI, agreeing with the ordered production size.`
+      : `Embedded physical-resolution metadata declares ~${Math.round(declaredPpi)} PPI, disagreeing with the ordered production size — this must be corrected before the file can be finalized.`,
   };
 }
 
@@ -385,6 +445,16 @@ export async function restoreSignQrCode(projectId: string): Promise<SignQrRestor
   if (!candidate) {
     throw new SignQrPreservationError("No production candidate exists yet for this sign — nothing to restore.");
   }
+  // Fix Final PNG Physical Size / PPI Metadata Integrity Phase: a real
+  // production candidate cannot exist without a confirmed ordered size
+  // (the plan/composition that produced it required one) — this guard is
+  // defensive, never expected to actually fire, and fails closed with a
+  // clear error rather than deriving a physical density from `null`.
+  if (preparation.orderedWidthIn === null || preparation.orderedHeightIn === null) {
+    throw new SignQrPreservationError("This sign has no confirmed ordered physical size — cannot derive physical-resolution metadata.");
+  }
+  const orderedWidthIn = preparation.orderedWidthIn;
+  const orderedHeightIn = preparation.orderedHeightIn;
 
   const [source, candidateImage] = await Promise.all([
     downloadRgba(preparation.originalAssetId),
@@ -441,7 +511,19 @@ export async function restoreSignQrCode(projectId: string): Promise<SignQrRestor
 
   const png = new PNG({ width: working.width, height: working.height });
   working.data.copy(png.data);
-  const restoredPngBytes = PNG.sync.write(png);
+  // Fix Final PNG Physical Size / PPI Metadata Integrity Phase (real Get
+  // Hibachi production incident: this exact `PNG.sync.write` call, with no
+  // pHYs wrap, is the root cause — the composited QR-repaired candidate
+  // opened in production software at 72 DPI / ~85x57in instead of the
+  // ordered ~36x24in). RE-DERIVES the physical density from THIS
+  // candidate's own actual pixel width ÷ the ordered physical width —
+  // never copied from the prior candidate's own pHYs (a later derived
+  // candidate may legitimately have different pixel dimensions; the
+  // ordered physical size is what stays authoritative) — mirrors exactly
+  // how the worker's own initial composition output already derives it
+  // (`final-artwork-worker-capability.ts`).
+  const achievedPpi = working.width / orderedWidthIn;
+  const restoredPngBytes = withPhysicalPixelDensity(PNG.sync.write(png), pixelsPerMetreForPpi(achievedPpi));
 
   const graph = getCapabilityGraph();
   const newAsset = await graph.assets.uploadProductionAsset(projectId, {
@@ -495,10 +577,23 @@ export async function restoreSignQrCode(projectId: string): Promise<SignQrRestor
 
   const repo = getProjectRepository();
   const priorValidation = await repo.getLatestProductionAssetValidationForJob(projectId, candidate.job.id);
-  const merged = mergeMachineReadableCheck(
+  const merged = mergeChecks(
     priorValidation?.report as Record<string, unknown> | null | undefined,
-    buildMachineReadableCheck(afterReport),
-    afterReport,
+    [
+      buildMachineReadableCheck(afterReport),
+      // Fix Final PNG Physical Size / PPI Metadata Integrity Phase: this
+      // restoration composited a genuinely NEW asset (`newAsset.id`) — its
+      // own delivered density is re-verified fresh here, never carried
+      // forward from the prior asset's own (possibly different) check.
+      buildPhysicalResolutionCheck(
+        pixelsPerMetreForPpi(achievedPpi),
+        working.width,
+        working.height,
+        orderedWidthIn,
+        orderedHeightIn,
+      ),
+    ],
+    { machineReadableContentEvidence: afterReport },
   );
 
   await repo.createProductionAssetValidation(projectId, {

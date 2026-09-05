@@ -466,6 +466,13 @@ export const PRINT_VALIDATION_CHECK_CODES = [
    * `"pass"`/`"not_applicable"` are non-blocking passes.
    */
   "machine_readable_content_preserved",
+  /**
+   * Fix Final PNG Physical Size / PPI Metadata Integrity Phase: see
+   * `RigidSignPlanEvidence.deliveredPhysicalDensity`'s own doc. BLOCKING
+   * for rigid signs — never `null`/skipped, and never merely info-severity
+   * the way apparel's `density_metadata` check is.
+   */
+  "physical_resolution_metadata",
 ] as const;
 
 export type PrintValidationCheckCode =
@@ -1117,6 +1124,43 @@ export interface RigidSignPlanEvidence {
    * evidence existed, or a genuine failure to complete the comparison.
    */
   machineReadableContent: RigidSignMachineReadableContentEvidence | null;
+  /**
+   * Fix Final PNG Physical Size / PPI Metadata Integrity Phase (real Get
+   * Hibachi production incident: a QR-repaired 6144x4096 candidate, ordered
+   * at 36x24in, opened in CorelDRAW at ~85.33x56.89in / 72 DPI instead of
+   * ~36x24in / ~171 DPI — the repair's own PNG encoder never wrote a pHYs
+   * chunk at all). This module's own narrow mirror of `final-artwork`'s
+   * `PhysicalPixelDensity` (`production-png.ts`) — never imported, the SAME
+   * cross-capability discipline `ProductionNormalizationSummary
+   * .densityPixelsPerMetre` already follows for apparel (Print Validation
+   * never depends on the Final Artwork capability; the worker maps one to
+   * the other).
+   *
+   * Unlike apparel's `density_metadata` check (deliberately INFO-severity —
+   * a written density tag adds no image information, so effective
+   * resolution computed from pixel geometry stays authoritative there),
+   * this is BLOCKING for rigid signs: the profile's actual downstream
+   * consumer is production software (CorelDRAW et al.) that reads the
+   * embedded pHYs to determine the sign's PHYSICAL SIZE directly, so a
+   * missing or wrong density tag is a genuine, customer-facing production
+   * defect here, not a cosmetic one.
+   *
+   * `null` means the delivered PNG carries no `pHYs` chunk at all — fail
+   * closed, exactly like `fitToProduction`/`machineReadableContent: null`.
+   * The worker computes this by reading back the ACTUAL persisted bytes
+   * (`readPhysicalPixelDensity`) after encoding — never merely trusting
+   * that the encoder was called.
+   */
+  deliveredPhysicalDensity: RigidSignPhysicalDensityEvidence | null;
+}
+
+/**
+ * Fix Final PNG Physical Size / PPI Metadata Integrity Phase: see
+ * `RigidSignPlanEvidence.deliveredPhysicalDensity`'s own doc.
+ */
+export interface RigidSignPhysicalDensityEvidence {
+  pixelsPerMetreX: number;
+  pixelsPerMetreY: number;
 }
 
 /**
