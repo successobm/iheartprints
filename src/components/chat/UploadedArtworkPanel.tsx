@@ -835,6 +835,12 @@ function SignQrNeedsAttentionRegion({
           disabled={busy}
           maxLength={500}
           placeholder="e.g. https://your-website.com/book"
+          // Fix QR Review UX Phase: this field starts empty (`useState("")`
+          // above) and is never seeded from any visible artwork text —
+          // `autoComplete="off"` additionally defends against a browser
+          // silently re-suggesting a value it remembers from an unrelated
+          // prior manual entry in this same field.
+          autoComplete="off"
           onChange={(event) => setDestination(event.target.value)}
           className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm text-ink outline-none focus:border-ink/40 disabled:opacity-50"
           data-testid="sign-qr-destination-input"
@@ -861,7 +867,9 @@ function SignQrNeedsAttentionRegion({
           Print as supplied
         </button>
       </div>
-      <p className="mt-1.5 text-xs text-muted">The QR code may not scan in the printed artwork.</p>
+      <p className="mt-1.5 text-xs text-muted">
+        The QR code could not be verified. Printing as supplied may result in a QR code that does not scan.
+      </p>
     </div>
   );
 }

@@ -93,6 +93,20 @@ export function SignProductionAction({
     );
   }
 
+  if (cta.kind === "needs_qr_resolution") {
+    // Fix QR Review UX Phase: deliberately no execution button here — the
+    // QR resolution panel below already carries the correct next actions
+    // ("Fix QR code"/"Print as supplied"/"Restore QR code"). No "Try
+    // again": re-running the identical deterministic composition against
+    // the identical immutable source would reproduce identical, still-
+    // unresolved QR evidence every time.
+    return (
+      <p className="text-sm text-ink" data-sign-production-needs-attention>
+        This artwork needs further review before it can be finalized.
+      </p>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-3">
       {cta.needsAttentionNotice ? (

@@ -123,6 +123,16 @@ export function SignQrPreservationPanel({
     overall === "fail" ||
     overall === "hard_fail" ||
     (needsAttentionRegion !== undefined && destination.trim().length === 0);
+  // Fix QR Review UX Phase, Section O: once evidence already exists as
+  // `review_required`, nothing about the immutable source has changed —
+  // re-running the identical deterministic comparison reproduces the
+  // identical, still-unresolved result every time. The resolution actions
+  // ("Fix QR code"/"Print as supplied") below dominate instead of
+  // encouraging a repeated, meaningless re-check. Every other state
+  // (never checked, pass, fail/hard_fail, accepted_as_supplied,
+  // not_applicable) keeps the button — a genuine re-check remains
+  // meaningful for those.
+  const showCheckButton = overall !== "review_required";
 
   return (
     <section className="flex flex-col gap-2 rounded-lg border border-ink/10 p-3" data-sign-qr-preservation-panel>
@@ -177,7 +187,17 @@ export function SignQrPreservationPanel({
               value={destination}
               disabled={busy}
               maxLength={500}
-              placeholder="e.g. https://your-website.com/book"
+              placeholder="Enter confirmed QR destination"
+              // Fix QR Review UX Phase: this field starts empty (`useState("")`
+              // above) and is NEVER seeded from any visible artwork text,
+              // OCR-like inference, or business identity — only an
+              // operator's own explicit keystrokes ever populate it.
+              // `autoComplete="off"` additionally defends against a
+              // BROWSER silently re-suggesting a value it remembers from
+              // an unrelated prior manual entry in this same field — the
+              // real, empirically-confirmed cause of a customer/operator
+              // ever seeing an unverified destination pre-filled here.
+              autoComplete="off"
               onChange={(event) => setDestination(event.target.value)}
               className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm text-ink outline-none focus:border-ink/40 disabled:opacity-50"
               data-testid="sign-qr-destination-input"
@@ -215,21 +235,25 @@ export function SignQrPreservationPanel({
               Print as supplied
             </button>
           </div>
-          <p className="text-xs text-muted">The QR code may not scan in the printed artwork.</p>
+          <p className="text-xs text-muted">
+            The QR code could not be verified. Printing as supplied may result in a QR code that does not scan.
+          </p>
         </div>
       ) : null}
 
       <div className="mt-1 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={() => void runNoBodyAction("qr-check", setChecking)}
-          disabled={busy}
-          aria-busy={checking}
-          className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
-          data-testid="sign-qr-check-button"
-        >
-          {checking ? "Checking…" : "Check QR code"}
-        </button>
+        {showCheckButton ? (
+          <button
+            type="button"
+            onClick={() => void runNoBodyAction("qr-check", setChecking)}
+            disabled={busy}
+            aria-busy={checking}
+            className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-ink transition enabled:hover:border-ink/30 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="sign-qr-check-button"
+          >
+            {checking ? "Checking…" : "Check QR code"}
+          </button>
+        ) : null}
         {canRestore ? (
           <button
             type="button"
