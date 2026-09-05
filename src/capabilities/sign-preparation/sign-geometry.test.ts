@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { deriveUniformBackgroundExtension } from "./sign-geometry";
 import { adaptGeometryStepsToActualReconstruction } from "./sign-transform-executor";
+import { encodeFitArtworkToCanvasParams } from "./sign-composition-steps";
 import type { SignRepairStep } from "./contracts";
 
 /**
@@ -263,5 +264,168 @@ describe("adaptGeometryStepsToActualReconstruction (Signs Phase S3C)", () => {
     assert.equal(outcome.steps.length, 0);
     assert.equal(outcome.expectedOutputWidthPx, 1350);
     assert.equal(outcome.expectedOutputHeightPx, 1800);
+  });
+});
+
+describe("adaptGeometryStepsToActualReconstruction — Phase 3B fit_artwork_to_canvas (Fix Post-Reconstruction Geometry Adaptation for Phase 3B fit_artwork_to_canvas)", () => {
+  // The exact real, persisted Get Hibachi two-step plan's own `afterSteps`
+  // (0858d192-e74e-40b5-8532-a91bc4bcdf8e, planKey ...c4759f0f...): a single
+  // fit_artwork_to_canvas step, genuine safe-area fit, following
+  // reconstruct_resolution requesting 5508x3672 but the provider (a reused,
+  // cached Topaz result — providerRequestId identical across both the real
+  // project's jobs) actually returning 6144x4096.
+  function getHibachiFitStep(): SignRepairStep {
+    return {
+      kind: "fit_artwork_to_canvas",
+      params: encodeFitArtworkToCanvasParams({
+        expectedArtworkWidthPx: 5508, expectedArtworkHeightPx: 3672,
+        canvasWidthPx: 5508, canvasHeightPx: 3672,
+        scaleTargetWidthPx: 5468, scaleTargetHeightPx: 3632,
+        placementXPx: 30, placementYPx: 20,
+        backgroundR: 0, backgroundG: 0, backgroundB: 0,
+      }),
+      risk: "review_required",
+      reasons: ["test fixture: the real Get Hibachi fit_artwork_to_canvas step"],
+    };
+  }
+
+  it("the real Get Hibachi plan shape adapts end-to-end through the top-level function, given the governing policy's physical safe-area inset", () => {
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [getHibachiFitStep()],
+      6144, // actualReconstructedWidthPx
+      4096, // actualReconstructedHeightPx
+      5508, // requestedReconstructionWidthPx
+      3672, // requestedReconstructionHeightPx
+      36, // orderedWidthIn
+      24, // orderedHeightIn
+      5508, // plannedExpectedOutputWidthPx
+      3672, // plannedExpectedOutputHeightPx
+      0.125, // minimumSafeInsetIn — the governing rigid_rect_up_to_24x36:v1 policy figure
+    );
+    assert.equal(outcome.status, "adapted");
+    if (outcome.status !== "adapted") throw new Error("unreachable");
+    assert.equal(outcome.steps.length, 1);
+    const adapted = outcome.steps[0]!;
+    assert.equal(adapted.kind, "fit_artwork_to_canvas");
+    assert.equal(adapted.params.expectedArtworkWidthPx, 6144);
+    assert.equal(adapted.params.expectedArtworkHeightPx, 4096);
+    assert.equal(adapted.params.scaleTargetWidthPx, 6100);
+    assert.equal(adapted.params.scaleTargetHeightPx, 4052);
+    assert.equal(adapted.params.placementXPx, 33);
+    assert.equal(adapted.params.placementYPx, 22);
+    assert.equal(outcome.expectedOutputWidthPx, 6144);
+    assert.equal(outcome.expectedOutputHeightPx, 4096);
+  });
+
+  it("exact match to the requested reconstruction leaves the fit step untouched (the pre-existing fast path, unaffected)", () => {
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [getHibachiFitStep()], 5508, 3672, 5508, 3672, 36, 24, 5508, 3672, 0.125,
+    );
+    assert.equal(outcome.status, "unchanged");
+    if (outcome.status !== "unchanged") throw new Error("unreachable");
+    assert.deepEqual(outcome.steps, [getHibachiFitStep()]);
+  });
+
+  it("missing minimumSafeInsetIn refuses rather than guessing one, even though the shape is otherwise adaptable", () => {
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [getHibachiFitStep()], 6144, 4096, 5508, 3672, 36, 24, 5508, 3672,
+      // minimumSafeInsetIn omitted
+    );
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "missing_safe_inset_policy");
+  });
+
+  // Section L: per-primitive classification — a crop_region before the fit,
+  // or ANY step after it, is NOT yet a proven-safe adaptation.
+  it("a crop_region preceding fit_artwork_to_canvas refuses (MUST FAIL CLOSED — not yet proven safe)", () => {
+    const cropStep: SignRepairStep = {
+      kind: "crop_region",
+      params: { expectedInputWidthPx: 5508, expectedInputHeightPx: 3672, xPx: 0, yPx: 0, widthPx: 5000, heightPx: 3600 },
+      risk: "review_required",
+      reasons: ["test"],
+    };
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [cropStep, getHibachiFitStep()], 6144, 4096, 5508, 3672, 36, 24, 5508, 3672, 0.125,
+    );
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "unsupported_composition_adaptation");
+  });
+
+  it("a move_region following fit_artwork_to_canvas refuses (MUST FAIL CLOSED — canvas-space coordinates not proven safe to rescale)", () => {
+    const moveStep: SignRepairStep = {
+      kind: "move_region",
+      params: { sourceStartYPx: 0, heightPx: 100, destStartYPx: 200 },
+      risk: "review_required",
+      reasons: ["test"],
+    };
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [getHibachiFitStep(), moveStep], 6144, 4096, 5508, 3672, 36, 24, 5508, 3672, 0.125,
+    );
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "unsupported_composition_adaptation");
+  });
+
+  it("a fill_rect following fit_artwork_to_canvas refuses (MUST FAIL CLOSED)", () => {
+    const fillStep: SignRepairStep = {
+      kind: "fill_rect",
+      params: { xPx: 0, yPx: 0, widthPx: 10, heightPx: 10, colorR: 0, colorG: 0, colorB: 0 },
+      risk: "review_required",
+      reasons: ["test"],
+    };
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [getHibachiFitStep(), fillStep], 6144, 4096, 5508, 3672, 36, 24, 5508, 3672, 0.125,
+    );
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "unsupported_composition_adaptation");
+  });
+
+  it("a replace_region_with_background following fit_artwork_to_canvas refuses (MUST FAIL CLOSED)", () => {
+    const replaceStep: SignRepairStep = {
+      kind: "replace_region_with_background",
+      params: { xPx: 0, yPx: 0, widthPx: 10, heightPx: 10, colorR: 0, colorG: 0, colorB: 0, contextDepthPx: 8 },
+      risk: "review_required",
+      reasons: ["test"],
+    };
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [getHibachiFitStep(), replaceStep], 6144, 4096, 5508, 3672, 36, 24, 5508, 3672, 0.125,
+    );
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "unsupported_composition_adaptation");
+  });
+
+  it("a replace_masked_region_with_background following fit_artwork_to_canvas refuses (MUST FAIL CLOSED)", () => {
+    const maskedStep: SignRepairStep = {
+      kind: "replace_masked_region_with_background",
+      params: { xPx: 0, yPx: 0, widthPx: 10, heightPx: 10, colorR: 0, colorG: 0, colorB: 0, contextDepthPx: 8, maskBase64: "AAAA" },
+      risk: "review_required",
+      reasons: ["test"],
+    };
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [getHibachiFitStep(), maskedStep], 6144, 4096, 5508, 3672, 36, 24, 5508, 3672, 0.125,
+    );
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "unsupported_composition_adaptation");
+  });
+
+  it("legacy geometry-step adaptation (pad_uniform_background) is entirely unaffected by the new composition branch", () => {
+    const padStep: SignRepairStep = {
+      kind: "pad_uniform_background",
+      params: { axis: "horizontal", leadingPx: 153, trailingPx: 153, colorR: 3, colorG: 3, colorB: 3 },
+      risk: "review_required",
+      reasons: ["test fixture"],
+    };
+    const outcome = adaptGeometryStepsToActualReconstruction(
+      [padStep], 4096, 6144, 2448, 3672, 18, 24, 2754, 3672,
+      // minimumSafeInsetIn omitted — legacy path never needs it.
+    );
+    assert.equal(outcome.status, "adapted");
+    if (outcome.status !== "adapted") throw new Error("unreachable");
+    assert.equal(outcome.steps[0]!.kind, "pad_uniform_background");
   });
 });

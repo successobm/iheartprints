@@ -53,6 +53,8 @@ import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { resampleExact } from "@/capabilities/final-artwork/raster-transform";
 
 import type { SignRepairStep } from "./contracts";
+import { deriveUniformBackgroundExtension } from "./sign-geometry";
+import { signSafeInsetPxForAxis } from "./sign-fit-to-production";
 import type { SignExecutionBounds, SignExecutionResult } from "./sign-transform-executor";
 
 export const COMPOSITION_STEP_KINDS = new Set<SignRepairStep["kind"]>([
@@ -324,6 +326,208 @@ export function executeFitArtworkToCanvas(
     fitted.data.copy(data, destRowStart, srcRowStart, srcRowStart + scaledWidthPx * 4);
   }
   return { status: "executed", image: { width: p.canvasWidthPx, height: p.canvasHeightPx, data } };
+}
+
+// ---------------------------------------------------------------------------
+// Post-Reconstruction Geometry Adaptation for fit_artwork_to_canvas (S3C
+// extension, Phase 3B): the composition-primitive sibling of
+// `sign-transform-executor.ts`'s own `adaptGeometryStepsToActualReconstruction`
+// for the four LEGACY geometry-stage step kinds — that function never
+// recognized any Phase 3B composition primitive (it predates them), which is
+// exactly the gap that let a real, authorized `[reconstruct_resolution,
+// fit_artwork_to_canvas]` plan refuse deterministically forever whenever the
+// provider's actual reconstruction diverged from the planner's assumed
+// (requested) size: `expectedArtworkWidthPx`/`expectedArtworkHeightPx` stayed
+// pinned to the REQUESTED reconstruction size, so `executeFitArtworkToCanvas`
+// correctly (and by design) refused the ACTUAL, differently-sized artwork it
+// was actually handed.
+// ---------------------------------------------------------------------------
+
+export type AdaptFitArtworkToCanvasOutcome =
+  | {
+      status: "unchanged" | "adapted";
+      step: SignRepairStep;
+      /** The step's own (possibly re-derived) canvas dimensions — what the caller must validate the final executed output against, mirroring `AdaptGeometryStepsOutcome`'s own `expectedOutputWidthPx`/`expectedOutputHeightPx` contract. */
+      canvasWidthPx: number;
+      canvasHeightPx: number;
+    }
+  | { status: "refused"; reason: string; detail: string };
+
+/**
+ * Re-derives a persisted `fit_artwork_to_canvas` step's params from the
+ * ACTUAL reconstructed artwork dimensions, when they diverge from the step's
+ * own planning-time `expectedArtworkWidthPx`/`expectedArtworkHeightPx` — by
+ * running the artwork's ACTUAL dimensions through the exact same formula
+ * `buildSignCompositionPlan` used to build the step in the first place
+ * (`deriveCanvasPixelDensity` → canvas size → `signSafeInsetPxForAxis` →
+ * scale target → `deriveUniformFitDimensions` → centered placement), never a
+ * separate or approximated calculation. This guarantees the adapted step
+ * describes EXACTLY the physical composition (36x24in canvas, artwork
+ * uniformly scaled, centered, 0.125in protected-content safe area,
+ * background extended to every uncovered edge) the operator actually
+ * authorized — only which PIXELS represent it changes.
+ *
+ * NEVER mutates the persisted plan, never changes plan identity/`planKey`,
+ * never re-plans. Refuses — never silently reinterprets — the instant any
+ * of the physical relationships the authorized step encoded cannot be
+ * proven to carry over safely:
+ *
+ *   - the step's own params cannot be decoded at all;
+ *   - the actual artwork's aspect ratio no longer matches the ordered
+ *     physical size closely enough (reuses the SAME
+ *     `deriveUniformBackgroundExtension` aspect check
+ *     `adaptGeometryStepsToActualReconstruction`'s own "no geometry step to
+ *     adapt" branch already applies, so both paths agree on what counts as
+ *     "too far off to salvage" — a `fit_artwork_to_canvas`-only segment has
+ *     no step of its own that could add a corrective extension);
+ *   - the recomputed physical safe-area inset would leave no positive fit
+ *     area on the adapted canvas;
+ *   - the persisted placement was NOT the ordinary centered default (proven
+ *     by recomputing that default from the step's OWN persisted values and
+ *     comparing) — an explicit, non-centered operator placement has no
+ *     provably-correct translation to a differently-sized canvas, so this
+ *     never guesses one; or
+ *   - the recomputed placement would not fit inside the adapted canvas.
+ */
+export function adaptFitArtworkToCanvasStepToActualReconstruction(
+  step: SignRepairStep,
+  actualArtworkWidthPx: number,
+  actualArtworkHeightPx: number,
+  orderedWidthIn: number,
+  orderedHeightIn: number,
+  minimumSafeInsetIn: number,
+): AdaptFitArtworkToCanvasOutcome {
+  const p = decodeFitArtworkToCanvasParams(step.params);
+  if (!p) {
+    return {
+      status: "refused",
+      reason: "missing_or_invalid_params",
+      detail: `Step "fit_artwork_to_canvas" has missing or invalid persisted parameters — refusing to adapt rather than guessing.`,
+    };
+  }
+
+  if (actualArtworkWidthPx === p.expectedArtworkWidthPx && actualArtworkHeightPx === p.expectedArtworkHeightPx) {
+    // The provider returned EXACTLY what was requested — the persisted step
+    // already applies verbatim.
+    return { status: "unchanged", step, canvasWidthPx: p.canvasWidthPx, canvasHeightPx: p.canvasHeightPx };
+  }
+
+  // The adapted canvas must still be EXACTLY the ordered physical aspect
+  // ratio. `deriveUniformBackgroundExtension`'s `plateWidthPx`/`plateHeightPx`
+  // in the `!needsExtension` case are simply the actual artwork's own
+  // dimensions — identical to `buildSignCompositionPlan`'s own
+  // `deriveCanvasPixelDensity` → `round(orderedIn * canvasPpi)` whenever the
+  // actual artwork is genuinely proportional (which it always reduces to,
+  // for an exact-aspect input); reusing this ALREADY-PROVEN helper rather
+  // than re-deriving canvas density independently.
+  const geometry = deriveUniformBackgroundExtension(
+    actualArtworkWidthPx,
+    actualArtworkHeightPx,
+    orderedWidthIn,
+    orderedHeightIn,
+  );
+  if (geometry.needsExtension) {
+    return {
+      status: "refused",
+      reason: "aspect_ratio_drift",
+      detail:
+        `The actual reconstruction (${actualArtworkWidthPx}x${actualArtworkHeightPx}px) no longer matches the ` +
+        `ordered ${orderedWidthIn}x${orderedHeightIn}in aspect ratio closely enough for fit_artwork_to_canvas ` +
+        "alone to adapt — refusing rather than fabricating an extension the approved plan never included.",
+    };
+  }
+  const newCanvasWidthPx = geometry.plateWidthPx;
+  const newCanvasHeightPx = geometry.plateHeightPx;
+
+  // Presence of scaleTargetWidthPx/HeightPx is the reliable, persisted
+  // signal that this step encodes a genuine physical safe-area inset
+  // (`encodeFitArtworkToCanvasParams`'s own doc) rather than the ordinary
+  // "fit to fill the whole canvas" shape — recompute the SAME physical inset
+  // (never a stale pixel value scaled by a ratio) at the adapted canvas's
+  // own achieved density, via the identical `signSafeInsetPxForAxis`
+  // function the validator itself uses, so an adapted fit is guaranteed to
+  // land inside the SAME validator SAFE guide a non-adapted one would.
+  const hadSafeAreaInset = p.scaleTargetWidthPx !== undefined && p.scaleTargetHeightPx !== undefined;
+  let newScaleTargetWidthPx: number | undefined;
+  let newScaleTargetHeightPx: number | undefined;
+  if (hadSafeAreaInset) {
+    const newInsetPxX = signSafeInsetPxForAxis(minimumSafeInsetIn, newCanvasWidthPx / orderedWidthIn);
+    const newInsetPxY = signSafeInsetPxForAxis(minimumSafeInsetIn, newCanvasHeightPx / orderedHeightIn);
+    newScaleTargetWidthPx = newCanvasWidthPx - 2 * newInsetPxX;
+    newScaleTargetHeightPx = newCanvasHeightPx - 2 * newInsetPxY;
+    if (newScaleTargetWidthPx <= 0 || newScaleTargetHeightPx <= 0) {
+      return {
+        status: "refused",
+        reason: "safe_area_inset_exceeds_canvas",
+        detail:
+          `The recomputed ${minimumSafeInsetIn}in physical safe-area inset leaves no positive area to fit ` +
+          `artwork into on the adapted ${newCanvasWidthPx}x${newCanvasHeightPx}px canvas.`,
+      };
+    }
+  }
+
+  // Placement translation is only ever attempted when the PERSISTED
+  // placement is provably the ordinary centered default — recomputed here
+  // from the step's OWN persisted (planning-time) values, never assumed.
+  // An explicit, operator-chosen non-centered placement has no
+  // provably-correct translation to a differently-sized canvas.
+  const oldScaleTargetWidthPx = p.scaleTargetWidthPx ?? p.canvasWidthPx;
+  const oldScaleTargetHeightPx = p.scaleTargetHeightPx ?? p.canvasHeightPx;
+  const oldFit = deriveUniformFitDimensions(
+    p.expectedArtworkWidthPx, p.expectedArtworkHeightPx, oldScaleTargetWidthPx, oldScaleTargetHeightPx,
+  );
+  const oldDefaultPlacementXPx = Math.floor((p.canvasWidthPx - oldFit.scaledWidthPx) / 2);
+  const oldDefaultPlacementYPx = Math.floor((p.canvasHeightPx - oldFit.scaledHeightPx) / 2);
+  if (p.placementXPx !== oldDefaultPlacementXPx || p.placementYPx !== oldDefaultPlacementYPx) {
+    return {
+      status: "refused",
+      reason: "explicit_placement_cannot_be_translated",
+      detail:
+        `Step "fit_artwork_to_canvas" was placed at an explicit, non-default position ` +
+        `[${p.placementXPx},${p.placementYPx}] — refusing to guess how that placement should translate to the ` +
+        `adapted ${newCanvasWidthPx}x${newCanvasHeightPx}px canvas.`,
+    };
+  }
+
+  const newFit = deriveUniformFitDimensions(
+    actualArtworkWidthPx, actualArtworkHeightPx,
+    newScaleTargetWidthPx ?? newCanvasWidthPx, newScaleTargetHeightPx ?? newCanvasHeightPx,
+  );
+  const newPlacementXPx = Math.floor((newCanvasWidthPx - newFit.scaledWidthPx) / 2);
+  const newPlacementYPx = Math.floor((newCanvasHeightPx - newFit.scaledHeightPx) / 2);
+  if (
+    newPlacementXPx < 0 || newPlacementYPx < 0 ||
+    newPlacementXPx + newFit.scaledWidthPx > newCanvasWidthPx ||
+    newPlacementYPx + newFit.scaledHeightPx > newCanvasHeightPx
+  ) {
+    return {
+      status: "refused",
+      reason: "adapted_placement_out_of_bounds",
+      detail:
+        `The adapted placement [${newPlacementXPx},${newPlacementYPx}] with fitted size ` +
+        `${newFit.scaledWidthPx}x${newFit.scaledHeightPx}px does not fit inside the adapted ` +
+        `${newCanvasWidthPx}x${newCanvasHeightPx}px canvas.`,
+    };
+  }
+
+  const adaptedStep: SignRepairStep = {
+    ...step,
+    params: encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: actualArtworkWidthPx,
+      expectedArtworkHeightPx: actualArtworkHeightPx,
+      canvasWidthPx: newCanvasWidthPx,
+      canvasHeightPx: newCanvasHeightPx,
+      scaleTargetWidthPx: newScaleTargetWidthPx,
+      scaleTargetHeightPx: newScaleTargetHeightPx,
+      placementXPx: newPlacementXPx,
+      placementYPx: newPlacementYPx,
+      backgroundR: p.backgroundR,
+      backgroundG: p.backgroundG,
+      backgroundB: p.backgroundB,
+    }),
+  };
+
+  return { status: "adapted", step: adaptedStep, canvasWidthPx: newCanvasWidthPx, canvasHeightPx: newCanvasHeightPx };
 }
 
 // ---------------------------------------------------------------------------

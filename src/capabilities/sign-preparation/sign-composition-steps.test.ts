@@ -13,6 +13,7 @@ import type { SignRepairStep } from "./contracts";
 import { makeImage, fillRect } from "./sign-fixtures";
 import {
   MAX_MASKED_REGION_PIXELS,
+  adaptFitArtworkToCanvasStepToActualReconstruction,
   applyCorrectionsToCanvas,
   applyFillRect,
   applyMoveRegion,
@@ -234,6 +235,229 @@ describe("sign-composition-steps: fit_artwork_to_canvas — scaleTargetWidthPx/H
     });
     const result = executeFitArtworkToCanvas(artwork, s);
     assert.equal(result.status, "refused");
+  });
+});
+
+describe("adaptFitArtworkToCanvasStepToActualReconstruction (Fix Post-Reconstruction Geometry Adaptation for Phase 3B fit_artwork_to_canvas)", () => {
+  // The exact real, persisted Get Hibachi fit_artwork_to_canvas step
+  // (0858d192-e74e-40b5-8532-a91bc4bcdf8e, planKey ...c4759f0f...) — a
+  // genuine safe-area fit (scaleTargetWidthPx/HeightPx present).
+  function getHibachiFitStep(): SignRepairStep {
+    return step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 5508, expectedArtworkHeightPx: 3672,
+      canvasWidthPx: 5508, canvasHeightPx: 3672,
+      scaleTargetWidthPx: 5468, scaleTargetHeightPx: 3632,
+      placementXPx: 30, placementYPx: 20,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+  }
+
+  it("the real Get Hibachi shape: 6144x4096 actual reconstruction (vs 5508x3672 requested) adapts to the exact expected physical geometry", () => {
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(
+      getHibachiFitStep(), 6144, 4096, 36, 24, 0.125,
+    );
+    assert.equal(outcome.status, "adapted");
+    if (outcome.status !== "adapted") throw new Error("unreachable");
+    assert.equal(outcome.canvasWidthPx, 6144);
+    assert.equal(outcome.canvasHeightPx, 4096);
+    assert.equal(outcome.step.params.expectedArtworkWidthPx, 6144);
+    assert.equal(outcome.step.params.expectedArtworkHeightPx, 4096);
+    assert.equal(outcome.step.params.canvasWidthPx, 6144);
+    assert.equal(outcome.step.params.canvasHeightPx, 4096);
+    // Physical 0.125in inset at the achieved 170.6667 PPI: ceil(21.333) = 22px/axis.
+    assert.equal(outcome.step.params.scaleTargetWidthPx, 6100);
+    assert.equal(outcome.step.params.scaleTargetHeightPx, 4052);
+    // Still exactly centered on the adapted canvas.
+    assert.equal(outcome.step.params.placementXPx, 33);
+    assert.equal(outcome.step.params.placementYPx, 22);
+    // Background/colour never touched by adaptation.
+    assert.equal(outcome.step.params.backgroundR, 0);
+    assert.equal(outcome.step.params.backgroundG, 0);
+    assert.equal(outcome.step.params.backgroundB, 0);
+  });
+
+  it("the adapted Get Hibachi step, executed against a synthetic 6144x4096 artwork, does NOT trigger the dimension-identity refusal", () => {
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(
+      getHibachiFitStep(), 6144, 4096, 36, 24, 0.125,
+    );
+    assert.equal(outcome.status, "adapted");
+    if (outcome.status !== "adapted") throw new Error("unreachable");
+    const artwork = makeImage(6144, 4096, { r: 10, g: 200, b: 10 });
+    const result = executeFitArtworkToCanvas(artwork, outcome.step);
+    assert.equal(result.status, "executed", result.status === "refused" ? result.detail : undefined);
+    if (result.status !== "executed") return;
+    assert.equal(result.image.width, 6144);
+    assert.equal(result.image.height, 4096);
+    // No stretch: the scaled artwork region is still visible near center.
+    assert.deepEqual(pixelAt(result.image, 3072, 2048), { r: 10, g: 200, b: 10, a: 255 });
+    // Background reaches the true cut edge (corner never covered by the fitted artwork).
+    assert.deepEqual(pixelAt(result.image, 0, 0), { r: 0, g: 0, b: 0, a: 255 });
+  });
+
+  it("exact match to the expected reconstruction size leaves the step byte-for-byte unchanged", () => {
+    const original = getHibachiFitStep();
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(original, 5508, 3672, 36, 24, 0.125);
+    assert.equal(outcome.status, "unchanged");
+    if (outcome.status !== "unchanged") throw new Error("unreachable");
+    assert.deepEqual(outcome.step, original);
+    assert.equal(outcome.canvasWidthPx, 5508);
+    assert.equal(outcome.canvasHeightPx, 3672);
+  });
+
+  it("an ordinary fit-to-fill step (no scaleTarget persisted) adapts the canvas and re-centers, with NO scaleTarget invented", () => {
+    const ordinaryStep = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 1000, expectedArtworkHeightPx: 1000,
+      canvasWidthPx: 1000, canvasHeightPx: 1000,
+      placementXPx: 0, placementYPx: 0,
+      backgroundR: 255, backgroundG: 255, backgroundB: 255,
+    }));
+    // Actual reconstruction is 2000x2000 — exact same 1:1 aspect, double the pixels.
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(ordinaryStep, 2000, 2000, 10, 10, 0.125);
+    assert.equal(outcome.status, "adapted");
+    if (outcome.status !== "adapted") throw new Error("unreachable");
+    assert.equal(outcome.canvasWidthPx, 2000);
+    assert.equal(outcome.canvasHeightPx, 2000);
+    assert.equal(outcome.step.params.scaleTargetWidthPx, undefined);
+    assert.equal(outcome.step.params.scaleTargetHeightPx, undefined);
+    assert.equal(outcome.step.params.placementXPx, 0);
+    assert.equal(outcome.step.params.placementYPx, 0);
+  });
+
+  it("rounding: a non-integer achieved scale still produces a deterministic, in-bounds adaptation", () => {
+    // 1536x1024 (3:2) requested; actual 4097x2731 — very nearly exact 3:2
+    // (2731*1.5=4096.5, i.e. off by half a pixel on the limiting axis) but
+    // NOT a "nice" multiple of the requested size, exercising real rounding.
+    const oddStep = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 1536, expectedArtworkHeightPx: 1024,
+      canvasWidthPx: 1536, canvasHeightPx: 1024,
+      scaleTargetWidthPx: 1500, scaleTargetHeightPx: 1000,
+      placementXPx: 18, placementYPx: 12,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(oddStep, 4097, 2731, 36, 24, 0.125);
+    assert.equal(outcome.status, "adapted");
+    if (outcome.status !== "adapted") throw new Error("unreachable");
+    // Every recomputed field is a whole, non-negative integer and the fitted
+    // artwork remains fully inside the adapted canvas — the actual contract
+    // this function must uphold under rounding, rather than one hand-picked
+    // expected value.
+    const keysToCheck: (keyof typeof outcome.step.params)[] = [
+      "expectedArtworkWidthPx", "expectedArtworkHeightPx", "canvasWidthPx", "canvasHeightPx",
+      "scaleTargetWidthPx", "scaleTargetHeightPx", "placementXPx", "placementYPx",
+    ];
+    for (const key of keysToCheck) {
+      const v: number | string = outcome.step.params[key];
+      assert.equal(typeof v, "number", `${key} must be numeric`);
+      assert.ok(Number.isInteger(v as number), `${key} must be a whole pixel amount`);
+    }
+    const p = outcome.step.params;
+    const fit = deriveUniformFitDimensions(
+      p.expectedArtworkWidthPx as number, p.expectedArtworkHeightPx as number,
+      p.scaleTargetWidthPx as number, p.scaleTargetHeightPx as number,
+    );
+    assert.ok((p.placementXPx as number) + fit.scaledWidthPx <= (p.canvasWidthPx as number));
+    assert.ok((p.placementYPx as number) + fit.scaledHeightPx <= (p.canvasHeightPx as number));
+  });
+
+  it("safe-inset rounding: the physical inset always rounds UP to whole pixels (never shrinks below 0.125in)", () => {
+    // achievedPpi 170.6667 -> 0.125*170.6667 = 21.3333 -> ceil = 22, exactly
+    // mirroring the real Get Hibachi computation, independently re-asserted
+    // here at the single-axis level via the resulting scaleTarget.
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(getHibachiFitStep(), 6144, 4096, 36, 24, 0.125);
+    assert.equal(outcome.status, "adapted");
+    if (outcome.status !== "adapted") throw new Error("unreachable");
+    const insetPxX = ((outcome.step.params.canvasWidthPx as number) - (outcome.step.params.scaleTargetWidthPx as number)) / 2;
+    const insetPxY = ((outcome.step.params.canvasHeightPx as number) - (outcome.step.params.scaleTargetHeightPx as number)) / 2;
+    assert.equal(insetPxX, 22);
+    assert.equal(insetPxY, 22);
+    // The achieved physical inset is AT LEAST 0.125in on each axis, never less.
+    assert.ok(insetPxX / (6144 / 36) >= 0.125);
+    assert.ok(insetPxY / (4096 / 24) >= 0.125);
+  });
+
+  it("x/y centering rounding: placement uses floor(), never round(), when the leftover is odd", () => {
+    // Non-square artwork (100x77) fit into a 180x180 safe-area target on a
+    // 200x200 canvas: scale = min(180/100, 180/77) = 1.8 (width-limiting),
+    // scaledHeightPx = round(77*1.8) = round(138.6) = 139 (ODD) -> leftover
+    // on Y is 200-139=61 -> floor(61/2)=30, which floor() and round() would
+    // actually agree on here — so cross-check DIRECTLY against the exact
+    // same floor formula rather than a hand-picked magic number, proving
+    // the adaptation uses the identical centering convention
+    // `buildSignCompositionPlan` itself uses, for BOTH axes, after a real
+    // (non-trivial, proportional) actual-vs-expected divergence.
+    const nonSquareStep = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 77,
+      canvasWidthPx: 200, canvasHeightPx: 200,
+      scaleTargetWidthPx: 180, scaleTargetHeightPx: 180,
+      placementXPx: 10, placementYPx: 30,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+    // Actual reconstruction is exactly double: 200x154 (same 100:77 aspect,
+    // ordered 100:77 too) — a genuine divergence to adapt.
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(nonSquareStep, 200, 154, 100, 77, 0.125);
+    assert.equal(outcome.status, "adapted");
+    if (outcome.status !== "adapted") throw new Error("unreachable");
+    const p = outcome.step.params;
+    const fit = deriveUniformFitDimensions(
+      p.expectedArtworkWidthPx as number, p.expectedArtworkHeightPx as number,
+      p.scaleTargetWidthPx as number, p.scaleTargetHeightPx as number,
+    );
+    assert.equal(p.placementXPx, Math.floor(((p.canvasWidthPx as number) - fit.scaledWidthPx) / 2));
+    assert.equal(p.placementYPx, Math.floor(((p.canvasHeightPx as number) - fit.scaledHeightPx) / 2));
+  });
+
+  it("aspect-ratio drift WITHIN tolerance (<1%) still adapts", () => {
+    // 6144x4096 is exact 3:2; nudge width by ~0.3% — within SIGN_ASPECT_TOLERANCE.
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(getHibachiFitStep(), 6162, 4096, 36, 24, 0.125);
+    assert.equal(outcome.status, "adapted");
+  });
+
+  it("aspect-ratio drift OUTSIDE tolerance (>1%) refuses rather than fabricating an extension", () => {
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(getHibachiFitStep(), 6400, 4096, 36, 24, 0.125);
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "aspect_ratio_drift");
+  });
+
+  it("missing/invalid persisted params fail closed", () => {
+    const malformed: SignRepairStep = {
+      kind: "fit_artwork_to_canvas",
+      params: { expectedArtworkWidthPx: 100 }, // missing every other required field
+      risk: "review_required",
+      reasons: ["test"],
+    };
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(malformed, 200, 200, 1, 1, 0.125);
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "missing_or_invalid_params");
+  });
+
+  it("an explicit, non-default (non-centered) placement refuses rather than guessing a translated position", () => {
+    const explicitPlacementStep = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 100, expectedArtworkHeightPx: 100,
+      canvasWidthPx: 300, canvasHeightPx: 300,
+      placementXPx: 5, placementYPx: 5, // NOT the centered default (100,100)
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(explicitPlacementStep, 200, 200, 1, 1, 0.125);
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "explicit_placement_cannot_be_translated");
+  });
+
+  it("a safe-area inset that would leave no positive fit area on the adapted canvas refuses", () => {
+    const tinyCanvasStep = step("fit_artwork_to_canvas", encodeFitArtworkToCanvasParams({
+      expectedArtworkWidthPx: 10, expectedArtworkHeightPx: 10,
+      canvasWidthPx: 10, canvasHeightPx: 10,
+      scaleTargetWidthPx: 8, scaleTargetHeightPx: 8,
+      placementXPx: 1, placementYPx: 1,
+      backgroundR: 0, backgroundG: 0, backgroundB: 0,
+    }));
+    // A huge physical inset (10in) on a tiny adapted canvas leaves nothing.
+    const outcome = adaptFitArtworkToCanvasStepToActualReconstruction(tinyCanvasStep, 20, 20, 1, 1, 10);
+    assert.equal(outcome.status, "refused");
+    if (outcome.status !== "refused") throw new Error("unreachable");
+    assert.equal(outcome.reason, "safe_area_inset_exceeds_canvas");
   });
 });
 

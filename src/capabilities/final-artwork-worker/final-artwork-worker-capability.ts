@@ -2069,6 +2069,23 @@ export function createFinalArtworkWorkerCapability(
     // ACTUAL reconstruction when it diverges; axis/colour/every other
     // approved parameter is carried over unchanged, and a plan requiring an
     // axis change or an unapproved extension refuses rather than adapting.
+    //
+    // Fix Post-Reconstruction Geometry Adaptation for Phase 3B
+    // `fit_artwork_to_canvas` Phase: a canvas-first plan's own
+    // `fit_artwork_to_canvas` step needs the governing resolution policy's
+    // physical safe-area inset to adapt correctly (see
+    // `adaptFitArtworkToCanvasStepToActualReconstruction`'s own doc) —
+    // resolved here, before adaptation, the same fail-closed way the
+    // (separately, later) PrintValidation-evidence policy lookup below
+    // already does for an unrecognized `policyId`.
+    const reconstructionPolicy = getSignResolutionPolicyById(plan.policyId);
+    if (!reconstructionPolicy) {
+      await completeWithoutAsset(
+        job,
+        `Resolution policy "${plan.policyId}" is not supported by this build — refused before adapting reconstruction geometry.`,
+      );
+      return { outcome: "handled" };
+    }
     const adaptation = adaptGeometryStepsToActualReconstruction(
       split.after,
       reconstructedImage.width,
@@ -2079,6 +2096,7 @@ export function createFinalArtworkWorkerCapability(
       plan.orderedHeightIn,
       plan.expectedOutputWidthPx,
       plan.expectedOutputHeightPx,
+      reconstructionPolicy.minimumSafeInsetIn,
     );
     if (adaptation.status === "refused") {
       await completeWithoutAsset(job, adaptation.detail);
@@ -2115,7 +2133,22 @@ export function createFinalArtworkWorkerCapability(
     // for every legacy (v1-v3) plan shape, which contains no composition
     // primitive.
     if (isSignCompositionPlan({ steps: adaptation.steps })) {
-      const verification = verifySignCompositionExecution(reconstructedImage, plan, finalized.image);
+      // Fix Post-Reconstruction Geometry Adaptation for Phase 3B
+      // `fit_artwork_to_canvas` Phase: verification must re-derive against
+      // the SAME adapted steps/expected-output dimensions execution just
+      // used — never the persisted plan's own pre-adaptation values, which
+      // for a genuinely adapted fit_artwork_to_canvas step would
+      // independently re-fail this check with the identical dimension-
+      // identity mismatch adaptation exists to resolve. The persisted
+      // `plan` itself is never mutated — only this local, verification-only
+      // view substitutes the adapted steps/expected output.
+      const verificationPlan: SignRepairPlan = {
+        ...plan,
+        steps: adaptation.steps,
+        expectedOutputWidthPx: adaptation.expectedOutputWidthPx,
+        expectedOutputHeightPx: adaptation.expectedOutputHeightPx,
+      };
+      const verification = verifySignCompositionExecution(reconstructedImage, verificationPlan, finalized.image);
       if (verification.status !== "pass") {
         const failedCheck = verification.checks.find((check) => check.status === "fail");
         await completeWithoutAsset(

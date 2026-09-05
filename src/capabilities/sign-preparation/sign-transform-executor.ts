@@ -36,7 +36,12 @@ import type { SignRepairPlan, SignRepairStep, SignRepairStepKind } from "./contr
 import { deriveUniformBackgroundExtension } from "./sign-geometry";
 import { tiledRowColor, type SignPerimeterBandMeasurement, type SignPerimeterBandRow } from "./perimeter-reconstruction";
 import { frameDepthAt, type SignFrameBand } from "./frame-structure-model";
-import { COMPOSITION_STEP_KINDS, executeCompositionSteps, isCompositionStepKind } from "./sign-composition-steps";
+import {
+  COMPOSITION_STEP_KINDS,
+  adaptFitArtworkToCanvasStepToActualReconstruction,
+  executeCompositionSteps,
+  isCompositionStepKind,
+} from "./sign-composition-steps";
 
 /**
  * Rejected-Final Regeneration Phase: the deterministic identity of THIS
@@ -418,6 +423,26 @@ export type AdaptGeometryStepsOutcome =
  * before this ever runs) preserves aspect ratio exactly, so the axis
  * decision is invariant under it — these branches exist to fail closed on
  * an assumption violation, not because either is expected to fire.
+ *
+ * Fix Post-Reconstruction Geometry Adaptation for Phase 3B
+ * `fit_artwork_to_canvas` Phase: a post-reconstruction segment consisting of
+ * EXACTLY ONE `fit_artwork_to_canvas` step (no leading `crop_region`, no
+ * trailing `move_region`/`fill_rect`/`replace_region_with_background`/
+ * `replace_masked_region_with_background`) is adapted via the dedicated
+ * `adaptFitArtworkToCanvasStepToActualReconstruction` — the real, currently
+ * reachable shape a canvas-first plan produces (`buildSignCompositionPlan`
+ * with no crop and no move/fill/replacement choices). ANY other
+ * composition-primitive shape in `afterSteps` (a `crop_region` preceding
+ * the fit, or any step following it) refuses outright: proportionally
+ * rescaling a `crop_region`'s rectangle, or rescaling a `move_region`/
+ * `fill_rect`/`replace_region_with_background`/
+ * `replace_masked_region_with_background`'s canvas-space coordinates to a
+ * differently-sized adapted canvas, has not been proven safe here — see
+ * this module's own doc for the full per-primitive classification. Needs
+ * `minimumSafeInsetIn` only for this branch (the physical policy figure a
+ * genuine safe-area fit's inset must be recomputed from — see that
+ * function's own doc); omitted, it is simply never available to adapt a
+ * safe-area fit, and such a step refuses rather than guessing a value.
  */
 export function adaptGeometryStepsToActualReconstruction(
   afterSteps: SignRepairStep[],
@@ -429,6 +454,7 @@ export function adaptGeometryStepsToActualReconstruction(
   orderedHeightIn: number,
   plannedExpectedOutputWidthPx: number,
   plannedExpectedOutputHeightPx: number,
+  minimumSafeInsetIn?: number,
 ): AdaptGeometryStepsOutcome {
   if (
     actualReconstructedWidthPx === requestedReconstructionWidthPx &&
@@ -442,6 +468,47 @@ export function adaptGeometryStepsToActualReconstruction(
       steps: afterSteps,
       expectedOutputWidthPx: plannedExpectedOutputWidthPx,
       expectedOutputHeightPx: plannedExpectedOutputHeightPx,
+    };
+  }
+
+  if (afterSteps.some((step) => isCompositionStepKind(step.kind))) {
+    if (afterSteps.length !== 1 || afterSteps[0]!.kind !== "fit_artwork_to_canvas") {
+      // A `crop_region` before the fit, or ANY move/fill/replacement step
+      // after it — see this function's own doc comment on why neither is
+      // adapted here yet.
+      return {
+        status: "refused",
+        reason: "unsupported_composition_adaptation",
+        detail:
+          "The approved plan's post-reconstruction composition segment is not a single, bare " +
+          "fit_artwork_to_canvas step — adapting a crop_region or a move_region/fill_rect/" +
+          "replace_region_with_background/replace_masked_region_with_background to a differently-sized " +
+          "reconstruction has not been proven safe, so this refuses rather than guessing.",
+      };
+    }
+    if (minimumSafeInsetIn === undefined) {
+      return {
+        status: "refused",
+        reason: "missing_safe_inset_policy",
+        detail:
+          "Adapting a fit_artwork_to_canvas step requires the governing resolution policy's physical safe-area " +
+          "inset, which was not supplied — refusing rather than guessing one.",
+      };
+    }
+    const adapted = adaptFitArtworkToCanvasStepToActualReconstruction(
+      afterSteps[0]!,
+      actualReconstructedWidthPx,
+      actualReconstructedHeightPx,
+      orderedWidthIn,
+      orderedHeightIn,
+      minimumSafeInsetIn,
+    );
+    if (adapted.status === "refused") return adapted;
+    return {
+      status: adapted.status,
+      steps: [adapted.step],
+      expectedOutputWidthPx: adapted.canvasWidthPx,
+      expectedOutputHeightPx: adapted.canvasHeightPx,
     };
   }
 
