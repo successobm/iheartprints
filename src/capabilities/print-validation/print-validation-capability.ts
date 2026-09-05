@@ -991,20 +991,47 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
   });
 
   // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION / DESTINATION
-  // RESOLUTION: see `RigidSignPlanEvidence.machineReadableContent`'s own
-  // doc for why `null` here pushes NOTHING (never a manufactured
-  // failure) — this evidence is opt-in (computed when a candidate
-  // completes, or an operator explicitly runs the check/restoration),
-  // unlike `fitToProduction` above.
+  // RESOLUTION — Fix "Machine-Readable Verification Is a Required
+  // Pre-Finalization Gate" Phase (real Get Hibachi acceptance incident: the
+  // real 6144x4096 candidate reached "Print-ready" / "Download corrected
+  // artwork" while its own QR panel still read "Not checked yet for this
+  // candidate" — a logically invalid combination this profile must never
+  // produce again). SUPERSEDES the prior product decision documented on
+  // `RigidSignPlanEvidence.machineReadableContent`'s own doc (that field's
+  // doc comment still explains WHY `null` was historically produced, but
+  // no longer explains how it is handled here): `null` now means "this
+  // comparison has never been proven to resolve safely for this exact
+  // candidate" and is BLOCKING, exactly like `fitToProduction: null`
+  // already is — never a silently-skipped check, never a manufactured
+  // "not applicable" by omission. The worker now computes this evidence
+  // automatically at ordinary job completion
+  // (`evaluateSignMachineReadableContent`, reusing the SAME deterministic,
+  // local, provider-free comparison the operator's own "Check QR code"
+  // action always used) — `null` reaching this profile in practice means
+  // either a historical asset produced before that evidence existed, or a
+  // genuine failure to complete the comparison; either way, fail closed.
   const machineReadableContent = sign.machineReadableContent;
-  if (machineReadableContent !== null) {
+  if (machineReadableContent === null) {
+    checks.push({
+      check: "machine_readable_content_preserved",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "Machine-readable (QR) content on this artwork has not yet been verified against the customer's " +
+        "original artwork — this must be checked before the file can be finalized.",
+    });
+    requiredTransformations.add("require_human_review");
+  } else {
     const result = machineReadableContent.overallResult;
-    // `review_required` is now BLOCKING alongside `fail`/`hard_fail` — a
+    // `review_required` is BLOCKING alongside `fail`/`hard_fail` — a
     // detected-but-undecodable QR is an UNRESOLVED PRODUCTION ISSUE
     // (SIGNS QR DESTINATION RESOLUTION's own rule), not a mere advisory.
     // `accepted_as_supplied` is the ONLY way past it without a verified
     // payload, and it is deliberately non-blocking (`severity: "warning"`)
     // while remaining a distinct, truthful, never-"pass" status.
+    // `not_applicable` (genuinely no QR-like content detected in the
+    // source at all) is the ONLY result that passes with no operator
+    // action ever required.
     const blocking = result === "fail" || result === "hard_fail" || result === "review_required";
     const acceptedAsSupplied = result === "accepted_as_supplied";
     const status: PrintValidationCheckStatus = blocking ? "fail" : acceptedAsSupplied ? "warning" : "pass";

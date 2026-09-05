@@ -1101,15 +1101,20 @@ export interface RigidSignPlanEvidence {
    * `MachineReadablePreservationReport` — never imported, mirroring every
    * other cross-capability evidence type in this file.
    *
-   * `null` means "this comparison has never been run for this plate" —
-   * DELIBERATELY NOT fail-closed the way `fitToProduction: null` is.
-   * Fit-to-production is computed automatically for every rigid-sign job
-   * completion; QR preservation, in this phase, is computed only when an
-   * operator explicitly runs the check (or restoration) — every plate
-   * produced before this evidence existed, and every plate whose operator
-   * has not yet run the check, correctly reads `null` here and gets NO
-   * check pushed at all (never a manufactured "unknown" blocking failure)
-   * — see `validateRigidSign`'s own handling.
+   * `null` means "this comparison has never been proven to resolve safely
+   * for this exact candidate" — Fix "Machine-Readable Verification Is a
+   * Required Pre-Finalization Gate" Phase SUPERSEDES the prior product
+   * decision (a real Get Hibachi acceptance run reached "Print-ready" /
+   * "Download corrected artwork" while its own QR content had never been
+   * checked at all — a logically invalid, customer-facing state this
+   * profile must never produce). `null` is now FAIL-CLOSED / BLOCKING,
+   * exactly like `fitToProduction: null` — see `validateRigidSign`'s own
+   * handling. The worker computes this evidence automatically at ordinary
+   * job completion (`evaluateSignMachineReadableContent`, the SAME
+   * deterministic, local, provider-free comparison the operator's own
+   * "Check QR code" action always used), so `null` reaching this profile
+   * in practice means either a historical asset produced before that
+   * evidence existed, or a genuine failure to complete the comparison.
    */
   machineReadableContent: RigidSignMachineReadableContentEvidence | null;
 }

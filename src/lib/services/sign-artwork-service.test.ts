@@ -1187,3 +1187,216 @@ describe("sign-artwork-service: Fix \"Try Again\" Retry Eligibility Phase (real 
     assert.equal(revived.lastError, null);
   });
 });
+
+describe("sign-artwork-service: Fix \"Machine-Readable Verification Is a Required Pre-Finalization Gate\" Phase (real Get Hibachi acceptance incident)", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-qr-finalization-gate-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function freshGraph() {
+    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import("@/capabilities/composition");
+    resetCapabilityGraphForTests();
+    const { resetDecodedCandidateCacheForTests } = await import("@/lib/services/sign-wand-candidate-cache");
+    resetDecodedCandidateCacheForTests();
+    const graph = getCapabilityGraph();
+    const { getProjectRepository } = await import("@/lib/db");
+    return { graph, repo: getProjectRepository() };
+  }
+
+  /** Byte-for-byte paste — mirrors `qr-preservation.test.ts`'s own local `paste` helper exactly. */
+  function pasteImage(
+    canvas: ReturnType<typeof makeImage>,
+    source: ReturnType<typeof makeImage>,
+    atX: number,
+    atY: number,
+  ): void {
+    for (let y = 0; y < source.height; y++) {
+      for (let x = 0; x < source.width; x++) {
+        const si = (y * source.width + x) * 4;
+        const dx = atX + x;
+        const dy = atY + y;
+        if (dx < 0 || dx >= canvas.width || dy < 0 || dy >= canvas.height) continue;
+        const di = (dy * canvas.width + dx) * 4;
+        canvas.data[di] = source.data[si]!;
+        canvas.data[di + 1] = source.data[si + 1]!;
+        canvas.data[di + 2] = source.data[si + 2]!;
+        canvas.data[di + 3] = 255;
+      }
+    }
+  }
+
+  /** A real, decodable QR raster — mirrors `qr-preservation.test.ts`'s own `synthesizeQr` exactly, reusing the SAME `qrcode` package rather than inventing a second QR generator for tests. */
+  async function synthesizeQr(payload: string, sizePx = 150): Promise<ReturnType<typeof makeImage>> {
+    const QRCode = (await import("qrcode")).default;
+    const { PNG } = await import("pngjs");
+    const buf = await QRCode.toBuffer(payload, { errorCorrectionLevel: "H", margin: 2, width: sizePx });
+    const png = PNG.sync.read(buf);
+    return { width: png.width, height: png.height, data: Buffer.from(png.data) };
+  }
+
+  /** Damages the QR's interior data cells while leaving its 3 finder patterns intact — undecodable, but still detectable as QR-LIKE structure. Mirrors `qr-preservation.test.ts`'s own `damageInterior` exactly — this is what a real, photographed/printed source QR that never reliably decodes looks like to the detector (the real, durably-investigated Get Hibachi source condition). */
+  function damageQrInterior(image: ReturnType<typeof makeImage>): ReturnType<typeof makeImage> {
+    const damaged = { ...image, data: Buffer.from(image.data) };
+    const midY = Math.floor(image.height * 0.25);
+    const midX = Math.floor(image.width * 0.25);
+    for (let y = midY; y < midY + Math.floor(image.height * 0.5); y++) {
+      for (let x = midX; x < midX + Math.floor(image.width * 0.5); x++) {
+        const i = (y * damaged.width + x) * 4;
+        const v = (x + y) % 2 === 0 ? 0 : 255;
+        damaged.data[i] = v;
+        damaged.data[i + 1] = v;
+        damaged.data[i + 2] = v;
+      }
+    }
+    return damaged;
+  }
+
+  /**
+   * A 600x900px (4x6in @ exactly 150 PPI — the RIGID_RECT_UP_TO_24X36_V1
+   * target) sign, with `qrGraphic` (if given) pasted well clear of the
+   * 0.125in safe inset so this test's own scenario is never contaminated
+   * by an UNRELATED safe-inset violation. `reconstruction: null` (source
+   * already meets target resolution) and an exact-aspect, no-crop,
+   * default-centered `fit_artwork_to_canvas` (scale 1, placement (0,0)) —
+   * so the composited candidate reproduces every source pixel, QR
+   * included, BYTE-FOR-BYTE (the same fact `projectWithBlockedCandidate`
+   * above already relies on).
+   */
+  async function projectWithSign(qrGraphic: Awaited<ReturnType<typeof synthesizeQr>> | null) {
+    const image = makeImage(600, 900, { r: 255, g: 255, b: 255 });
+    if (qrGraphic) pasteImage(image, qrGraphic, 225, 375);
+
+    const { graph, repo } = await freshGraph();
+    const created = await repo.createProject();
+    const projectId = created.project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(image),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 4, 6);
+    await graph.signPreparation.confirmSignCompositionPlan(projectId, {
+      reconstruction: null,
+      crop: null,
+      fitBackground: { r: 255, g: 255, b: 255 },
+      fitPlacement: null,
+      moves: [],
+      fills: [],
+      replacements: [],
+    });
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    return { graph, repo, projectId, job };
+  }
+
+  it("1. no QR-like content at all: machine-readable not_applicable, computed automatically, Print Ready allowed", async () => {
+    const { repo, projectId, job } = await projectWithSign(null);
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    // Sanity, matching this file's own established harness limitation
+    // (see this describe-suite's own `freshGraph`/preservation-placeholder
+    // note at the top of the file): the graph's semantic preservation
+    // provider under test always answers "cannot_determine", so overall
+    // `status` never reaches "ready" through this real end-to-end
+    // harness regardless of QR — this test isolates the ONE check this
+    // phase actually changed instead.
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string; severity: string }> }).checks;
+    const qrCheck = checks.find((c) => c.check === "machine_readable_content_preserved");
+    assert.equal(qrCheck?.status, "pass");
+    assert.equal(qrCheck?.severity, "blocking");
+    const evidence = (validation!.report as {
+      machineReadableContentEvidence: { overall: string } | undefined;
+    }).machineReadableContentEvidence;
+    assert.equal(evidence?.overall, "not_applicable");
+    // No QR content: this check is never among the blocking failures.
+    const blockingFailures = checks.filter((c) => c.severity === "blocking" && c.status !== "pass");
+    assert.ok(
+      !blockingFailures.some((c) => c.check === "machine_readable_content_preserved"),
+      "a sign with no QR-like content must never be blocked by the machine-readable check",
+    );
+  });
+
+  it("2. THE REAL GET HIBACHI CONDITION — QR-like content detected, but the SOURCE itself is not reliably decodable: Print Ready is automatically blocked, with NO operator action, and finalized download is refused", async () => {
+    const qr = damageQrInterior(await synthesizeQr("https://get-hibachi.com"));
+    const { graph, repo, projectId, job } = await projectWithSign(qr);
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(
+      validation!.status,
+      "finalization_required",
+      "an unresolved, detected-but-undecodable QR must block Print Ready — automatically, before any operator ever clicks Check QR code",
+    );
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string; severity: string }> }).checks;
+    const qrCheck = checks.find((c) => c.check === "machine_readable_content_preserved");
+    assert.equal(qrCheck?.status, "fail");
+    assert.equal(qrCheck?.severity, "blocking");
+    const evidence = (validation!.report as {
+      machineReadableContentEvidence: { overall: string } | undefined;
+    }).machineReadableContentEvidence;
+    assert.equal(
+      evidence?.overall,
+      "review_required",
+      "the source QR-like content could not be verified — production review is required, never a fabricated destination",
+    );
+
+    // Server-side download authority — Section K: the SAME authoritative
+    // state that blocks Print Ready must ALSO block the finalized download
+    // route, never merely a hidden button.
+    const download = await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+    assert.equal(download, null, "finalized download must be refused while machine-readable content is unresolved");
+  });
+
+  it("3. source QR decodes + candidate preserves the SAME payload: PASS, computed automatically, never blocking", async () => {
+    const qr = await synthesizeQr("https://get-hibachi.com");
+    const { repo, projectId, job } = await projectWithSign(qr);
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    // Same harness limitation as test 1 above — this test isolates the ONE
+    // check this phase actually changed, never the overall status.
+    const checks = (validation!.report as { checks: Array<{ check: string; status: string; severity: string }> }).checks;
+    const qrCheck = checks.find((c) => c.check === "machine_readable_content_preserved");
+    assert.equal(qrCheck?.status, "pass");
+    assert.equal(qrCheck?.severity, "blocking");
+    const evidence = (validation!.report as {
+      machineReadableContentEvidence: { overall: string; instances: Array<{ result: string; provenance: string | null }> } | undefined;
+    }).machineReadableContentEvidence;
+    assert.equal(evidence?.overall, "pass");
+    assert.equal(evidence?.instances[0]?.result, "pass");
+    assert.equal(evidence?.instances[0]?.provenance, "verified_from_source_qr");
+    const blockingFailures = checks.filter((c) => c.severity === "blocking" && c.status !== "pass");
+    assert.ok(
+      !blockingFailures.some((c) => c.check === "machine_readable_content_preserved"),
+      "a verified, preserved QR must never itself be a blocking failure",
+    );
+  });
+
+  it("the operator's explicit 'Check QR code' re-check produces IDENTICAL evidence to the automatic one — one coherent architecture, never two disagreeing authorities", async () => {
+    const qr = damageQrInterior(await synthesizeQr("https://get-hibachi.com"));
+    const { repo, projectId, job } = await projectWithSign(qr);
+    const automatic = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+
+    const { checkSignQrPreservation } = await import("./sign-qr-preservation-service");
+    const manual = await checkSignQrPreservation(projectId);
+
+    assert.equal(manual.report.overall, "review_required");
+    assert.equal(
+      manual.validationStatus,
+      "finalization_required",
+      "the operator-triggered re-check reaches the identical blocking conclusion the automatic check already did",
+    );
+    assert.equal(
+      (automatic!.report as { status: string }).status,
+      manual.validationStatus,
+      "automatic and operator-triggered evaluation must never disagree",
+    );
+  });
+});

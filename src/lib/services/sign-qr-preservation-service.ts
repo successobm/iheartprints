@@ -294,6 +294,34 @@ export interface SignQrCheckResult {
 }
 
 /**
+ * Fix "Machine-Readable Verification Is a Required Pre-Finalization Gate"
+ * Phase: the CORE deterministic comparison, extracted from
+ * `checkSignQrPreservation` so it has exactly ONE implementation, reused by
+ * BOTH the operator-triggered "Check QR code" action (unchanged below) AND
+ * the worker's own AUTOMATIC evaluation at ordinary job completion
+ * (`final-artwork-worker-capability.ts`) — never a second, possibly-
+ * drifting copy of "download source + candidate, compare, apply any
+ * durable resolution records." Read-only to the artwork: never mutates a
+ * pixel, never creates a candidate, never calls a provider.
+ */
+export async function evaluateSignMachineReadableContent(
+  preparation: SignPreparation,
+  candidateAssetId: string,
+): Promise<MachineReadablePreservationReport> {
+  const [source, candidateImage] = await Promise.all([
+    downloadRgba(preparation.originalAssetId),
+    downloadRgba(candidateAssetId),
+  ]);
+  const raw = compareMachineReadableContent(source.image, candidateImage.image);
+  const resolutions = parseQrResolutions(preparation);
+  const { report } = applyQrResolutions(raw, resolutions, {
+    assetId: preparation.originalAssetId,
+    sha256: source.sha256,
+  });
+  return report;
+}
+
+/**
  * Read-only to the artwork: decodes the immutable source and the CURRENT
  * candidate, compares, applies any durable resolution records, and
  * persists a NEW `ProductionAssetValidation` for the SAME asset recording
@@ -307,17 +335,7 @@ export async function checkSignQrPreservation(projectId: string): Promise<SignQr
     throw new SignQrPreservationError("No production candidate exists yet for this sign — nothing to check.");
   }
 
-  const [source, candidateImage] = await Promise.all([
-    downloadRgba(preparation.originalAssetId),
-    downloadRgba(candidate.assetId),
-  ]);
-
-  const raw = compareMachineReadableContent(source.image, candidateImage.image);
-  const resolutions = parseQrResolutions(preparation);
-  const { report } = applyQrResolutions(raw, resolutions, {
-    assetId: preparation.originalAssetId,
-    sha256: source.sha256,
-  });
+  const report = await evaluateSignMachineReadableContent(preparation, candidate.assetId);
 
   const repo = getProjectRepository();
   const priorValidation = await repo.getLatestProductionAssetValidationForJob(projectId, candidate.job.id);

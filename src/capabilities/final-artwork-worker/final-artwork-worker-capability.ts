@@ -43,6 +43,7 @@ import type {
   ConceptEvaluationStatus,
   FinalArtworkJob,
   FinalArtworkJobStatus,
+  SignPreparation,
   SignPreservationVerification,
 } from "@/lib/domain/types";
 import type { AssetCapability } from "@/capabilities/assets";
@@ -132,9 +133,13 @@ import {
 } from "@/capabilities/final-artwork/production-png";
 import type {
   RigidSignFitToProductionEvidence,
+  RigidSignMachineReadableContentEvidence,
   RigidSignPlanEvidence,
   RigidSignSubstrateBoundaryEvidence,
 } from "@/capabilities/print-validation/contracts";
+import { compareMachineReadableContent } from "@/capabilities/machine-readable-content/qr-preservation";
+import { applyQrResolutions, type SignQrResolutionRecord } from "@/capabilities/machine-readable-content/qr-resolution";
+import type { MachineReadablePreservationReport } from "@/capabilities/machine-readable-content/contracts";
 import {
   adaptGeometryStepsToActualReconstruction,
   affectedEdgesForAxis,
@@ -2222,6 +2227,95 @@ export function createFinalArtworkWorkerCapability(
    * refuses — no reconstructed sign becomes `print_ready` until a future
    * phase (S4) adds preservation verification to justify it.
    */
+  /** Local copy of `sign-qr-preservation-service.ts`'s own (private) `parseQrResolutions` — duplicated rather than imported: that file is a SERVICE layered on top of the capability composition graph (`getCapabilityGraph`), and importing it into this capability would risk a module-level circular import back into this very file. Mirrors it exactly — malformed/legacy entries are dropped, never guessed. */
+  function parseSignQrResolutionsForWorker(preparation: SignPreparation): SignQrResolutionRecord[] {
+    const raw = preparation.qrResolutions;
+    if (!Array.isArray(raw)) return [];
+    const valid = raw.filter(
+      (r) =>
+        typeof r.sourceAssetId === "string" &&
+        typeof r.sourceSha256 === "string" &&
+        typeof r.regionKey === "string" &&
+        (r.state === "confirmed_destination" || r.state === "print_as_supplied") &&
+        (r.confirmedPayload === null || typeof r.confirmedPayload === "string") &&
+        (r.confirmedBy === "customer" || r.confirmedBy === "operator") &&
+        typeof r.confirmedAt === "string",
+    );
+    return valid as unknown as SignQrResolutionRecord[];
+  }
+
+  /**
+   * Fix "Machine-Readable Verification Is a Required Pre-Finalization
+   * Gate" Phase (real Get Hibachi acceptance incident: a real 6144x4096
+   * candidate reached "Print-ready" / "Download corrected artwork" while
+   * its own QR panel still read "Not checked yet for this candidate" — a
+   * logically invalid combination this profile must never produce again).
+   *
+   * Runs the SAME deterministic, local, provider-free comparison the
+   * operator's own "Check QR code" action always used
+   * (`compareMachineReadableContent`/`applyQrResolutions`,
+   * `@/capabilities/machine-readable-content`) — automatically, right here
+   * at ordinary job completion, reusing the source/candidate bytes this
+   * job already has authoritative ids for. The operator no longer needs
+   * to remember an extra safety step for the common case; "Check QR
+   * code"/"Restore QR code" remain available for re-verification after a
+   * correction, or as a fallback for a historical candidate produced
+   * before this evidence existed.
+   *
+   * Deliberately does NOT call `sign-qr-preservation-service.ts` (see
+   * `parseSignQrResolutionsForWorker`'s own doc on why) — reuses only the
+   * pure, dependency-free capability-layer functions directly, via this
+   * worker's own already-available `assets` dependency, mirroring exactly
+   * how `fitToProduction` below downloads/decodes the final plate fresh
+   * rather than threading a variable through both execution branches.
+   *
+   * `null` on any failure to read/decode either image — never fabricated
+   * as safe; `validateRigidSign` already treats
+   * `machineReadableContent: null` as blocking, exactly like
+   * `fitToProduction: null` already is.
+   */
+  async function evaluateSignMachineReadableContentAutomatically(
+    preparation: SignPreparation,
+    candidateAssetId: string,
+    sourceSha256ForResolutions: string,
+  ): Promise<MachineReadablePreservationReport | null> {
+    try {
+      const [sourceBytes, candidateBytes] = await Promise.all([
+        assets.downloadAssetBytes(preparation.originalAssetId),
+        assets.downloadAssetBytes(candidateAssetId),
+      ]);
+      if (!sourceBytes || !candidateBytes) return null;
+      const sourceImage = decodePngUpload(sourceBytes.bytes).image;
+      const candidateImage = decodePngUpload(candidateBytes.bytes).image;
+      const raw = compareMachineReadableContent(sourceImage, candidateImage);
+      const resolutions = parseSignQrResolutionsForWorker(preparation);
+      const { report } = applyQrResolutions(raw, resolutions, {
+        assetId: preparation.originalAssetId,
+        sha256: sourceSha256ForResolutions,
+      });
+      return report;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Narrow mirror into `RigidSignPlanEvidence.machineReadableContent`'s own evidence shape — see that field's doc on why this module never imports `machine-readable-content/contracts.ts`'s types directly. */
+  function mapMachineReadableReportToRigidSignEvidence(
+    report: MachineReadablePreservationReport,
+  ): RigidSignMachineReadableContentEvidence {
+    return {
+      regions: report.instances.map((instance) => ({
+        id: instance.id,
+        kind: instance.kind,
+        sourceDecodable: instance.sourceDecodable,
+        candidateDecodable: instance.candidateDecodable,
+        result: instance.result,
+        provenance: instance.provenance,
+      })),
+      overallResult: report.overall,
+    };
+  }
+
   async function runSignPreparationJob(
     job: FinalArtworkJob,
     /** See `runSignReconstructionAndContinue`'s own doc for exactly what `"existingResultOnly"` changes. Defaults to normal behavior for every existing caller. */
@@ -2868,6 +2962,24 @@ export function createFinalArtworkWorkerCapability(
       fitToProduction = null;
     }
 
+    // Fix "Machine-Readable Verification Is a Required Pre-Finalization
+    // Gate" Phase: computed automatically here, exactly once per job
+    // completion — see `evaluateSignMachineReadableContentAutomatically`'s
+    // own doc. `rawMachineReadableReport` (the fuller, un-narrowed
+    // evidence) is also threaded into the persisted validation report
+    // below so the operator-facing QR panel (`readMachineReadableContent
+    // Summary`) sees it immediately, exactly as if "Check QR code" had
+    // just been run — never leaving the panel showing "Not checked yet"
+    // for a candidate that print-ready/validation now correctly blocks on.
+    const rawMachineReadableReport = await evaluateSignMachineReadableContentAutomatically(
+      preparation,
+      productionAsset.id,
+      sourceSha256,
+    );
+    const machineReadableContent = rawMachineReadableReport
+      ? mapMachineReadableReportToRigidSignEvidence(rawMachineReadableReport)
+      : null;
+
     const rigidSign: RigidSignPlanEvidence = {
       sourceAssetId: preparation.originalAssetId,
       sourceSha256,
@@ -2932,17 +3044,13 @@ export function createFinalArtworkWorkerCapability(
           : null,
       substrateBoundary,
       fitToProduction,
-      // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: not yet computed
-      // automatically as part of ordinary job completion — see
-      // `RigidSignPlanEvidence.machineReadableContent`'s own doc for why
-      // `null` here is correct and non-regressive (never treated as a
-      // failure). An operator's explicit "Check QR code"/"Restore QR
-      // code" action (`sign-artwork-service.ts`) computes and persists
-      // this evidence in its own, separate `ProductionAssetValidation`
-      // run for the SAME job/asset — deliberately scoped this phase to an
-      // explicit operator action rather than every job's own automatic
-      // completion path.
-      machineReadableContent: null,
+      // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: now computed
+      // automatically above (`evaluateSignMachineReadableContentAutomatically`)
+      // — `null` here means the comparison itself could not be completed
+      // (a read/decode failure) and `validateRigidSign` treats it as
+      // blocking, exactly like `fitToProduction: null`. See that field's
+      // own doc in `contracts.ts` for the full history of this decision.
+      machineReadableContent,
     };
 
     const validationInput: PrintValidationInput = {
@@ -2975,11 +3083,23 @@ export function createFinalArtworkWorkerCapability(
     };
 
     const report = printValidation.validateArtwork(validationInput);
+    // Fix "Machine-Readable Verification Is a Required Pre-Finalization
+    // Gate" Phase: the fuller, un-narrowed comparison (never persisted by
+    // `validateArtwork`'s own typed report, per its own cross-capability
+    // "narrow mirror" discipline) is appended onto the persisted JSON here
+    // — the SAME field name (`machineReadableContentEvidence`)
+    // `sign-qr-preservation-service.ts`'s own "Check QR code" merge already
+    // uses, so `readMachineReadableContentSummary` (the operator QR
+    // panel's own reader) sees identical evidence regardless of whether it
+    // arrived via this automatic check or a later manual re-check.
+    const persistedReport: Record<string, unknown> = rawMachineReadableReport
+      ? { ...(report as unknown as Record<string, unknown>), machineReadableContentEvidence: rawMachineReadableReport }
+      : (report as unknown as Record<string, unknown>);
     await repo.createProductionAssetValidation(job.projectId, {
       finalArtworkJobId: job.id,
       assetId: productionAsset.id,
       status: report.status,
-      report: report as unknown as Record<string, unknown>,
+      report: persistedReport,
     });
     await repo.updateFinalArtworkJob(job.id, {
       status: "completed",

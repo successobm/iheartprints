@@ -116,11 +116,16 @@ function evidence(overrides: Partial<RigidSignPlanEvidence> = {}): RigidSignPlan
         reason: "test fixture default — comfortably clear",
       })),
     },
-    // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: the default
-    // fixture never ran the QR check, so this stays `null` (never
-    // evaluated — never a manufactured failure) unless a test explicitly
-    // overrides it.
-    machineReadableContent: null,
+    // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION — Fix
+    // "Machine-Readable Verification Is a Required Pre-Finalization Gate"
+    // Phase: `null` is now BLOCKING (see `validateRigidSign`'s own
+    // handling), so every test in this file NOT specifically about QR
+    // behavior needs a baseline representing "no QR-like content
+    // detected" (`not_applicable`) — the one result that both is a real,
+    // affirmative determination AND never blocks — so QR/machine-readable
+    // behavior stays fully isolated to the dedicated suite below, which
+    // overrides this per-case.
+    machineReadableContent: { regions: [], overallResult: "not_applicable" },
     ...overrides,
   };
 }
@@ -1481,11 +1486,18 @@ describe("SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION → print_ready", () 
     return report.checks.find((c) => c.check === "machine_readable_content_preserved");
   }
 
-  it("machineReadableContent: null (never evaluated) pushes NO check at all — never a manufactured failure", () => {
-    const report = printValidation.validateArtwork(baseInput());
-    assert.equal(checkOf(report), undefined);
-    // Every other control check still passes, and the run still reaches ready.
-    assert.equal(report.status, "ready");
+  it("Fix \"Machine-Readable Verification Is a Required Pre-Finalization Gate\" Phase: machineReadableContent: null (never evaluated) is now BLOCKING — supersedes the prior 'pushes no check at all' behavior, the real Get Hibachi acceptance defect", () => {
+    const report = printValidation.validateArtwork(
+      baseInput({ rigidSign: evidence({ machineReadableContent: null }) }),
+    );
+    assert.equal(checkOf(report)?.status, "fail");
+    assert.equal(checkOf(report)?.severity, "blocking");
+    assert.match(checkOf(report)!.reason, /not yet been verified/i);
+    assert.notEqual(
+      report.status,
+      "ready",
+      "a candidate whose machine-readable content has never been evaluated must never reach Print Ready",
+    );
   });
 
   it("overallResult 'pass': the check passes, ready is reachable", () => {
