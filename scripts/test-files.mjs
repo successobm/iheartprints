@@ -453,6 +453,10 @@ export const TEST_FILES = [
   // of SignFitToProductionCorrectionTool.tsx, same reasoning as the other
   // pure, DOM-free modules above.
   "src/app/internal/projects/[projectId]/sign-authorize/sign-production-fit-state.test.ts",
+  // Signs Normal Workstation Simplification Phase: SSR snapshot checks
+  // proving the normal workstation no longer renders Wand/tolerance/
+  // Advanced-pixel-correction/Move/Remove/Destination-X/Y markup at all.
+  "src/app/internal/projects/[projectId]/sign-authorize/SignFitToProductionCorrectionTool.test.tsx",
   "src/app/api/internal/projects/[projectId]/sign-artwork/original-image/route.test.ts",
   "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",
