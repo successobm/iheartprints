@@ -139,6 +139,18 @@ function describeStepForOperator(
       return describeRotate(step);
     case "approved_crop":
       return describeApprovedCrop();
+    case "fit_artwork_to_canvas":
+      return describeFitArtworkToCanvas(step);
+    case "crop_region":
+      return describeCropRegion(step);
+    case "move_region":
+      return describeMoveRegion(step);
+    case "fill_rect":
+      return describeFillRect(step);
+    case "replace_region_with_background":
+      return describeReplaceRegionWithBackground(step);
+    case "replace_masked_region_with_background":
+      return describeReplaceMaskedRegionWithBackground(step);
     default:
       // Unreachable for any kind this build's planner emits — mirrors the
       // customer module's "silently omit an unmapped code" discipline
@@ -450,5 +462,145 @@ function describeApprovedCrop(): SignPlanOperatorStepView {
     detail: null,
     needsReview: true,
     reviewReason: "Trimming could remove part of the design, so this requires production review.",
+  };
+}
+
+/**
+ * Signs Flat-Raster Production Workflow Correction (Section E/F/H): the
+ * ONE whole-composition remedy — never a per-object edit. Distinguishes,
+ * using ONLY the step's own persisted params (never a fresh measurement,
+ * never the historical original source), between:
+ *
+ *  - a genuine "Fit to Safe Area" reduction — `scaleTargetWidthPx`/
+ *    `scaleTargetHeightPx` are present (they are ONLY ever persisted when
+ *    an operator-requested safe-area inset produced a scale target
+ *    smaller than the canvas — `encodeFitArtworkToCanvasParams`'s own
+ *    doc), and
+ *  - the ORDINARY "place the artwork on the ordered canvas" step every
+ *    sign's initial composition plan already contains (no inset
+ *    requested — the two fields are simply absent).
+ *
+ * The applied scale is derived from `expectedArtworkWidthPx`/
+ * `expectedArtworkHeightPx` — the EXACT dimensions
+ * `executeFitArtworkToCanvas` itself validates the incoming artwork
+ * against before scaling it — never the plan's own `sourceWidthPx`/
+ * `sourceHeightPx` (a different, pre-composition, possibly-reconstructed-
+ * from stage). Omitted entirely rather than fabricated when the numbers
+ * needed to compute it safely aren't all present.
+ */
+function describeFitArtworkToCanvas(step: SignRepairStep): SignPlanOperatorStepView {
+  const canvasWidthPx = numberParam(step, "canvasWidthPx");
+  const canvasHeightPx = numberParam(step, "canvasHeightPx");
+  const expectedArtworkWidthPx = numberParam(step, "expectedArtworkWidthPx");
+  const expectedArtworkHeightPx = numberParam(step, "expectedArtworkHeightPx");
+  const scaleTargetWidthPx = numberParam(step, "scaleTargetWidthPx");
+  const scaleTargetHeightPx = numberParam(step, "scaleTargetHeightPx");
+  const needsReview = step.risk !== "auto_safe";
+
+  const isSafeAreaFit = scaleTargetWidthPx !== null && scaleTargetHeightPx !== null;
+
+  let scalePercent: number | null = null;
+  const targetWidthPx = scaleTargetWidthPx ?? canvasWidthPx;
+  const targetHeightPx = scaleTargetHeightPx ?? canvasHeightPx;
+  if (
+    expectedArtworkWidthPx !== null && expectedArtworkWidthPx > 0 &&
+    expectedArtworkHeightPx !== null && expectedArtworkHeightPx > 0 &&
+    targetWidthPx !== null && targetHeightPx !== null
+  ) {
+    const scale = Math.min(targetWidthPx / expectedArtworkWidthPx, targetHeightPx / expectedArtworkHeightPx);
+    if (Number.isFinite(scale) && scale > 0) scalePercent = scale * 100;
+  }
+
+  if (isSafeAreaFit) {
+    const detailParts: string[] = [];
+    if (scalePercent !== null) detailParts.push(`Artwork scale: ${scalePercent.toFixed(1)}%.`);
+    detailParts.push("Background will extend to the cut edge.");
+    detailParts.push("Aspect ratio will be preserved. Artwork will not be stretched.");
+    return {
+      summary: "Reduce the complete artwork slightly so important content stays inside the 0.125\" safe area.",
+      detail: detailParts.join(" "),
+      needsReview,
+      reviewReason: needsReview
+        ? "Repositioning the whole composition changes where content sits relative to the cut edge, so this requires production review."
+        : null,
+    };
+  }
+
+  return {
+    summary: "Place the artwork on the exact ordered production canvas.",
+    detail: "Any uncovered edge is filled with the artwork's own background. The artwork itself is not stretched or cropped.",
+    needsReview,
+    reviewReason: needsReview
+      ? "Placing the artwork on the production canvas changes its pixels, so this requires production review."
+      : null,
+  };
+}
+
+function describeCropRegion(step: SignRepairStep): SignPlanOperatorStepView {
+  const widthPx = numberParam(step, "widthPx");
+  const heightPx = numberParam(step, "heightPx");
+  const needsReview = step.risk !== "auto_safe";
+  return {
+    summary: "Crop the artwork to the operator-selected area before production.",
+    detail: widthPx !== null && heightPx !== null ? `Cropped size: ${widthPx} × ${heightPx} px.` : null,
+    needsReview,
+    reviewReason: needsReview ? "Cropping could remove part of the design, so this requires production review." : null,
+  };
+}
+
+function describeMoveRegion(step: SignRepairStep): SignPlanOperatorStepView {
+  const sourceStartYPx = numberParam(step, "sourceStartYPx");
+  const heightPx = numberParam(step, "heightPx");
+  const destStartYPx = numberParam(step, "destStartYPx");
+  const needsReview = step.risk !== "auto_safe";
+  return {
+    summary: "Move a horizontal band of the artwork to a new position.",
+    detail:
+      sourceStartYPx !== null && heightPx !== null && destStartYPx !== null
+        ? `A ${heightPx}px-tall band moves from y ${sourceStartYPx} to y ${destStartYPx}.`
+        : null,
+    needsReview,
+    reviewReason: needsReview
+      ? "Moving artwork changes its position relative to the cut edge, so this requires production review."
+      : null,
+  };
+}
+
+function describeFillRect(step: SignRepairStep): SignPlanOperatorStepView {
+  const widthPx = numberParam(step, "widthPx");
+  const heightPx = numberParam(step, "heightPx");
+  const color = colorDescription(step);
+  const needsReview = step.risk !== "auto_safe";
+  const sizePhrase = widthPx !== null && heightPx !== null ? `a ${widthPx} × ${heightPx} px area` : "a selected area";
+  return {
+    summary: "Fill a selected area with a solid colour.",
+    detail: color ? `Fill ${sizePhrase} with ${color}.` : `Fill ${sizePhrase}.`,
+    needsReview,
+    reviewReason: needsReview ? "Filling artwork with a solid colour changes its pixels, so this requires production review." : null,
+  };
+}
+
+function describeReplaceRegionWithBackground(step: SignRepairStep): SignPlanOperatorStepView {
+  const widthPx = numberParam(step, "widthPx");
+  const heightPx = numberParam(step, "heightPx");
+  const color = colorDescription(step);
+  const needsReview = step.risk !== "auto_safe";
+  const sizePhrase = widthPx !== null && heightPx !== null ? `a ${widthPx} × ${heightPx} px area` : "a selected area";
+  return {
+    summary: "Remove a selected artifact and fill it with the surrounding background.",
+    detail: color ? `Replace ${sizePhrase} with ${color}, independently verified as the actual surrounding colour.` : null,
+    needsReview,
+    reviewReason: needsReview ? "Removing artwork could delete something meaningful, so this requires production review." : null,
+  };
+}
+
+function describeReplaceMaskedRegionWithBackground(step: SignRepairStep): SignPlanOperatorStepView {
+  const color = colorDescription(step);
+  const needsReview = step.risk !== "auto_safe";
+  return {
+    summary: "Remove a selected artifact — its exact shape, not just a box around it — and fill it with the surrounding background.",
+    detail: color ? `Fill with ${color}, independently verified as the actual surrounding colour.` : null,
+    needsReview,
+    reviewReason: needsReview ? "Removing artwork could delete something meaningful, so this requires production review." : null,
   };
 }

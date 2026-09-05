@@ -48,6 +48,18 @@ const INTERNAL_VOCABULARY = [
   "planKey",
   "auto_safe",
   "review_required",
+  "fit_artwork_to_canvas",
+  "crop_region",
+  "move_region",
+  "fill_rect",
+  "replace_region_with_background",
+  "replace_masked_region_with_background",
+  "scaleTargetWidthPx",
+  "scaleTargetHeightPx",
+  "expectedArtworkWidthPx",
+  "canvasWidthPx",
+  "sourceStartYPx",
+  "destStartYPx",
 ];
 
 function assertNoLeakedVocabulary(view: unknown): void {
@@ -621,6 +633,52 @@ describe("General Product Rule audit: no currently-reachable SignRepairStepKind 
     },
     { kind: "rotate_90", params: {}, risk: "review_required", reasons: [] },
     { kind: "approved_crop", params: {}, risk: "auto_safe", reasons: [] },
+    // Signs Flat-Raster Production Workflow Correction / real Get Hibachi
+    // authorization-screen defect: the canvas-first composition primitives
+    // (Signs Phase 3B) were never added to this audit when they shipped —
+    // exactly the gap that let `fit_artwork_to_canvas` silently fall
+    // through to the generic fallback on the real Get Hibachi plan.
+    {
+      kind: "fit_artwork_to_canvas",
+      params: {
+        expectedArtworkWidthPx: 2000, expectedArtworkHeightPx: 2000,
+        canvasWidthPx: 2000, canvasHeightPx: 2000,
+        placementXPx: 0, placementYPx: 0,
+        backgroundR: 0, backgroundG: 0, backgroundB: 0,
+      },
+      risk: "review_required",
+      reasons: [],
+    },
+    {
+      kind: "crop_region",
+      params: { expectedInputWidthPx: 2000, expectedInputHeightPx: 2000, xPx: 0, yPx: 0, widthPx: 1000, heightPx: 1000 },
+      risk: "review_required",
+      reasons: [],
+    },
+    {
+      kind: "move_region",
+      params: { sourceStartYPx: 0, heightPx: 100, destStartYPx: 200 },
+      risk: "review_required",
+      reasons: [],
+    },
+    {
+      kind: "fill_rect",
+      params: { xPx: 0, yPx: 0, widthPx: 100, heightPx: 100, colorR: 200, colorG: 10, colorB: 10 },
+      risk: "review_required",
+      reasons: [],
+    },
+    {
+      kind: "replace_region_with_background",
+      params: { xPx: 0, yPx: 0, widthPx: 100, heightPx: 100, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 8 },
+      risk: "review_required",
+      reasons: [],
+    },
+    {
+      kind: "replace_masked_region_with_background",
+      params: { xPx: 0, yPx: 0, widthPx: 100, heightPx: 100, colorR: 200, colorG: 10, colorB: 10, contextDepthPx: 8, maskBase64: "AAAA" },
+      risk: "review_required",
+      reasons: [],
+    },
   ];
 
   it("every currently-reachable step kind produces a real summary, never the generic fallback", () => {
@@ -640,6 +698,338 @@ describe("General Product Rule audit: no currently-reachable SignRepairStepKind 
         `step kind "${step.kind}" fell through to the generic fallback — add first-class operator-review copy for it`,
       );
     }
+  });
+});
+
+describe("describeSignPlanForOperator — fit_artwork_to_canvas (Show the Actual Fit-to-Safe-Area Change on the Authorization Screen)", () => {
+  // 2. fit-only plan shows Fit-to-Safe-Area summary
+  // 5. scale percentage derived from persisted plan when safely available
+  it("a genuine safe-area inset fit (scaleTargetWidthPx/HeightPx present) is described as Fit to Safe Area, with the derived scale percentage", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "fit_artwork_to_canvas",
+          params: {
+            expectedArtworkWidthPx: 5508, expectedArtworkHeightPx: 3672,
+            canvasWidthPx: 5508, canvasHeightPx: 3672,
+            scaleTargetWidthPx: 5468, scaleTargetHeightPx: 3632,
+            placementXPx: 30, placementYPx: 20,
+            backgroundR: 0, backgroundG: 0, backgroundB: 0,
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 36,
+      orderedHeightIn: 24,
+      artworkWidthPx: 1536,
+      artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]),
+      plan,
+    });
+    const step = view.steps[0]!;
+    assert.match(step.summary, /safe area/i);
+    assert.match(step.summary, /0\.125/);
+    // 3632/3672 = 0.98910675... -> 98.9%, the exact real Get Hibachi value.
+    assert.match(step.detail!, /98\.9%/);
+    assert.equal(step.needsReview, true);
+    assert.match(step.reviewReason!, /production review/i);
+    assertNoLeakedVocabulary(view);
+  });
+
+  // 7. aspect ratio preserved / no stretch stated where guaranteed by the actual primitive
+  // 8. background extends to cut edge stated where the actual step performs that behavior
+  it("the Fit to Safe Area summary states background extension and aspect-ratio/no-stretch, matching what the primitive actually guarantees", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "fit_artwork_to_canvas",
+          params: {
+            expectedArtworkWidthPx: 5508, expectedArtworkHeightPx: 3672,
+            canvasWidthPx: 5508, canvasHeightPx: 3672,
+            scaleTargetWidthPx: 5468, scaleTargetHeightPx: 3632,
+            placementXPx: 30, placementYPx: 20,
+            backgroundR: 0, backgroundG: 0, backgroundB: 0,
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 36, orderedHeightIn: 24, artworkWidthPx: 1536, artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    const step = view.steps[0]!;
+    assert.match(step.detail!, /background will extend to the cut edge/i);
+    assert.match(step.detail!, /aspect ratio will be preserved/i);
+    assert.match(step.detail!, /not be stretched/i);
+  });
+
+  it("an ordinary 'fit to fill the canvas' step (no scaleTarget present — every initial composition plan's own shape) is described as placement, never Fit to Safe Area, and never mentions a scale percentage", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "fit_artwork_to_canvas",
+          params: {
+            expectedArtworkWidthPx: 1000, expectedArtworkHeightPx: 1000,
+            canvasWidthPx: 1000, canvasHeightPx: 1000,
+            placementXPx: 0, placementYPx: 0,
+            backgroundR: 255, backgroundG: 255, backgroundB: 255,
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 18, orderedHeightIn: 24, artworkWidthPx: 1000, artworkHeightPx: 1000,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    const step = view.steps[0]!;
+    assert.doesNotMatch(step.summary, /safe area/i);
+    assert.doesNotMatch(step.detail ?? "", /%/);
+    assert.match(step.summary, /production canvas/i);
+  });
+
+  // 6. Fit percentage omitted when not safely derivable
+  it("omits the scale percentage rather than fabricating one when the artwork dimensions needed to derive it are missing", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "fit_artwork_to_canvas",
+          params: {
+            // expectedArtworkWidthPx/HeightPx deliberately absent/invalid.
+            canvasWidthPx: 5508, canvasHeightPx: 3672,
+            scaleTargetWidthPx: 5468, scaleTargetHeightPx: 3632,
+            placementXPx: 30, placementYPx: 20,
+            backgroundR: 0, backgroundG: 0, backgroundB: 0,
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 36, orderedHeightIn: 24, artworkWidthPx: 1536, artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    const step = view.steps[0]!;
+    assert.doesNotMatch(step.detail ?? "", /%/);
+    // Still correctly identified as a safe-area fit (scaleTarget IS present) — only the percentage is withheld.
+    assert.match(step.summary, /safe area/i);
+  });
+
+  // 3. fit + resolution plan shows BOTH summaries
+  // 4. ordering of internal steps does not cause one material adjustment to vanish
+  it("a plan with BOTH reconstruct_resolution and fit_artwork_to_canvas shows BOTH summaries — the real Get Hibachi plan shape, reconstruct-then-fit order", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_resolution",
+          params: { requestedScale: 3.5859375, requestedWidthPx: 5508, requestedHeightPx: 3672 },
+          risk: "auto_safe",
+          reasons: [],
+        },
+        {
+          kind: "fit_artwork_to_canvas",
+          params: {
+            expectedArtworkWidthPx: 5508, expectedArtworkHeightPx: 3672,
+            canvasWidthPx: 5508, canvasHeightPx: 3672,
+            scaleTargetWidthPx: 5468, scaleTargetHeightPx: 3632,
+            placementXPx: 30, placementYPx: 20,
+            backgroundR: 0, backgroundG: 0, backgroundB: 0,
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 36, orderedHeightIn: 24, artworkWidthPx: 1536, artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.equal(view.steps.length, 2);
+    assert.match(view.steps[0]!.summary, /resolution/i);
+    assert.match(view.steps[0]!.detail!, /5508/);
+    assert.match(view.steps[0]!.detail!, /3672/);
+    assert.match(view.steps[1]!.summary, /safe area/i);
+    assert.match(view.steps[1]!.detail!, /98\.9%/);
+  });
+
+  it("the same two steps in the OPPOSITE order still show both summaries — ordering never hides a material adjustment", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "fit_artwork_to_canvas",
+          params: {
+            expectedArtworkWidthPx: 5508, expectedArtworkHeightPx: 3672,
+            canvasWidthPx: 5508, canvasHeightPx: 3672,
+            scaleTargetWidthPx: 5468, scaleTargetHeightPx: 3632,
+            placementXPx: 30, placementYPx: 20,
+            backgroundR: 0, backgroundG: 0, backgroundB: 0,
+          },
+          risk: "review_required",
+          reasons: [],
+        },
+        {
+          kind: "reconstruct_resolution",
+          params: { requestedScale: 3.5859375, requestedWidthPx: 5508, requestedHeightPx: 3672 },
+          risk: "auto_safe",
+          reasons: [],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 36, orderedHeightIn: 24, artworkWidthPx: 1536, artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.equal(view.steps.length, 2);
+    assert.match(view.steps[0]!.summary, /safe area/i);
+    assert.match(view.steps[1]!.summary, /resolution/i);
+  });
+
+  // 1. resolution-only plan shows resolution summary
+  it("a resolution-only plan (no fit step at all) shows only the resolution summary", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_resolution",
+          params: { requestedScale: 3.5859375, requestedWidthPx: 5508, requestedHeightPx: 3672 },
+          risk: "auto_safe",
+          reasons: [],
+        },
+      ],
+      "auto_safe",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 36, orderedHeightIn: 24, artworkWidthPx: 1536, artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.equal(view.steps.length, 1);
+    assert.match(view.steps[0]!.summary, /resolution/i);
+  });
+
+  // 9. exact ordered size shown from project/production spec, not hard-coded
+  it("the ordered size shown comes from the caller's own orderedWidthIn/orderedHeightIn input, never a fixed value", () => {
+    const plan = planWithSteps([], "auto_safe");
+    const viewA = describeSignPlanForOperator({
+      orderedWidthIn: 36, orderedHeightIn: 24, artworkWidthPx: 1536, artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    const viewB = describeSignPlanForOperator({
+      orderedWidthIn: 18, orderedHeightIn: 12, artworkWidthPx: 1536, artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.equal(viewA.orderedWidthIn, 36);
+    assert.equal(viewA.orderedHeightIn, 24);
+    assert.equal(viewB.orderedWidthIn, 18);
+    assert.equal(viewB.orderedHeightIn, 12);
+  });
+
+  // The exact real Get Hibachi persisted plan shape (read-only trace,
+  // 2026 acceptance): reconstruct_resolution then fit_artwork_to_canvas,
+  // scale 3632/3672 = 98.9%.
+  it("the REAL Get Hibachi persisted plan's exact shape: both steps render real, distinct, non-generic copy", () => {
+    const plan = planWithSteps(
+      [
+        {
+          kind: "reconstruct_resolution",
+          risk: "auto_safe",
+          params: { requestedScale: 3.5859375, requestedWidthPx: 5508, requestedHeightPx: 3672 },
+          reasons: [],
+        },
+        {
+          kind: "fit_artwork_to_canvas",
+          risk: "review_required",
+          params: {
+            backgroundB: 0, backgroundG: 0, backgroundR: 0,
+            placementXPx: 30, placementYPx: 20,
+            canvasWidthPx: 5508, canvasHeightPx: 3672,
+            scaleTargetWidthPx: 5468, scaleTargetHeightPx: 3632,
+            expectedArtworkWidthPx: 5508, expectedArtworkHeightPx: 3672,
+          },
+          reasons: [],
+        },
+      ],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 36, orderedHeightIn: 24, artworkWidthPx: 1536, artworkHeightPx: 1024,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.equal(view.steps.length, 2);
+    assert.notEqual(view.steps[0]!.summary, "A production adjustment is proposed for this artwork.");
+    assert.notEqual(view.steps[1]!.summary, "A production adjustment is proposed for this artwork.");
+    assert.match(view.steps[1]!.detail!, /98\.9%/);
+    assert.match(view.steps[1]!.detail!, /background will extend to the cut edge/i);
+    assertNoLeakedVocabulary(view);
+  });
+});
+
+describe("describeSignPlanForOperator — other canvas-first composition primitives (never the generic fallback)", () => {
+  it("crop_region: dimensions translated, no bare internal identifiers", () => {
+    const plan = planWithSteps(
+      [{ kind: "crop_region", params: { expectedInputWidthPx: 2000, expectedInputHeightPx: 2000, xPx: 100, yPx: 100, widthPx: 1800, heightPx: 1800 }, risk: "review_required", reasons: [] }],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 18, orderedHeightIn: 24, artworkWidthPx: 2000, artworkHeightPx: 2000,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.match(view.steps[0]!.summary, /crop/i);
+    assert.match(view.steps[0]!.detail!, /1800/);
+    assertNoLeakedVocabulary(view);
+  });
+
+  it("move_region: source/destination y translated", () => {
+    const plan = planWithSteps(
+      [{ kind: "move_region", params: { sourceStartYPx: 50, heightPx: 100, destStartYPx: 500 }, risk: "review_required", reasons: [] }],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 18, orderedHeightIn: 24, artworkWidthPx: 1000, artworkHeightPx: 1000,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.match(view.steps[0]!.summary, /move/i);
+    assert.match(view.steps[0]!.detail!, /50/);
+    assert.match(view.steps[0]!.detail!, /500/);
+    assertNoLeakedVocabulary(view);
+  });
+
+  it("replace_region_with_background: colour translated via the same colorDescription helper as pad steps", () => {
+    const plan = planWithSteps(
+      [{ kind: "replace_region_with_background", params: { xPx: 0, yPx: 0, widthPx: 30, heightPx: 30, colorR: 10, colorG: 10, colorB: 10, contextDepthPx: 8 }, risk: "review_required", reasons: [] }],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 18, orderedHeightIn: 24, artworkWidthPx: 1000, artworkHeightPx: 1000,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.match(view.steps[0]!.summary, /remove/i);
+    assert.match(view.steps[0]!.detail!, /near-black/i);
+    assertNoLeakedVocabulary(view);
+  });
+
+  it("replace_masked_region_with_background: described as an exact-shape removal, distinct from the rectangular variant", () => {
+    const plan = planWithSteps(
+      [{ kind: "replace_masked_region_with_background", params: { xPx: 0, yPx: 0, widthPx: 30, heightPx: 30, colorR: 10, colorG: 10, colorB: 10, contextDepthPx: 8, maskBase64: "AAAA" }, risk: "review_required", reasons: [] }],
+      "review_required",
+    );
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 18, orderedHeightIn: 24, artworkWidthPx: 1000, artworkHeightPx: 1000,
+      inspection: inspectionWithEdges([]), plan,
+    });
+    assert.match(view.steps[0]!.summary, /exact shape/i);
+    assertNoLeakedVocabulary(view);
   });
 });
 
