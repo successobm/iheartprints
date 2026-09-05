@@ -1024,3 +1024,166 @@ describe("sign-artwork-service: Operator Production Correction UX (preview + com
     assert.equal(checks.find((c) => c.check === "protected_content_safe_inset")?.status, "fail");
   });
 });
+
+describe("sign-artwork-service: Fix \"Try Again\" Retry Eligibility Phase (real Get Hibachi acceptance incident)", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-retry-eligibility-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function freshGraph() {
+    const { resetCapabilityGraphForTests, getCapabilityGraph } = await import("@/capabilities/composition");
+    resetCapabilityGraphForTests();
+    const { resetDecodedCandidateCacheForTests } = await import("@/lib/services/sign-wand-candidate-cache");
+    resetDecodedCandidateCacheForTests();
+    const graph = getCapabilityGraph();
+    const { getProjectRepository } = await import("@/lib/db");
+    return { graph, repo: getProjectRepository() };
+  }
+
+  function tinySign() {
+    return makeImage(600, 900, { r: 200, g: 10, b: 10 });
+  }
+
+  /** An authorized, requested (but never actually executed) sign job — a fresh, minimal project up through `requestSignFinalArtwork`. */
+  async function authorizedSignJob(graph: Awaited<ReturnType<typeof freshGraph>>["graph"], repo: Awaited<ReturnType<typeof freshGraph>>["repo"]) {
+    const created = await repo.createProject();
+    const projectId = created.project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(tinySign()),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 4, 6);
+    await graph.signPreparation.confirmSignCompositionPlan(projectId, {
+      reconstruction: null,
+      crop: null,
+      fitBackground: { r: 200, g: 10, b: 10 },
+      fitPlacement: null,
+      moves: [],
+      fills: [],
+      replacements: [],
+    });
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    return { projectId, job };
+  }
+
+  /**
+   * 600x900px = exactly 4x6in at 150 PPI, with a 20x20 black artifact only
+   * 5px from the LEFT cut edge — mirrors the OTHER describe block's own
+   * `signWithLeftEdgeArtifact`/`projectWithBlockedCandidate` (locally scoped
+   * there, unreachable from this describe block), reproduced here so this
+   * one has its own genuine, real (not simulated) completed-with-a-real-
+   * candidate-but-blocked project.
+   */
+  function signWithLeftEdgeArtifact() {
+    const image = makeImage(600, 900, { r: 200, g: 10, b: 10 });
+    fillRect(image, 5, 440, 25, 460, { r: 20, g: 20, b: 20 });
+    return image;
+  }
+
+  async function projectWithBlockedCandidate(graph: Awaited<ReturnType<typeof freshGraph>>["graph"], repo: Awaited<ReturnType<typeof freshGraph>>["repo"]) {
+    const created = await repo.createProject();
+    const projectId = created.project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(signWithLeftEdgeArtifact()),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 4, 6);
+    await graph.signPreparation.confirmSignCompositionPlan(projectId, {
+      reconstruction: null,
+      crop: null,
+      fitBackground: { r: 200, g: 10, b: 10 },
+      fitPlacement: null,
+      moves: [],
+      fills: [],
+      replacements: [],
+    });
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    return { projectId, job };
+  }
+
+  it("a completed job that never produced a validated candidate (completeWithoutAsset) revives on the next request — the real Get Hibachi defect", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId, job } = await authorizedSignJob(graph, repo);
+
+    // Simulate the exact durable shape a real `completeWithoutAsset`
+    // outcome leaves behind (e.g. the real Get Hibachi
+    // fit_artwork_to_canvas dimension-identity refusal) — completed, a
+    // lastError explaining the refusal, but no production candidate or
+    // validation ever created. The worker is never actually run here; the
+    // point is the durable STATE this test starts from, not how it arose.
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "completed",
+      attempts: 1,
+      lastError:
+        "Step \"fit_artwork_to_canvas\" expected a 5508x3672px artwork, but received 6144x4096px — " +
+        "refusing rather than fitting the wrong source identity.",
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+    });
+
+    const validationBefore = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.equal(validationBefore, null, "sanity: no candidate was ever validated for this job");
+
+    const { job: revived, alreadyRequested } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    assert.equal(alreadyRequested, true);
+    assert.equal(revived.id, job.id, "the SAME job identity is revived — never a duplicate job");
+    assert.equal(revived.status, "queued", "eligible for the worker to actually run again");
+    assert.equal(revived.attempts, 0);
+    assert.equal(revived.lastError, null);
+    assert.equal(revived.completedAt, null);
+    assert.equal(revived.startedAt, null);
+  });
+
+  it("a completed job WITH a genuine blocked candidate (state 6) is never blindly re-queued — the existing, protected Wand/correction behavior", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId, job } = await projectWithBlockedCandidate(graph, repo);
+    const before = await repo.getFinalArtworkJob(job.id);
+    assert.equal(before!.status, "completed");
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.notEqual(validation, null, "sanity: a real candidate WAS produced and validated");
+
+    const { job: result, alreadyRequested } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    assert.equal(alreadyRequested, true);
+    assert.equal(result.id, job.id);
+    assert.equal(
+      result.status,
+      "completed",
+      "never auto-revived — a real candidate exists for the operator to inspect/correct; blindly " +
+        "re-running the identical plan against the identical source would only reproduce it",
+    );
+    assert.equal(result.attempts, before!.attempts, "attempts left untouched");
+  });
+
+  it("a genuinely failed job (status: failed) still revives exactly as before — unaffected by the completed-without-candidate fix", async () => {
+    const { graph, repo } = await freshGraph();
+    const { projectId, job } = await authorizedSignJob(graph, repo);
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "failed",
+      attempts: 3,
+      lastError: "a transient infrastructure failure",
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+    });
+
+    const { job: revived, alreadyRequested } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    assert.equal(alreadyRequested, true);
+    assert.equal(revived.id, job.id);
+    assert.equal(revived.status, "queued");
+    assert.equal(revived.attempts, 0);
+    assert.equal(revived.lastError, null);
+  });
+});

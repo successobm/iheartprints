@@ -1660,6 +1660,45 @@ function findJobForWidth(
  * state requires the operator's own preparation to have been superseded
  * and then reverted back to byte-identical terms, a genuinely rare
  * operator-only edge case; an operator can always trigger a fresh plan.
+ *
+ * Fix "Try Again" Retry Eligibility Phase (real Get Hibachi acceptance
+ * incident, traced read-only immediately after commit e1e917c fixed
+ * `fit_artwork_to_canvas`'s post-reconstruction geometry adaptation):
+ * `existing.status === "failed"` alone missed an entire class of genuinely
+ * retryable jobs. `completeWithoutAsset` (`final-artwork-worker-capability.ts`)
+ * deliberately records a job that refused to produce ANY candidate —
+ * malformed/mismatched step params, a reconstruction the provider could not
+ * even be dispatched for, a deterministic composition-verification failure —
+ * as `status: "completed"`, by explicit design ("a successfully completed
+ * DETERMINATION, not a failure": nothing crashed, the honest conclusion was
+ * simply "this cannot be produced as planned"). The operator-facing CTA
+ * (`sign-production-cta-state.ts`) already, correctly, labels this
+ * `"try_again"` — but until this fix, clicking it silently did nothing: this
+ * function returned the SAME untouched "completed" job (`alreadyRequested:
+ * true`), and `prepareSignArtworkForProduction` only ever triggers the local
+ * worker for `"queued"`/`"running"`/`"recoverable"`, so no execution ever ran
+ * again. The real, durable evidence proving this: after e1e917c fixed the
+ * underlying refusal (a reused, cached, actually-6144x4096 reconstruction
+ * against a plan requesting 5508x3672) and Eric clicked "Try again" on the
+ * real Get Hibachi project, its `FinalArtworkJob` row's `attempts`,
+ * `lastError`, `completedAt`, and `updatedAt` were BYTE-IDENTICAL
+ * before and after the click — proving, independent of which commit the
+ * runtime was actually serving, that no re-execution had been attempted at
+ * all; the fix belongs here, upstream of execution entirely.
+ *
+ * Revival now ALSO applies to a `"completed"` job that never produced a
+ * validated candidate at all (`getLatestProductionAssetValidationForJob`
+ * returns `null` for it) — the exact, already-established signal
+ * `resolveSignProductionStatus`/`resolveBlockedSignProductionCandidateFor`
+ * both already use to distinguish "nothing was ever produced to review"
+ * from a genuine candidate that exists but failed validation. That second
+ * case — Signs Phase 3B's own protected Wand/correction behavior for the
+ * real cc6cfc4b-… project (`sign-production-cta-state.ts`'s own "state 6"
+ * doc) — is DELIBERATELY left unrevived here: a real candidate exists for
+ * the operator to inspect/correct, and blindly re-running the identical
+ * plan against the identical source would only reproduce the identical
+ * blocked candidate. Only the "nothing was ever produced" case is
+ * semantically equivalent to a technical failure and safe to retry.
  */
 async function resolveSignJob(
   repo: ProjectRepository,
@@ -1673,7 +1712,11 @@ async function resolveSignJob(
   );
   const existing = existingJobs.find((job) => job.signPlanKey === signPlanKey);
   if (existing) {
-    if (existing.status === "failed") {
+    const shouldRevive =
+      existing.status === "failed" ||
+      (existing.status === "completed" &&
+        (await repo.getLatestProductionAssetValidationForJob(projectId, existing.id)) === null);
+    if (shouldRevive) {
       const revived = await repo.updateFinalArtworkJob(existing.id, {
         status: "queued",
         lastError: null,
