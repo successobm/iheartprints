@@ -26,6 +26,7 @@ function production(
     blockedValidationStatus: null,
     fitToProduction: null,
     machineReadableContent: null,
+    physicalResolutionMetadata: null,
     ...overrides,
   };
 }
@@ -95,7 +96,9 @@ test("exactly one of print_ready/in_flight/action/needs_qr_resolution — never 
   ];
   for (const overrides of cases) {
     const cta = resolveSignProductionCtaState(production(overrides));
-    const kinds = ["print_ready", "in_flight", "action", "needs_qr_resolution"].filter((k) => k === cta.kind);
+    const kinds = ["print_ready", "in_flight", "action", "needs_qr_resolution", "needs_physical_resolution_repair"].filter(
+      (k) => k === cta.kind,
+    );
     assert.equal(kinds.length, 1, `exactly one kind for ${JSON.stringify(overrides)}`);
   }
 });
@@ -192,6 +195,78 @@ describe("Fix QR Review UX Phase (real Get Hibachi acceptance incident: 'Try aga
     assert.deepEqual(
       resolveSignProductionCtaState(
         production({ jobStatus: "queued", inFlight: true, machineReadableContent: blockingEvidence }),
+      ),
+      { kind: "in_flight" },
+    );
+  });
+});
+
+describe("Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair Phase", () => {
+  it("a genuinely evaluated, disagreeing physical_resolution_metadata check: needs_physical_resolution_repair, NEVER try_again — a metadata repair, not an execution retry", () => {
+    const cta = resolveSignProductionCtaState(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        physicalResolutionMetadata: { status: "fail", reason: "declares the wrong PPI" },
+      }),
+    );
+    assert.deepEqual(cta, { kind: "needs_physical_resolution_repair" });
+  });
+
+  it("null physicalResolutionMetadata (never evaluated for this check, e.g. a validation persisted before it existed — the real historical Get Hibachi shape): NEVER needs_physical_resolution_repair, needsAttention for another reason still gets try_again", () => {
+    const cta = resolveSignProductionCtaState(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        blockedCandidateAssetId: "candidate-asset-id",
+        physicalResolutionMetadata: null,
+      }),
+    );
+    assert.deepEqual(cta, { kind: "action", label: "try_again", needsAttentionNotice: true });
+  });
+
+  it("a passing physical_resolution_metadata check never triggers needs_physical_resolution_repair, even if needsAttention is somehow also true for an unrelated reason", () => {
+    const cta = resolveSignProductionCtaState(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        physicalResolutionMetadata: { status: "pass", reason: "agrees with the ordered size" },
+      }),
+    );
+    assert.deepEqual(cta, { kind: "action", label: "try_again", needsAttentionNotice: true });
+  });
+
+  it("machine-readable blocking takes precedence over a simultaneously-failing physical_resolution_metadata check", () => {
+    const cta = resolveSignProductionCtaState(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        machineReadableContent: { regions: [], overall: "review_required" },
+        physicalResolutionMetadata: { status: "fail", reason: "declares the wrong PPI" },
+      }),
+    );
+    assert.deepEqual(cta, { kind: "needs_qr_resolution" });
+  });
+
+  it("needs_physical_resolution_repair never renders when print-ready or in-flight take precedence (defensive precedence)", () => {
+    assert.deepEqual(
+      resolveSignProductionCtaState(
+        production({
+          jobStatus: "completed",
+          printReady: true,
+          needsAttention: true,
+          physicalResolutionMetadata: { status: "fail", reason: "declares the wrong PPI" },
+        }),
+      ),
+      { kind: "print_ready" },
+    );
+    assert.deepEqual(
+      resolveSignProductionCtaState(
+        production({
+          jobStatus: "queued",
+          inFlight: true,
+          physicalResolutionMetadata: { status: "fail", reason: "declares the wrong PPI" },
+        }),
       ),
       { kind: "in_flight" },
     );

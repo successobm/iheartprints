@@ -239,6 +239,7 @@ describe("loadSignPlanOperatorReview — production status", () => {
       blockedValidationStatus: null,
       fitToProduction: null,
       machineReadableContent: null,
+      physicalResolutionMetadata: null,
     });
   });
 
@@ -513,5 +514,90 @@ describe("loadSignPlanOperatorReview — production status", () => {
     assert.equal(review.status, "ready");
     if (review.status !== "ready") return;
     assert.equal(review.production.machineReadableContent, null);
+  });
+
+  it("Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair Phase: reads physicalResolutionMetadata back from the SAME report.checks entry — never re-computed here", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const asset = await graph.assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-physical-resolution-test`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "finalization_required",
+      report: {
+        checks: [
+          {
+            check: "physical_resolution_metadata",
+            status: "fail",
+            severity: "blocking",
+            reason: "test disagreement reason",
+          },
+        ],
+      },
+    });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.physicalResolutionMetadata?.status, "fail");
+    assert.equal(review.production.physicalResolutionMetadata?.reason, "test disagreement reason");
+  });
+
+  it("Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair Phase: a report persisted before this check existed reads back as null, never guessed", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+    const asset = await graph.assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-physical-resolution-missing-test`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "ready",
+      report: { checks: [] }, // the pre-this-feature shape — no physical_resolution_metadata check at all
+    });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.physicalResolutionMetadata, null);
   });
 });

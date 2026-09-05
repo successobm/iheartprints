@@ -94,6 +94,7 @@ export {
   type SignFitToProductionSummary,
   type SignMachineReadableContentRegionSummary,
   type SignMachineReadableContentSummary,
+  type SignPhysicalResolutionMetadataSummary,
 } from "./sign-plan-operator-review";
 // Signs Phase 3B (Canvas-First Correction).
 export {

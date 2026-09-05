@@ -93,6 +93,7 @@ describe("LIVE PRODUCT BLOCKER #4A — sign-authorize operator page state", () =
         blockedValidationStatus: null,
         fitToProduction: null,
         machineReadableContent: null,
+        physicalResolutionMetadata: null,
       },
     };
     assert.deepEqual(

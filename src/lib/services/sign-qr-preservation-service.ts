@@ -48,7 +48,31 @@
  *                                   undecodable region. Never claims the
  *                                   QR is verified.
  *
- * All four are idempotent: re-running any of them when nothing has
+ *   `repairSignPhysicalResolutionMetadata` — Fix Existing Final Sign
+ *                                   Candidate Physical-Resolution Metadata
+ *                                   Repair Phase. Governed, metadata-ONLY
+ *                                   repair for a current candidate whose
+ *                                   embedded `pHYs` density is missing or
+ *                                   disagrees with the ordered physical
+ *                                   size (the real Get Hibachi production
+ *                                   incident: a candidate composited by
+ *                                   `restoreSignQrCode` before the pHYs fix
+ *                                   existed). Splices ONLY the `pHYs` chunk
+ *                                   directly on the raw PNG container bytes
+ *                                   (`withPhysicalPixelDensity` — never a
+ *                                   decode/re-encode round-trip), proves
+ *                                   the decoded RGBA pixels of the repaired
+ *                                   bytes are byte-for-byte identical to
+ *                                   the current candidate's BEFORE
+ *                                   persisting anything, persists a NEW
+ *                                   derived `ProductionAsset` (never
+ *                                   overwrites the prior candidate), and
+ *                                   re-verifies machine-readable content
+ *                                   against the ACTUAL new persisted bytes.
+ *                                   A no-op (no new asset) when the current
+ *                                   candidate's metadata already agrees.
+ *
+ * All five are idempotent: re-running any of them when nothing has
  * materially changed produces the same evidence again.
  *
  * VALIDATION INTEGRATION (Section Y): reuses the SAME
@@ -92,7 +116,12 @@ import { createHash } from "node:crypto";
 import { PNG } from "pngjs";
 
 import { getCapabilityGraph } from "@/capabilities/composition";
-import { pixelsPerMetreForPpi, readPhysicalPixelDensity, withPhysicalPixelDensity } from "@/capabilities/final-artwork/production-png";
+import {
+  pixelsPerMetreForPpi,
+  readPhysicalPixelDensity,
+  withPhysicalPixelDensity,
+  type PhysicalPixelDensity,
+} from "@/capabilities/final-artwork/production-png";
 import { hasAnyTransparentPixel } from "@/capabilities/final-artwork/raster-transform";
 import type { MachineReadablePreservationReport } from "@/capabilities/machine-readable-content/contracts";
 import { compareMachineReadableContent } from "@/capabilities/machine-readable-content/qr-preservation";
@@ -293,6 +322,60 @@ function buildPhysicalResolutionCheck(
       ? `Embedded physical-resolution metadata declares ~${Math.round(declaredPpi)} PPI, agreeing with the ordered production size.`
       : `Embedded physical-resolution metadata declares ~${Math.round(declaredPpi)} PPI, disagreeing with the ordered production size — this must be corrected before the file can be finalized.`,
   };
+}
+
+/**
+ * Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair
+ * Phase (real Get Hibachi production incident: candidate
+ * `9783f071-628c-447a-ae74-72eb382a04d2` was composited by `restoreSignQrCode`
+ * BEFORE the pHYs fix existed, and carries NO physical-resolution metadata
+ * at all — production software interprets its 6144x4096 pixels at an
+ * arbitrary default density instead of the ordered 36x24in). True iff
+ * `density` (the CURRENT candidate's own actual embedded density, or `null`
+ * when it carries none at all) agrees with the ONLY authoritative
+ * expectation — actual pixel dimensions ÷ ordered physical inches — within
+ * the SAME tolerance `buildPhysicalResolutionCheck` above already applies.
+ * `null` never agrees (a missing chunk is never "close enough").
+ */
+function physicalDensityAgreesWithOrderedSize(
+  density: PhysicalPixelDensity | null,
+  widthPx: number,
+  heightPx: number,
+  orderedWidthIn: number,
+  orderedHeightIn: number,
+): boolean {
+  if (density === null) return false;
+  const expectedPpiX = widthPx / orderedWidthIn;
+  const expectedPpiY = heightPx / orderedHeightIn;
+  const agreesX = Math.abs(density.ppiX - expectedPpiX) / expectedPpiX <= PHYSICAL_RESOLUTION_METADATA_TOLERANCE;
+  const agreesY = Math.abs(density.ppiY - expectedPpiY) / expectedPpiY <= PHYSICAL_RESOLUTION_METADATA_TOLERANCE;
+  return agreesX && agreesY;
+}
+
+/**
+ * Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair
+ * Phase (Section H, marked CRITICAL): the pixel-mutation safety net for
+ * `repairSignPhysicalResolutionMetadata` — exported specifically so it is
+ * directly, cheaply unit-testable in isolation (Section R: "a pixel-
+ * mutation safety test proving the operation refuses/fails if it would
+ * unexpectedly change decoded pixels"), without needing to fabricate a
+ * genuinely-corrupting PNG codec bug end to end. Throws
+ * `SignQrPreservationError` — never silently returns — on ANY difference:
+ * width, height, or a single RGBA byte. `repairSignPhysicalResolutionMetadata`
+ * calls this twice: once against the freshly-produced repaired bytes
+ * BEFORE persisting anything, and again against the ACTUAL bytes read back
+ * from storage after persisting (Section Q: never trust the in-memory
+ * buffer alone).
+ */
+export function assertPhysicalResolutionRepairPreservesPixels(
+  before: { width: number; height: number; data: Buffer },
+  after: { width: number; height: number; data: Buffer },
+): void {
+  if (before.width !== after.width || before.height !== after.height || !before.data.equals(after.data)) {
+    throw new SignQrPreservationError(
+      "Physical-resolution metadata repair was refused: the repaired file's decoded pixels did not match the current candidate exactly.",
+    );
+  }
 }
 
 /** Loosely-typed `SignPreparation.qrResolutions` narrowed to `SignQrResolutionRecord[]` — malformed/legacy entries are dropped, never guessed (mirrors every other jsonb reader in this codebase). */
@@ -729,4 +812,179 @@ export async function acceptSignQrPrintAsSupplied(
 
   const result = await checkSignQrPreservation(projectId);
   return { report: result.report };
+}
+
+export interface SignPhysicalResolutionRepairResult {
+  /** `false` means the current candidate's metadata already agreed with the ordered physical size — a genuine no-op, no new asset created (Section N: idempotency). */
+  repaired: boolean;
+  /** The NEW derived asset's id — `null` iff `repaired` is `false`. */
+  newAssetId: string | null;
+  pixelsPerMetre: number | null;
+  achievedPpi: number | null;
+  /** `null` iff `repaired` is `false` (nothing new was validated). */
+  validationStatus: "ready" | "finalization_required" | null;
+}
+
+/**
+ * Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair
+ * Phase: the governed, metadata-ONLY repair for a current candidate whose
+ * embedded `pHYs` physical-resolution density is missing or wrong — real
+ * Get Hibachi production incident, candidate
+ * `9783f071-628c-447a-ae74-72eb382a04d2` (composited by `restoreSignQrCode`
+ * before the pHYs fix existed, `dcf0ca6`, so it carries no pHYs chunk at
+ * all and opens in production software at an arbitrary default density
+ * instead of the ordered 36x24in).
+ *
+ * DOES NOT ALTER A SINGLE ARTWORK PIXEL. The core operation is
+ * `withPhysicalPixelDensity` applied DIRECTLY to the current candidate's
+ * raw downloaded PNG container bytes (never a `PNG.sync.read` →
+ * `PNG.sync.write` round-trip, which could re-encode IDAT and change the
+ * compressed representation for no reason) — see that function's own doc
+ * for why this is safe and additive. Before persisting anything, the
+ * repaired bytes are decoded and their RGBA pixels compared byte-for-byte
+ * against the current candidate's own decoded RGBA; ANY difference — width,
+ * height, or a single byte — refuses the whole operation (Section H,
+ * marked critical: "the metadata repair must fail if pixel identity
+ * differs").
+ *
+ * Idempotent (Section N): if the current candidate's density ALREADY
+ * agrees with the ordered physical size (within the same tolerance
+ * `buildPhysicalResolutionCheck` uses), this is a genuine no-op — no new
+ * asset, no new validation, `repaired: false`. This is also this
+ * function's own eligibility gate (Section E) — there is no separate
+ * "is this needed" check to keep in sync with the repair itself; the live
+ * candidate bytes are always the source of truth, never a possibly-stale
+ * persisted check.
+ *
+ * Never regenerates, moves, or recomposites the QR (Section I) — since the
+ * pixels are provably unchanged, the QR pixels are unchanged too; this
+ * still re-runs the EXISTING machine-readable verification against the
+ * ACTUAL new persisted bytes (never merely copies forward the prior
+ * check's result) before recording success, exactly like
+ * `restoreSignQrCode` already does for its own newly-composited asset.
+ *
+ * Lineage (Section J): persists a NEW derived `ProductionAsset` under the
+ * SAME `FinalArtworkJob`, recording `physicalResolutionRepair.repairedFrom
+ * AssetId` — the prior candidate is never overwritten and remains historical.
+ *
+ * Zero Topaz calls, zero OpenAI calls (Section S) — every operation here is
+ * local byte-level PNG chunk surgery and pixel comparison.
+ */
+export async function repairSignPhysicalResolutionMetadata(projectId: string): Promise<SignPhysicalResolutionRepairResult> {
+  const preparation = await loadSignPreparationOrThrow(projectId);
+  const candidate = await resolveCurrentSignCandidate(projectId);
+  if (!candidate) {
+    throw new SignQrPreservationError("No production candidate exists yet for this sign — nothing to repair.");
+  }
+  if (preparation.orderedWidthIn === null || preparation.orderedHeightIn === null) {
+    throw new SignQrPreservationError(
+      "This sign has no confirmed ordered physical size — cannot derive physical-resolution metadata.",
+    );
+  }
+  const orderedWidthIn = preparation.orderedWidthIn;
+  const orderedHeightIn = preparation.orderedHeightIn;
+
+  const graph = getCapabilityGraph();
+  const downloaded = await graph.assets.downloadAssetBytes(candidate.assetId);
+  if (!downloaded) {
+    throw new SignQrPreservationError("The current production candidate could not be read.");
+  }
+  const currentBytes = downloaded.bytes;
+  const currentPng = PNG.sync.read(currentBytes);
+  const widthPx = currentPng.width;
+  const heightPx = currentPng.height;
+  const currentRgba = Buffer.from(currentPng.data);
+
+  const currentDensity = readPhysicalPixelDensity(currentBytes);
+  if (physicalDensityAgreesWithOrderedSize(currentDensity, widthPx, heightPx, orderedWidthIn, orderedHeightIn)) {
+    // Section N/Q: already correct — a genuine no-op, never a duplicate
+    // derived candidate.
+    return {
+      repaired: false,
+      newAssetId: null,
+      pixelsPerMetre: currentDensity!.pixelsPerMetreX,
+      achievedPpi: currentDensity!.ppiX,
+      validationStatus: null,
+    };
+  }
+
+  // Section F: derived from THIS candidate's own actual pixel width ÷ the
+  // ordered physical width — never hardcoded, never copied from anywhere
+  // else — mirrors exactly how `restoreSignQrCode`/the worker's own initial
+  // composition already derive it.
+  const achievedPpi = widthPx / orderedWidthIn;
+  const targetPixelsPerMetre = pixelsPerMetreForPpi(achievedPpi);
+
+  // Section G: metadata-only, directly on the raw container bytes — no
+  // decode/re-encode of IDAT.
+  const repairedBytes = withPhysicalPixelDensity(currentBytes, targetPixelsPerMetre);
+
+  // Section H (CRITICAL): pixel-identity proof BEFORE persisting anything.
+  const repairedPng = PNG.sync.read(repairedBytes);
+  assertPhysicalResolutionRepairPreservesPixels(
+    { width: widthPx, height: heightPx, data: currentRgba },
+    { width: repairedPng.width, height: repairedPng.height, data: Buffer.from(repairedPng.data) },
+  );
+
+  const newAsset = await graph.assets.uploadProductionAsset(projectId, {
+    conceptId: `sign-${candidate.job.id}-physical-resolution-repaired-${Date.now()}`,
+    bytes: repairedBytes,
+    contentType: "image/png",
+    widthPx,
+    heightPx,
+    hasTransparency: hasAnyTransparentPixel({ width: widthPx, height: heightPx, data: currentRgba }),
+    finalArtworkJobId: candidate.job.id,
+    productionRole: "production_png",
+    metadata: {
+      physicalResolutionRepair: {
+        repairedFromAssetId: candidate.assetId,
+        pixelsPerMetre: targetPixelsPerMetre,
+      },
+    },
+  });
+
+  // Section Q: decode the ACTUAL persisted bytes back from storage — never
+  // trust the in-memory buffer this function just wrote — and re-prove
+  // pixel identity against them too.
+  const persisted = await downloadRgba(newAsset.id);
+  try {
+    assertPhysicalResolutionRepairPreservesPixels(
+      { width: widthPx, height: heightPx, data: currentRgba },
+      persisted.image,
+    );
+  } catch {
+    throw new SignQrPreservationError(
+      "Physical-resolution metadata repair was written, but the persisted result did not verify as pixel-identical — treat this as unresolved.",
+    );
+  }
+
+  // Section I: re-run the EXISTING machine-readable verification against
+  // the ACTUAL new asset — never merely copy forward the prior check.
+  const mrReport = await evaluateSignMachineReadableContent(preparation, newAsset.id);
+
+  const repo = getProjectRepository();
+  const priorValidation = await repo.getLatestProductionAssetValidationForJob(projectId, candidate.job.id);
+  const merged = mergeChecks(
+    priorValidation?.report as Record<string, unknown> | null | undefined,
+    [
+      buildMachineReadableCheck(mrReport),
+      buildPhysicalResolutionCheck(targetPixelsPerMetre, widthPx, heightPx, orderedWidthIn, orderedHeightIn),
+    ],
+    { machineReadableContentEvidence: mrReport },
+  );
+
+  await repo.createProductionAssetValidation(projectId, {
+    finalArtworkJobId: candidate.job.id,
+    assetId: newAsset.id,
+    status: merged.status,
+    report: merged.report,
+  });
+
+  return {
+    repaired: true,
+    newAssetId: newAsset.id,
+    pixelsPerMetre: targetPixelsPerMetre,
+    achievedPpi,
+    validationStatus: merged.status,
+  };
 }

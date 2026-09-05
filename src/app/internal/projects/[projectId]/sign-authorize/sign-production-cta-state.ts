@@ -1,4 +1,8 @@
-import type { SignMachineReadableContentSummary, SignPlanOperatorProductionStatus } from "@/capabilities/sign-preparation";
+import type {
+  SignMachineReadableContentSummary,
+  SignPhysicalResolutionMetadataSummary,
+  SignPlanOperatorProductionStatus,
+} from "@/capabilities/sign-preparation";
 
 /**
  * FIX AUTHORIZED SIGN PRODUCTION WORKSPACE CTA: pure extraction of
@@ -49,6 +53,20 @@ export type SignProductionCtaState =
    */
   | { kind: "needs_qr_resolution" }
   /**
+   * Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair
+   * Phase (real Get Hibachi production incident): a candidate blocked ONLY
+   * by disagreeing/missing physical-resolution metadata is a metadata
+   * repair, never an execution retry — re-running the identical
+   * deterministic composition against the identical source reproduces
+   * pixels that already agree with the ordered size; the density TAG is
+   * what needs correcting. No execution button here at all: the physical-
+   * resolution repair panel below (`SignPhysicalResolutionRepairPanel`)
+   * carries the correct next action ("Fix print size metadata"). Checked
+   * AFTER `needs_qr_resolution` — see `resolveSignProductionCtaState`'s own
+   * precedence note.
+   */
+  | { kind: "needs_physical_resolution_repair" }
+  /**
    * States 2, 5, and 6 (COMPLETED-BUT-BLOCKED) all render the SAME
    * execution button, differing only in label and whether the
    * needs-attention notice shows above it:
@@ -91,13 +109,37 @@ function isMachineReadableBlocking(machineReadableContent: SignMachineReadableCo
 }
 
 /**
+ * Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair
+ * Phase: true iff the `physical_resolution_metadata` check ITSELF was
+ * evaluated and genuinely disagrees (`"fail"`) — mirrors
+ * `isMachineReadableBlocking`'s own `null`-is-never-blocking discipline
+ * exactly (Section CASE C protection's identical reasoning): `null` means
+ * no evidence for THIS check at all — either never evaluated, or (the real
+ * historical Get Hibachi shape) a validation persisted before this check
+ * existed — and must never be assumed to mean "blocking", or an
+ * `needsAttention` candidate blocked for a genuinely UNRELATED reason would
+ * be misclassified into this branch instead of the ordinary `try_again`.
+ * The real historical shape is instead surfaced by
+ * `SignPhysicalResolutionRepairPanel`, rendered unconditionally alongside
+ * the QR panel whenever a job has completed — independent of this CTA,
+ * exactly like that panel already is.
+ */
+function isPhysicalResolutionMetadataBlocking(
+  physicalResolutionMetadata: SignPhysicalResolutionMetadataSummary | null,
+): boolean {
+  return physicalResolutionMetadata?.status === "fail";
+}
+
+/**
  * Pure, framework-free. Same precedence `SignProductionAction` always had:
  * print-ready wins over in-flight (a job cannot be both), in-flight wins
  * over any label decision (nothing to click while work is running).
  * Fix QR Review UX Phase: an unresolved machine-readable blocking state
  * now wins over the ordinary "try_again" label — it is never an execution
- * retry condition — before `failed`/`needsAttention` decide the label for
- * every other case.
+ * retry condition. Fix Existing Final Sign Candidate Physical-Resolution
+ * Metadata Repair Phase: a genuinely-evaluated-and-disagreeing physical-
+ * resolution metadata state wins next, for the identical reason — before
+ * `failed`/`needsAttention` decide the label for every other case.
  */
 export function resolveSignProductionCtaState(
   production: SignPlanOperatorProductionStatus,
@@ -106,6 +148,9 @@ export function resolveSignProductionCtaState(
   if (production.inFlight) return { kind: "in_flight" };
   if (production.needsAttention && isMachineReadableBlocking(production.machineReadableContent)) {
     return { kind: "needs_qr_resolution" };
+  }
+  if (production.needsAttention && isPhysicalResolutionMetadataBlocking(production.physicalResolutionMetadata)) {
+    return { kind: "needs_physical_resolution_repair" };
   }
   return {
     kind: "action",

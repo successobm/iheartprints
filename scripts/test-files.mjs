@@ -458,6 +458,10 @@ export const TEST_FILES = [
   // Advanced-pixel-correction/Move/Remove/Destination-X/Y markup at all.
   "src/app/internal/projects/[projectId]/sign-authorize/SignFitToProductionCorrectionTool.test.tsx",
   "src/app/internal/projects/[projectId]/sign-authorize/SignQrPreservationPanel.test.tsx",
+  // Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair
+  // Phase: the "Fix print size metadata" operator panel's own SSR
+  // visibility checks.
+  "src/app/internal/projects/[projectId]/sign-authorize/SignPhysicalResolutionRepairPanel.test.tsx",
   "src/app/api/internal/projects/[projectId]/sign-artwork/original-image/route.test.ts",
   "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",

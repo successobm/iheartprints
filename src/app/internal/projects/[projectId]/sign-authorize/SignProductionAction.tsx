@@ -107,6 +107,21 @@ export function SignProductionAction({
     );
   }
 
+  if (cta.kind === "needs_physical_resolution_repair") {
+    // Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair
+    // Phase: deliberately no execution button here either — the physical-
+    // resolution repair panel below carries the correct next action ("Fix
+    // print size metadata"). No "Try again": re-running the identical
+    // deterministic composition reproduces identical pixels whose embedded
+    // print-size metadata already agrees — the density TAG is what needs
+    // correcting, not the artwork.
+    return (
+      <p className="text-sm text-ink" data-sign-production-needs-attention>
+        This artwork needs a print-size metadata correction before it can be finalized.
+      </p>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-3">
       {cta.needsAttentionNotice ? (

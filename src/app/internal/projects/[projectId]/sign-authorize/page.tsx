@@ -10,6 +10,7 @@ import { SignAuthorizeButton } from "./SignAuthorizeButton";
 import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
 import { SignCompareOriginal } from "./SignCompareOriginal";
 import { SignFitToProductionCorrectionTool } from "./SignFitToProductionCorrectionTool";
+import { SignPhysicalResolutionRepairPanel } from "./SignPhysicalResolutionRepairPanel";
 import { SignProductionAction } from "./SignProductionAction";
 import { SignQrPreservationPanel } from "./SignQrPreservationPanel";
 import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
@@ -318,10 +319,21 @@ function SignPlanReview({
           its own, and a failing one blocks it through the same existing
           validation architecture every other check here already uses. */}
       {review.production.jobStatus === "completed" ? (
-        <section className="border-t border-ink/10 pt-4">
+        <section className="flex flex-col gap-4 border-t border-ink/10 pt-4">
           <SignQrPreservationPanel
             projectId={projectId}
             machineReadableContent={review.production.machineReadableContent}
+          />
+          {/* Fix Existing Final Sign Candidate Physical-Resolution Metadata
+              Repair Phase: rendered unconditionally alongside the QR panel,
+              independent of the overall print-ready CTA above — the real
+              historical defect this repairs is a candidate the system
+              otherwise considers print-ready (its persisted validation
+              simply predates this check) while its actual downloaded bytes
+              carry the wrong (or no) print-size metadata. */}
+          <SignPhysicalResolutionRepairPanel
+            projectId={projectId}
+            physicalResolutionMetadata={review.production.physicalResolutionMetadata}
           />
         </section>
       ) : null}

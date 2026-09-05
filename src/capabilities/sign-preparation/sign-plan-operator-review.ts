@@ -84,6 +84,32 @@ export interface SignPlanOperatorProductionStatus {
    * validation on this job — never treated as "no QR" or "passed".
    */
   machineReadableContent: SignMachineReadableContentSummary | null;
+  /**
+   * Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair
+   * Phase: the operator page's own read of the `physical_resolution_metadata`
+   * PrintValidation check — read from the SAME latest validation record
+   * already fetched above, never a second, independent PPI calculation.
+   * `null` when no completed job/validation exists yet, OR when the
+   * persisted validation predates this check's own existence (a real,
+   * durable historical shape — e.g. the Get Hibachi candidate this phase
+   * was filed against).
+   */
+  physicalResolutionMetadata: SignPhysicalResolutionMetadataSummary | null;
+}
+
+/**
+ * Presentation-only summary of the `physical_resolution_metadata`
+ * PrintValidation check — `reason` is the SAME sentence
+ * `buildPhysicalResolutionCheck`/`checkRigidSignPhysicalResolutionMetadata`
+ * already composed, never re-derived here. No structured PPI evidence
+ * field exists for this check (unlike `fitToProduction`'s `edges`) — the
+ * reason text already carries the declared PPI, and no operator UI needs
+ * more than status/reason to decide whether the "Fix print size metadata"
+ * action should be offered.
+ */
+export interface SignPhysicalResolutionMetadataSummary {
+  status: string;
+  reason: string;
 }
 
 /**
@@ -257,6 +283,23 @@ function readMachineReadableContentSummary(
   return { regions, overall: evidence.overall as SignMachineReadableContentSummary["overall"] };
 }
 
+/**
+ * Reads the `physical_resolution_metadata` check's own status/reason back
+ * out of a persisted `PrintValidationReport`'s generic `Record<string,
+ * unknown>` shape — mirrors `readFitToProductionSummary`'s discipline
+ * exactly (never re-computed, `null` on any malformed/missing shape,
+ * including a report persisted before this check existed at all).
+ */
+function readPhysicalResolutionMetadataSummary(
+  report: Record<string, unknown> | null | undefined,
+): SignPhysicalResolutionMetadataSummary | null {
+  const checks = report?.checks;
+  if (!Array.isArray(checks)) return null;
+  const raw = (checks as Record<string, unknown>[]).find((c) => c.check === "physical_resolution_metadata");
+  if (!raw || typeof raw.status !== "string" || typeof raw.reason !== "string") return null;
+  return { status: raw.status, reason: raw.reason };
+}
+
 async function resolveSignProductionStatus(
   repo: ProjectRepository,
   projectId: string,
@@ -273,6 +316,7 @@ async function resolveSignProductionStatus(
     blockedValidationStatus: null,
     fitToProduction: null,
     machineReadableContent: null,
+    physicalResolutionMetadata: null,
   };
 
   const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
@@ -289,11 +333,15 @@ async function resolveSignProductionStatus(
   let blockedValidationStatus: string | null = null;
   let fitToProduction: SignFitToProductionSummary | null = null;
   let machineReadableContent: SignMachineReadableContentSummary | null = null;
+  let physicalResolutionMetadata: SignPhysicalResolutionMetadataSummary | null = null;
   if (job.status === "completed") {
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
     printReady = validation?.status === "ready";
     fitToProduction = readFitToProductionSummary(validation?.report as Record<string, unknown> | null | undefined);
     machineReadableContent = readMachineReadableContentSummary(
+      validation?.report as Record<string, unknown> | null | undefined,
+    );
+    physicalResolutionMetadata = readPhysicalResolutionMetadataSummary(
       validation?.report as Record<string, unknown> | null | undefined,
     );
     if (validation && !printReady) {
@@ -330,6 +378,7 @@ async function resolveSignProductionStatus(
     blockedValidationStatus,
     fitToProduction,
     machineReadableContent,
+    physicalResolutionMetadata,
   };
 }
 
