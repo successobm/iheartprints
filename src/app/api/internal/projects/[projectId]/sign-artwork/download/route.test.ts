@@ -121,4 +121,99 @@ describe("GET /api/internal/projects/[projectId]/sign-artwork/download", () => {
     const res = await get("00000000-0000-0000-0000-000000000000", cookieHeaderFor(internalSession.sessionToken));
     assert.equal(res.status, 404);
   });
+
+  it("prepared and genuinely print-ready (all required checks present and passing): 200, real bytes served", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    const project = await repo.getProject(projectId);
+    assert.equal(project!.project.status, "print_ready", "sanity: this fixture must genuinely reach print_ready");
+
+    const internalSession = await graph.acquisition.resolveOrCreateSession(null);
+    await repo.grantInternalEntitlement(internalSession.id);
+    const res = await get(projectId, cookieHeaderFor(internalSession.sessionToken));
+    assert.equal(res.status, 200);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    assert.ok(bytes.length > 0, "must actually serve real bytes, not an empty body");
+  });
+
+  it("Sign Production Review Print-Ready Authority Repair: a validation whose status literally reads \"ready\" but is missing a currently-required check (the real historical Get Hibachi shape) fails closed — 404, never serves the stale-ready file", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    const project = await repo.getProject(projectId);
+    assert.equal(project!.project.status, "print_ready", "sanity: must genuinely reach print_ready first");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.ok(validation);
+    const checks = (validation!.report as { checks: Array<Record<string, unknown>> }).checks;
+    const staleChecks = checks.filter((c) => c.check !== "physical_resolution_metadata");
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: validation!.assetId,
+      status: "ready",
+      report: { ...validation!.report, checks: staleChecks },
+    });
+
+    const internalSession = await graph.acquisition.resolveOrCreateSession(null);
+    await repo.grantInternalEntitlement(internalSession.id);
+    const res = await get(projectId, cookieHeaderFor(internalSession.sessionToken));
+    assert.equal(res.status, 404, "a stale 'ready' validation missing a currently-required check must never be served as print-ready");
+  });
+
+  it("candidate changed after a previously-passing validation: a newer, never-validated asset on the same job never becomes the download — the OLD validated bytes keep serving", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await graph.signPreparation.planSignRepair(projectId);
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.ok(validation);
+    const originalBytes = await graph.assets.downloadAssetBytes(validation!.assetId);
+    assert.ok(originalBytes);
+
+    await graph.assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-candidate-changed-${Date.now()}`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+
+    const internalSession = await graph.acquisition.resolveOrCreateSession(null);
+    await repo.grantInternalEntitlement(internalSession.id);
+    const res = await get(projectId, cookieHeaderFor(internalSession.sessionToken));
+    assert.equal(res.status, 200);
+    const servedBytes = Buffer.from(await res.arrayBuffer());
+    assert.ok(servedBytes.equals(originalBytes!.bytes), "must keep serving the OLD validated bytes, never the newer unvalidated candidate");
+  });
 });

@@ -62,6 +62,7 @@ import {
   currentProductionTreatmentKey,
 } from "@/capabilities/shared/production-treatment";
 import { describeProductionVariantStatus } from "@/capabilities/shared/production-variant";
+import { isRigidSignValidationTrulyPrintReady } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
 import { ArtworkFinalizationRasterNotReadyError } from "./raster-not-ready-error";
 import {
   isReconstructionIntermediateAsset,
@@ -1089,6 +1090,20 @@ async function resolveSatisfiedProductionDelivery(
  * exact asset), substituting the sign authority's own intent identity
  * (the preparation's CURRENT `planKey`) for the apparel width/treatment
  * match `resolveCurrentMatchingProductionJob` performs.
+ *
+ * Sign Production Review Print-Ready Authority Repair (real Get Hibachi
+ * production incident, second occurrence): "ready" alone is never enough
+ * here. `isRigidSignValidationTrulyPrintReady` additionally requires every
+ * check `validateRigidSign` unconditionally computes to actually be PRESENT
+ * in this validation's own `report.checks` — a stale validation persisted
+ * before a newly-introduced blocking check existed (e.g.
+ * `physical_resolution_metadata`) reads `status: "ready"` forever, because
+ * `aggregateStatus` only ever iterates checks that exist. This is the ONE
+ * place this profile's download authority is decided; `resolveBlockedSign
+ * ProductionCandidateFor` / `resolveTrustworthySignRepairParentFor` apply
+ * the exact same test, inverted, so a stale-ready candidate is correctly
+ * reclassified as BLOCKED (inspectable, repairable) rather than remaining
+ * invisible to both.
  */
 async function resolveSatisfiedSignProductionDelivery(
   repo: ProjectRepository,
@@ -1121,7 +1136,7 @@ async function resolveSatisfiedSignProductionDelivery(
     projectId,
     job.id,
   );
-  if (!validation || validation.status !== "ready") return null;
+  if (!validation || !isRigidSignValidationTrulyPrintReady(validation.report)) return null;
 
   const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
   const asset = jobAssets.find(
@@ -1161,6 +1176,14 @@ async function resolveSatisfiedSignProductionDelivery(
  * as though it were newer/better. If a future writer breaks that
  * invariant again, this function will silently prefer its output exactly
  * the same way.
+ *
+ * Sign Production Review Print-Ready Authority Repair: "anything OTHER
+ * than ready" is now `!isRigidSignValidationTrulyPrintReady(...)` — the
+ * exact inverse of `resolveSatisfiedSignProductionDelivery`'s own test —
+ * so a validation whose `status` literally reads `"ready"` but is missing
+ * a currently-required check (the real historical Get Hibachi shape) is
+ * correctly classified as BLOCKED here, inspectable and eligible as a
+ * repair parent, rather than falling into neither resolver.
  */
 async function resolveBlockedSignProductionCandidateFor(
   repo: ProjectRepository,
@@ -1181,7 +1204,7 @@ async function resolveBlockedSignProductionCandidateFor(
     projectId,
     job.id,
   );
-  if (!validation || validation.status === "ready") return null;
+  if (!validation || isRigidSignValidationTrulyPrintReady(validation.report)) return null;
 
   const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
   const asset = jobAssets.find(
@@ -1256,6 +1279,15 @@ function isAssetTrustworthyAsSignRepairParent(asset: AssetRecord): boolean {
  * asset needs to know or reconstruct the full shape of the lineage graph,
  * each just answers "am I, myself, trustworthy?" and the newest one that
  * says yes wins.
+ *
+ * Sign Production Review Print-Ready Authority Repair: "anything other
+ * than ready" scoping is `!isRigidSignValidationTrulyPrintReady(...)`, the
+ * identical test `resolveBlockedSignProductionCandidateFor` now applies —
+ * a stale-ready validation (missing a currently-required check) is
+ * therefore still eligible to resolve a repair parent here, exactly like
+ * it was before any new check existed. Without this, a metadata-repair
+ * capability such as `repairSignPhysicalResolutionMetadata` would stop
+ * resolving ANY current candidate the moment this authority repair landed.
  */
 async function resolveTrustworthySignRepairParentFor(
   repo: ProjectRepository,
@@ -1276,7 +1308,7 @@ async function resolveTrustworthySignRepairParentFor(
     projectId,
     job.id,
   );
-  if (!validation || validation.status === "ready") return null;
+  if (!validation || isRigidSignValidationTrulyPrintReady(validation.report)) return null;
 
   const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
   const candidates = jobAssets

@@ -10,6 +10,7 @@ import type { AssetCapability } from "@/capabilities/assets";
 import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
 import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
 import type { FinalArtworkProvider, FinalArtworkProviderInput, FinalArtworkProviderOutput } from "@/capabilities/final-artwork/provider";
+import { RIGID_SIGN_REQUIRED_PRINT_READY_CHECK_CODES } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
 import { createSignPreparationCapability } from "@/capabilities/sign-preparation";
 import {
   exactAspectSignArtwork,
@@ -863,7 +864,7 @@ describe("resolveBlockedSignProductionCandidate", () => {
     assert.equal(await finalArtwork.resolveBlockedSignProductionCandidate(projectId), null);
   });
 
-  it("job completed with a READY validation: resolves null — a certified asset is never a blocked candidate", async () => {
+  it("job completed with a GENUINELY READY validation (every required check present and passing): resolves null — a certified asset is never a blocked candidate", async () => {
     const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
     const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
     const asset = await assets.uploadProductionAsset(projectId, {
@@ -881,10 +882,41 @@ describe("resolveBlockedSignProductionCandidate", () => {
       finalArtworkJobId: job.id,
       assetId: asset.id,
       status: "ready",
-      report: {},
+      // Sign Production Review Print-Ready Authority Repair: `status:
+      // "ready"` ALONE is no longer sufficient (see that phase's own new
+      // describe block below) — an empty `report: {}` is exactly the stale/
+      // never-fully-evaluated shape the repair now correctly refuses. Every
+      // required check must genuinely be present.
+      report: { checks: RIGID_SIGN_REQUIRED_PRINT_READY_CHECK_CODES.map((check) => ({ check, status: "pass", severity: "blocking" })) },
     });
     await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
     assert.equal(await finalArtwork.resolveBlockedSignProductionCandidate(projectId), null);
+  });
+
+  it("job completed with a validation whose status literally reads \"ready\" but is missing required checks (the pre-Print-Ready-Authority-Repair shape): now correctly resolves AS a blocked candidate, not null", async () => {
+    const { repo, assets, signPreparation, finalArtwork, projectId } = await build();
+    const job = await planAndAuthorize(signPreparation, finalArtwork, projectId);
+    const asset = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-stale-ready`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "ready",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+    const blocked = await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    assert.ok(blocked, "a stale 'ready' with no real evidence must now be visible for operator inspection, never invisibly treated as certified");
+    assert.equal(blocked!.assetId, asset.id);
   });
 
   it("job completed with a BLOCKING validation: resolves the exact validation-bound asset", async () => {
@@ -1418,5 +1450,217 @@ describe("resolveTrustworthySignRepairParent (SIGNS CANDIDATE AUTHORITY)", () =>
 
     const trustworthy = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
     assert.equal(trustworthy, null, "no trustworthy candidate exists — must fail closed, never fabricate one");
+  });
+});
+
+/**
+ * Sign Production Review Print-Ready Authority Repair (real Get Hibachi
+ * production incident, second occurrence): `ProductionAssetValidation
+ * .status === "ready"` alone is never enough for the sign download
+ * authority — every check `validateRigidSign` currently requires must be
+ * PRESENT in that exact validation's own persisted `report.checks`, never
+ * merely inherited from whatever the aggregate computed when it was
+ * written. Proves the three sign candidate-authority resolvers
+ * (`resolveCurrentSignProductionDelivery` / `resolveBlockedSignProduction
+ * Candidate` / `resolveTrustworthySignRepairParent`) all apply the SAME
+ * corrected rule, never independently.
+ */
+describe("Sign Production Review Print-Ready Authority Repair: stale validation / candidate safety", () => {
+  let tempDir = "";
+  let previousCwd = "";
+
+  before(() => {
+    previousCwd = process.cwd();
+    tempDir = mkdtempSync(path.join(tmpdir(), "iheartprints-sign-print-ready-authority-"));
+    process.chdir(tempDir);
+  });
+
+  after(async () => {
+    await cleanupTempWorkspace(tempDir, previousCwd);
+  });
+
+  async function build() {
+    const { LocalProjectRepository } = await import("@/lib/db/local-store");
+    const repo: ProjectRepository = new LocalProjectRepository();
+    const assets = createAssetCapability(repo, new DataUriAssetStorageProvider(), new PngThumbnailGenerator());
+    const signPreparation = createSignPreparationCapability(repo, assets);
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const worker = createFinalArtworkWorkerCapability(repo, assets, new ThrowingProvider());
+    const project = await repo.createProject();
+    return { repo, assets, signPreparation, finalArtwork, worker, projectId: project.project.id };
+  }
+
+  /** A REAL, worker-produced, genuinely print-ready sign candidate — every required check present and passing. */
+  async function buildPrintReadyCandidate(deps: Awaited<ReturnType<typeof build>>) {
+    const { repo, signPreparation, finalArtwork, worker, projectId } = deps;
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    const outcome = await signPreparation.planSignRepair(projectId);
+    assert.equal(outcome.result.plan!.steps.length, 0, "sanity: zero-step plan needs no provider");
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    await worker.processNextJob();
+    const project = await repo.getProject(projectId);
+    assert.equal(project!.project.status, "print_ready", "sanity: this fixture must genuinely reach print_ready");
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.ok(validation, "sanity: a real validation must exist");
+    const checks = (validation!.report as { checks: Array<Record<string, unknown>> }).checks;
+    assert.ok(checks.some((c) => c.check === "physical_resolution_metadata" && c.status === "pass"), "sanity: the real worker path must produce a passing physical_resolution_metadata check");
+    return { job, validation: validation!, checks };
+  }
+
+  it("1/2/3: a validation whose status literally reads \"ready\" but is MISSING physical_resolution_metadata entirely (the exact real historical shape) fails closed on every resolver — never print-ready, correctly reclassified as blocked", async () => {
+    const deps = await build();
+    const { repo, finalArtwork, projectId } = deps;
+    const { job, validation, checks } = await buildPrintReadyCandidate(deps);
+
+    // Simulate the real historical defect: persist a NEW "latest" validation
+    // for the SAME asset, with `physical_resolution_metadata` entirely
+    // absent (as it genuinely was before this check existed) but `status`
+    // still literally "ready" — exactly what an OLDER version of
+    // `aggregateStatus` would have computed with no knowledge of the check.
+    const staleChecks = checks.filter((c) => c.check !== "physical_resolution_metadata");
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: validation.assetId,
+      status: "ready",
+      report: { ...validation.report, checks: staleChecks },
+    });
+
+    assert.equal(
+      await finalArtwork.resolveCurrentSignProductionDelivery(projectId),
+      null,
+      "a stale 'ready' validation missing a currently-required check must never satisfy the download authority",
+    );
+    const blocked = await finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+    assert.ok(blocked, "the same candidate must now be visible as a BLOCKED candidate for operator inspection");
+    assert.equal(blocked!.assetId, validation.assetId);
+    const repairParent = await finalArtwork.resolveTrustworthySignRepairParent(projectId);
+    assert.ok(repairParent, "the same candidate must remain resolvable as a repair parent — a metadata-repair capability must not lose its target");
+    assert.equal(repairParent!.assetId, validation.assetId);
+  });
+
+  it("QR pass + physical resolution null (present in a different, unrelated shape than 'missing entirely') => still NO download", async () => {
+    const deps = await build();
+    const { repo, finalArtwork, projectId } = deps;
+    const { job, validation, checks } = await buildPrintReadyCandidate(deps);
+
+    // machine_readable_content_preserved genuinely passes; physical_resolution_metadata is simply never present.
+    const withoutPhysical = checks.filter((c) => c.check !== "physical_resolution_metadata");
+    assert.ok(withoutPhysical.some((c) => c.check === "machine_readable_content_preserved" && c.status === "pass"));
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: validation.assetId,
+      status: "ready",
+      report: { ...validation.report, checks: withoutPhysical },
+    });
+
+    assert.equal(await finalArtwork.resolveCurrentSignProductionDelivery(projectId), null);
+  });
+
+  it("physical resolution pass + a required check present but FAILING (never merely absent) => still NO download", async () => {
+    const deps = await build();
+    const { repo, finalArtwork, projectId } = deps;
+    const { job, validation, checks } = await buildPrintReadyCandidate(deps);
+
+    const withOneFailing = checks.map((c) =>
+      c.check === "content_within_bounds" ? { ...c, status: "fail" } : c,
+    );
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: validation.assetId,
+      status: "finalization_required",
+      report: { ...validation.report, checks: withOneFailing },
+    });
+
+    assert.equal(await finalArtwork.resolveCurrentSignProductionDelivery(projectId), null);
+  });
+
+  it("all required blocking validations genuinely present and passing => download exposed (the ordinary real-worker case, unaffected by this repair)", async () => {
+    const deps = await build();
+    const { assets, finalArtwork, projectId } = deps;
+    const { job } = await buildPrintReadyCandidate(deps);
+
+    const delivery = await finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+    assert.ok(delivery, "a genuinely complete, passing validation must still resolve as the print-ready delivery");
+    assert.equal(delivery!.job.id, job.id);
+    const downloaded = await assets.downloadAssetBytes(delivery!.assetId);
+    assert.ok(downloaded, "the resolved asset id must actually download real bytes");
+  });
+
+  it("validation belongs to a PREVIOUS candidate (references an asset id that is not the job's current/only asset in the way expected): never served", async () => {
+    const deps = await build();
+    const { repo, assets, signPreparation, finalArtwork, projectId } = deps;
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    await signPreparation.planSignRepair(projectId);
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    // A validation naming an asset id that was never actually uploaded for
+    // this job at all (the most extreme "belongs to a previous/different
+    // candidate" shape) — the resolver must never guess or fall back.
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: "00000000-0000-0000-0000-000000000000",
+      status: "ready",
+      report: {
+        checks: [
+          { check: "asset_exists", status: "pass", severity: "blocking", reason: "x" },
+          { check: "content_type", status: "pass", severity: "blocking", reason: "x" },
+          { check: "raster_dimensions_known", status: "pass", severity: "blocking", reason: "x" },
+          { check: "repair_plan_recorded", status: "pass", severity: "blocking", reason: "x" },
+          { check: "source_lineage", status: "pass", severity: "blocking", reason: "x" },
+          { check: "executed_plan_matches_recorded_plan", status: "pass", severity: "blocking", reason: "x" },
+          { check: "exact_physical_dimensions", status: "pass", severity: "blocking", reason: "x" },
+          { check: "effective_resolution", status: "pass", severity: "blocking", reason: "x" },
+          { check: "no_unintended_transparency", status: "pass", severity: "blocking", reason: "x" },
+          { check: "content_within_bounds", status: "pass", severity: "blocking", reason: "x" },
+          { check: "substrate_boundary_semantics", status: "pass", severity: "blocking", reason: "x" },
+          { check: "protected_content_safe_inset", status: "pass", severity: "blocking", reason: "x" },
+          { check: "machine_readable_content_preserved", status: "pass", severity: "blocking", reason: "x" },
+          { check: "physical_resolution_metadata", status: "pass", severity: "blocking", reason: "x" },
+        ],
+      },
+    });
+
+    assert.equal(
+      await finalArtwork.resolveCurrentSignProductionDelivery(projectId),
+      null,
+      "a fully-passing report bound to a nonexistent/foreign asset id must never be served — presence of the real asset under THIS job is checked independently of the checks array",
+    );
+    assert.equal(await assets.downloadAssetBytes("00000000-0000-0000-0000-000000000000"), null);
+  });
+
+  it("candidate changed after a previously-passing validation: a NEW unvalidated asset uploaded to the same job never silently becomes the download — the OLD validated asset keeps serving until the NEW one has its own passing validation", async () => {
+    const deps = await build();
+    const { assets, projectId, finalArtwork } = deps;
+    const { job, validation } = await buildPrintReadyCandidate(deps);
+
+    const newerUnvalidatedAsset = await assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-candidate-changed-${Date.now()}`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+
+    const delivery = await finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+    assert.ok(delivery, "the candidate change must not remove the existing valid delivery");
+    assert.equal(delivery!.assetId, validation.assetId, "the OLD validated asset remains authoritative");
+    assert.notEqual(delivery!.assetId, newerUnvalidatedAsset.id, "the newer, never-validated asset must never become the download merely by being newer");
   });
 });

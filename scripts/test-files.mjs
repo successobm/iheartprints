@@ -401,6 +401,10 @@ export const TEST_FILES = [
   "src/capabilities/sign-preservation/sign-preservation-image-derivation.test.ts",
   "src/capabilities/sign-preservation/openai-sign-preservation-semantic-provider.test.ts",
   "src/capabilities/print-validation/rigid-sign-print-validation.test.ts",
+  // Sign Production Review Print-Ready Authority Repair: the ONE
+  // authoritative "is this candidate truly print ready" function shared by
+  // the download authority and the operator review page's own peek.
+  "src/capabilities/print-validation/rigid-sign-print-ready-authority.test.ts",
   "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",
   "src/capabilities/final-artwork-worker/exhausted-provider-result-recovery.test.ts",
@@ -462,6 +466,11 @@ export const TEST_FILES = [
   // Phase: the "Fix print size metadata" operator panel's own SSR
   // visibility checks.
   "src/app/internal/projects/[projectId]/sign-authorize/SignPhysicalResolutionRepairPanel.test.tsx",
+  // Sign Production Review Print-Ready Authority Repair: the final
+  // download's own SSR visibility checks, plus a source-level structural
+  // pin proving it renders after every validation/repair panel.
+  "src/app/internal/projects/[projectId]/sign-authorize/SignPrintReadyDownload.test.tsx",
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-production-review-download-position.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/original-image/route.test.ts",
   "src/capabilities/final-artwork-worker/sign-production-delivery.test.ts",
   "src/app/api/internal/projects/[projectId]/sign-artwork/prepare/route.test.ts",

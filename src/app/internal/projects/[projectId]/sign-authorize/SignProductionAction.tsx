@@ -27,6 +27,15 @@ import { resolveSignProductionCtaState } from "./sign-production-cta-state";
  * for the real investigation finding behind this task: the reported real
  * project was already showing the CORRECT "Try again" for a genuinely
  * failed job, not a misclassification.
+ *
+ * Sign Production Review Print-Ready Authority Repair: this component no
+ * longer renders anything for `cta.kind === "print_ready"` — the final
+ * download is `SignPrintReadyDownload`, rendered by `page.tsx` at the very
+ * BOTTOM of the workflow, after every validation/repair panel, never here
+ * (Section G/H of that phase). Both components read the SAME
+ * `resolveSignProductionCtaState(production)` — there is exactly one
+ * authoritative "is this truly print ready" answer, never two independently
+ * rendered opinions.
  */
 export function SignProductionAction({
   projectId,
@@ -71,18 +80,10 @@ export function SignProductionAction({
   const cta = resolveSignProductionCtaState(production);
 
   if (cta.kind === "print_ready") {
-    return (
-      <div className="flex flex-col gap-2" data-sign-production-ready>
-        <p className="text-sm font-semibold text-ink">Print-ready</p>
-        <a
-          href={`/api/internal/projects/${projectId}/sign-artwork/download`}
-          className="rounded-full bg-ink px-3.5 py-2 text-center text-sm font-medium text-white transition hover:bg-ink/90"
-          data-testid="sign-download-link"
-        >
-          Download corrected artwork
-        </a>
-      </div>
-    );
+    // Sign Production Review Print-Ready Authority Repair: nothing renders
+    // here — `SignPrintReadyDownload` (rendered by `page.tsx`, at the very
+    // bottom of the workflow) owns the print-ready download presentation.
+    return null;
   }
 
   if (cta.kind === "in_flight") {

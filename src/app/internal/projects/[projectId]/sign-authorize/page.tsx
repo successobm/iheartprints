@@ -11,11 +11,13 @@ import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
 import { SignCompareOriginal } from "./SignCompareOriginal";
 import { SignFitToProductionCorrectionTool } from "./SignFitToProductionCorrectionTool";
 import { SignPhysicalResolutionRepairPanel } from "./SignPhysicalResolutionRepairPanel";
+import { SignPrintReadyDownload } from "./SignPrintReadyDownload";
 import { SignProductionAction } from "./SignProductionAction";
 import { SignQrPreservationPanel } from "./SignQrPreservationPanel";
 import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
 import { SignStructuralLayoutForm } from "./SignStructuralLayoutForm";
 import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
+import { resolveSignProductionCtaState } from "./sign-production-cta-state";
 
 type PageProps = {
   params: Promise<{ projectId: string }>;
@@ -142,6 +144,13 @@ function SignPlanReview({
   const isAuthorized = authorization.matchesCurrentPlan && authorization.authorizedBy !== null;
   const canAuthorize = plan.canAuthorize;
   const hasWorkspace = review.production.blockedCandidateAssetId !== null && review.production.fitToProduction !== null;
+  // Sign Production Review Print-Ready Authority Repair: the SAME
+  // authoritative CTA state `SignProductionAction`/`SignPrintReadyDownload`
+  // each independently recompute from `review.production` — used here only
+  // to skip rendering `SignProductionAction`'s now-empty wrapping section
+  // once the candidate is truly print ready (it renders nothing for
+  // `"print_ready"`; the download itself lives at the bottom instead).
+  const productionCta = resolveSignProductionCtaState(review.production);
 
   return (
     <div className="flex flex-col gap-4">
@@ -305,7 +314,7 @@ function SignPlanReview({
         )}
       </section>
 
-      {isAuthorized ? (
+      {isAuthorized && productionCta.kind !== "print_ready" ? (
         <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
           <SignProductionAction projectId={projectId} production={review.production} />
         </section>
@@ -337,6 +346,14 @@ function SignPlanReview({
           />
         </section>
       ) : null}
+
+      {/* Sign Production Review Print-Ready Authority Repair: the final
+          download — the ONLY place this workflow ever shows "Print-ready" /
+          a download link — moved here, after every validation/repair panel
+          above, and rendered only once the CURRENT candidate is truly print
+          ready (never merely authorized, never from a stale/inherited
+          validation). See `SignPrintReadyDownload`'s own doc. */}
+      <SignPrintReadyDownload projectId={projectId} production={review.production} />
     </div>
   );
 }

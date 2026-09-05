@@ -600,4 +600,49 @@ describe("loadSignPlanOperatorReview — production status", () => {
     if (review.status !== "ready") return;
     assert.equal(review.production.physicalResolutionMetadata, null);
   });
+
+  it("Sign Production Review Print-Ready Authority Repair: a validation whose status literally reads \"ready\" but is missing a currently-required check never reports printReady true — reclassified as a blocked candidate for operator inspection instead", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    await graph.signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      declaredContentType: "image/png",
+      filename: "sign.png",
+    });
+    await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+    const outcome = await graph.signPreparation.planSignRepair(projectId);
+    assert.equal(outcome.result.plan!.steps.length, 0, "sanity: zero-step plan needs no provider");
+    await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    await graph.finalArtwork.requestSignFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+
+    const project = await repo.getProject(projectId);
+    assert.equal(project!.project.status, "print_ready", "sanity: this fixture must genuinely reach print_ready first");
+
+    const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, (await repo.getSignPreparation(projectId))!.id);
+    const job = jobs[0]!;
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+    assert.ok(validation);
+    const checks = (validation!.report as { checks: Array<Record<string, unknown>> }).checks;
+    assert.ok(checks.some((c) => c.check === "physical_resolution_metadata"), "sanity: the real path must have computed this check");
+
+    // Simulate the real historical defect: a NEW "latest" validation for
+    // the SAME asset, status still literally "ready", but with
+    // physical_resolution_metadata entirely absent — exactly what an
+    // older aggregate computation (before this check existed) produced.
+    const staleChecks = checks.filter((c) => c.check !== "physical_resolution_metadata");
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: validation!.assetId,
+      status: "ready",
+      report: { ...validation!.report, checks: staleChecks },
+    });
+
+    const review = await loadSignPlanOperatorReview(repo, projectId);
+    assert.equal(review.status, "ready");
+    if (review.status !== "ready") return;
+    assert.equal(review.production.printReady, false, "a stale 'ready' status missing a required check must never report printReady");
+    assert.equal(review.production.needsAttention, true);
+    assert.equal(review.production.blockedCandidateAssetId, validation!.assetId, "the candidate must now be surfaced for operator inspection instead");
+  });
 });

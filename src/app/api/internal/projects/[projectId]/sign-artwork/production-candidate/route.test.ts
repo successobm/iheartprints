@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { exactAspectSignArtwork, toPngBytes } from "@/capabilities/sign-preparation/sign-fixtures";
+import { RIGID_SIGN_REQUIRED_PRINT_READY_CHECK_CODES } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 /**
@@ -111,7 +112,7 @@ describe("GET /api/internal/projects/[projectId]/sign-artwork/production-candida
     assert.equal(res.status, 404);
   });
 
-  it("a job with a READY validation: 404 — a certified asset is never served through this route", async () => {
+  it("a job with a GENUINELY READY validation (every required check present and passing): 404 — a certified asset is never served through this route", async () => {
     const { graph, repo } = await freshGraph();
     const projectId = (await repo.createProject()).project.id;
     const job = await planAndAuthorize(graph, projectId);
@@ -130,12 +131,42 @@ describe("GET /api/internal/projects/[projectId]/sign-artwork/production-candida
       finalArtworkJobId: job.id,
       assetId: asset.id,
       status: "ready",
-      report: {},
+      // Sign Production Review Print-Ready Authority Repair: `status:
+      // "ready"` alone is no longer sufficient (see the test right below
+      // this one) — every required check must genuinely be present.
+      report: { checks: RIGID_SIGN_REQUIRED_PRINT_READY_CHECK_CODES.map((check) => ({ check, status: "pass", severity: "blocking" })) },
     });
     await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
 
     const res = await get(projectId, await internalCookie(graph, repo));
     assert.equal(res.status, 404);
+  });
+
+  it("Sign Production Review Print-Ready Authority Repair: a validation whose status literally reads \"ready\" but is missing required checks is now correctly served through this route (blocked, inspectable), not refused as though certified", async () => {
+    const { graph, repo } = await freshGraph();
+    const projectId = (await repo.createProject()).project.id;
+    const job = await planAndAuthorize(graph, projectId);
+    const asset = await graph.assets.uploadProductionAsset(projectId, {
+      conceptId: `sign-${job.id}-stale-ready`,
+      bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+      contentType: "image/png",
+      widthPx: 1800,
+      heightPx: 2400,
+      hasTransparency: false,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {},
+    });
+    await repo.createProductionAssetValidation(projectId, {
+      finalArtworkJobId: job.id,
+      assetId: asset.id,
+      status: "ready",
+      report: {},
+    });
+    await repo.updateFinalArtworkJob(job.id, { status: "completed", completedAt: new Date(0).toISOString() });
+
+    const res = await get(projectId, await internalCookie(graph, repo));
+    assert.equal(res.status, 200, "a stale 'ready' with no real evidence is a genuine blocked candidate, not a certified one — it must be inspectable here");
   });
 
   it("a job with a blocking validation: 200, exact bytes, blocked headers/filename, no state mutation", async () => {

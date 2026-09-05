@@ -20,6 +20,7 @@
  */
 
 import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
+import { isRigidSignValidationTrulyPrintReady } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { FinalArtworkJobStatus, SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/types";
 
@@ -336,7 +337,18 @@ async function resolveSignProductionStatus(
   let physicalResolutionMetadata: SignPhysicalResolutionMetadataSummary | null = null;
   if (job.status === "completed") {
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
-    printReady = validation?.status === "ready";
+    // Sign Production Review Print-Ready Authority Repair (real Get Hibachi
+    // production incident, second occurrence): `validation.status ===
+    // "ready"` alone is never enough — that status is computed from
+    // whatever checks happened to exist in THIS validation's own persisted
+    // report, so a validation written before a newly-introduced blocking
+    // check existed (e.g. `physical_resolution_metadata`) reads "ready"
+    // forever. `isRigidSignValidationTrulyPrintReady` is the ONE
+    // authoritative answer, shared verbatim with the download authority
+    // (`final-artwork-capability.ts`'s `resolveSatisfiedSignProductionDelivery`)
+    // — this presentation-only peek must never independently disagree with
+    // what the download route will actually serve.
+    printReady = validation !== null && isRigidSignValidationTrulyPrintReady(validation.report);
     fitToProduction = readFitToProductionSummary(validation?.report as Record<string, unknown> | null | undefined);
     machineReadableContent = readMachineReadableContentSummary(
       validation?.report as Record<string, unknown> | null | undefined,
