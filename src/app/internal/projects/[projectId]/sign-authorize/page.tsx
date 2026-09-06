@@ -14,6 +14,7 @@ import { SignPhysicalResolutionRepairPanel } from "./SignPhysicalResolutionRepai
 import { SignPrintReadyDownload } from "./SignPrintReadyDownload";
 import { SignProductionAction } from "./SignProductionAction";
 import { SignQrPreservationPanel } from "./SignQrPreservationPanel";
+import { SignVisualAcceptancePanel } from "./SignVisualAcceptancePanel";
 import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
 import { SignStructuralLayoutForm } from "./SignStructuralLayoutForm";
 import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
@@ -193,6 +194,22 @@ function SignPlanReview({
           </a>
         ) : null}
       </div>
+
+      {/* Signs QR Visual Revision Acceptance: a materially QR-revised
+          candidate must be reviewed and explicitly approved before Print
+          Ready/Download can ever be exposed — shown prominently, right
+          after the exact revised artwork above, never buried in the
+          collapsible technical details below. Rendered only once this
+          candidate's visible pixels actually came from a QR replacement
+          (`requiresVisualAcceptance`); otherwise this section doesn't
+          exist for ordinary sign artwork. */}
+      {review.production.requiresVisualAcceptance ? (
+        <SignVisualAcceptancePanel
+          projectId={projectId}
+          visualAcceptanceSatisfied={review.production.visualAcceptanceSatisfied}
+          visualAcceptanceAcceptedAt={review.production.visualAcceptanceAcceptedAt}
+        />
+      ) : null}
 
       <details className="rounded-lg border border-ink/10 p-3" open={!hasWorkspace}>
         <summary className="cursor-pointer select-none text-sm font-semibold text-ink">Production details</summary>

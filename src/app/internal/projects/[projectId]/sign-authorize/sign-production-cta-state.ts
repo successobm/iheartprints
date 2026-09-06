@@ -40,6 +40,21 @@ export type SignProductionCtaState =
   /** State 3 (ACTIVE JOB): work is in flight right now — no execution button at all, prevents a duplicate dispatch by construction. */
   | { kind: "in_flight" }
   /**
+   * Signs QR Visual Revision Acceptance: every TECHNICAL check passes, but
+   * this exact candidate's visible pixels came from a QR replacement that
+   * no human has approved yet. No execution button here at all — nothing
+   * about re-running the identical deterministic composition would change
+   * whether a human has looked at the result; the dedicated visual-
+   * acceptance panel below carries the one real next action ("Approve
+   * revised artwork"). Checked ahead of the ordinary `needs_qr_resolution`
+   * /`needs_physical_resolution_repair`/`action` branches below — by
+   * construction it can never overlap with either of the first two (both
+   * require a FAILING technical check; this state requires every technical
+   * check to already pass) — but its own precedence keeps this module's
+   * "what wins" ordering exhaustive and explicit rather than incidental.
+   */
+  | { kind: "needs_visual_acceptance"; assetId: string }
+  /**
    * Fix QR Review UX Phase (real Get Hibachi acceptance incident: a
    * candidate whose physical production checks all PASS, blocked only by
    * unresolved machine-readable content, still showed a large "Try again"
@@ -146,6 +161,14 @@ export function resolveSignProductionCtaState(
 ): SignProductionCtaState {
   if (production.printReady) return { kind: "print_ready" };
   if (production.inFlight) return { kind: "in_flight" };
+  if (
+    production.needsAttention &&
+    production.requiresVisualAcceptance &&
+    !production.visualAcceptanceSatisfied &&
+    production.blockedCandidateAssetId
+  ) {
+    return { kind: "needs_visual_acceptance", assetId: production.blockedCandidateAssetId };
+  }
   if (production.needsAttention && isMachineReadableBlocking(production.machineReadableContent)) {
     return { kind: "needs_qr_resolution" };
   }

@@ -29,6 +29,9 @@ function production(overrides: Partial<SignPlanOperatorProductionStatus> = {}): 
     fitToProduction: null,
     machineReadableContent: null,
     physicalResolutionMetadata: null,
+    requiresVisualAcceptance: false,
+    visualAcceptanceSatisfied: false,
+    visualAcceptanceAcceptedAt: null,
     ...overrides,
   };
 }

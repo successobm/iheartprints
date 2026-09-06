@@ -20,6 +20,7 @@
  */
 
 import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
+import { doesSignCandidateContainQrReplacement } from "@/capabilities/final-artwork/sign-candidate-visual-acceptance";
 import { isRigidSignValidationTrulyPrintReady } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { FinalArtworkJobStatus, SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/types";
@@ -96,6 +97,23 @@ export interface SignPlanOperatorProductionStatus {
    * was filed against).
    */
   physicalResolutionMetadata: SignPhysicalResolutionMetadataSummary | null;
+  /**
+   * Signs QR Visual Revision Acceptance: `true` iff the CURRENT candidate's
+   * visible pixels came from a QR replacement (`doesSignCandidateContain
+   * QrReplacement`) — i.e. a human must explicitly approve the revised
+   * artwork before this candidate can ever be deliverable, independent of
+   * every technical check already passing. Only ever computed once the
+   * candidate is otherwise TECHNICALLY ready
+   * (`isRigidSignValidationTrulyPrintReady`); `false` while a technical
+   * check still blocks, so the existing technical-repair panels keep
+   * precedence over an acceptance prompt for artwork that isn't finished
+   * yet.
+   */
+  requiresVisualAcceptance: boolean;
+  /** Meaningful only when `requiresVisualAcceptance` is `true`: whether an acceptance bound to this EXACT candidate asset id already exists. */
+  visualAcceptanceSatisfied: boolean;
+  /** When the current candidate's visual acceptance was recorded — `null` unless `visualAcceptanceSatisfied` is `true`. */
+  visualAcceptanceAcceptedAt: string | null;
 }
 
 /**
@@ -318,6 +336,9 @@ async function resolveSignProductionStatus(
     fitToProduction: null,
     machineReadableContent: null,
     physicalResolutionMetadata: null,
+    requiresVisualAcceptance: false,
+    visualAcceptanceSatisfied: false,
+    visualAcceptanceAcceptedAt: null,
   };
 
   const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation.id);
@@ -335,6 +356,9 @@ async function resolveSignProductionStatus(
   let fitToProduction: SignFitToProductionSummary | null = null;
   let machineReadableContent: SignMachineReadableContentSummary | null = null;
   let physicalResolutionMetadata: SignPhysicalResolutionMetadataSummary | null = null;
+  let requiresVisualAcceptance = false;
+  let visualAcceptanceSatisfied = false;
+  let visualAcceptanceAcceptedAt: string | null = null;
   if (job.status === "completed") {
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
     // Sign Production Review Print-Ready Authority Repair (real Get Hibachi
@@ -344,11 +368,31 @@ async function resolveSignProductionStatus(
     // report, so a validation written before a newly-introduced blocking
     // check existed (e.g. `physical_resolution_metadata`) reads "ready"
     // forever. `isRigidSignValidationTrulyPrintReady` is the ONE
-    // authoritative answer, shared verbatim with the download authority
-    // (`final-artwork-capability.ts`'s `resolveSatisfiedSignProductionDelivery`)
-    // — this presentation-only peek must never independently disagree with
-    // what the download route will actually serve.
-    printReady = validation !== null && isRigidSignValidationTrulyPrintReady(validation.report);
+    // authoritative TECHNICAL answer, shared verbatim with the download
+    // authority (`final-artwork-capability.ts`'s
+    // `resolveSatisfiedSignProductionDelivery`/`isSignCandidateReadyFor
+    // Delivery`) — this presentation-only peek must never independently
+    // disagree with what the download route will actually serve.
+    const technicallyReady = validation !== null && isRigidSignValidationTrulyPrintReady(validation.report);
+    // Signs QR Visual Revision Acceptance: technical readiness alone is now
+    // ALSO never enough when this exact candidate's visible pixels came
+    // from a QR replacement — mirrors `isSignCandidateReadyForDelivery`'s
+    // own combined test exactly, so this peek and the download authority
+    // can never disagree about whether the candidate is truly print ready.
+    if (validation && technicallyReady) {
+      requiresVisualAcceptance = await doesSignCandidateContainQrReplacement(
+        repo,
+        projectId,
+        job.id,
+        validation.assetId,
+      );
+      if (requiresVisualAcceptance) {
+        const acceptance = await repo.getSignCandidateVisualAcceptance(projectId, validation.assetId);
+        visualAcceptanceSatisfied = acceptance !== null;
+        visualAcceptanceAcceptedAt = acceptance?.acceptedAt ?? null;
+      }
+    }
+    printReady = technicallyReady && (!requiresVisualAcceptance || visualAcceptanceSatisfied);
     fitToProduction = readFitToProductionSummary(validation?.report as Record<string, unknown> | null | undefined);
     machineReadableContent = readMachineReadableContentSummary(
       validation?.report as Record<string, unknown> | null | undefined,
@@ -391,6 +435,9 @@ async function resolveSignProductionStatus(
     fitToProduction,
     machineReadableContent,
     physicalResolutionMetadata,
+    requiresVisualAcceptance,
+    visualAcceptanceSatisfied,
+    visualAcceptanceAcceptedAt,
   };
 }
 

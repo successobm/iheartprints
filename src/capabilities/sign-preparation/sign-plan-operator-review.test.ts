@@ -240,6 +240,9 @@ describe("loadSignPlanOperatorReview — production status", () => {
       fitToProduction: null,
       machineReadableContent: null,
       physicalResolutionMetadata: null,
+      requiresVisualAcceptance: false,
+      visualAcceptanceSatisfied: false,
+      visualAcceptanceAcceptedAt: null,
     });
   });
 
@@ -644,5 +647,110 @@ describe("loadSignPlanOperatorReview — production status", () => {
     assert.equal(review.production.printReady, false, "a stale 'ready' status missing a required check must never report printReady");
     assert.equal(review.production.needsAttention, true);
     assert.equal(review.production.blockedCandidateAssetId, validation!.assetId, "the candidate must now be surfaced for operator inspection instead");
+  });
+
+  describe("Signs QR Visual Revision Acceptance", () => {
+    /**
+     * Builds a genuinely, fully technically print-ready candidate through
+     * the real pipeline (proving the resulting `report.checks` array is a
+     * real, correctly-shaped set of all 14 required passing checks — never
+     * hand-enumerated here), then persists a NEW synthetic candidate under
+     * the SAME job carrying `metadata.qrRestoration` and the SAME passing
+     * checks, bound to a NEW asset id — the smallest way to exercise the
+     * `requiresVisualAcceptance`/`visualAcceptanceSatisfied` wiring without
+     * re-running an actual QR decode/composite pipeline (already covered
+     * end to end in `sign-qr-preservation-service.test.ts`).
+     */
+    async function projectWithQrReplacedCandidate(
+      graph: Awaited<ReturnType<typeof freshGraph>>["graph"],
+      repo: Awaited<ReturnType<typeof freshGraph>>["repo"],
+    ) {
+      const projectId = (await repo.createProject()).project.id;
+      await graph.signPreparation.uploadSignArtwork(projectId, {
+        bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+        declaredContentType: "image/png",
+        filename: "sign.png",
+      });
+      await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+      await graph.signPreparation.planSignRepair(projectId);
+      await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+      await graph.finalArtwork.requestSignFinalArtwork(projectId);
+      await graph.finalArtworkScheduler.runBatch();
+
+      const project = await repo.getProject(projectId);
+      assert.equal(project!.project.status, "print_ready", "sanity: this fixture must genuinely reach print_ready first");
+
+      const preparation = await repo.getSignPreparation(projectId);
+      const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation!.id);
+      const job = jobs[0]!;
+      const baseValidation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      assert.ok(baseValidation);
+
+      const qrAsset = await graph.assets.uploadProductionAsset(projectId, {
+        conceptId: `sign-${job.id}-qr-replaced-synthetic`,
+        bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+        contentType: "image/png",
+        widthPx: 1800,
+        heightPx: 2400,
+        hasTransparency: false,
+        finalArtworkJobId: job.id,
+        productionRole: "production_png",
+        metadata: {
+          qrRestoration: {
+            restoredFromAssetId: baseValidation!.assetId,
+            sourceAssetId: preparation!.originalAssetId,
+            planKey: preparation!.planKey,
+            restoredCount: 1,
+            placementValidated: true,
+          },
+        },
+      });
+      await repo.createProductionAssetValidation(projectId, {
+        finalArtworkJobId: job.id,
+        assetId: qrAsset.id,
+        status: baseValidation!.status,
+        report: { ...(baseValidation!.report as Record<string, unknown>) },
+      });
+
+      return { projectId, job, assetId: qrAsset.id };
+    }
+
+    it("a QR-replaced candidate that is otherwise fully technically ready still reports printReady:false until visually accepted", async () => {
+      const { graph, repo } = await freshGraph();
+      const { projectId, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+
+      const review = await loadSignPlanOperatorReview(repo, projectId);
+      assert.equal(review.status, "ready");
+      if (review.status !== "ready") return;
+      assert.equal(review.production.requiresVisualAcceptance, true);
+      assert.equal(review.production.visualAcceptanceSatisfied, false);
+      assert.equal(review.production.visualAcceptanceAcceptedAt, null);
+      assert.equal(review.production.printReady, false, "technical readiness alone must never report printReady for a QR-replaced candidate");
+      assert.equal(review.production.needsAttention, true);
+      assert.equal(review.production.blockedCandidateAssetId, assetId, "the exact candidate awaiting approval must be surfaced for the review page's preview");
+    });
+
+    it("once visually accepted for the exact current candidate, the review reports printReady:true", async () => {
+      const { graph, repo } = await freshGraph();
+      const { projectId, job, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+      const preparation = await repo.getSignPreparation(projectId);
+
+      await repo.createSignCandidateVisualAcceptance(projectId, {
+        finalArtworkJobId: job.id,
+        assetId,
+        planKey: preparation!.planKey!,
+        acceptedBy: "operator",
+      });
+
+      const review = await loadSignPlanOperatorReview(repo, projectId);
+      assert.equal(review.status, "ready");
+      if (review.status !== "ready") return;
+      assert.equal(review.production.requiresVisualAcceptance, true);
+      assert.equal(review.production.visualAcceptanceSatisfied, true);
+      assert.ok(review.production.visualAcceptanceAcceptedAt);
+      assert.equal(review.production.printReady, true);
+      assert.equal(review.production.needsAttention, false);
+      assert.equal(review.production.blockedCandidateAssetId, null);
+    });
   });
 });

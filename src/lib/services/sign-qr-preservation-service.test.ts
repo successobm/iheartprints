@@ -471,6 +471,382 @@ describe("sign-qr-preservation-service: SIGNS QR DESTINATION RESOLUTION", () => 
     assert.equal(afterA.report.overall, "pass");
     assert.equal(afterB.report.overall, "review_required", "project B's own unresolved QR must remain blocking — untouched by project A's resolution");
   });
+
+  describe("Signs QR Visual Revision Acceptance", () => {
+    /**
+     * A plain, QR-free print-ready candidate — mirrors
+     * `repairSignPhysicalResolutionMetadata`'s own identically-named fixture
+     * below (different `describe` scope, so duplicated rather than shared)
+     * exactly: exact-aspect artwork, no reconstruction, no QR content
+     * anywhere. Used only to prove this task's new gate is a genuine no-op
+     * for ordinary sign artwork.
+     */
+    async function projectWithPrintReadySignCandidate(
+      graph: Awaited<ReturnType<typeof freshGraph>>["graph"],
+      repo: Awaited<ReturnType<typeof freshGraph>>["repo"],
+    ) {
+      const created = await repo.createProject();
+      const projectId = created.project.id;
+      await graph.signPreparation.uploadSignArtwork(projectId, {
+        bytes: toPngBytes(exactAspectSignArtwork(1800, 2400)),
+        declaredContentType: "image/png",
+        filename: "sign-clean.png",
+      });
+      await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+      await graph.signPreparation.planSignRepair(projectId);
+      await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+      const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+      await graph.finalArtworkScheduler.runBatch();
+      const completedJob = await repo.getFinalArtworkJob(job.id);
+      assert.equal(completedJob!.status, "completed", "sanity: the worker run must complete for this fixture");
+      return { projectId, job };
+    }
+
+    /**
+     * Builds a candidate whose visible pixels genuinely came from a QR
+     * replacement — reuses `projectWithBrokenQrCandidate` (an undecodable
+     * source QR) + `confirmSignQrDestination` (destination confirmation ->
+     * immediate deterministic restoration, exactly like the "derived asset"
+     * test above), so the resulting candidate is the SAME real production
+     * shape as every other test in this file: a genuine
+     * `metadata.qrRestoration`-tagged asset.
+     */
+    async function projectWithQrReplacedCandidate(
+      graph: Awaited<ReturnType<typeof freshGraph>>["graph"],
+      repo: Awaited<ReturnType<typeof freshGraph>>["repo"],
+      payload = "https://example-test-business.com/visual-acceptance",
+    ) {
+      const { checkSignQrPreservation, confirmSignQrDestination } = await import("./sign-qr-preservation-service");
+
+      // Deliberately exact-aspect (1800x2400 @ 12x16in = 150 PPI, the SAME
+      // geometry `projectWithPrintReadySignCandidate` above uses) with a
+      // damaged QR pasted well inside the content rect, plan formulated by
+      // the deterministic AUTO-PLANNER (`planSignRepair`) rather than a
+      // manual composition plan — a manually-composed plan is a genuinely
+      // different `executed_plan_matches_recorded_plan` shape that does not
+      // reach full technical readiness on its own, which would leave this
+      // whole describe block unable to isolate the (separate) visual-
+      // acceptance gate this task adds. The REAL Get Hibachi project this
+      // task was filed against reached full technical print-readiness
+      // through exactly this auto-planned shape too.
+      const image = exactAspectSignArtwork(1800, 2400);
+      const damagedQr = await synthesizeDamagedQr(`${payload}/original-broken`, 300);
+      paste(image, damagedQr, 700, 900);
+
+      const created = await repo.createProject();
+      const projectId = created.project.id;
+      await graph.signPreparation.uploadSignArtwork(projectId, {
+        bytes: toPngBytes(image),
+        declaredContentType: "image/png",
+        filename: "sign-clean-with-qr.png",
+      });
+      await graph.signPreparation.confirmSignProductionSpec(projectId, 12, 16);
+      await graph.signPreparation.planSignRepair(projectId);
+      await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+      const { job } = await graph.finalArtwork.requestSignFinalArtwork(projectId);
+      await graph.finalArtworkScheduler.runBatch();
+      const completedJob = await repo.getFinalArtworkJob(job.id);
+      assert.equal(completedJob!.status, "completed", "sanity: the worker run must complete for this fixture");
+
+      const before = await checkSignQrPreservation(projectId);
+      assert.equal(
+        before.report.overall,
+        "review_required",
+        "sanity: the source QR must genuinely be undecodable/blocking before destination confirmation",
+      );
+      const regionKey = before.report.instances[0].regionKey!;
+      const confirmResult = await confirmSignQrDestination(projectId, {
+        regionKey,
+        destination: payload,
+        confirmedBy: "customer",
+      });
+      assert.equal(
+        confirmResult.appliedImmediately,
+        true,
+        "sanity: this fixture must apply the restoration immediately",
+      );
+      const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      assert.ok(validation);
+      return { projectId, job, assetId: validation!.assetId };
+    }
+
+    it("sanity: the QR-replaced candidate is technically fully print-ready on its own — this suite genuinely isolates the visual-acceptance gate", async () => {
+      const { graph, repo } = await freshGraph();
+      const { isRigidSignValidationTrulyPrintReady } = await import(
+        "@/capabilities/print-validation/rigid-sign-print-ready-authority"
+      );
+      const { projectId, job } = await projectWithQrReplacedCandidate(graph, repo);
+      const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      assert.ok(
+        isRigidSignValidationTrulyPrintReady(validation!.report),
+        "fixture sanity: every technical check must already pass",
+      );
+    });
+
+    it("doesSignCandidateContainQrReplacement: true for the direct QR-restoration asset, and true for a metadata-only derivative built on top of it", async () => {
+      const { graph, repo } = await freshGraph();
+      const { doesSignCandidateContainQrReplacement } = await import(
+        "@/capabilities/final-artwork/sign-candidate-visual-acceptance"
+      );
+      const { projectId, job, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+      assert.equal(await doesSignCandidateContainQrReplacement(repo, projectId, job.id, assetId), true);
+
+      // A further metadata-only derivative (mirrors `repairSignPhysical
+      // ResolutionMetadata`'s own real shape: `metadata.physicalResolution
+      // Repair.repairedFromAssetId`, no `qrRestoration` of its own) must
+      // STILL require acceptance — the real Get Hibachi lineage shape this
+      // walk exists for.
+      const sourceBytes = (await graph.assets.downloadAssetBytes(assetId))!.bytes;
+      const derived = await graph.assets.uploadProductionAsset(projectId, {
+        conceptId: `sign-${job.id}-synthetic-metadata-derivative`,
+        bytes: sourceBytes,
+        contentType: "image/png",
+        widthPx: 600,
+        heightPx: 900,
+        hasTransparency: false,
+        finalArtworkJobId: job.id,
+        productionRole: "production_png",
+        metadata: { physicalResolutionRepair: { repairedFromAssetId: assetId, pixelsPerMetre: 5906 } },
+      });
+      assert.equal(await doesSignCandidateContainQrReplacement(repo, projectId, job.id, derived.id), true);
+    });
+
+    it("doesSignCandidateContainQrReplacement: false for an ordinary candidate that never had a QR replaced", async () => {
+      const { graph, repo } = await freshGraph();
+      const { doesSignCandidateContainQrReplacement } = await import(
+        "@/capabilities/final-artwork/sign-candidate-visual-acceptance"
+      );
+      const { projectId, job } = await projectWithPrintReadySignCandidate(graph, repo);
+      const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      assert.equal(
+        await doesSignCandidateContainQrReplacement(repo, projectId, job.id, validation!.assetId),
+        false,
+      );
+    });
+
+    it("plan authorization + destination confirmation + QR technical verification, alone, do NOT satisfy visual acceptance — NOT deliverable, inspectable instead", async () => {
+      const { graph, repo } = await freshGraph();
+      const { projectId, job, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+
+      assert.equal(await repo.getSignCandidateVisualAcceptance(projectId, assetId), null);
+      assert.equal(
+        await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId),
+        null,
+        "must NOT be deliverable without visual acceptance, even though destination confirmation and QR technical verification both already happened",
+      );
+
+      const blocked = await graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+      assert.ok(blocked, "must be inspectable while awaiting acceptance");
+      assert.equal(blocked!.assetId, assetId);
+      assert.equal(blocked!.job.id, job.id);
+      assert.equal(
+        blocked!.validationStatus,
+        "ready",
+        "the TECHNICAL status genuinely is ready — it is the separate visual-acceptance authority withholding delivery",
+      );
+    });
+
+    it("explicit visual acceptance for the exact current candidate makes it deliverable, and it stops reading as blocked/inspectable", async () => {
+      const { graph, repo } = await freshGraph();
+      const { acceptSignCandidateVisualArtwork } = await import(
+        "@/lib/services/sign-candidate-visual-acceptance-service"
+      );
+      const { projectId, job, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+
+      const result = await acceptSignCandidateVisualArtwork(projectId);
+      assert.equal(result.assetId, assetId);
+      assert.equal(result.alreadyAccepted, false);
+
+      const delivery = await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+      assert.ok(delivery);
+      assert.equal(delivery!.assetId, assetId);
+      assert.equal(delivery!.job.id, job.id);
+
+      const blocked = await graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+      assert.equal(blocked, null, "once truly deliverable, it must no longer read as blocked/inspectable");
+    });
+
+    it("repeated approval of the same current candidate is idempotent — one row, same acceptedAt", async () => {
+      const { repo, graph } = await freshGraph();
+      const { acceptSignCandidateVisualArtwork } = await import(
+        "@/lib/services/sign-candidate-visual-acceptance-service"
+      );
+      const { projectId, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+
+      const first = await acceptSignCandidateVisualArtwork(projectId);
+      const second = await acceptSignCandidateVisualArtwork(projectId);
+      assert.equal(second.alreadyAccepted, true);
+      assert.equal(second.acceptedAt, first.acceptedAt);
+      assert.equal(second.assetId, assetId);
+    });
+
+    it("acceptance is durable — a freshly-obtained repository handle reading the same on-disk store sees it", async () => {
+      const { graph, repo } = await freshGraph();
+      const { acceptSignCandidateVisualArtwork } = await import(
+        "@/lib/services/sign-candidate-visual-acceptance-service"
+      );
+      const { projectId, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+      await acceptSignCandidateVisualArtwork(projectId);
+
+      const { getProjectRepository } = await import("@/lib/db");
+      const freshRepo = getProjectRepository();
+      const acceptance = await freshRepo.getSignCandidateVisualAcceptance(projectId, assetId);
+      assert.ok(acceptance);
+      assert.equal(acceptance!.assetId, assetId);
+    });
+
+    it("a technical regression on an already-accepted candidate's asset id still blocks delivery — acceptance never overrides technical validity", async () => {
+      const { graph, repo } = await freshGraph();
+      const { acceptSignCandidateVisualArtwork } = await import(
+        "@/lib/services/sign-candidate-visual-acceptance-service"
+      );
+      const { projectId, job, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+      await acceptSignCandidateVisualArtwork(projectId);
+      assert.ok(
+        await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId),
+        "sanity: deliverable right after acceptance",
+      );
+
+      const priorValidation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      const report = priorValidation!.report as { checks: Array<Record<string, unknown>> };
+      const failingChecks = report.checks.map((c) =>
+        c.check === "machine_readable_content_preserved" ? { ...c, status: "fail", severity: "blocking" } : c,
+      );
+      await repo.createProductionAssetValidation(projectId, {
+        finalArtworkJobId: job.id,
+        assetId,
+        status: "finalization_required",
+        report: { ...report, checks: failingChecks },
+      });
+
+      assert.equal(
+        await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId),
+        null,
+        "a technical regression must still block delivery even though this exact asset was already visually accepted",
+      );
+    });
+
+    it("acceptance for an OLD candidate does not carry forward to a NEW QR-revised candidate under the same job", async () => {
+      const { graph, repo } = await freshGraph();
+      const { acceptSignCandidateVisualArtwork } = await import(
+        "@/lib/services/sign-candidate-visual-acceptance-service"
+      );
+      const { projectId, job, assetId: oldAssetId } = await projectWithQrReplacedCandidate(graph, repo);
+      const acceptedOld = await acceptSignCandidateVisualArtwork(projectId);
+      assert.equal(acceptedOld.assetId, oldAssetId);
+      assert.ok(await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId));
+
+      // A genuinely NEW candidate under the SAME job, derived from the
+      // accepted one via the SAME metadata-only lineage link
+      // `repairSignPhysicalResolutionMetadata` uses in real production —
+      // the real "QR replacement creates a new visible candidate" shape.
+      const oldValidation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      const oldBytes = (await graph.assets.downloadAssetBytes(oldAssetId))!.bytes;
+      const newAsset = await graph.assets.uploadProductionAsset(projectId, {
+        conceptId: `sign-${job.id}-successor-candidate`,
+        bytes: oldBytes,
+        contentType: "image/png",
+        widthPx: 600,
+        heightPx: 900,
+        hasTransparency: false,
+        finalArtworkJobId: job.id,
+        productionRole: "production_png",
+        metadata: { physicalResolutionRepair: { repairedFromAssetId: oldAssetId, pixelsPerMetre: 5906 } },
+      });
+      await repo.createProductionAssetValidation(projectId, {
+        finalArtworkJobId: job.id,
+        assetId: newAsset.id,
+        status: oldValidation!.status,
+        report: oldValidation!.report as Record<string, unknown>,
+      });
+
+      // The OLD candidate's acceptance must never authorize the NEW one.
+      assert.equal(await repo.getSignCandidateVisualAcceptance(projectId, newAsset.id), null);
+      assert.equal(
+        await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId),
+        null,
+        "the new candidate must require its OWN fresh acceptance",
+      );
+
+      const blocked = await graph.finalArtwork.resolveBlockedSignProductionCandidate(projectId);
+      assert.ok(blocked);
+      assert.equal(blocked!.assetId, newAsset.id, "the CURRENT (newest) candidate needs review, never the old accepted one");
+
+      // Accepting again resolves the NEW candidate — never silently reuses
+      // the old row.
+      const acceptedNew = await acceptSignCandidateVisualArtwork(projectId);
+      assert.equal(acceptedNew.assetId, newAsset.id);
+      assert.notEqual(acceptedNew.acceptedAt, acceptedOld.acceptedAt);
+      const delivery = await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+      assert.ok(delivery);
+      assert.equal(delivery!.assetId, newAsset.id);
+    });
+
+    it("download route denies before acceptance and allows exactly the accepted, technically valid current candidate after", async () => {
+      const { graph, repo } = await freshGraph();
+      const { acceptSignCandidateVisualArtwork } = await import(
+        "@/lib/services/sign-candidate-visual-acceptance-service"
+      );
+      const { getSignProductionArtworkDownload } = await import("@/lib/services/sign-artwork-service");
+      const { projectId, assetId } = await projectWithQrReplacedCandidate(graph, repo);
+
+      assert.equal(await getSignProductionArtworkDownload(projectId), null, "download route must deny before acceptance");
+
+      await acceptSignCandidateVisualArtwork(projectId);
+      const download = await getSignProductionArtworkDownload(projectId);
+      assert.ok(download, "download route must allow the accepted, technically valid current candidate");
+      const delivery = await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId);
+      assert.equal(delivery!.assetId, assetId, "the download identity must be the exact candidate that was visually accepted");
+    });
+
+    it("acceptance action refuses a project with no candidate currently awaiting approval", async () => {
+      const { repo } = await freshGraph();
+      const { acceptSignCandidateVisualArtwork, SignCandidateVisualAcceptanceError } = await import(
+        "@/lib/services/sign-candidate-visual-acceptance-service"
+      );
+      const created = await repo.createProject();
+      await assert.rejects(
+        () => acceptSignCandidateVisualArtwork(created.project.id),
+        SignCandidateVisualAcceptanceError,
+      );
+    });
+
+    it("acceptance action refuses a candidate that is not yet technically valid (unresolved QR)", async () => {
+      const { graph, repo } = await freshGraph();
+      const { acceptSignCandidateVisualArtwork, SignCandidateVisualAcceptanceError } = await import(
+        "@/lib/services/sign-candidate-visual-acceptance-service"
+      );
+      const { checkSignQrPreservation } = await import("./sign-qr-preservation-service");
+      const { projectId } = await projectWithBrokenQrCandidate(
+        graph,
+        repo,
+        "https://example-test-business.com/unresolved",
+      );
+      // Destination never confirmed — QR check still reports
+      // review_required, which blocks the technical gate entirely.
+      const result = await checkSignQrPreservation(projectId);
+      assert.equal(result.report.overall, "review_required");
+
+      await assert.rejects(
+        () => acceptSignCandidateVisualArtwork(projectId),
+        SignCandidateVisualAcceptanceError,
+      );
+    });
+
+    it("a sign with no QR at all never requires visual acceptance — ordinary Wand/DTF-unrelated sign behavior is unaffected", async () => {
+      const { graph, repo } = await freshGraph();
+      const { isRigidSignValidationTrulyPrintReady } = await import(
+        "@/capabilities/print-validation/rigid-sign-print-ready-authority"
+      );
+      const { projectId, job } = await projectWithPrintReadySignCandidate(graph, repo);
+      const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
+      assert.ok(isRigidSignValidationTrulyPrintReady(validation!.report));
+      assert.ok(
+        await graph.finalArtwork.resolveCurrentSignProductionDelivery(projectId),
+        "an ordinary (no-QR) sign must remain deliverable exactly as before this task, with zero new gate",
+      );
+    });
+  });
 });
 
 /**

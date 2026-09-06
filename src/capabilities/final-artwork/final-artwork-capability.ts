@@ -70,6 +70,7 @@ import {
   resolveEffectiveProductionTargetIn,
   type EffectiveProductionTargetIn,
 } from "./production-request-identity";
+import { doesSignCandidateContainQrReplacement } from "./sign-candidate-visual-acceptance";
 
 /**
  * Signs Phase S2: `requestSignFinalArtwork`'s result. There is no
@@ -309,13 +310,23 @@ export interface FinalArtworkCapability {
    * inspect before deciding the next engineering/design step). NEVER the
    * customer-delivery authority — `resolveCurrentSignProductionDelivery`
    * remains the only path that can ever say "this is print-ready", and
-   * this resolver explicitly REFUSES whenever the latest validation IS
-   * `"ready"` (that state has nothing to inspect here; it already has a
-   * certified download). Mirrors `resolveCurrentSignProductionDelivery`'s
-   * own job resolution (current-plan job only, via `signPlanKey`) and its
-   * own validation-bound asset resolution (never positional — see that
-   * resolver's own doc for why a job can legitimately carry more than one
-   * final). Read-only: never creates, mutates, or deletes anything.
+   * this resolver explicitly REFUSES whenever `isSignCandidateReadyFor
+   * Delivery` says the candidate is truly deliverable (that state has
+   * nothing to inspect here; it already has a certified download).
+   * Mirrors `resolveCurrentSignProductionDelivery`'s own job resolution
+   * (current-plan job only, via `signPlanKey`) and its own validation-bound
+   * asset resolution (never positional — see that resolver's own doc for
+   * why a job can legitimately carry more than one final). Read-only:
+   * never creates, mutates, or deletes anything.
+   *
+   * Signs QR Visual Revision Acceptance: a candidate whose latest
+   * validation reads `"ready"` (every TECHNICAL check passes) now ALSO
+   * resolves here — inspectable, never yet a certified download — when its
+   * visible pixels came from a QR replacement that no human has approved
+   * yet. `validationStatus` on the returned record still faithfully reads
+   * `"ready"` in that case; it is `isSignCandidateReadyForDelivery`, never
+   * `validationStatus` alone, that decides whether a candidate is truly
+   * deliverable.
    */
   resolveBlockedSignProductionCandidate(
     projectId: string,
@@ -1080,6 +1091,52 @@ async function resolveSatisfiedProductionDelivery(
 }
 
 /**
+ * Signs QR Visual Revision Acceptance: the sign delivery authority's own
+ * combined "is this candidate ACTUALLY deliverable" test — technical
+ * validity (`isRigidSignValidationTrulyPrintReady`) AND, when this exact
+ * candidate's own visible pixels came from a QR replacement
+ * (`doesSignCandidateContainQrReplacement`), an explicit human visual
+ * acceptance BOUND TO THIS EXACT ASSET ID
+ * (`ProjectRepository.getSignCandidateVisualAcceptance`).
+ *
+ * ONE authoritative function, reused identically by
+ * `resolveSatisfiedSignProductionDelivery` (download authority) and
+ * `resolveBlockedSignProductionCandidateFor` (its own exact inverse, used
+ * for operator inspection) — exactly like `isRigidSignValidationTrulyPrint
+ * Ready` itself is already reused identically by both, so the two can
+ * never again independently answer "is this deliverable" and disagree.
+ *
+ * Deliberately does NOT gate `resolveTrustworthySignRepairParentFor` —
+ * repair-parent trustworthiness is a technical-pixel question (is this
+ * candidate a SAFE BASE to derive a new correction from), never a
+ * "has a human approved how this looks" question; gating it here would
+ * make a technically-valid-but-unaccepted candidate invisible to its own
+ * repair machinery for no reason, since there is nothing to repair.
+ *
+ * Technical validity is checked FIRST and short-circuits: a candidate
+ * that fails a technical check is never asked whether it "requires visual
+ * acceptance" at all — that question only has meaning once the artwork it
+ * would ask about is otherwise final.
+ */
+async function isSignCandidateReadyForDelivery(
+  repo: ProjectRepository,
+  projectId: string,
+  finalArtworkJobId: string,
+  validation: { assetId: string; report: Record<string, unknown> },
+): Promise<boolean> {
+  if (!isRigidSignValidationTrulyPrintReady(validation.report)) return false;
+  const requiresVisualAcceptance = await doesSignCandidateContainQrReplacement(
+    repo,
+    projectId,
+    finalArtworkJobId,
+    validation.assetId,
+  );
+  if (!requiresVisualAcceptance) return true;
+  const acceptance = await repo.getSignCandidateVisualAcceptance(projectId, validation.assetId);
+  return acceptance !== null;
+}
+
+/**
  * LIVE PRODUCT BLOCKER #4B: the sign-authority counterpart of
  * `resolveSatisfiedProductionDelivery` — see
  * `FinalArtworkCapability.resolveCurrentSignProductionDelivery`'s own doc
@@ -1104,6 +1161,12 @@ async function resolveSatisfiedProductionDelivery(
  * the exact same test, inverted, so a stale-ready candidate is correctly
  * reclassified as BLOCKED (inspectable, repairable) rather than remaining
  * invisible to both.
+ *
+ * Signs QR Visual Revision Acceptance: "ready" is now ALSO never enough
+ * alone when this exact candidate's visible pixels came from a QR
+ * replacement — `isSignCandidateReadyForDelivery` additionally requires a
+ * human visual acceptance bound to this exact asset id. See that
+ * function's own doc for the full reasoning.
  */
 async function resolveSatisfiedSignProductionDelivery(
   repo: ProjectRepository,
@@ -1136,7 +1199,8 @@ async function resolveSatisfiedSignProductionDelivery(
     projectId,
     job.id,
   );
-  if (!validation || !isRigidSignValidationTrulyPrintReady(validation.report)) return null;
+  if (!validation) return null;
+  if (!(await isSignCandidateReadyForDelivery(repo, projectId, job.id, validation))) return null;
 
   const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
   const asset = jobAssets.find(
@@ -1204,7 +1268,8 @@ async function resolveBlockedSignProductionCandidateFor(
     projectId,
     job.id,
   );
-  if (!validation || isRigidSignValidationTrulyPrintReady(validation.report)) return null;
+  if (!validation) return null;
+  if (await isSignCandidateReadyForDelivery(repo, projectId, job.id, validation)) return null;
 
   const jobAssets = await repo.listAssetsForFinalArtworkJob(projectId, job.id);
   const asset = jobAssets.find(

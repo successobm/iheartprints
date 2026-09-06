@@ -30,6 +30,7 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  SignCandidateVisualAcceptance,
   SignPlanAuthorizationActor,
   SignPreparation,
   SignPreparationStatus,
@@ -356,6 +357,14 @@ export interface CreateSignPreservationVerificationInput {
   semanticEvidence: Record<string, unknown> | null;
   status: SignPreservationStatus;
   reasons: string[];
+}
+
+/** Signs QR Visual Revision Acceptance: input for persisting one human's approval of the exact revised candidate. See `SignCandidateVisualAcceptance`'s own doc comment for the four-authority model this is one part of. */
+export interface CreateSignCandidateVisualAcceptanceInput {
+  finalArtworkJobId: string;
+  assetId: string;
+  planKey: string;
+  acceptedBy: SignPlanAuthorizationActor;
 }
 
 /** Signs Phase S4.2C.1: input for the ONE creation of a transport attempt's identity row — files/status are populated afterward via `updateSignPreservationTransportAttempt`. */
@@ -1339,6 +1348,31 @@ export interface ProjectRepository {
     finalAssetId: string,
     verificationAlgorithmVersion: string,
   ): Promise<SignPreservationVerification | null>;
+
+  /**
+   * Signs QR Visual Revision Acceptance: persists one human's approval of
+   * the exact revised production candidate. Append-only — mirroring
+   * `createSignPreservationVerification` exactly. Implementations must
+   * enforce the `assetId` uniqueness this identity depends on (a DB unique
+   * constraint for Supabase; an equivalent guard for the local store) —
+   * an asset never changes once created (Constitution §6.11), so at most
+   * one acceptance decision can ever apply to it.
+   */
+  createSignCandidateVisualAcceptance(
+    projectId: string,
+    input: CreateSignCandidateVisualAcceptanceInput,
+  ): Promise<SignCandidateVisualAcceptance>;
+  /**
+   * The idempotent lookup key AND the print-ready authority's own read: an
+   * acceptance already on file for this EXACT `assetId` is reused rather
+   * than re-recorded — a different asset id (a newer, replaced candidate)
+   * never matches an existing row, so acceptance can never be silently
+   * carried across a material revision.
+   */
+  getSignCandidateVisualAcceptance(
+    projectId: string,
+    assetId: string,
+  ): Promise<SignCandidateVisualAcceptance | null>;
 
   /**
    * Signs Phase S4.2C.1: durable, recoverable bookkeeping for one in-flight

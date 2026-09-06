@@ -56,6 +56,7 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  SignCandidateVisualAcceptance,
   SignPreservationTransportAttempt,
   SignPreservationVerification,
   TShirtDesignBrief,
@@ -66,6 +67,7 @@ import type {
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
+  CreateSignCandidateVisualAcceptanceInput,
   CreateSignPreparationInput,
   CreateSignPreservationTransportAttemptInput,
   CreateSignPreservationVerificationInput,
@@ -417,6 +419,18 @@ type DbSignPreservationVerification = {
   semantic_evidence: Record<string, unknown> | null;
   status: string;
   reasons: unknown;
+  created_at: string;
+};
+
+/** Signs QR Visual Revision Acceptance. */
+type DbSignCandidateVisualAcceptance = {
+  id: string;
+  project_id: string;
+  final_artwork_job_id: string;
+  asset_id: string;
+  plan_key: string;
+  accepted_at: string;
+  accepted_by: string;
   created_at: string;
 };
 
@@ -873,6 +887,21 @@ function mapSignPreservationVerification(
     semanticEvidence: row.semantic_evidence,
     status: row.status as SignPreservationVerification["status"],
     reasons: Array.isArray(row.reasons) ? (row.reasons as string[]) : [],
+    createdAt: row.created_at,
+  };
+}
+
+function mapSignCandidateVisualAcceptance(
+  row: DbSignCandidateVisualAcceptance,
+): SignCandidateVisualAcceptance {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    finalArtworkJobId: row.final_artwork_job_id,
+    assetId: row.asset_id,
+    planKey: row.plan_key,
+    acceptedAt: row.accepted_at,
+    acceptedBy: row.accepted_by as SignPlanAuthorizationActor,
     createdAt: row.created_at,
   };
 }
@@ -2830,6 +2859,48 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (error) throw error;
     return data
       ? mapSignPreservationVerification(data as DbSignPreservationVerification)
+      : null;
+  }
+
+  async createSignCandidateVisualAcceptance(
+    projectId: string,
+    input: CreateSignCandidateVisualAcceptanceInput,
+  ): Promise<SignCandidateVisualAcceptance> {
+    const { data, error } = await this.client
+      .from("sign_candidate_visual_acceptances")
+      .insert({
+        project_id: projectId,
+        final_artwork_job_id: input.finalArtworkJobId,
+        asset_id: input.assetId,
+        plan_key: input.planKey,
+        accepted_by: input.acceptedBy,
+      })
+      .select("*")
+      .single();
+    if (error) {
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "sign_candidate_visual_acceptances_asset_id_idx",
+        );
+      }
+      throw error;
+    }
+    return mapSignCandidateVisualAcceptance(data as DbSignCandidateVisualAcceptance);
+  }
+
+  async getSignCandidateVisualAcceptance(
+    projectId: string,
+    assetId: string,
+  ): Promise<SignCandidateVisualAcceptance | null> {
+    const { data, error } = await this.client
+      .from("sign_candidate_visual_acceptances")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("asset_id", assetId)
+      .maybeSingle();
+    if (error) throw error;
+    return data
+      ? mapSignCandidateVisualAcceptance(data as DbSignCandidateVisualAcceptance)
       : null;
   }
 

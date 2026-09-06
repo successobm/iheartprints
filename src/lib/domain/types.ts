@@ -2798,6 +2798,41 @@ export interface SignPreservationVerification {
 }
 
 /**
+ * Signs QR Visual Revision Acceptance: durable proof a human has looked at
+ * and approved the EXACT, immutable production candidate whose visible
+ * artwork a QR replacement/restoration materially changed. A genuinely
+ * separate authority from plan authorization (`sign_preparations
+ * .authorizedAt/By`, approves a repair PLAN), destination confirmation
+ * (`sign_preparations.qrResolutions`, confirms the intended PAYLOAD TEXT),
+ * and technical QR verification (`ProductionAssetValidation`'s
+ * `machine_readable_content_preserved` check, proves the QR scans) — none
+ * of those three says anyone has SEEN the revised pixels. See the
+ * migration's own header comment
+ * (`20260906190000_sign_candidate_visual_acceptances.sql`) for the full
+ * four-authority reasoning.
+ *
+ * Bound to `assetId` alone — assets are append-only (Constitution §6.11),
+ * so a genuinely new visible revision always means a NEW asset id, and a
+ * row for one asset is therefore never reachable as authorizing a
+ * different one. `finalArtworkJobId`/`planKey` are redundant, fail-closed
+ * cross-checks, mirroring `SignPreservationVerification`'s identical
+ * discipline.
+ */
+export interface SignCandidateVisualAcceptance {
+  id: string;
+  projectId: string;
+  finalArtworkJobId: string;
+  /** THE binding identity this acceptance is FOR. */
+  assetId: string;
+  /** The approved plan's own canonical identity, re-verified at read time — a redundant, fail-closed cross-check alongside `assetId`. */
+  planKey: string;
+  acceptedAt: string;
+  /** WHO accepted it — see `SignPlanAuthorizationActor`. Never a personal identity (ARCHITECTURE.md §23). */
+  acceptedBy: SignPlanAuthorizationActor;
+  createdAt: string;
+}
+
+/**
  * Signs Phase S4.2C.1: durable, RECOVERABLE bookkeeping for one in-flight
  * OpenAI Files-transport semantic-preservation attempt — deliberately NOT
  * permanent semantic evidence (that remains

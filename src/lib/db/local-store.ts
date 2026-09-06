@@ -45,6 +45,7 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  SignCandidateVisualAcceptance,
   SignPreparation,
   SignPreservationTransportAttempt,
   SignPreservationVerification,
@@ -63,6 +64,7 @@ import type {
   CompletePaidImageIntentInput,
   CreateMessageInput,
   CreateProductionAssetValidationInput,
+  CreateSignCandidateVisualAcceptanceInput,
   CreateSignPreservationTransportAttemptInput,
   CreateSignPreservationVerificationInput,
   UpdateSignPreservationTransportAttemptInput,
@@ -123,6 +125,8 @@ interface LocalDatabase {
   signPreservationVerifications: SignPreservationVerification[];
   /** Signs Phase S4.2C.1. */
   signPreservationTransportAttempts: SignPreservationTransportAttempt[];
+  /** Signs QR Visual Revision Acceptance. */
+  signCandidateVisualAcceptances: SignCandidateVisualAcceptance[];
 }
 
 /**
@@ -182,6 +186,7 @@ function emptyDb(): LocalDatabase {
     signPreparations: [],
     signPreservationVerifications: [],
     signPreservationTransportAttempts: [],
+    signCandidateVisualAcceptances: [],
   };
 }
 
@@ -375,6 +380,8 @@ async function readDb(): Promise<LocalDatabase> {
       signPreservationVerifications: parsed.signPreservationVerifications ?? [],
       // Signs Phase S4.2C.1: absent in every store written before it existed.
       signPreservationTransportAttempts: parsed.signPreservationTransportAttempts ?? [],
+      // Signs QR Visual Revision Acceptance: absent in every store written before it existed.
+      signCandidateVisualAcceptances: parsed.signCandidateVisualAcceptances ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -2219,6 +2226,45 @@ export class LocalProjectRepository implements ProjectRepository {
         (item) =>
           item.finalAssetId === finalAssetId &&
           item.verificationAlgorithmVersion === verificationAlgorithmVersion,
+      ) ?? null
+    );
+  }
+
+  async createSignCandidateVisualAcceptance(
+    projectId: string,
+    input: CreateSignCandidateVisualAcceptanceInput,
+  ): Promise<SignCandidateVisualAcceptance> {
+    const db = await readDb();
+    // Mirrors the DB unique index this table's migration declares — see
+    // `createSignPreservationVerification`'s identical comment.
+    const duplicate = db.signCandidateVisualAcceptances.some((item) => item.assetId === input.assetId);
+    if (duplicate) {
+      throw new UniqueConstraintViolationError("sign_candidate_visual_acceptances_asset_id_idx");
+    }
+    const timestamp = nowIso();
+    const acceptance: SignCandidateVisualAcceptance = {
+      id: randomUUID(),
+      projectId,
+      finalArtworkJobId: input.finalArtworkJobId,
+      assetId: input.assetId,
+      planKey: input.planKey,
+      acceptedAt: timestamp,
+      acceptedBy: input.acceptedBy,
+      createdAt: timestamp,
+    };
+    db.signCandidateVisualAcceptances.push(acceptance);
+    await writeDb(db);
+    return acceptance;
+  }
+
+  async getSignCandidateVisualAcceptance(
+    projectId: string,
+    assetId: string,
+  ): Promise<SignCandidateVisualAcceptance | null> {
+    const db = await readDb();
+    return (
+      db.signCandidateVisualAcceptances.find(
+        (item) => item.projectId === projectId && item.assetId === assetId,
       ) ?? null
     );
   }

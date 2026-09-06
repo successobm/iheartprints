@@ -94,6 +94,20 @@ export function SignProductionAction({
     );
   }
 
+  if (cta.kind === "needs_visual_acceptance") {
+    // Signs QR Visual Revision Acceptance: deliberately no execution
+    // button here — the visual acceptance panel below already carries the
+    // one real next action ("Approve revised artwork"). No "Try again":
+    // every technical check already passes; re-running the identical
+    // deterministic composition would not change whether a human has
+    // looked at the result.
+    return (
+      <p className="text-sm text-ink" data-sign-production-needs-attention>
+        This artwork&apos;s QR code was replaced — review the revised artwork before it can be finalized.
+      </p>
+    );
+  }
+
   if (cta.kind === "needs_qr_resolution") {
     // Fix QR Review UX Phase: deliberately no execution button here — the
     // QR resolution panel below already carries the correct next actions

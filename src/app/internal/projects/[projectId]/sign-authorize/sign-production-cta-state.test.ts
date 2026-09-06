@@ -27,6 +27,9 @@ function production(
     fitToProduction: null,
     machineReadableContent: null,
     physicalResolutionMetadata: null,
+    requiresVisualAcceptance: false,
+    visualAcceptanceSatisfied: false,
+    visualAcceptanceAcceptedAt: null,
     ...overrides,
   };
 }
@@ -266,6 +269,77 @@ describe("Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair 
           jobStatus: "queued",
           inFlight: true,
           physicalResolutionMetadata: { status: "fail", reason: "declares the wrong PPI" },
+        }),
+      ),
+      { kind: "in_flight" },
+    );
+  });
+
+  it("Signs QR Visual Revision Acceptance: every technical check passes but visual acceptance is required and not yet satisfied — needs_visual_acceptance, no execution button state", () => {
+    const cta = resolveSignProductionCtaState(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        blockedCandidateAssetId: "qr-replaced-asset-id",
+        requiresVisualAcceptance: true,
+        visualAcceptanceSatisfied: false,
+      }),
+    );
+    assert.deepEqual(cta, { kind: "needs_visual_acceptance", assetId: "qr-replaced-asset-id" });
+  });
+
+  it("Signs QR Visual Revision Acceptance: a satisfied acceptance never triggers needs_visual_acceptance, even if needsAttention is somehow also true for an unrelated reason", () => {
+    const cta = resolveSignProductionCtaState(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        requiresVisualAcceptance: true,
+        visualAcceptanceSatisfied: true,
+      }),
+    );
+    assert.equal(cta.kind === "needs_visual_acceptance", false, `must never be needs_visual_acceptance once satisfied, got ${cta.kind}`);
+  });
+
+  it("Signs QR Visual Revision Acceptance: needs_visual_acceptance takes precedence over the generic try_again fallback", () => {
+    const cta = resolveSignProductionCtaState(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        blockedCandidateAssetId: "qr-replaced-asset-id",
+        requiresVisualAcceptance: true,
+        visualAcceptanceSatisfied: false,
+        // Neither machine-readable nor physical-resolution blocking — by
+        // construction (requiresVisualAcceptance is only ever true once
+        // every OTHER technical check already passes), but asserted
+        // explicitly here so this test does not rely on that invariant
+        // holding silently.
+        machineReadableContent: { regions: [], overall: "pass" },
+        physicalResolutionMetadata: { status: "pass", reason: "agrees with the ordered size" },
+      }),
+    );
+    assert.deepEqual(cta, { kind: "needs_visual_acceptance", assetId: "qr-replaced-asset-id" });
+  });
+
+  it("needs_visual_acceptance never renders when print-ready or in-flight take precedence (defensive precedence)", () => {
+    assert.deepEqual(
+      resolveSignProductionCtaState(
+        production({
+          jobStatus: "completed",
+          printReady: true,
+          needsAttention: true,
+          requiresVisualAcceptance: true,
+          visualAcceptanceSatisfied: false,
+        }),
+      ),
+      { kind: "print_ready" },
+    );
+    assert.deepEqual(
+      resolveSignProductionCtaState(
+        production({
+          jobStatus: "queued",
+          inFlight: true,
+          requiresVisualAcceptance: true,
+          visualAcceptanceSatisfied: false,
         }),
       ),
       { kind: "in_flight" },
