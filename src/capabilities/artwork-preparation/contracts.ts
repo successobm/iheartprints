@@ -131,6 +131,20 @@ export interface ArtworkAnalysis {
   /** Fraction of the canvas an edge-connected fill from the border would remove (0–1). */
   exteriorMaskFraction: number;
   /**
+   * DTF Background-Removal Status Contradiction Phase (live acceptance
+   * defect): of `exteriorMaskFraction`, the fraction that is STILL VISIBLE
+   * (alpha >= the visibility threshold) — i.e. genuinely unremoved. A pixel
+   * counted in `exteriorMaskFraction` only because it already has alpha 0
+   * contributes nothing here. This is what `already usably transparent`
+   * (`repairability.ts`) must check: a canvas whose BORDER crosses the
+   * transparency-coverage threshold can still have a substantial, still-
+   * opaque, edge-connected background elsewhere (e.g. a solid-colour block
+   * behind the design that a thin transparent margin never touched) — this
+   * fraction is what proves that background is genuinely still there,
+   * independent of whether the border alone looks "already transparent".
+   */
+  exteriorMaskOpaqueFraction: number;
+  /**
    * Pixels that MATCH the background colour but are NOT reachable from the
    * border — intentional interior blacks, enclosed shapes, outlines. The
    * bowling reference has ≈5,835 of these, and destroying them is the

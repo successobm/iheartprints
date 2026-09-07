@@ -147,10 +147,31 @@ function resolveBackgroundTreatment(analysis: ArtworkAnalysis): {
  * "Already transparent" means the transparency is doing real work — the
  * border is genuinely open, not merely that a stray anti-aliased pixel
  * somewhere is at alpha 254.
+ *
+ * DTF Background-Removal Status Contradiction Phase (live acceptance
+ * defect): a border crossing `MIN_EDGE_DOMINANT_COVERAGE` is NECESSARY but
+ * not SUFFICIENT. A thin transparent margin (or rounded corners, or partial
+ * prior removal) can satisfy that threshold while a substantial, still-
+ * OPAQUE, edge-connected background — the same uniform colour the border's
+ * own dominant colour identifies — remains elsewhere on the canvas (e.g. a
+ * solid-colour block sitting behind the design). `exteriorMaskOpaqueFraction`
+ * is exactly this artwork's own removable-background computation
+ * (`background-isolation.ts`'s `computeExteriorMask`, the SAME flood fill
+ * `remove_exterior` below already trusts), restricted to pixels that are
+ * genuinely still visible. Requiring it to be negligible — the identical
+ * `MIN_MEANINGFUL_MASK_FRACTION` bar that already decides whether an
+ * exterior fill counts as "a background" at all, never a new threshold —
+ * is what keeps this classification from claiming "nothing to remove" while
+ * a real, unremoved background is still sitting on the canvas: exactly the
+ * artwork the separation-review pass (`region-separation.ts`) independently
+ * proves still needs a removal decision. A `false` result here falls
+ * through to the SAME `remove_exterior`/`manual_review` branches every
+ * other background already goes through — no new state, no new message.
  */
 function isAlreadyUsablyTransparent(analysis: ArtworkAnalysis): boolean {
   return (
     analysis.hasTransparency &&
-    analysis.edge.transparentFraction >= MIN_EDGE_DOMINANT_COVERAGE
+    analysis.edge.transparentFraction >= MIN_EDGE_DOMINANT_COVERAGE &&
+    analysis.exteriorMaskOpaqueFraction < MIN_MEANINGFUL_MASK_FRACTION
   );
 }

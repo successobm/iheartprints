@@ -265,6 +265,23 @@ export interface ExteriorMaskResult {
   mask: Uint8Array;
   exteriorCount: number;
   /**
+   * DTF Background-Removal Status Contradiction Phase (live acceptance
+   * defect): of `exteriorCount`, the pixels that are STILL VISIBLE (alpha >=
+   * `VISIBLE_ALPHA_THRESHOLD`) — i.e. exterior-connected, background-colour
+   * membership earned by matching `backgroundColor` within `tolerance`,
+   * never by `matchesBackgroundColor`'s "already invisible" shortcut. This is
+   * the one number that answers "how much of the detected background is
+   * ACTUALLY STILL THERE, unremoved" — `exteriorCount` alone conflates a
+   * pixel that already has alpha 0 (nothing to do) with a pixel that is
+   * still fully opaque and colour-matches (a real, unremoved background).
+   * `repairability.ts`'s "already usably transparent" classification reads
+   * this specifically so a border that merely crosses the transparency-
+   * coverage threshold, while a substantial uniform background remains
+   * opaque elsewhere on the canvas, is never mistaken for "nothing to
+   * remove".
+   */
+  exteriorOpaquePixelCount: number;
+  /**
    * Pixels whose colour matches the background but which NO border-connected
    * path reaches. These are the customer's interior line work, and they are
    * never removed. The single most important number this module reports.
@@ -347,6 +364,7 @@ export function computeExteriorMask(
   }
 
   let exteriorCount = 0;
+  let exteriorOpaquePixelCount = 0;
   let disconnectedMatchCount = 0;
   let left = width;
   let top = height;
@@ -354,12 +372,13 @@ export function computeExteriorMask(
   let bottom = -1;
 
   for (let pixel = 0; pixel < total; pixel += 1) {
+    const idx = pixel * 4;
     if (mask[pixel] === 1) {
       exteriorCount += 1;
+      if (data[idx + 3]! >= VISIBLE_ALPHA_THRESHOLD) exteriorOpaquePixelCount += 1;
       continue;
     }
 
-    const idx = pixel * 4;
     if (data[idx + 3]! < VISIBLE_ALPHA_THRESHOLD) continue;
 
     if (channelDistance(data, idx, options.backgroundColor) <= options.tolerance) {
@@ -386,7 +405,7 @@ export function computeExteriorMask(
           height: bottom + 1 - top,
         };
 
-  return { mask, exteriorCount, disconnectedMatchCount, bounds };
+  return { mask, exteriorCount, exteriorOpaquePixelCount, disconnectedMatchCount, bounds };
 }
 
 export interface BackgroundIsolationOptions {

@@ -221,6 +221,27 @@ export function alreadyTransparentArtwork(): RgbaImage {
   return image;
 }
 
+/**
+ * DTF Background-Removal Status Contradiction Phase (live acceptance
+ * defect): the real customer shape — a thin border that is genuinely
+ * transparent, satisfying the old "already usably transparent" test on its
+ * own, sitting on top of a large uniform-colour background that was NEVER
+ * actually removed. The classic cause: a naive colour-key export zeroes the
+ * alpha channel but leaves the RGB channel intact underneath it, so the
+ * border pixels read as fully invisible while still carrying the
+ * background's own colour — exactly what `edge.dominantColor` measures
+ * regardless of alpha. Must never classify as `already_transparent`; the
+ * large opaque background block is a real, unremoved candidate.
+ */
+export function transparentBorderOverOpaqueBackgroundArtwork(): RgbaImage {
+  const magentaTransparent: Rgba = { r: 255, g: 0, b: 255, a: 0 };
+  const magentaOpaque: Rgba = { r: 255, g: 0, b: 255, a: 255 };
+  const image = createCanvas(120, 120, magentaTransparent);
+  fillRect(image, 3, 3, 114, 114, magentaOpaque);
+  fillRect(image, 40, 40, 40, 40, GOLD);
+  return image;
+}
+
 /** G: the subject runs off the left edge, so it touches the exterior. */
 export function edgeTouchingSubjectArtwork(): RgbaImage {
   const image = createCanvas(120, 120, NEAR_BLACK);

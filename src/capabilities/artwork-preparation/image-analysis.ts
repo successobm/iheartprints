@@ -96,6 +96,8 @@ export function analyzeArtwork(input: AnalyzeArtworkInput): ArtworkAnalysis {
 
   const totalPixels = image.width * image.height;
   const exteriorMaskFraction = totalPixels === 0 ? 0 : mask.exteriorCount / totalPixels;
+  const exteriorMaskOpaqueFraction =
+    totalPixels === 0 ? 0 : mask.exteriorOpaquePixelCount / totalPixels;
   const artworkArea = mask.bounds ? mask.bounds.width * mask.bounds.height : 0;
   const deadCanvasFraction = totalPixels === 0 ? 1 : 1 - artworkArea / totalPixels;
 
@@ -117,6 +119,7 @@ export function analyzeArtwork(input: AnalyzeArtworkInput): ArtworkAnalysis {
     estimatedBackgroundColor,
     backgroundTolerance,
     exteriorMaskFraction,
+    exteriorMaskOpaqueFraction,
     disconnectedBackgroundColoredPixels: mask.disconnectedMatchCount,
     backgroundIsEdgeConnected,
     artworkBounds: mask.bounds,

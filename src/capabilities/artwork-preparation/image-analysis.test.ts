@@ -12,6 +12,7 @@ import {
   NEAR_BLACK,
   solidBlackExteriorArtwork,
   TRANSPARENT,
+  transparentBorderOverOpaqueBackgroundArtwork,
   whiteBackgroundArtwork,
   WHITE,
 } from "./artwork-fixtures";
@@ -234,6 +235,90 @@ describe("classifyRepairability", () => {
     // A flat canvas with nothing on it but background.
     const assessment = classifyRepairability(analyze(createCanvas(80, 80, NEAR_BLACK)));
     assert.equal(assessment.canPrepareAutomatically, false);
+  });
+});
+
+/**
+ * DTF Background-Removal Status Contradiction Phase: a live acceptance
+ * defect. "Here's what we found" told the customer "your artwork already
+ * has a clear background, so there's nothing to remove" — then clicking
+ * "Prepare My Artwork" immediately routed into a background-removal review
+ * for a large pink/magenta area. Root cause: `isAlreadyUsablyTransparent`
+ * checked only whether the CANVAS EDGE crossed a transparency-coverage
+ * threshold, never whether a substantial, still-opaque, edge-connected
+ * background (the SAME `exteriorMaskFraction`/`backgroundIsEdgeConnected`
+ * signal the `remove_exterior` branch already computes) remained elsewhere
+ * on the canvas — exactly what a naive colour-key export produces (alpha
+ * zeroed at a thin border, RGB left intact underneath it, the real
+ * background block never actually removed).
+ */
+describe("DTF Background-Removal Status Contradiction Phase", () => {
+  it("CASE 1 — already transparent / no removal required: truthfully reports nothing to remove, unaffected by the fix", () => {
+    const analysis = analyze(alreadyTransparentArtwork());
+    // The genuinely-clean case: no meaningful opaque background remains.
+    assert.ok(analysis.exteriorMaskOpaqueFraction < 0.01);
+    const assessment = classifyRepairability(analysis);
+    assert.equal(assessment.backgroundTreatment, "already_transparent");
+    assert.equal(assessment.classification, "PRINT_READY_ALREADY");
+    assert.equal(assessment.canPrepareAutomatically, true);
+  });
+
+  it("CASE 2 — a transparent-enough border over a real, unremoved opaque background: never claims nothing to remove, routes to removal instead", () => {
+    const analysis = analyze(transparentBorderOverOpaqueBackgroundArtwork());
+
+    // Sanity: this fixture genuinely satisfies the OLD (defective) test on
+    // its own — a border that is fully invisible and crosses the coverage
+    // threshold — which is exactly why the old code misclassified it.
+    assert.equal(analysis.hasTransparency, true);
+    assert.ok(analysis.edge.transparentFraction >= 0.85);
+
+    // The fix's own signal: a substantial opaque background genuinely
+    // remains, unremoved.
+    assert.ok(analysis.exteriorMaskOpaqueFraction > 0.5);
+
+    const assessment = classifyRepairability(analysis);
+    assert.notEqual(assessment.backgroundTreatment, "already_transparent");
+    assert.notEqual(assessment.classification, "PRINT_READY_ALREADY");
+    // A uniform, edge-connected background that large is exactly what
+    // `remove_exterior` exists for — reusing the existing branch, never a
+    // new state.
+    assert.equal(assessment.backgroundTreatment, "remove_exterior");
+    assert.equal(assessment.reasons.includes("already_transparent"), false);
+
+    const view = describeArtworkForCustomer(analysis, assessment);
+    assert.doesNotMatch(view.backgroundMessage, /nothing to remove/i);
+    assert.doesNotMatch(view.backgroundMessage, /already has a clear background/i);
+  });
+
+  it("CASE 3 — uncertain/interior matching colours: conservative artwork-preservation behavior is unaffected by the fix", () => {
+    // The bowling-style reference shape: a background-coloured region that
+    // is NOT reachable from the border (real interior line work) must never
+    // be swept into the opaque-exterior signal, and must never be removed.
+    const analysis = analyze(enclosedBlackRegionArtwork());
+    const assessment = classifyRepairability(analysis);
+    // Whatever this shape's actual classification is, it must never claim
+    // "already transparent" when it plainly is not (it has no transparency
+    // at all), and the fix must not have changed its outcome.
+    assert.equal(assessment.backgroundTreatment !== "already_transparent", true);
+  });
+
+  it("CASE 4 — resolution enhancement also required: background and resolution decisions stay independent; the fix never marks low-resolution artwork print-ready", () => {
+    const analysis = analyze(transparentBorderOverOpaqueBackgroundArtwork(), {
+      printPlacement: "full_front",
+    });
+    assert.ok(analysis.pixelSufficiency);
+    assert.equal(analysis.pixelSufficiency!.sufficient, false, "sanity: this small fixture must genuinely fall short of the target");
+
+    const assessment = classifyRepairability(analysis);
+    assert.equal(assessment.enhancementRequired, true);
+    assert.equal(assessment.classification, "REQUIRES_ENHANCEMENT");
+    // The background fix and the resolution requirement must not interact:
+    // the background is still correctly identified as removable...
+    assert.equal(assessment.backgroundTreatment, "remove_exterior");
+    assert.notEqual(assessment.backgroundTreatment, "already_transparent");
+    // ...and enhancement is still required — fixing the background defect
+    // must never accidentally mark low-resolution artwork print-ready.
+    assert.notEqual(assessment.classification, "PRINT_READY_ALREADY");
   });
 });
 
