@@ -35,6 +35,8 @@ import type {
   PixelSufficiency,
   RgbColor,
 } from "./contracts";
+import { computeRegionMap } from "./region-separation";
+import { assessSeparationReviewState } from "./separation-review";
 
 /**
  * Bucket width used to find the dominant edge colour. Coarse enough that
@@ -106,6 +108,28 @@ export function analyzeArtwork(input: AnalyzeArtworkInput): ArtworkAnalysis {
     exteriorMaskFraction >= MIN_MEANINGFUL_MASK_FRACTION &&
     exteriorMaskFraction <= MAX_MEANINGFUL_MASK_FRACTION;
 
+  // DTF Background-Removal Second-Path Contradiction Phase: the SAME
+  // authority `SeparationReviewPanel` uses, run here too, against a fresh
+  // look (`decisionSet: null` — nothing has been decided yet for a
+  // brand-new analysis). `sourceAssetSha256`/`algorithmVersion` identity
+  // fields are never read for this boolean; a fixed placeholder is
+  // deliberate rather than threading the real asset hash all the way
+  // through `analyzeArtwork`'s own signature for a value this call site
+  // never persists or compares.
+  //
+  // `computeRegionMap` itself already excludes any region/proposal with no
+  // genuinely visible pixel (alpha at or above `VISIBLE_ALPHA_THRESHOLD`) —
+  // see its own doc comment — so `assessSeparationReviewState`'s verdict
+  // alone is authoritative here: the SAME filtered `regionMap` is what
+  // `SeparationReviewPanel` itself gates its "Check what will be removed"
+  // screen against, so this call site and that screen can never disagree.
+  let regionSeparationReviewRequired = false;
+  if (totalPixels > 0) {
+    const regionComputation = computeRegionMap(image, "analysis-only", estimatedBackgroundColor, backgroundTolerance);
+    regionSeparationReviewRequired =
+      assessSeparationReviewState(regionComputation.regionMap, null) !== "review_not_required";
+  }
+
   return {
     widthPx: image.width,
     heightPx: image.height,
@@ -125,6 +149,7 @@ export function analyzeArtwork(input: AnalyzeArtworkInput): ArtworkAnalysis {
     artworkBounds: mask.bounds,
     deadCanvasFraction,
     backgroundConfidence: scoreBackgroundConfidence(edge),
+    regionSeparationReviewRequired,
     pixelSufficiency: measurePixelSufficiency(
       mask.bounds?.width ?? image.width,
       mask.bounds?.height ?? image.height,

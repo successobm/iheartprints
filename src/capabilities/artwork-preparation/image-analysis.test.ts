@@ -13,9 +13,11 @@ import {
   solidBlackExteriorArtwork,
   TRANSPARENT,
   transparentBorderOverOpaqueBackgroundArtwork,
+  transparentMarginOverIsolatedOpaqueBackgroundArtwork,
   whiteBackgroundArtwork,
   WHITE,
 } from "./artwork-fixtures";
+import { resolveBackgroundTolerance } from "./background-isolation";
 import {
   analyzeArtwork,
   artworkHasTransparency,
@@ -23,6 +25,8 @@ import {
   measurePixelSufficiency,
 } from "./image-analysis";
 import { classifyRepairability } from "./repairability";
+import { computeRegionMap } from "./region-separation";
+import { assessSeparationReviewState } from "./separation-review";
 import { describeArtworkForCustomer, describeApprovedPreparation } from "./preparation-copy";
 
 function analyze(
@@ -319,6 +323,109 @@ describe("DTF Background-Removal Status Contradiction Phase", () => {
     // ...and enhancement is still required — fixing the background defect
     // must never accidentally mark low-resolution artwork print-ready.
     assert.notEqual(assessment.classification, "PRINT_READY_ALREADY");
+  });
+});
+
+/**
+ * DTF Background-Removal Second-Path Contradiction Phase: a live acceptance
+ * defect discovered continuing local acceptance testing AFTER the fix above.
+ * "Here's what we found" still told the customer "nothing to remove", then
+ * "Check what will be removed" immediately opened on a real proposal — for
+ * artwork whose transparent canvas edge and border-flood-reachable exterior
+ * were both genuinely clean. Root cause: `isAlreadyUsablyTransparent` only
+ * consulted the border-only exterior-mask signal
+ * (`exteriorMaskOpaqueFraction`); it never consulted `region-separation.ts`'s
+ * separate, more thorough pass (`computeRegionMap` + `assessSeparationReviewState`
+ * — the SAME authority `SeparationReviewPanel`'s own screen is driven by),
+ * which can find a real, currently-visible background cavity — enclosed by
+ * ink, never touching the canvas border — that a border-only flood fill is
+ * structurally blind to.
+ *
+ * The fix threads that SAME authority's verdict into `ArtworkAnalysis` as
+ * `regionSeparationReviewRequired` and requires it to be `false` for
+ * `already_transparent`, so Phase 1 and `SeparationReviewPanel` can never
+ * again disagree about whether there is something left to decide.
+ *
+ * A companion false-positive was caught and fixed during this same phase:
+ * `computeRegionMap`'s own region/proposal membership test treats "already
+ * invisible" (alpha below `VISIBLE_ALPHA_THRESHOLD`) the same as
+ * "colour-matches", so a region or in-bounds proposal can legitimately
+ * consist ENTIRELY of already-invisible pixels — never a real removal
+ * candidate. `computeRegionMap` now excludes any region/proposal with no
+ * genuinely visible pixel, which is what keeps CASE 1 below passing.
+ */
+describe("DTF Background-Removal Second-Path Contradiction Phase", () => {
+  it("CASE 1 — a real, enclosed, currently-visible background cavity that only region-separation's more thorough pass can see: never claims nothing to remove", () => {
+    const analysis = analyze(transparentMarginOverIsolatedOpaqueBackgroundArtwork());
+
+    // Sanity: this fixture genuinely satisfies BOTH prior (defective) checks
+    // on its own — a fully transparent canvas edge, and nothing opaque
+    // reachable by a border flood fill — which is exactly why a border-only
+    // signal alone is blind to it.
+    assert.equal(analysis.hasTransparency, true);
+    assert.ok(analysis.edge.transparentFraction >= 0.85);
+    assert.ok(analysis.exteriorMaskOpaqueFraction < 0.01);
+
+    // The fix's own signal: region-separation's more thorough pass finds a
+    // real, currently-visible candidate the border-only signal cannot see.
+    assert.equal(analysis.regionSeparationReviewRequired, true);
+
+    const assessment = classifyRepairability(analysis);
+    assert.notEqual(assessment.backgroundTreatment, "already_transparent");
+    assert.notEqual(assessment.classification, "PRINT_READY_ALREADY");
+
+    const view = describeArtworkForCustomer(analysis, assessment);
+    assert.doesNotMatch(view.backgroundMessage, /nothing to remove/i);
+    assert.doesNotMatch(view.backgroundMessage, /already has a clear background/i);
+  });
+
+  it("CASE 2 — a legacy analysis predating this field fails safe rather than defaulting to already_transparent", () => {
+    const analysis = analyze(alreadyTransparentArtwork());
+    // Sanity: the fresh analysis is genuinely already_transparent.
+    assert.equal(classifyRepairability(analysis).backgroundTreatment, "already_transparent");
+
+    // Simulate a row persisted before `regionSeparationReviewRequired`
+    // existed — the field is simply ABSENT from the stored JSON, not
+    // `false`. No migration, versioning field, or recompute-on-read was
+    // added for this: `isAlreadyUsablyTransparent` requires the field to be
+    // EXPLICITLY `false` (never a bare `!field` negation, under which
+    // `!undefined` — a missing field — reads identically to a confirmed
+    // `false`), so a legacy row can never silently satisfy the newer,
+    // stricter condition — it fails toward requiring a fresh look, never
+    // toward a false "print ready".
+    const legacy = { ...analysis } as Record<string, unknown>;
+    delete legacy.regionSeparationReviewRequired;
+    const assessment = classifyRepairability(legacy as unknown as typeof analysis);
+    assert.notEqual(assessment.backgroundTreatment, "already_transparent");
+  });
+
+  it("CASE 3 — no second UI path can independently render \"nothing to remove\" from contradictory state: SeparationReviewPanel's own gate agrees with Phase 1's signal, both ways", () => {
+    for (const [image, expectReviewRequired] of [
+      [alreadyTransparentArtwork(), false],
+      [transparentMarginOverIsolatedOpaqueBackgroundArtwork(), true],
+    ] as const) {
+      const analysis = analyze(image);
+      const backgroundTolerance = resolveBackgroundTolerance(analysis.edge.maxChannelStandardDeviation);
+      const { regionMap } = computeRegionMap(image, "test-only", analysis.estimatedBackgroundColor, backgroundTolerance);
+      // The EXACT authority `SeparationReviewPanel`'s "Check what will be
+      // removed" screen is driven by, run directly here — never a second,
+      // independently-diverging implementation.
+      const state = assessSeparationReviewState(regionMap, null);
+      assert.equal(state !== "review_not_required", expectReviewRequired);
+      assert.equal(analysis.regionSeparationReviewRequired, expectReviewRequired);
+    }
+  });
+
+  it("CASE 4 — existing conservative removal behavior remains intact: a fully opaque interior-line-work shape (no invisible pixels anywhere) is unaffected by the visibility filter", () => {
+    const analysis = analyze(enclosedBlackRegionArtwork());
+    // Sanity: nothing in this fixture is below the visibility threshold, so
+    // the new filter inside `computeRegionMap` has literally nothing to do.
+    assert.equal(analysis.hasTransparency, false);
+    const assessment = classifyRepairability(analysis);
+    // Whatever this shape's actual classification is, it must never claim
+    // "already transparent" when it plainly is not, and this fix must not
+    // have changed that outcome.
+    assert.notEqual(assessment.backgroundTreatment, "already_transparent");
   });
 });
 

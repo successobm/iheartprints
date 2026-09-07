@@ -161,6 +161,28 @@ export interface ArtworkAnalysis {
   backgroundConfidence: number;
   /** `null` when no print placement is known yet — never guessed. */
   pixelSufficiency: PixelSufficiency | null;
+  /**
+   * DTF Background-Removal Second-Path Contradiction Phase (live acceptance
+   * defect, discovered continuing local acceptance testing AFTER the
+   * `exteriorMaskOpaqueFraction` fix): `already_transparent` must also never
+   * claim "nothing to remove" when the SEPARATE, more thorough region-
+   * separation pass (`region-separation.ts`'s `computeRegionMap` +
+   * `separation-review.ts`'s `assessSeparationReviewState` — the SAME
+   * authority `SeparationReviewPanel`'s "Check what will be removed" screen
+   * is driven by) would independently require a review for this exact
+   * artwork. `exteriorMaskOpaqueFraction` alone only detects a residual
+   * opaque background that is directly reachable by a flood fill FROM THE
+   * BORDER; it structurally cannot see an opaque background block that sits
+   * INSIDE a transparent margin — never touching the border at all (the
+   * real "ChatGPT Image" shape this phase was filed against: a fully
+   * transparent canvas edge, with a substantial near-black, non-border-
+   * connected background still opaque within the artwork's own bounds).
+   * `true` means region-separation would require a real removal decision
+   * for this artwork's CURRENT background estimate — computed with
+   * `decisionSet: null` (a fresh look, no prior decision to carry
+   * forward), exactly the state a brand-new analysis is always in.
+   */
+  regionSeparationReviewRequired: boolean;
 }
 
 /** What the classifier concluded, plus everything a caller needs to act on it. */

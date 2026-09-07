@@ -596,6 +596,14 @@ export function computeRegionMap(
 
   const consequentialRegions: ConsequentialRegion[] = regions
     .filter((r) => r.pixelCount >= MIN_CONSEQUENTIAL_REGION_PX)
+    // DTF Background-Removal Second-Path Contradiction Phase: a region can
+    // clear the pixel-count bar while every one of its pixels is already
+    // invisible (`matchesBackgroundColor`'s alpha shortcut labels alpha < 8
+    // as "background" regardless of colour) — see `hasVisibleLabeledPixel`.
+    // Such a region is never a real removal candidate, so it must not be
+    // "consequential" for either this classification or the separation
+    // review screen both ultimately read from this same list.
+    .filter((r) => hasVisibleLabeledPixel(original, label, r.id))
     .map((r) => ({
       regionId: r.id,
       pixelCount: r.pixelCount,
@@ -604,12 +612,14 @@ export function computeRegionMap(
     }))
     .sort((a, b) => b.pixelCount - a.pixelCount);
 
-  const { mask: proposalMask, pixelCount: proposalPixelCount } = computeInBoundsProposalMask(
-    silhouette,
-    bounds,
-    width,
-    height,
-  );
+  const rawProposal = computeInBoundsProposalMask(silhouette, bounds, width, height);
+  // Same rule for the in-bounds proposal: a proposal mask that is entirely
+  // pixels already below `VISIBLE_ALPHA_THRESHOLD` is a no-op removal, not a
+  // real candidate — treat it exactly like an empty proposal (pixelCount 0)
+  // below, rather than a separate, only-Phase-1 check.
+  const proposalHasVisiblePixel = rawProposal.pixelCount > 0 && hasVisiblePixel(original, rawProposal.mask);
+  const proposalMask = proposalHasVisiblePixel ? rawProposal.mask : null;
+  const proposalPixelCount = proposalHasVisiblePixel ? rawProposal.pixelCount : 0;
 
   // Phase 28C: whether this proposal, taken as a whole and REGARDLESS of any
   // region decision, is provably safe to fully remove automatically —
@@ -658,10 +668,10 @@ export function computeRegionMap(
             SILHOUETTE_RADIUS_PX,
             width,
             height,
-            proposalMask,
+            proposalMask!, // non-null: this branch only runs when proposalPixelCount > 0, which requires proposalHasVisiblePixel
           ),
           pixelCount: proposalPixelCount,
-          bounds: proposalMaskBounds(proposalMask, width, height),
+          bounds: proposalMaskBounds(proposalMask!, width, height),
           fullRemovalSafe,
         };
 
@@ -671,6 +681,35 @@ export function computeRegionMap(
   };
 
   return { regionMap, ink, silhouette, label, proposalMask: inBoundsProposal ? proposalMask : null };
+}
+
+/**
+ * DTF Background-Removal Second-Path Contradiction Phase (live acceptance
+ * defect): whether at least one pixel among the given ids (interpreted
+ * against `label`) is STILL VISIBLE (alpha at or above
+ * `VISIBLE_ALPHA_THRESHOLD`). Region/proposal membership everywhere in this
+ * module is tested via `matchesBackgroundColor`, which treats "already
+ * invisible" the same as "colour-matches" — so a region or an in-bounds
+ * proposal can legitimately consist ENTIRELY of pixels that are already
+ * effectively transparent (a real customer upload proved this: a fully
+ * transparent canvas edge with a 654,954-pixel in-bounds proposal and five
+ * "consequential" regions, every single pixel of which measured alpha 0-7).
+ * Removing an already-invisible pixel is a genuine no-op; a region/proposal
+ * with no visible pixel at all is never a real removal candidate, no
+ * matter how large its pixel COUNT reads — see the two call sites below.
+ */
+function hasVisiblePixel(image: RgbaImage, mask: Uint8Array): boolean {
+  for (let i = 0; i < mask.length; i += 1) {
+    if (mask[i] === 1 && image.data[i * 4 + 3]! >= VISIBLE_ALPHA_THRESHOLD) return true;
+  }
+  return false;
+}
+
+function hasVisibleLabeledPixel(image: RgbaImage, label: Int32Array, regionId: number): boolean {
+  for (let i = 0; i < label.length; i += 1) {
+    if (label[i] === regionId && image.data[i * 4 + 3]! >= VISIBLE_ALPHA_THRESHOLD) return true;
+  }
+  return false;
 }
 
 /**

@@ -167,11 +167,43 @@ function resolveBackgroundTreatment(analysis: ArtworkAnalysis): {
  * proves still needs a removal decision. A `false` result here falls
  * through to the SAME `remove_exterior`/`manual_review` branches every
  * other background already goes through — no new state, no new message.
+ *
+ * DTF Background-Removal Second-Path Contradiction Phase (live acceptance
+ * defect, discovered continuing local acceptance testing): the check above
+ * only catches a residual opaque background that is directly reachable BY
+ * A FLOOD FILL FROM THE BORDER. It cannot see an opaque background block
+ * sitting INSIDE a fully transparent margin — never touching the border at
+ * all — which is exactly the shape a real customer upload produced:
+ * `edge.transparentFraction === 1` (the canvas edge is completely open) and
+ * `exteriorMaskOpaqueFraction === 0` (nothing opaque is border-reachable),
+ * yet `region-separation.ts`'s own, separate, more thorough analysis
+ * (`computeRegionMap` + `assessSeparationReviewState`, the SAME authority
+ * `SeparationReviewPanel`'s "Check what will be removed" screen is driven
+ * by) found a 654,954-pixel in-bounds proposal and five consequential
+ * regions — a real, substantial candidate this check alone was blind to.
+ * `regionSeparationReviewRequired` is that authority's own verdict,
+ * computed once in `analyzeArtwork` and reused here rather than a second,
+ * possibly-disagreeing implementation — required to be EXPLICITLY `false`
+ * (never merely falsy) for exactly the same reason `exteriorMaskOpaqueFraction`
+ * is: two independent screens must never be able to reach two different
+ * answers to "is there anything left to remove" for the identical artwork.
+ *
+ * The `=== false` (rather than `!analysis.regionSeparationReviewRequired`)
+ * is deliberate, not stylistic: this field is boolean, so `!undefined` is
+ * `true` — the SAME as `!false` — meaning a naive negation would silently
+ * treat a persisted analysis row from before this field existed exactly
+ * like a fresh row that positively confirmed nothing needs review. A
+ * missing field is not a confirmed answer; conservatively requiring an
+ * EXPLICIT `false` means every legacy row fails toward the same
+ * `remove_exterior`/`manual_review` fallback every other undecided
+ * background already goes through, with no migration, no version field,
+ * and no recompute-on-read required.
  */
 function isAlreadyUsablyTransparent(analysis: ArtworkAnalysis): boolean {
   return (
     analysis.hasTransparency &&
     analysis.edge.transparentFraction >= MIN_EDGE_DOMINANT_COVERAGE &&
-    analysis.exteriorMaskOpaqueFraction < MIN_MEANINGFUL_MASK_FRACTION
+    analysis.exteriorMaskOpaqueFraction < MIN_MEANINGFUL_MASK_FRACTION &&
+    analysis.regionSeparationReviewRequired === false
   );
 }

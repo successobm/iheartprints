@@ -242,6 +242,32 @@ export function transparentBorderOverOpaqueBackgroundArtwork(): RgbaImage {
   return image;
 }
 
+/**
+ * DTF Background-Removal Second-Path Contradiction Phase (live acceptance
+ * defect, discovered continuing local acceptance testing AFTER the
+ * `exteriorMaskOpaqueFraction` fix above): the canvas edge is genuinely,
+ * fully transparent — nothing opaque is reachable by a flood fill FROM THE
+ * BORDER, so `exteriorMaskOpaqueFraction` alone reads 0 and the border-only
+ * check has nothing to object to. But a fully OPAQUE cavity, coloured to
+ * match the estimated background exactly (same RGB as the transparent
+ * margin, alpha 255 instead of 0), sits enclosed entirely INSIDE a GOLD
+ * ink ring — never touching any edge, and never reachable by a flood fill
+ * from the border without crossing ink. `region-separation.ts`'s
+ * `computeRegionMap` (the SAME authority `SeparationReviewPanel`'s "Check
+ * what will be removed" screen is driven by) finds this cavity as a
+ * genuine consequential region regardless: it is real, currently VISIBLE,
+ * background-coloured content — an enclosed counter/hole shape — that the
+ * border-only exterior-mask signal is structurally blind to. Must never
+ * classify as `already_transparent`.
+ */
+export function transparentMarginOverIsolatedOpaqueBackgroundArtwork(): RgbaImage {
+  const opaqueBackgroundColor: Rgba = { r: 0, g: 0, b: 0, a: 255 }; // same RGB as TRANSPARENT, fully visible
+  const image = createCanvas(160, 160, TRANSPARENT);
+  fillRect(image, 30, 30, 80, 80, GOLD);
+  fillRect(image, 50, 50, 40, 40, opaqueBackgroundColor);
+  return image;
+}
+
 /** G: the subject runs off the left edge, so it touches the exterior. */
 export function edgeTouchingSubjectArtwork(): RgbaImage {
   const image = createCanvas(120, 120, NEAR_BLACK);
