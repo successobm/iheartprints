@@ -4,9 +4,10 @@ import { useEffect, type CSSProperties, type MouseEvent } from "react";
 
 import { GUIDED_CLEANUP_COPY } from "@/capabilities/artwork-preparation";
 import {
+  DEFAULT_CUSTOM_PREVIEW_COLOR,
   DEFAULT_PREVIEW_BACKGROUND,
-  previewBackgroundSurfaceStyle,
-  type PreviewBackground,
+  previewSurfaceStyle,
+  type PreviewSurface,
 } from "./preview-background";
 
 /**
@@ -19,19 +20,21 @@ import {
  * `GuidedCleanupWorkspace`. Viewing can never approve or mutate.
  *
  * Phase 1.5: prepared enlarge may reuse the compare QA Preview Background
- * (solid White / Gray / Black). That remains presentation-only.
+ * (solid White / Gray / Black / Custom Color). That remains presentation-only.
  */
 
 interface ArtworkPreviewModalProps {
   title: string;
   url: string;
   /**
-   * Legacy checkerboard flag. Prefer `previewBackground` for prepared
+   * Legacy checkerboard flag. Prefer `previewSurface` for prepared
    * inspection; when a QA background is provided it wins.
    */
   showTransparencyCheckerboard: boolean;
-  /** Solid QA inspection surface for prepared artwork enlarge. */
-  previewBackground?: PreviewBackground;
+  /** Solid QA inspection surface for prepared artwork enlarge — White / Gray / Black / Custom. */
+  previewSurface?: PreviewSurface;
+  /** The active custom colour, only consulted when `previewSurface === "custom"`. */
+  customPreviewColor?: string;
   onClose: () => void;
 }
 
@@ -39,7 +42,8 @@ export function ArtworkPreviewModal({
   title,
   url,
   showTransparencyCheckerboard,
-  previewBackground,
+  previewSurface,
+  customPreviewColor = DEFAULT_CUSTOM_PREVIEW_COLOR,
   onClose,
 }: ArtworkPreviewModalProps) {
   useEffect(() => {
@@ -54,8 +58,8 @@ export function ArtworkPreviewModal({
     if (event.target === event.currentTarget) onClose();
   }
 
-  const surfaceStyle = previewBackground
-    ? previewBackgroundSurfaceStyle(previewBackground)
+  const surfaceStyle = previewSurface
+    ? previewSurfaceStyle(previewSurface, customPreviewColor)
     : transparencySurfaceStyle(showTransparencyCheckerboard);
 
   return (
@@ -81,7 +85,7 @@ export function ArtworkPreviewModal({
 
         <div
           className="flex min-h-[45vh] flex-1 items-center justify-center p-4 sm:p-8"
-          data-preview-background={previewBackground ?? undefined}
+          data-preview-background={previewSurface ?? undefined}
           style={surfaceStyle}
         >
           {/* `object-contain`, never `cover` — the customer is here to check

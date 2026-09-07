@@ -1250,6 +1250,7 @@ function CompareStep({
               original={{ url: originalImageUrl, loading: originalImageUrl === null }}
               prepared={{ url: preparedImageUrl, loading: preparedImageUrl === null }}
               reviewRequired={false}
+              garmentColor={preparation.productColor ?? null}
             />
           </div>
         </>

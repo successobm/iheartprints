@@ -224,7 +224,15 @@ describe("GuidedCleanupWorkspace", () => {
     );
     const source = readFileSync(sourcePath, "utf8");
     assert.doesNotMatch(source, /transparencySurfaceStyle/);
-    assert.match(source, /previewBackgroundSurfaceStyle/);
+    // DTF Custom Preview Background Phase: the workspace now resolves its QA
+    // surface via `previewSurfaceStyle` (White/Gray/Black/Custom, still from
+    // the SAME `preview-background.ts` module) rather than the older,
+    // presets-only `previewBackgroundSurfaceStyle` — the historical bug this
+    // test guards against was an unimported/undefined identifier, not this
+    // specific name, and "regression: workspace render path never throws on
+    // Preview Background surface" above already proves the current helper is
+    // genuinely imported and callable (renderToString would throw otherwise).
+    assert.match(source, /previewSurfaceStyle/);
     assert.match(source, /from "\.\/preview-background"/);
   });
 
@@ -446,7 +454,7 @@ describe("ArtworkPreviewModal — Enlarge stays view-only", () => {
         title: "Prepared artwork",
         url: "https://signed.example/prepared.png",
         showTransparencyCheckerboard: false,
-        previewBackground: "white",
+        previewSurface: "white",
         onClose: () => {},
       }),
     );

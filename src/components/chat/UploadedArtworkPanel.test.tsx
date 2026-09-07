@@ -1040,6 +1040,85 @@ describe("ArtworkComparison", () => {
     assert.match(html, /Inspection background:/);
   });
 
+  /**
+   * DTF Custom Preview Background Phase.
+   */
+  describe("Custom Color", () => {
+    it("CASE 9 — exposes a Custom Color option alongside White / Gray / Black, with an accessible label", () => {
+      const html = renderToString(
+        createElement(ArtworkComparison, {
+          original: { url: "https://signed.example/original.png", loading: false },
+          prepared: { url: "https://signed.example/prepared.png", loading: false },
+        }),
+      );
+
+      assert.match(html, /data-preview-background-option="custom"/);
+      assert.match(html, /Custom Color/);
+      assert.match(html, /type="color"/);
+      assert.match(html, /aria-label="Choose a custom preview color"/);
+    });
+
+    it("the preview-only clarification is present near Preview Background", () => {
+      const html = renderToString(
+        createElement(ArtworkComparison, {
+          original: { url: "https://signed.example/original.png", loading: false },
+          prepared: { url: "https://signed.example/prepared.png", loading: false },
+        }),
+      );
+
+      assert.match(html, /Preview Background/);
+      assert.match(html, /never added to your artwork/i);
+    });
+
+    it("CASE 7 — the Original tile never carries a preview-background/custom-color attribute at all, regardless of state", () => {
+      const html = renderToString(
+        createElement(ArtworkComparison, {
+          original: { url: "https://signed.example/original.png", loading: false },
+          prepared: { url: "https://signed.example/prepared.png", loading: false },
+        }),
+      );
+
+      // The Original comparison surface renders with no
+      // `data-preview-background` attribute — only the Prepared surface
+      // (`data-comparison-surface="prepared"`) ever carries one.
+      const originalSurfaceMatch = html.match(
+        /<div class="flex h-48[^"]*" data-comparison-surface="original"[^>]*>/,
+      );
+      assert.ok(originalSurfaceMatch, "expected to find the Original comparison surface");
+      assert.doesNotMatch(originalSurfaceMatch![0], /data-preview-background=/);
+      assert.match(html, /The artwork you uploaded, untouched\./);
+    });
+
+    it("CASE 10 — a resolvable garment color (Blue) exposes a Garment preset chip and seeds the custom swatch, without altering the default active surface", () => {
+      const html = renderToString(
+        createElement(ArtworkComparison, {
+          original: { url: "https://signed.example/original.png", loading: false },
+          prepared: { url: "https://signed.example/prepared.png", loading: false },
+          garmentColor: "Blue",
+        }),
+      );
+
+      assert.match(html, /Garment: Blue/);
+      assert.match(html, /#1F3FAF/);
+      // Gray remains the DEFAULT active surface even when a garment preset
+      // is available — the customer must explicitly choose it.
+      assert.match(html, new RegExp(`data-preview-background="${DEFAULT_PREVIEW_BACKGROUND}"`));
+    });
+
+    it("an unresolvable or absent garment color renders no Garment chip at all — no guess, no placeholder", () => {
+      for (const garmentColor of [null, undefined, "Heather Blue", ""]) {
+        const html = renderToString(
+          createElement(ArtworkComparison, {
+            original: { url: "https://signed.example/original.png", loading: false },
+            prepared: { url: "https://signed.example/prepared.png", loading: false },
+            garmentColor,
+          }),
+        );
+        assert.doesNotMatch(html, /Garment:/);
+      }
+    });
+  });
+
   it("Q: has no approval affordance of its own", () => {
     const html = renderToString(
       createElement(ArtworkComparison, {

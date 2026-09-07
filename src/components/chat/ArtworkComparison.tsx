@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import {
   ArtworkPreviewModal,
@@ -8,10 +8,15 @@ import {
 } from "./ArtworkPreviewModal";
 import { PreviewBackgroundControl } from "./PreviewBackgroundControl";
 import {
+  DEFAULT_CUSTOM_PREVIEW_COLOR,
   DEFAULT_PREVIEW_BACKGROUND,
+  garmentPresetChipLabel,
   PREVIEW_BACKGROUND_COPY,
-  previewBackgroundSurfaceStyle,
-  type PreviewBackground,
+  previewSurfaceStyle,
+  resolveGarmentPreviewColor,
+  sameHexColor,
+  type PreviewSurface,
+  type ResolvedGarmentPreviewColor,
 } from "./preview-background";
 
 /**
@@ -54,16 +59,33 @@ interface ArtworkComparisonProps {
    * about what checking will find.
    */
   reviewRequired?: boolean;
+  /**
+   * DTF Custom Preview Background Phase: the customer's own already-entered
+   * garment colour (`ArtworkPreparation.productColor`), if any. Used ONLY to
+   * seed the Custom Color picker's starting swatch and an optional "Garment:
+   * <color>" preset chip — reused, read-only, via `resolveGarmentPreviewColor`.
+   * Never required: `undefined`/unresolvable simply means no chip and a
+   * generic starting colour, never an error and never a guess.
+   */
+  garmentColor?: string | null;
 }
 
 export function ArtworkComparison({
   original,
   prepared,
   reviewRequired = false,
+  garmentColor = null,
 }: ArtworkComparisonProps) {
   const [enlarged, setEnlarged] = useState<"original" | "prepared" | null>(null);
-  const [previewBackground, setPreviewBackground] = useState<PreviewBackground>(
+  const [previewSurface, setPreviewSurface] = useState<PreviewSurface>(
     DEFAULT_PREVIEW_BACKGROUND,
+  );
+  const garmentPreset = useMemo(
+    () => resolveGarmentPreviewColor(garmentColor),
+    [garmentColor],
+  );
+  const [customColor, setCustomColor] = useState<string>(
+    garmentPreset?.hex ?? DEFAULT_CUSTOM_PREVIEW_COLOR,
   );
 
   const enlargedUrl =
@@ -74,8 +96,11 @@ export function ArtworkComparison({
       <div className="mb-2 space-y-1">
         <PreviewBackgroundControl
           idPrefix="compare-preview-bg"
-          value={previewBackground}
-          onChange={setPreviewBackground}
+          value={previewSurface}
+          onChange={setPreviewSurface}
+          customColor={customColor}
+          onCustomColorChange={setCustomColor}
+          garmentPreset={garmentPreset}
         />
         <p className="text-xs text-muted">{PREVIEW_BACKGROUND_COPY.helper}</p>
         {reviewRequired ? (
@@ -100,7 +125,9 @@ export function ArtworkComparison({
           caption="Background removed. Check your design before continuing."
           image={prepared}
           surface="prepared"
-          previewBackground={previewBackground}
+          previewSurface={previewSurface}
+          customColor={customColor}
+          garmentPreset={garmentPreset}
           onEnlarge={() => setEnlarged("prepared")}
         />
       </div>
@@ -110,9 +137,8 @@ export function ArtworkComparison({
           title={enlarged === "original" ? "Original artwork" : "Prepared artwork"}
           url={enlargedUrl}
           showTransparencyCheckerboard={false}
-          previewBackground={
-            enlarged === "prepared" ? previewBackground : undefined
-          }
+          previewSurface={enlarged === "prepared" ? previewSurface : undefined}
+          customPreviewColor={customColor}
           onClose={() => setEnlarged(null)}
         />
       ) : null}
@@ -125,8 +151,32 @@ interface ComparisonTileProps {
   caption: string;
   image: ArtworkComparisonImage;
   surface: "original" | "prepared";
-  previewBackground?: PreviewBackground;
+  previewSurface?: PreviewSurface;
+  customColor?: string;
+  garmentPreset?: ResolvedGarmentPreviewColor | null;
   onEnlarge: () => void;
+}
+
+/**
+ * The "Inspection background:" caption label. Custom shows the garment
+ * preset's own name when the two coincide (never re-labels a customer's
+ * explicit garment colour as merely "Custom Color"), otherwise the plain hex
+ * — same discipline `describePreviewSurface` uses in the sibling
+ * garment-preview-surface module, kept as its own small copy here since
+ * this control's states (four fixed options, no server round trip) are not
+ * the same shape as that module's.
+ */
+function describeInspectionSurface(
+  previewSurface: PreviewSurface | undefined,
+  customColor: string,
+  garmentPreset: ResolvedGarmentPreviewColor | null | undefined,
+): string {
+  if (!previewSurface) return PREVIEW_BACKGROUND_COPY.options.white;
+  if (previewSurface !== "custom") return PREVIEW_BACKGROUND_COPY.options[previewSurface];
+  if (garmentPreset && sameHexColor(customColor, garmentPreset.hex)) {
+    return garmentPresetChipLabel(garmentPreset.label);
+  }
+  return `${PREVIEW_BACKGROUND_COPY.options.custom} (${customColor.toUpperCase()})`;
 }
 
 function ComparisonTile({
@@ -134,12 +184,14 @@ function ComparisonTile({
   caption,
   image,
   surface,
-  previewBackground,
+  previewSurface,
+  customColor = DEFAULT_CUSTOM_PREVIEW_COLOR,
+  garmentPreset = null,
   onEnlarge,
 }: ComparisonTileProps) {
   const surfaceStyle =
-    surface === "prepared" && previewBackground
-      ? previewBackgroundSurfaceStyle(previewBackground)
+    surface === "prepared" && previewSurface
+      ? previewSurfaceStyle(previewSurface, customColor)
       : transparencySurfaceStyle(false);
 
   return (
@@ -148,7 +200,7 @@ function ComparisonTile({
         className="flex h-48 items-center justify-center p-3"
         data-comparison-surface={surface}
         data-preview-background={
-          surface === "prepared" ? previewBackground : undefined
+          surface === "prepared" ? previewSurface : undefined
         }
         style={surfaceStyle}
       >
@@ -175,9 +227,7 @@ function ComparisonTile({
           {surface === "prepared" ? (
             <p className="mt-1 text-[11px] text-muted">
               Inspection background:{" "}
-              {previewBackground
-                ? PREVIEW_BACKGROUND_COPY.options[previewBackground]
-                : PREVIEW_BACKGROUND_COPY.options.white}
+              {describeInspectionSurface(previewSurface, customColor, garmentPreset)}
             </p>
           ) : (
             <p className="mt-1 text-[11px] text-muted">

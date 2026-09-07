@@ -22,9 +22,11 @@ import {
 import { PreviewBackgroundControl } from "./PreviewBackgroundControl";
 import {
   candidateHighlightFrameClassName,
+  DEFAULT_CUSTOM_PREVIEW_COLOR,
   DEFAULT_PREVIEW_BACKGROUND,
-  previewBackgroundSurfaceStyle,
+  previewSurfaceStyle,
   type PreviewBackground,
+  type PreviewSurface,
 } from "./preview-background";
 import {
   clampZoomFactor,
@@ -160,13 +162,17 @@ export function GuidedCleanupWorkspace({
   /** 1 = Fit. Preserved across preparedRevision remounts. */
   const [zoomFactor, setZoomFactor] = useState(GUIDED_CLEANUP_ZOOM_MIN);
   /** QA inspection surface only — never persisted, never sent to the server. */
-  const [previewBackground, setPreviewBackground] = useState<PreviewBackground>(
+  const [previewSurface, setPreviewSurface] = useState<PreviewSurface>(
     initialPreviewBackground,
+  );
+  /** Custom Color's active hex — only consulted while `previewSurface === "custom"`. */
+  const [customPreviewColor, setCustomPreviewColor] = useState<string>(
+    DEFAULT_CUSTOM_PREVIEW_COLOR,
   );
   // Phase 1.5: solid QA surface from preview-background.ts only — never the
   // legacy ArtworkPreviewModal checkerboard helper (a stale Turbopack chunk
   // once called that helper as a bare identifier and crashed Clean Up Background).
-  const artworkSurfaceStyle = previewBackgroundSurfaceStyle(previewBackground);
+  const artworkSurfaceStyle = previewSurfaceStyle(previewSurface, customPreviewColor);
   const panSession = useRef<GestureSession | null>(null);
   const zoomFactorRef = useRef(zoomFactor);
   const displayRef = useRef({ width: 0, height: 0 });
@@ -614,8 +620,10 @@ export function GuidedCleanupWorkspace({
           </div>
           <PreviewBackgroundControl
             idPrefix="guided-cleanup-preview-bg"
-            value={previewBackground}
-            onChange={setPreviewBackground}
+            value={previewSurface}
+            onChange={setPreviewSurface}
+            customColor={customPreviewColor}
+            onCustomColorChange={setCustomPreviewColor}
             disabled={busy}
           />
         </div>
@@ -625,7 +633,7 @@ export function GuidedCleanupWorkspace({
           data-cleanup-viewport
           data-zoom-factor={clampZoomFactor(zoomFactor)}
           data-wheel-zoom="ctrl-meta"
-          data-preview-background={previewBackground}
+          data-preview-background={previewSurface}
           data-qa-surface="preview-background"
           className="min-h-[50vh] flex-1 overflow-auto overscroll-contain"
           style={artworkSurfaceStyle}
