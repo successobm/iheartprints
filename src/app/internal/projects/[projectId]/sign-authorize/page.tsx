@@ -18,7 +18,7 @@ import { SignVisualAcceptancePanel } from "./SignVisualAcceptancePanel";
 import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
 import { SignStructuralLayoutForm } from "./SignStructuralLayoutForm";
 import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
-import { resolveSignProductionCtaState } from "./sign-production-cta-state";
+import { describeSignProductionCurrentStatus, resolveSignProductionCtaState } from "./sign-production-cta-state";
 
 type PageProps = {
   params: Promise<{ projectId: string }>;
@@ -211,6 +211,18 @@ function SignPlanReview({
         />
       ) : null}
 
+      {/* Production Details Hierarchy Cleanup Phase: ONE collapsible section
+          holding every retrospective/diagnostic fact about this plan and
+          candidate — ordered output, truthful current status, plan
+          findings/steps, plan authorization, and the QR/print-size repair
+          panels (each already its own self-contained, headed section) —
+          so they all expand/collapse together. Deliberately excludes the
+          revised-artwork approval panel above (a primary human review
+          gate, kept prominent near the artwork) and the final Print-ready
+          download below (the workflow's terminal action/result) — see
+          `sign-production-review-download-position.test.ts` and this
+          page's own hierarchy tests for the invariants this boundary must
+          keep. */}
       <details className="rounded-lg border border-ink/10 p-3" open={!hasWorkspace}>
         <summary className="cursor-pointer select-none text-sm font-semibold text-ink">Production details</summary>
         <div className="mt-3 flex flex-col gap-4">
@@ -243,10 +255,30 @@ function SignPlanReview({
             </p>
           </section>
 
+          {/* Stale/Misleading Status Cleanup Phase (real Get Hibachi
+              acceptance incident): `plan.riskLabel` is a HISTORICAL fact —
+              why the repair PLAN itself needed a human to authorize it,
+              frozen at planning time — never re-derived as production
+              progresses. Labeled as exactly that here, never as "Status",
+              so it can never contradict what the page is doing right now
+              (e.g. exposing Print Ready while this still read "Needs
+              production review"). The line below it is the TRUTHFUL
+              current answer, from the SAME authority the execution
+              button/download section already use. */}
           <section className="flex flex-col gap-1">
-            <h3 className="text-sm font-semibold text-ink">Status</h3>
+            <h3 className="text-sm font-semibold text-ink">Plan risk classification</h3>
             <p className="text-sm text-ink" data-sign-authorize-risk-label>
               {plan.riskLabel}
+            </p>
+            <p className="text-xs text-muted">
+              Decided when this plan was formulated — not this candidate&apos;s current production status.
+            </p>
+          </section>
+
+          <section className="flex flex-col gap-1">
+            <h3 className="text-sm font-semibold text-ink">Current status</h3>
+            <p className="text-sm text-ink" data-sign-authorize-current-status>
+              {describeSignProductionCurrentStatus(review.production)}
             </p>
           </section>
 
@@ -277,6 +309,54 @@ function SignPlanReview({
                 </div>
               ))}
             </section>
+          ) : null}
+
+          <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
+            <h3 className="text-sm font-semibold text-ink">Authorization</h3>
+            {isAuthorized ? (
+              <div data-sign-authorize-authorized>
+                <p className="text-sm font-semibold text-ink">Authorized</p>
+                <p className="text-sm text-muted">
+                  This production plan has been reviewed and authorized{authorization.authorizedBy === "customer" ? " by the customer" : " by an operator"}
+                  {authorization.authorizedAt ? ` on ${new Date(authorization.authorizedAt).toLocaleString()}` : ""}.
+                </p>
+              </div>
+            ) : canAuthorize ? (
+              <SignAuthorizeButton projectId={projectId} />
+            ) : (
+              <p className="text-sm text-ink" data-sign-authorize-blocked>
+                The planner couldn&apos;t formulate an automatic preparation for this artwork. There is nothing to
+                authorize.
+              </p>
+            )}
+          </section>
+
+          {/* SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: only
+              meaningful once a production candidate actually exists —
+              there is nothing to compare the source against before that.
+              A passing QR check never manufactures Print Ready on its
+              own, and a failing one blocks it through the same existing
+              validation architecture every other check here already
+              uses. */}
+          {review.production.jobStatus === "completed" ? (
+            <div className="flex flex-col gap-4 border-t border-ink/10 pt-4">
+              <SignQrPreservationPanel
+                projectId={projectId}
+                machineReadableContent={review.production.machineReadableContent}
+              />
+              {/* Fix Existing Final Sign Candidate Physical-Resolution
+                  Metadata Repair Phase: rendered unconditionally alongside
+                  the QR panel, independent of the overall print-ready CTA
+                  — the real historical defect this repairs is a candidate
+                  the system otherwise considers print-ready (its
+                  persisted validation simply predates this check) while
+                  its actual downloaded bytes carry the wrong (or no)
+                  print-size metadata. */}
+              <SignPhysicalResolutionRepairPanel
+                projectId={projectId}
+                physicalResolutionMetadata={review.production.physicalResolutionMetadata}
+              />
+            </div>
           ) : null}
         </div>
       </details>
@@ -312,55 +392,9 @@ function SignPlanReview({
         </details>
       ) : null}
 
-      <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
-        {isAuthorized ? (
-          <div data-sign-authorize-authorized>
-            <p className="text-sm font-semibold text-ink">Authorized</p>
-            <p className="text-sm text-muted">
-              This production plan has been reviewed and authorized{authorization.authorizedBy === "customer" ? " by the customer" : " by an operator"}
-              {authorization.authorizedAt ? ` on ${new Date(authorization.authorizedAt).toLocaleString()}` : ""}.
-            </p>
-          </div>
-        ) : canAuthorize ? (
-          <SignAuthorizeButton projectId={projectId} />
-        ) : (
-          <p className="text-sm text-ink" data-sign-authorize-blocked>
-            The planner couldn&apos;t formulate an automatic preparation for this artwork. There is nothing to
-            authorize.
-          </p>
-        )}
-      </section>
-
       {isAuthorized && productionCta.kind !== "print_ready" ? (
         <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
           <SignProductionAction projectId={projectId} production={review.production} />
-        </section>
-      ) : null}
-
-      {/* SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION: only meaningful
-          once a production candidate actually exists — there is nothing
-          to compare the source against before that. Independent of the
-          right-edge/Fit-to-Production workspace above (Section AB: never
-          conflated); a passing QR check never manufactures Print Ready on
-          its own, and a failing one blocks it through the same existing
-          validation architecture every other check here already uses. */}
-      {review.production.jobStatus === "completed" ? (
-        <section className="flex flex-col gap-4 border-t border-ink/10 pt-4">
-          <SignQrPreservationPanel
-            projectId={projectId}
-            machineReadableContent={review.production.machineReadableContent}
-          />
-          {/* Fix Existing Final Sign Candidate Physical-Resolution Metadata
-              Repair Phase: rendered unconditionally alongside the QR panel,
-              independent of the overall print-ready CTA above — the real
-              historical defect this repairs is a candidate the system
-              otherwise considers print-ready (its persisted validation
-              simply predates this check) while its actual downloaded bytes
-              carry the wrong (or no) print-size metadata. */}
-          <SignPhysicalResolutionRepairPanel
-            projectId={projectId}
-            physicalResolutionMetadata={review.production.physicalResolutionMetadata}
-          />
         </section>
       ) : null}
 

@@ -181,3 +181,51 @@ export function resolveSignProductionCtaState(
     needsAttentionNotice: production.needsAttention,
   };
 }
+
+/**
+ * Stale/Misleading Status Cleanup Phase (real Get Hibachi acceptance
+ * incident: after a materially QR-revised candidate was explicitly
+ * approved and Print Ready correctly appeared, the "Status" section still
+ * read "Needs production review" — a contradiction). That copy came from
+ * `plan.riskLabel`, a HISTORICAL fact frozen at planning time (why the
+ * repair PLAN itself needed a human to authorize it) — never re-derived as
+ * production progresses through authorization, QR replacement, visual
+ * acceptance, or Print Ready. It is real information (kept, relabeled —
+ * see `page.tsx`), just never the answer to "what is this candidate's
+ * CURRENT status right now."
+ *
+ * This function IS that current answer — the SAME authoritative
+ * `resolveSignProductionCtaState` the execution button/download section
+ * already use, translated to a plain status sentence, so the page can
+ * never show a status contradicting what it is simultaneously doing
+ * (exposing Print Ready, showing an unresolved QR panel, etc.). No
+ * parallel state is invented here — every branch mirrors a state
+ * `SignProductionAction`'s own copy already expresses for the cases where
+ * it renders visible text.
+ */
+export function describeSignProductionCurrentStatus(
+  production: SignPlanOperatorProductionStatus,
+): string {
+  const cta = resolveSignProductionCtaState(production);
+  switch (cta.kind) {
+    case "print_ready":
+      return "Print ready.";
+    case "in_flight":
+      return "Preparing artwork.";
+    case "needs_qr_resolution":
+      return "Needs QR resolution before this can be finalized.";
+    case "needs_physical_resolution_repair":
+      return "Needs a print-size metadata correction before this can be finalized.";
+    case "needs_visual_acceptance":
+      return "Needs the revised artwork approved before this can be finalized.";
+    case "action":
+      if (cta.label === "prepare_artwork") return "Not yet prepared for production.";
+      // "try_again": either a genuine failed attempt, or a completed job
+      // whose candidate needs attention for a reason none of the specific
+      // branches above claimed (mirrors `SignProductionAction`'s own
+      // `needsAttentionNotice` distinction exactly).
+      return cta.needsAttentionNotice
+        ? "Needs further review before this can be finalized."
+        : "The last production attempt failed and needs to be retried.";
+  }
+}

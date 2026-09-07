@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it, test } from "node:test";
 
 import type { SignPlanOperatorProductionStatus } from "@/capabilities/sign-preparation";
-import { resolveSignProductionCtaState } from "./sign-production-cta-state";
+import { describeSignProductionCurrentStatus, resolveSignProductionCtaState } from "./sign-production-cta-state";
 
 /**
  * FIX AUTHORIZED SIGN PRODUCTION WORKSPACE CTA: regression coverage for the
@@ -344,5 +344,88 @@ describe("Fix Existing Final Sign Candidate Physical-Resolution Metadata Repair 
       ),
       { kind: "in_flight" },
     );
+  });
+});
+
+describe("describeSignProductionCurrentStatus", () => {
+  it("pre-approval, QR-revised candidate: reports review is still required, never a bare 'print ready'-adjacent claim", () => {
+    const status = describeSignProductionCurrentStatus(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        blockedCandidateAssetId: "qr-replaced-asset-id",
+        requiresVisualAcceptance: true,
+        visualAcceptanceSatisfied: false,
+      }),
+    );
+    assert.match(status, /approv/i, "must convey the revised artwork still needs approval/review");
+    assert.doesNotMatch(status, /print ready/i);
+  });
+
+  it("after exact-candidate visual acceptance and full technical readiness: never reports 'needs production review' or any needs-review language", () => {
+    const status = describeSignProductionCurrentStatus(
+      production({
+        jobStatus: "completed",
+        printReady: true,
+        needsAttention: false,
+        requiresVisualAcceptance: true,
+        visualAcceptanceSatisfied: true,
+      }),
+    );
+    assert.equal(status, "Print ready.");
+    assert.doesNotMatch(status, /needs production review/i);
+    assert.doesNotMatch(status, /review/i);
+  });
+
+  it("print-ready takes precedence over every other signal (defensive)", () => {
+    const status = describeSignProductionCurrentStatus(
+      production({
+        jobStatus: "completed",
+        printReady: true,
+        needsAttention: true,
+        requiresVisualAcceptance: true,
+        visualAcceptanceSatisfied: false,
+        machineReadableContent: { regions: [], overall: "fail" },
+      }),
+    );
+    assert.equal(status, "Print ready.");
+  });
+
+  it("in flight: reports preparing, never a stale review claim", () => {
+    const status = describeSignProductionCurrentStatus(production({ jobStatus: "queued", inFlight: true }));
+    assert.equal(status, "Preparing artwork.");
+  });
+
+  it("QR-blocking (unrelated to visual acceptance): reports needs QR resolution", () => {
+    const status = describeSignProductionCurrentStatus(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        machineReadableContent: { regions: [], overall: "review_required" },
+      }),
+    );
+    assert.match(status, /QR/);
+  });
+
+  it("physical-resolution-blocking: reports needs a print-size metadata correction", () => {
+    const status = describeSignProductionCurrentStatus(
+      production({
+        jobStatus: "completed",
+        needsAttention: true,
+        physicalResolutionMetadata: { status: "fail", reason: "declares the wrong PPI" },
+      }),
+    );
+    assert.match(status, /print-size metadata/);
+  });
+
+  it("never prepared at all: reports not yet prepared, never a review claim", () => {
+    const status = describeSignProductionCurrentStatus(production({ jobStatus: null }));
+    assert.equal(status, "Not yet prepared for production.");
+  });
+
+  it("a genuinely failed job (no needsAttention): reports a failed attempt, distinct from a needs-review state", () => {
+    const status = describeSignProductionCurrentStatus(production({ jobStatus: "failed", failed: true }));
+    assert.match(status, /failed/i);
+    assert.doesNotMatch(status, /review/i);
   });
 });

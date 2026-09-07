@@ -60,3 +60,73 @@ describe("Sign Production Review page: final download position", () => {
     assert.doesNotMatch(source, /Download corrected artwork/);
   });
 });
+
+/**
+ * Production Details Hierarchy Cleanup Phase: Authorization, the QR panel,
+ * and the print-size metadata panel used to render as their OWN top-level
+ * sections, staying visible even when "Production details" was collapsed.
+ * Same source-level structural pattern as the suite above — this page has
+ * no full-render harness (see that suite's own doc) — pinning the ONE
+ * invariant that matters: these three sections' JSX now falls strictly
+ * BETWEEN "Production details"'s own `<summary>` and its OWN closing
+ * `</details>` (the first one after that summary — nothing else nests a
+ * `<details>` inside it), so they expand/collapse together with it, while
+ * the revised-artwork approval panel and the final Print-ready download
+ * remain OUTSIDE that same boundary.
+ */
+describe("Sign Production Review page: Production details hierarchy", () => {
+  const source = readFileSync(
+    "src/app/internal/projects/[projectId]/sign-authorize/page.tsx",
+    "utf8",
+  );
+
+  const productionDetailsStart = source.indexOf("Production details");
+  const productionDetailsEnd = source.indexOf("</details>", productionDetailsStart);
+
+  it("sanity: both boundary markers were actually found", () => {
+    assert.ok(productionDetailsStart >= 0, "the 'Production details' summary text must exist");
+    assert.ok(productionDetailsEnd > productionDetailsStart, "a closing </details> must follow it");
+  });
+
+  it("Authorization renders inside Production details", () => {
+    const authorizationIndex = source.indexOf('<h3 className="text-sm font-semibold text-ink">Authorization</h3>');
+    assert.ok(authorizationIndex >= 0, "sanity: the Authorization heading must exist");
+    assert.ok(authorizationIndex > productionDetailsStart && authorizationIndex < productionDetailsEnd, "Authorization must render between the Production details summary and its closing </details>");
+  });
+
+  it("the QR section renders inside Production details", () => {
+    const qrIndex = source.indexOf("<SignQrPreservationPanel");
+    assert.ok(qrIndex >= 0, "sanity: the QR panel must still be rendered");
+    assert.ok(qrIndex > productionDetailsStart && qrIndex < productionDetailsEnd, "SignQrPreservationPanel must render between the Production details summary and its closing </details>");
+  });
+
+  it("print size metadata renders inside Production details", () => {
+    const physicalIndex = source.indexOf("<SignPhysicalResolutionRepairPanel");
+    assert.ok(physicalIndex >= 0, "sanity: the physical-resolution panel must still be rendered");
+    assert.ok(physicalIndex > productionDetailsStart && physicalIndex < productionDetailsEnd, "SignPhysicalResolutionRepairPanel must render between the Production details summary and its closing </details>");
+  });
+
+  it("Ordered output, current status, and Proposed preparation also render inside Production details (collapse together)", () => {
+    for (const marker of ["Ordered output", "Current status", "Proposed preparation"]) {
+      const index = source.indexOf(marker);
+      assert.ok(index >= 0, `sanity: "${marker}" must exist`);
+      assert.ok(index > productionDetailsStart && index < productionDetailsEnd, `"${marker}" must render inside Production details`);
+    }
+  });
+
+  it("revised-artwork approval remains OUTSIDE Production details, never moved into it", () => {
+    const panelIndex = source.indexOf("<SignVisualAcceptancePanel");
+    assert.ok(panelIndex >= 0, "sanity: the visual-acceptance panel must still be rendered");
+    assert.ok(panelIndex < productionDetailsStart, "SignVisualAcceptancePanel must render BEFORE Production details, never inside it");
+  });
+
+  it("Print-ready download remains OUTSIDE Production details, never moved into it", () => {
+    const downloadIndex = source.indexOf("<SignPrintReadyDownload");
+    assert.ok(downloadIndex > productionDetailsEnd, "SignPrintReadyDownload must render AFTER Production details' own closing </details>, never inside it");
+  });
+
+  it("the historical plan-risk classification is labeled as such, never presented as bare current 'Status'", () => {
+    assert.match(source, /Plan risk classification/);
+    assert.doesNotMatch(source, /<h3[^>]*>Status<\/h3>/, "a bare 'Status' heading must never reappear — it read as current state and was misleading");
+  });
+});
