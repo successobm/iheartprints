@@ -3,6 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 
 import {
+  describePreviewSurface,
+  GARMENT_INSPECTION_SURFACES,
+  resolveInitialPreviewSurfaceHex,
+} from "./garment-preview-surface";
+import {
   canStepRegion,
   computeAutoAdvanceTarget,
   computeRegionProgress,
@@ -211,12 +216,6 @@ export interface SeparationReviewPanelProps {
   onApproved?: () => void;
 }
 
-const GARMENT_INSPECTION_SURFACES = [
-  { key: "black", hex: "#000000", label: "Black" },
-  { key: "white", hex: "#FFFFFF", label: "White" },
-  { key: "red", hex: "#B22234", label: "Red" },
-  { key: "gray", hex: "#C8C8C8", label: "Gray" },
-] as const;
 
 /** Phase 15 copy: neutral framing that does not presume every region is substrate. */
 const QUESTION_COPY = "Should this highlighted area print?";
@@ -355,7 +354,9 @@ export function SeparationReviewPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [previewSurface, setPreviewSurface] = useState<string>(garmentColor);
+  const [previewSurface, setPreviewSurface] = useState<string>(() =>
+    resolveInitialPreviewSurfaceHex(garmentColor),
+  );
   const [imageNonce, setImageNonce] = useState(0);
   // Which region the workspace is currently showing. `null` only before the
   // first load resolves, or while final review owns the screen.
@@ -753,7 +754,10 @@ export function SeparationReviewPanel({
         </p>
         {errorBanner}
 
-        <div className="mt-3 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
+        <p className="mt-3 text-xs text-muted" data-preview-surface-label>
+          Previewing on: <span className="font-medium text-ink">{describePreviewSurface(previewSurface, garmentColor)}</span>
+        </p>
+        <div className="mt-1.5 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
           {GARMENT_INSPECTION_SURFACES.map((s) => (
             <button
               key={s.key}
@@ -786,7 +790,7 @@ export function SeparationReviewPanel({
             <GarmentPreviewImage
               src={`/api/projects/${projectId}/artwork-preparation/separation/image?mode=master-preview&garment=${encodeURIComponent(previewSurface)}&v=${imageNonce}`}
               backgroundColor={previewSurface}
-              alt="Resulting prepared artwork on the selected garment colour"
+              alt={`Resulting prepared artwork previewed on ${describePreviewSurface(previewSurface, garmentColor)}`}
               className="mt-1 h-[280px] w-full rounded-lg border border-black/8 object-contain sm:h-[360px]"
             />
           </div>
@@ -882,7 +886,11 @@ export function SeparationReviewPanel({
         </div>
 
         {proposalViewMode === "result" ? (
-          <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
+          <>
+          <p className="mt-2 text-xs text-muted" data-preview-surface-label>
+            Previewing on: <span className="font-medium text-ink">{describePreviewSurface(previewSurface, garmentColor)}</span> — transparent areas take on this colour here; they are not part of your artwork.
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
             {GARMENT_INSPECTION_SURFACES.map((s) => (
               <button
                 key={s.key}
@@ -899,6 +907,7 @@ export function SeparationReviewPanel({
               </button>
             ))}
           </div>
+          </>
         ) : null}
 
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -909,7 +918,7 @@ export function SeparationReviewPanel({
             proposalViewMode === "proposal"
               ? "Your artwork at full color. The pink area will become transparent; any spots you've chosen to keep are tinted green."
               : proposalViewMode === "result"
-                ? "The resulting artwork on the selected garment colour"
+                ? `The resulting artwork previewed on ${describePreviewSurface(previewSurface, garmentColor)} — the transparent area is not part of your artwork`
                 : "The original artwork, untouched"
           }
           onClick={showPreserveMode() && proposalViewMode === "proposal" ? handleProposalImageClick : undefined}
@@ -1179,7 +1188,11 @@ export function SeparationReviewPanel({
           </div>
 
           {contextMode === "result" ? (
-            <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
+            <>
+            <p className="mt-2 text-xs text-muted" data-preview-surface-label>
+              Previewing on: <span className="font-medium text-ink">{describePreviewSurface(previewSurface, garmentColor)}</span>
+            </p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5" role="group" aria-label="Preview garment colour">
               {GARMENT_INSPECTION_SURFACES.map((s) => (
                 <button
                   key={s.key}
@@ -1196,6 +1209,7 @@ export function SeparationReviewPanel({
                 </button>
               ))}
             </div>
+            </>
           ) : null}
 
           {/* eslint-disable-next-line @next/next/no-img-element */}

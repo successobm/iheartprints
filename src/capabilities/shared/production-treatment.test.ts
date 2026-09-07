@@ -50,6 +50,14 @@ describe("garment colour resolution (Goal 4)", () => {
     assert.equal(resolveGarmentColor("SPORT GREY")!.hex, "#9AA0A6");
   });
 
+  it("DTF Background-Removal Garment-Preview Contradiction Phase: the bare word 'Blue' resolves — every other basic hue already had a bare-word entry", () => {
+    assert.equal(resolveGarmentColor("Blue")!.hex, "#1F3FAF");
+    assert.equal(resolveGarmentColor("blue")!.hex, "#1F3FAF");
+    // Synonymous with the already-existing qualified spelling — never a
+    // second, independent colour.
+    assert.equal(resolveGarmentColor("Blue")!.hex, resolveGarmentColor("Royal Blue")!.hex);
+  });
+
   it("keeps the operator's own label alongside the RGB the engine used", () => {
     // Two different questions: what the operator chose, and what the engine
     // actually did. A future colour-table change must be detectable rather

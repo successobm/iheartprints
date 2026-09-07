@@ -217,6 +217,11 @@ export const TEST_FILES = [
   "src/components/chat/region-review-workspace.test.ts",
   "src/components/chat/proposal-review-workspace.test.ts",
   "src/components/chat/separation-review-workspace-shape.test.ts",
+  // DTF Background-Removal Garment-Preview Contradiction Phase: garment-
+  // colour resolution for the "Check what will be removed" preview
+  // surface, and the pixel-level proof that a previewed garment colour
+  // never changes the underlying removal master/output.
+  "src/components/chat/garment-preview-surface.test.ts",
   "src/capabilities/artwork-preparation/separation-review.test.ts",
   "src/capabilities/artwork-preparation/separation-decision-workflow.test.ts",
   "src/capabilities/artwork-preparation/complex-background-operator-routing.test.ts",

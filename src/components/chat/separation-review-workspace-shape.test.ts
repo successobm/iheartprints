@@ -254,3 +254,50 @@ describe("SeparationReviewPanel structure — one region at a time, not 18 cards
     assert.doesNotMatch(SOURCE, /assessSeparationReviewState/, "routing must come from the server's own view, never a second client-side state machine");
   });
 });
+
+/**
+ * DTF Background-Removal Garment-Preview Contradiction Phase: structural
+ * proof, at the source level, that the previewSurface a customer's own
+ * garment colour is never passed straight through unresolved, and that
+ * every "Result"-mode swatch group tells the customer which surface is
+ * currently showing.
+ */
+describe("SeparationReviewPanel garment-preview surface (DTF Background-Removal Garment-Preview Contradiction Phase)", () => {
+  it("previewSurface is always seeded from the resolved surface, never the raw garmentColor string directly", () => {
+    assert.doesNotMatch(
+      SOURCE,
+      /useState<string>\(garmentColor\)/,
+      "the raw, unresolved garmentColor prop must never seed previewSurface directly",
+    );
+    assert.match(SOURCE, /resolveInitialPreviewSurfaceHex\(garmentColor\)/);
+  });
+
+  it("imports the resolution/labeling helpers from the extracted pure module, never redefining them inline", () => {
+    assert.match(SOURCE, /from "\.\/garment-preview-surface"/);
+  });
+
+  it("no hardcoded black fallback remains in the component's own garment-preview logic", () => {
+    // The component itself must never hand-roll a `"#000000"` fallback —
+    // that authority now lives solely in `garment-preview-surface.ts`
+    // (`FALLBACK_PREVIEW_SURFACE`, white).
+    assert.doesNotMatch(SOURCE, /#000000/i);
+  });
+
+  it("every 'Result'-mode garment-swatch group is paired with a 'Previewing on' label, so the customer is never left guessing", () => {
+    const labelCount = (SOURCE.match(/Previewing on:/g) ?? []).length;
+    const swatchGroupCount = (SOURCE.match(/aria-label="Preview garment colour"/g) ?? []).length;
+    assert.equal(swatchGroupCount, 3, "sanity: exactly the three known garment-preview swatch groups");
+    assert.equal(labelCount, swatchGroupCount, "every garment-preview swatch group must have its own 'Previewing on' label");
+  });
+
+  it("Original and Proposed Removal never request a garment-composited image — only Result does", () => {
+    const originalUrlLine = SOURCE.match(/mode=original`/g) ?? [];
+    const proposalHighlightLine = SOURCE.match(/mode=proposal-highlight/g) ?? [];
+    assert.ok(originalUrlLine.length > 0);
+    assert.ok(proposalHighlightLine.length > 0);
+    // Neither literal ever carries a `garment=` query param in the same URL
+    // template — only `mode=master-preview` templates do.
+    assert.doesNotMatch(SOURCE, /mode=original[^`]*garment=/);
+    assert.doesNotMatch(SOURCE, /mode=proposal-highlight[^`]*garment=/);
+  });
+});

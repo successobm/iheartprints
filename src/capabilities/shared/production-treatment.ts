@@ -235,6 +235,14 @@ const GARMENT_COLOR_TABLE: Record<string, string> = {
   "navy blue": "#1B2A44",
   royal: "#1F3FAF",
   "royal blue": "#1F3FAF",
+  // DTF Background-Removal Garment-Preview Contradiction Phase (live
+  // acceptance defect): every other basic hue already has a bare-word
+  // entry (red, green, purple, orange, gold, yellow, pink, brown below) —
+  // "blue" alone, with no qualifier, was the one missing. A customer who
+  // types the single word "Blue" is stating a real, common answer, not an
+  // ambiguous one; treated as a synonym for `royal`/`royal blue`, the same
+  // hex a qualified "Royal Blue" already resolves to.
+  blue: "#1F3FAF",
   red: "#B22234",
   maroon: "#5C1A2B",
   forest: "#1E4620",

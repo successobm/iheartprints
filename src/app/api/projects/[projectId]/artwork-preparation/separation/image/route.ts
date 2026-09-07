@@ -162,11 +162,21 @@ export async function GET(request: Request, context: RouteContext) {
     if (mode === "master") return pngResponse(encodePng(master));
 
     // master-preview
-    const garmentParam = url.searchParams.get("garment") ?? "#000000";
+    //
+    // DTF Background-Removal Garment-Preview Contradiction Phase (live
+    // acceptance defect): the caller is now expected to always send an
+    // already-resolved `#RRGGBB` (`SeparationReviewPanel` resolves the
+    // customer's own stated garment colour before ever requesting this
+    // route — see that component's `resolveInitialPreviewSurfaceHex`).
+    // This fallback exists purely for a malformed/absent `garment` param
+    // reaching the route directly; white, never black, so an unresolved
+    // request never silently composites transparent pixels indistinguishably
+    // from real opaque black artwork ink.
+    const garmentParam = url.searchParams.get("garment") ?? "#FFFFFF";
     const garment = resolveGarmentColor(garmentParam) ?? {
       label: "Preview",
-      hex: "#000000",
-      rgb: { r: 0, g: 0, b: 0 },
+      hex: "#FFFFFF",
+      rgb: { r: 255, g: 255, b: 255 },
     };
     return pngResponse(encodePng(compositeOverGarment(master, garment)));
   } catch (error) {
