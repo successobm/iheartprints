@@ -102,15 +102,21 @@ describe("Topaz provider-result download security boundary (Signs Phase S3A)", (
     // S3B.1: S3A originally coupled these (the provider cap WAS
     // `MAX_UPLOAD_BYTES`) — a real live Ruth acceptance run proved that
     // wrong (a genuine, already-paid-for Topaz result at ~34.6MB was
-    // rejected by the 25MB customer-upload cap). This asserts the
-    // decoupling: the customer-upload limit is untouched at 25MB, and the
-    // provider cap is a materially different, independently-set value.
-    assert.equal(MAX_UPLOAD_BYTES, 25 * 1024 * 1024, "customer upload limit remains 25 MB, unchanged");
+    // rejected by the 25MB customer-upload cap of the time). This asserts
+    // the decoupling itself, not a frozen exact value for either side —
+    // the Large Raster Upload Limit Audit deliberately revisited
+    // `MAX_UPLOAD_BYTES` on its own evidence (see `upload-limits.ts`), and
+    // this test's job is to keep proving the two remain independent, not
+    // to pin the customer-upload figure in place forever.
     assert.equal(MAX_PROVIDER_RESULT_DOWNLOAD_BYTES, 64 * 1024 * 1024, "provider result cap is 64 MiB");
     assert.notEqual(
       MAX_PROVIDER_RESULT_DOWNLOAD_BYTES,
       MAX_UPLOAD_BYTES,
       "the two caps must never be the same value/reference again",
+    );
+    assert.ok(
+      MAX_PROVIDER_RESULT_DOWNLOAD_BYTES > MAX_UPLOAD_BYTES,
+      "a provider RESULT may legitimately be larger than a customer UPLOAD — the cap ordering must hold regardless of either constant's exact value",
     );
   });
 
@@ -303,7 +309,15 @@ describe("Topaz provider-result download security boundary (Signs Phase S3A)", (
     // non-image body is used deliberately — decode is a separate concern
     // covered by tests 9-12b).
     const realWorldObservedBytes = 36_324_544;
-    assert.ok(realWorldObservedBytes > MAX_UPLOAD_BYTES, "sanity: this size WOULD have tripped the old coupled cap");
+    // The HISTORICAL coupled cap at the time of the real S3B run — a
+    // frozen fact about that incident, deliberately not `MAX_UPLOAD_BYTES`
+    // (the Large Raster Upload Limit Audit later revisited that constant
+    // on its own evidence; this sanity check is about what was true THEN).
+    const historicalCoupledCapBytes = 25 * 1024 * 1024;
+    assert.ok(
+      realWorldObservedBytes > historicalCoupledCapBytes,
+      "sanity: this size WOULD have tripped the old coupled cap",
+    );
     assert.ok(
       realWorldObservedBytes < MAX_PROVIDER_RESULT_DOWNLOAD_BYTES,
       "sanity: this size must fit under the new provider cap",
