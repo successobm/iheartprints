@@ -8228,12 +8228,19 @@ iHeartPrints is exposed beyond trusted operators.
    and the internal continue pages — no per-project route checks session
    ownership, and `isAuthorizedForArtworkCorrection` resolves to
    "project exists".
-2. **Upload Content-Length / body-buffering bypass.**
-   `artwork-upload/route.ts` rejects an oversized declared length but then
-   buffers the entire body via `request.formData()` before the
-   authoritative size check — a lying or chunked `Content-Length` defeats
-   the early bound (memory-exhaustion DoS). No platform body cap is
-   configured.
+2. **Upload Content-Length / body-buffering bypass — HARDENED (Large
+   Raster Upload Limit Audit).** `artwork-upload/route.ts` rejected an
+   oversized DECLARED length but then buffered the entire body via
+   `request.formData()` before any authoritative re-check — a missing,
+   lying, or chunked-transfer-encoded `Content-Length` defeated the early
+   bound entirely (memory-exhaustion DoS), regardless of what the byte
+   limit was set to. `capped-request-body.ts`'s `capRequestBodyBytes` now
+   wraps the request body's own stream and enforces `MAX_UPLOAD_BYTES`
+   WHILE it is read — the same read-and-check-as-you-go discipline
+   `topaz-transparency-upscale-provider.ts`'s `download()` already uses —
+   so `formData()` itself aborts once the cap is exceeded, never fully
+   buffering an oversized body regardless of any header. No platform body
+   cap is configured, and none is required by this fix.
 3. **Production signing-secret fallback.** `ASSET_SIGNING_SECRET`
    (`signed-url-token.ts`) and the guided-cleanup candidate-token secret
    (`guided-cleanup-candidate.ts`) fall back to hardcoded constants in
