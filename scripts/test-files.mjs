@@ -295,6 +295,9 @@ export const TEST_FILES = [
   "src/components/chat/uploaded-artwork-print-ready-flow.test.tsx",
   // Existing Artwork → Print Ready Phase 1.
   "src/capabilities/artwork-preparation/upload-security.test.ts",
+  // Large Raster Upload Limit Audit: the streaming request-body cap that
+  // closes the Content-Length-bypass gap (ARCHITECTURE.md §23 item 2).
+  "src/capabilities/artwork-preparation/capped-request-body.test.ts",
   "src/capabilities/artwork-preparation/image-analysis.test.ts",
   "src/capabilities/artwork-preparation/background-isolation.test.ts",
   "src/capabilities/artwork-preparation/artwork-preparation-capability.test.ts",

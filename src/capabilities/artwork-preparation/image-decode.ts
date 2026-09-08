@@ -114,7 +114,18 @@ export function decodePngUpload(bytes: Buffer): DecodedUpload {
     image: {
       width: decoded.width,
       height: decoded.height,
-      data: Buffer.from(decoded.data),
+      // Large Raster Upload Limit Audit: `decoded.data` is already a
+      // freshly-allocated Buffer owned solely by this `decoded` PNG
+      // instance (`pngjs` allocates a new one per `PNG.sync.read` call —
+      // never pooled/reused across calls), so wrapping it in
+      // `Buffer.from(decoded.data)` was an unnecessary second full-size
+      // copy: two ~width*height*4-byte RGBA buffers alive at once for a
+      // real, non-negligible duration (Node's GC does not reclaim the
+      // moment a variable goes out of scope). At the 40 MP pixel ceiling
+      // that was an avoidable extra ~160 MB of peak decode memory on a
+      // ~512 MB production runtime. Returning the buffer directly halves
+      // this step's peak memory with no behavior change.
+      data: decoded.data,
     },
     header,
   };
