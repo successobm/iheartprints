@@ -57,6 +57,7 @@ import {
   type SignCompositionFillInput,
   type SignCompositionMaskedReplacementInput,
   type SignCompositionMoveInput,
+  type SignBackgroundTreatment,
   type SignCompositionOperatorInput,
   type SignCompositionReconstructionInput,
   type SignCompositionReplacementInput,
@@ -181,6 +182,30 @@ export async function planSignArtwork(projectId: string): Promise<ApiProjectSnap
       }),
     },
   };
+}
+
+/**
+ * Constitution amendment 3.2 (§16A.2): the internal operator's (and,
+ * through the customer-facing route mirroring this one, the customer's
+ * own) way to durably select KEEP or REMOVE background treatment for the
+ * CURRENT immutable sign original. Deliberately does NOT auto-replan —
+ * unlike `confirmOperatorStructuralLayoutForSign`'s two-step pattern, a
+ * treatment change is a durable decision on its own; the next explicit
+ * "Check this artwork" / composition-plan action is what actually consumes
+ * it (`resolveSignBackgroundTreatment` reads the CURRENT value fresh every
+ * time — never cached), so this never silently re-plans on the caller's
+ * behalf. Returns the refreshed `SignPlanOperatorReview` (internal-only,
+ * never the customer-facing snapshot) so the caller can see the governed
+ * outcome (removed / already transparent / review required) immediately.
+ */
+export async function setSignArtworkBackgroundTreatment(
+  projectId: string,
+  treatment: SignBackgroundTreatment,
+): Promise<SignPlanOperatorReview> {
+  const graph = getCapabilityGraph();
+  await graph.signPreparation.setSignBackgroundTreatment(projectId, treatment);
+  const repo = getProjectRepository();
+  return loadSignPlanOperatorReview(repo, projectId);
 }
 
 /**

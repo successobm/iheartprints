@@ -7,6 +7,7 @@ import { ACQUISITION_SESSION_COOKIE } from "@/lib/http/acquisition-session-cooki
 import { getProjectRepository } from "@/lib/db";
 
 import { SignAuthorizeButton } from "./SignAuthorizeButton";
+import { SignBackgroundTreatmentPanel } from "./SignBackgroundTreatmentPanel";
 import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
 import { SignCompareOriginal } from "./SignCompareOriginal";
 import { SignFitToProductionCorrectionTool } from "./SignFitToProductionCorrectionTool";
@@ -183,7 +184,10 @@ function SignPlanReview({
       )}
 
       <div className="flex flex-wrap items-center gap-3 border-t border-ink/10 pt-3">
-        <SignCompareOriginal projectId={projectId} />
+        <SignCompareOriginal
+          projectId={projectId}
+          showTransparencyCheckerboard={review.backgroundTreatment === "remove"}
+        />
         {review.production.blockedCandidateAssetId ? (
           <a
             href={`/api/internal/projects/${projectId}/sign-artwork/production-candidate`}
@@ -194,6 +198,12 @@ function SignPlanReview({
           </a>
         ) : null}
       </div>
+
+      <SignBackgroundTreatmentPanel
+        projectId={projectId}
+        backgroundTreatment={review.backgroundTreatment}
+        backgroundRemovalStatus={review.backgroundRemoval?.status ?? null}
+      />
 
       {/* Signs QR Visual Revision Acceptance: a materially QR-revised
           candidate must be reviewed and explicitly approved before Print
