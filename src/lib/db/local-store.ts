@@ -2430,6 +2430,12 @@ export class LocalProjectRepository implements ProjectRepository {
       operatorStructuralOverrideCreatedBy: null,
       edgeIntentClassifications: null,
       qrResolutions: null,
+      // Constitution amendment 3.2: every preparation starts explicitly
+      // "keep" — the pre-existing, unconditional opaque contract — never
+      // defaulted to "remove".
+      backgroundTreatment: "keep",
+      backgroundTreatmentConfirmedAt: null,
+      backgroundRemoval: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
