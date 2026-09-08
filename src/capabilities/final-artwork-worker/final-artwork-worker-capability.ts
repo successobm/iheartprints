@@ -35,7 +35,7 @@ import { createHash } from "node:crypto";
 import { PNG } from "pngjs";
 
 import type { ProjectRepository } from "@/lib/db/repository";
-import { productionIntentMatches } from "@/lib/domain/types";
+import { productionIntentMatches, resolveSignBackgroundTreatment } from "@/lib/domain/types";
 import type {
   ArtworkVersion,
   AssetRecord,
@@ -1657,6 +1657,7 @@ export function createFinalArtworkWorkerCapability(
       sourceImage,
       { x: 0, y: 0, width: sourceImage.width, height: sourceImage.height },
       split.before,
+      plan.backgroundTreatment ?? "keep",
     );
     if (preReconstruct.status === "refused") {
       await completeWithoutAsset(job, preReconstruct.detail);
@@ -2114,6 +2115,7 @@ export function createFinalArtworkWorkerCapability(
       reconstructedImage,
       { x: 0, y: 0, width: reconstructedImage.width, height: reconstructedImage.height },
       adaptation.steps,
+      plan.backgroundTreatment ?? "keep",
     );
     if (continued.status === "refused") {
       await completeWithoutAsset(job, continued.detail);
@@ -2124,6 +2126,7 @@ export function createFinalArtworkWorkerCapability(
       continued.contentBounds,
       adaptation.expectedOutputWidthPx,
       adaptation.expectedOutputHeightPx,
+      plan.backgroundTreatment ?? "keep",
     );
     if (finalized.status === "refused") {
       await completeWithoutAsset(job, finalized.detail);
@@ -2996,6 +2999,15 @@ export function createFinalArtworkWorkerCapability(
       : null;
 
     const rigidSign: RigidSignPlanEvidence = {
+      // Constitution amendment 3.2: read from the PLAN's own recorded
+      // treatment (part of `planKey` identity), never re-derived from
+      // `preparation.backgroundTreatment` directly — a preparation-level
+      // change after this plan was built must never retroactively change
+      // what an already-built plan is judged against. Falls back to the
+      // preparation's own fail-closed-resolved value only for a plan
+      // persisted before this amendment (`plan.backgroundTreatment`
+      // undefined), which is always `"keep"`.
+      backgroundTreatment: plan.backgroundTreatment ?? resolveSignBackgroundTreatment(preparation.backgroundTreatment),
       sourceAssetId: preparation.originalAssetId,
       sourceSha256,
       planKey: plan.planKey,

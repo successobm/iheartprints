@@ -10,11 +10,18 @@
  * Structural properties, mirroring `ArtworkPreparationCapability`:
  *
  *   - depends on `ProjectRepository` + `AssetCapability` and NO provider
- *     port of any kind — nothing in this module can make a network call,
- *     and S1 never changes a pixel;
+ *     port of any kind — nothing in this module can make a network call.
+ *     S1 itself never changes a pixel; Constitution amendment 3.2 (§16A.2)
+ *     adds exactly ONE additive, explicitly-authorized exception —
+ *     `setSignBackgroundTreatment("remove")` — which reuses artwork-
+ *     preparation's neutral, pure, provider-free classification/removal
+ *     engine (never a provider port, never a second algorithm) to produce
+ *     a NEW derived asset; the immutable original is still never mutated;
  *   - the uploaded original is immutable; inspection and planning are
- *     recomputed from those exact bytes on every planning pass rather than
- *     trusting stored state as authority;
+ *     recomputed from those exact bytes (or, under a governed "remove"
+ *     treatment, the derived transparent prepared asset — see
+ *     `decodeSignSource`) on every planning pass rather than trusting
+ *     stored state as authority;
  *   - the ordered size is human-confirmed, both dimensions, fail-closed
  *     (§16A.2) — nothing here defaults or infers a dimension;
  *   - all reads are project-scoped; a cross-project id resolves to
@@ -26,6 +33,7 @@ import { createHash } from "node:crypto";
 import type { AssetCapability } from "@/capabilities/assets";
 import {
   decodePngUpload,
+  encodeRgbaToPng,
 } from "@/capabilities/artwork-preparation/image-decode";
 import {
   sanitizeUploadFilename,
@@ -33,6 +41,16 @@ import {
 } from "@/capabilities/artwork-preparation/upload-limits";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/types";
+import {
+  resolveSignBackgroundTreatment,
+  type SignBackgroundTreatment,
+} from "@/lib/domain/types";
+import {
+  SIGN_BACKGROUND_REMOVAL_VERSION,
+  describeSignBackgroundRemovalStatus,
+  prepareSignBackgroundRemoval,
+  type SignBackgroundRemovalRecord,
+} from "./sign-background-removal";
 
 import type {
   SignInspectionReport,
@@ -172,6 +190,35 @@ export interface SignPreparationCapability {
     designId: string,
     input: SignCompositionOperatorInput,
   ): Promise<SignPreparation>;
+  /**
+   * Constitution amendment 3.2 (§16A.2): durably selects KEEP or REMOVE
+   * background treatment for the CURRENT immutable original.
+   *
+   * `"keep"` is a pure, instant metadata write — the pre-existing,
+   * unconditional opaque contract, unchanged.
+   *
+   * `"remove"` re-decodes the IMMUTABLE ORIGINAL (never a previously
+   * prepared derivative — always re-derived from truth) and runs it
+   * through `sign-background-removal.ts` (artwork-preparation's reused,
+   * neutral, pure engine — never a second algorithm, never a provider
+   * call). On a safe conventional removal, persists a NEW derived,
+   * transparent asset and the governed outcome record. On an ambiguous
+   * case, persists `review_required` and does NOT claim success —
+   * `planSignRepair`/`confirmSignCompositionPlan` refuse fail-closed
+   * until a designer resolves it (a fresh call to this method, after
+   * manual correction, is how that happens for V1 — no separate
+   * review-resolution surface exists yet).
+   *
+   * Never mutates `originalAssetId`. Changing the treatment does not
+   * itself touch any existing `plan`/`planKey`/authorization/acceptance —
+   * `planKey` identity (via `SignRepairPlan.backgroundTreatment`) is what
+   * makes the NEXT plan naturally distinct from, and never confusable
+   * with, one built under the OLD treatment.
+   */
+  setSignBackgroundTreatment(
+    designId: string,
+    treatment: SignBackgroundTreatment,
+  ): Promise<SignPreparation>;
 }
 
 /** Signs Phase 3B: the operator's own composition choices — everything `confirmSignCompositionPlan` needs beyond what it resolves itself (spec/policy/source lineage). */
@@ -205,10 +252,36 @@ export function createSignPreparationCapability(
     return preparation;
   }
 
-  async function decodeOriginal(preparation: SignPreparation) {
-    const downloaded = await assets.downloadAssetBytes(
-      preparation.originalAssetId,
-    );
+  /**
+   * Constitution amendment 3.2: resolves and decodes the SOURCE the rest
+   * of the pipeline (inspection/planning/composition) actually operates
+   * on. Under `"keep"` (or `"remove"` with no successful removal yet)
+   * this is exactly `preparation.originalAssetId`, byte-for-byte the
+   * pre-amendment behavior. Under a governed `"remove"` with a recorded
+   * `status: "removed"` outcome BOUND to the current immutable original
+   * (`removal.sourceAssetId === preparation.originalAssetId` — a stale
+   * record computed against a since-replaced original is never trusted),
+   * this resolves to the derived, transparent PREPARED asset instead —
+   * the "governed background preparation → transparent derived prepared
+   * artwork" step the rest of the pipeline (exact canvas, QR, acceptance)
+   * then runs against unchanged. `preparation.originalAssetId` itself is
+   * NEVER read, mutated, or bypassed here — only which bytes get decoded
+   * for downstream computation changes.
+   */
+  async function decodeSignSource(
+    preparation: SignPreparation,
+  ): Promise<{ decoded: ReturnType<typeof decodePngUpload>; sha256: string; assetId: string }> {
+    const treatment = resolveSignBackgroundTreatment(preparation.backgroundTreatment);
+    const removal = preparation.backgroundRemoval as unknown as SignBackgroundRemovalRecord | null;
+    const useAssetId =
+      treatment === "remove" &&
+      removal?.status === "removed" &&
+      removal.preparedAssetId &&
+      removal.sourceAssetId === preparation.originalAssetId
+        ? removal.preparedAssetId
+        : preparation.originalAssetId;
+
+    const downloaded = await assets.downloadAssetBytes(useAssetId);
     if (!downloaded) {
       throw new SignPreparationStateError(
         "The original artwork file could not be loaded.",
@@ -216,7 +289,29 @@ export function createSignPreparationCapability(
     }
     const decoded = decodePngUpload(downloaded.bytes);
     const sha256 = createHash("sha256").update(downloaded.bytes).digest("hex");
-    return { decoded, sha256 };
+    return { decoded, sha256, assetId: useAssetId };
+  }
+
+  /**
+   * Constitution amendment 3.2: fails closed BEFORE any planning/
+   * composition work when an explicit `"remove"` selection has not yet
+   * been governed-resolved for the CURRENT immutable original, or
+   * resolved to `review_required`/`no_visible_artwork` — "do not claim
+   * success" (never silently proceeds against an unresolved or refused
+   * background-removal outcome).
+   */
+  function assertBackgroundTreatmentReadyToPlan(preparation: SignPreparation): void {
+    const treatment = resolveSignBackgroundTreatment(preparation.backgroundTreatment);
+    if (treatment !== "remove") return;
+    const removal = preparation.backgroundRemoval as unknown as SignBackgroundRemovalRecord | null;
+    if (!removal || removal.sourceAssetId !== preparation.originalAssetId) {
+      throw new SignPreparationStateError(
+        "Background removal has not been evaluated for the current artwork yet.",
+      );
+    }
+    if (removal.status === "review_required" || removal.status === "no_visible_artwork") {
+      throw new SignPreparationStateError(describeSignBackgroundRemovalStatus(removal.status));
+    }
   }
 
   return {
@@ -306,7 +401,7 @@ export function createSignPreparationCapability(
       // spec-dependent geometry an operator will read.
       const spec = resolveSignProductionSpec(updated);
       if (spec.status === "confirmed") {
-        const { decoded } = await decodeOriginal(updated);
+        const { decoded } = await decodeSignSource(updated);
         const inspection = inspectSignArtwork(decoded.image, spec.spec, policy);
         return repo.updateSignPreparation(preparation.id, {
           inspection: inspection as unknown as Record<string, unknown>,
@@ -317,11 +412,12 @@ export function createSignPreparationCapability(
 
     async planSignRepair(designId) {
       const preparation = await loadOwned(designId);
+      assertBackgroundTreatmentReadyToPlan(preparation);
 
       const specResolution = resolveSignProductionSpec(preparation);
       if (specResolution.status !== "confirmed") {
         // Fail closed: no plan, no persisted plan state, explicit defects.
-        const { decoded } = await decodeOriginal(preparation);
+        const { decoded } = await decodeSignSource(preparation);
         const inspection = inspectSignArtwork(decoded.image, null, null);
         return {
           preparation,
@@ -345,9 +441,12 @@ export function createSignPreparationCapability(
         );
       }
 
-      // Recompute from the immutable original — stored inspection is a
-      // diagnostic record, never the authority.
-      const { decoded, sha256 } = await decodeOriginal(preparation);
+      // Recompute from the SOURCE — stored inspection is a diagnostic
+      // record, never the authority. `decodeSignSource` resolves this to
+      // the governed transparent prepared asset under an explicit
+      // "remove" treatment (Constitution amendment 3.2), or the immutable
+      // original otherwise — see its own doc.
+      const { decoded, sha256, assetId: sourceAssetId } = await decodeSignSource(preparation);
       const inspection = inspectSignArtwork(
         decoded.image,
         specResolution.spec,
@@ -452,8 +551,9 @@ export function createSignPreparationCapability(
         spec: specResolution.spec,
         policy,
         inspection,
-        sourceAssetId: preparation.originalAssetId,
+        sourceAssetId,
         sourceSha256: sha256,
+        backgroundTreatment: resolveSignBackgroundTreatment(preparation.backgroundTreatment),
         perimeterBands,
         frameStructuralModel,
         frameCleanFillRunPx,
@@ -535,7 +635,7 @@ export function createSignPreparationCapability(
         });
       }
 
-      const { decoded, sha256 } = await decodeOriginal(preparation);
+      const { decoded, sha256 } = await decodeSignSource(preparation);
       const override = {
         sourceAssetId: preparation.originalAssetId,
         sourceSha256: sha256,
@@ -579,6 +679,7 @@ export function createSignPreparationCapability(
 
     async confirmSignCompositionPlan(designId, input) {
       const preparation = await loadOwned(designId);
+      assertBackgroundTreatmentReadyToPlan(preparation);
 
       const specResolution = resolveSignProductionSpec(preparation);
       if (specResolution.status !== "confirmed") {
@@ -593,17 +694,22 @@ export function createSignPreparationCapability(
         );
       }
 
-      // Recompute from the immutable original — never trusted from stored
-      // state — exactly like `planSignRepair`'s own discipline.
-      const { decoded, sha256 } = await decodeOriginal(preparation);
+      // Recompute from the SOURCE — never trusted from stored state —
+      // exactly like `planSignRepair`'s own discipline. Resolves to the
+      // governed transparent prepared asset under an explicit "remove"
+      // treatment (Constitution amendment 3.2), or the immutable original
+      // otherwise — see `decodeSignSource`'s own doc.
+      const { decoded, sha256, assetId: sourceAssetId } = await decodeSignSource(preparation);
+      const backgroundTreatment = resolveSignBackgroundTreatment(preparation.backgroundTreatment);
 
       const buildResult = buildSignCompositionPlan({
         spec: specResolution.spec,
         policy,
-        sourceAssetId: preparation.originalAssetId,
+        sourceAssetId,
         sourceSha256: sha256,
         sourceWidthPx: decoded.image.width,
         sourceHeightPx: decoded.image.height,
+        backgroundTreatment,
         reconstruction: input.reconstruction,
         crop: input.crop,
         fitBackground: input.fitBackground,
@@ -624,6 +730,108 @@ export function createSignPreparationCapability(
         plan: buildResult.plan as unknown as Record<string, unknown>,
         planKey: buildResult.plan.planKey,
       });
+    },
+
+    async setSignBackgroundTreatment(designId, treatment) {
+      const preparation = await loadOwned(designId);
+      const now = new Date().toISOString();
+
+      if (treatment === "keep") {
+        return repo.updateSignPreparation(preparation.id, {
+          backgroundTreatment: "keep",
+          backgroundTreatmentConfirmedAt: now,
+        });
+      }
+
+      // "remove" — always re-derive from the IMMUTABLE ORIGINAL, never a
+      // previously prepared derivative (recomputing against a stale
+      // prepared asset would compound corrections rather than starting
+      // fresh from the customer's own untouched bytes every time).
+      const downloaded = await assets.downloadAssetBytes(preparation.originalAssetId);
+      if (!downloaded) {
+        throw new SignPreparationStateError(
+          "The original artwork file could not be loaded.",
+        );
+      }
+      const decoded = decodePngUpload(downloaded.bytes);
+      const sourceSha256 = createHash("sha256").update(downloaded.bytes).digest("hex");
+      const outcome = prepareSignBackgroundRemoval(decoded.image);
+
+      if (outcome.status !== "removed") {
+        // already_transparent / no_visible_artwork / review_required — no
+        // new asset. "review_required" means: do not claim success —
+        // `assertBackgroundTreatmentReadyToPlan` refuses planning/
+        // composition until this is resolved.
+        const record: SignBackgroundRemovalRecord = {
+          version: SIGN_BACKGROUND_REMOVAL_VERSION,
+          status: outcome.status,
+          sourceAssetId: preparation.originalAssetId,
+          sourceSha256,
+          sourceWidthPx: decoded.image.width,
+          sourceHeightPx: decoded.image.height,
+          preparedAssetId: null,
+          reasons: outcome.reasons,
+          exteriorPixelsRemoved: null,
+          computedAt: now,
+        };
+        return repo.updateSignPreparation(preparation.id, {
+          backgroundTreatment: "remove",
+          backgroundTreatmentConfirmedAt: now,
+          backgroundRemoval: record as unknown as Record<string, unknown>,
+        });
+      }
+
+      const asset = await assets.uploadCustomerArtwork(designId, {
+        conceptId: `sign-bg-removed-${preparation.id}-${randomSuffix()}`,
+        bytes: encodeRgbaToPng(outcome.image),
+        contentType: "image/png",
+        widthPx: outcome.image.width,
+        heightPx: outcome.image.height,
+        hasTransparency: true,
+        kind: "png",
+        metadata: {
+          // Mirrors artwork-preparation's own `derivedFromAssetId` lineage
+          // convention exactly.
+          derivedFromAssetId: preparation.originalAssetId,
+          signPreparationId: preparation.id,
+          signBackgroundRemoval: true,
+        },
+      });
+
+      const record: SignBackgroundRemovalRecord = {
+        version: SIGN_BACKGROUND_REMOVAL_VERSION,
+        status: "removed",
+        sourceAssetId: preparation.originalAssetId,
+        sourceSha256,
+        sourceWidthPx: decoded.image.width,
+        sourceHeightPx: decoded.image.height,
+        preparedAssetId: asset.id,
+        reasons: outcome.reasons,
+        exteriorPixelsRemoved: outcome.exteriorPixelsRemoved,
+        computedAt: now,
+      };
+      const updated = await repo.updateSignPreparation(preparation.id, {
+        backgroundTreatment: "remove",
+        backgroundTreatmentConfirmedAt: now,
+        backgroundRemoval: record as unknown as Record<string, unknown>,
+      });
+
+      // Re-inspect under the confirmed spec (if any) against the NEW
+      // prepared source — mirrors `confirmSignProductionSpec`'s own
+      // re-inspection discipline exactly, so a stale KEEP-sourced
+      // inspection is never left displayed after a treatment change.
+      const spec = resolveSignProductionSpec(updated);
+      if (spec.status === "confirmed") {
+        const policy = getSignResolutionPolicyById(spec.spec.resolutionPolicyId);
+        if (policy) {
+          const { decoded: sourceDecoded } = await decodeSignSource(updated);
+          const inspection = inspectSignArtwork(sourceDecoded.image, spec.spec, policy);
+          return repo.updateSignPreparation(preparation.id, {
+            inspection: inspection as unknown as Record<string, unknown>,
+          });
+        }
+      }
+      return updated;
     },
   };
 }

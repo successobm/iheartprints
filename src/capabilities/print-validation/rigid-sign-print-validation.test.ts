@@ -283,6 +283,99 @@ describe("rigid_sign_raster print validation profile", () => {
     assert.notEqual(report.status, "ready");
   });
 
+  // Constitution amendment 3.2 (§16A.2): `no_unintended_transparency`
+  // becomes background-treatment-AWARE. Every test above this point
+  // exercises the default `backgroundTreatment` (absent -> "keep"), and
+  // must keep meaning exactly what it always meant — proven by "17" and
+  // "unknown transparency is never treated as opaque" above, unchanged.
+  describe("Constitution amendment 3.2: background-treatment-aware transparency", () => {
+    it('KEEP (explicit): transparency still blocks — identical to the default', () => {
+      const report = printValidation.validateArtwork(
+        baseInput({
+          rigidSign: evidence({ backgroundTreatment: "keep" }),
+          primaryAsset: {
+            contentType: "image/png",
+            widthPx: 2754,
+            heightPx: 3672,
+            hasTransparency: true,
+            vectorAssetId: null,
+            resolutionProvenance: "native",
+            nativeWidthPx: null,
+            nativeHeightPx: null,
+          },
+        }),
+      );
+      const check = report.checks.find((c) => c.check === "no_unintended_transparency");
+      assert.equal(check?.status, "fail");
+      assert.equal(check?.severity, "blocking");
+      assert.equal(report.status, "finalization_required");
+    });
+
+    it('REMOVE: governed transparency is PERMITTED — the plate can reach "ready" carrying alpha', () => {
+      const report = printValidation.validateArtwork(
+        baseInput({
+          rigidSign: evidence({ backgroundTreatment: "remove" }),
+          primaryAsset: {
+            contentType: "image/png",
+            widthPx: 2754,
+            heightPx: 3672,
+            hasTransparency: true,
+            vectorAssetId: null,
+            resolutionProvenance: "native",
+            nativeWidthPx: null,
+            nativeHeightPx: null,
+          },
+        }),
+      );
+      const check = report.checks.find((c) => c.check === "no_unintended_transparency");
+      assert.equal(check?.status, "pass");
+      assert.equal(report.status, "ready");
+    });
+
+    it("REMOVE: an opaque plate (nothing to remove) still passes — permitted either way", () => {
+      const report = printValidation.validateArtwork(
+        baseInput({ rigidSign: evidence({ backgroundTreatment: "remove" }) }),
+      );
+      const check = report.checks.find((c) => c.check === "no_unintended_transparency");
+      assert.equal(check?.status, "pass");
+      assert.equal(report.status, "ready");
+    });
+
+    it("REMOVE: unknown transparency metadata still fails closed as unknown — never assumed governed", () => {
+      const report = printValidation.validateArtwork(
+        baseInput({
+          rigidSign: evidence({ backgroundTreatment: "remove" }),
+          primaryAsset: {
+            contentType: "image/png",
+            widthPx: 2754,
+            heightPx: 3672,
+            hasTransparency: null,
+            vectorAssetId: null,
+            resolutionProvenance: "native",
+            nativeWidthPx: null,
+            nativeHeightPx: null,
+          },
+        }),
+      );
+      const check = report.checks.find((c) => c.check === "no_unintended_transparency");
+      assert.equal(check?.status, "unknown");
+      assert.notEqual(report.status, "ready");
+    });
+
+    it("every OTHER blocking check remains fully authoritative under REMOVE — this amendment relaxes nothing else", () => {
+      const report = printValidation.validateArtwork(
+        baseInput({
+          rigidSign: evidence({ backgroundTreatment: "remove", contentBoundsWithinOutput: false, contentBoundsReason: "out of bounds" }),
+        }),
+      );
+      const transparency = report.checks.find((c) => c.check === "no_unintended_transparency");
+      assert.equal(transparency?.status, "pass");
+      const bounds = report.checks.find((c) => c.check === "content_within_bounds");
+      assert.equal(bounds?.status, "fail");
+      assert.notEqual(report.status, "ready");
+    });
+  });
+
   it("18: missing source lineage evidence is a hard block", () => {
     const report = printValidation.validateArtwork(
       baseInput({ rigidSign: evidence({ sourceAssetId: "", sourceSha256: "" }) }),

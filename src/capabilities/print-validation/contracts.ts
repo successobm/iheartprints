@@ -25,6 +25,7 @@ import type {
 import type { ProductionMethod } from "@/capabilities/shared/contracts";
 import type { PlacementSizingPolicy } from "@/capabilities/shared/print-placement-dimensions";
 import type { ProductionTreatment } from "@/capabilities/shared/production-treatment";
+import type { SignBackgroundTreatment } from "@/lib/domain/types";
 
 // ---------------------------------------------------------------------------
 // Production Requirements (Goal 2 / Goal 3 / Goal 8)
@@ -961,6 +962,19 @@ export interface DtfFeatureIntegritySummary {
  * reach `print_ready`) without re-deriving it.
  */
 export interface RigidSignPlanEvidence {
+  /**
+   * Constitution amendment 3.2 (§16A.2): the background treatment the
+   * validated PLAN was formulated under — never re-derived from the
+   * asset's own measured `hasTransparency` (that would let an
+   * accidentally-transparent "keep" plate silently reclassify itself as
+   * governed). Drives `no_unintended_transparency`'s own truthful,
+   * treatment-aware semantics below. Optional so every existing test
+   * fixture and pre-amendment construction site keeps compiling
+   * unchanged — `validateRigidSign` reads it as
+   * `sign.backgroundTreatment ?? "keep"`, reproducing today's
+   * opaque-only behavior exactly when absent.
+   */
+  backgroundTreatment?: SignBackgroundTreatment;
   /** The immutable original asset the plan was formulated against. */
   sourceAssetId: string;
   /** SHA-256 of the exact source bytes the worker actually read before executing. */

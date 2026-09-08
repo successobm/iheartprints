@@ -913,17 +913,48 @@ function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
 
   checks.push(checkResolutionProvenance(asset));
 
+  // Constitution amendment 3.2 (§16A.2): truthful, treatment-aware
+  // semantics — never merely "permit any alpha" for a "remove" plan. The
+  // check code stays `no_unintended_transparency` (unchanged identity,
+  // still unconditionally required in `RIGID_SIGN_REQUIRED_PRINT_READY_
+  // CHECK_CODES`) because what it protects against is unchanged: the ONLY
+  // thing that changes is what counts as "unintended" for THIS plan.
+  //   "keep"   — the original, unconditional contract: any transparency
+  //              is unintended and blocks, exactly as before this
+  //              amendment. `hasTransparency === null` still fails closed
+  //              as "unknown", never treated as opaque.
+  //   "remove" — transparency is the EXPECTED, GOVERNED result of an
+  //              explicit, durable REMOVE selection recorded on the plan
+  //              itself (never re-derived from the asset's own measured
+  //              alpha, which would let an accidental "keep" leak get
+  //              relabeled as governed) — so it is PERMITTED, not merely
+  //              ignored. `hasTransparency === null` still fails closed:
+  //              an unmeasured asset is never assumed governed.
+  const backgroundTreatment = sign.backgroundTreatment ?? "keep";
   const opaque = asset.hasTransparency === false;
-  checks.push({
-    check: "no_unintended_transparency",
-    status: asset.hasTransparency === null ? "unknown" : opaque ? "pass" : "fail",
-    severity: "blocking",
-    reason:
-      asset.hasTransparency === null
-        ? "Transparency metadata is not recorded for this asset."
+  const transparencyStatus: PrintValidationCheck["status"] =
+    asset.hasTransparency === null
+      ? "unknown"
+      : backgroundTreatment === "remove"
+        ? "pass"
+        : opaque
+          ? "pass"
+          : "fail";
+  const transparencyReason =
+    asset.hasTransparency === null
+      ? "Transparency metadata is not recorded for this asset."
+      : backgroundTreatment === "remove"
+        ? asset.hasTransparency
+          ? "Production plate carries transparency under the explicitly-authorized \"remove\" background treatment — governed, not unintended."
+          : "Production plate is opaque under the \"remove\" background treatment (no exterior background was found to remove) — permitted either way."
         : opaque
           ? "Production plate is fully opaque, as rigid-sign production requires."
-          : "Production plate carries transparency; rigid-sign production intent is opaque and no flattening colour was ever invented for it.",
+          : "Production plate carries transparency; rigid-sign production intent is opaque and no flattening colour was ever invented for it.";
+  checks.push({
+    check: "no_unintended_transparency",
+    status: transparencyStatus,
+    severity: "blocking",
+    reason: transparencyReason,
   });
 
   checks.push({

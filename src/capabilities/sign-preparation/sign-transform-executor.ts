@@ -32,7 +32,7 @@ import { PNG } from "pngjs";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { hasAnyTransparentPixel, resampleExact } from "@/capabilities/final-artwork/raster-transform";
 
-import type { SignRepairPlan, SignRepairStep, SignRepairStepKind } from "./contracts";
+import type { SignBackgroundTreatment, SignRepairPlan, SignRepairStep, SignRepairStepKind } from "./contracts";
 import { deriveUniformBackgroundExtension } from "./sign-geometry";
 import { tiledRowColor, type SignPerimeterBandMeasurement, type SignPerimeterBandRow } from "./perimeter-reconstruction";
 import { frameDepthAt, type SignFrameBand } from "./frame-structure-model";
@@ -257,6 +257,13 @@ export function executeAdmittedSignSteps(
   image: RgbaImage,
   bounds: SignExecutionBounds,
   steps: SignRepairStep[],
+  /**
+   * Constitution amendment 3.2: defaults to `"keep"` — reproduces every
+   * pre-amendment call site byte-for-byte. Only affects
+   * `fit_artwork_to_canvas`'s own padding-fill alpha (via
+   * `executeCompositionSteps`) — never any legacy step kind.
+   */
+  backgroundTreatment: SignBackgroundTreatment = "keep",
 ): SignExecutionResult {
   // Signs Phase 3B: a segment containing ANY composition primitive is
   // delegated WHOLESALE to `executeCompositionSteps` — never folded
@@ -276,7 +283,7 @@ export function executeAdmittedSignSteps(
           "with legacy geometry step kinds in the same execution segment.",
       };
     }
-    return executeCompositionSteps(image, bounds, steps);
+    return executeCompositionSteps(image, bounds, steps, backgroundTreatment);
   }
 
   let currentImage = image;
@@ -314,6 +321,16 @@ export function finalizeSignExecution(
   bounds: SignExecutionBounds,
   expectedWidthPx: number,
   expectedHeightPx: number,
+  /**
+   * Constitution amendment 3.2: defaults to `"keep"` — reproduces every
+   * pre-amendment call site byte-for-byte. Under `"keep"`, ANY transparency
+   * in the executed output remains refused exactly as before. Under
+   * `"remove"`, transparency is the EXPECTED, governed result of the
+   * explicitly-authorized background removal that fed this execution — it
+   * is never refused here. This is the ONLY relaxation amendment 3.2 makes
+   * to this function; every other check (geometry match) is unconditional.
+   */
+  backgroundTreatment: SignBackgroundTreatment = "keep",
 ): SignExecutionResult {
   if (image.width !== expectedWidthPx || image.height !== expectedHeightPx) {
     return {
@@ -324,7 +341,7 @@ export function finalizeSignExecution(
         `${expectedWidthPx}x${expectedHeightPx}px. Refusing rather than persisting a plate the plan does not describe.`,
     };
   }
-  if (hasAnyTransparentPixel(image)) {
+  if (backgroundTreatment !== "remove" && hasAnyTransparentPixel(image)) {
     return {
       status: "refused",
       reason: "output_not_opaque",
@@ -363,12 +380,14 @@ export function executeSignRepairPlan(
         "Plan requires an approved crop. approved_crop remains approval-gated and is not part of S2 automatic execution.",
     };
   }
-  if (hasAnyTransparentPixel(source)) {
+  const backgroundTreatment: SignBackgroundTreatment = plan.backgroundTreatment ?? "keep";
+  if (backgroundTreatment !== "remove" && hasAnyTransparentPixel(source)) {
     return {
       status: "refused",
       reason: "source_transparent",
       detail:
-        "Source artwork carries transparency. No S2 step flattens transparency or invents a fill colour, so a legally opaque plate cannot be produced from it.",
+        "Source artwork carries transparency. No S2 step flattens transparency or invents a fill colour, so a legally opaque plate cannot be produced from it. " +
+        "(Constitution amendment 3.2: this refusal applies only under the \"keep\" background treatment — an explicit \"remove\" selection permits a governed-transparent source.)",
     };
   }
 
@@ -377,9 +396,15 @@ export function executeSignRepairPlan(
   // offsets it, resample/downsample/rotation scale or reorient it, but no
   // step ever shrinks it to exclude a real source pixel.
   const initialBounds: SignExecutionBounds = { x: 0, y: 0, width: source.width, height: source.height };
-  const executed = executeAdmittedSignSteps(source, initialBounds, plan.steps);
+  const executed = executeAdmittedSignSteps(source, initialBounds, plan.steps, backgroundTreatment);
   if (executed.status === "refused") return executed;
-  return finalizeSignExecution(executed.image, executed.contentBounds, plan.expectedOutputWidthPx, plan.expectedOutputHeightPx);
+  return finalizeSignExecution(
+    executed.image,
+    executed.contentBounds,
+    plan.expectedOutputWidthPx,
+    plan.expectedOutputHeightPx,
+    backgroundTreatment,
+  );
 }
 
 // ---------------------------------------------------------------------------

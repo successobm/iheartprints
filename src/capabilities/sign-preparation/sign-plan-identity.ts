@@ -53,6 +53,7 @@ export type SignPlanIdentityInput = Pick<
   | "steps"
   | "expectedOutputWidthPx"
   | "expectedOutputHeightPx"
+  | "backgroundTreatment"
 >;
 
 export function computeSignPlanKey(input: SignPlanIdentityInput): string {
@@ -67,6 +68,14 @@ export function computeSignPlanKey(input: SignPlanIdentityInput): string {
     steps: input.steps.map((step) => canonicalStep(step)),
     expectedOutputWidthPx: input.expectedOutputWidthPx,
     expectedOutputHeightPx: input.expectedOutputHeightPx,
+    // Constitution amendment 3.2: production-significant — a treatment
+    // change must invalidate a stale authorization/acceptance bound to the
+    // OLD plan. Omitted from the payload (rather than defaulted to "keep")
+    // when genuinely absent so a pre-amendment-3.2 persisted plan's key is
+    // untouched by this change; every current planner always supplies it.
+    ...(input.backgroundTreatment !== undefined
+      ? { backgroundTreatment: input.backgroundTreatment }
+      : {}),
   };
   const digest = createHash("sha256")
     .update(stableStringify(payload))

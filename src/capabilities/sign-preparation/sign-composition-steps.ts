@@ -52,7 +52,7 @@
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { resampleExact } from "@/capabilities/final-artwork/raster-transform";
 
-import type { SignRepairStep } from "./contracts";
+import type { SignBackgroundTreatment, SignRepairStep } from "./contracts";
 import { deriveUniformBackgroundExtension } from "./sign-geometry";
 import { signSafeInsetPxForAxis } from "./sign-fit-to-production";
 import type { SignExecutionBounds, SignExecutionResult } from "./sign-transform-executor";
@@ -285,6 +285,20 @@ export function deriveUniformFitDimensions(
 export function executeFitArtworkToCanvas(
   artwork: RgbaImage,
   step: SignRepairStep,
+  /**
+   * Constitution amendment 3.2: defaults to `"keep"` — reproduces every
+   * pre-amendment call site byte-for-byte (opaque, full-alpha padding).
+   * Under `"remove"`, every canvas pixel the fitted artwork does not cover
+   * is pre-filled TRANSPARENT (alpha 0) instead of the step's own
+   * `backgroundR/G/B` at full alpha — an explicitly REMOVE-treated sign
+   * has no legitimate opaque "background fill colour" left to invent for
+   * its own padding; leaving it opaque would silently reintroduce exactly
+   * the unwanted background the customer asked to remove. The fitted
+   * artwork's OWN pixels (including any alpha the governed background-
+   * removal pass produced) are still copied byte-for-byte either way —
+   * this only changes what UNCOVERED canvas pixels become.
+   */
+  backgroundTreatment: SignBackgroundTreatment = "keep",
 ): { status: "executed"; image: RgbaImage } | { status: "refused"; reason: "unsupported_step_kind"; detail: string } {
   const p = decodeFitArtworkToCanvasParams(step.params);
   if (!p) return refuse(`Step "fit_artwork_to_canvas" is missing valid parameters.`);
@@ -313,12 +327,13 @@ export function executeFitArtworkToCanvas(
   }
   const { image: fitted } = resampleExact(artwork, scaledWidthPx, scaledHeightPx);
 
+  const paddingAlpha = backgroundTreatment === "remove" ? 0 : 255;
   const data = Buffer.alloc(p.canvasWidthPx * p.canvasHeightPx * 4);
   for (let i = 0; i < p.canvasWidthPx * p.canvasHeightPx; i++) {
     data[i * 4] = p.backgroundR;
     data[i * 4 + 1] = p.backgroundG;
     data[i * 4 + 2] = p.backgroundB;
-    data[i * 4 + 3] = 255;
+    data[i * 4 + 3] = paddingAlpha;
   }
   for (let y = 0; y < scaledHeightPx; y++) {
     const srcRowStart = y * scaledWidthPx * 4;
@@ -1081,6 +1096,16 @@ export function executeCompositionSteps(
   image: RgbaImage,
   _bounds: SignExecutionBounds,
   steps: SignRepairStep[],
+  /**
+   * Constitution amendment 3.2: defaults to `"keep"` — reproduces every
+   * pre-amendment call site byte-for-byte. Only governs
+   * `executeFitArtworkToCanvas`'s own padding-fill alpha; every other
+   * composition primitive here is unaffected (move/fill/replace steps
+   * remain full-alpha byte copies/measured-colour fills either way — see
+   * that function's own doc for why REMOVE's padding must be transparent
+   * but its Advanced-tool corrections are unaffected by this amendment).
+   */
+  backgroundTreatment: SignBackgroundTreatment = "keep",
 ): SignExecutionResult {
   if (steps.length === 0) {
     return refuse("A composition plan segment must contain at least a fit_artwork_to_canvas step.");
@@ -1099,7 +1124,7 @@ export function executeCompositionSteps(
         "optional leading crop_region — none was found at the expected position.",
     );
   }
-  const fitted = executeFitArtworkToCanvas(artwork, steps[index]!);
+  const fitted = executeFitArtworkToCanvas(artwork, steps[index]!, backgroundTreatment);
   if (fitted.status === "refused") return fitted;
   index++;
 
