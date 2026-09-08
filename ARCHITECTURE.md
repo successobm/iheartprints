@@ -63,6 +63,7 @@ dormant seams authorize nothing. The registry:
 | S3B | Live/real bounded provider reconstruction acceptance | One real dispatch attempted (real Ruth artwork); reconstruction succeeded provider-side at 4096×6144 (Topaz's 4× ceiling). Exposed and motivated both S3B.1 and S3C. A deterministic recovery of the existing paid intermediate, using the corrected code, has not yet been separately authorized/performed |
 | S4 | Preservation verification for reconstructed/review-required output | Not implemented |
 | S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
+| 3.2 (Background Treatment) | Constitution amendment 3.2 (§16A.2): explicit, durable KEEP/REMOVE background treatment. REMOVE reuses `artwork-preparation`'s pure classification/removal engine (`analyzeArtwork`, `classifyRepairability`, `isolateBackground` — never a duplicated algorithm, never a provider) to produce a governed derived transparent asset; the executor (`sign-transform-executor.ts`/`sign-composition-steps.ts`) and Print Validation's `no_unintended_transparency` check become treatment-aware; QR detection/decoding (`qr-detect-decode.ts`) becomes alpha-safe via a fixed neutral analysis-only composite. Wired into the operator canvas-first composition path (`confirmSignCompositionPlan`/`buildSignCompositionPlan`); the legacy automatic `planSignRepair` diagnostic path is treatment-aware for diagnosis only. `backgroundTreatment` is part of `SignRepairPlan`/`planKey` identity, so a treatment change invalidates a stale authorization/acceptance by construction | Implemented |
 
 ### Apparel raster profile (implemented)
 
@@ -102,11 +103,38 @@ internal — it is a production-profile fact, never customer-facing copy.
 ### Rigid sign raster profile (admitted, unimplemented)
 
 The constitutional contract is §16A: an operator-oriented workflow
-producing an opaque, exact-size, aspect-preserving, preservation-verified
+producing an exact-size, aspect-preserving, preservation-verified
 production PNG at human-confirmed ordered width and height, under a
 viewing-distance-based resolution policy (initial V1 for rigid rectangles
 ≤ 24×36 in: 150 PPI target, 100 PPI blocking minimum, revisable
 operationally within the profile — never universal signage policy).
+
+**Background treatment (Constitution amendment 3.2, §16A.2).** The plate is
+opaque by default (KEEP — the original, unconditional contract, unchanged)
+unless the customer/operator explicitly, durably selects REMOVE, in which
+case the plate may intentionally carry alpha, produced only through
+governed background preparation. REMOVE reuses `artwork-preparation`'s pure
+classification/removal engine (`analyzeArtwork`/`classifyRepairability`/
+`isolateBackground`) rather than a second algorithm — the one narrow,
+explicitly-documented crossing of the `sign-preparation` →
+`artwork-preparation` capability boundary beyond S1's existing pure-ingress
+reuse (`capability-boundaries.ts`'s own "SIGNS PHASE S1" block, extended).
+Ambiguous artwork the classifier cannot safely resolve routes to
+`review_required` — never a destructive guess, and never a generative
+fallback (§16A.6's exclusion of generative redesign/outpainting is
+unchanged). `backgroundTreatment` is part of `SignRepairPlan`/`planKey`
+identity, so changing it invalidates a stale authorization/acceptance by
+construction, the same discipline `orderedWidthIn`/`orderedHeightIn`
+already establish. The exact ordered canvas — dimensions, aspect ratio,
+physical density — is unaffected by transparency: `fit_artwork_to_canvas`'s
+own uncovered padding becomes transparent under REMOVE (never an invented
+opaque fill colour) while the fitted artwork's own pixels/alpha are copied
+byte-for-byte regardless of treatment. QR/machine-readable-content
+detection (`qr-detect-decode.ts`) is alpha-safe: every pixel is
+alpha-composited against a fixed neutral value before luminance/decode
+analysis (never the production asset itself, which is never rewritten for
+this purpose), so RGB bytes hidden beneath a fully transparent pixel can
+never influence or forge a detected QR region.
 Architecturally it will be a new `ProductionCategory` arm and validation
 profile behind the existing FinalArtwork orchestration — shared job
 lifecycle, shared provider boundary, shared authoritative-validation
