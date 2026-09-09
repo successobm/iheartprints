@@ -224,7 +224,6 @@ function renderSignStep(
     orderedWidthIn: number | null;
     orderedHeightIn: number | null;
     specConfirmed: boolean;
-    productionTypeConfirmed?: boolean;
     plan?: SignPlanCustomerView | null;
   } | null = null,
   options: { busy?: boolean } = {},
@@ -242,7 +241,6 @@ function renderSignStep(
             plan: null,
             authorization: { authorizedBy: null, authorizedAt: null, matchesCurrentPlan: false },
             qrResolutions: null,
-            productionTypeConfirmed: true,
             ...signArtwork,
           }
         : null,

@@ -10,7 +10,6 @@
  */
 
 import type { SignPreparation } from "@/lib/domain/types";
-import { resolveSignProductionType } from "@/lib/domain/types";
 
 import type { SignSpecMissing, SignSpecResolution } from "./contracts";
 import { getSignResolutionPolicyById } from "./resolution-policy";
@@ -35,14 +34,10 @@ export function isValidOrderedDimensionIn(value: unknown): value is number {
 export function resolveSignProductionSpec(
   preparation: Pick<
     SignPreparation,
-    "orderedWidthIn" | "orderedHeightIn" | "specConfirmedAt" | "resolutionPolicyId" | "productionType"
+    "orderedWidthIn" | "orderedHeightIn" | "specConfirmedAt" | "resolutionPolicyId"
   >,
 ): SignSpecResolution {
   const missing: SignSpecMissing[] = [];
-  // Banner Production Profile: fail-closed resolved, never read raw — a
-  // missing/legacy/unrecognized value always resolves to
-  // "rigid_sign_raster", never "banner_raster".
-  const category = resolveSignProductionType(preparation.productionType);
 
   if (!isValidOrderedDimensionIn(preparation.orderedWidthIn)) {
     missing.push("ordered_width");
@@ -56,21 +51,24 @@ export function resolveSignProductionSpec(
   ) {
     missing.push("confirmation");
   }
+  // Dimension-Driven Signs Refactor: a resolution policy is a pure function
+  // of (width, height) — never a product/substrate category any more, and
+  // never "looked up" by id alone (`getSignResolutionPolicyById` recomputes
+  // it fresh for the current dimension-driven id, or returns the unchanged
+  // legacy row for either former rigid/banner id). A policy id this build
+  // cannot read is an absence of knowledge, not a licence to substitute a
+  // different policy: fails closed.
   const policy =
-    typeof preparation.resolutionPolicyId === "string"
-      ? getSignResolutionPolicyById(preparation.resolutionPolicyId)
+    typeof preparation.resolutionPolicyId === "string" &&
+    isValidOrderedDimensionIn(preparation.orderedWidthIn) &&
+    isValidOrderedDimensionIn(preparation.orderedHeightIn)
+      ? getSignResolutionPolicyById(
+          preparation.resolutionPolicyId,
+          preparation.orderedWidthIn,
+          preparation.orderedHeightIn,
+        )
       : null;
-  if (
-    policy === null ||
-    // A policy stamped for a DIFFERENT production category than the one
-    // this preparation currently resolves to is exactly as much an
-    // absence of knowledge as an unrecognized id — never silently
-    // reinterpreted across categories.
-    policy.category !== category
-  ) {
-    // A policy id this build cannot read is an absence of knowledge, not a
-    // license to substitute a different policy (the
-    // UNRECOGNIZED_PRODUCTION_OUTPUT precedent): fail closed.
+  if (policy === null) {
     missing.push("resolution_policy");
   }
 
@@ -81,7 +79,13 @@ export function resolveSignProductionSpec(
   return {
     status: "confirmed",
     spec: {
-      category,
+      // Derived from the resolved policy, never from a customer-facing
+      // production-type answer any more — see `resolution-policy.ts`'s own
+      // doc. Always `RIGID_SIGN_CATEGORY` (the unified Signs category) for
+      // any spec confirmed under the current dimension-driven policy;
+      // reflects the former category honestly for an already-existing
+      // legacy spec.
+      category: policy!.category,
       orderedWidthIn: preparation.orderedWidthIn as number,
       orderedHeightIn: preparation.orderedHeightIn as number,
       confirmedAt: preparation.specConfirmedAt as string,

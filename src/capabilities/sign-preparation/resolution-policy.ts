@@ -1,19 +1,85 @@
 /**
- * Signs Phase S1: the rigid-sign resolution POLICY table (Constitution
- * §16A.4).
+ * Signs Raster Artwork Preparation: the resolution POLICY (Constitution
+ * §16A.4, narrowed by the Dimension-Driven Signs Refactor).
  *
- * Sign resolution requirements are a profile policy derived from product
- * class, physical dimensions, viewing distance, and production process —
- * never a universal constant, and never copied from another profile. The
- * apparel profile's 300 PPI is an apparel fact and does not appear here;
- * likewise nothing here is "all signs = 150 PPI": each policy row names the
- * envelope it governs, and an ordered size outside every envelope has NO
- * policy and fails closed.
+ * iHeartPrints prepares print-ready artwork. It does not need to know, and
+ * this policy does not ask, whether the finished file will later be printed
+ * on ACM, banner vinyl, coroplast, PVC, foam board, or any other Signs
+ * substrate — that is a fulfillment/material fact outside the iHeartPrints
+ * product boundary (AGENTS.md, Constitution §16A.5). What DOES vary the
+ * resolution policy is exactly what Constitution §16A.4 has always said it
+ * should: "product class, physical dimensions, viewing distance, print
+ * process — never a universal constant." This module reads that as: the
+ * ordered PHYSICAL DIMENSIONS themselves, and this runtime's own proven
+ * memory ceiling — never a product/substrate label.
  *
- * Revising a figure inside this profile is an operational decision recorded
- * here and in ARCHITECTURE.md (§16A.4), not a Constitution amendment.
- * Adding a policy for a NEW sign class is a deliberate product decision,
- * never a fallback.
+ * THE FORMER TWO-POLICY MODEL (Constitution amendment 3.3): a Rigid Sign
+ * table row (≤24×36in, 150/100 PPI) and a Banner table row (≤36×96in,
+ * 72/50 PPI), matched by an explicit `SignProductionCategory` the customer
+ * had to answer BEFORE dimensions. Real production use proved this wrong in
+ * two ways: (1) it required a "what are we making?" question the artwork-
+ * preparation job never actually needed an answer to, and (2) coupling
+ * resolution to a discrete product-category boundary meant a genuinely
+ * larger physical order was refused for being the wrong LABEL, not for
+ * being technically unsafe to produce.
+ *
+ * THE CURRENT MODEL: one continuous, dimension-driven formula.
+ * `resolveSignResolutionPolicy(width, height)` — no category parameter —
+ * computes:
+ *
+ *   1. A MEMORY-SAFE target PPI, bounded above so the constructed canvas
+ *      never exceeds `SAFE_CANVAS_PIXEL_BUDGET`: `sqrt(SAFE_CANVAS_PIXEL_
+ *      BUDGET / (widthIn * heightIn))`. `SAFE_CANVAS_PIXEL_BUDGET` is not
+ *      an invented number — it is exactly the pixel count of the 84×24in
+ *      canvas at 72 PPI (6048×1728 = 10,450,944px) that the Banner
+ *      Production Profile Audit empirically measured at ~257MB peak RSS in
+ *      the REAL `buildSignCompositionPlan -> executeSignRepairPlan ->
+ *      encodeSignPlate` pipeline (isolated fresh Node processes, this
+ *      runtime's actual ~512MB/1-shared-vCPU DigitalOcean profile) — the
+ *      largest tested point with genuine safety margin (the same audit
+ *      measured ~416MB at 20.2MP, "already negligible margin", and ~566MB
+ *      at 29.0MP, "unsafe outright"). This bound applies to EVERY Signs
+ *      order now, not only large ones: an 18×24in order under a customer's
+ *      own very-high-resolution artwork was previously able to construct an
+ *      UNCAPPED, arbitrarily-dense canvas (the pre-Banner rigid policy had
+ *      no `maxCanvasPpi` at all) — a latent version of the exact same
+ *      memory risk the Banner audit found, simply never large enough in
+ *      practice to have been caught. This formula closes that gap for every
+ *      order, dimension-driven, the same way for all of them.
+ *   2. A QUALITY target ceiling, `QUALITY_TARGET_PPI_CEILING` (150) — the
+ *      original near-view rigid-sign figure, Phase S0's own viewing-
+ *      distance judgment, preserved unchanged as the UPPER bound so small
+ *      signs keep exactly their historical target quality (an 18×24in order
+ *      still resolves to 150 PPI target — the memory-safe bound at that
+ *      size, ~247 PPI, is well above it and never binds).
+ *   3. `targetPpi = min(quality ceiling, memory-safe target)` — whichever is
+ *      more conservative for THIS order's own physical size.
+ *   4. `minPpi = targetPpi * MIN_TARGET_RATIO` (2/3 — the original rigid
+ *      policy's own 100/150 ratio, applied consistently rather than two
+ *      independently-fitted numbers), never below `ABSOLUTE_MIN_USABLE_PPI`.
+ *   5. `maxCanvasPpi = targetPpi`, always — canvas CONSTRUCTION (not just
+ *      the after-the-fact validation target) is capped at the same
+ *      memory-safe figure, universally, closing the latent uncapped-canvas
+ *      gap described above for every order size.
+ *
+ * When even `ABSOLUTE_MIN_USABLE_PPI` cannot be reached at the requested
+ * physical size (an area so large that any technically-safe canvas would be
+ * unusably low-resolution), the function returns `null` — fails closed,
+ * exactly as the old envelope check did, but for an honest TECHNICAL
+ * reason ("too large to safely and usefully produce") rather than a
+ * product-label boundary. `isValidOrderedDimensionIn`'s existing 240in
+ * (20ft) per-axis sanity ceiling (`sign-spec.ts`) is unchanged and remains
+ * the first, cheaper degenerate-input guard.
+ *
+ * BACKWARD COMPATIBILITY: `RIGID_RECT_UP_TO_24X36_V1` and
+ * `BANNER_RECT_UP_TO_36X96_V1` below are kept, UNCHANGED, as fixed
+ * historical policy rows — never resolved by `resolveSignResolutionPolicy`
+ * for a NEW confirmation, but still returned by `getSignResolutionPolicyById`
+ * for an EXISTING preparation whose `resolutionPolicyId` was stamped under
+ * the old two-policy model, so an already-planned/authorized Signs order
+ * (of either former category) continues to load, re-plan, and validate
+ * exactly as it always did. `SIGN_MINIMUM_SAFE_INSET_IN` (a physical
+ * finishing-tolerance fact, not a resolution concern) is unchanged.
  */
 
 import {
@@ -24,15 +90,14 @@ import { BANNER_CATEGORY, RIGID_SIGN_CATEGORY, type SignProductionCategory } fro
 
 /**
  * Structural Layout Reflow Phase 1 (Foundations): the minimum physical
- * clearance meaningful content must keep from a rigid sign's finished cut
- * edge, on all four sides. A single, central figure — never duplicated as
- * a magic number anywhere else this value is needed (`SignProductionTemplate
- * .minimumSafeInsetIn`, `signSafeInsetPx`). This is a genuine production
- * fact (finishing/cutting tolerance), not an apparel figure and not
- * derived from `targetPpi`/`minPpi` — it could in principle vary by
- * policy exactly like they do, which is why it lives ON the policy row
- * rather than as a single bare global constant; V1 has exactly one rigid-
- * sign policy, so today every policy shares this same figure.
+ * clearance meaningful content must keep from a sign's finished cut edge,
+ * on all four sides. A single, central figure — never duplicated as a
+ * magic number anywhere else this value is needed
+ * (`SignProductionTemplate.minimumSafeInsetIn`, `signSafeInsetPx`). This is
+ * a genuine production fact (finishing/cutting tolerance), not derived from
+ * `targetPpi`/`minPpi` — it could in principle vary, which is why it lives
+ * ON the policy rather than as a single bare global constant; every Signs
+ * order shares this same figure today.
  */
 export const SIGN_MINIMUM_SAFE_INSET_IN = 0.125;
 
@@ -40,167 +105,164 @@ export interface SignResolutionPolicy {
   /** Stable identity, stamped onto confirmations and plans. Versioned. */
   id: string;
   /**
-   * Banner Production Profile: which Signs raster production profile this
-   * policy governs — `resolveSignResolutionPolicy` never matches a policy
-   * against the wrong category, so the SAME ordered dimensions can (and,
-   * for a banner-shaped order, do) resolve differently depending on the
-   * category explicitly requested. No policy row is ever matched by size
-   * alone.
+   * Retained for backward-compatible plan/validation dispatch
+   * (`PrintValidationProfile`, `ProductionCategory`) — never a live
+   * decision input any more. Every NEW resolution always resolves to
+   * `RIGID_SIGN_CATEGORY`, the single unified Signs raster category; a
+   * `BANNER_CATEGORY` policy can still be returned, but only for an
+   * EXISTING preparation stamped with the old banner policy id.
    */
   category: SignProductionCategory;
   /** Effective-resolution target (warning threshold below it). */
   targetPpi: number;
   /** Blocking minimum effective resolution. */
   minPpi: number;
-  /**
-   * The envelope this policy governs: the ordered rectangle must fit within
-   * shortSideMaxIn × longSideMaxIn in either orientation.
-   */
-  shortSideMaxIn: number;
-  longSideMaxIn: number;
   /** See `SIGN_MINIMUM_SAFE_INSET_IN`'s own doc. */
   minimumSafeInsetIn: number;
   /**
-   * Banner Production Profile Audit: an explicit, optional CONSTRUCTION
-   * ceiling on canvas pixel density — never just a validation target.
-   * `sign-composition-plan-builder.ts`'s `deriveCanvasPixelDensity` derives
-   * canvas density from the (possibly reconstructed) ARTWORK's own actual
-   * pixel resolution, uncapped by default — safe for the rigid-sign
-   * envelope (≤24×36in even at the full 40 MP ingestion ceiling stays
-   * within this runtime's proven-safe memory bounds), but NOT safe for
-   * banner's larger physical envelope: empirical measurement (real
-   * buildSignCompositionPlan -> executeSignRepairPlan -> encodeSignPlate
-   * pipeline, isolated fresh processes) showed an un-capped, aspect-
-   * matched, ingestion-ceiling-dense 84×24in banner could reach ~140
-   * effective PPI — well past what this ~512 MB runtime safely handles.
-   * When set, `deriveCanvasPixelDensity`'s result is clamped to this value
-   * regardless of how much resolution the customer's artwork provides —
-   * `undefined` (every existing rigid-sign policy) reproduces the
-   * pre-audit uncapped behavior exactly, byte-for-byte.
+   * Construction-time ceiling on canvas pixel density — never just a
+   * validation target. `sign-composition-plan-builder.ts`'s
+   * `deriveCanvasPixelDensity` derives canvas density from the (possibly
+   * reconstructed) ARTWORK's own actual pixel resolution; the result is
+   * clamped to this value regardless of how much resolution the customer's
+   * artwork provides, so a customer's own high-resolution upload can never
+   * push canvas construction past this policy's own proven-safe pixel
+   * ceiling. Always set for a dimension-driven policy (`= targetPpi`);
+   * `undefined` only for the legacy pre-audit rigid policy row below,
+   * preserved so an already-planned rigid sign replays byte-for-byte.
    */
   maxCanvasPpi?: number;
 }
 
 /**
- * V1: rectangular rigid signs up to 24×36 in, at typical near-view signage
- * distance. 150 target / 100 blocking minimum per the Phase S0 audit and
- * Constitution §16A.4 — initial production policy, expected to evolve from
- * production evidence.
+ * The empirically-proven-safe canvas pixel budget: exactly the pixel count
+ * of the 84×24in canvas at 72 PPI (6048 × 1728px) the Banner Production
+ * Profile Audit measured at ~257MB peak RSS in the real composition →
+ * execution → encode pipeline, on this runtime's actual ~512MB/1-shared-
+ * vCPU profile — the largest tested point with genuine safety margin. See
+ * this file's own top-of-file doc for the full measured curve.
+ */
+export const SAFE_CANVAS_PIXEL_BUDGET = 6048 * 1728;
+
+/**
+ * Upper quality ceiling on target PPI — the original Phase S0 near-view
+ * rigid-sign figure (Constitution §16A.4), unchanged. Binds for small
+ * signs, where the memory-safe bound is far above it; never exceeded.
+ */
+export const QUALITY_TARGET_PPI_CEILING = 150;
+
+/** target:minimum ratio — the original rigid policy's own 100/150, applied consistently rather than refit per size class. */
+export const MIN_TARGET_PPI_RATIO = 2 / 3;
+
+/**
+ * Below this, output is not usable print resolution regardless of memory
+ * headroom — a request whose only technically-safe canvas would fall below
+ * it is refused (`resolveSignResolutionPolicy` returns `null`) rather than
+ * silently producing a worthless file. Conservative relative to the lowest
+ * figure ever offered (the legacy banner policy's 50 PPI minimum).
+ */
+export const ABSOLUTE_MIN_USABLE_PPI = 30;
+
+/** Stable identity for the current dimension-driven formula. Bump on a formula revision that changes what a given size resolves to. */
+export const SIGNS_DIMENSION_DRIVEN_POLICY_ID = "signs_dimension_driven:v1";
+
+/**
+ * LEGACY (Constitution amendment 3.0; superseded by the Dimension-Driven
+ * Signs Refactor): the original rigid-sign policy row, ≤24×36in @ 150/100
+ * PPI, uncapped canvas construction. Kept ONLY so an existing preparation
+ * whose `resolutionPolicyId` was stamped with this id continues to load,
+ * re-plan, and validate exactly as it always has — never resolved by
+ * `resolveSignResolutionPolicy` for a new confirmation.
  */
 export const RIGID_RECT_UP_TO_24X36_V1: SignResolutionPolicy = {
   id: "rigid_rect_up_to_24x36:v1",
   category: RIGID_SIGN_CATEGORY,
   targetPpi: 150,
   minPpi: 100,
-  shortSideMaxIn: 24,
-  longSideMaxIn: 36,
   minimumSafeInsetIn: SIGN_MINIMUM_SAFE_INSET_IN,
 };
 
 /**
- * Banner Production Profile (Constitution amendment 3.3, §16A-bis): V1
- * banner envelope and resolution figures — a deliberately bounded range
- * that comfortably includes the real motivating case (84×24in) with modest
- * headroom, not an unnecessarily broad maximum.
- *
- * targetPpi 72 / minPpi 50 — LOWER than rigid's 150/100, for two
- * independent, converging reasons (Constitution §16A.4: resolution policy
- * is "derived from product class, physical dimensions, viewing distance,
- * print process... never a universal constant"):
- *
- *   1. Viewing distance: a banner's much larger physical format (up to
- *      36×96in here, vs rigid's 24×36in) is real-world signage practice
- *      for viewing from meaningfully farther away than a near-view rigid
- *      sign — 72 PPI ("screen resolution") is a legitimate, commonly-used
- *      large-format print target at that distance, not a quality
- *      compromise invented for this runtime.
- *   2. Runtime memory: empirical measurement (real
- *      buildSignCompositionPlan -> executeSignRepairPlan ->
- *      encodeSignPlate pipeline, synthetic opaque 84×24in artwork,
- *      isolated fresh Node processes, this repo's actual ~512 MB/1-shared-
- *      vCPU DigitalOcean runtime) showed peak RSS climbing roughly
- *      linearly with canvas pixel count: ~257 MB at 72 PPI (84×24in
- *      canvas = 6048×1728px ≈ 10.5 MP), ~416 MB at 100 PPI (20.2 MP),
- *      ~566 MB at 120 PPI (29.0 MP) — 100 PPI already leaves negligible
- *      margin once realistic Next.js server baseline and any concurrency
- *      are added; 120+ PPI is unsafe outright. 72 PPI is the highest
- *      target in the tested range with genuine safety margin.
- *
- * `maxCanvasPpi: targetPpi` additionally CAPS canvas construction itself
- * (never just validation) at 72 PPI regardless of how much resolution the
- * customer's artwork provides — see `SignResolutionPolicy.maxCanvasPpi`'s
- * own doc for why this is required (not merely defensive) for banner's
- * larger physical envelope.
- *
- * shortSideMaxIn 36 mirrors rigid's own short-side cap (a reasonable
- * banner height ceiling). longSideMaxIn 96 (8ft) covers the real 84in case
- * with 12in of headroom — re-verified safe at the full envelope corner
- * (36×96in @ the 72 PPI cap = 2592×6912px ≈ 17.9 MP, well under the
- * 84×24in @ 72 PPI figure already measured safe above).
+ * LEGACY (Constitution amendment 3.3; superseded by the Dimension-Driven
+ * Signs Refactor): the original banner policy row, ≤36×96in @ 72/50 PPI,
+ * canvas construction capped at 72 PPI. Kept ONLY so an existing
+ * preparation whose `resolutionPolicyId` was stamped with this id
+ * continues to load, re-plan, and validate exactly as it always has —
+ * never resolved by `resolveSignResolutionPolicy` for a new confirmation.
  */
 export const BANNER_RECT_UP_TO_36X96_V1: SignResolutionPolicy = {
   id: "banner_rect_up_to_36x96:v1",
   category: BANNER_CATEGORY,
   targetPpi: 72,
   minPpi: 50,
-  shortSideMaxIn: 36,
-  longSideMaxIn: 96,
   minimumSafeInsetIn: SIGN_MINIMUM_SAFE_INSET_IN,
   maxCanvasPpi: 72,
 };
 
-export const RIGID_SIGN_RESOLUTION_POLICIES: readonly SignResolutionPolicy[] = [
-  RIGID_RECT_UP_TO_24X36_V1,
-];
-
-export const BANNER_RESOLUTION_POLICIES: readonly SignResolutionPolicy[] = [
-  BANNER_RECT_UP_TO_36X96_V1,
-];
-
-/** Every Signs resolution policy this build admits, across every production category. */
-export const ALL_SIGN_RESOLUTION_POLICIES: readonly SignResolutionPolicy[] = [
-  ...RIGID_SIGN_RESOLUTION_POLICIES,
-  ...BANNER_RESOLUTION_POLICIES,
-];
+/** Every legacy fixed policy row this build still recognizes for backward compatibility, keyed by id. Never consulted by `resolveSignResolutionPolicy`. */
+const LEGACY_POLICIES_BY_ID: ReadonlyMap<string, SignResolutionPolicy> = new Map([
+  [RIGID_RECT_UP_TO_24X36_V1.id, RIGID_RECT_UP_TO_24X36_V1],
+  [BANNER_RECT_UP_TO_36X96_V1.id, BANNER_RECT_UP_TO_36X96_V1],
+]);
 
 /**
- * The policy governing one ordered size UNDER ONE EXPLICIT production
- * category, or `null` when no policy in that category covers it — in
- * which case confirmation/planning fail closed rather than borrowing a
- * figure from a class nobody decided (`unsupported_input`).
- *
- * Banner Production Profile: `category` defaults to `RIGID_SIGN_CATEGORY`
- * so every pre-Banner call site (omitting the third argument) keeps
- * resolving EXACTLY as before — byte-for-byte. Deliberately never resolves
- * across categories: an 84×24in order explicitly requesting
- * `RIGID_SIGN_CATEGORY` is matched ONLY against rigid-sign policies (and
- * fails, correctly) even though a banner policy would otherwise cover that
- * size — there is no implicit "large sign means banner" inference
- * anywhere in this function.
+ * The dimension-driven resolution policy for one ordered physical size, or
+ * `null` when no technically-safe, usable policy exists at that size (an
+ * absurd/degenerate input, or a physical area so large that even the
+ * memory-safe bound falls below `ABSOLUTE_MIN_USABLE_PPI`). See this file's
+ * own top-of-file doc for the full derivation. Deliberately takes no
+ * product/substrate/category parameter — the SAME two dimensions always
+ * resolve to the SAME policy, independent of what the finished sign will
+ * later be printed on.
  */
 export function resolveSignResolutionPolicy(
   orderedWidthIn: number,
   orderedHeightIn: number,
-  category: SignProductionCategory = RIGID_SIGN_CATEGORY,
 ): SignResolutionPolicy | null {
   if (!isPositiveFinite(orderedWidthIn) || !isPositiveFinite(orderedHeightIn)) {
     return null;
   }
-  const shortSide = Math.min(orderedWidthIn, orderedHeightIn);
-  const longSide = Math.max(orderedWidthIn, orderedHeightIn);
-  return (
-    ALL_SIGN_RESOLUTION_POLICIES.find(
-      (policy) =>
-        policy.category === category &&
-        shortSide <= policy.shortSideMaxIn && longSide <= policy.longSideMaxIn,
-    ) ?? null
+  const areaSqIn = orderedWidthIn * orderedHeightIn;
+  const memorySafeTargetPpi = Math.sqrt(SAFE_CANVAS_PIXEL_BUDGET / areaSqIn);
+  const targetPpi = Math.round(Math.min(QUALITY_TARGET_PPI_CEILING, memorySafeTargetPpi));
+  if (targetPpi < ABSOLUTE_MIN_USABLE_PPI) {
+    return null;
+  }
+  const minPpi = Math.max(
+    ABSOLUTE_MIN_USABLE_PPI,
+    Math.round(targetPpi * MIN_TARGET_PPI_RATIO),
   );
+  return {
+    id: SIGNS_DIMENSION_DRIVEN_POLICY_ID,
+    category: RIGID_SIGN_CATEGORY,
+    targetPpi,
+    minPpi,
+    minimumSafeInsetIn: SIGN_MINIMUM_SAFE_INSET_IN,
+    maxCanvasPpi: targetPpi,
+  };
 }
 
+/**
+ * Resolves a PERSISTED `resolutionPolicyId` back into the policy it means,
+ * given the preparation's own ordered dimensions (a dimension-driven policy
+ * is a pure function of size, never stored numbers alone — recomputed
+ * fresh every time, exactly like `resolveSignResolutionPolicy` itself).
+ * Recognizes the current dimension-driven id (recomputes from `orderedWidthIn`
+ * /`orderedHeightIn`) and both legacy fixed ids (returns the unchanged
+ * historical row, ignoring dimensions — an already-confirmed legacy spec's
+ * envelope was validated once, at confirmation time, under the policy that
+ * was live then). Any other id is an absence of knowledge, not a licence to
+ * substitute a different policy: fails closed to `null`.
+ */
 export function getSignResolutionPolicyById(
   id: string,
+  orderedWidthIn: number,
+  orderedHeightIn: number,
 ): SignResolutionPolicy | null {
-  return ALL_SIGN_RESOLUTION_POLICIES.find((policy) => policy.id === id) ?? null;
+  if (id === SIGNS_DIMENSION_DRIVEN_POLICY_ID) {
+    return resolveSignResolutionPolicy(orderedWidthIn, orderedHeightIn);
+  }
+  return LEGACY_POLICIES_BY_ID.get(id) ?? null;
 }
 
 function isPositiveFinite(value: number): boolean {

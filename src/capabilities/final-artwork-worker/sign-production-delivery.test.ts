@@ -616,11 +616,13 @@ describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4C): customer-shaped non
 /**
  * LIVE PRODUCT BLOCKER #4D: the REAL customer's exact plan geometry
  * (1086×1448 source, 24×36in ordered — reproducing the persisted plan's
- * own `reconstruct_resolution` request of 3672×4896 and `pad_uniform
- * _background` of 306px top/bottom, bit-for-bit), with the fake Topaz
- * provider returning a genuinely LARGER proportional result — analogous
- * to the real, previously-observed Ruth behavior — through the REAL
- * worker path, with no injected validation shortcut.
+ * own `reconstruct_resolution` request of 2693×3590 and `pad_uniform
+ * _background` of 225px top/bottom, bit-for-bit under the Dimension-Driven
+ * Signs Refactor's own memory-safe target for this physical size — see
+ * `resolution-policy.ts`'s own doc), with the fake Topaz provider returning
+ * a genuinely LARGER proportional result — analogous to the real,
+ * previously-observed Ruth behavior — through the REAL worker path, with
+ * no injected validation shortcut.
  */
 describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4D): real-customer-shaped plan, oversized proportional Topaz result, still reaches a downloadable print_ready file", () => {
   let tempDir = "";
@@ -694,15 +696,22 @@ describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4D): real-customer-shape
     assert.deepEqual(plan.steps.map((s) => s.kind), ["reconstruct_resolution", "pad_uniform_background"]);
     assert.equal(plan.overallRisk, "review_required");
     const reconstructStep = plan.steps[0]!;
-    assert.equal(reconstructStep.params.requestedWidthPx, 3672);
-    assert.equal(reconstructStep.params.requestedHeightPx, 4896);
-    assert.ok(Math.abs((reconstructStep.params.requestedScale as number) - 3.38121546961326) < 1e-6);
+    // Dimension-Driven Signs Refactor: 24x36in resolves the dimension-
+    // driven policy's own memory-safe target for this physical area (~110
+    // PPI, below the old rigid policy's flat 150 PPI — 24x36in @ 150 PPI
+    // is 19.44MP, past this runtime's proven-safe canvas budget), not the
+    // legacy rigid policy's figure — recomputed fresh from the real
+    // planner rather than hand-derived (this file's own established
+    // discipline for these acceptance numbers).
+    assert.equal(reconstructStep.params.requestedWidthPx, 2693);
+    assert.equal(reconstructStep.params.requestedHeightPx, 3590);
+    assert.ok(Math.abs((reconstructStep.params.requestedScale as number) - 2.4795580110497237) < 1e-6);
     const padStep = plan.steps[1]!;
     assert.equal(padStep.params.axis, "vertical");
-    assert.equal(padStep.params.leadingPx, 306);
-    assert.equal(padStep.params.trailingPx, 306);
-    assert.equal(plan.expectedOutputWidthPx, 3672);
-    assert.equal(plan.expectedOutputHeightPx, 5508);
+    assert.equal(padStep.params.leadingPx, 225);
+    assert.equal(padStep.params.trailingPx, 225);
+    assert.equal(plan.expectedOutputWidthPx, 2693);
+    assert.equal(plan.expectedOutputHeightPx, 4040);
 
     // --- 3. Operator authorizes THIS exact plan --------------------------
     await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
@@ -711,7 +720,7 @@ describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4D): real-customer-shape
     // (1.25x both axes — clean, exact, proportional, analogous to the
     // real, previously-observed Ruth 4x behavior) rather than exactly
     // what was requested.
-    reconstructionProvider.behavior = { kind: "oversized_but_valid", widthPx: 4590, heightPx: 6120 };
+    reconstructionProvider.behavior = { kind: "oversized_but_valid", widthPx: 3366, heightPx: 4488 };
 
     const { job } = await finalArtwork.requestSignFinalArtwork(projectId);
     await worker.processNextJob();
@@ -726,13 +735,13 @@ describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4D): real-customer-shape
         a.finalArtworkJobId === job.id && a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a),
     );
     assert.ok(asset, "the real worker produced the final production asset");
-    // Content width stays the actual reconstruction's own width (4590);
+    // Content width stays the actual reconstruction's own width (3366);
     // height is the ordered-aspect target for THAT actual reconstruction
-    // (4590 * 36/24 = 6885), not the plan's own 3672x5508 prediction —
+    // (3366 * 36/24 = 5049), not the plan's own 2693x4040 prediction —
     // exactly 1.25x the plan's own baseline numbers on both axes, since
     // the oversizing itself was a clean, uniform 1.25x.
-    assert.equal(asset!.widthPx, 4590);
-    assert.equal(asset!.heightPx, 6885);
+    assert.equal(asset!.widthPx, 3366);
+    assert.equal(asset!.heightPx, 5049);
 
     // --- 7. Preservation authority: genuinely "preserved" ----------------
     const { buildCombinedVerificationAlgorithmVersion } = await import("@/capabilities/sign-preservation");
@@ -789,8 +798,8 @@ describe("FULL WORKER ACCEPTANCE (LIVE PRODUCT BLOCKER #4D): real-customer-shape
     assert.ok(downloaded, "the actual corrected PNG bytes are downloadable");
     const { PNG } = await import("pngjs");
     const decoded = PNG.sync.read(downloaded!.bytes);
-    assert.equal(decoded.width, 4590);
-    assert.equal(decoded.height, 6885);
+    assert.equal(decoded.width, 3366);
+    assert.equal(decoded.height, 5049);
   });
 });
 

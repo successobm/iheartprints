@@ -71,7 +71,7 @@ import type { ToleranceLevel } from "@/capabilities/shared/flood-fill-selection"
 import type { SignOperatorRegionBoundary } from "@/capabilities/sign-preparation/sign-operator-structural-override";
 import { loadSignPlanOperatorReview, type SignPlanOperatorReview } from "@/capabilities/sign-preparation/sign-plan-operator-review";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
-import type { FinalArtworkJobStatus, SignProductionType } from "@/lib/domain/types";
+import type { FinalArtworkJobStatus } from "@/lib/domain/types";
 import { getProjectRepository } from "@/lib/db";
 import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
 import { buildPrintReadyFilename } from "@/lib/services/print-ready-filename";
@@ -139,32 +139,6 @@ export async function confirmSignArtworkSize(
     input.orderedWidthIn,
     input.orderedHeightIn,
   );
-
-  const snapshot = await getConversation(projectId);
-  if (!snapshot) {
-    throw new SignArtworkBridgeError("Project not found");
-  }
-  return snapshot;
-}
-
-/**
- * Banner Production Profile (Constitution amendment 3.3, §16A-bis): the
- * customer's explicit "what are we making?" answer — Rigid Sign or Banner
- * — asked BEFORE dimensions. Bridges the sign original first (a customer
- * can reach this the very first time they identify their upload as a
- * Sign, before any `SignPreparation` exists yet), then durably records the
- * choice. Idempotent: re-selecting the SAME type is a harmless no-op;
- * selecting a DIFFERENT type after dimensions were already confirmed under
- * the old one makes the stale spec/plan/acceptance fail closed until the
- * customer re-confirms size — see `setSignProductionType`'s own doc.
- */
-export async function setSignArtworkProductionType(
-  projectId: string,
-  productionType: SignProductionType,
-): Promise<ApiProjectSnapshot> {
-  const graph = getCapabilityGraph();
-  await bridgeSignArtworkIfNeeded(projectId);
-  await graph.signPreparation.setSignProductionType(projectId, productionType);
 
   const snapshot = await getConversation(projectId);
   if (!snapshot) {
@@ -593,7 +567,11 @@ async function resolveCurrentCandidateImage(projectId: string): Promise<{
   if (!preparation || preparation.orderedWidthIn === null || preparation.orderedHeightIn === null || !preparation.resolutionPolicyId || !preparation.planKey) {
     return null;
   }
-  const policy = getSignResolutionPolicyById(preparation.resolutionPolicyId);
+  const policy = getSignResolutionPolicyById(
+    preparation.resolutionPolicyId,
+    preparation.orderedWidthIn,
+    preparation.orderedHeightIn,
+  );
   if (!policy) return null;
 
   let image = getCachedDecodedCandidate(candidate.assetId);
@@ -1309,12 +1287,22 @@ export async function previewSignSafeAreaFit(projectId: string): Promise<SignSaf
 export async function applySignSafeAreaFit(projectId: string): Promise<SignPlanOperatorReview> {
   const graph = getCapabilityGraph();
   const preparation = await graph.signPreparation.getSignPreparation(projectId);
-  if (!preparation || !preparation.plan || !preparation.resolutionPolicyId) {
+  if (
+    !preparation ||
+    !preparation.plan ||
+    !preparation.resolutionPolicyId ||
+    preparation.orderedWidthIn === null ||
+    preparation.orderedHeightIn === null
+  ) {
     throw new SignArtworkBridgeError("This project has no current composition plan to correct.");
   }
-  const policy = getSignResolutionPolicyById(preparation.resolutionPolicyId);
+  const policy = getSignResolutionPolicyById(
+    preparation.resolutionPolicyId,
+    preparation.orderedWidthIn,
+    preparation.orderedHeightIn,
+  );
   if (!policy) {
-    throw new SignArtworkBridgeError("That sign size isn't covered by a supported rigid-sign policy yet.");
+    throw new SignArtworkBridgeError("That size isn't one we can safely and usefully prepare artwork for yet.");
   }
   const currentPlan = preparation.plan as unknown as SignRepairPlan;
   const choices = resolveFitInputChoices(currentPlan);

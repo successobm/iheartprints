@@ -2570,47 +2570,26 @@ export function resolveSignBackgroundTreatment(
 }
 
 /**
- * Banner Production Profile (Constitution amendment 3.3, §16A-bis): which
- * admitted Signs raster production profile governs one order. Two sibling
- * profiles under the same shared Signs preparation/composition/validation
- * authority — never a third, implicit "large sign" category inferred from
- * dimensions alone.
+ * LEGACY COMPATIBILITY VOCABULARY (superseded by the Dimension-Driven Signs
+ * Refactor). Constitution amendment 3.3 (§16A-bis) briefly admitted two
+ * sibling Signs raster production profiles — "rigid_sign_raster" and
+ * "banner_raster" — distinguished by an explicit customer "what are we
+ * making?" answer BEFORE dimensions, each with its own size envelope and
+ * resolution policy. Real production use proved that question unnecessary:
+ * iHeartPrints prepares print-ready artwork to a requested physical size;
+ * it does not need to know what substrate/product the finished sign will
+ * later be printed on, and resolution policy is now derived purely from
+ * the ordered dimensions and this runtime's own proven memory ceiling
+ * (`sign-preparation/resolution-policy.ts`'s own doc), never from this
+ * value.
  *
- *   "rigid_sign_raster" — DEFAULT. The original, unconditional §16A
- *                          contract, unchanged: exact-size rectangular
- *                          rigid signs, governed by
- *                          `RIGID_RECT_UP_TO_24X36_V1`. Every existing
- *                          preparation with no explicit selection reads
- *                          as this — a missing/legacy value is never
- *                          silently promoted to "banner_raster"
- *                          (`resolveSignProductionType` below is the one
- *                          fail-closed reader every caller must use).
- *   "banner_raster"      — explicitly, durably selected. Governed by its
- *                          own sibling resolution policy (larger physical
- *                          envelope, lower target/minimum PPI — a
- *                          product class + viewing-distance fact per
- *                          §16A.4, not a relaxed rigid-sign figure) and
- *                          its own `validationProfile` in print
- *                          validation. Reuses every substrate-neutral
- *                          Signs authority unchanged: artwork
- *                          immutability, background treatment, canvas-
- *                          first composition, QR preservation,
- *                          candidate-bound acceptance.
- *
- * The string values are the SAME literals `RIGID_SIGN_CATEGORY`/
- * `BANNER_CATEGORY` (`sign-preparation/contracts.ts`) already use for
- * `SignProductionSpec.category` and `PrintValidationCapability`'s
- * `validationProfile` dispatch — one vocabulary, not two, so a
- * `SignPreparation.productionType` value plugs directly into both
- * without translation.
- *
- * Durable, candidate-authoritative, and part of `SignRepairPlan`
- * identity (`planKey`) via `policyId` (each profile's policies live in
- * disjoint id namespaces) — changing it is production-significant and
- * must invalidate a stale authorization/acceptance bound to the OLD
- * profile, the same "a re-plan is a different plan" discipline
- * `backgroundTreatment`/`orderedWidthIn`/`orderedHeightIn` already
- * establish.
+ * `SIGN_PRODUCTION_TYPES`/`SignProductionType`/`resolveSignProductionType`
+ * and `SignPreparation.productionType`/`productionTypeConfirmedAt` are kept
+ * ONLY so an already-existing row (of either former value) continues to
+ * load without error — nothing in this codebase writes a new value to
+ * `productionType` any more, and nothing reads it to choose a resolution
+ * policy, gate a workflow step, or select a repair strategy. Values here
+ * are historical/read-only compatibility metadata, not decision authority.
  */
 export const SIGN_PRODUCTION_TYPES = ["rigid_sign_raster", "banner_raster"] as const;
 export type SignProductionType = (typeof SIGN_PRODUCTION_TYPES)[number];
@@ -2619,14 +2598,11 @@ export type SignProductionType = (typeof SIGN_PRODUCTION_TYPES)[number];
 export const DEFAULT_SIGN_PRODUCTION_TYPE: SignProductionType = "rigid_sign_raster";
 
 /**
- * Fail-closed reader every caller must use instead of reading
- * `SignPreparation.productionType` directly — a `null`/`undefined`/
- * unrecognized stored value (a pre-Banner-amendment row, a partial
- * write, a future value this build does not know) always resolves to
- * `"rigid_sign_raster"`, never `"banner_raster"`. No ambiguous implicit
- * "large sign means banner" inference exists anywhere — this function is
- * the only path from a stored/absent value to a production type, and it
- * only ever returns what was explicitly, durably selected.
+ * Fail-closed reader for the legacy `SignPreparation.productionType` value
+ * — a `null`/`undefined`/unrecognized stored value (a pre-Banner-amendment
+ * row, a partial write, a future value this build does not know) always
+ * resolves to `"rigid_sign_raster"`, never `"banner_raster"`. Kept for the
+ * rare historical/audit read; no live decision path calls this any more.
  */
 export function resolveSignProductionType(
   value: string | null | undefined,
@@ -2811,15 +2787,15 @@ export interface SignPreparation {
    */
   backgroundRemoval: Record<string, unknown> | null;
   /**
-   * Banner Production Profile: durable KEEP/REMOVE-style selection —
-   * see `SignProductionType`'s own doc. Stored as the raw string so an
-   * unrecognized/legacy value round-trips honestly rather than being
-   * silently coerced at the domain-type boundary; every reader MUST go
-   * through `resolveSignProductionType` rather than comparing this field
-   * directly, so a `null`/malformed row never behaves as "banner_raster".
+   * LEGACY COMPATIBILITY METADATA — see `SignProductionType`'s own doc
+   * (Dimension-Driven Signs Refactor). Stored as the raw string so an
+   * unrecognized/legacy value round-trips honestly; `resolveSignProductionType`
+   * is the only fail-closed reader. No live code writes a new value here or
+   * reads this to make a decision any more — kept only so an already-
+   * existing row continues to load.
    */
   productionType: string | null;
-  /** When a human explicitly selected `productionType`. Consent provenance, mirrors `specConfirmedAt`/`backgroundTreatmentConfirmedAt`. `null` means never explicitly selected (implicit "rigid_sign_raster"). */
+  /** LEGACY COMPATIBILITY METADATA — see `productionType`'s own doc. When a human explicitly selected it, back when that question existed. */
   productionTypeConfirmedAt: string | null;
   createdAt: string;
   updatedAt: string;
