@@ -10,6 +10,7 @@ import { deriveProductionRequirements } from "@/capabilities/print-validation/pr
 import { RIGID_SIGN_CATEGORY } from "./contracts";
 import {
   RIGID_RECT_UP_TO_24X36_V1,
+  SIGNS_DIMENSION_DRIVEN_POLICY_ID,
   resolveSignResolutionPolicy,
   SIGN_RECONSTRUCTION_HEADROOM,
   SIGN_RECONSTRUCTION_SCALE_CEILING,
@@ -84,12 +85,14 @@ describe("rigid_sign_raster category separation", () => {
     assert.notEqual(requirements.category, "signage");
   });
 
-  it("policy resolution fails closed outside every envelope", () => {
-    assert.equal(resolveSignResolutionPolicy(18, 24)?.id, "rigid_rect_up_to_24x36:v1");
-    assert.equal(resolveSignResolutionPolicy(24, 36)?.id, "rigid_rect_up_to_24x36:v1");
-    assert.equal(resolveSignResolutionPolicy(36, 24)?.id, "rigid_rect_up_to_24x36:v1");
-    assert.equal(resolveSignResolutionPolicy(25, 30), null);
-    assert.equal(resolveSignResolutionPolicy(18, 40), null);
+  it("Dimension-Driven Signs Refactor: policy resolution is no longer a discrete product-category envelope — see signs-dimension-driven-resolution.test.ts for the full formula coverage. Still fails closed on degenerate input.", () => {
+    assert.equal(resolveSignResolutionPolicy(18, 24)?.id, SIGNS_DIMENSION_DRIVEN_POLICY_ID);
+    assert.equal(resolveSignResolutionPolicy(24, 36)?.id, SIGNS_DIMENSION_DRIVEN_POLICY_ID);
+    // 25x30 and 18x40 were refused under the old rigid-only 24x36 envelope —
+    // both are now genuinely supported sizes under the dimension-driven
+    // formula, not a product-category boundary.
+    assert.notEqual(resolveSignResolutionPolicy(25, 30), null);
+    assert.notEqual(resolveSignResolutionPolicy(18, 40), null);
     assert.equal(resolveSignResolutionPolicy(0, 24), null);
     assert.equal(resolveSignResolutionPolicy(Number.NaN, 24), null);
   });

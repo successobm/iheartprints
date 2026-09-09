@@ -131,11 +131,17 @@ describe("POST /api/projects/[projectId]/sign-artwork", () => {
     assert.equal(secondAssetId, firstAssetId);
   });
 
-  it("rejects an ordered size no rigid-sign policy covers, with no plan or partial state left behind", async () => {
+  it("rejects an ordered size no dimension-driven resolution policy can safely and usefully cover, with no plan or partial state left behind", async () => {
     const projectId = await freshProject();
     await uploadExistingArtwork(projectId);
 
-    const response = await post(projectId, { orderedWidthIn: 96, orderedHeightIn: 96 });
+    // Dimension-Driven Signs Refactor: 96x96 was refused under the old
+    // rigid-only 24x36 envelope but is a genuinely supported size now (its
+    // own memory-safe target, ~34 PPI, is above the usable floor) — the
+    // boundary moved from a product-category envelope to a technical one.
+    // 200x100in (20,000 sq in) is large enough that even the memory-safe
+    // target PPI falls below the usable floor.
+    const response = await post(projectId, { orderedWidthIn: 200, orderedHeightIn: 100 });
     assert.equal(response.status, 409);
   });
 

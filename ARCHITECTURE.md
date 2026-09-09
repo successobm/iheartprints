@@ -43,8 +43,7 @@ dormant seams authorize nothing. The registry:
 | Profile | Constitutional status | Implementation status |
 |---|---|---|
 | Apparel raster (DTF/DTG-oriented; internal DTF halftone treatment) | Activated (Constitution §16) | Implemented and live — the pipeline this document describes |
-| Rigid sign raster | Admitted (Constitution §16A) | **Phases S1–S3D implemented; S4.1/S4.2A/S4.2A.1 implemented, still not wired into READINESS.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative `rigid_sign_raster` Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); provider-output-ADAPTIVE deterministic geometry (S3C); bounded, alpha-only provider-introduced-transparency canonicalization on a verified-opaque source (S3D); DETERMINISTIC preservation-verification evidence, its own append-only table (S4.1); SEMANTIC (multimodal) preservation verification against a fake provider only — no real model call yet — the first S4 layer capable of `"preserved"`, gated behind deterministic structural authority (S4.2A); and the actual `FinalArtworkWorkerCapability` orchestration seam that now calls it automatically for every reconstructed sign (S4.2A.1) — are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned, restoring full opacity if the provider introduced any, and now automatically preservation-verified — deterministically always, semantically whenever structural authority is valid) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it; the persisted preservation record is NOT yet consulted by Print Validation at all (that remains Signs Phase S4.4). Customer-facing routes and S4.2B–S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing three real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`); S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions; and S3D corrected for real provider-introduced alpha (Topaz's own reconstruction carrying non-255 alpha on a verified-opaque source) via bounded, RGB-preserving canonicalization. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only |
-| Banner raster | Admitted (Constitution amendment 3.3, §16A) | **Domain/policy/composition/print-validation/UI layer complete on `feature/signs-banner-production-profile`, not yet merged.** A new `production_type` (`rigid_sign_raster` default / `banner_raster`) selects between two disjoint resolution-policy namespaces via the SAME shared composition/repair/QR/background-treatment/print-validation architecture rigid_sign_raster already uses — nothing duplicated. Banner's own policy (`banner_rect_up_to_36x96:v1`): ≤36×96in envelope, 72 PPI target / 50 PPI blocking minimum (own empirically-justified figures, never rigid's 150/100), plus a construction-time `maxCanvasPpi: 72` ceiling that caps the canvas pixel density `buildSignCompositionPlan` derives from the artwork's own resolution — proven necessary by isolated-process empirical memory profiling of the real composition→execution→encode pipeline against this runtime's ~512MB/1-shared-vCPU DigitalOcean profile (see "Banner Production Profile" phase note below). Choosing/changing `production_type` is its own capability method (`setSignProductionType`) that clears any stale spec/plan/authorization confirmed under a prior type — the same "production-significant fact invalidates downstream state" discipline `backgroundTreatment` already established. New customer-facing "What are we making?" step (`choose_sign_production_type`) precedes size confirmation in `uploaded-artwork-flow.ts`'s routing; an existing project with no `production_type` set safely resolves to `rigid_sign_raster` (fail-closed default). No bleed/hem/grommet/finishing geometry is admitted (deferred — an exact-size raster file needs none of it to be honestly `print_ready`). Additive migration (`sign_production_type`) written but **not remotely applied**. Zero OpenAI/Topaz calls; DTF, rigid-sign behavior, and upload limits unchanged and regression-tested |
+| Signs raster artwork preparation | Admitted (Constitution §16A; amendment 3.4 unified it onto one dimension-driven policy) | **Phases S1–S3D implemented; S4.1/S4.2A/S4.2A.1 implemented, still not wired into READINESS.** Inspection, diagnosis, and repair PLANNING (S1); deterministic repair EXECUTION and authoritative Print Validation (S2); BOUNDED provider reconstruction dispatch for `reconstruct_resolution` steps (S3A); provider-output-ADAPTIVE deterministic geometry (S3C); bounded, alpha-only provider-introduced-transparency canonicalization on a verified-opaque source (S3D); DETERMINISTIC preservation-verification evidence, its own append-only table (S4.1); SEMANTIC (multimodal) preservation verification against a fake provider only — no real model call yet — the first S4 layer capable of `"preserved"`, gated behind deterministic structural authority (S4.2A); and the actual `FinalArtworkWorkerCapability` orchestration seam that now calls it automatically for every reconstructed sign (S4.2A.1) — are real and tested. A deterministic (`auto_safe`, non-reconstructed) plan can reach `print_ready` today. A plan requiring reconstruction now EXECUTES (one bounded, paid-call-idempotent Topaz dispatch, replayed into the plan's deterministic remainder, adapting its geometry-stage pixel amounts to whatever the provider actually returned, restoring full opacity if the provider introduced any, and now automatically preservation-verified — deterministically always, semantically whenever structural authority is valid) but its resulting asset is **structurally blocked from `print_ready`** — `resolutionProvenance === "reconstructed"` is an unconditional Print Validation refusal until preservation verification (S4) exists to justify it; the persisted preservation record is NOT yet consulted by Print Validation at all (that remains Signs Phase S4.4). Customer-facing routes and S4.2B–S5 remain **not implemented**. One real, controlled S3B live acceptance dispatch has occurred (the real "Kids Fun Extras"/Ruth artwork, one paid Topaz submission) — the provider reconstruction itself completed at 4096×6144 (Topaz's own 4× ceiling, not the requested 2448×3672), exposing three real-world provider-contract gaps in turn: S3B.1 corrected an undersized download cap (25 MB customer-upload cap wrongly reused for provider output; now a dedicated 64 MiB `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES`); S3C corrected the deterministic geometry stage's reliance on the plan's requested (rather than actual) reconstruction dimensions; and S3D corrected for real provider-introduced alpha (Topaz's own reconstruction carrying non-255 alpha on a verified-opaque source) via bounded, RGB-preserving canonicalization. A deterministic RECOVERY of the already-paid-for real Ruth intermediate, using this corrected code, has not yet been separately authorized/performed; operator/internal only. **Amendment 3.4 (Dimension-Driven Signs Refactor)**: the resolution policy is now one continuous, dimension-driven formula (no product/substrate-category question, no discrete envelope table) — see "Signs resolution policy: dimension-driven" below |
 | All other categories | Not admitted | Dormant seams only |
 
 **Signs phase boundary** (Constitution §16A/§16B — admission is not implementation, and each phase's own scope is the honest limit of what "implemented" means until the next one lands):
@@ -65,7 +64,8 @@ dormant seams authorize nothing. The registry:
 | S4 | Preservation verification for reconstructed/review-required output | Not implemented |
 | S5 | Operator review/delivery workflow, customer-facing surface | Not implemented |
 | 3.2 (Background Treatment) | Constitution amendment 3.2 (§16A.2): explicit, durable KEEP/REMOVE background treatment. REMOVE reuses `artwork-preparation`'s pure classification/removal engine (`analyzeArtwork`, `classifyRepairability`, `isolateBackground` — never a duplicated algorithm, never a provider) to produce a governed derived transparent asset; the executor (`sign-transform-executor.ts`/`sign-composition-steps.ts`) and Print Validation's `no_unintended_transparency` check become treatment-aware; QR detection/decoding (`qr-detect-decode.ts`) becomes alpha-safe via a fixed neutral analysis-only composite. Wired into the operator canvas-first composition path (`confirmSignCompositionPlan`/`buildSignCompositionPlan`); the legacy automatic `planSignRepair` diagnostic path is treatment-aware for diagnosis only. `backgroundTreatment` is part of `SignRepairPlan`/`planKey` identity, so a treatment change invalidates a stale authorization/acceptance by construction | Implemented |
-| 3.3 (Banner Production Profile) | Constitution amendment 3.3 (§16A retitled "Signs Raster Production Profiles"): admits Banner as a sibling Signs profile. See "Banner raster profile" section below for the full architecture | Implemented (code-complete on `feature/signs-banner-production-profile`; not yet merged/deployed) |
+| 3.3 (Banner Production Profile) | Constitution amendment 3.3 (§16A retitled "Signs Raster Production Profiles"): admitted Banner as a sibling Signs profile. **Superseded by amendment 3.4** — see below | Superseded (merged to main, then unified by 3.4 before its own release) |
+| 3.4 (Dimension-Driven Signs Refactor) | Constitution amendment 3.4 (§16A retitled "Signs Raster Artwork Preparation"): supersedes amendment 3.3's Rigid Sign/Banner split with one unified, dimension-driven resolution policy — no product/substrate-category question. See "Signs resolution policy: dimension-driven" section below for the full architecture | Implemented (code-complete; see the production main SHA this document was last updated against) |
 
 ### Apparel raster profile (implemented)
 
@@ -102,14 +102,17 @@ validation it performs itself. Everything downstream of the file belongs to
 the decorator. Decoration-method vocabulary (including "DTF" and "DTG") is
 internal — it is a production-profile fact, never customer-facing copy.
 
-### Rigid sign raster profile (admitted, unimplemented)
+### Signs raster artwork preparation profile (admitted)
 
 The constitutional contract is §16A: an operator-oriented workflow
-producing an exact-size, aspect-preserving, preservation-verified
-production PNG at human-confirmed ordered width and height, under a
-viewing-distance-based resolution policy (initial V1 for rigid rectangles
-≤ 24×36 in: 150 PPI target, 100 PPI blocking minimum, revisable
-operationally within the profile — never universal signage policy).
+producing an exact-requested-size, aspect-preserving, preservation-verified
+production PNG at human-confirmed physical width and height, under a
+dimension-driven resolution policy (§16A.4; amendment 3.4, Dimension-Driven
+Signs Refactor — see "Signs resolution policy: dimension-driven" below for
+the exact formula and its empirical basis). One unified profile: the
+customer answers only "what size?" — never a substrate/product-category
+question — and the resolution policy, repair strategy, and validation are
+all derived from that answer alone, never from a product label.
 
 **Background treatment (Constitution amendment 3.2, §16A.2).** The plate is
 opaque by default (KEEP — the original, unconditional contract, unchanged)
@@ -156,135 +159,48 @@ broader validation categories) may remain in the codebase. They are
 **dormant hooks**, not unfinished requirements. Broader architecture must
 not broaden the product; only admission does (Constitution §7.14).
 
-### Banner raster profile (admitted, Constitution amendment 3.3)
+### Signs resolution policy: dimension-driven (Constitution amendment 3.4, Dimension-Driven Signs Refactor)
 
-The real motivating case: an 84×24in (7ft×2ft) banner order, correctly
-refused under `rigid_sign_raster` (§16A.6 has never admitted banners). The
-honest fix audited and built here is a genuine **sibling** Signs raster
-profile — never a raised rigid-sign ceiling, and never an inference that a
-large sign order is automatically a banner.
+The real motivating case: an 84×24in (7ft×2ft) sign order, correctly
+accepted in SIZE once the (short-lived) amendment 3.3 Rigid Sign/Banner
+split admitted a genuinely larger physical envelope — but real production
+use then proved the split ITSELF unnecessary. iHeartPrints prepares
+print-ready artwork; it does not need to know, and no longer asks, what
+substrate the finished sign will later be printed on (ACM, banner vinyl,
+coroplast, PVC, foam board — all the identical artwork-preparation
+workflow). Amendment 3.4 removes the "what are we making?" (Rigid
+Sign/Banner) question entirely and replaces the discrete two-policy table
+it depended on with one continuous, dimension-driven formula.
 
-**Shared vs profile-specific.** Every substrate-neutral piece of the Signs
-architecture — canvas-first composition (`buildSignCompositionPlan`),
-deterministic repair/reconstruction, background treatment (KEEP/REMOVE,
-amendment 3.2, entirely reused, zero Banner-specific code), QR/machine-
-readable-content preservation (detection, alpha-safe analysis, destination
-resolution, final validation), and Print Validation's `validateRigidSign`
-— is reused **unchanged** for Banner. Only two things are genuinely
-profile-specific and new:
+**What changed vs. what stayed the same.** Every substrate-neutral piece
+of the Signs architecture — canvas-first composition
+(`buildSignCompositionPlan`), deterministic repair/reconstruction,
+background treatment (KEEP/REMOVE, amendment 3.2, entirely unchanged),
+QR/machine-readable-content preservation, and Print Validation's
+`validateRigidSign` — is untouched. What changed is narrowly
+`resolveSignResolutionPolicy(orderedWidthIn, orderedHeightIn)`
+(`resolution-policy.ts`): it no longer takes a category parameter or
+matches a discrete envelope row; it COMPUTES a policy from the two
+dimensions alone, every time, for every order.
 
-- A `SignProductionCategory`/`SignProductionType` value (`rigid_sign_raster`
-  default / `banner_raster`), durably selected by the customer/operator
-  BEFORE dimensions are confirmed (`choose_sign_production_type` step,
-  `uploaded-artwork-flow.ts`) — never inferred from size. An existing
-  project with no stored value resolves to `rigid_sign_raster`
-  (`resolveSignProductionType`, fail-closed default; `SIGN_PRODUCTION_TYPES`
-  is the only two admitted values — anything else, including a future
-  unrecognized persisted value, also resolves to the safe default).
-  `setSignProductionType` is a pure, instant metadata write with no pixel
-  work and no provider call; changing an ALREADY-confirmed type is
-  production-significant and clears the stale `specConfirmedAt`,
-  `resolutionPolicyId`, `plan`, `planKey`, and any `authorizedPlanKey`/
-  `authorizedAt`/`authorizedBy` bound to the prior type (status reverts to
-  `"inspected"`) — the same "production-significant fact invalidates
-  downstream state" discipline `backgroundTreatment` already established.
-  Re-confirming the SAME type is a pure no-op. The customer's own stated
-  ordered width/height survive a type change (`SignSizeStep` simply
-  re-confirms them under the new category) — only the CATEGORY-DEPENDENT
-  derived state (policy, plan, authorization) is cleared.
-- A second `SignResolutionPolicy` row, `banner_rect_up_to_36x96:v1`
-  (`resolution-policy.ts`), matched only within its own category —
-  `resolveSignResolutionPolicy(width, height, category)` never matches a
-  policy against the wrong category, so an 84×24in order explicitly under
-  `rigid_sign_raster` is judged only against rigid policies (and correctly
-  still refused) even though the banner policy would otherwise cover that
-  size.
+**The formula.**
 
-**Banner's resolution policy is its own, not borrowed.** ≤36×96in envelope
-(comfortably covers the real 84×24in case with headroom, without an
-unnecessarily broad maximum); 72 PPI target / 50 PPI blocking minimum —
-deliberately lower than rigid sign's 150/100, for two independent,
-converging reasons: (1) a banner's larger physical format is legitimately
-viewed from farther away than a near-view rigid sign, and 72 PPI is
-ordinary large-format signage practice at that distance, not a quality
-compromise; and (2) real, empirical memory evidence (below).
+1. A **memory-safe target**: `sqrt(SAFE_CANVAS_PIXEL_BUDGET / (widthIn * heightIn))`, where `SAFE_CANVAS_PIXEL_BUDGET` is exactly the 84×24in-at-72-PPI pixel count (6,048×1,728 = 10,450,944px) the Banner Production Profile Audit (amendment 3.3's own work) empirically measured safe — not a re-derived or re-estimated number, the SAME evidence, reused for every order size rather than only large ones.
+2. A **quality ceiling** of 150 PPI — amendment 3.0's own original figure, unchanged, binding for small signs where the memory-safe bound is far above it.
+3. `targetPpi = round(min(quality ceiling, memory-safe target))`; `minPpi = round(targetPpi * 2/3)` (amendment 3.0's own 100-of-150 ratio, applied consistently instead of two independently-fitted numbers), floored at `ABSOLUTE_MIN_USABLE_PPI` (30); `maxCanvasPpi = targetPpi`, ALWAYS — canvas construction itself is capped at this order's own memory-safe figure, universally, for every Signs order, not only large ones.
+4. A request is refused (`resolveSignResolutionPolicy` returns `null`) only when even the memory-safe target falls below `ABSOLUTE_MIN_USABLE_PPI` — an honest technical reason (the physical area is too large to safely and usefully produce), never a product-category boundary.
 
-**Memory safety (the reason a raw viewing-distance argument alone was not
-sufficient — Constitution amendment 3.3's own instruction was to prove
-this, or stop and report).** This runtime is a single DigitalOcean
-instance, ~512MB RAM / 1 shared vCPU. The existing 40,000,000-total-pixel /
-12,000px-per-axis INGESTION guard is unrelated to and untouched by this
-work — it bounds what a customer may UPLOAD, not what the FINAL PRODUCTION
-CANVAS may be, and this profile does not raise it. The actual risk is the
-canvas `buildSignCompositionPlan` constructs and `executeSignRepairPlan`/
-`encodeSignPlate` hold as one full in-memory RGBA buffer: an 84×24in
-banner's LARGE physical envelope, at a naively unbounded density derived
-from a customer's own high-resolution artwork, could size that buffer far
-larger than a rigid sign's ≤24×36in envelope ever could. This was measured
-directly, not assumed: isolated fresh Node processes (`node --expose-gc`),
-synthetic opaque RGBA test data shaped like the real pipeline's inputs, one
-candidate PPI per process (avoiding cross-run GC contamination), through
-the REAL `buildSignCompositionPlan → executeSignRepairPlan/executeComposition
-Steps → encodeSignPlate` pipeline, `process.memoryUsage()` sampled at each
-stage. Measured peak RSS for an 84×24in canvas climbed roughly linearly
-with pixel count: ~257MB at 72 PPI (6048×1728px ≈ 10.5MP), ~416MB at 100
-PPI (20.2MP), ~566MB at 120 PPI (29.0MP, already over this runtime's own
-ceiling). 72 PPI is the highest target in the tested range with genuine
-safety margin once a realistic Next.js server baseline and any concurrency
-are accounted for; 100 PPI already leaves negligible margin, and 120+ PPI
-is unsafe outright. This measurement also surfaced and fixed two genuine
-(not hypothetical) redundant full-canvas buffer copies in the shared
-composition/encode path (`sign-transform-executor.ts`'s `encodeSignPlate`,
-`sign-composition-steps.ts`'s `executeCompositionSteps`) — a real
-memory-safety improvement to the SHARED pipeline, benefiting rigid-sign
-executions too, not just Banner (commit `8b0a3d0`).
+**84×24in resolves to exactly 72 PPI target** (the SAME figure amendment 3.3 proved safe): `sqrt(10,450,944 / (84*24)) = 72.0` exactly. **18×24in resolves to the full 150 PPI quality ceiling** (memory-safe bound ~156 PPI, above the ceiling) — byte-for-byte identical to every pre-3.4 rigid-sign order this size. **24×36in** (the OLD rigid policy's own maximum envelope corner) now resolves to ~110 PPI, BELOW the old flat 150 PPI figure — this is a genuine, evidence-based SAFETY CORRECTION, not a regression invented for this amendment: 24×36in @ 150 PPI is 19.44 megapixels, in the SAME "already negligible memory margin" zone the Banner audit's own 20.2MP/~416MB data point identified — a real latent risk the pre-3.4 rigid policy carried but had never been large enough, before Banner's larger envelope, to expose or measure. The dimension-driven formula closes this gap honestly, for every order this size, going forward.
 
-`SignResolutionPolicy.maxCanvasPpi` (optional; `undefined` for every
-existing rigid-sign policy, reproducing pre-Banner behavior exactly) is the
-mechanism that makes 72 PPI actually SAFE rather than merely a validation
-target: `deriveCanvasPixelDensity` in `sign-composition-plan-builder.ts`
-still derives raw density from the artwork's own (possibly reconstructed)
-pixel resolution exactly as before, but the result is clamped to
-`maxCanvasPpi` at CANVAS CONSTRUCTION time, before a single pixel is
-composited — so a customer's own higher-resolution artwork can never push
-Banner's canvas construction past this proven-safe ceiling, regardless of
-how much detail the source provides. A source already at or below the
-ceiling is left completely uncapped (the clamp only ever clamps downward).
+**Memory-safety evidence (unchanged from amendment 3.3, reused rather than re-derived).** This runtime is a single DigitalOcean instance, ~512MB RAM / 1 shared vCPU. The existing 40,000,000-total-pixel / 12,000px-per-axis INGESTION guard is unrelated to and untouched by this policy — it bounds what a customer may UPLOAD, not what the FINAL PRODUCTION CANVAS may be. Isolated fresh Node processes (`node --expose-gc`), synthetic opaque RGBA test data shaped like the real pipeline's inputs, one candidate PPI per process, through the REAL `buildSignCompositionPlan → executeSignRepairPlan/executeCompositionSteps → encodeSignPlate` pipeline, `process.memoryUsage()` sampled at each stage: peak RSS climbed roughly linearly with pixel count — ~257MB at 72 PPI (84×24in canvas, 10.45MP), ~416MB at 100 PPI (20.2MP, negligible margin), ~566MB at 120 PPI (29.0MP, unsafe). That same measurement pass also surfaced and fixed two genuine redundant full-canvas buffer copies in the shared composition/encode path (`sign-transform-executor.ts`'s `encodeSignPlate`, `sign-composition-steps.ts`'s `executeCompositionSteps` — commit `8b0a3d0`), a real memory-safety improvement to the shared pipeline benefiting every Signs order.
 
-**Composition.** `buildSignCompositionPlan` is reused unchanged: canvas
-shape is derived ONLY from the ordered spec (never the artwork), so an
-84×24in Banner order always produces an exact 3.5:1-aspect canvas — no
-stretch, no distortion — regardless of the source artwork's own aspect or
-resolution; only the canvas's PIXEL DENSITY (via `maxCanvasPpi`) is
-Banner-specific.
+**Composition.** `buildSignCompositionPlan` is unchanged: canvas shape is derived ONLY from the requested spec (never the artwork), so an 84×24in order always produces an exact 3.5:1-aspect canvas — no stretch, no distortion — regardless of the source artwork's own aspect or resolution; only the canvas's PIXEL DENSITY (via `maxCanvasPpi`, now universal) is dimension-derived.
 
-**Print Validation.** `banner_raster` is a new `PrintValidationProfile`/
-`ProductionCategory` value that dispatches to the SAME `validateRigidSign`
-function rigid_sign_raster already uses (never a second, duplicated
-validator) — profile-parameterized rather than hardcoded, so exact physical
-dimensions, no-stretch, transparency policy, QR/machine-readable integrity,
-candidate-bound plan/authorization identity, and content-bounds checks are
-identical shared logic; only the resolution threshold (72/50 PPI) differs,
-by construction of the profile's own `ProductionRequirements`
-(`deriveRigidSignProductionRequirements`, category-parameterized, no
-hardcoded literal).
+**Print Validation.** Unchanged in mechanism: `validateRigidSign` still reads `targetPpi`/`minPpi` from the supplied evidence rather than hardcoding a figure, so it never needed to change for this refactor. `PrintValidationProfile`/`ProductionCategory` still admit the legacy `"rigid_sign_raster"`/`"banner_raster"` literals — required for an already-existing plan/validation record stamped under either, never produced by new code, which always resolves `RIGID_SIGN_CATEGORY`, the single unified category.
 
-**Finishing/bleed (deferred, not avoided by oversight).** Audited against
-this profile's own contract: an exact-size Banner raster PNG can be
-honestly produced and validated as `print_ready` — correct physical
-dimensions, correct aspect, adequate resolution, governed transparency,
-QR integrity — with NO bleed, hem, seam, pole-pocket, grommet, or wind-slit
-geometry at all. iHeartPrints builds artwork preparation, not vendor
-fulfillment (Constitution §16A.6); admitting finishing geometry now would
-be scope invention, not scope this real customer case actually requires.
-Deferred, explicitly, pending a real need.
+**Finishing/bleed (deferred, unchanged from amendment 3.3's own audit).** An exact-size Signs raster PNG at any requested dimension can be honestly produced and validated as `print_ready` with NO bleed, hem, seam, pole-pocket, grommet, or wind-slit geometry at all. iHeartPrints builds artwork preparation, not vendor fulfillment (Constitution §16A.6). Deferred, explicitly, pending a real need.
 
-**Schema.** One additive migration,
-`supabase/migrations/20260909010300_sign_production_type.sql` — two
-nullable/defaulted columns on `sign_preparations` (`production_type` with a
-CHECK constraint against exactly the two admitted values, defaulting to
-`'rigid_sign_raster'`, plus `production_type_confirmed_at`). Not remotely
-applied as part of this work.
+**Backward compatibility, no migration.** `getSignResolutionPolicyById(id, orderedWidthIn, orderedHeightIn)` recognizes THREE ids: the current dimension-driven id (recomputes fresh from the supplied dimensions — a pure function, never a stored number), and the two former fixed rows (`rigid_rect_up_to_24x36:v1`, `banner_rect_up_to_36x96:v1`, preserved byte-for-byte, returned unchanged regardless of the supplied dimensions) — so an already-existing preparation of either former category continues to load, re-plan, and validate exactly as it always did, with zero migration. The `production_type`/`production_type_confirmed_at` database columns and the `SignProductionType` domain vocabulary are retained, unchanged in shape, as **inert historical-compatibility metadata only** — no live code path writes a new value to them or reads them to make a decision; `setSignProductionType` (the capability method), the `/sign-artwork/production-type` customer route, and the `choose_sign_production_type` UI step are all removed. An existing project is never forced through any new step: the very next (and only) question after upload is the requested physical size.
 
 ---
 

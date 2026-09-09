@@ -135,9 +135,15 @@ describe("SignPreparationCapability", () => {
       capability.confirmSignProductionSpec(projectId, Number.NaN, 24),
       SignPreparationStateError,
     );
-    // Outside every V1 policy envelope: refused, never borrowed policy.
+    // Dimension-Driven Signs Refactor: 40x60 was refused under the old
+    // rigid-only 24x36 envelope but is a genuinely supported size under
+    // the dimension-driven formula now — that boundary moved from a
+    // product-category envelope to a technical (memory-safe/usable-PPI)
+    // one. 200x100in (20,000 sq in) is large enough that even the
+    // memory-safe target PPI falls below the usable floor — refused for
+    // an honest technical reason, never a product-label boundary.
     await assert.rejects(
-      capability.confirmSignProductionSpec(projectId, 40, 60),
+      capability.confirmSignProductionSpec(projectId, 200, 100),
       SignPreparationStateError,
     );
   });
@@ -157,7 +163,12 @@ describe("SignPreparationCapability", () => {
     assert.equal(confirmed.orderedWidthIn, 18);
     assert.equal(confirmed.orderedHeightIn, 24);
     assert.ok(confirmed.specConfirmedAt);
-    assert.equal(confirmed.resolutionPolicyId, "rigid_rect_up_to_24x36:v1");
+    // Dimension-Driven Signs Refactor: 18x24in resolves the SAME 150 PPI
+    // target as the legacy rigid policy (the memory-safe bound at this
+    // size, ~156 PPI, is above the 150 PPI quality ceiling, so the ceiling
+    // binds) — proving continuity for previously-supported sizes even
+    // though the policy is no longer a discrete table lookup.
+    assert.equal(confirmed.resolutionPolicyId, "signs_dimension_driven:v1");
 
     const outcome = await capability.planSignRepair(projectId);
     assert.equal(outcome.result.status, "planned");
