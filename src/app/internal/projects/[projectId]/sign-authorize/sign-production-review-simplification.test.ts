@@ -71,6 +71,18 @@ describe("Sign Production Review page: technical/diagnostic detail is closed by 
     assert.doesNotMatch(source, /Phase 3B/);
   });
 
+  it("nor in the canvas-first composition form's own visible description text (rendered inside Advanced details)", () => {
+    const formSource = readFileSync(
+      "src/app/internal/projects/[projectId]/sign-authorize/SignCompositionPlanForm.tsx",
+      "utf8",
+    );
+    // A JS/doc-comment mention of the phase name is fine (never rendered);
+    // this pins only the actual <p>...</p> description text an operator
+    // who opens the form would read.
+    const description = formSource.slice(formSource.indexOf("<p className"), formSource.indexOf("</p>"));
+    assert.doesNotMatch(description, /Phase 3B/);
+  });
+
   it("structural-region tooling still renders, but only inside Advanced details (capability preserved, never removed)", () => {
     const advancedStart = source.indexOf("Advanced details");
     const advancedEnd = source.indexOf("</details>", advancedStart);
