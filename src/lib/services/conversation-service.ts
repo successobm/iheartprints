@@ -888,23 +888,6 @@ export interface SignArtworkView {
   orderedHeightIn: number | null;
   specConfirmed: boolean;
   /**
-   * Whether the customer has EXPLICITLY selected a production type yet.
-   * `deriveUploadedArtworkStep` reads this (together with `specConfirmed`)
-   * to decide whether to show the "what are we making?" step before size
-   * entry — an EXISTING preparation with `specConfirmed: true` never sees
-   * this step regardless of this flag (its size was already confirmed
-   * under the implicit rigid-sign default, before Banner existed), so no
-   * existing project is ever forced through a new, unnecessary question.
-   *
-   * Deliberately a bare boolean, never the raw `SignProductionType` value
-   * itself: like "DTF"/"DTG" (`AGENTS.md`), the internal production-profile
-   * vocabulary (`"rigid_sign_raster"`/`"banner_raster"`) is a production
-   * fact, not customer-facing copy, and must never appear in a customer-
-   * visible API response — this view only ever exposes WHETHER a choice
-   * was made, never WHICH internal profile literal it resolved to.
-   */
-  productionTypeConfirmed: boolean;
-  /**
    * LIVE PRODUCT BLOCKER #3: the durable, customer-safe planning outcome —
    * reconstructed from the persisted `SignPreparation.plan` on every
    * snapshot build (never cached client-side), so a reload resumes at the
@@ -983,7 +966,6 @@ async function resolveSignArtworkView(
       orderedWidthIn: preparation.orderedWidthIn,
       orderedHeightIn: preparation.orderedHeightIn,
       specConfirmed: preparation.specConfirmedAt !== null,
-      productionTypeConfirmed: preparation.productionTypeConfirmedAt !== null,
       plan: durableSignPlanView(preparation),
       authorization: {
         authorizedBy: preparation.authorizedBy,

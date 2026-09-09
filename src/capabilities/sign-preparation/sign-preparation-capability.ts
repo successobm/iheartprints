@@ -44,8 +44,6 @@ import type { SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/t
 import {
   resolveSignBackgroundTreatment,
   type SignBackgroundTreatment,
-  resolveSignProductionType,
-  type SignProductionType,
 } from "@/lib/domain/types";
 import {
   SIGN_BACKGROUND_REMOVAL_VERSION,
@@ -126,7 +124,8 @@ export interface SignPreparationCapability {
   /**
    * Records the HUMAN confirmation of the ordered physical size — both
    * dimensions, explicitly (§16A.2). Fails closed on invalid dimensions and
-   * on sizes no rigid-sign resolution policy covers, and stamps the
+   * on sizes the dimension-driven resolution policy cannot safely and
+   * usefully cover (`resolution-policy.ts`'s own doc), and stamps the
    * governing policy id so later policy revisions cannot silently
    * re-govern this order. Re-runs inspection under the confirmed spec.
    */
@@ -220,38 +219,6 @@ export interface SignPreparationCapability {
   setSignBackgroundTreatment(
     designId: string,
     treatment: SignBackgroundTreatment,
-  ): Promise<SignPreparation>;
-  /**
-   * Banner Production Profile (Constitution amendment 3.3, §16A-bis):
-   * durably selects which admitted Signs raster production profile
-   * governs this order — `"rigid_sign_raster"` (default) or
-   * `"banner_raster"`. A pure, instant metadata write — no pixel work, no
-   * provider call.
-   *
-   * A stale ordered size/plan/acceptance is never trusted across a
-   * category change. `resolveSignProductionSpec` re-derives from the
-   * CURRENT `productionType` on every read, so a previously-confirmed
-   * spec whose stamped `resolutionPolicyId` no longer matches the new
-   * category fails closed (`missing: ["resolution_policy"]`) — but that
-   * alone only protects a FUTURE re-plan, not a plan/authorization that
-   * already exists: `authorizeSignRepairPlan` only self-verifies the
-   * stored plan against its own recomputed key, and never re-derives spec/
-   * category, so on an ACTUAL type change (not a same-type re-confirm)
-   * this method additionally clears `specConfirmedAt`, `resolutionPolicyId`,
-   * `plan`, `planKey`, and any existing authorization, and resets `status`
-   * to `"inspected"` — the identical "nothing stale survives" discipline
-   * `planSignRepair`'s own blocked branch already applies. The size is
-   * never re-asked for by mistake: the customer's previously-entered
-   * `orderedWidthIn`/`orderedHeightIn` are left intact so `SignSizeStep`
-   * simply re-confirms them under the new category. A re-plan under the
-   * new type naturally gets a different `planKey` (each category's
-   * policies live in a
-   * disjoint `policyId` namespace), so a stale authorization/acceptance
-   * bound to the OLD category's plan can never be silently reused.
-   */
-  setSignProductionType(
-    designId: string,
-    productionType: SignProductionType,
   ): Promise<SignPreparation>;
 }
 
@@ -417,18 +384,14 @@ export function createSignPreparationCapability(
           "Both the ordered width and height must be explicit positive measurements in inches.",
         );
       }
-      // Banner Production Profile: resolved against the CURRENT, durably
-      // selected production type — never inferred from the size itself.
-      // An 84×24in order explicitly under "rigid_sign_raster" is matched
-      // ONLY against rigid-sign policies (and correctly fails) even though
-      // a banner policy would otherwise cover that size.
-      const productionType = resolveSignProductionType(preparation.productionType);
-      const policy = resolveSignResolutionPolicy(orderedWidthIn, orderedHeightIn, productionType);
+      // Dimension-Driven Signs Refactor: resolved purely from the ordered
+      // physical size — never from a product/substrate category. The same
+      // width×height always resolves the same way, independent of what the
+      // finished sign will later be printed on.
+      const policy = resolveSignResolutionPolicy(orderedWidthIn, orderedHeightIn);
       if (!policy) {
         throw new SignPreparationStateError(
-          productionType === "banner_raster"
-            ? "That banner size isn't covered by a supported banner policy yet."
-            : "That sign size isn't covered by a supported rigid-sign policy yet.",
+          "That size isn't one we can safely and usefully prepare artwork for yet.",
         );
       }
 
@@ -474,12 +437,14 @@ export function createSignPreparationCapability(
 
       const policy = getSignResolutionPolicyById(
         specResolution.spec.resolutionPolicyId,
+        specResolution.spec.orderedWidthIn,
+        specResolution.spec.orderedHeightIn,
       );
       if (!policy) {
         // Structurally unreachable (spec resolution validated the id), but
         // an absence of policy must never plan anything.
         throw new SignPreparationStateError(
-          "That sign size isn't covered by a supported rigid-sign policy yet.",
+          "That size isn't one we can safely and usefully prepare artwork for yet.",
         );
       }
 
@@ -729,10 +694,14 @@ export function createSignPreparationCapability(
           "The ordered sign size must be confirmed before a composition plan can be built.",
         );
       }
-      const policy = getSignResolutionPolicyById(specResolution.spec.resolutionPolicyId);
+      const policy = getSignResolutionPolicyById(
+        specResolution.spec.resolutionPolicyId,
+        specResolution.spec.orderedWidthIn,
+        specResolution.spec.orderedHeightIn,
+      );
       if (!policy) {
         throw new SignPreparationStateError(
-          "That sign size isn't covered by a supported rigid-sign policy yet.",
+          "That size isn't one we can safely and usefully prepare artwork for yet.",
         );
       }
 
@@ -864,7 +833,11 @@ export function createSignPreparationCapability(
       // inspection is never left displayed after a treatment change.
       const spec = resolveSignProductionSpec(updated);
       if (spec.status === "confirmed") {
-        const policy = getSignResolutionPolicyById(spec.spec.resolutionPolicyId);
+        const policy = getSignResolutionPolicyById(
+          spec.spec.resolutionPolicyId,
+          spec.spec.orderedWidthIn,
+          spec.spec.orderedHeightIn,
+        );
         if (policy) {
           const { decoded: sourceDecoded } = await decodeSignSource(updated);
           const inspection = inspectSignArtwork(sourceDecoded.image, spec.spec, policy);
@@ -874,47 +847,6 @@ export function createSignPreparationCapability(
         }
       }
       return updated;
-    },
-
-    async setSignProductionType(designId, productionType) {
-      const preparation = await loadOwned(designId);
-      const now = new Date().toISOString();
-      const currentType = resolveSignProductionType(preparation.productionType);
-
-      if (currentType === productionType) {
-        // Same-type re-confirm (including the very first confirmation to
-        // the implicit default): nothing downstream can possibly be stale,
-        // so nothing else is touched. Idempotent on an exact repeat.
-        if (preparation.productionTypeConfirmedAt !== null) {
-          return preparation;
-        }
-        return repo.updateSignPreparation(preparation.id, {
-          productionType,
-          productionTypeConfirmedAt: now,
-        });
-      }
-
-      // Genuine change: production type selects a disjoint resolution-
-      // policy namespace (Constitution amendment 3.3, §16A-bis), so any
-      // spec/plan/authorization confirmed under the OLD type is
-      // production-significant state that must never be silently carried
-      // forward — fail closed by clearing it, mirroring `planSignRepair`'s
-      // own "no plan survives a blocked re-evaluation" discipline. The
-      // ordered width/height are deliberately left intact: they are the
-      // customer's own stated fact, independent of which profile governs
-      // them, and `SignSizeStep` re-confirms them under the new category.
-      return repo.updateSignPreparation(preparation.id, {
-        productionType,
-        productionTypeConfirmedAt: now,
-        status: "inspected",
-        specConfirmedAt: null,
-        resolutionPolicyId: null,
-        plan: null,
-        planKey: null,
-        authorizedPlanKey: null,
-        authorizedAt: null,
-        authorizedBy: null,
-      });
     },
   };
 }

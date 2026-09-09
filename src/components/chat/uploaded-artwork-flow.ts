@@ -54,16 +54,13 @@ export type UploadedArtworkStep =
   /** We have their artwork; we still need to know what and where we're printing. */
   | "confirm_details"
   /**
-   * Sign path, Banner Production Profile (Constitution amendment 3.3,
-   * §16A-bis): "what are we making?" — Rigid Sign or Banner — asked ONCE,
-   * before dimensions, never after (so the customer never enters a size
-   * only to learn the profile they assumed doesn't cover it). Only for a
-   * brand-new preparation with no size confirmed yet; an existing
-   * preparation's already-confirmed size implicitly resolves as
-   * `"rigid_sign_raster"` and never sees this step.
+   * Sign path: the human-confirmed ordered width and height (Constitution
+   * §16A.2). Dimension-Driven Signs Refactor: this is the ONLY question the
+   * Sign path asks before "Check my artwork" — iHeartPrints prepares
+   * print-ready artwork to the requested physical size; it does not need
+   * (and no longer asks) what substrate or product category the finished
+   * sign will later be printed on.
    */
-  | "choose_sign_production_type"
-  /** Sign path: the human-confirmed ordered width and height (Constitution §16A.2). */
   | "confirm_sign_size"
   /**
    * Sign path: the ordered size is durably recorded, and the customer may
@@ -124,16 +121,6 @@ export type UploadedArtworkStep =
  */
 export interface SignArtworkFlowState {
   specConfirmed: boolean;
-  /**
-   * Banner Production Profile (Constitution amendment 3.3, §16A-bis):
-   * mirrors `SignArtworkView.productionTypeConfirmed` exactly.
-   * `deriveUploadedArtworkStep` shows `"choose_sign_production_type"`
-   * ONLY when this is `false` AND `specConfirmed` is also `false` — an
-   * existing preparation whose size was already confirmed (before Banner
-   * existed, under the implicit rigid-sign default) never sees this step,
-   * regardless of this flag.
-   */
-  productionTypeConfirmed: boolean;
   /**
    * LIVE PRODUCT BLOCKER #3: whether a plan has been durably formulated
    * (`SignPreparation.status === "planned"` — true for a SAFE or a
@@ -322,16 +309,10 @@ export function deriveUploadedArtworkStep(
   // `artworkTypeChoice`, so a reload after the bridge has run never
   // re-asks "what are we printing" for a job already identified as a sign.
   if (signArtwork) {
-    if (!signArtwork.specConfirmed) {
-      // Banner Production Profile: "what are we making?" comes BEFORE
-      // dimensions, but only for a brand-new preparation that has never
-      // answered it — an existing preparation whose size is already
-      // confirmed skips straight past this branch entirely (see below),
-      // so this never re-asks a question a legacy project's implicit
-      // rigid-sign default already, honestly, answered.
-      if (!signArtwork.productionTypeConfirmed) return "choose_sign_production_type";
-      return "confirm_sign_size";
-    }
+    // Dimension-Driven Signs Refactor: the ordered physical size is the
+    // ONLY question this path asks before "Check my artwork" — no
+    // substrate/product-category question precedes it any more.
+    if (!signArtwork.specConfirmed) return "confirm_sign_size";
     if (!signArtwork.hasPlan) return "sign_context_saved";
     // SIGNS QR DESTINATION RESOLUTION: an unresolved detected-but-
     // undecodable QR takes priority over plan review/authorization —
@@ -360,12 +341,7 @@ export function deriveUploadedArtworkStep(
   // choice yet means the routing question itself is the next step.
   if (!preparation.printPlacement) {
     if (input.artworkTypeChoice === "dtf") return "confirm_details";
-    // Banner Production Profile: no `SignPreparation` exists yet at this
-    // point (the `if (signArtwork)` branch above would have handled it
-    // otherwise) — a customer who just identified their upload as a Sign
-    // has never answered "what are we making?" yet, so this always asks
-    // it first, exactly like the existing-preparation branch above does.
-    if (input.artworkTypeChoice === "sign") return "choose_sign_production_type";
+    if (input.artworkTypeChoice === "sign") return "confirm_sign_size";
     return "choose_artwork_type";
   }
   return "review_analysis";

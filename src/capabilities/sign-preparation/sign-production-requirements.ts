@@ -1,13 +1,16 @@
 /**
- * Signs Phase S1: builds provider-neutral `ProductionRequirements` for
- * either admitted Signs raster profile — `rigid_sign_raster` OR (Banner
- * Production Profile, Constitution amendment 3.3) `banner_raster` — from a
- * CONFIRMED `SignProductionSpec` — never from brief text, keywords, or the
- * dormant `signage` placeholder (whose 36×72in / `targetPpi: null` /
- * vector assumptions are explicitly not Signs policy of either profile;
+ * Signs Raster Artwork Preparation: builds provider-neutral
+ * `ProductionRequirements` for the unified, dimension-driven Signs raster
+ * profile from a CONFIRMED `SignProductionSpec` — never from brief text,
+ * keywords, or the dormant `signage` placeholder (whose 36×72in /
+ * `targetPpi: null` / vector assumptions are explicitly not Signs policy;
  * Constitution §16A, Phase S0 audit). Category-DERIVED from `spec.category`
- * (never a hardcoded literal), so this one function serves both profiles —
- * never a second, duplicated requirements builder.
+ * (never a hardcoded literal) purely for backward-compatible dispatch of an
+ * already-existing legacy Rigid/Banner spec — a NEW spec always resolves
+ * `RIGID_SIGN_CATEGORY`, the single unified category (`resolution-policy.ts`'s
+ * own doc). One function serves every Signs order, regardless of the
+ * substrate it will later be printed on — never a second, duplicated
+ * requirements builder.
  *
  * This is the profile's requirements seam for S2's worker routing and
  * validation profile. S1 itself produces and validates nothing.

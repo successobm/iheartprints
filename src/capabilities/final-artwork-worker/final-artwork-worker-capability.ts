@@ -2086,7 +2086,11 @@ export function createFinalArtworkWorkerCapability(
     // resolved here, before adaptation, the same fail-closed way the
     // (separately, later) PrintValidation-evidence policy lookup below
     // already does for an unrecognized `policyId`.
-    const reconstructionPolicy = getSignResolutionPolicyById(plan.policyId);
+    const reconstructionPolicy = getSignResolutionPolicyById(
+      plan.policyId,
+      plan.orderedWidthIn,
+      plan.orderedHeightIn,
+    );
     if (!reconstructionPolicy) {
       await completeWithoutAsset(
         job,
@@ -2800,7 +2804,11 @@ export function createFinalArtworkWorkerCapability(
       }
     }
 
-    const policy = getSignResolutionPolicyById(plan.policyId);
+    const policy = getSignResolutionPolicyById(
+      plan.policyId,
+      plan.orderedWidthIn,
+      plan.orderedHeightIn,
+    );
     if (!policy) {
       await completeWithoutAsset(
         job,

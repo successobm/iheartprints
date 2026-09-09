@@ -8,7 +8,7 @@ import type {
   DesignSummaryView,
   RecommendationAction,
 } from "@/capabilities/shared/contracts";
-import type { GarmentSizeClass, PrintPlacement, SignProductionType } from "@/lib/domain/types";
+import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
 import { PRODUCTION_BOX_RECOMMENDATIONS } from "@/capabilities/shared/garment-production-sizing";
 import type { ApiProjectSnapshot } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
@@ -1049,26 +1049,6 @@ export function ChatApp() {
   }
 
   /**
-   * Banner Production Profile (Constitution amendment 3.3, §16A-bis): the
-   * Sign path's "what are we making?" answer — Rigid Sign or Banner —
-   * asked before dimensions. Bridges the already-uploaded original into
-   * the Signs authority (first call only, same as `confirmSignArtworkSize`)
-   * and records the confirmed production type.
-   */
-  async function chooseSignProductionType(productionType: SignProductionType) {
-    if (!snapshot) return;
-    await submitPreparationAction(
-      () =>
-        fetch(`/api/projects/${snapshot.project.id}/sign-artwork/production-type`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ productionType }),
-        }),
-      "Failed to save what you're making",
-    );
-  }
-
-  /**
    * LIVE PRODUCT BLOCKER #3: "Check my artwork" — runs the existing Signs
    * inspection/diagnosis/planning capability and shows the translated
    * result. No body: the project has exactly one `SignPreparation`, same
@@ -1471,7 +1451,6 @@ export function ChatApp() {
     signArtwork: snapshot?.signArtwork
       ? {
           specConfirmed: snapshot.signArtwork.specConfirmed,
-          productionTypeConfirmed: snapshot.signArtwork.productionTypeConfirmed,
           hasPlan: snapshot.signArtwork.plan !== null,
           authorization: { matchesCurrentPlan: snapshot.signArtwork.authorization.matchesCurrentPlan },
           qrResolutions: snapshot.signArtwork.qrResolutions,
@@ -1848,9 +1827,6 @@ export function ChatApp() {
                 }
                 onUpload={(file) => void uploadExistingArtwork(file)}
                 onChooseArtworkType={(choice) => chooseArtworkType(choice)}
-                onChooseSignProductionType={(productionType) =>
-                  void chooseSignProductionType(productionType)
-                }
                 onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
                 onPlanSignArtwork={() => void planSignArtwork()}
                 onAuthorizeSignPlan={() => void authorizeSignPlan()}
