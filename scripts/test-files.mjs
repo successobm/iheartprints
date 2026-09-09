@@ -332,6 +332,15 @@ export const TEST_FILES = [
   // row that, pre-Phase-2D, would have left segmentation ambiguous.
   "src/capabilities/sign-preparation/sign-preparation-capability-transition-runs.test.ts",
   "src/capabilities/sign-preparation/rigid-sign-category.test.ts",
+  // Banner Production Profile (Constitution amendment 3.3, §16A-bis): the
+  // banner_raster sibling category — policy resolution, production
+  // requirements, and canvas-first composition (exact 3.5:1, no-stretch,
+  // maxCanvasPpi memory ceiling).
+  "src/capabilities/sign-preparation/banner-category.test.ts",
+  // Banner Production Profile: end-to-end production-type model coverage —
+  // default rigid_sign_raster, the real 84x24in customer case, type-change
+  // invalidation of stale spec/plan/authorization, unknown-value fail-closed.
+  "src/capabilities/sign-preparation/sign-preparation-capability-production-type.test.ts",
   // Structural Layout Reflow Phase 1 (Foundations): dormant reflow_
   // structural_layout contract, SignProductionTemplate, the 0.125in safe
   // inset policy, and the deterministic structural-layout segmentation
@@ -416,6 +425,10 @@ export const TEST_FILES = [
   "src/capabilities/sign-preservation/sign-preservation-image-derivation.test.ts",
   "src/capabilities/sign-preservation/openai-sign-preservation-semantic-provider.test.ts",
   "src/capabilities/print-validation/rigid-sign-print-validation.test.ts",
+  // Banner Production Profile (Constitution amendment 3.3, §16A-bis):
+  // banner_raster dispatches to the SAME shared print-validation logic,
+  // governed by its own (lower) resolution thresholds.
+  "src/capabilities/print-validation/banner-print-validation.test.ts",
   // Sign Production Review Print-Ready Authority Repair: the ONE
   // authoritative "is this candidate truly print ready" function shared by
   // the download authority and the operator review page's own peek.
