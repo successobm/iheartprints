@@ -71,7 +71,7 @@ import type { ToleranceLevel } from "@/capabilities/shared/flood-fill-selection"
 import type { SignOperatorRegionBoundary } from "@/capabilities/sign-preparation/sign-operator-structural-override";
 import { loadSignPlanOperatorReview, type SignPlanOperatorReview } from "@/capabilities/sign-preparation/sign-plan-operator-review";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
-import type { FinalArtworkJobStatus } from "@/lib/domain/types";
+import type { FinalArtworkJobStatus, SignProductionType } from "@/lib/domain/types";
 import { getProjectRepository } from "@/lib/db";
 import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
 import { buildPrintReadyFilename } from "@/lib/services/print-ready-filename";
@@ -89,45 +89,82 @@ export class SignArtworkBridgeError extends Error {
 }
 
 /**
+ * LIVE PRODUCT BLOCKER #1: bridges the already-uploaded Existing Artwork
+ * bytes into the Signs profile's own immutable original, exactly once —
+ * `SignPreparationCapability.uploadSignArtwork` refuses a second upload for
+ * one project by construction, so a second call is always a no-op that
+ * returns the SAME preparation. Factored out of `confirmSignArtworkSize` so
+ * Banner Production Profile's `setSignArtworkProductionType` (which now
+ * runs BEFORE size confirmation) can bridge just as safely without a
+ * second, duplicated copy of this logic.
+ */
+async function bridgeSignArtworkIfNeeded(projectId: string) {
+  const graph = getCapabilityGraph();
+  const existing = await graph.signPreparation.getSignPreparation(projectId);
+  if (existing) return existing;
+
+  const reference = await graph.artworkPreparation.getOriginalAssetReference(projectId);
+  if (!reference) {
+    throw new SignArtworkBridgeError(
+      "Upload your artwork before choosing a sign size.",
+    );
+  }
+  const downloaded = await graph.assets.downloadAssetBytes(reference.assetId);
+  if (!downloaded) {
+    throw new SignArtworkBridgeError(
+      "We couldn't read your uploaded artwork. Please try uploading again.",
+    );
+  }
+  return graph.signPreparation.uploadSignArtwork(projectId, {
+    bytes: downloaded.bytes,
+    declaredContentType: downloaded.contentType,
+    filename: reference.filename,
+  });
+}
+
+/**
  * Idempotent: a second call for a project that already has a
  * `SignPreparation` re-confirms the (possibly changed) size against the
- * SAME sign original rather than adopting the upload a second time —
- * `SignPreparationCapability.uploadSignArtwork` refuses a second upload for
- * one project by construction, so this only ever bridges once.
+ * SAME sign original rather than adopting the upload a second time.
  */
 export async function confirmSignArtworkSize(
   projectId: string,
   input: { orderedWidthIn: number; orderedHeightIn: number },
 ): Promise<ApiProjectSnapshot> {
   const graph = getCapabilityGraph();
-
-  let signPreparation = await graph.signPreparation.getSignPreparation(projectId);
-  if (!signPreparation) {
-    const reference =
-      await graph.artworkPreparation.getOriginalAssetReference(projectId);
-    if (!reference) {
-      throw new SignArtworkBridgeError(
-        "Upload your artwork before choosing a sign size.",
-      );
-    }
-    const downloaded = await graph.assets.downloadAssetBytes(reference.assetId);
-    if (!downloaded) {
-      throw new SignArtworkBridgeError(
-        "We couldn't read your uploaded artwork. Please try uploading again.",
-      );
-    }
-    signPreparation = await graph.signPreparation.uploadSignArtwork(projectId, {
-      bytes: downloaded.bytes,
-      declaredContentType: downloaded.contentType,
-      filename: reference.filename,
-    });
-  }
+  await bridgeSignArtworkIfNeeded(projectId);
 
   await graph.signPreparation.confirmSignProductionSpec(
     projectId,
     input.orderedWidthIn,
     input.orderedHeightIn,
   );
+
+  const snapshot = await getConversation(projectId);
+  if (!snapshot) {
+    throw new SignArtworkBridgeError("Project not found");
+  }
+  return snapshot;
+}
+
+/**
+ * Banner Production Profile (Constitution amendment 3.3, §16A-bis): the
+ * customer's explicit "what are we making?" answer — Rigid Sign or Banner
+ * — asked BEFORE dimensions. Bridges the sign original first (a customer
+ * can reach this the very first time they identify their upload as a
+ * Sign, before any `SignPreparation` exists yet), then durably records the
+ * choice. Idempotent: re-selecting the SAME type is a harmless no-op;
+ * selecting a DIFFERENT type after dimensions were already confirmed under
+ * the old one makes the stale spec/plan/acceptance fail closed until the
+ * customer re-confirms size — see `setSignProductionType`'s own doc.
+ */
+export async function setSignArtworkProductionType(
+  projectId: string,
+  productionType: SignProductionType,
+): Promise<ApiProjectSnapshot> {
+  const graph = getCapabilityGraph();
+  await bridgeSignArtworkIfNeeded(projectId);
+  await graph.signPreparation.setSignProductionType(projectId, productionType);
 
   const snapshot = await getConversation(projectId);
   if (!snapshot) {
