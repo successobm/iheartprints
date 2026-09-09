@@ -27,8 +27,14 @@ import { INTERNAL_ACCESS_KEY_HEADER } from "@/lib/config/internal-access-config"
  *
  * NEVER: localStorage, sessionStorage, a URL/query parameter, a
  * `console.log`, or a value echoed back into the DOM after submission.
+ *
+ * `returnTo` (Production Operator Access Blocker fix): where the operator
+ * lands after a successful grant. Already validated as a same-origin
+ * root-relative path by the SERVER (`resolveInternalAccessReturnTo` in
+ * `page.tsx`) before it ever reaches this client component as a prop, so
+ * this component trusts it outright rather than re-validating client-side.
  */
-export function InternalAccessForm() {
+export function InternalAccessForm({ returnTo = "/" }: { returnTo?: string }) {
   const router = useRouter();
   const [key, setKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -55,7 +61,7 @@ export function InternalAccessForm() {
       // A real, browser-managed cookie -- Next.js includes it on the RSC
       // request this navigation makes regardless of push vs. a hard reload,
       // so the destination page sees the new session immediately either way.
-      router.push("/");
+      router.push(returnTo);
     } catch {
       setError("That didn't work. Check your key and try again.");
       setSubmitting(false);

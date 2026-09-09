@@ -107,8 +107,15 @@ export default async function SignAuthorizePage({ params }: PageProps) {
           <p className="text-sm text-ink" data-sign-authorize-not-internal>
             This browser doesn&apos;t have internal production access.
           </p>
+          {/* Production Operator Access Blocker fix: carries THIS exact
+              project back through `/internal/access` so a successful grant
+              returns the operator here, not to the site root — see
+              `resolveInternalAccessReturnTo` for the validation this value
+              goes through before it is ever trusted. `projectId` is already
+              this page's own trusted route param, and `encodeURIComponent`
+              keeps it a single opaque query value. */}
           <Link
-            href="/internal/access"
+            href={`/internal/access?returnTo=${encodeURIComponent(`/internal/projects/${projectId}/sign-authorize`)}`}
             className="rounded-full bg-ink px-3.5 py-2 text-center text-sm font-medium text-white transition hover:bg-ink/90"
           >
             Get internal access

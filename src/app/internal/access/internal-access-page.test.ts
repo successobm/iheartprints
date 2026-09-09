@@ -83,6 +83,16 @@ describe("Phase 28M.1 — the raw key is never mishandled in the new UI", () => 
     }
   });
 
+  it("Production Operator Access Blocker fix: the page reads returnTo and hands it to the form, never hardcoding '/' as the destination", () => {
+    assert.match(pageSource, /resolveInternalAccessReturnTo/);
+    assert.match(pageSource, /<InternalAccessForm returnTo=\{returnTo\}/);
+  });
+
+  it("Production Operator Access Blocker fix: the form navigates to the validated returnTo, never a hardcoded '/'", () => {
+    assert.match(formSource, /router\.push\(returnTo\)/);
+    assert.doesNotMatch(formSource, /router\.push\(\s*["']\/["']\s*\)/);
+  });
+
   it("the 'already internal' shortcut looks up the session by TOKEN, never by internal id", () => {
     // Phase 28P bugfix regression: the cookie carries `session.sessionToken`
     // (see `acquisition-access-route.test.ts`'s own `cookieFromResponse`),
