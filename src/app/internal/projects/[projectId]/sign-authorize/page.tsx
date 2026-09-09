@@ -6,12 +6,13 @@ import { isInternalAccessConfigured } from "@/lib/config/internal-access-config"
 import { ACQUISITION_SESSION_COOKIE } from "@/lib/http/acquisition-session-cookie";
 import { getProjectRepository } from "@/lib/db";
 
-import { SignAuthorizeButton } from "./SignAuthorizeButton";
+import { SignApproveAndContinueButton } from "./SignApproveAndContinueButton";
 import { SignBackgroundTreatmentPanel } from "./SignBackgroundTreatmentPanel";
 import { SignCheckArtworkButton } from "./SignCheckArtworkButton";
 import { SignCompareOriginal } from "./SignCompareOriginal";
 import { SignFitToProductionCorrectionTool } from "./SignFitToProductionCorrectionTool";
 import { SignPhysicalResolutionRepairPanel } from "./SignPhysicalResolutionRepairPanel";
+import { SignPlanSummary } from "./SignPlanSummary";
 import { SignPrintReadyDownload } from "./SignPrintReadyDownload";
 import { SignProductionAction } from "./SignProductionAction";
 import { SignQrPreservationPanel } from "./SignQrPreservationPanel";
@@ -163,6 +164,21 @@ function SignPlanReview({
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Simplify Signs Production Review Phase: the FIRST thing an operator
+          reads — plain human language, never technical implementation
+          terms. Only while a decision is genuinely pending; once authorized
+          this framing is stale (the decision is already made), same
+          gating the collapsed diagnostic sections below already use. */}
+      {!isAuthorized ? (
+        <SignPlanSummary
+          orderedWidthIn={review.orderedWidthIn}
+          orderedHeightIn={review.orderedHeightIn}
+          findings={plan.findings}
+          proposedAction={plan.proposedAction}
+          reviewRequired={plan.reviewRequired}
+        />
+      ) : null}
+
       {/* Production Workspace Phase (Section F): ONE authoritative working
           canvas — the current production candidate, with Fit to Production
           evidence, tools, and actions all beside it. This replaces the
@@ -212,6 +228,24 @@ function SignPlanReview({
         backgroundRemovalStatus={review.backgroundRemoval?.status ?? null}
       />
 
+      {/* Simplify Signs Production Review Phase: the ONE primary action —
+          "Approve & Continue" performs the existing governed authorization
+          AND automatically starts the existing governed preparation, from
+          one click (`SignApproveAndContinueButton`'s own doc explains why
+          this is orchestration, never a governance change). Never rendered
+          once already authorized — `SignProductionAction` below (in-flight/
+          print-ready/retry) becomes the authoritative next state instead. */}
+      {!isAuthorized ? (
+        canAuthorize ? (
+          <SignApproveAndContinueButton projectId={projectId} />
+        ) : (
+          <p className="text-sm text-ink" data-sign-authorize-blocked>
+            The planner couldn&apos;t formulate an automatic preparation for this artwork. There is nothing to
+            authorize.
+          </p>
+        )
+      ) : null}
+
       {/* Signs QR Visual Revision Acceptance: a materially QR-revised
           candidate must be reviewed and explicitly approved before Print
           Ready/Download can ever be exposed — shown prominently, right
@@ -240,7 +274,12 @@ function SignPlanReview({
           `sign-production-review-download-position.test.ts` and this
           page's own hierarchy tests for the invariants this boundary must
           keep. */}
-      <details className="rounded-lg border border-ink/10 p-3" open={!hasWorkspace}>
+      {/* Simplify Signs Production Review Phase: closed by default, always
+          — the plain-language summary above is now the normal-flow read,
+          and this technical/diagnostic detail is deliberately one
+          click away rather than open-by-default for a fresh review-
+          required plan the way it used to be. */}
+      <details className="rounded-lg border border-ink/10 p-3">
         <summary className="cursor-pointer select-none text-sm font-semibold text-ink">Production details</summary>
         <div className="mt-3 flex flex-col gap-4">
           {review.production.blockedCandidateAssetId ? (
@@ -328,6 +367,12 @@ function SignPlanReview({
             </section>
           ) : null}
 
+          {/* Simplify Signs Production Review Phase: informational only —
+              the ONE actionable authorization control now lives above, as
+              "Approve & Continue" (`SignApproveAndContinueButton`). This
+              section still states the durable authorization FACT (useful
+              for diagnostics/audit even once collapsed), but never
+              duplicates the action itself. */}
           <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
             <h3 className="text-sm font-semibold text-ink">Authorization</h3>
             {isAuthorized ? (
@@ -339,7 +384,7 @@ function SignPlanReview({
                 </p>
               </div>
             ) : canAuthorize ? (
-              <SignAuthorizeButton projectId={projectId} />
+              <p className="text-sm text-muted">Not yet authorized — use Approve &amp; Continue above.</p>
             ) : (
               <p className="text-sm text-ink" data-sign-authorize-blocked>
                 The planner couldn&apos;t formulate an automatic preparation for this artwork. There is nothing to
@@ -378,9 +423,14 @@ function SignPlanReview({
         </div>
       </details>
 
+      {/* Simplify Signs Production Review Phase (Section 4): specialized
+          evidence tooling and a raw manual composition override, never
+          normal-workflow actions — closed by default, plain "Advanced
+          details" label (no development-phase name visible), capabilities
+          and semantics fully unchanged, never automatically invoked. */}
       {!isAuthorized ? (
         <details className="rounded-lg border border-ink/10 p-3">
-          <summary className="cursor-pointer select-none text-sm font-semibold text-ink">Plan details</summary>
+          <summary className="cursor-pointer select-none text-sm font-semibold text-ink">Advanced details</summary>
           <div className="mt-3 flex flex-col gap-6">
             <section className="flex flex-col gap-3">
               <h3 className="text-sm font-semibold text-ink">Structural regions</h3>
@@ -397,7 +447,7 @@ function SignPlanReview({
             </section>
 
             <section className="flex flex-col gap-3 border-t border-ink/10 pt-4">
-              <h3 className="text-sm font-semibold text-ink">Canvas-first composition (Phase 3B)</h3>
+              <h3 className="text-sm font-semibold text-ink">Canvas-first composition</h3>
               <p className="text-sm text-muted">
                 The ordered spec alone defines the production canvas. Choose an explicit crop, fit placement, band
                 moves, and fill rectangles — never inferred from the artwork&apos;s own perimeter. Building a plan
