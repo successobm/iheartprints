@@ -4,7 +4,11 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import type { SignPlanOperatorProductionStatus } from "@/capabilities/sign-preparation";
-import { resolveSignProductionCtaState } from "./sign-production-cta-state";
+import {
+  hasSignPreparationPollingTimedOut,
+  resolveSignProductionCtaState,
+  SIGN_PREPARATION_POLL_INTERVAL_MS,
+} from "./sign-production-cta-state";
 
 /**
  * LIVE PRODUCT BLOCKER #4B: "Prepare artwork" — deliberately separate from
@@ -18,6 +22,23 @@ import { resolveSignProductionCtaState } from "./sign-production-cta-state";
  * re-fetch-authoritative-state approach `SignAuthorizeButton` uses after a
  * click, just on a timer instead of once. The interval clears the moment
  * the server reports the job is no longer in flight.
+ *
+ * "Preparing Artwork" Never Spins Forever Phase (real production blocker):
+ * that polling loop used to have no upper bound — a job that never gets
+ * claimed by the independent worker layer (see `docs/deployment/final-
+ * artwork-worker.md`; the web process is never itself the worker in
+ * production) left the operator staring at "Preparing artwork…"
+ * indefinitely, with no way to tell a genuinely-still-processing job apart
+ * from one that will never move. Once `hasSignPreparationPollingTimedOut`
+ * (`sign-production-cta-state.ts`) says enough time has passed with no
+ * observed transition, polling stops and this renders an honest "taking
+ * longer than expected" state with a manual "Check again" — never a false
+ * "failed" claim (the job may still be legitimately queued/running), and
+ * never a second POST to `/prepare` (that would only reconfirm the exact
+ * SAME idempotently-reused job, never actually make it run any sooner).
+ * "Check again" re-arms a fresh polling window rather than a one-shot
+ * check, so a job that finishes shortly after is still picked up
+ * automatically.
  *
  * FIX AUTHORIZED SIGN PRODUCTION WORKSPACE CTA: the "what to show" decision
  * (print-ready / in-flight / prepare-vs-retry) is now `resolveSignProduction
@@ -47,12 +68,42 @@ export function SignProductionAction({
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pollingTimedOut, setPollingTimedOut] = useState(false);
+  // Bumped by "Check again" to deliberately re-arm a fresh polling window
+  // (fresh start time, fresh timeout) — the only reason this effect's own
+  // dependency array includes a value nothing inside it reads directly.
+  const [pollEpoch, setPollEpoch] = useState(0);
 
   useEffect(() => {
-    if (!production.inFlight) return;
-    const interval = setInterval(() => router.refresh(), 3000);
-    return () => clearInterval(interval);
-  }, [production.inFlight, router]);
+    // Deferred (not a direct synchronous call in the effect body) so a
+    // fresh in-flight period — either a brand new attempt or "Check
+    // again" re-arming this same one — never renders a stale "taking
+    // longer than expected" left over from an earlier period.
+    const resetTimer = setTimeout(() => setPollingTimedOut(false), 0);
+    if (!production.inFlight) {
+      return () => clearTimeout(resetTimer);
+    }
+    const inFlightStartedAtMs = Date.now();
+    const interval = setInterval(() => {
+      if (hasSignPreparationPollingTimedOut(inFlightStartedAtMs, Date.now())) {
+        setPollingTimedOut(true);
+        clearInterval(interval);
+        return;
+      }
+      router.refresh();
+    }, SIGN_PREPARATION_POLL_INTERVAL_MS);
+    return () => {
+      clearTimeout(resetTimer);
+      clearInterval(interval);
+    };
+    // pollEpoch is a deliberate manual re-arm trigger ("Check again"), never read inside the effect itself.
+  }, [production.inFlight, router, pollEpoch]);
+
+  function checkAgain() {
+    setPollingTimedOut(false);
+    setPollEpoch((epoch) => epoch + 1);
+    router.refresh();
+  }
 
   async function handleClick() {
     if (submitting) return;
@@ -87,6 +138,23 @@ export function SignProductionAction({
   }
 
   if (cta.kind === "in_flight") {
+    if (pollingTimedOut) {
+      return (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-ink" data-sign-production-poll-timeout>
+            This is taking longer than expected.
+          </p>
+          <button
+            type="button"
+            onClick={checkAgain}
+            className="self-start rounded-full border border-ink/20 px-3.5 py-2 text-sm font-medium text-ink transition hover:bg-ink/5"
+            data-testid="sign-production-check-again-button"
+          >
+            Check again
+          </button>
+        </div>
+      );
+    }
     return (
       <p className="text-sm text-muted" aria-busy="true" data-sign-production-processing>
         Preparing artwork…

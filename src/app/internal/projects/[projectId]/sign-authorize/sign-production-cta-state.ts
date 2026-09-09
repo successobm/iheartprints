@@ -146,6 +146,42 @@ function isPhysicalResolutionMetadataBlocking(
 }
 
 /**
+ * "Preparing Artwork" Never Spins Forever Phase (real production blocker:
+ * a genuinely-queued `FinalArtworkJob` can sit unclaimed for an extended
+ * period whenever nothing has actually run the independent worker layer
+ * yet — see `docs/deployment/final-artwork-worker.md`'s "scheduled
+ * endpoint" topology; the web process is never itself the worker in
+ * production). `SignProductionAction`'s own polling (`router.refresh()`
+ * every `SIGN_PREPARATION_POLL_INTERVAL_MS` while `cta.kind === "in_flight"`)
+ * must never continue unboundedly: once a plan has been in flight for
+ * `SIGN_PREPARATION_POLL_TIMEOUT_MS` with no observed transition out of
+ * it, the UI stops silently spinning and says so plainly instead.
+ *
+ * `SIGN_PREPARATION_POLL_TIMEOUT_MS` is generous on purpose — the
+ * deterministic (no-provider) path this real case exercises completes in
+ * low single-digit seconds (empirically reproduced against the real
+ * plan's own fixture), but a plan that DOES need Topaz reconstruction can
+ * legitimately take up to the Sprint 2M Phase 2D bake-off's own observed
+ * ~70-130s per call (`docs/deployment/final-artwork-worker.md`'s "Live
+ * provider safety" section) — this threshold must never fire while a
+ * genuinely-processing Topaz job is still within its own normal range.
+ */
+export const SIGN_PREPARATION_POLL_INTERVAL_MS = 3000;
+export const SIGN_PREPARATION_POLL_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * Pure time math, extracted for the identical reason
+ * `resolveSignProductionCtaState` below already is: directly testable
+ * with real numbers, no mounted timer, no mounted router.
+ */
+export function hasSignPreparationPollingTimedOut(
+  inFlightStartedAtMs: number,
+  nowMs: number,
+): boolean {
+  return nowMs - inFlightStartedAtMs >= SIGN_PREPARATION_POLL_TIMEOUT_MS;
+}
+
+/**
  * Pure, framework-free. Same precedence `SignProductionAction` always had:
  * print-ready wins over in-flight (a job cannot be both), in-flight wins
  * over any label decision (nothing to click while work is running).
