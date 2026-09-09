@@ -63,6 +63,29 @@ export interface SignPlanOperatorView {
   artworkHeightPx: number;
   /** Reused verbatim from `describeSignPlanForCustomer` — one findings authority. */
   findings: string[];
+  /**
+   * Simplify Signs Production Review Phase: reused verbatim from
+   * `describeSignPlanForCustomer`'s `proposedAction` — the SAME one
+   * plain-language "here's what we'll do about it" sentence a customer
+   * would see, e.g. "We can add space around the design so it fits your
+   * sign without stretching or trimming your artwork." `null` for a plan
+   * with no steps that translate to customer language, or when nothing
+   * needs to change. Exists so the normal operator review screen can show
+   * one honest sentence without duplicating `sign-preparation-copy.ts`'s
+   * own translation authority — the exact discipline `findings` above
+   * already follows.
+   */
+  proposedAction: string | null;
+  /**
+   * Simplify Signs Production Review Phase: reused verbatim from
+   * `describeSignPlanForCustomer`'s `reviewRequired` — whether a human
+   * must approve this plan before it may run (true for every
+   * `review_required` plan; false for a proven `auto_safe` one). Drives
+   * the normal review screen's headline ("Artwork needs review" vs.
+   * "Ready to prepare") without re-deriving the risk tier from
+   * `riskLabel`'s own display string.
+   */
+  reviewRequired: boolean;
   /** In plan order. Only steps the plan actually contains — nothing fabricated. */
   steps: SignPlanOperatorStepView[];
 }
@@ -113,6 +136,8 @@ export function describeSignPlanForOperator(
     artworkWidthPx: input.artworkWidthPx,
     artworkHeightPx: input.artworkHeightPx,
     findings: customerView.findings,
+    proposedAction: customerView.proposedAction,
+    reviewRequired: customerView.reviewRequired,
     steps: input.plan.steps.map((step) => describeStepForOperator(step, input.inspection)),
   };
 }

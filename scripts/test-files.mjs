@@ -252,6 +252,13 @@ export const TEST_FILES = [
   // registered immediately per the established discipline.
   "src/app/internal/access/internal-access-return-to.test.ts",
   "src/app/internal/projects/[projectId]/sign-authorize/sign-authorize-return-to.test.ts",
+  // Simplify Signs Production Review Phase: ONE primary "Approve &
+  // Continue" action, plain-language normal review screen, technical/
+  // advanced tooling closed by default -- registered immediately per the
+  // established discipline.
+  "src/app/internal/projects/[projectId]/sign-authorize/SignApproveAndContinueButton.test.tsx",
+  "src/app/internal/projects/[projectId]/sign-authorize/SignPlanSummary.test.tsx",
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-production-review-simplification.test.ts",
   "src/app/api/projects/[projectId]/artwork-preparation/separation/phase16-complex-background-routing.test.ts",
   "src/components/chat/uploaded-artwork-separation-mount.test.tsx",
   "src/capabilities/artwork-preparation/bowling-live-shape-ui-acceptance.test.ts",

@@ -1227,3 +1227,51 @@ describe("describeSignPlanForOperator — real planner output", () => {
     assertNoLeakedVocabulary(view);
   });
 });
+
+/**
+ * Simplify Signs Production Review Phase: `proposedAction`/`reviewRequired`
+ * — the two fields the new normal-flow review screen (`SignPlanSummary`)
+ * reads. Both are reused verbatim from `describeSignPlanForCustomer`, one
+ * translation authority — this proves they actually agree, never a second,
+ * independently-computed operator opinion.
+ */
+describe("describeSignPlanForOperator — proposedAction/reviewRequired (Simplify Signs Production Review Phase)", () => {
+  it("review_required plan: reviewRequired is true, proposedAction is the SAME sentence a customer would see", () => {
+    const { inspection, result } = realPlan(ruthLikeSignArtwork(), 18, 24);
+    assert.equal(result.plan!.overallRisk, "review_required");
+
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 18,
+      orderedHeightIn: 24,
+      artworkWidthPx: inspection.source.widthPx,
+      artworkHeightPx: inspection.source.heightPx,
+      inspection,
+      plan: result.plan!,
+    });
+
+    assert.equal(view.reviewRequired, true);
+    assert.ok(view.proposedAction);
+    assert.doesNotMatch(view.proposedAction!, /px|RGB/i);
+  });
+
+  it("auto_safe plan (exact-aspect, resolution-only): reviewRequired is false", () => {
+    // Same fixture/sizing as the "Exact-aspect, low-resolution artwork"
+    // test above — source (1024x1536) and ordered (16x24) share the exact
+    // same aspect ratio, so the plan is resolution-only and always risks
+    // auto_safe.
+    const { inspection, result } = realPlan(ruthLikeSignArtwork(), 16, 24);
+    assert.equal(result.status, "planned");
+    assert.equal(result.plan!.overallRisk, "auto_safe");
+
+    const view = describeSignPlanForOperator({
+      orderedWidthIn: 16,
+      orderedHeightIn: 24,
+      artworkWidthPx: inspection.source.widthPx,
+      artworkHeightPx: inspection.source.heightPx,
+      inspection,
+      plan: result.plan!,
+    });
+
+    assert.equal(view.reviewRequired, false);
+  });
+});
