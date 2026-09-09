@@ -63,10 +63,18 @@ export type UploadedArtworkStep =
    */
   | "confirm_sign_size"
   /**
-   * Sign path: the ordered size is durably recorded, and the customer may
-   * now ask iHeartPrints to inspect the artwork ("Check my artwork"). No
-   * plan exists yet — this is not the same as a step that has nothing left
-   * to do; the next action is right here.
+   * Sign path fallback: the ordered size is durably recorded, but no plan
+   * exists yet. Signs Workflow Dead Ends fix (Defect 1): confirming the
+   * ordered size now chains straight into inspection/planning
+   * (`sign-artwork-service.ts`'s `confirmSignArtworkSize`), so this step is
+   * NOT the normal continuation any more — a customer who just entered
+   * their sign size lands on `sign_plan_review` (or, for the rare
+   * genuinely-blocked-with-no-durable-plan case, an equivalent reload)
+   * directly. This step remains reachable only as a safe retry surface:
+   * a reload after a BLOCKED planning outcome durably looks identical to
+   * "never planned" (see `SignArtworkView.plan`'s doc), and re-offering
+   * "Check my artwork" here — rather than trapping the customer — lets
+   * them re-run the same deterministic, idempotent inspection.
    */
   | "sign_context_saved"
   /**

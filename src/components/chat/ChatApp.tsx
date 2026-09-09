@@ -23,7 +23,10 @@ import {
   type WorkflowChoice,
 } from "./uploaded-artwork-flow";
 import { UploadedArtworkPanel } from "./UploadedArtworkPanel";
-import { resolveSignProductionWorkspaceUrl } from "./sign-production-bridge";
+import {
+  resolveSignProductionWorkspaceUrl,
+  resolveSignReviewWorkspaceUrl,
+} from "./sign-production-bridge";
 import { WorkflowChoiceCard } from "./WorkflowChoiceCard";
 import {
   CHAT_PROJECT_STORAGE_KEY,
@@ -1121,6 +1124,23 @@ export function ChatApp() {
   }
 
   /**
+   * Signs Workflow Dead Ends fix (Defect 2): "Review required" no longer
+   * dead-ends. A `needs_review` plan cannot be authorized by the customer's
+   * own click (`isAuthorizationSufficientForRisk`), so this is never a
+   * self-service authorization — it is pure client-side navigation into the
+   * SAME existing internal production workspace `continueToSignProduction`
+   * already bridges to, where the ALREADY-BUILT operator-only
+   * `SignAuthorizeButton` lives. See `sign-production-bridge.ts`'s
+   * `resolveSignReviewWorkspaceUrl` for the eligibility gate; like every
+   * other bridge in this file, it never weakens, bypasses, or duplicates
+   * the workspace's own internal-access gate.
+   */
+  function reviewSignPlanInWorkspace() {
+    const target = resolveSignReviewWorkspaceUrl(snapshot ?? null);
+    if (target) window.location.assign(target);
+  }
+
+  /**
    * SIGNS QR DESTINATION RESOLUTION: "Fix QR code" — the customer's own
    * confirmation of a detected-but-undecodable QR's intended destination.
    * `regionKey` is passed through verbatim from `signArtwork.qrResolutions`
@@ -1830,6 +1850,7 @@ export function ChatApp() {
                 onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
                 onPlanSignArtwork={() => void planSignArtwork()}
                 onAuthorizeSignPlan={() => void authorizeSignPlan()}
+                onReviewInProductionWorkspace={() => reviewSignPlanInWorkspace()}
                 onContinueToProduction={() => continueToSignProduction()}
                 onConfirmQrDestination={(input) => void confirmQrDestination(input)}
                 onAcceptQrPrintAsSupplied={(input) => void acceptQrPrintAsSupplied(input)}

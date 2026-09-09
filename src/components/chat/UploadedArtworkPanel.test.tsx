@@ -271,6 +271,9 @@ function renderSignStep(
       onAuthorizeSignPlan: () => {
         throw new Error("onAuthorizeSignPlan must never fire from rendering");
       },
+      onReviewInProductionWorkspace: () => {
+        throw new Error("onReviewInProductionWorkspace must never fire from rendering");
+      },
       onContinueToProduction: () => {
         throw new Error("onContinueToProduction must never fire from rendering");
       },
@@ -508,6 +511,89 @@ describe("Sign plan review (LIVE PRODUCT BLOCKER #3)", () => {
     const match = html.match(/<button[^>]*data-testid="sign-authorize-plan-button"[^>]*>/);
     return match ? match[0] : null;
   }
+
+  /** Same isolation, for the "Review in production workspace" action. */
+  function extractReviewWorkspaceButtonTag(html: string): string | null {
+    const match = html.match(/<button[^>]*data-testid="sign-review-in-workspace-button"[^>]*>/);
+    return match ? match[0] : null;
+  }
+
+  describe("Signs Workflow Dead Ends fix (Defect 2): 'Review required' always has a continuation action", () => {
+    it("needs_review: shows an enabled 'Review in production workspace' action — never a dead end", () => {
+      const html = renderSignStep("sign_plan_review", {
+        orderedWidthIn: 18,
+        orderedHeightIn: 24,
+        specConfirmed: true,
+        plan: readyPlan({
+          status: "needs_review",
+          reviewRequired: true,
+          proposedAction: "We can add space around the design.",
+        }),
+      });
+      const buttonTag = extractReviewWorkspaceButtonTag(html);
+      assert.ok(buttonTag, "the review-workspace continuation action must render");
+      assert.doesNotMatch(buttonTag!, /\bdisabled=""/);
+      assert.match(visibleText(html), /Review in production workspace/);
+    });
+
+    it("needs_review with busy=true: the action is disabled", () => {
+      const html = renderSignStep(
+        "sign_plan_review",
+        {
+          orderedWidthIn: 18,
+          orderedHeightIn: 24,
+          specConfirmed: true,
+          plan: readyPlan({ status: "needs_review", reviewRequired: true }),
+        },
+        { busy: true },
+      );
+      const buttonTag = extractReviewWorkspaceButtonTag(html);
+      assert.ok(buttonTag);
+      assert.match(buttonTag!, /\bdisabled=""/);
+    });
+
+    it("ready: NEVER shows the review-workspace action — that risk class has its own sufficient customer action", () => {
+      const html = renderSignStep("sign_plan_review", {
+        orderedWidthIn: 24,
+        orderedHeightIn: 36,
+        specConfirmed: true,
+        plan: readyPlan(),
+      });
+      assert.doesNotMatch(html, /data-testid="sign-review-in-workspace-button"/);
+    });
+
+    it("blocked: NEVER shows the review-workspace action — a genuinely non-repairable condition is distinguished from a user-approval one", () => {
+      const html = renderSignStep("sign_plan_review", {
+        orderedWidthIn: 18,
+        orderedHeightIn: 24,
+        specConfirmed: true,
+        plan: readyPlan({ status: "blocked", proposedAction: null, canProceed: false }),
+      });
+      assert.doesNotMatch(html, /data-testid="sign-review-in-workspace-button"/);
+      // Blocked already asserts its own distinct copy elsewhere in this
+      // file ("can't safely prepare this artwork automatically", never
+      // "Review required") — this only pins the missing action alongside it.
+      assert.doesNotMatch(visibleText(html), /review required/i);
+    });
+
+    it("the UI never says 'We'll need your approval' without an approval action present", () => {
+      for (const status of ["ready", "needs_review", "blocked"] as const) {
+        const html = renderSignStep("sign_plan_review", {
+          orderedWidthIn: 18,
+          orderedHeightIn: 24,
+          specConfirmed: true,
+          plan: readyPlan({ status, reviewRequired: status === "needs_review" }),
+        });
+        const text = visibleText(html);
+        if (/we'll need your approval/i.test(text)) {
+          assert.ok(
+            extractReviewWorkspaceButtonTag(html),
+            `status ${status}: approval copy without a continuation action`,
+          );
+        }
+      }
+    });
+  });
 
   describe("LIVE PRODUCT BLOCKER #4: the Prepare artwork action", () => {
     it("ready: shows an enabled 'Prepare artwork' action — the resolution-only case is never stranded", () => {

@@ -126,6 +126,24 @@ async function bridgeSignArtworkIfNeeded(projectId: string) {
  * Idempotent: a second call for a project that already has a
  * `SignPreparation` re-confirms the (possibly changed) size against the
  * SAME sign original rather than adopting the upload a second time.
+ *
+ * Signs Workflow Dead Ends fix (Defect 1): by the time a customer submits
+ * this, they have already uploaded artwork, identified it as a Sign, and
+ * supplied the ordered size — there is no remaining decision before
+ * inspection, so this chains straight into the EXISTING `planSignArtwork`
+ * (the same "Check my artwork" action, not a second one) rather than
+ * leaving the customer on an inert "your details are saved, click to
+ * continue" screen. This is a state/action fix, not a UI-level simulated
+ * click: `confirmSignProductionSpec` is one durable step and
+ * `planSignRepair` is the very next one, and nothing customer-facing
+ * happens between them, so running both within this one request is the
+ * accurate model of "confirming the size proceeds into inspection" —
+ * mirroring `confirmOperatorStructuralLayoutForSign`'s own established
+ * "confirm, then immediately re-plan" pattern for the internal operator
+ * surface. `planSignArtwork` itself remains exactly as idempotent as
+ * before (re-clicking "Check my artwork" after a reload still safely
+ * reproduces the identical result, e.g. after a BLOCKED outcome whose
+ * durable row looks like "never planned" — see that function's own doc).
  */
 export async function confirmSignArtworkSize(
   projectId: string,
@@ -140,11 +158,7 @@ export async function confirmSignArtworkSize(
     input.orderedHeightIn,
   );
 
-  const snapshot = await getConversation(projectId);
-  if (!snapshot) {
-    throw new SignArtworkBridgeError("Project not found");
-  }
-  return snapshot;
+  return planSignArtwork(projectId);
 }
 
 /**

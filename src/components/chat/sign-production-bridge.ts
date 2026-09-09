@@ -50,6 +50,66 @@ export interface SignProductionBridgeSnapshot {
 }
 
 /**
+ * Signs Workflow Dead Ends fix (Defect 2): the other half of this same
+ * bridge, for the OTHER genuinely terminal-looking screen — a plan whose
+ * risk classification requires an operator's own review
+ * (`isAuthorizationSufficientForRisk`, `sign-plan-authorization.ts`:
+ * `review_required` accepts only `authorizedBy: "operator"`, never a
+ * customer's own click). The customer chat surface correctly never offers
+ * a self-service "approve" action for this risk class — but it was ALSO
+ * never pointing anywhere an operator (Eric, under the current user model)
+ * COULD go authorize it, even though the exact governed action already
+ * exists and is already fully built: `SignAuthorizeButton` on
+ * `/internal/projects/[projectId]/sign-authorize`
+ * (`POST /api/internal/projects/[projectId]/sign-artwork/authorize`).
+ *
+ * This function decides the SAME URL `resolveSignProductionWorkspaceUrl`
+ * does, but on a different, narrower gate: a plan exists AND needs review
+ * AND has not already been authorized for the CURRENT plan. It grants
+ * nothing on its own — the internal workspace's own existing internal-
+ * access gate (`isInternalAccessConfigured` / `ACQUISITION_SESSION_COOKIE`)
+ * still runs untouched on arrival, exactly as `resolveSignProductionWorkspaceUrl`'s
+ * own doc already establishes for the authorized case. Never renders (or
+ * is asked to compute) anything for `"ready"`/`"blocked"` plans — a
+ * `"ready"` plan has its own sufficient customer self-service action
+ * (`onAuthorizeSignPlan`); a `"blocked"` plan has no plan to review at all.
+ */
+export interface SignReviewWorkspaceSnapshot {
+  project: { id: string };
+  signArtwork: {
+    plan: { reviewRequired: boolean } | null;
+    authorization: { matchesCurrentPlan: boolean };
+  } | null;
+}
+
+/**
+ * The internal production workspace URL for a plan that needs an
+ * operator's own review, or `null` when there is nothing (yet, or any
+ * longer) for an operator to review there.
+ *
+ * `null` on:
+ *   - no snapshot, or no `SignPreparation` for this project
+ *   - no current plan, or a current plan that does not require review
+ *     (`"ready"` or `"blocked"` — see this module's own doc)
+ *   - a review-required plan that has ALREADY been authorized for the
+ *     CURRENT plan (`matchesCurrentPlan === true`) — that customer is
+ *     already on `sign_plan_authorized`, whose OWN "Continue to
+ *     production" (`resolveSignProductionWorkspaceUrl`) is the right
+ *     action, not a second link to the identical destination
+ *   - a project id that is not a genuine non-empty identifier
+ */
+export function resolveSignReviewWorkspaceUrl(
+  snapshot: SignReviewWorkspaceSnapshot | null,
+): string | null {
+  if (!snapshot) return null;
+  if (!snapshot.signArtwork?.plan?.reviewRequired) return null;
+  if (snapshot.signArtwork.authorization.matchesCurrentPlan) return null;
+  const projectId = snapshot.project.id;
+  if (typeof projectId !== "string" || projectId.trim() === "") return null;
+  return `/internal/projects/${projectId}/sign-authorize`;
+}
+
+/**
  * The internal production workspace URL for this project's authorized plan,
  * or `null` when navigation is not (yet) authorized.
  *
