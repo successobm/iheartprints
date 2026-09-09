@@ -479,6 +479,9 @@ export const TEST_FILES = [
   // of SignProductionAction.tsx as a pure, router-free function — same
   // reasoning as sign-canvas-zoom/correction-coordinate-mapping below.
   "src/app/internal/projects/[projectId]/sign-authorize/sign-production-cta-state.test.ts",
+  // "Preparing Artwork" Never Spins Forever Phase: the bounded polling
+  // timeout -- registered immediately per the established discipline.
+  "src/app/internal/projects/[projectId]/sign-authorize/SignProductionAction.test.tsx",
   // Operator Production Correction UX: pointer/CSS -> production-candidate
   // native pixel coordinate mapping, zoom-invariant, DOM-free.
   "src/app/internal/projects/[projectId]/sign-authorize/correction-coordinate-mapping.test.ts",

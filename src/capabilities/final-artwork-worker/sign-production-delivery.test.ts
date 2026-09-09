@@ -14,6 +14,7 @@ import { RIGID_SIGN_REQUIRED_PRINT_READY_CHECK_CODES } from "@/capabilities/prin
 import { createSignPreparationCapability } from "@/capabilities/sign-preparation";
 import {
   exactAspectSignArtwork,
+  fillRect,
   makeImage,
   toPngBytes,
   uniformBackgroundSignArtwork,
@@ -72,6 +73,37 @@ class ThrowingProvider implements FinalArtworkProvider {
   async produce(_input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput> {
     throw new Error("must never dispatch the apparel provider for a deterministic-only sign job");
   }
+}
+
+/**
+ * "Preparing Artwork" Never Spins Forever Phase (real production blocker):
+ * reproduces the real customer's own geometric/repairability class —
+ * source 5481x1846px, requested 18x6in — a small (~1.01%) aspect mismatch,
+ * full-width content bleeding to both left and right edges. Confirmed
+ * (Signs Production Review Architectural Audit, two tasks prior) to
+ * classify as ordinary `foreground_bleed`, never edge-dependent structure
+ * — the planner's own downsample + pad_uniform_background, never the
+ * intelligent perimeter-reconstruction tier.
+ */
+function customerShapedWideSignArtwork(width: number, height: number): RgbaImage {
+  const image = makeImage(width, height, { r: 6, g: 6, b: 6 });
+  const stripes = [
+    { r: 228, g: 26, b: 60 },
+    { r: 255, g: 140, b: 20 },
+    { r: 250, g: 220, b: 40 },
+    { r: 60, g: 180, b: 80 },
+    { r: 40, g: 120, b: 220 },
+    { r: 140, g: 70, b: 180 },
+  ];
+  const bandTop = Math.round(height * 0.06);
+  const bandStep = Math.round(height * 0.02);
+  stripes.forEach((color, index) => {
+    fillRect(image, 0, bandTop + index * bandStep, width, bandTop + (index + 1) * bandStep, color);
+  });
+  fillRect(image, Math.round(width * 0.2), Math.round(height * 0.25), Math.round(width * 0.6), Math.round(height * 0.07), { r: 245, g: 245, b: 245 });
+  fillRect(image, Math.round(width * 0.06), Math.round(height * 0.34), Math.round(width * 0.88), Math.round(height * 0.59), { r: 255, g: 255, b: 255 });
+  fillRect(image, Math.round(width * 0.2), Math.round(height * 0.95), Math.round(width * 0.6), Math.round(height * 0.035), { r: 240, g: 60, b: 120 });
+  return image;
 }
 
 describe("resolveCurrentSignProductionDelivery — deterministic-only (no reconstruction)", () => {
@@ -275,6 +307,42 @@ describe("resolveCurrentSignProductionDelivery — deterministic-only (no recons
       null,
       "the OLD plan's print-ready job must not be handed over as though it answered the NEW plan",
     );
+  });
+
+  it("\"Preparing Artwork\" Never Spins Forever Phase: the REAL 5481x1846 -> 18x6 case processes fast, deterministically, with ZERO provider calls, and reaches a genuine terminal state — never hangs", async () => {
+    const { repo, signPreparation, finalArtwork, worker, projectId } = await build();
+    await signPreparation.uploadSignArtwork(projectId, {
+      bytes: toPngBytes(customerShapedWideSignArtwork(5481, 1846)),
+      declaredContentType: "image/png",
+      filename: "repro-5481x1846.png",
+    });
+    await signPreparation.confirmSignProductionSpec(projectId, 18, 6);
+    const outcome = await signPreparation.planSignRepair(projectId);
+    assert.equal(outcome.result.status, "planned");
+    const plan = outcome.result.plan!;
+    // The exact repair strategy the architectural audit found — downsample
+    // + a flat-colour pad, never the intelligent perimeter-structure tier
+    // (this content is ordinary foreground bleed, not edge-dependent
+    // structure) and never a provider dispatch of any kind.
+    assert.deepEqual(plan.steps.map((s) => s.kind), ["downsample", "pad_uniform_background"]);
+    assert.equal(plan.overallRisk, "review_required");
+    await signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
+    await finalArtwork.requestSignFinalArtwork(projectId);
+
+    // `ThrowingProvider.produce` throws on any call — if the worker never
+    // throws here, zero provider dispatches happened.
+    await worker.processNextJob();
+
+    const job = (await repo.listFinalArtworkJobsForSignPreparation(projectId, (await repo.getSignPreparation(projectId))!.id))[0];
+    assert.ok(job, "sanity: the job must exist");
+    // A genuine terminal state -- never left "queued"/"running" by this
+    // real worker call. Whether it lands on print_ready or needs a human's
+    // attention is a legitimate PrintValidation finding either way; the
+    // one invariant this test locks in is that it NEVER hangs.
+    assert.equal(job.status, "completed");
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project!.project.status, "finalizing", "must not still read as in-progress once the worker has actually run");
   });
 });
 

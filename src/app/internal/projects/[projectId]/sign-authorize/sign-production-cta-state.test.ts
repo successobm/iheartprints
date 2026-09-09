@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it, test } from "node:test";
 
 import type { SignPlanOperatorProductionStatus } from "@/capabilities/sign-preparation";
-import { describeSignProductionCurrentStatus, resolveSignProductionCtaState } from "./sign-production-cta-state";
+import {
+  describeSignProductionCurrentStatus,
+  hasSignPreparationPollingTimedOut,
+  resolveSignProductionCtaState,
+  SIGN_PREPARATION_POLL_TIMEOUT_MS,
+} from "./sign-production-cta-state";
 
 /**
  * FIX AUTHORIZED SIGN PRODUCTION WORKSPACE CTA: regression coverage for the
@@ -427,5 +432,53 @@ describe("describeSignProductionCurrentStatus", () => {
     const status = describeSignProductionCurrentStatus(production({ jobStatus: "failed", failed: true }));
     assert.match(status, /failed/i);
     assert.doesNotMatch(status, /review/i);
+  });
+});
+
+/**
+ * "Preparing Artwork" Never Spins Forever Phase (real production blocker):
+ * `hasSignPreparationPollingTimedOut` is the ONE piece of real time math
+ * behind the bounded polling fix — directly testable with real numbers,
+ * no mounted timer, no mounted router (mirrors this file's own established
+ * reason for extracting `resolveSignProductionCtaState` in the first
+ * place).
+ */
+describe("hasSignPreparationPollingTimedOut", () => {
+  it("false immediately after the in-flight period starts", () => {
+    const startedAt = 1_000_000;
+    assert.equal(hasSignPreparationPollingTimedOut(startedAt, startedAt), false);
+  });
+
+  it("false just under the threshold", () => {
+    const startedAt = 1_000_000;
+    assert.equal(
+      hasSignPreparationPollingTimedOut(startedAt, startedAt + SIGN_PREPARATION_POLL_TIMEOUT_MS - 1),
+      false,
+    );
+  });
+
+  it("true exactly at the threshold — never require MORE than the documented bound", () => {
+    const startedAt = 1_000_000;
+    assert.equal(
+      hasSignPreparationPollingTimedOut(startedAt, startedAt + SIGN_PREPARATION_POLL_TIMEOUT_MS),
+      true,
+    );
+  });
+
+  it("true well past the threshold", () => {
+    const startedAt = 1_000_000;
+    assert.equal(
+      hasSignPreparationPollingTimedOut(startedAt, startedAt + SIGN_PREPARATION_POLL_TIMEOUT_MS * 10),
+      true,
+    );
+  });
+
+  it("the threshold comfortably exceeds the worst documented real Topaz latency (~130s) — never falsely times out a legitimately-processing reconstruction", () => {
+    const startedAt = 1_000_000;
+    const worstObservedTopazLatencyMs = 130_000;
+    assert.equal(
+      hasSignPreparationPollingTimedOut(startedAt, startedAt + worstObservedTopazLatencyMs),
+      false,
+    );
   });
 });
