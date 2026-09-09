@@ -1129,7 +1129,17 @@ export function executeCompositionSteps(
   index++;
 
   const baseCanvas = fitted.image;
-  const working = Buffer.from(baseCanvas.data);
+  // Banner Production Profile Audit: `working` only needs to be an
+  // INDEPENDENT copy of `baseCanvas.data` when a move/fill/replace step
+  // actually follows — `applyMoveRegion` reads the pristine `baseCanvas`
+  // while writing into `working`, so the two must not alias once any such
+  // step runs. When there is nothing left to apply (the common case: a
+  // fresh plan with no operator correction steps yet), `baseCanvas.data`
+  // IS the final output already — copying it first was a full-canvas-sized
+  // allocation for zero benefit. `fitted.image` is freshly allocated by
+  // `executeFitArtworkToCanvas` and referenced nowhere else, so returning
+  // it directly (no copy) is byte-identical to before and always safe.
+  const working = index < steps.length ? Buffer.from(baseCanvas.data) : baseCanvas.data;
   for (; index < steps.length; index++) {
     const step = steps[index]!;
     let refusal: { status: "refused"; reason: "unsupported_step_kind"; detail: string } | null;
