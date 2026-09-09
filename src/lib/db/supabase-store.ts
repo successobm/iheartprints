@@ -497,6 +497,8 @@ type DbSignPreparation = {
   background_treatment: string | null;
   background_treatment_confirmed_at: string | null;
   background_removal: Record<string, unknown> | null;
+  production_type: string | null;
+  production_type_confirmed_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -974,6 +976,8 @@ function mapSignPreparation(row: DbSignPreparation): SignPreparation {
     backgroundTreatment: row.background_treatment ?? null,
     backgroundTreatmentConfirmedAt: row.background_treatment_confirmed_at ?? null,
     backgroundRemoval: row.background_removal ?? null,
+    productionType: row.production_type ?? null,
+    productionTypeConfirmedAt: row.production_type_confirmed_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3068,6 +3072,10 @@ export class SupabaseProjectRepository implements ProjectRepository {
         // "keep" — never defaulted to "remove" — matching the column's own
         // `not null default 'keep'`.
         background_treatment: "keep",
+        // Banner Production Profile: every preparation starts explicitly
+        // "rigid_sign_raster" — matching the column's own
+        // `not null default 'rigid_sign_raster'`.
+        production_type: "rigid_sign_raster",
       })
       .select("*")
       .single();
@@ -3135,6 +3143,10 @@ export class SupabaseProjectRepository implements ProjectRepository {
       update.background_treatment_confirmed_at = patch.backgroundTreatmentConfirmedAt;
     if (patch.backgroundRemoval !== undefined)
       update.background_removal = patch.backgroundRemoval;
+    if (patch.productionType !== undefined)
+      update.production_type = patch.productionType;
+    if (patch.productionTypeConfirmedAt !== undefined)
+      update.production_type_confirmed_at = patch.productionTypeConfirmedAt;
 
     const { data, error } = await this.client
       .from("sign_preparations")

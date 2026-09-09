@@ -18,7 +18,7 @@ import {
 } from "@/capabilities/shared/waiting-copy";
 import { OPENING_PROMPT } from "@/lib/domain/conversation";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
-import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
+import type { GarmentSizeClass, PrintPlacement, SignProductionType } from "@/lib/domain/types";
 import type { SignPlanCustomerView } from "@/capabilities/sign-preparation";
 import type {
   CustomerFinalizationStatus,
@@ -92,6 +92,13 @@ export interface UploadedArtworkPanelProps {
     orderedWidthIn: number;
     orderedHeightIn: number;
   }) => void;
+  /**
+   * Banner Production Profile (Constitution amendment 3.3, §16A-bis): the
+   * customer's explicit "what are we making?" answer — asked BEFORE
+   * dimensions, never inferred from size. See `SignProductionType` in
+   * `lib/domain/types.ts`.
+   */
+  onChooseSignProductionType?: (productionType: SignProductionType) => void;
   /**
    * LIVE PRODUCT BLOCKER #3: "Check my artwork" — runs the existing Signs
    * inspection/diagnosis/planning capability.
@@ -244,6 +251,10 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
 
       {step === "choose_artwork_type" ? (
         <ArtworkTypeStep busy={busy} onChoose={props.onChooseArtworkType} />
+      ) : null}
+
+      {step === "choose_sign_production_type" ? (
+        <SignProductionTypeStep busy={busy} onChoose={props.onChooseSignProductionType} />
       ) : null}
 
       {step === "confirm_sign_size" ? (
@@ -462,6 +473,54 @@ function ArtworkTypeStep({
           <span className="block text-sm font-medium text-ink">Sign</span>
           <span className="mt-1 block text-xs text-muted">
             Artwork for a physical sign, at a specific width and height.
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Banner Production Profile (Constitution amendment 3.3, §16A-bis): the
+ * Sign path's first production-context question, asked BEFORE dimensions —
+ * "what are we making?" Rigid Sign or Banner. Never lets the customer enter
+ * dimensions before learning which governed production profile applies, and
+ * never infers the profile from a size the customer hasn't given yet.
+ */
+function SignProductionTypeStep({
+  busy,
+  onChoose,
+}: {
+  busy: boolean;
+  onChoose?: (productionType: SignProductionType) => void;
+}) {
+  return (
+    <div>
+      <p className="text-sm font-semibold text-ink">What are we making?</p>
+      <p className="mt-1 text-sm text-muted">
+        This tells us which sizes and print settings apply to your sign.
+      </p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onChoose?.("rigid_sign_raster")}
+          className="rounded-xl border border-black/8 p-3 text-left transition enabled:hover:border-ink/30 enabled:hover:bg-black/[0.02] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span className="block text-sm font-medium text-ink">Rigid Sign</span>
+          <span className="mt-1 block text-xs text-muted">
+            A stiff, flat sign panel — coroplast, aluminum, or similar rigid material.
+          </span>
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onChoose?.("banner_raster")}
+          className="rounded-xl border border-black/8 p-3 text-left transition enabled:hover:border-ink/30 enabled:hover:bg-black/[0.02] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span className="block text-sm font-medium text-ink">Banner</span>
+          <span className="mt-1 block text-xs text-muted">
+            A flexible printed banner — larger sizes than a rigid sign panel.
           </span>
         </button>
       </div>

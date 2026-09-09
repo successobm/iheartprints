@@ -30,8 +30,23 @@ export const SIGN_INSPECTION_VERSION = "sign-inspection:v1";
 /** Bumped whenever the plan schema or step vocabulary changes meaning. Part of plan identity. */
 export const SIGN_REPAIR_PLAN_SCHEMA_VERSION = "sign-repair-plan:v1";
 
-/** The admitted profile this capability serves — never the dormant `signage` placeholder. */
+/** The original admitted profile this capability serves — never the dormant `signage` placeholder. */
 export const RIGID_SIGN_CATEGORY = "rigid_sign_raster" as const;
+
+/**
+ * Banner Production Profile: the sibling admitted profile — a straight-
+ * rectangle Signs raster deliverable at a larger physical envelope, lower
+ * target/minimum PPI (viewing-distance-appropriate per Constitution
+ * §16A.4), same shared substrate-neutral Signs authority (immutability,
+ * background treatment, canvas-first composition, QR preservation,
+ * candidate-bound acceptance) as `RIGID_SIGN_CATEGORY`. Never the dormant
+ * `signage` placeholder either — see `resolution-policy.ts`'s own doc.
+ */
+export const BANNER_CATEGORY = "banner_raster" as const;
+
+/** Every Signs raster production profile this capability admits. */
+export const SIGN_PRODUCTION_CATEGORIES = [RIGID_SIGN_CATEGORY, BANNER_CATEGORY] as const;
+export type SignProductionCategory = (typeof SIGN_PRODUCTION_CATEGORIES)[number];
 
 // ---------------------------------------------------------------------------
 // Ordered-size authority (Constitution §16A.2)
@@ -43,7 +58,7 @@ export const RIGID_SIGN_CATEGORY = "rigid_sign_raster" as const;
  * aspect ratio, filename, prose, or the dormant `signage` placeholder.
  */
 export interface SignProductionSpec {
-  category: typeof RIGID_SIGN_CATEGORY;
+  category: SignProductionCategory;
   orderedWidthIn: number;
   orderedHeightIn: number;
   /** When a human explicitly confirmed this exact size. The consent provenance. */

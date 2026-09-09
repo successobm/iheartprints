@@ -2811,7 +2811,10 @@ export function createFinalArtworkWorkerCapability(
 
     const requirements = deriveRigidSignProductionRequirements(
       {
-        category: "rigid_sign_raster",
+        // Banner Production Profile: derived from the RESOLVED policy's
+        // own category — never hardcoded — so a banner plan's evidence is
+        // never mislabeled as rigid_sign_raster or vice versa.
+        category: policy.category,
         orderedWidthIn: plan.orderedWidthIn,
         orderedHeightIn: plan.orderedHeightIn,
         confirmedAt: preparation.specConfirmedAt ?? new Date(0).toISOString(),
@@ -3083,7 +3086,10 @@ export function createFinalArtworkWorkerCapability(
 
     const validationInput: PrintValidationInput = {
       artworkVersionId: preparation.id,
-      validationProfile: "rigid_sign_raster",
+      // Banner Production Profile: the SAME resolved policy's category
+      // used above for `requirements` — never re-derived or hardcoded a
+      // second time, so the two can never disagree.
+      validationProfile: policy.category,
       designBriefVersionId: null,
       currentApprovedDesignBriefVersionId: null,
       printPlacement: null,

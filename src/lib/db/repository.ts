@@ -457,6 +457,9 @@ export type UpdateSignPreparationInput = Partial<{
   backgroundTreatmentConfirmedAt: string | null;
   /** Constitution amendment 3.2: see `SignPreparation.backgroundRemoval`'s own doc. */
   backgroundRemoval: Record<string, unknown> | null;
+  /** Banner Production Profile: see `SignPreparation.productionType`'s own doc. */
+  productionType: string | null;
+  productionTypeConfirmedAt: string | null;
 }>;
 
 /**

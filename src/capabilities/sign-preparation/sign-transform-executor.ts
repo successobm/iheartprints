@@ -1791,9 +1791,25 @@ function rotateBounds(bounds: SignExecutionBounds, preRotateImage: RgbaImage): S
   return { x: newX, y: newY, width: bounds.height, height: bounds.width };
 }
 
-/** Encodes an RGBA image to PNG bytes. The single encode path this executor uses. */
+/**
+ * Encodes an RGBA image to PNG bytes. The single encode path this executor
+ * uses.
+ *
+ * Banner Production Profile Audit: `new PNG({width, height})` allocates its
+ * OWN full-canvas-sized buffer internally regardless of what's passed in —
+ * `image.data.copy(png.data)` then paid for a second, redundant full-size
+ * allocation just to duplicate bytes already held. `pngjs`'s encoder
+ * (`packer-async.js`'s `pack` -> `filterData`) only ever READS `png.data`
+ * to produce a NEW, separate filtered/compressed output — it never mutates
+ * its input — so aliasing `png.data` directly to the caller's own buffer
+ * (never copying) is safe and byte-identical. Constructing with no
+ * width/height first (`this.data` stays `null` per pngjs's own
+ * constructor) skips even the transient allocation.
+ */
 export function encodeSignPlate(image: RgbaImage): Buffer {
-  const png = new PNG({ width: image.width, height: image.height });
-  image.data.copy(png.data);
+  const png = new PNG();
+  png.width = image.width;
+  png.height = image.height;
+  png.data = image.data;
   return PNG.sync.write(png);
 }

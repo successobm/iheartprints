@@ -167,7 +167,7 @@ describe("deriveUploadedArtworkStep", () => {
     );
   });
 
-  it("walks upload → artwork type → sign size → saved (Sign path)", () => {
+  it("walks upload → artwork type → choose production type → sign size → saved (Sign path)", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
@@ -176,26 +176,75 @@ describe("deriveUploadedArtworkStep", () => {
         artworkTypeChoice: "sign",
         atProjectStart: false,
       }),
-      "confirm_sign_size",
-      "choosing Sign goes straight to width/height — never garment colour or placement",
+      "choose_sign_production_type",
+      "Banner Production Profile: choosing Sign asks 'what are we making?' BEFORE width/height — never garment colour or placement, and never dimensions before the profile is known",
     );
 
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: false, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+        signArtwork: {
+          specConfirmed: false,
+          productionTypeConfirmed: false,
+          hasPlan: false,
+          authorization: { matchesCurrentPlan: false },
+          qrResolutions: null,
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "choose_sign_production_type",
+      "once the bridge has created a SignPreparation but no production type is confirmed yet, that durable signal still asks the profile question first",
+    );
+
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: false,
+          productionTypeConfirmed: true,
+          hasPlan: false,
+          authorization: { matchesCurrentPlan: false },
+          qrResolutions: null,
+        },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
       }),
       "confirm_sign_size",
-      "once the bridge has created a SignPreparation, that durable signal governs — the transient choice no longer matters",
+      "once the production type is confirmed, that durable signal governs — the transient choice no longer matters",
     );
 
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+        signArtwork: {
+          specConfirmed: true,
+          productionTypeConfirmed: true,
+          hasPlan: false,
+          authorization: { matchesCurrentPlan: false },
+          qrResolutions: null,
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "sign_context_saved",
+    );
+  });
+
+  it("Banner Production Profile: an EXISTING preparation with a confirmed spec never sees choose_sign_production_type, regardless of productionTypeConfirmed — it safely resolves as rigid_sign_raster and is never forced through a new question", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: true,
+          productionTypeConfirmed: false,
+          hasPlan: false,
+          authorization: { matchesCurrentPlan: false },
+          qrResolutions: null,
+        },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -208,7 +257,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+        signArtwork: { specConfirmed: true, productionTypeConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -223,7 +272,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+        signArtwork: { specConfirmed: true, productionTypeConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -236,7 +285,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: true }, qrResolutions: null },
+        signArtwork: { specConfirmed: true, productionTypeConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: true }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -249,7 +298,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation(),
-        signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+        signArtwork: { specConfirmed: true, productionTypeConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -278,7 +327,7 @@ describe("deriveUploadedArtworkStep", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         preparation: preparation({ printPlacement: null }),
-        signArtwork: { specConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+        signArtwork: { specConfirmed: true, productionTypeConfirmed: true, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
@@ -459,6 +508,7 @@ describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () 
         preparation: preparation(),
         signArtwork: {
           specConfirmed: true,
+          productionTypeConfirmed: true,
           hasPlan: true,
           authorization: { matchesCurrentPlan: true },
           qrResolutions: [{ regionKey: "abc123", status: "needs_attention" }],
@@ -477,6 +527,7 @@ describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () 
         preparation: preparation(),
         signArtwork: {
           specConfirmed: true,
+          productionTypeConfirmed: true,
           hasPlan: true,
           authorization: { matchesCurrentPlan: false },
           qrResolutions: [{ regionKey: "abc123", status: "needs_attention" }],
@@ -495,6 +546,7 @@ describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () 
         preparation: preparation(),
         signArtwork: {
           specConfirmed: true,
+          productionTypeConfirmed: true,
           hasPlan: true,
           authorization: { matchesCurrentPlan: true },
           qrResolutions: [
@@ -516,6 +568,7 @@ describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () 
         preparation: preparation(),
         signArtwork: {
           specConfirmed: true,
+          productionTypeConfirmed: true,
           hasPlan: true,
           authorization: { matchesCurrentPlan: true },
           qrResolutions: null,
@@ -534,6 +587,7 @@ describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () 
         preparation: preparation(),
         signArtwork: {
           specConfirmed: true,
+          productionTypeConfirmed: true,
           hasPlan: true,
           authorization: { matchesCurrentPlan: true },
           qrResolutions: [],
@@ -552,6 +606,7 @@ describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () 
         preparation: preparation(),
         signArtwork: {
           specConfirmed: true,
+          productionTypeConfirmed: true,
           hasPlan: true,
           authorization: { matchesCurrentPlan: true },
           qrResolutions: [
@@ -573,6 +628,7 @@ describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () 
         preparation: preparation(),
         signArtwork: {
           specConfirmed: false,
+          productionTypeConfirmed: true,
           hasPlan: false,
           authorization: { matchesCurrentPlan: false },
           qrResolutions: null,
@@ -582,6 +638,25 @@ describe("SIGNS QR DESTINATION RESOLUTION: sign_qr_needs_attention routing", () 
         atProjectStart: false,
       }),
       "confirm_sign_size",
+    );
+  });
+
+  it("QR step is never reached before the production type is even confirmed either — Banner Production Profile's own step takes the same priority", () => {
+    assert.equal(
+      deriveUploadedArtworkStep({
+        preparation: preparation(),
+        signArtwork: {
+          specConfirmed: false,
+          productionTypeConfirmed: false,
+          hasPlan: false,
+          authorization: { matchesCurrentPlan: false },
+          qrResolutions: null,
+        },
+        choice: "undecided",
+        artworkTypeChoice: "undecided",
+        atProjectStart: false,
+      }),
+      "choose_sign_production_type",
     );
   });
 });
