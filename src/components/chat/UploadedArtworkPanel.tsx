@@ -111,6 +111,18 @@ export interface UploadedArtworkPanelProps {
    */
   onAuthorizeSignPlan?: () => void;
   /**
+   * Signs Workflow Dead Ends fix (Defect 2): "Review in production
+   * workspace" — offered ONLY while `signArtwork.plan.reviewRequired` is
+   * true and not yet authorized for the CURRENT plan. A `needs_review`
+   * plan's approval is an OPERATOR decision, never a customer's own click
+   * (`isAuthorizationSufficientForRisk`) — this never authorizes anything
+   * itself; it only navigates (a full page load) to the EXISTING internal
+   * production workspace where that governed action already lives
+   * (`SignAuthorizeButton`, `/internal/projects/[projectId]/sign-authorize`).
+   * See `sign-production-bridge.ts`'s `resolveSignReviewWorkspaceUrl`.
+   */
+  onReviewInProductionWorkspace?: () => void;
+  /**
    * Production Workspace Bridge: "Continue to production" — navigates the
    * operator from the `sign_plan_authorized` step into the existing
    * internal production workspace (`/internal/projects/[projectId]
@@ -267,6 +279,7 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           plan={props.signArtwork.plan}
           busy={busy}
           onAuthorize={props.onAuthorizeSignPlan}
+          onReviewInWorkspace={props.onReviewInProductionWorkspace}
         />
       ) : null}
 
@@ -554,15 +567,19 @@ function SignSizeStep({
 }
 
 /**
- * LIVE PRODUCT BLOCKER #1/#3: the Sign path once the ordered size is saved,
- * before any plan exists yet. "Check my artwork" is the customer's explicit
- * request to run the existing inspection/diagnosis/planning capability —
- * deliberately never automatic, mirroring the DTF path's own explicit
- * "Remove the Background" action rather than running it silently on arrival.
+ * Signs Workflow Dead Ends fix (Defect 1): a RETRY surface, not the normal
+ * continuation any more. Confirming the ordered size now chains straight
+ * into inspection/planning server-side (`confirmSignArtworkSize` in
+ * `sign-artwork-service.ts`), so an ordinary customer never sees this step
+ * — the same "Check my artwork" request already ran automatically the
+ * moment their size was saved.
  *
- * Also the step a reload lands back on after a BLOCKED planning outcome
- * (see `SignArtworkView.plan`'s doc) — re-clicking is safe and
- * deterministic, so this is never a dead end even then.
+ * Still reachable, and still needed, for the one case that stays genuinely
+ * unresolved after that automatic run: a reload after a BLOCKED planning
+ * outcome durably looks identical to "never planned" (see
+ * `SignArtworkView.plan`'s doc), so the customer lands back here rather
+ * than being trapped. Re-clicking is safe and deterministic — it re-runs
+ * the identical existing inspection capability, never a second one.
  */
 function SignContextSavedStep({
   busy,
@@ -619,15 +636,26 @@ function SignContextSavedStep({
  * call any provider; `uploaded-artwork-flow.ts`'s routing moves this step
  * to `sign_plan_authorized` once that consent is durably recorded, so this
  * component is never asked to render the action a second time.
+ *
+ * Signs Workflow Dead Ends fix (Defect 2): a `needs_review` plan's "Review
+ * required" section is NOT the dead end it used to be — it now also offers
+ * `onReviewInWorkspace`, pure navigation into the EXISTING internal
+ * production workspace where the actual operator-only authorization action
+ * already lives (`SignAuthorizeButton`). This component still never
+ * authorizes anything itself and still never renders `onAuthorize` for
+ * anything but a `"ready"` plan — see `sign-production-bridge.ts`'s
+ * `resolveSignReviewWorkspaceUrl` for why that stays true.
  */
 function SignPlanReviewStep({
   plan,
   busy,
   onAuthorize,
+  onReviewInWorkspace,
 }: {
   plan: SignPlanCustomerView;
   busy: boolean;
   onAuthorize?: () => void;
+  onReviewInWorkspace?: () => void;
 }) {
   const headline =
     plan.status === "blocked"
@@ -706,6 +734,15 @@ function SignPlanReviewStep({
           <p className="mt-1 text-sm text-ink">
             We&apos;ll need your approval before making these changes.
           </p>
+          <button
+            type="button"
+            disabled={busy || !onReviewInWorkspace}
+            onClick={onReviewInWorkspace}
+            className="mt-3 rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="sign-review-in-workspace-button"
+          >
+            Review in production workspace
+          </button>
         </div>
       ) : null}
     </div>

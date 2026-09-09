@@ -8,6 +8,7 @@ import {
   bowlingStyleArtwork,
   toPngBytes,
 } from "@/capabilities/artwork-preparation/artwork-fixtures";
+import { ruthLikeSignArtwork, toPngBytes as toSignPngBytes } from "@/capabilities/sign-preparation/sign-fixtures";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 
 /**
@@ -47,6 +48,22 @@ describe("POST /api/projects/[projectId]/sign-artwork", () => {
     form.append(
       "file",
       new File([new Uint8Array(toPngBytes(bowlingStyleArtwork()))], filename, {
+        type: "image/png",
+      }),
+    );
+    const response = await uploadRoute(
+      new Request("http://localhost/upload", { method: "POST", body: form }),
+      { params: Promise.resolve({ projectId }) },
+    );
+    assert.equal(response.status, 200);
+  }
+
+  async function uploadRuthLikeArtwork(projectId: string) {
+    const { POST: uploadRoute } = await import("../artwork-upload/route");
+    const form = new FormData();
+    form.append(
+      "file",
+      new File([new Uint8Array(toSignPngBytes(ruthLikeSignArtwork()))], "ruth.png", {
         type: "image/png",
       }),
     );
@@ -151,6 +168,38 @@ describe("POST /api/projects/[projectId]/sign-artwork", () => {
 
     const response = await post(projectId, { orderedWidthIn: 0, orderedHeightIn: 36 });
     assert.equal(response.status, 400);
+  });
+
+  it("Signs Workflow Dead Ends fix (Defect 1): confirming the ordered size automatically runs inspection/planning — no separate 'Check my artwork' call is required", async () => {
+    const projectId = await freshProject();
+    await uploadRuthLikeArtwork(projectId);
+
+    // Same fixture and dimensions as `sign-preparation-capability.test.ts`'s
+    // "4/M" — a well-understood REVIEW_REQUIRED outcome (aspect mismatch,
+    // foreground reaching the extension edge) — proven here to already be
+    // durably planned by the time THIS ONE request returns, with no second
+    // request to `/sign-artwork/plan` in between.
+    const response = await post(projectId, { orderedWidthIn: 18, orderedHeightIn: 24 });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+
+    assert.equal(body.signArtwork.specConfirmed, true);
+    assert.ok(body.signArtwork.plan, "a plan is already present in THIS response");
+    assert.equal(body.signArtwork.plan.status, "needs_review");
+    assert.equal(body.signArtwork.plan.reviewRequired, true);
+    assert.ok(body.signArtwork.plan.proposedAction);
+    assert.ok(
+      body.signArtwork.plan.findings.some((f: string) => /reaches the very edge/i.test(f)),
+    );
+
+    // The durable row itself reflects a real, persisted plan — not merely a
+    // response-only projection — proving this ran the actual capability
+    // rather than fabricating a view.
+    const { getProjectRepository } = await import("@/lib/db");
+    const persisted = await getProjectRepository().getSignPreparation(projectId);
+    assert.equal(persisted!.status, "planned");
+    assert.ok(persisted!.plan);
+    assert.ok(persisted!.planKey);
   });
 
   it("scopes to the addressed project and nothing else", async () => {
