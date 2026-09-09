@@ -123,6 +123,10 @@ export const TEST_FILES = [
   "src/capabilities/worker-scheduler/worker-auth.test.ts",
   "src/capabilities/worker-scheduler/worker-rate-limiter.test.ts",
   "src/capabilities/worker-scheduler/worker-scheduler-capability.test.ts",
+  // Make Final Artwork Worker Run Automatically In Production Phase --
+  // registered immediately per the established discipline.
+  "src/capabilities/worker-scheduler/final-artwork-scheduler-capability.test.ts",
+  "scripts/validate-final-artwork-worker-workflow.test.mjs",
   // The local store resolves its path per call, so a suite that reaches this
   // module through its STATIC import graph still writes to its own temp
   // workspace and never to the developer's real .data/sprint1-store.json.
