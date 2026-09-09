@@ -1,0 +1,96 @@
+# Make Final Artwork Worker Run Automatically In Production Phase.
+#
+# The independent final-artwork worker layer (docs/deployment/final-
+# artwork-worker.md; capabilities/worker-scheduler,
+# capabilities/final-artwork-worker) is deliberately NEVER the web
+# process itself in production -- a durably queued FinalArtworkJob
+# (created by "Approve & Continue" / "Prepare artwork") sits queued
+# until something calls the ALREADY-BUILT, already-secured
+#
+#   POST /api/worker/final-artwork
+#
+# endpoint. That doc's own "topology 1 (recommended for production)"
+# names exactly this shape -- a scheduled call to that one endpoint --
+# without specifying a scheduler. This workflow IS that scheduler: pure
+# orchestration (when to call an existing, unmodified, already-governed
+# route), never a second worker implementation, never Signs/authorization/
+# QR/background logic of its own.
+#
+# CADENCE: GitHub's own scheduled-workflow floor is five minutes, so the
+# outer `schedule` trigger fires every five minutes; the job then polls
+# the SAME endpoint every ~60s within that window -- reproducing the
+# doc's own already-documented "a cadence of roughly once a minute is
+# more than sufficient" guidance, rather than inventing a different
+# figure. `workflow_dispatch` is an OPTIONAL manual override for
+# debugging only -- the automatic schedule is what makes this happen with
+# no customer/operator action, ever.
+#
+# SAFETY: the worker endpoint's own architecture already makes overlapping
+# calls harmless (one atomic claim per job -- two workers racing for the
+# same job always resolve to exactly one winner -- plus in-process batch
+# dedup within a single running instance), so this workflow adds no
+# locking of its own; `concurrency` below only avoids piling up redundant
+# GitHub-hosted runners, never a correctness requirement.
+#
+# SECURITY: the ONE secret this workflow needs is `WORKER_SECRET` -- the
+# SAME production secret this app's `POST /api/worker/*` routes already
+# require (see docs/deployment/final-artwork-worker.md's "Configuration"
+# section). It is read ONLY via `${{ secrets.WORKER_SECRET }}` (GitHub's
+# own encrypted repository-secret store, never committed, never logged --
+# GitHub Actions automatically redacts any log line containing a
+# configured secret's value) and sent ONLY as the existing route's own
+# `Authorization: Bearer` header. This workflow file itself never contains
+# a secret VALUE, only its NAME.
+
+name: Final Artwork Worker Trigger
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: final-artwork-worker-trigger
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Poll the existing final-artwork worker endpoint roughly once a minute
+        env:
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          WORKER_URL: https://iheartprints-88sjr.ondigitalocean.app/api/worker/final-artwork
+        run: |
+          set -u
+
+          if [ -z "${WORKER_SECRET:-}" ]; then
+            echo "::error::The WORKER_SECRET repository secret is not configured. Add it under Settings -> Secrets and variables -> Actions, using the SAME value already configured on the DigitalOcean app (see docs/deployment/final-artwork-worker.md)."
+            exit 1
+          fi
+
+          success_count=0
+          last_status="000"
+
+          # ~4 minutes of once-a-minute polling per five-minute scheduled
+          # tick -- the next scheduled run picks up the remainder of the
+          # window, so this never needs to cover the full five minutes
+          # itself.
+          for i in 1 2 3 4; do
+            last_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$WORKER_URL" \
+              -H "Authorization: Bearer ${WORKER_SECRET}" \
+              --max-time 60)
+            echo "final-artwork worker trigger #$i -> HTTP $last_status"
+            if [ "$last_status" = "200" ]; then
+              success_count=$((success_count + 1))
+            fi
+            if [ "$i" -lt 4 ]; then
+              sleep 60
+            fi
+          done
+
+          if [ "$success_count" -eq 0 ]; then
+            echo "::error::Every attempt in this run failed (last HTTP status: $last_status). Check IHEARTPRINTS deployment health and the WORKER_SECRET value."
+            exit 1
+          fi

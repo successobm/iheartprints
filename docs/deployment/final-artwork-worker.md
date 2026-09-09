@@ -49,7 +49,7 @@ Print-Ready Transition           (PrintProject.status)
 Same shape as the generation worker — only what calls
 `finalArtworkScheduler.runBatch()` / `.start()` changes.
 
-### 1. Scheduled endpoint (recommended for production)
+### 1. Scheduled endpoint (recommended for production, and what production actually runs)
 
 ```bash
 curl -sf -X POST "https://<app>/api/worker/final-artwork" \
@@ -61,7 +61,31 @@ Local raster transformation is CPU-bound and fast (no network call) —
 unlike concept generation, there is no provider latency to wait out. A
 cadence of roughly once a minute is more than sufficient; this queue is
 expected to be low-volume (one job per customer's "Prepare Print-Ready
-Artwork" click).
+Artwork" click, or one per Sign's "Approve & Continue").
+
+**Make Final Artwork Worker Run Automatically In Production Phase**: the
+concrete scheduler is `.github/workflows/final-artwork-worker.yml` — a
+GitHub Actions workflow, not a DigitalOcean-native component, chosen
+because this app's DigitalOcean configuration has no in-repo `app.yaml`/
+`.do/` spec (see "Runtime" above) and this environment had no
+DigitalOcean API/console access to add a DO-native scheduled job
+directly. It polls this SAME endpoint roughly once a minute (a `schedule`
+trigger every 5 minutes — GitHub's own practical floor for that trigger
+type — wrapping an in-job loop that calls the endpoint 4 times, 60s
+apart, reproducing the "roughly once a minute" cadence above rather than
+settling for a bare 5-minute cadence). Requires exactly one GitHub
+Actions repository secret, `WORKER_SECRET`, set to the SAME value already
+configured as this app's own `WORKER_SECRET` environment variable — never
+a new/different value, never committed, read only via
+`${{ secrets.WORKER_SECRET }}`. `workflow_dispatch` is available for a
+manual, OPTIONAL debugging trigger only; the customer/operator-facing
+guarantee ("a queued job starts automatically, with no manual step") is
+the `schedule` trigger alone.
+
+Overlapping invocations are already safe by the worker's own
+architecture (atomic per-job claim, §"Atomic claim" below) — this
+workflow's `concurrency` group only avoids piling up redundant
+GitHub-hosted runners, never a correctness dependency.
 
 ### 2. Standalone worker process
 
