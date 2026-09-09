@@ -1,0 +1,63 @@
+-- Constitution amendment 3.2 (§16A.2): the rigid-sign background treatment
+-- — an explicit, durable KEEP/REMOVE selection for a sign preparation's
+-- production plate, plus the governed background-removal outcome computed
+-- against the immutable original when REMOVE is selected. Additive and
+-- forward-only: every existing `sign_preparations` row gets an explicit
+-- 'keep' default and behaves EXACTLY as it does today.
+--
+-- NOT APPLIED to any live database by this change. This repository's
+-- convention is to land migration + dependent code together and apply the
+-- migration only as part of an explicit, reviewed deploy step.
+--
+-- SCHEMA DISCIPLINE AUDIT (mirrors `20260904140000_sign_qr_resolutions.sql`'s
+-- own audit shape)
+--
+-- 1. WHY TWO COLUMNS PLUS ONE JSONB, NOT A NEW TABLE
+--
+--    A sign preparation has exactly ONE current background treatment at a
+--    time (never several simultaneous candidates the way QR resolutions or
+--    edge-intent classifications can have several regions) — a scalar
+--    column on the existing row is the honest fit, mirroring
+--    `spec_confirmed_at`'s own precedent for a durable, single-valued,
+--    explicitly-confirmed decision.
+--
+-- 2. WHY 'keep' IS THE COLUMN DEFAULT, NOT NULL
+--
+--    Unlike `spec_confirmed_at` (where null honestly means "never
+--    confirmed, planning fails closed"), background treatment has a real,
+--    safe, pre-existing default behavior: the unconditional opaque
+--    contract every sign preparation has always had. A nullable column
+--    would force every reader to re-implement the same
+--    null-means-"keep" fallback; the column itself encodes it once. The
+--    application layer's `resolveSignBackgroundTreatment`
+--    (`src/lib/domain/types.ts`) still fail-closes to "keep" for any
+--    unrecognized value, so a partially-migrated or hand-edited row can
+--    never be silently read as "remove".
+--
+-- 3. WHY `background_removal` IS jsonb, LOOSELY TYPED
+--
+--    Mirrors `inspection`/`plan`'s own established discipline (Signs Phase
+--    S1): internal diagnostics from `sign-background-removal.ts` (reused
+--    `artwork-preparation` classification/removal engine — never a second
+--    algorithm), narrowed at the `SignPreparationCapability` boundary,
+--    recomputed from the current immutable original rather than trusted
+--    as authority, and never rendered raw to a customer. It embeds its own
+--    `sourceAssetId`/`sourceSha256` binding facts, the same
+--    never-trust-a-stored-fact-without-re-checking-it discipline
+--    `edge_intent_classifications`/`qr_resolutions` already established —
+--    a stale record computed against a since-replaced original must never
+--    silently keep governing a different one.
+--
+-- 4. BACKWARD COMPATIBILITY
+--
+--    Every existing row: `background_treatment` backfills to 'keep' (the
+--    column default applies to existing rows via the `alter table ...
+--    add column ... default` form below), `background_treatment_confirmed_at`
+--    and `background_removal` backfill to null. No existing preparation's
+--    observable behavior changes.
+
+alter table public.sign_preparations
+  add column if not exists background_treatment text not null default 'keep'
+    check (background_treatment in ('keep', 'remove')),
+  add column if not exists background_treatment_confirmed_at timestamptz null,
+  add column if not exists background_removal jsonb null;

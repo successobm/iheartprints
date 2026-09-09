@@ -17,6 +17,9 @@
  * anywhere in this capability.
  */
 
+import type { SignBackgroundTreatment } from "@/lib/domain/types";
+export type { SignBackgroundTreatment } from "@/lib/domain/types";
+
 // ---------------------------------------------------------------------------
 // Versions
 // ---------------------------------------------------------------------------
@@ -511,6 +514,19 @@ export interface SignRepairPlan {
   reasons: string[];
   /** Canonical identity — see `sign-plan-identity.ts`. */
   planKey: string;
+  /**
+   * Constitution amendment 3.2: the background treatment this plan was
+   * formulated under — part of plan IDENTITY (`sign-plan-identity.ts`
+   * includes it in `planKey`), exactly like `orderedWidthIn`/
+   * `orderedHeightIn`. A treatment change is production-significant: it
+   * changes `planKey`, which structurally invalidates a stale
+   * `authorizedPlanKey`/visual acceptance bound to the OLD plan — the same
+   * "a re-plan is a different plan" discipline every other
+   * production-significant plan input already gets. Optional only for
+   * decode of plans persisted before amendment 3.2; every planner now sets
+   * it explicitly (defaulting to `"keep"`, never inferred as `"remove"`).
+   */
+  backgroundTreatment?: SignBackgroundTreatment;
 }
 
 export type SignPlanningResult =

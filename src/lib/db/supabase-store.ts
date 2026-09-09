@@ -494,6 +494,9 @@ type DbSignPreparation = {
   operator_structural_override_created_by: "operator" | null;
   edge_intent_classifications: Record<string, unknown>[] | null;
   qr_resolutions: Record<string, unknown>[] | null;
+  background_treatment: string | null;
+  background_treatment_confirmed_at: string | null;
+  background_removal: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -968,6 +971,9 @@ function mapSignPreparation(row: DbSignPreparation): SignPreparation {
     operatorStructuralOverrideCreatedBy: row.operator_structural_override_created_by,
     edgeIntentClassifications: row.edge_intent_classifications ?? null,
     qrResolutions: row.qr_resolutions ?? null,
+    backgroundTreatment: row.background_treatment ?? null,
+    backgroundTreatmentConfirmedAt: row.background_treatment_confirmed_at ?? null,
+    backgroundRemoval: row.background_removal ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3058,6 +3064,10 @@ export class SupabaseProjectRepository implements ProjectRepository {
         original_asset_id: input.originalAssetId,
         original_filename: input.originalFilename,
         inspection: input.inspection,
+        // Constitution amendment 3.2: every preparation starts explicitly
+        // "keep" — never defaulted to "remove" — matching the column's own
+        // `not null default 'keep'`.
+        background_treatment: "keep",
       })
       .select("*")
       .single();
@@ -3119,6 +3129,12 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.edgeIntentClassifications !== undefined)
       update.edge_intent_classifications = patch.edgeIntentClassifications;
     if (patch.qrResolutions !== undefined) update.qr_resolutions = patch.qrResolutions;
+    if (patch.backgroundTreatment !== undefined)
+      update.background_treatment = patch.backgroundTreatment;
+    if (patch.backgroundTreatmentConfirmedAt !== undefined)
+      update.background_treatment_confirmed_at = patch.backgroundTreatmentConfirmedAt;
+    if (patch.backgroundRemoval !== undefined)
+      update.background_removal = patch.backgroundRemoval;
 
     const { data, error } = await this.client
       .from("sign_preparations")

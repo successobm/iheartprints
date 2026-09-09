@@ -2521,6 +2521,55 @@ export const SIGN_PLAN_AUTHORIZATION_ACTORS = ["customer", "operator"] as const;
 export type SignPlanAuthorizationActor = (typeof SIGN_PLAN_AUTHORIZATION_ACTORS)[number];
 
 /**
+ * Constitution amendment 3.2 (§16A.2): the rigid-sign background treatment —
+ * whether the production plate MUST be opaque (the unconditional V1/3.0
+ * default) or MAY intentionally carry alpha because the customer/operator
+ * explicitly authorized background removal.
+ *
+ *   "keep"   — DEFAULT. Preserves the original, unconditional §16A.2
+ *              contract exactly: the final plate must be fully opaque;
+ *              any transparency is a blocking defect. Every existing
+ *              preparation with no explicit selection reads as "keep" —
+ *              a missing/legacy value is never silently promoted to
+ *              "remove" (`resolveSignBackgroundTreatment` below is the
+ *              one fail-closed reader every caller must use).
+ *   "remove" — explicitly, durably selected. Permits the immutable
+ *              original's exterior background to be prepared away
+ *              (never destructively guessed — ambiguous cases route to
+ *              review, exactly like the apparel `manual_review`
+ *              precedent) into a transparent derived asset that then
+ *              flows through the SAME ordered-canvas/QR/acceptance
+ *              pipeline "keep" already uses. It does not relax any
+ *              OTHER Signs requirement — geometry, resolution, QR, and
+ *              visual acceptance remain fully authoritative.
+ *
+ * Durable, candidate-authoritative, and part of `SignRepairPlan`
+ * identity (`planKey`) — changing it is production-significant and must
+ * invalidate a stale authorization/acceptance bound to the OLD treatment,
+ * the same "a re-plan is a different plan" discipline `orderedWidthIn`/
+ * `orderedHeightIn` already establish.
+ */
+export const SIGN_BACKGROUND_TREATMENTS = ["keep", "remove"] as const;
+export type SignBackgroundTreatment = (typeof SIGN_BACKGROUND_TREATMENTS)[number];
+
+/** A default is not a decision, but a missing/legacy value must still resolve to something — always the safe, pre-existing behavior. */
+export const DEFAULT_SIGN_BACKGROUND_TREATMENT: SignBackgroundTreatment = "keep";
+
+/**
+ * Fail-closed reader every caller must use instead of reading
+ * `SignPreparation.backgroundTreatment` directly — a `null`/`undefined`/
+ * unrecognized stored value (a pre-amendment-3.2 row, a partial write, a
+ * future value this build does not know) always resolves to `"keep"`,
+ * never `"remove"`. Mirrors `resolveProductionTreatment`'s own
+ * fail-closed-default precedent (`shared/production-treatment.ts`).
+ */
+export function resolveSignBackgroundTreatment(
+  value: string | null | undefined,
+): SignBackgroundTreatment {
+  return value === "remove" ? "remove" : DEFAULT_SIGN_BACKGROUND_TREATMENT;
+}
+
+/**
  * Signs Phase S1: the durable record of one rigid-sign order's artwork —
  * "understand this sign order before changing any pixels."
  *
@@ -2672,6 +2721,30 @@ export interface SignPreparation {
    * (blocking) until an entry exists for it.
    */
   qrResolutions: Record<string, unknown>[] | null;
+  /**
+   * Constitution amendment 3.2 (§16A.2): durable KEEP/REMOVE selection —
+   * see `SignBackgroundTreatment`'s own doc. Stored as the raw string so
+   * an unrecognized/legacy value round-trips honestly rather than being
+   * silently coerced at the domain-type boundary; every reader MUST go
+   * through `resolveSignBackgroundTreatment` rather than comparing this
+   * field directly, so a `null`/malformed row never behaves as "remove".
+   */
+  backgroundTreatment: string | null;
+  /** When a human explicitly selected `backgroundTreatment`. Consent provenance, mirrors `specConfirmedAt`. `null` means never explicitly selected (implicit "keep"). */
+  backgroundTreatmentConfirmedAt: string | null;
+  /**
+   * Constitution amendment 3.2: the governed background-removal outcome
+   * for the CURRENT immutable original, computed by
+   * `sign-background-removal.ts` (which reuses `artwork-preparation`'s
+   * neutral classification/removal engine — never a second algorithm).
+   * Loosely typed and narrowed at the `SignPreparationCapability`
+   * boundary, exactly like `inspection`/`plan` — recomputed from the
+   * current source rather than trusted as authority, and never rendered
+   * raw to a customer. `null` until a "remove" treatment has ever been
+   * evaluated (including whenever the treatment is "keep" — evaluation
+   * only ever runs for "remove").
+   */
+  backgroundRemoval: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
 }

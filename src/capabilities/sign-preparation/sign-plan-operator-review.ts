@@ -24,9 +24,11 @@ import { doesSignCandidateContainQrReplacement } from "@/capabilities/final-artw
 import { isRigidSignValidationTrulyPrintReady } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { FinalArtworkJobStatus, SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/types";
+import { resolveSignBackgroundTreatment, type SignBackgroundTreatment } from "@/lib/domain/types";
 
 import type { SignInspectionReport, SignRepairPlan } from "./contracts";
 import { describeSignPlanForOperator, type SignPlanOperatorView } from "./sign-preparation-operator-copy";
+import type { SignBackgroundRemovalRecord } from "./sign-background-removal";
 
 /**
  * LIVE PRODUCT BLOCKER #4B: the minimum production-status facts the
@@ -460,6 +462,10 @@ export type SignPlanOperatorReview =
       plan: SignPlanOperatorView;
       /** Signs Phase 3A: whether operator-confirmed structural evidence is currently recorded for this preparation (regardless of whether the CURRENT plan happened to use it). */
       operatorStructuralOverridePresent: boolean;
+      /** Constitution amendment 3.2 (§16A.2): the preparation's CURRENT durable selection — fail-closed resolved, never read raw. */
+      backgroundTreatment: SignBackgroundTreatment;
+      /** Constitution amendment 3.2: the governed background-removal outcome for the current immutable original, when `backgroundTreatment === "remove"` has ever been evaluated. `null` under `"keep"`, or before "remove" has ever been evaluated. */
+      backgroundRemoval: SignBackgroundRemovalRecord | null;
       authorization: {
         authorizedBy: SignPlanAuthorizationActor | null;
         authorizedAt: string | null;
@@ -510,6 +516,8 @@ export async function loadSignPlanOperatorReview(
     originalAssetId: preparation.originalAssetId,
     plan: operatorPlan,
     operatorStructuralOverridePresent: preparation.operatorStructuralOverride !== null,
+    backgroundTreatment: resolveSignBackgroundTreatment(preparation.backgroundTreatment),
+    backgroundRemoval: preparation.backgroundRemoval as unknown as SignBackgroundRemovalRecord | null,
     authorization: {
       authorizedBy: preparation.authorizedBy,
       authorizedAt: preparation.authorizedAt,

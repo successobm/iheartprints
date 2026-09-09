@@ -295,6 +295,9 @@ export const TEST_FILES = [
   "src/components/chat/uploaded-artwork-print-ready-flow.test.tsx",
   // Existing Artwork → Print Ready Phase 1.
   "src/capabilities/artwork-preparation/upload-security.test.ts",
+  // Large Raster Upload Limit Audit: the streaming request-body cap that
+  // closes the Content-Length-bypass gap (ARCHITECTURE.md §23 item 2).
+  "src/capabilities/artwork-preparation/capped-request-body.test.ts",
   "src/capabilities/artwork-preparation/image-analysis.test.ts",
   "src/capabilities/artwork-preparation/background-isolation.test.ts",
   "src/capabilities/artwork-preparation/artwork-preparation-capability.test.ts",
@@ -308,6 +311,13 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/frame-structure-model.test.ts",
   "src/capabilities/sign-preparation/sign-transform-executor-parametric-frame.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-capability.test.ts",
+  // Constitution amendment 3.2 (§16A.2): optional KEEP/REMOVE background
+  // treatment — the safe-removal/review-required engine reuse, and the
+  // real SignPreparationCapability path (upload -> confirm spec -> set
+  // treatment -> plan), including planKey identity changing with treatment.
+  "src/capabilities/sign-preparation/sign-background-removal.test.ts",
+  "src/capabilities/sign-preparation/sign-background-treatment-execution.test.ts",
+  "src/capabilities/sign-preparation/sign-preparation-capability-background-treatment.test.ts",
   // Structural Layout Reflow Phase 2B (Planning Orchestration Wiring):
   // reflow_structural_layout through the REAL SignPreparationCapability
   // path (upload -> confirm spec -> plan), not only direct unit calls.
@@ -433,6 +443,9 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/sign-plan-operator-review.test.ts",
   // SIGNS QR / MACHINE-READABLE CONTENT PRESERVATION.
   "src/capabilities/machine-readable-content/qr-detect-decode.test.ts",
+  // Constitution amendment 3.2 (§16A.2): QR detection/decoding must be
+  // alpha-safe now a Signs candidate can legitimately carry transparency.
+  "src/capabilities/machine-readable-content/qr-alpha-safety.test.ts",
   "src/capabilities/machine-readable-content/qr-preservation.test.ts",
   "src/capabilities/machine-readable-content/qr-restore.test.ts",
   // SIGNS QR DESTINATION RESOLUTION.

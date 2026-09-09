@@ -47,13 +47,67 @@ export interface RgbaImage {
   data: Buffer;
 }
 
+/**
+ * Constitution amendment 3.2 (§16A.2): the fixed neutral value transparent
+ * regions are composited against for QR ANALYSIS ONLY (detection/decoding
+ * luminance) — never the production asset, whose real bytes/alpha are
+ * never touched by this module. Mid-grey is deliberately equidistant from
+ * a QR's black/white modules so a transparent region can never bias
+ * detection toward falsely reading either colour of module.
+ */
+const QR_ANALYSIS_NEUTRAL_BACKGROUND = 128;
+
+/**
+ * Alpha-weighted luminance: every pixel is first blended against
+ * `QR_ANALYSIS_NEUTRAL_BACKGROUND` in proportion to its own alpha, THEN
+ * converted to luminance — never a raw RGB read that ignores alpha. A
+ * fully transparent pixel (alpha 0) therefore contributes ONLY the neutral
+ * background regardless of whatever RGB bytes happen to sit underneath it
+ * (an unpremultiplied PNG's "hidden" colour data is never meaningful for
+ * production, so it must never be meaningful for QR analysis either) —
+ * hidden RGB beneath alpha=0 can never influence detection. A fully
+ * opaque pixel (alpha 255 — every "keep"-treatment plate, and most of a
+ * "remove"-treatment one) is mathematically unchanged: this function's
+ * output for any image with no transparency is byte-for-byte identical to
+ * before this amendment.
+ */
 function luminanceBuffer(image: RgbaImage): Uint8ClampedArray {
   const out = new Uint8ClampedArray(image.width * image.height);
   for (let i = 0; i < out.length; i++) {
-    const r = image.data[i * 4];
-    const g = image.data[i * 4 + 1];
-    const b = image.data[i * 4 + 2];
-    out[i] = (r * 306 + g * 601 + b * 117) >> 10;
+    const r = image.data[i * 4]!;
+    const g = image.data[i * 4 + 1]!;
+    const b = image.data[i * 4 + 2]!;
+    const a = image.data[i * 4 + 3]!;
+    const blendedR = (r * a + QR_ANALYSIS_NEUTRAL_BACKGROUND * (255 - a)) / 255;
+    const blendedG = (g * a + QR_ANALYSIS_NEUTRAL_BACKGROUND * (255 - a)) / 255;
+    const blendedB = (b * a + QR_ANALYSIS_NEUTRAL_BACKGROUND * (255 - a)) / 255;
+    out[i] = (blendedR * 306 + blendedG * 601 + blendedB * 117) >> 10;
+  }
+  return out;
+}
+
+/**
+ * Constitution amendment 3.2: alpha-composites `image` against
+ * `QR_ANALYSIS_NEUTRAL_BACKGROUND` (alpha forced to 255 in the RETURNED
+ * buffer, since it exists for analysis only) — the RGBA-shaped sibling of
+ * `luminanceBuffer` above, for the code path that needs a full 4-byte-
+ * per-pixel buffer (`jsQR` itself) rather than a 1-byte-per-pixel
+ * luminance array. Same underlying blend, same guarantee: a fully
+ * transparent pixel's real RGB bytes can never influence what this
+ * buffer's own pixel reads as. Always a NEW buffer — `image.data` is
+ * never mutated.
+ */
+function alphaCompositeForQrAnalysis(image: RgbaImage): Buffer {
+  const out = Buffer.alloc(image.width * image.height * 4);
+  for (let i = 0; i < image.width * image.height; i++) {
+    const r = image.data[i * 4]!;
+    const g = image.data[i * 4 + 1]!;
+    const b = image.data[i * 4 + 2]!;
+    const a = image.data[i * 4 + 3]!;
+    out[i * 4] = Math.round((r * a + QR_ANALYSIS_NEUTRAL_BACKGROUND * (255 - a)) / 255);
+    out[i * 4 + 1] = Math.round((g * a + QR_ANALYSIS_NEUTRAL_BACKGROUND * (255 - a)) / 255);
+    out[i * 4 + 2] = Math.round((b * a + QR_ANALYSIS_NEUTRAL_BACKGROUND * (255 - a)) / 255);
+    out[i * 4 + 3] = 255;
   }
   return out;
 }
@@ -88,7 +142,15 @@ export function decodeQrCodes(
   image: RgbaImage,
   maxInstances = 4,
 ): DecodedMachineReadableRegion[] {
-  const working = Buffer.from(image.data);
+  // Constitution amendment 3.2: `jsQR` (via `jsQrDecode` below) reads this
+  // buffer's raw RGBA bytes directly — it has no alpha awareness of its
+  // own, so a plain `Buffer.from(image.data)` copy would let hidden RGB
+  // beneath a transparent pixel influence detection exactly the way
+  // `luminanceBuffer` (used only by the lighter finder-pattern pre-scan,
+  // `scanForQrFinderPatterns`) was fixed to prevent. `alphaCompositeForQrAnalysis`
+  // is the ONE place that makes the ACTUAL decode path alpha-safe too —
+  // `image.data` itself is never touched, only this private working copy.
+  const working = alphaCompositeForQrAnalysis(image);
   const results: DecodedMachineReadableRegion[] = [];
 
   for (let attempt = 0; attempt < maxInstances; attempt++) {

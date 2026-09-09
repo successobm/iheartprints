@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import { transparencySurfaceStyle } from "@/components/chat/ArtworkPreviewModal";
+
 /**
  * Production Workspace Phase (Section F/Q): the compact replacement for the
  * old permanently-stacked "original artwork" preview. Preservation still
@@ -12,8 +14,21 @@ import { useState } from "react";
  * the SAME internal-session-gated routes the rest of the page already
  * trusts (`original-image`, `production-candidate`) — this component never
  * fetches, computes, or compares pixels itself.
+ *
+ * Constitution amendment 3.2 (§16A.2): `showTransparencyCheckerboard`
+ * reuses the SAME checkerboard convention `ArtworkPreviewModal`/
+ * `FinalArtworkDeliveryCard` already use for apparel — never a second
+ * visual language — so a REMOVE-treated candidate's transparency is
+ * obvious rather than silently blending into the card background. Preview
+ * only: the underlying `<img>` bytes/alpha are never touched.
  */
-export function SignCompareOriginal({ projectId }: { projectId: string }) {
+export function SignCompareOriginal({
+  projectId,
+  showTransparencyCheckerboard = false,
+}: {
+  projectId: string;
+  showTransparencyCheckerboard?: boolean;
+}) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -55,6 +70,7 @@ export function SignCompareOriginal({ projectId }: { projectId: string }) {
                   src={`/api/internal/projects/${projectId}/sign-artwork/original-image`}
                   alt="Customer's originally uploaded sign artwork"
                   className="max-h-[75vh] w-full rounded border border-ink/10 object-contain"
+                  style={transparencySurfaceStyle(showTransparencyCheckerboard)}
                 />
               </div>
               <div>
@@ -64,6 +80,7 @@ export function SignCompareOriginal({ projectId }: { projectId: string }) {
                   src={`/api/internal/projects/${projectId}/sign-artwork/production-candidate`}
                   alt="Current production candidate"
                   className="max-h-[75vh] w-full rounded border border-ink/10 object-contain"
+                  style={transparencySurfaceStyle(showTransparencyCheckerboard)}
                 />
               </div>
             </div>

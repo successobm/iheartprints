@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import { PNG } from "pngjs";
+import { randomFillSync } from "node:crypto";
+
 import {
   bowlingStyleArtwork,
   solidBlackExteriorArtwork,
@@ -11,6 +14,19 @@ import {
 } from "@/capabilities/artwork-preparation/artwork-fixtures";
 import { MAX_UPLOAD_BYTES } from "@/capabilities/artwork-preparation";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
+
+/**
+ * A genuinely large, genuinely VALID, genuinely decodable PNG — real
+ * (incompressible) random pixel data, not a padded/truncated fixture. Used
+ * to prove the Large Raster Upload Limit Audit's raised ceiling actually
+ * accepts real files in that range end to end, not merely that the byte
+ * count passes a check.
+ */
+function largeRandomPng(width: number, height: number): Buffer {
+  const png = new PNG({ width, height });
+  randomFillSync(png.data);
+  return PNG.sync.write(png);
+}
 
 /**
  * The upload ingress boundary end to end, through the real route handler.
@@ -148,12 +164,65 @@ describe("POST /api/projects/[projectId]/artwork-upload", () => {
     assert.equal((await response.json()).code, "malformed_image");
   });
 
-  it("rejects an oversized encoded upload", async () => {
+  it("rejects an oversized encoded upload, with an actionable message stating the real limit", async () => {
     const projectId = await freshProject();
     const oversized = Buffer.alloc(MAX_UPLOAD_BYTES + 1024);
     toPngBytes(solidBlackExteriorArtwork()).copy(oversized);
 
     const response = await post(projectId, uploadRequest(oversized));
+    assert.equal(response.status, 413);
+    const body = await response.json();
+    assert.match(body.error, /too large/i);
+    assert.match(body.error, new RegExp(`${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB`));
+  });
+
+  it("Large Raster Upload Limit Audit: accepts a real, valid, genuinely large PNG that the OLD 25 MB limit would have rejected but the current limit does not — the real customer scenario this fix unblocks", async () => {
+    const projectId = await freshProject();
+    // 3000x2500 random-noise pixels: ~28-29 MB compressed (incompressible
+    // content, so byte size tracks pixel count closely) — comfortably
+    // between the old 25 MB ceiling and the current one, and comfortably
+    // under MAX_TOTAL_PIXELS/MAX_IMAGE_DIMENSION_PX, so this is a genuinely
+    // ACCEPTABLE real-world file, not an edge case of either bound.
+    const bytes = largeRandomPng(3000, 2500);
+    assert.ok(bytes.length > 25 * 1024 * 1024, `fixture must exceed the OLD limit to prove anything, got ${bytes.length}`);
+    assert.ok(bytes.length < MAX_UPLOAD_BYTES, `fixture must be under the CURRENT limit, got ${bytes.length}`);
+
+    const response = await post(projectId, uploadRequest(bytes, { filename: "banner-source.png" }));
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.artworkPreparation.status, "analyzed");
+  });
+
+  it("rejects a request whose declared Content-Length lies about a large real body — the streaming cap holds regardless of the header", async () => {
+    const projectId = await freshProject();
+    const bytes = Buffer.alloc(MAX_UPLOAD_BYTES + 5 * 1024 * 1024);
+    toPngBytes(solidBlackExteriorArtwork()).copy(bytes);
+
+    const form = new FormData();
+    form.append("file", new File([new Uint8Array(bytes)], "artwork.png", { type: "image/png" }));
+    // A raw Request built from FormData computes its own accurate
+    // Content-Length — this test instead drives the route with a body the
+    // Content-Length pre-check cannot see coming, by stripping it via a
+    // manually reconstructed streaming request (mirrors
+    // `capped-request-body.test.ts`'s own adversarial fixture).
+    const encoded = await new Response(form).arrayBuffer();
+    const contentType = new Response(form).headers.get("content-type")!;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(encoded));
+        controller.close();
+      },
+    });
+    const request = new Request("http://localhost/upload", {
+      method: "POST",
+      headers: { "content-type": contentType }, // no content-length
+      body,
+      // @ts-expect-error -- required by undici for a streaming body.
+      duplex: "half",
+    });
+    assert.equal(request.headers.get("content-length"), null);
+
+    const response = await post(projectId, request);
     assert.equal(response.status, 413);
   });
 

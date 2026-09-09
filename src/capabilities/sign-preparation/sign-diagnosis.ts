@@ -13,6 +13,7 @@
  */
 
 import type {
+  SignBackgroundTreatment,
   SignDefect,
   SignInspectionReport,
   SignSpecResolution,
@@ -62,9 +63,17 @@ export function diagnoseSpecResolution(
   return defects;
 }
 
-/** Observation-level defects for an inspection performed under a confirmed spec. */
+/**
+ * Observation-level defects for an inspection performed under a confirmed
+ * spec. `backgroundTreatment` (Constitution amendment 3.2) defaults to
+ * `"keep"` — reproducing every prior call site byte-for-byte — and governs
+ * ONLY `transparency_present` below: under `"remove"`, transparency in the
+ * inspected source is the EXPECTED, governed result of background removal,
+ * never a defect.
+ */
 export function diagnoseInspection(
   inspection: SignInspectionReport,
+  backgroundTreatment: SignBackgroundTreatment = "keep",
 ): SignDefect[] {
   const defects: SignDefect[] = [];
 
@@ -102,14 +111,15 @@ export function diagnoseInspection(
     }
   }
 
-  if (inspection.transparency.hasAlphaPixels) {
+  if (inspection.transparency.hasAlphaPixels && backgroundTreatment !== "remove") {
     defects.push({
       code: "transparency_present",
       severity: "review",
       detail:
         `Source carries transparency (${(inspection.transparency.transparentPixelFraction * 100).toFixed(3)}% ` +
-        "of pixels below full opacity). Rigid-sign production intent is opaque (§16A.2); " +
-        "what the transparent regions should become is a human decision, never a silent flatten.",
+        "of pixels below full opacity). Rigid-sign production intent is opaque (§16A.2) under the " +
+        "\"keep\" background treatment; what the transparent regions should become is a human decision, " +
+        "never a silent flatten.",
     });
   }
 

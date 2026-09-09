@@ -31,6 +31,7 @@
  */
 
 import type {
+  SignBackgroundTreatment,
   SignDefect,
   SignEdge,
   SignEdgeEvidence,
@@ -72,6 +73,8 @@ export interface SignPlanningInput {
   inspection: SignInspectionReport;
   sourceAssetId: string;
   sourceSha256: string;
+  /** Constitution amendment 3.2: defaults to `"keep"` when omitted — reproduces every pre-amendment call site byte-for-byte. */
+  backgroundTreatment?: SignBackgroundTreatment;
   /**
    * Production-Aware Perimeter Reconstruction Phase: one measurement per
    * edge (however many the caller computed — `sign-preparation-
@@ -558,7 +561,10 @@ function evaluateStructuralReflow(
  */
 export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
   const { spec, policy, inspection } = input;
-  const defects: SignDefect[] = diagnoseInspection(inspection);
+  // Constitution amendment 3.2: defaults to "keep", reproducing every plan
+  // built before this amendment byte-for-byte.
+  const backgroundTreatment: SignBackgroundTreatment = input.backgroundTreatment ?? "keep";
+  const defects: SignDefect[] = diagnoseInspection(inspection, backgroundTreatment);
   const reasons: string[] = [];
   const steps: SignRepairStep[] = [];
 
@@ -1102,6 +1108,7 @@ export function planSignRepair(input: SignPlanningInput): SignPlanningResult {
     overallRisk,
     defects: defects.map((defect) => defect.code),
     reasons,
+    backgroundTreatment,
   };
 
   const planKey = computeSignPlanKey(planWithoutKey);

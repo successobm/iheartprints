@@ -12,13 +12,44 @@
  */
 
 /**
- * Maximum encoded upload size. Generous for real customer artwork (a 4000px
- * transparent PNG logo is typically well under 10 MB) while still bounding
- * how much a single request can buffer.
+ * Maximum encoded (compressed, on-the-wire) upload size.
+ *
+ * Large Raster Upload Limit Audit: the original 25 MB figure was never
+ * derived from a decode-memory or dimension budget — those are governed
+ * independently and unconditionally by `MAX_IMAGE_DIMENSION_PX`/
+ * `MAX_TOTAL_PIXELS` below, checked against the PNG HEADER before any
+ * bitmap is allocated (`image-decode.ts`). Compressed byte size and decoded
+ * memory are only loosely correlated for PNG: a highly complex/photographic
+ * or AI-generated raster can be large on the wire while well within the
+ * pixel budget (PNG has no lossy mode to shrink such content the way JPEG
+ * would), so a real customer's honest, moderate-resolution artwork can
+ * legitimately exceed a byte cap chosen for "typical" content. A real
+ * production precedent for a similarly-large legitimate raster already
+ * exists in this codebase: `MAX_PROVIDER_RESULT_DOWNLOAD_BYTES` = 64 MiB
+ * (`topaz-transparency-upscale-provider.ts`), raised from this same 25 MB
+ * figure after a genuine 36,324,544-byte Topaz result was wrongly rejected.
+ *
+ * 50 MB keeps real headroom below that 64 MiB precedent (a provider RESULT
+ * may legitimately be larger than a customer UPLOAD) while comfortably
+ * covering a realistic complex/AI-generated PNG at the full pixel ceiling
+ * below. It is a bounded, authoritative cap, not a cosmetic one:
+ * `capped-request-body.ts` enforces it WHILE the request body streams in
+ * (never trusting a missing/lying/chunked `Content-Length`), so the actual
+ * worst-case raw-byte buffering for one request is this constant, not the
+ * previously-unbounded body-buffering-bypass gap documented in
+ * `ARCHITECTURE.md` §23 item 2.
  */
-export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
-/** Hard per-axis bound. Comfortably above any real apparel plate (a 14" @ 300 PPI print is 4200px). */
+/**
+ * Hard per-axis bound. UNCHANGED by the Large Raster Upload Limit Audit —
+ * comfortably above any real apparel plate (a 14" @ 300 PPI print is
+ * 4200px) and above the real Signs/banner case that motivated this audit
+ * (an 84"-wide banner reaches this bound only above ~143 PPI, well past
+ * any resolution a banner viewed at distance needs). Deliberately NOT
+ * raised: see `MAX_TOTAL_PIXELS`'s own doc for why the decode-time memory
+ * budget this bounds is already close to this runtime's safe ceiling.
+ */
 export const MAX_IMAGE_DIMENSION_PX = 12000;
 
 /**
@@ -26,6 +57,25 @@ export const MAX_IMAGE_DIMENSION_PX = 12000;
  * per pixel is ~160 MB of RGBA, the largest single allocation this pipeline
  * is willing to make. A file can satisfy both per-axis bounds and still blow
  * past this (e.g. 12000x11000), which is why it is checked independently.
+ *
+ * Large Raster Upload Limit Audit: audited, deliberately UNCHANGED. The
+ * production runtime (~512 MB RAM, 1 shared vCPU) already runs the upload
+ * decode/analysis pipeline synchronously inline in the request handler
+ * (`ARCHITECTURE.md` §23 item 5) with, at this EXISTING 40 MP ceiling: two
+ * full RGBA buffers during decode (`image-decode.ts` — one before this
+ * audit's redundant-copy fix, still momentarily two during the fix's own
+ * brief overlap) plus several full-resolution 1-4-byte-per-pixel mask/label
+ * buffers during apparel's upload-time region-separation analysis
+ * (`region-separation.ts`'s `computeRegionMap`, called from
+ * `analyzeArtwork` — an `Int32Array` region-label buffer alone is another
+ * ~160 MB at this ceiling). Realistic peak resident memory for a single
+ * request already reaches several hundred MB at the EXISTING cap — a real,
+ * pre-existing, load-bearing constraint this audit did not introduce.
+ * Raising this bound further, without also reworking that synchronous
+ * decode/analysis pipeline (batching/streaming the mask computation, or
+ * moving it off the request thread), would risk real out-of-memory
+ * failures under concurrent uploads. That rework is architectural and
+ * explicitly out of this task's scope — see the final report's §G/§P.
  */
 export const MAX_TOTAL_PIXELS = 40_000_000;
 

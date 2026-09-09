@@ -452,6 +452,11 @@ export type UpdateSignPreparationInput = Partial<{
   edgeIntentClassifications: Record<string, unknown>[] | null;
   /** SIGNS QR DESTINATION RESOLUTION: see `SignPreparation.qrResolutions`'s own doc. */
   qrResolutions: Record<string, unknown>[] | null;
+  /** Constitution amendment 3.2: see `SignPreparation.backgroundTreatment`'s own doc. */
+  backgroundTreatment: string | null;
+  backgroundTreatmentConfirmedAt: string | null;
+  /** Constitution amendment 3.2: see `SignPreparation.backgroundRemoval`'s own doc. */
+  backgroundRemoval: Record<string, unknown> | null;
 }>;
 
 /**

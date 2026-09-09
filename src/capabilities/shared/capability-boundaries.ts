@@ -1986,7 +1986,23 @@
  *     `RECONSTRUCTION_HEADROOM`) imported as CONSTANTS from the topaz module
  *     so the planner and the executor can never quietly disagree. Importing
  *     the constants is not permission to call the provider: nothing in
- *     sign-preparation may dispatch, poll, or download anything.
+ *     sign-preparation may dispatch, poll, or download anything;
+ *   - Constitution amendment 3.2 (§16A.2, optional REMOVE background
+ *     treatment): THREE named, pure, deterministic functions from
+ *     artwork-preparation — `analyzeArtwork` (`image-analysis.ts`),
+ *     `classifyRepairability` (`repairability.ts`), and `isolateBackground`
+ *     (`background-isolation.ts`) — reused whole, unmodified, by
+ *     `sign-preparation/sign-background-removal.ts` so a second white-
+ *     removal algorithm is never built. Never `ArtworkPreparationCapability`
+ *     itself, never `ArtworkPreparation`'s persistence/record type, never a
+ *     provider port (none of the three functions has one). Called with
+ *     `printPlacement: null`/`intendedPrintWidthIn: null` so apparel's
+ *     placement-driven `pixelSufficiency`/`enhancementRequired` computation
+ *     never activates for a sign — this is the SAME "reusing apparel
+ *     placement sizing... for sign dimensions" prohibition below, honored
+ *     by construction rather than by convention alone. Signs' own review-
+ *     required routing, QR-safety layer, and print-validation gate remain
+ *     fully authoritative on top of whatever these three functions return.
  *
  * FORBIDDEN:
  *   - executing any repair step (upscale, extend, pad, crop, resample,

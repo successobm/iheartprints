@@ -82,6 +82,12 @@ describe("validateUploadBytes", () => {
     );
   });
 
+  it("accepts an encoded upload exactly at the size limit — the boundary is inclusive", () => {
+    const atLimit = Buffer.alloc(MAX_UPLOAD_BYTES);
+    toPngBytes(solidBlackExteriorArtwork()).copy(atLimit);
+    assert.equal(validateUploadBytes(atLimit, "image/png").byteSize, MAX_UPLOAD_BYTES);
+  });
+
   it("rejects an unsupported format even when the declared type says PNG", () => {
     // A JPEG renamed and re-labelled as a PNG: the bytes decide.
     expectRejection(

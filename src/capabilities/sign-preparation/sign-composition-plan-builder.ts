@@ -27,7 +27,7 @@
  * physical size.
  */
 
-import type { SignProductionSpec } from "./contracts";
+import type { SignProductionSpec, SignBackgroundTreatment } from "./contracts";
 import { SIGN_REPAIR_PLAN_SCHEMA_VERSION, type SignRepairPlan, type SignRepairStep } from "./contracts";
 import { buildSignProductionTemplate } from "./sign-production-template";
 import { computeSignPlanKey } from "./sign-plan-identity";
@@ -108,6 +108,16 @@ export interface SignCompositionPlanInput {
   policy: SignResolutionPolicy;
   sourceAssetId: string;
   sourceSha256: string;
+  /**
+   * Constitution amendment 3.2: the preparation's current, durable
+   * background treatment (`resolveSignBackgroundTreatment` — a caller must
+   * never read `SignPreparation.backgroundTreatment` directly). Defaults
+   * to `"keep"` when omitted, reproducing every plan built before this
+   * amendment byte-for-byte. Stamped onto the resulting plan and folded
+   * into `planKey` (see `sign-plan-identity.ts`) — never silently applied
+   * without becoming part of what this plan IS.
+   */
+  backgroundTreatment?: SignBackgroundTreatment;
   /** The ORIGINAL immutable asset's own pixel dimensions — plan-lineage identity, unrelated to the (possibly much larger) reconstructed intermediate the composition steps actually operate on. */
   sourceWidthPx: number;
   sourceHeightPx: number;
@@ -369,6 +379,7 @@ export function buildSignCompositionPlan(input: SignCompositionPlanInput): SignC
     });
   }
 
+  const backgroundTreatment: SignBackgroundTreatment = input.backgroundTreatment ?? "keep";
   const planWithoutKey: Omit<SignRepairPlan, "planKey"> = {
     schemaVersion: SIGN_REPAIR_PLAN_SCHEMA_VERSION,
     policyId: input.policy.id,
@@ -384,6 +395,7 @@ export function buildSignCompositionPlan(input: SignCompositionPlanInput): SignC
     expectedEffectivePpi: canvasHeightPx / input.spec.orderedHeightIn,
     overallRisk: "review_required",
     defects: [],
+    backgroundTreatment,
     reasons: [
       "Canvas-first composition plan (Signs Phase 3B): the ordered spec alone defines the production canvas; the " +
         "artwork's own perimeter never defines substrate geometry.",
