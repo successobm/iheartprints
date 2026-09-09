@@ -25,23 +25,32 @@ Print'em All is a separate fulfillment business that consumes iHeartPrints
 output; it owns no production profile.
 
 Production scope is governed by the Constitution's profile registry (§16B).
-Two profiles are constitutionally admitted: **apparel raster** (activated,
+Three profiles are constitutionally admitted: **apparel raster** (activated,
 implemented, live — the DTF/DTG-oriented pipeline; deliverable: validated
 transparent PNG at the selected physical print size, 300 PPI target judged
-from pixel geometry) and **rigid sign raster** (admitted, NOT implemented —
-deliverable when built: opaque exact-size PNG at human-confirmed ordered
-dimensions under §16A's preservation and resolution rules).
+from pixel geometry) and two sibling Signs raster profiles under §16A —
+**Rigid Sign** (deliverable: opaque exact-size PNG at human-confirmed
+ordered dimensions up to 24×36in, 150/100 PPI target/minimum) and
+**Banner** (admitted by amendment 3.3; deliverable: the same kind of
+opaque exact-size PNG, up to 36×96in, at its own independently-derived
+72/50 PPI target/minimum — never Rigid Sign's figures borrowed, and never
+inferred from size alone; the customer/operator explicitly selects the
+profile before dimensions are confirmed).
 
-**Signs guardrail.** Work on rigid sign raster is permitted ONLY inside
+**Signs guardrail.** Work on either Signs profile is permitted ONLY inside
 explicitly approved Signs phases (S1 and later, each approved by the
-product owner). Outside an approved Signs phase, do not add sign behavior,
-copy, or claims. This admission authorizes nothing else: no banners,
-vehicle wraps, multi-panel murals, contour cutting, dimensional letters,
-installation, vector ingestion (SVG/EPS/AI/PDF), general generative
-redesign/outpainting/inpainting or any generative-model use against
-customer artwork, CMYK/ICC workflows, imposition, sign pricing/catalogs/
-fulfillment, or customer-facing sign storefront — and no embroidery,
-engraving, paper, or 3D engines. Constitution §16A.3 (amendment 3.1) admits
+product owner). Outside an approved Signs phase, do not add sign or banner
+behavior, copy, or claims. This admission authorizes nothing else, for
+either profile: no vehicle wraps, multi-panel murals, contour cutting,
+dimensional letters, installation, vector ingestion (SVG/EPS/AI/PDF),
+general generative redesign/outpainting/inpainting or any generative-model
+use against customer artwork, CMYK/ICC workflows, imposition, sign/banner
+pricing/catalogs/fulfillment, or a customer-facing sign/banner storefront —
+and no embroidery, engraving, paper, or 3D engines. Banner additionally
+admits no bleed, hems, seams, pole pockets, grommets, wind slits, or other
+finishing/mounting geometry (§16A.2, §16A.6) — it is an artwork-preparation
+admission only, never a claim about physical substrate or flexibility.
+Constitution §16A.3 (amendment 3.1) admits
 exactly one narrow, non-generative exception — deterministic, pixel-sourced
 perimeter structure reconstruction (`reconstruct_perimeter_structure`,
 `src/capabilities/sign-preparation/perimeter-reconstruction.ts`), gated on
