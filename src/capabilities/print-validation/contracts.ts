@@ -94,6 +94,17 @@ export type ProductionCategory =
    */
   | "rigid_sign_raster"
   /**
+   * Banner Production Profile (Constitution amendment 3.3, §16A-bis): the
+   * sibling Signs raster profile — same structured, human-confirmed
+   * `SignProductionSpec` authority as `rigid_sign_raster` (never brief-
+   * derived, same Sprint A2 lesson), a different physical envelope and
+   * resolution policy. Requirements built by the SAME
+   * `deriveRigidSignProductionRequirements` (now category-aware, reading
+   * `spec.category` rather than a hardcoded literal — never a duplicated
+   * function).
+   */
+  | "banner_raster"
+  /**
    * Reserved, dormant. See `signage` — retained for a future explicit
    * vector production profile, produced by nothing today.
    */
@@ -725,11 +736,20 @@ export interface ProductionNormalizationSummary {
  * repaired to an exact ordered substrate size, is the specification; there
  * is no Design Brief, no Concept Evaluation, and no apparel transparency
  * requirement. See `RigidSignPlanEvidence` and `validateRigidSign`.
+ *
+ * Banner Production Profile (Constitution amendment 3.3, §16A-bis):
+ * `"banner_raster"` — the sibling Signs profile, dispatched to the SAME
+ * `validateRigidSign` function (every check it runs already reads from
+ * `RigidSignPlanEvidence`'s own data fields — ordered dimensions, the
+ * governing policy's target/min PPI, background treatment — never a
+ * hardcoded rigid-sign constant, except the profile label itself, which
+ * now reflects whichever of the two profiles was actually requested).
  */
 export type PrintValidationProfile =
   | "generated_concept"
   | "uploaded_preserve"
-  | "rigid_sign_raster";
+  | "rigid_sign_raster"
+  | "banner_raster";
 
 /**
  * Existing Artwork → Print Ready Phase 2 (Goal 8): the deterministic

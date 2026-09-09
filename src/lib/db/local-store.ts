@@ -2436,6 +2436,11 @@ export class LocalProjectRepository implements ProjectRepository {
       backgroundTreatment: "keep",
       backgroundTreatmentConfirmedAt: null,
       backgroundRemoval: null,
+      // Banner Production Profile: every preparation starts explicitly
+      // "rigid_sign_raster" — the pre-existing, unconditional rigid-sign
+      // contract — never defaulted to "banner_raster".
+      productionType: "rigid_sign_raster",
+      productionTypeConfirmedAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };

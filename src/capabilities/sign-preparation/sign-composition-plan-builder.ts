@@ -251,7 +251,16 @@ export function buildSignCompositionPlan(input: SignCompositionPlanInput): SignC
     artworkHeightPx = input.crop.heightPx;
   }
 
-  const canvasPpi = deriveCanvasPixelDensity(artworkWidthPx, artworkHeightPx, template.widthIn, template.heightIn);
+  const rawCanvasPpi = deriveCanvasPixelDensity(artworkWidthPx, artworkHeightPx, template.widthIn, template.heightIn);
+  // Banner Production Profile Audit: `policy.maxCanvasPpi`, when set,
+  // bounds canvas CONSTRUCTION itself — never just validation — so a
+  // customer's own artwork resolution can never push the canvas past a
+  // proven-safe pixel ceiling for this policy's physical envelope. Absent
+  // (every rigid-sign policy) reproduces the pre-audit uncapped behavior
+  // exactly, byte-for-byte.
+  const canvasPpi = input.policy.maxCanvasPpi !== undefined
+    ? Math.min(rawCanvasPpi, input.policy.maxCanvasPpi)
+    : rawCanvasPpi;
   const canvasWidthPx = Math.max(1, Math.round(template.widthIn * canvasPpi));
   const canvasHeightPx = Math.max(1, Math.round(template.heightIn * canvasPpi));
 

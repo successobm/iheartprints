@@ -2570,6 +2570,71 @@ export function resolveSignBackgroundTreatment(
 }
 
 /**
+ * Banner Production Profile (Constitution amendment 3.3, §16A-bis): which
+ * admitted Signs raster production profile governs one order. Two sibling
+ * profiles under the same shared Signs preparation/composition/validation
+ * authority — never a third, implicit "large sign" category inferred from
+ * dimensions alone.
+ *
+ *   "rigid_sign_raster" — DEFAULT. The original, unconditional §16A
+ *                          contract, unchanged: exact-size rectangular
+ *                          rigid signs, governed by
+ *                          `RIGID_RECT_UP_TO_24X36_V1`. Every existing
+ *                          preparation with no explicit selection reads
+ *                          as this — a missing/legacy value is never
+ *                          silently promoted to "banner_raster"
+ *                          (`resolveSignProductionType` below is the one
+ *                          fail-closed reader every caller must use).
+ *   "banner_raster"      — explicitly, durably selected. Governed by its
+ *                          own sibling resolution policy (larger physical
+ *                          envelope, lower target/minimum PPI — a
+ *                          product class + viewing-distance fact per
+ *                          §16A.4, not a relaxed rigid-sign figure) and
+ *                          its own `validationProfile` in print
+ *                          validation. Reuses every substrate-neutral
+ *                          Signs authority unchanged: artwork
+ *                          immutability, background treatment, canvas-
+ *                          first composition, QR preservation,
+ *                          candidate-bound acceptance.
+ *
+ * The string values are the SAME literals `RIGID_SIGN_CATEGORY`/
+ * `BANNER_CATEGORY` (`sign-preparation/contracts.ts`) already use for
+ * `SignProductionSpec.category` and `PrintValidationCapability`'s
+ * `validationProfile` dispatch — one vocabulary, not two, so a
+ * `SignPreparation.productionType` value plugs directly into both
+ * without translation.
+ *
+ * Durable, candidate-authoritative, and part of `SignRepairPlan`
+ * identity (`planKey`) via `policyId` (each profile's policies live in
+ * disjoint id namespaces) — changing it is production-significant and
+ * must invalidate a stale authorization/acceptance bound to the OLD
+ * profile, the same "a re-plan is a different plan" discipline
+ * `backgroundTreatment`/`orderedWidthIn`/`orderedHeightIn` already
+ * establish.
+ */
+export const SIGN_PRODUCTION_TYPES = ["rigid_sign_raster", "banner_raster"] as const;
+export type SignProductionType = (typeof SIGN_PRODUCTION_TYPES)[number];
+
+/** A default is not a decision, but a missing/legacy value must still resolve to something — always the safe, pre-existing behavior. */
+export const DEFAULT_SIGN_PRODUCTION_TYPE: SignProductionType = "rigid_sign_raster";
+
+/**
+ * Fail-closed reader every caller must use instead of reading
+ * `SignPreparation.productionType` directly — a `null`/`undefined`/
+ * unrecognized stored value (a pre-Banner-amendment row, a partial
+ * write, a future value this build does not know) always resolves to
+ * `"rigid_sign_raster"`, never `"banner_raster"`. No ambiguous implicit
+ * "large sign means banner" inference exists anywhere — this function is
+ * the only path from a stored/absent value to a production type, and it
+ * only ever returns what was explicitly, durably selected.
+ */
+export function resolveSignProductionType(
+  value: string | null | undefined,
+): SignProductionType {
+  return value === "banner_raster" ? "banner_raster" : DEFAULT_SIGN_PRODUCTION_TYPE;
+}
+
+/**
  * Signs Phase S1: the durable record of one rigid-sign order's artwork —
  * "understand this sign order before changing any pixels."
  *
@@ -2745,6 +2810,17 @@ export interface SignPreparation {
    * only ever runs for "remove").
    */
   backgroundRemoval: Record<string, unknown> | null;
+  /**
+   * Banner Production Profile: durable KEEP/REMOVE-style selection —
+   * see `SignProductionType`'s own doc. Stored as the raw string so an
+   * unrecognized/legacy value round-trips honestly rather than being
+   * silently coerced at the domain-type boundary; every reader MUST go
+   * through `resolveSignProductionType` rather than comparing this field
+   * directly, so a `null`/malformed row never behaves as "banner_raster".
+   */
+  productionType: string | null;
+  /** When a human explicitly selected `productionType`. Consent provenance, mirrors `specConfirmedAt`/`backgroundTreatmentConfirmedAt`. `null` means never explicitly selected (implicit "rigid_sign_raster"). */
+  productionTypeConfirmedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

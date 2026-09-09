@@ -1,0 +1,54 @@
+-- Banner Production Profile: an explicit, durable Signs production-type
+-- selection — which admitted Signs raster production profile governs one
+-- order, "rigid_sign_raster" (default, unchanged §16A contract) or
+-- "banner_raster" (new sibling profile). Additive and forward-only: every
+-- existing `sign_preparations` row gets an explicit 'rigid_sign_raster'
+-- default and behaves EXACTLY as it does today.
+--
+-- NOT APPLIED to any live database by this change. This repository's
+-- convention is to land migration + dependent code together and apply the
+-- migration only as part of an explicit, reviewed deploy step.
+--
+-- SCHEMA DISCIPLINE AUDIT (mirrors `20260908120000_sign_background_
+-- treatment.sql`'s own audit shape — same reasoning, same discipline)
+--
+-- 1. WHY TWO COLUMNS, NOT A NEW TABLE
+--
+--    A sign preparation has exactly ONE current production type at a
+--    time — a scalar column on the existing row is the honest fit,
+--    mirroring `background_treatment`/`spec_confirmed_at`'s own
+--    precedent for a durable, single-valued, explicitly-confirmed
+--    decision.
+--
+-- 2. WHY 'rigid_sign_raster' IS THE COLUMN DEFAULT, NOT NULL
+--
+--    Every sign preparation created before this migration IS a rigid
+--    sign — that is the only profile that has ever existed. A nullable
+--    column would force every reader to re-implement the same
+--    null-means-"rigid_sign_raster" fallback; the column itself encodes
+--    it once. The application layer's `resolveSignProductionType`
+--    (`src/lib/domain/types.ts`) still fail-closes to
+--    "rigid_sign_raster" for any unrecognized value, so a partially-
+--    migrated or hand-edited row can never be silently read as
+--    "banner_raster".
+--
+-- 3. VALUES MATCH THE EXISTING DOMAIN VOCABULARY EXACTLY
+--
+--    'rigid_sign_raster' is the SAME literal `RIGID_SIGN_CATEGORY`
+--    (`sign-preparation/contracts.ts`) and `PrintValidationCapability`'s
+--    `validationProfile` dispatch already use — one vocabulary, not a
+--    second one requiring translation. 'banner_raster' is the new
+--    sibling profile's own matching literal (`BANNER_CATEGORY`).
+--
+-- 4. BACKWARD COMPATIBILITY
+--
+--    Every existing row: `production_type` backfills to
+--    'rigid_sign_raster' (the column default applies to existing rows
+--    via the `alter table ... add column ... default` form below),
+--    `production_type_confirmed_at` backfills to null. No existing
+--    preparation's observable behavior changes.
+
+alter table public.sign_preparations
+  add column if not exists production_type text not null default 'rigid_sign_raster'
+    check (production_type in ('rigid_sign_raster', 'banner_raster')),
+  add column if not exists production_type_confirmed_at timestamptz null;

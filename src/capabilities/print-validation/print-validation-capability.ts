@@ -156,8 +156,18 @@ function validate(input: PrintValidationInput): PrintValidationReport {
   // so it branches before `deriveProductionRequirements` is ever called.
   // Every apparel line below this branch is unreached and unchanged for a
   // sign validation run.
-  if ((input.validationProfile ?? "generated_concept") === "rigid_sign_raster") {
-    return validateRigidSign(input);
+  // Banner Production Profile (Constitution amendment 3.3, §16A-bis):
+  // both admitted Signs raster profiles dispatch to the SAME
+  // `validateRigidSign` — its checks already read from `RigidSignPlanEvidence`'s
+  // own data fields (ordered dimensions, the governing policy's PPI
+  // figures, background treatment), never a hardcoded rigid-only
+  // constant, except the profile label itself (now threaded through
+  // rather than hardcoded).
+  if (
+    input.validationProfile === "rigid_sign_raster" ||
+    input.validationProfile === "banner_raster"
+  ) {
+    return validateRigidSign(input, input.validationProfile);
   }
 
   const requirements = deriveProductionRequirements({
@@ -634,8 +644,21 @@ function geometryStepIdentityMatches(
   );
 }
 
-function validateRigidSign(input: PrintValidationInput): PrintValidationReport {
-  const profile: PrintValidationProfile = "rigid_sign_raster";
+/**
+ * Banner Production Profile (Constitution amendment 3.3, §16A-bis): serves
+ * BOTH admitted Signs raster profiles — `profile` is threaded through from
+ * the caller's own already-narrowed dispatch, never re-derived or assumed,
+ * so a rigid-sign validation can never be mislabeled as a banner one or
+ * vice versa. Every check below already reads its numeric/policy facts
+ * from `RigidSignPlanEvidence` (`sign.orderedWidthIn`, `sign.targetPpi`,
+ * `sign.backgroundTreatment`, ...) — none of them re-derive rigid-sign-
+ * specific figures, so no check logic changes between the two profiles,
+ * only which policy/requirements the CALLER supplied.
+ */
+function validateRigidSign(
+  input: PrintValidationInput,
+  profile: PrintValidationProfile = "rigid_sign_raster",
+): PrintValidationReport {
   const productionTreatment: ProductionTreatment = DEFAULT_PRODUCTION_TREATMENT;
   const checks: PrintValidationCheck[] = [];
   const requiredTransformations = new Set<FinalizationTransformation>();
