@@ -133,7 +133,7 @@ export function SignCompositionPlanForm({ projectId }: { projectId: string }) {
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-ink/15 p-3">
       <p className="text-sm text-ink/70">
-        Canvas-first composition (Signs Phase 3B). The output canvas is derived from the ordered spec alone —
+        Canvas-first composition. The output canvas is derived from the ordered spec alone —
         crop/fit/move/fill are explicit production decisions.
       </p>
 
