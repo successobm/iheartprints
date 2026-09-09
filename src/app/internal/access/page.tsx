@@ -7,6 +7,7 @@ import { getProjectRepository } from "@/lib/db";
 
 import { InternalAccessForm } from "./InternalAccessForm";
 import { resolveInternalAccessPageState } from "./internal-access-page-state";
+import { resolveInternalAccessReturnTo } from "./internal-access-return-to";
 
 /**
  * Phase 28M.1: the one-time operator bootstrap for the internal/system-admin
@@ -41,9 +42,21 @@ import { resolveInternalAccessPageState } from "./internal-access-page-state";
  * the key — but doing the check server-side keeps this page consistent with
  * this codebase's existing habit of never handing a client component more
  * than it needs.
+ *
+ * RETURN URL (Production Operator Access Blocker fix): `returnTo` is read
+ * from the query string and validated once, here, by
+ * `resolveInternalAccessReturnTo` (same-origin root-relative paths only —
+ * see that function's own doc for the open-redirect defenses) before it
+ * ever reaches a `<Link href>` or `InternalAccessForm`'s `router.push`.
+ * Untrusted input in, a value this page has already proven safe out.
  */
-export default async function InternalAccessPage() {
+type PageProps = {
+  searchParams: Promise<{ returnTo?: string | string[] }>;
+};
+
+export default async function InternalAccessPage({ searchParams }: PageProps) {
   const configured = isInternalAccessConfigured();
+  const returnTo = resolveInternalAccessReturnTo((await searchParams).returnTo);
 
   let alreadyInternal = false;
   if (configured) {
@@ -83,14 +96,14 @@ export default async function InternalAccessPage() {
             This browser already has internal production access.
           </p>
           <Link
-            href="/"
+            href={returnTo}
             className="rounded-full bg-ink px-3.5 py-2 text-center text-sm font-medium text-white transition hover:bg-ink/90"
           >
-            Continue to iHeartPrints
+            {returnTo === "/" ? "Continue to iHeartPrints" : "Continue"}
           </Link>
         </div>
       ) : (
-        <InternalAccessForm />
+        <InternalAccessForm returnTo={returnTo} />
       )}
     </div>
   );

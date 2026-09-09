@@ -246,6 +246,12 @@ export const TEST_FILES = [
   // render-branch logic and the raw-key handling properties Section 8
   // requires -- registered immediately per the established discipline.
   "src/app/internal/access/internal-access-page.test.ts",
+  // Production Operator Access Blocker fix: the return-URL validator that
+  // sends an operator back to the exact Sign Production Review page they
+  // came from after "Get internal access", never an open redirect --
+  // registered immediately per the established discipline.
+  "src/app/internal/access/internal-access-return-to.test.ts",
+  "src/app/internal/projects/[projectId]/sign-authorize/sign-authorize-return-to.test.ts",
   "src/app/api/projects/[projectId]/artwork-preparation/separation/phase16-complex-background-routing.test.ts",
   "src/components/chat/uploaded-artwork-separation-mount.test.tsx",
   "src/capabilities/artwork-preparation/bowling-live-shape-ui-acceptance.test.ts",

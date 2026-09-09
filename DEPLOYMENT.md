@@ -101,11 +101,35 @@ DigitalOcean App Platform app at the V1 finalization deployment:
 | `WORKER_SECRET` | Required in production for `POST /api/worker/*` |
 | `FINAL_ARTWORK_PROVIDER` | `local` or `topaz` |
 | `TOPAZ_API_KEY` | Required when `FINAL_ARTWORK_PROVIDER=topaz` |
+| `IHEARTPRINTS_INTERNAL_ACCESS_KEY` | Production Operator Access Blocker fix (see below): grants a browser the internal/operator entitlement (`POST /api/internal/acquisition-access`, `/internal/access`, `/internal/projects/[projectId]/sign-authorize`). Unset by default with **no** development fallback — without it, internal access cannot be granted in any environment. Minimum 24 characters (§23b, `internal-access-config.ts`) |
 
 Related names also used by the codebase (see `.env.example` and
 `ARCHITECTURE.md` §21): `CONCEPT_GENERATION_PROVIDER`, `OPENAI_IMAGE_MODEL`,
 `CONVERSATION_UNDERSTANDING_PROVIDER`, `MAX_GENERATION_JOBS_PER_RUN`,
 `WORKER_HEARTBEAT_INTERVAL`.
+
+### Setting an App Platform environment variable
+
+There is no in-repo `app.yaml` / `.do/` spec (see above), so App Platform
+environment variables are set directly against the live app — DigitalOcean
+Console → the `iheartprints` app → **Settings** → the web component's **App-
+Level Environment Variables** → **Edit**. Mark a real secret's value
+**Encrypted**, not plaintext. Saving triggers an automatic redeploy — no
+`git push` is needed to pick up a new/changed environment variable alone.
+
+Production Operator Access Blocker fix (this session found
+`IHEARTPRINTS_INTERNAL_ACCESS_KEY` absent from production — see table
+above): this environment has no `doctl` and no DigitalOcean API credential,
+so this variable could not be configured directly here. Generate a real
+value locally (never in a shared/logged context), e.g.:
+
+```bash
+openssl rand -base64 32
+```
+
+then set it as `IHEARTPRINTS_INTERNAL_ACCESS_KEY` (Encrypted) in the
+console as above, and store the value itself in a password manager — never
+in this repository, a commit, an issue, or a chat transcript.
 
 ## Migrations
 
