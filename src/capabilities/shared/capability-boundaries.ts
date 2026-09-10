@@ -2031,4 +2031,98 @@
  * mirroring `production_treatment_key`.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "PEA2" as const;
+/**
+ * ============================================================================
+ * UNIVERSAL RASTER RECONSTRUCTION PHASE R3B — ARTWORK FIDELITY CONTRACT
+ * ============================================================================
+ *
+ * `artwork-fidelity` is the durable AUTHORITY foundation a future
+ * `RasterReconstructionCapability` will read from — never a reconstruction
+ * capability itself. Established by the Phase R3A audit specifically
+ * because reconstruction (Phase R1) proved genuinely capable but NOT
+ * inherently faithful (Phase R2: wording hallucination, a reproducible
+ * ™→® mark substitution even under an otherwise-successful exact-wording
+ * constraint), and because post-hoc comparison against only the DEGRADED
+ * source (the real production condition — no clean master normally exists)
+ * proved too unreliable for automatic acceptance. This capability exists to
+ * establish authoritative facts BEFORE reconstruction, not to judge a
+ * candidate after it.
+ *
+ * SHARED, NEVER DTF- OR SIGNS-PREFIXED. This is the same "provider-neutral,
+ * process-neutral" discipline `resolution-sufficiency.ts` and the (not yet
+ * built) `RasterReconstructionCapability` itself already follow — a
+ * Fidelity Contract must be equally usable by a future apparel
+ * reconstruction path and a future sign reconstruction path, never owned by
+ * either.
+ *
+ * ArtworkFidelityCapability MAY own:
+ *   - proposed (non-authoritative, machine-suggested) fidelity facts;
+ *   - customer/operator CONFIRMATION of those facts — the ONLY thing that
+ *     grants reconstruction authority;
+ *   - the frozen, confirmed fidelity authority itself;
+ *   - the fidelity contract's canonical identity key (`contractKey`),
+ *     mirroring `SignPreparation.planKey`'s recompute-and-compare
+ *     discipline exactly;
+ *   - the immutable source binding (`sourceAssetId`/`sourceSha256`).
+ *
+ * ArtworkFidelityCapability may NOT own, and does not, this phase:
+ *   - image reconstruction of any kind (no OpenAI call, no Topaz call, no
+ *     provider port of any kind exists in this module);
+ *   - vision extraction or OCR (a future phase may PROPOSE facts via
+ *     vision, but that proposal is never this capability's own job — it
+ *     only stores and confirms what a caller supplies);
+ *   - production transformation, background removal, DTF sizing, sign
+ *     sizing, or QR repair execution;
+ *   - Print Ready or Print Validation of any kind.
+ *
+ * MACHINE-READABLE CONTENT (QR) IS DELIBERATELY NOT DUPLICATED HERE.
+ * `SignPreparation.qrResolutions` already carries durable, byte-exact QR
+ * authority (`SignQrResolutionRecord`), keyed by the same
+ * `sourceAssetId`/`sourceSha256` an `ArtworkFidelityContract` also carries
+ * — a future consumer joins on that shared key rather than this table
+ * embedding or referencing a copy of QR payload authority.
+ *
+ * AUTHORITY PROVENANCE. `confirmedBy` reuses `SignPlanAuthorizationActor`
+ * (`"customer" | "operator"`) — the SAME narrow actor type
+ * `sign_preparations.authorized_by` already established, never a personal
+ * identity (this codebase has no user-authentication layer,
+ * ARCHITECTURE.md §23). Model-proposed content (`proposedFacts`) can NEVER
+ * satisfy confirmed authority by existing alone — `confirmContract`
+ * requires an explicit, validated `confirmedBy` actor even when the
+ * confirmed values happen to equal the proposal.
+ *
+ * EXACT WORDING IS NEVER NORMALIZED AT REST. Capitalization and punctuation
+ * are part of the authoritative fact — "PROVISIONS" must never silently
+ * become "provisions." A comparison-only normalization, if a future
+ * verification step ever needs one, must stay a pure function computed
+ * FROM `confirmedWording`, never a second stored representation of it.
+ *
+ * PROTECTED MARKS ARE A CLOSED SET (™ / ® / ©) — Phase R2's own direct
+ * regression proof (™ became ® in 2/2 independent reconstructions) is why
+ * this is a typed enum, never a generic free-text "symbol" field, and
+ * never a general trademark-recognition system.
+ *
+ * CONTRACT IDENTITY (`contractKey`, `artwork-fidelity-contract-identity.ts`)
+ * covers exactly the confirmed, production-significant facts — source
+ * binding, confirmed wording, confirmed marks, and the measured content
+ * bounding-box aspect ratio — with canonical serialization, never sensitive
+ * to cosmetic array ordering, and `null` until a contract is actually
+ * confirmed (a `"proposed"` contract has no semantic authority yet to key).
+ * Mirrors `computeSignPlanKey` exactly, including WHY: two contracts
+ * confirming byte-identical authority are the same contract; a
+ * self-contained local copy of the canonical-JSON helper is used rather
+ * than importing `sign-preparation`'s own copy, so this shared capability
+ * never depends on a downstream, Signs-owned module.
+ *
+ * FUTURE AUTHORITY THIS PHASE ESTABLISHES, NOT YET WIRED: a future
+ * `RasterReconstructionCapability` may READ a confirmed `ArtworkFidelityContract`
+ * to derive its provider prompt (mirroring `GenerationPromptRequest
+ * .requiredWording`'s own "structured field first, flattened into
+ * provider-prompt text only at the adapter boundary" pattern) and to
+ * verify a reconstructed candidate against it. It may NOT mutate the
+ * contract — confirmation is a customer/operator act, never a side effect
+ * of a reconstruction attempt. Nothing in this codebase calls this
+ * capability from a live request path yet.
+ */
+
+export const CAPABILITY_BOUNDARY_VERSION = "PEA3" as const;

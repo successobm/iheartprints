@@ -1,6 +1,8 @@
 import type {
   AcquisitionFreeConceptClaim,
   AcquisitionSession,
+  ArtworkFidelityContract,
+  ArtworkFidelityContractStatus,
   ArtworkPreparation,
   ArtworkPreparationStatus,
   ArtworkVersion,
@@ -30,6 +32,7 @@ import type {
   ProductionUnlock,
   ProjectSnapshot,
   ProjectStatus,
+  ProtectedMarkType,
   SignCandidateVisualAcceptance,
   SignPlanAuthorizationActor,
   SignPreparation,
@@ -460,6 +463,36 @@ export type UpdateSignPreparationInput = Partial<{
   /** Banner Production Profile: see `SignPreparation.productionType`'s own doc. */
   productionType: string | null;
   productionTypeConfirmedAt: string | null;
+}>;
+
+/**
+ * Universal Raster Reconstruction Phase R3B. `sourceSha256` is required at
+ * creation — a contract always binds to a specific, already-measured
+ * source, never a placeholder to fill in later (mirrors
+ * `CreateSignPreparationInput`'s own "the immutable original is known up
+ * front" shape).
+ */
+export interface CreateArtworkFidelityContractInput {
+  sourceAssetId: string;
+  sourceSha256: string;
+  proposedFacts: Record<string, unknown> | null;
+}
+
+/**
+ * Universal Raster Reconstruction Phase R3B. Deliberately narrow, mirroring
+ * `UpdateSignPreparationInput`'s own "the immutable binding is NOT
+ * patchable" discipline: `sourceAssetId`/`sourceSha256` are never patched
+ * here — a different source means a new contract, never a mutated one.
+ */
+export type UpdateArtworkFidelityContractInput = Partial<{
+  status: ArtworkFidelityContractStatus;
+  proposedFacts: Record<string, unknown> | null;
+  confirmedWording: string[] | null;
+  confirmedMarks: ProtectedMarkType[] | null;
+  confirmedBy: SignPlanAuthorizationActor | null;
+  confirmedAt: string | null;
+  sourceContentBoundingBoxAspectRatio: number | null;
+  contractKey: string | null;
 }>;
 
 /**
@@ -1449,4 +1482,23 @@ export interface ProjectRepository {
     id: string,
     patch: UpdateSignPreparationInput,
   ): Promise<SignPreparation>;
+
+  /**
+   * Universal Raster Reconstruction Phase R3B: persist a durable Artwork
+   * Fidelity Contract — see `ArtworkFidelityContract`'s own doc comment.
+   * Always created in `status: "proposed"`; only an explicit confirmation
+   * (`updateArtworkFidelityContract` with `status: "confirmed"`) grants it
+   * reconstruction authority.
+   */
+  createArtworkFidelityContract(
+    projectId: string,
+    input: CreateArtworkFidelityContractInput,
+  ): Promise<ArtworkFidelityContract>;
+  /** Latest fidelity contract for the project, or `null` — mirrors `getSignPreparation`. */
+  getArtworkFidelityContract(projectId: string): Promise<ArtworkFidelityContract | null>;
+  getArtworkFidelityContractById(id: string): Promise<ArtworkFidelityContract | null>;
+  updateArtworkFidelityContract(
+    id: string,
+    patch: UpdateArtworkFidelityContractInput,
+  ): Promise<ArtworkFidelityContract>;
 }

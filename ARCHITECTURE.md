@@ -11148,6 +11148,130 @@ never a bypass.
 
 ---
 
+## 23o. Universal Raster Reconstruction Phase R3B — Artwork Fidelity Contract
+
+**Status: durable authority foundation only. No reconstruction, no provider
+call, no customer-facing UI, no DTF/Signs behavior change.**
+
+Phase R1 (research-only bake-off, `research/raster-reconstruction-r1/`)
+proved OpenAI image-conditioned editing (`gpt-image-1`, `/v1/images/edits`)
+performs genuine, image-conditioned generative reconstruction — dramatically
+cleaner than Topaz Transparency Upscale's Class B enhancement on genuinely
+degraded raster sources. Phase R2 proved that same reconstruction is **not
+inherently faithful**: a real, reproduced failure changed confirmed source
+wording ("ESTABLISHED PROVISIONS" → "ESTABLISHED PRODUCTS"), and — even once
+an exact-wording constraint eliminated that specific failure — a **™ mark
+became ®** in 2 of 2 independent reconstructions. Phase R2 also proved that
+comparing a reconstructed candidate against only the *degraded* source (the
+real production condition — no clean master normally exists for a customer
+upload) is too unreliable for automatic acceptance: 2 of 3 such comparisons
+were false positives, caused by the comparison model's own inability to
+cleanly read degraded pixels, not genuine content differences.
+
+**The conclusion those two phases forced**: fidelity authority cannot depend
+solely on post-hoc visual comparison against a degraded raster. Authoritative
+facts about what an artwork is supposed to say and contain must be
+established *before* reconstruction, from a source the system can actually
+trust — the customer (or, in an operator-assisted context, an internal
+operator) confirming what their own artwork says, not a vision model's
+best guess against damaged pixels.
+
+### `ArtworkFidelityContract` (`src/capabilities/artwork-fidelity/`)
+
+The durable record binding a set of CONFIRMED preservation facts to an
+immutable source asset:
+
+```
+ORIGINAL CUSTOMER SOURCE
+        ↓
+ARTWORK FIDELITY CONTRACT (proposed -- non-authoritative machine evidence only)
+        ↓
+CONFIRMED AUTHORITY (customer or operator explicitly confirms)
+        ↓
+[FUTURE, NOT BUILT THIS PHASE] RASTER RECONSTRUCTION CANDIDATE
+        ↓
+[FUTURE, NOT BUILT THIS PHASE] ACCEPTED CLEAN MASTER
+        ↓
+PRINT-SPECIFIC PRODUCTION PREPARATION (DTF / Signs, unchanged)
+```
+
+**`ArtworkFidelityContract` != Accepted Clean Master != Print Ready.** A
+confirmed contract establishes what must be TRUE of a future reconstruction;
+it produces no pixels, calls no provider, and grants no production
+readiness of any kind. `PrintValidationCapability` remains the sole
+authority for `print_ready` (§13i/§23n), completely untouched by this phase.
+
+**Shared, never DTF- or Signs-prefixed** — see
+`capability-boundaries.ts`'s own "UNIVERSAL RASTER RECONSTRUCTION PHASE
+R3B — ARTWORK FIDELITY CONTRACT" section for the full boundary rules
+(what this capability may and may not own).
+
+### The contract
+
+- `status`: `"proposed"` (machine-proposed facts may exist; carries **no**
+  reconstruction authority) or `"confirmed"` (a customer/operator
+  explicitly confirmed the facts — the *only* status with authority).
+- `sourceAssetId` / `sourceSha256` — the immutable binding, set once and
+  never patched; a different source is a new contract.
+- `proposedFacts` — non-authoritative machine evidence, loosely typed and
+  narrowed at the capability boundary, exactly like
+  `SignPreparation.inspection`/`.plan`. Never read as confirmed fact by
+  anything.
+- `confirmedWording: string[] | null` — exact strings, **never normalized
+  at rest**. Capitalization and punctuation are part of the authoritative
+  fact (the direct R2 regression proof this exists to prevent).
+- `confirmedMarks: ProtectedMarkType[] | null` — a closed set (`™`/`®`/`©`
+  only), never a generic free-text "symbol" field, and never a general
+  trademark-recognition system.
+- `confirmedBy: SignPlanAuthorizationActor | null` — reuses the SAME
+  narrow `"customer" | "operator"` actor type `sign_preparations
+  .authorized_by` already established, never a personal identity (this
+  codebase has no user-authentication layer, §23).
+- `sourceContentBoundingBoxAspectRatio: number | null` — deterministic
+  machine EVIDENCE only, never something a customer confirms. Intended for
+  a future post-reconstruction geometry comparison (Phase R2's own
+  bounding-box measurement method); this phase stores the evidence slot
+  without wiring automatic measurement.
+- `contractKey: string | null` — canonical identity of the CONFIRMED facts,
+  mirroring `SignPreparation.planKey` exactly (`sign-plan-identity.ts`'s
+  own precedent). `null` until confirmed. A future consumer always
+  recomputes this from current durable state and compares before trusting
+  a contract — never trusts a stored key alone
+  (`deriveArtworkFidelityContractKey`,
+  `artwork-fidelity-contract-identity.ts`).
+
+**Machine-readable content (QR) is deliberately not duplicated.**
+`SignPreparation.qrResolutions` already carries durable, byte-exact QR
+authority (`SignQrResolutionRecord`), keyed by the same
+`sourceAssetId`/`sourceSha256` a Fidelity Contract also carries — a future
+consumer joins on that shared key rather than this table embedding a copy.
+
+### Schema
+
+One new table, `artwork_fidelity_contracts`
+(`supabase/migrations/20260910120000_artwork_fidelity_contracts.sql`),
+following the `sign_preparations` schema-discipline-audit precedent exactly
+— server-only (`ENABLE ROW LEVEL SECURITY` + `REVOKE ALL ... FROM anon,
+authenticated`, generically verified by
+`security-lockdown.migration.test.ts`'s catch-all test). Justified, not
+merely convenient: `AssetRecord.metadata` cannot represent a fact ledger
+the customer revises over multiple confirmation rounds (assets are
+append-only, §6.11), and reusing `ArtworkPreparation`/`SignPreparation`
+would make either lie about owning a genuinely shared, provider-neutral
+concept — the exact anti-pattern each of those tables was itself built to
+avoid.
+
+### Advisory/foundational only, this phase
+
+Nothing in this codebase creates, reads, or consumes an
+`ArtworkFidelityContract` from a live request path yet.
+`RasterReconstructionCapability` does not exist. No customer-facing or
+operator-facing UI exists to propose or confirm facts. No vision-extraction
+or OCR call proposes facts automatically. This is the seam a future phase
+reads from — exactly like `resolution-sufficiency.ts` was before it.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

@@ -22,6 +22,7 @@ import {
 import type {
   AcquisitionFreeConceptClaim,
   AcquisitionSession,
+  ArtworkFidelityContract,
   ArtworkPreparation,
   ArtworkVersion,
   AssetRecord,
@@ -54,6 +55,7 @@ import type {
 import type {
   ApproveDesignBriefInput,
   CaptureAcquisitionEmailInput,
+  CreateArtworkFidelityContractInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateSignPreparationInput,
@@ -80,6 +82,7 @@ import type {
   RecordPaidImageIntentFailureInput,
   ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
+  UpdateArtworkFidelityContractInput,
   UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
@@ -127,6 +130,8 @@ interface LocalDatabase {
   signPreservationTransportAttempts: SignPreservationTransportAttempt[];
   /** Signs QR Visual Revision Acceptance. */
   signCandidateVisualAcceptances: SignCandidateVisualAcceptance[];
+  /** Universal Raster Reconstruction Phase R3B. */
+  artworkFidelityContracts: ArtworkFidelityContract[];
 }
 
 /**
@@ -187,6 +192,7 @@ function emptyDb(): LocalDatabase {
     signPreservationVerifications: [],
     signPreservationTransportAttempts: [],
     signCandidateVisualAcceptances: [],
+    artworkFidelityContracts: [],
   };
 }
 
@@ -382,6 +388,8 @@ async function readDb(): Promise<LocalDatabase> {
       signPreservationTransportAttempts: parsed.signPreservationTransportAttempts ?? [],
       // Signs QR Visual Revision Acceptance: absent in every store written before it existed.
       signCandidateVisualAcceptances: parsed.signCandidateVisualAcceptances ?? [],
+      // Universal Raster Reconstruction Phase R3B: absent in every store written before it existed.
+      artworkFidelityContracts: parsed.artworkFidelityContracts ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -2473,5 +2481,62 @@ export class LocalProjectRepository implements ProjectRepository {
     Object.assign(preparation, patch, { updatedAt: nowIso() });
     await writeDb(db);
     return preparation;
+  }
+
+  async createArtworkFidelityContract(
+    projectId: string,
+    input: CreateArtworkFidelityContractInput,
+  ): Promise<ArtworkFidelityContract> {
+    const db = await readDb();
+    const timestamp = nowIso();
+    const contract: ArtworkFidelityContract = {
+      id: randomUUID(),
+      projectId,
+      status: "proposed",
+      sourceAssetId: input.sourceAssetId,
+      sourceSha256: input.sourceSha256,
+      proposedFacts: input.proposedFacts,
+      confirmedWording: null,
+      confirmedMarks: null,
+      confirmedBy: null,
+      confirmedAt: null,
+      sourceContentBoundingBoxAspectRatio: null,
+      contractKey: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.artworkFidelityContracts.push(contract);
+    await writeDb(db);
+    return contract;
+  }
+
+  async getArtworkFidelityContract(
+    projectId: string,
+  ): Promise<ArtworkFidelityContract | null> {
+    const db = await readDb();
+    const matches = db.artworkFidelityContracts
+      .filter((item) => item.projectId === projectId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return matches.at(-1) ?? null;
+  }
+
+  async getArtworkFidelityContractById(
+    id: string,
+  ): Promise<ArtworkFidelityContract | null> {
+    const db = await readDb();
+    return db.artworkFidelityContracts.find((item) => item.id === id) ?? null;
+  }
+
+  async updateArtworkFidelityContract(
+    id: string,
+    patch: UpdateArtworkFidelityContractInput,
+  ): Promise<ArtworkFidelityContract> {
+    const db = await readDb();
+    const contract = db.artworkFidelityContracts.find((item) => item.id === id);
+    if (!contract) throw new Error("Artwork fidelity contract not found");
+
+    Object.assign(contract, patch, { updatedAt: nowIso() });
+    await writeDb(db);
+    return contract;
   }
 }
