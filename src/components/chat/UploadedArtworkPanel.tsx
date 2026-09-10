@@ -21,11 +21,13 @@ import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
 import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
 import type { SignPlanCustomerView } from "@/capabilities/sign-preparation";
 import type {
+  ArtworkFidelityView,
   CustomerFinalizationStatus,
   SignArtworkView,
 } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { ArtworkComparison } from "./ArtworkComparison";
+import { ArtworkFidelityConfirmationStep } from "./ArtworkFidelityConfirmationStep";
 import CorrectionFinalReview from "./CorrectionFinalReview";
 import CorrectionWorkspace from "./CorrectionWorkspace";
 import { PREVIEW_BACKGROUND_COPY } from "./preview-background";
@@ -82,6 +84,16 @@ export interface UploadedArtworkPanelProps {
    */
   preparedRevision?: string | null;
   onUpload: (file: File) => void;
+  /**
+   * Universal Raster Reconstruction Phase R4A: the shared fidelity
+   * proposal/confirmation state — `null` until "check my artwork" has run
+   * at least once. See `ArtworkFidelityConfirmationStep`.
+   */
+  artworkFidelity?: ArtworkFidelityView | null;
+  /** Confirmation succeeded — parent should refetch its snapshot. */
+  onFidelityConfirmed?: () => void;
+  /** "Skip for now" on the fidelity confirmation step — client-only, never blocks the flow (Section 13). */
+  onSkipFidelity?: () => void;
   /**
    * LIVE PRODUCT BLOCKER #1: the routing answer at `choose_artwork_type`.
    * Client-only — see `ArtworkTypeChoice`'s doc in `uploaded-artwork-flow.ts`.
@@ -253,6 +265,16 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
       className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm"
     >
       {step === "upload" ? <UploadStep busy={busy} onUpload={props.onUpload} /> : null}
+
+      {step === "confirm_artwork_fidelity" ? (
+        <ArtworkFidelityConfirmationStep
+          projectId={props.projectId}
+          artworkFidelity={props.artworkFidelity ?? null}
+          busy={busy}
+          onConfirmed={() => props.onFidelityConfirmed?.()}
+          onSkip={() => props.onSkipFidelity?.()}
+        />
+      ) : null}
 
       {step === "choose_artwork_type" ? (
         <ArtworkTypeStep busy={busy} onChoose={props.onChooseArtworkType} />

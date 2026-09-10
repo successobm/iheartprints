@@ -767,4 +767,12 @@ export const TEST_FILES = [
   // CHECK constraint exists and has not been weakened -- registered
   // immediately per the established discipline.
   "src/capabilities/artwork-fidelity/artwork-fidelity-contracts.migration.test.ts",
+  // Universal Raster Reconstruction Phase R4A: production fidelity proposal
+  // + customer confirmation vertical slice -- registered immediately per
+  // the established discipline.
+  "src/capabilities/artwork-fidelity-proposal/downscale-for-proposal.test.ts",
+  "src/capabilities/artwork-fidelity-proposal/artwork-fidelity-proposal-capability.test.ts",
+  "src/capabilities/artwork-fidelity-proposal/openai-artwork-fidelity-proposal-provider.test.ts",
+  "src/capabilities/artwork-fidelity-proposal/resolve-artwork-fidelity-proposal-provider.test.ts",
+  "src/lib/services/artwork-fidelity-service.test.ts",
 ];

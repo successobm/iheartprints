@@ -11317,6 +11317,81 @@ reads from — exactly like `resolution-sufficiency.ts` was before it.
 
 ---
 
+## 23p. Universal Raster Reconstruction Phase R4A — Production Fidelity Proposal + Customer Confirmation
+
+Phase R4A makes the R3B foundation above USABLE from the real customer
+upload flow for the first time — proposal extraction, and the customer's
+own confirmation of it, but deliberately **not** reconstruction.
+
+**VISION PROPOSES → CUSTOMER CONFIRMS/CORRECTS → ARTWORK FIDELITY
+CONTRACT.** A vision-model proposal is never authority on its own; only an
+explicit customer (or operator) confirmation creates the immutable
+confirmed contract `ArtworkFidelityCapability.confirmContract` already
+enforced structurally at R3B/R3B-R.
+
+### `ArtworkFidelityProposalCapability` (`src/capabilities/artwork-fidelity-proposal/`)
+
+The first (and, this phase, only) provider port added to this area — sits
+ABOVE `ArtworkFidelityCapability`, never merged into it, per that
+capability's own "no provider port of any kind" structural property.
+Bytes in, a `proposedFacts`-shaped payload out (`wording[]`/
+`protectedMarks[]`, each carrying `readability`/`classification` +
+`confidence`, reimplementing the prompt/schema proven in Phase R3C/R3D
+research — see that module's own doc comments for the exact hypotheses
+encoded). Deliberately advisory-only, mirroring `ConceptEvaluationProvider`
+rather than the blocking Sign Preservation gate: a provider failure of any
+kind degrades to an empty proposal rather than ever blocking or erroring
+the customer flow — confirmation always requires explicit customer input
+regardless of whether extraction succeeded. Resolves to the real OpenAI
+provider only when `ARTWORK_FIDELITY_PROPOSAL_PROVIDER=openai` is
+configured (`artwork-fidelity-proposal-provider-config.ts`); unconditionally
+forced to the safe placeholder under `isAutomatedTestEnvironment()`, same
+discipline as every other provider resolver in this codebase.
+
+### Orchestration (`src/lib/services/artwork-fidelity-service.ts`)
+
+Composes `ArtworkPreparationCapability` (source asset resolution) +
+`AssetCapability` (server-side byte download) +
+`ArtworkFidelityProposalCapability` + `ArtworkFidelityCapability` at the
+app layer — none of those capabilities depend on each other directly. The
+source is always the customer's single original upload
+(`getOriginalAssetReference`) — the SAME immutable asset the DTF and
+(via `bridgeSignArtworkIfNeeded`) Signs paths already key off of — so
+proposal/confirmation runs once, before either profile's own destructive
+processing (DTF background removal; Signs composition planning). Source
+sha256 is always recomputed server-side, on both propose and confirm —
+never trusted from a client request body, which is what makes
+`confirmContract`'s own staleness check mean something end-to-end.
+
+### Customer surface
+
+One route, `POST /api/projects/[projectId]/artwork-fidelity`
+(`{action: "propose" | "confirm"}`), and one shared UI step,
+`confirm_artwork_fidelity` in `uploaded-artwork-flow.ts` /
+`ArtworkFidelityConfirmationStep.tsx` — inserted at the earliest point
+BOTH the DTF and Signs paths share (before the `choose_artwork_type`
+branch), never duplicated per profile. Deliberately **not a hard gate**:
+reconstruction does not exist yet, so nothing currently requires a
+confirmed contract to proceed — the step is skippable
+(`fidelityStepDismissed`, transient/client-only) and never retroactively
+interrupts a preparation that had already reached `compare`/`approved`
+before this phase shipped. **Future gating point, not yet built:** once a
+`RasterReconstructionCapability` exists and actually needs confirmed
+authority, remove the skip escape hatch (or require `status: "confirmed"`
+specifically) so reconstruction-bound artwork cannot proceed without one —
+see `deriveUploadedArtworkStep`'s own doc comment on this step.
+
+### Still not built this phase
+
+`RasterReconstructionCapability`, OpenAI image editing/reconstruction,
+Topaz, an accepted clean master, a reconstruction candidate, post-
+reconstruction fidelity comparison, DTF/Signs reconstruction routing, or
+any Print Ready transition change. A confirmed `ArtworkFidelityContract`
+exists and is real, immutable authority after this phase — nothing yet
+reads it for production.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

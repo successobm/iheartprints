@@ -4,6 +4,8 @@ import type {
   EmailCaptureResult,
 } from "@/capabilities/acquisition";
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
+import { isArtworkFidelityProposedFacts, type ArtworkFidelityProposedFacts } from "@/capabilities/artwork-fidelity-proposal";
+import type { ArtworkFidelityContractStatus, ProtectedMarkType } from "@/lib/domain/types";
 import {
   describeSignPlanForCustomer,
   type SignDefectCode,
@@ -354,6 +356,14 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * are never phrased for a customer here.
    */
   signArtwork: SignArtworkView | null;
+  /**
+   * Universal Raster Reconstruction Phase R4A: the shared fidelity
+   * proposal/confirmation state — `null` until "check my artwork" has run
+   * at least once. Shared by BOTH the DTF and Signs paths (never a
+   * profile-specific copy), bound to the same immutable original both
+   * paths key off of.
+   */
+  artworkFidelity: ArtworkFidelityView | null;
   /**
    * Sprint A4: where this session stands in the acquisition funnel, already
    * phrased for the customer. Never the persisted entitlement value, never
@@ -774,6 +784,7 @@ async function withConceptStatus(
     printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
     artworkPreparation,
     signArtwork: await resolveSignArtworkView(snapshot.project.id),
+    artworkFidelity: await resolveArtworkFidelityView(snapshot.project.id),
     acquisition: await resolveAcquisitionView(snapshot),
     payment: await resolvePaymentView(snapshot.project.id),
     productionTreatment: await resolveProductionTreatmentView(
@@ -871,6 +882,67 @@ async function resolveArtworkPreparation(
 ): Promise<ArtworkPreparationView | null> {
   try {
     return await getCapabilityGraph().artworkPreparation.getPreparation(projectId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Universal Raster Reconstruction Phase R4A: the Artwork Fidelity
+ * Contract's customer-safe view — the latest proposal/confirmation for this
+ * project, or `null` before anything has been proposed. Deliberately never
+ * exposes `contractKey`, a provider/model name, a raw provider request id,
+ * or the stored `proposedFacts` blob verbatim — only the fields the
+ * confirmation UI needs (readability/confidence ARE surfaced; they drive
+ * which fields the UI makes look uncertain, never a jargon "score").
+ */
+export interface ArtworkFidelityView {
+  contractId: string;
+  status: ArtworkFidelityContractStatus;
+  wording: {
+    text: string | null;
+    readability: "readable" | "partially_readable" | "cannot_read";
+    confidence: "high" | "medium" | "low";
+  }[];
+  protectedMarks: {
+    visualDescription: string;
+    classification: "TM" | "R" | "C" | "cannot_determine";
+    confidence: "high" | "medium" | "low";
+  }[];
+  confirmedWording: string[] | null;
+  confirmedMarks: ProtectedMarkType[] | null;
+  confirmedAt: string | null;
+}
+
+/** `null` when nothing has been proposed yet for this project — same advisory, never-take-down-the-snapshot discipline as `resolveSignArtworkView`. */
+async function resolveArtworkFidelityView(
+  projectId: string,
+): Promise<ArtworkFidelityView | null> {
+  try {
+    const contract = await getCapabilityGraph().artworkFidelity.getContract(projectId);
+    if (!contract) return null;
+    const facts: ArtworkFidelityProposedFacts | null = isArtworkFidelityProposedFacts(
+      contract.proposedFacts,
+    )
+      ? contract.proposedFacts
+      : null;
+    return {
+      contractId: contract.id,
+      status: contract.status,
+      wording: (facts?.wording ?? []).map((w) => ({
+        text: w.text,
+        readability: w.readability,
+        confidence: w.confidence,
+      })),
+      protectedMarks: (facts?.protectedMarks ?? []).map((m) => ({
+        visualDescription: m.visualDescription,
+        classification: m.classification,
+        confidence: m.confidence,
+      })),
+      confirmedWording: contract.confirmedWording,
+      confirmedMarks: contract.confirmedMarks,
+      confirmedAt: contract.confirmedAt,
+    };
   } catch {
     return null;
   }

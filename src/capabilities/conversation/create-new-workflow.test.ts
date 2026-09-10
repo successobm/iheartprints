@@ -259,6 +259,8 @@ describe("Correction A — the Create New workflow transition", () => {
     assert.equal(atStart, false);
     assert.equal(
       deriveUploadedArtworkStep({
+        artworkFidelity: { status: "confirmed" },
+        fidelityStepDismissed: true,
         preparation: null,
         signArtwork: null,
         choice: "undecided",

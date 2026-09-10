@@ -754,6 +754,8 @@ describe("UploadedArtworkPanel", () => {
 
   it("renders that guidance through the Existing Artwork upload step only", () => {
     const step = deriveUploadedArtworkStep({
+      artworkFidelity: { status: "confirmed" },
+      fidelityStepDismissed: true,
       preparation: null,
       signArtwork: null,
       choice: "upload_existing",
@@ -877,6 +879,8 @@ describe("UploadedArtworkPanel", () => {
     // Reload identity is the preparation record alone — same inputs the
     // server would re-hydrate after a hard refresh.
     const step = deriveUploadedArtworkStep({
+      artworkFidelity: { status: "confirmed" },
+      fidelityStepDismissed: true,
       preparation: preparation({
         approved: true,
         status: "approved",
