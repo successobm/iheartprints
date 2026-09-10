@@ -789,9 +789,11 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const provider = new FakeReconstructionProvider();
     const local = new CountingLocalProvider();
     const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+    // Native-sufficient sleeve artwork: this scenario is about intent
+    // lifecycle / paid-call idempotency, not reconstruction certification.
     const setup = await setupApprovedPreparation(repo, assets, {
-      geometry: SMALL_FIXTURE,
-      printPlacement: "left_chest",
+      geometry: ALREADY_LARGE_ENOUGH_FIXTURE,
+      printPlacement: "sleeve",
     });
     const first = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
@@ -819,9 +821,10 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     await worker.processNextJob();
     assert.equal(
       provider.submitCount,
-      1,
-      "exactly one paid submission across the whole transition",
+      0,
+      "native-sufficient artwork never spends a reconstruction credit",
     );
+    assert.equal(local.calls, 1);
     assert.ok(await productionAssetFor(repo, setup.projectId, again.job.id));
     assert.equal(
       (await repo.getProject(setup.projectId))!.project.status,
@@ -833,13 +836,15 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     // Sprint A2 Correction 3, mirrored for Existing Artwork. Both workflows
     // now share one reconciliation boundary, so this proves the shared path
     // rather than a parallel implementation.
+    // Native-sufficient path: Print Ready authority must not depend on the
+    // temporary reconstructed-upload guard this sprint introduced.
     const repo = await freshRepo();
     const provider = new FakeReconstructionProvider();
     const local = new CountingLocalProvider();
     const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
     const setup = await setupApprovedPreparation(repo, assets, {
-      geometry: SMALL_FIXTURE,
-      printPlacement: "left_chest",
+      geometry: ALREADY_LARGE_ENOUGH_FIXTURE,
+      printPlacement: "sleeve",
     });
     const conversationService = await import("@/lib/services/conversation-service");
 
@@ -853,7 +858,8 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     );
     const plate = await productionAssetFor(repo, setup.projectId, original.job.id);
     assert.ok(plate);
-    assert.equal(provider.submitCount, 1);
+    assert.equal(provider.submitCount, 0);
+    assert.equal(local.calls, 1);
     assert.ok(await conversationService.getProductionArtworkUrl(setup.projectId));
 
     // Unsupported request → the plate stops being the answer.
@@ -888,7 +894,7 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       (await conversationService.getFinalizationStatus(setup.projectId))?.status,
       "print_ready",
     );
-    assert.equal(provider.submitCount, 1, "no second paid reconstruction");
+    assert.equal(provider.submitCount, 0, "no paid reconstruction on either pass");
     assert.equal(
       (await productionAssetFor(repo, setup.projectId, original.job.id))?.id,
       plate!.id,
@@ -948,10 +954,21 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
 
     const report = await latestReport(repo, setup.projectId, job.id);
     assert.equal(report.profile, "uploaded_preserve");
-    assert.equal(report.status, "ready", report.blockingIssues.join("; "));
+    assert.equal(
+      report.status,
+      "finalization_required",
+      report.blockingIssues.join("; "),
+    );
+    assert.equal(
+      report.checks.find((c) => c.check === "reconstruction_certification_evidence")
+        ?.status,
+      "fail",
+    );
 
     const finished = await repo.getProject(setup.projectId);
-    assert.equal(finished!.project.status, "print_ready");
+    assert.equal(finished!.project.status, "finalization_required");
+    // Plate exists with correct geometry; automatic Print Ready is withheld.
+    assert.ok(productionAsset);
   });
 
   it("J: a 12in target produces a 3600px-wide plate", async () => {
@@ -972,11 +989,15 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     assert.equal(productionAsset?.widthPx, 3600);
 
     const report = await latestReport(repo, setup.projectId, job.id);
-    assert.equal(report.status, "ready", report.blockingIssues.join("; "));
+    assert.equal(
+      report.status,
+      "finalization_required",
+      report.blockingIssues.join("; "),
+    );
   });
 
   // --- M/N via the real pipeline -------------------------------------------
-  it("M/N: the plate is print-ready with no Concept Evaluation and no typed wording anywhere", async () => {
+  it("M/N: reconstructed upload validates without Concept Evaluation / wording, but is not automatically print-ready", async () => {
     const repo = await freshRepo();
     const { assets, finalArtwork, worker } = buildPipeline(repo);
     const setup = await setupApprovedPreparation(repo, assets);
@@ -994,13 +1015,13 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     assert.equal(snapshot!.brief.exactText, null, "no wording was ever typed");
 
     const report = await latestReport(repo, setup.projectId, job.id);
-    assert.equal(report.status, "ready");
+    assert.equal(report.status, "finalization_required");
     const emitted = report.checks.map((check) => check.check);
     assert.ok(!emitted.includes("concept_evaluation_alignment"));
     assert.ok(!emitted.includes("required_wording_verification"));
-    assert.ok(emitted.includes("source_lineage"));
-    assert.ok(emitted.includes("preserved_source_geometry"));
-    assert.ok(emitted.includes("reconstruction_sufficiency"));
+    assert.ok(!emitted.includes("brief_provenance"));
+    assert.ok(emitted.includes("reconstruction_certification_evidence"));
+    assert.equal(snapshot!.project.status, "finalization_required");
   });
 
   // --- P/Q/R: assets are separate and immutable -----------------------------
@@ -1098,7 +1119,12 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
   it("V: a completed job is reused only while the production size still matches", async () => {
     const repo = await freshRepo();
     const { assets, finalArtwork, worker } = buildPipeline(repo);
-    const setup = await setupApprovedPreparation(repo, assets);
+    // Native-sufficient: this scenario is about job reuse / size matching,
+    // not reconstruction certification.
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: ALREADY_LARGE_ENOUGH_FIXTURE,
+      printPlacement: "sleeve",
+    });
 
     const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
@@ -1241,8 +1267,12 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
   it("S: an already-completed print_ready plate stays deliverable, and is never retroactively invalidated", async () => {
     const repo = await freshRepo();
     const provider = new FakeReconstructionProvider();
-    const { assets, finalArtwork, worker } = buildPipeline(repo, provider);
-    const setup = await setupApprovedPreparation(repo, assets);
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: ALREADY_LARGE_ENOUGH_FIXTURE,
+      printPlacement: "sleeve",
+    });
 
     const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
@@ -1267,7 +1297,8 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       await finalArtwork.getCurrentProductionAssetId(setup.projectId),
       asset.id,
     );
-    assert.equal(provider.submitCount, 1, "nothing was re-produced");
+    assert.equal(provider.submitCount, 0, "native-sufficient path — nothing reconstructed");
+    assert.equal(local.calls, 1);
   });
 
   it("W: changing the size after a completed plate demands a NEW production run", async () => {
@@ -1308,9 +1339,15 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     assert.equal(stillThere?.id, firstAsset?.id);
     assert.equal(stillThere?.widthPx, 1200);
 
+    // False Print-Ready Guard: reconstructed undersized uploads produce plates
+    // but are not automatically deliverable without certification evidence.
     assert.equal(
       await finalArtwork.getCurrentProductionAssetId(setup.projectId),
-      secondAsset?.id,
+      null,
+    );
+    assert.equal(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "finalization_required",
     );
   });
 

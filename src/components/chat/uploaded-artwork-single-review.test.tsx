@@ -93,7 +93,7 @@ function preparation(overrides: Partial<ArtworkPreparationView> = {}): ArtworkPr
     classification: "REQUIRES_ENHANCEMENT",
     customer: {
       backgroundMessage: "Your artwork has a solid background that can be removed automatically.",
-      resolutionMessage: 'Your artwork is smaller than the recommended print resolution for a 6.92"-wide print on the full front. We\'ll need to enhance it before creating the final print-ready file.',
+      resolutionMessage: 'Your artwork is smaller than the recommended print resolution for a 6.92"-wide print on the full front. We\'ll prepare it carefully, and it may need a quick review before we can mark it print ready.',
       canPrepare: true,
       prepareActionLabel: "Remove the Background",
       enhancementNeeded: true,

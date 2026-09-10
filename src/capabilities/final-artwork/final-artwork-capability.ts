@@ -1911,7 +1911,21 @@ async function resolvePreparedUploadJob(
       const latestValidation = isStale
         ? null // already reviving below; no need to also check this.
         : await repo.getLatestProductionAssetValidationForJob(projectId, existing.id);
-      const revalidationWorthwhile = latestValidation !== null && latestValidation.status !== "ready";
+      // False Print-Ready Guard: a completed plate whose only outstanding
+      // authority failure is `reconstruction_certification_evidence` is a
+      // TERMINAL review verdict, not a transient validation miss. Re-queuing
+      // would re-spend provider super-resolution for the same size/artwork
+      // without changing the certification evidence. Leave the completed job
+      // as-is (`alreadyRequested: true`) so the customer stays on needs_review
+      // without burning another credit.
+      const terminalCertificationWithhold =
+        latestValidation !== null &&
+        latestValidation.status !== "ready" &&
+        validationReportHasFailedCertificationEvidence(latestValidation.report);
+      const revalidationWorthwhile =
+        latestValidation !== null &&
+        latestValidation.status !== "ready" &&
+        !terminalCertificationWithhold;
       if (isStale || revalidationWorthwhile) {
         const revived = await repo.updateFinalArtworkJob(existing.id, {
           status: "queued",
@@ -2087,6 +2101,31 @@ async function createJobToleratingRace(
     }
     throw error;
   }
+}
+
+/**
+ * False Print-Ready Guard: detect a terminal certification withhold in a
+ * persisted Print Validation report without importing the print-validation
+ * capability (domain/capability cycle avoidance — the report is stored as a
+ * plain object on `ProductionAssetValidation`).
+ *
+ * A failed `reconstruction_certification_evidence` check means human review
+ * (or a future fidelity authority) is required; re-running the same
+ * provider/size cannot manufacture that evidence.
+ */
+function validationReportHasFailedCertificationEvidence(
+  report: Record<string, unknown>,
+): boolean {
+  const checks = report.checks;
+  if (!Array.isArray(checks)) return false;
+  return checks.some((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const check = entry as { check?: unknown; status?: unknown };
+    return (
+      check.check === "reconstruction_certification_evidence" &&
+      check.status === "fail"
+    );
+  });
 }
 
 /**

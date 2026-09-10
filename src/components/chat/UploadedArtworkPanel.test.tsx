@@ -34,7 +34,7 @@ function preparation(
       backgroundMessage:
         "Your artwork has a solid background that can be removed automatically.",
       resolutionMessage:
-        'Your artwork is smaller than the recommended print resolution for a 10.5"-wide print on the full front. We\'ll need to enhance it before creating the final print-ready file.',
+        'Your artwork is smaller than the recommended print resolution for a 10.5"-wide print on the full front. We\'ll prepare it carefully, and it may need a quick review before we can mark it print ready.',
       canPrepare: true,
       prepareActionLabel: "Remove the Background",
       enhancementNeeded: true,
@@ -794,7 +794,7 @@ describe("UploadedArtworkPanel", () => {
       html,
       /Your artwork has a solid background that can be removed automatically/,
     );
-    assert.match(html, /We&#x27;ll need to enhance it before creating the final print-ready file/);
+    assert.match(html, /We&#x27;ll prepare it carefully, and it may need a quick review before we can mark it print ready/);
     assert.match(html, /Remove the Background/);
   });
 
@@ -847,7 +847,7 @@ describe("UploadedArtworkPanel", () => {
     assert.doesNotMatch(approved, /preserved your artwork|design itself is unchanged/);
     assert.match(
       approved,
-      /still needs to be enhanced before we can create the final print-ready file/,
+      /may need a quick review before we can mark it print ready/,
     );
   });
 
@@ -870,7 +870,7 @@ describe("UploadedArtworkPanel", () => {
     assert.doesNotMatch(approved, /Use This Artwork/);
     assert.match(approved, /Background preparation complete/);
     assert.match(approved, /ready for final print preparation/);
-    assert.doesNotMatch(approved, /still needs to be enhanced/);
+    assert.doesNotMatch(approved, /quick review before we can mark it print ready/);
   });
 
   it("persisted approved state reloads into the same truthful terminal copy", () => {
@@ -895,7 +895,7 @@ describe("UploadedArtworkPanel", () => {
       hasPreparedArtwork: true,
     });
     assert.match(html, /Background preparation complete/);
-    assert.match(html, /still needs to be enhanced/);
+    assert.match(html, /may need a quick review before we can mark it print ready/);
     assert.doesNotMatch(html, /Use This Artwork/);
   });
 
@@ -937,10 +937,11 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     assert.match(text, /Full Back/);
     assert.match(text, /Adjust size/);
     const html = render("approved", approvedState);
-    // Enhancement is stated as a fact about a later step, with the
-    // preservation promise attached.
-    assert.match(html, /needs to be enhanced for this print size/);
-    assert.match(html, /wording, and colours stay exactly as they are/);
+    // Undersized artwork is stated honestly: preparation may need review
+    // before Print Ready — never a false claim that enhancement already succeeded.
+    assert.match(html, /smaller than recommended for this print size/);
+    assert.match(html, /may need a quick review before we can mark it print ready/);
+    assert.doesNotMatch(html, /enhanced successfully|We enhanced your artwork/i);
   });
 
   it("never shows concept-generation or revision affordances", () => {
@@ -990,7 +991,7 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
     });
 
     assert.match(html, /Create Print-Ready Artwork/);
-    assert.doesNotMatch(html, /needs to be enhanced for this print size/);
+    assert.doesNotMatch(html, /smaller than recommended for this print size/);
   });
 
   it("replaces the action with the shared waiting copy while production runs", () => {
@@ -1019,12 +1020,13 @@ describe("UploadedArtworkPanel — print-ready continuation", () => {
       finalizationStatus: "needs_review",
     });
 
-    assert.match(html, /needs attention before we can finish/);
+    assert.match(html, /needs a quick review before we can mark it print ready/);
     assert.match(html, /uploaded artwork and the prepared version are both safe/);
     assert.doesNotMatch(html, /Try Again/);
     assert.match(html, /Create Print-Ready Artwork/);
     assert.doesNotMatch(html, /Retry Preparation/);
     assert.doesNotMatch(html, /is ready|print-ready file is ready/i);
+    assert.doesNotMatch(html, /Download Print-Ready Artwork/);
   });
 
   it("retryable_failure shows Retry Preparation and not the preparing spinner", () => {
@@ -1378,7 +1380,7 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
       customer: {
         backgroundMessage: "Your artwork has a solid background that can be removed automatically.",
         resolutionMessage:
-          'Your artwork is smaller than the recommended print resolution for a 10.5"-wide print on the full front. We\'ll need to enhance it before creating the final print-ready file.',
+          'Your artwork is smaller than the recommended print resolution for a 10.5"-wide print on the full front. We\'ll prepare it carefully, and it may need a quick review before we can mark it print ready.',
         canPrepare: true,
         prepareActionLabel: "Remove the Background",
         enhancementNeeded: true,
@@ -1387,7 +1389,7 @@ describe("UploadedArtworkPanel — the artwork-repair doorway (Phase 27E UX corr
 
     assert.match(html, /data-resolution-notice/);
     assert.match(html, /Resolution enhancement needed/);
-    assert.match(html, /We&#x27;ll need to enhance it/);
+    assert.match(html, /may need a quick review before we can mark it print ready/);
     // It must sit in its own block, AFTER the primary compare/repair
     // decision area (Section 9) — not nested inside the Edit Artwork card,
     // and not phrased as another repair failure.

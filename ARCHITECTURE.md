@@ -7165,6 +7165,27 @@ different and in places stricter:
   artwork's proportions, so a crop, letterbox, or squash is caught.
 - `reconstruction_sufficiency` — the plate was not enlarged beyond the raster
   it was built from.
+- `reconstruction_certification_evidence` — **temporary False Print-Ready
+  Guard.** Provider super-resolution (e.g. Topaz Transparency Upscale) can
+  manufacture a geometrically sufficient continuous-tone plate from prepared
+  artwork that was below the production target. Pixel count and 300 PPI
+  metadata are **not** proof of visual print suitability. When
+  `resolutionProvenance` or enhancement is `"reconstructed"` and no
+  authoritative reconstruction-quality / fidelity evidence exists, this
+  blocking check fails and the report status is `finalization_required`
+  (customer-visible as `needs_review`) rather than `ready` / `print_ready`.
+  The production asset may still exist. This is deliberately **not** a
+  blur/SSIM/OCR score — those authorities do not exist yet. There is no
+  mild/severe numeric cutoff: the only contract thresholds are
+  `decideEnhancement`'s binary (≥1× skip) and Topaz's 4× ceiling, and
+  inventing a second quality line would be false precision. Halftone,
+  Create New (`generated_concept`), and Signs profiles are unchanged.
+  Replace this guard when an explicit fidelity/quality authority ships.
+  Completed jobs withheld only by this check are **not** re-queued on
+  duplicate Create Print-Ready requests (see
+  `resolvePreparedUploadJob` / `validationReportHasFailedCertificationEvidence`)
+  — re-running provider super-resolution cannot manufacture fidelity evidence
+  and must not spend another credit.
 
 Every report also carries a `validation_profile` info check and a `profile`
 field, so **"not asked" is never indistinguishable from "passed"**.
@@ -7181,10 +7202,14 @@ substrate-defined) and emits none of `uploaded_preserve`'s or
 
 Deterministic checks prove the pipeline used the artwork the customer
 approved, and that its geometry survived. They **do not** prove it still looks
-the same. A provider-hosted reconstruction is a genuine enhancement transform,
-and visual fidelity after it remains provider-dependent and unproven by
-arithmetic. This limitation is stated in
-`print-validation/contracts.ts` rather than papered over.
+the same. A provider-hosted **super-resolution** step (Topaz Transparency
+Upscale) manufactures additional pixels; it is not generative redesign, and
+visual fidelity after it remains unproven by arithmetic. Until an explicit
+reconstruction-quality/fidelity authority exists,
+`reconstruction_certification_evidence` withholds automatic Print Ready for
+continuous-tone `"reconstructed"` Existing Artwork plates (see above). This
+limitation is stated in `print-validation/contracts.ts` rather than papered
+over.
 
 ### Project lifecycle
 

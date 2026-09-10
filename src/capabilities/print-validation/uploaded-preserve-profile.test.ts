@@ -112,23 +112,24 @@ function statusOf(
 describe("Print Validation — uploaded_preserve applicability profile", () => {
   const capability = createPrintValidationCapability();
 
-  it("M: a plate with no Concept Evaluation at all is still print-ready", () => {
+  it("M: a plate with no Concept Evaluation at all remains applicable under uploaded_preserve, but reconstructed plates are not automatically print-ready", () => {
     const report = capability.validateArtwork(uploadedPreserveInput());
 
     assert.equal(report.profile, "uploaded_preserve");
-    assert.equal(report.status, "ready");
-    assert.deepEqual(report.blockingIssues, []);
     assert.ok(
       !codes(report).includes("concept_evaluation_alignment"),
       "a concept evaluation that could not exist is not asked for",
     );
+    assert.equal(statusOf(report, "reconstruction_certification_evidence"), "fail");
+    assert.equal(report.status, "finalization_required");
   });
 
   it("N: absent typed required wording never blocks — the wording is in the customer's pixels", () => {
     const report = capability.validateArtwork(uploadedPreserveInput());
 
     assert.ok(!codes(report).includes("required_wording_verification"));
-    assert.equal(report.status, "ready");
+    // Still finalization_required from reconstruction_certification_evidence — not from wording.
+    assert.ok(!report.blockingIssues.some((issue) => /wording/i.test(issue)));
   });
 
   it("does not ask for brief provenance, because no brief version authorizes uploaded artwork", () => {
@@ -136,7 +137,6 @@ describe("Print Validation — uploaded_preserve applicability profile", () => {
 
     assert.ok(!codes(report).includes("brief_provenance"));
     assert.equal(report.designBriefVersionId, null);
-    assert.equal(report.status, "ready");
   });
 
   it("records which profile it applied, so 'not asked' is never mistaken for 'passed'", () => {

@@ -88,7 +88,7 @@ export function describeApprovedPreparation(
     // preservation promise is one this pipeline cannot keep, so it isn't made.
     summary: "We've removed the background from the artwork you uploaded.",
     nextStepMessage: enhancementNeeded
-      ? "This artwork still needs to be enhanced before we can create the final print-ready file."
+      ? "This artwork still needs more resolution for the chosen print size. We'll prepare it carefully, and it may need a quick review before we can mark it print ready."
       : "This prepared artwork is ready for final print preparation.",
   };
 }
@@ -122,7 +122,7 @@ export function describePrintReadyPreparation(
     message:
       "Next we'll produce the final print-ready file at the size below.",
     enhancementMessage: enhancementNeeded
-      ? "Your artwork needs to be enhanced for this print size. We'll take care of that — your design, wording, and colours stay exactly as they are."
+      ? "Your artwork is smaller than recommended for this print size. We'll prepare it carefully — it may need a quick review before we can mark it print ready."
       : null,
     // Phase 27M: by this step the artwork has already been prepared,
     // reviewed, and (for a manual correction) accepted — this action creates
@@ -272,7 +272,7 @@ export function describeGuidedCleanupOutcome(
  * version both survive any finalization failure.
  */
 export const PRINT_READY_NEEDS_ATTENTION_MESSAGE =
-  "Your artwork needs attention before we can finish the print-ready file. Your uploaded artwork and the prepared version are both safe — you can try again, and we'll take another look.";
+  "We prepared your artwork, but it needs a quick review before we can mark it print ready. Your uploaded artwork and the prepared version are both safe.";
 
 function backgroundMessageFor(assessment: RepairabilityAssessment): string {
   switch (assessment.backgroundTreatment) {
@@ -315,7 +315,7 @@ function resolutionMessageFor(
     return `Your artwork has enough detail to print ${size} wide on the ${placement}.`;
   }
 
-  return `Your artwork is smaller than the recommended print resolution for a ${size}-wide print on the ${placement}. We'll need to enhance it before creating the final print-ready file.`;
+  return `Your artwork is smaller than the recommended print resolution for a ${size}-wide print on the ${placement}. We'll prepare it carefully, and it may need a quick review before we can mark it print ready.`;
 }
 
 function formatInches(value: number): string {

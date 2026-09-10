@@ -477,7 +477,7 @@ describe("customer-facing copy", () => {
 
     assert.equal(view.enhancementNeeded, true);
     assert.match(view.resolutionMessage!, /smaller than the recommended print resolution/);
-    assert.match(view.resolutionMessage!, /We'll need to enhance it before/);
+    assert.match(view.resolutionMessage!, /may need a quick review before we can mark it print ready/);
   });
 
   it("explains a complex background without offering a destructive action", () => {
@@ -499,13 +499,17 @@ describe("customer-facing copy", () => {
     const needsEnhancement = describeApprovedPreparation(true);
     assert.equal(needsEnhancement.headline, "Background preparation complete");
     assert.match(needsEnhancement.summary, /removed the background/);
-    assert.match(needsEnhancement.nextStepMessage, /still needs to be enhanced/);
+    assert.match(
+      needsEnhancement.nextStepMessage,
+      /may need a quick review before we can mark it print ready/,
+    );
+    assert.doesNotMatch(needsEnhancement.nextStepMessage, /enhanced successfully|We enhanced/i);
     assert.doesNotMatch(needsEnhancement.headline, /ready to go/i);
     assert.doesNotMatch(needsEnhancement.summary, /ready to go/i);
 
     const sufficient = describeApprovedPreparation(false);
     assert.equal(sufficient.headline, "Background preparation complete");
     assert.match(sufficient.nextStepMessage, /ready for final print preparation/);
-    assert.doesNotMatch(sufficient.nextStepMessage, /still needs to be enhanced/);
+    assert.doesNotMatch(sufficient.nextStepMessage, /quick review before we can mark it print ready/);
   });
 });

@@ -493,6 +493,19 @@ function validate(input: PrintValidationInput): PrintValidationReport {
         if (sufficiencyCheck.status !== "pass") {
           requiredTransformations.add("upscale_raster_artwork");
         }
+
+        // False Print-Ready Guard: provider super-resolution pixel count is
+        // not visual-quality proof. Withhold automatic Print Ready until an
+        // explicit fidelity/quality authority exists (or a human reviews).
+        const certificationCheck = checkReconstructionCertificationEvidence(
+          asset,
+          input.uploadedPreserve,
+          normalization,
+        );
+        checks.push(certificationCheck);
+        if (certificationCheck.status !== "pass") {
+          requiredTransformations.add("require_human_review");
+        }
       }
     }
   }
@@ -1872,6 +1885,67 @@ function checkReconstructionSufficiency(
     reason: sufficient
       ? `Production artwork was sized down from (or held at) the detail it was built from (${Math.round(normalization.trimmedWidthPx)}px → ${Math.round(producedWidthPx)}px), so every printed pixel carries real detail.`
       : `Production artwork was enlarged ${contentScale.toFixed(2)}x beyond the artwork it was built from (${Math.round(normalization.trimmedWidthPx)}px → ${Math.round(producedWidthPx)}px) — it carries the required pixel count without the detail to match it.`,
+  };
+}
+
+/**
+ * False Print-Ready Guard (temporary authority repair).
+ *
+ * Why this exists: `reconstruction_sufficiency` and
+ * `honestDimensionsFor("reconstructed")` correctly refuse *interpolated*
+ * enlargement lies, but they also treat provider super-resolution output
+ * dimensions as trustworthy production detail. That is enough to certify a
+ * geometrically perfect plate that still looks like the undersized source
+ * (Cochrane-class failure). No blur/SSIM/OCR/fidelity authority exists yet.
+ *
+ * Temporary policy (no invented quality score): for continuous-tone
+ * Existing Artwork plates, if resolution provenance or enhancement path is
+ * `"reconstructed"`, automatic Print Ready is withheld. Coverage ratio is
+ * recorded in the reason for observability; it is not used as a mild/severe
+ * magic threshold — the codebase has no defensible second cutoff between
+ * `decideEnhancement`'s binary (>=1 skip) and Topaz's 4× ceiling, and
+ * inventing one would be false precision. Halftone, Create New, and Signs
+ * profiles are out of scope here.
+ *
+ * Replace this guard with an explicit reconstruction-quality/fidelity
+ * authority when that sprint ships; until then uncertain must not become
+ * print_ready.
+ */
+function checkReconstructionCertificationEvidence(
+  asset: NonNullable<PrintValidationInput["primaryAsset"]>,
+  evidence: UploadedPreserveEvidence,
+  normalization: ProductionNormalizationSummary,
+): PrintValidationCheck {
+  const reconstructed =
+    asset.resolutionProvenance === "reconstructed" ||
+    evidence.enhancement === "reconstructed";
+
+  const requiredWidthPx = Math.max(
+    1,
+    Math.round(normalization.intendedWidthIn * normalization.targetPpi),
+  );
+  const sourceVisibleWidthPx = Math.max(0, Math.round(evidence.sourceAlphaBBoxWidthPx));
+  const coverageRatio = sourceVisibleWidthPx / requiredWidthPx;
+
+  if (!reconstructed) {
+    return {
+      check: "reconstruction_certification_evidence",
+      status: "pass",
+      severity: "blocking",
+      reason:
+        "Production artwork did not depend on provider super-resolution — certification evidence is not required for this path.",
+    };
+  }
+
+  return {
+    check: "reconstruction_certification_evidence",
+    status: "fail",
+    severity: "blocking",
+    reason:
+      `Prepared artwork provided ${sourceVisibleWidthPx}px of visible width against a ${requiredWidthPx}px production target ` +
+      `(coverage ${(coverageRatio * 100).toFixed(1)}%). Provider super-resolution produced the plate's pixel count, but ` +
+      `iHeartPrints has no authoritative reconstruction-quality/fidelity evidence. Automatic Print Ready is withheld — ` +
+      `human review (or a future fidelity authority) is required. This is not a claim that processing failed.`,
   };
 }
 

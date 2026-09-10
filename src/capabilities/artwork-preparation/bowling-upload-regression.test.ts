@@ -175,7 +175,7 @@ describe("Bowling acceptance regression — uploaded artwork → prepared artwor
     assert.equal(contextView.customer.enhancementNeeded, true);
     assert.match(
       contextView.customer.resolutionMessage!,
-      /We'll need to enhance it before creating the final print-ready file\./,
+      /We'll prepare it carefully, and it may need a quick review before we can mark it print ready\./,
     );
 
     const prepared = await capability.prepareBackground(projectId);

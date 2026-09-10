@@ -338,6 +338,20 @@ export const PRINT_VALIDATION_CHECK_CODES = [
    * has the required pixel count without the detail to match it.
    */
   "reconstruction_sufficiency",
+  /**
+   * `uploaded_preserve` continuous-tone only. Temporary authority guard
+   * (False Print-Ready Guard sprint): provider super-resolution pixel count
+   * is not, by itself, proof of visual print readiness when the plate's
+   * resolution provenance is `"reconstructed"` (or enhancement was
+   * `"reconstructed"`) and no authoritative reconstruction-quality/fidelity
+   * evidence exists. Blocks automatic `print_ready` so uncertain quality
+   * requires human review (`finalization_required`) rather than silent
+   * certification. Not a blur/SSIM/OCR score — those authorities do not exist
+   * yet. Does not apply to `generated_concept`, Signs profiles, or
+   * `halftone_dtf` (which answers a different representation's questions).
+   * Replace with an explicit fidelity/quality authority when one ships.
+   */
+  "reconstruction_certification_evidence",
   // --- Print'em All Phase 2: DTF halftone treatment ------------------------
   // Emitted ONLY for a plate whose durable production treatment is
   // `halftone_dtf`, and replacing `reconstruction_sufficiency` rather than
@@ -758,13 +772,16 @@ export type PrintValidationProfile =
  *
  * HONESTY BOUNDARY, stated plainly because it would otherwise be tempting to
  * read more into these numbers than they carry: none of this proves the
- * artwork still LOOKS the same. A provider-hosted reconstruction is a genuine
- * enhancement transform, and visual fidelity after it remains
- * provider-dependent and unproven by arithmetic. What these fields DO prove is
- * that the pipeline used the artwork the customer approved (not the original
- * upload, not another project's asset), and that the geometry survived —
- * nothing was cropped away, stretched, letterboxed, or invented past the
- * density of the raster it was built from.
+ * artwork still LOOKS the same. A provider-hosted super-resolution step
+ * (e.g. Topaz Transparency Upscale) manufactures additional pixels; it is
+ * not generative redesign, and visual fidelity / print suitability after it
+ * remains unproven by arithmetic. What these fields DO prove is that the
+ * pipeline used the artwork the customer approved (not the original upload,
+ * not another project's asset), and that the geometry survived — nothing was
+ * cropped away, stretched, letterboxed, or invented past the density of the
+ * raster it was built from. Until an explicit reconstruction-quality /
+ * fidelity authority exists, `reconstruction_certification_evidence` refuses
+ * automatic Print Ready for `"reconstructed"` continuous-tone plates.
  */
 export interface UploadedPreserveEvidence {
   /** The approved prepared `ArtworkVersion` this plate was produced from. Must equal the report's `artworkVersionId`. */

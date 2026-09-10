@@ -175,10 +175,11 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
     );
   });
 
-  it("D2: the same live file at a width its 4x reconstruction genuinely covers is certifiable", () => {
+  it("D2: the same live file at a width its 4x reconstruction genuinely covers is geometrically valid but not automatically print-ready", () => {
     // 7in x 300 = 2100px plate. 2100 / 562 = 3.74x — inside the provider's
-    // reach, so this is a real, honest print_ready outcome for the live
-    // artwork rather than a smaller-is-easier fiction.
+    // reach. Geometry and reconstruction_sufficiency pass; the temporary
+    // False Print-Ready Guard still withholds automatic Print Ready until
+    // a fidelity authority exists.
     const sourceBytes = artworkPng(
       LIVE_CANVAS.width,
       LIVE_CANVAS.height,
@@ -227,7 +228,7 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
     );
     assert.ok(meta.trimmedWidthPx >= 2100);
 
-    // --- authoritative validation, uploaded-preserve profile, unchanged rules
+    // --- authoritative validation, uploaded-preserve profile
     const encoded = encodeProductionPng(normalized.result);
     assert.equal(encoded.hasTransparency, true, "GOAL 7: transparency survives");
 
@@ -295,8 +296,9 @@ describe("Print'em All Phase 0 — production-need-driven reconstruction", () =>
         `${name} must pass: ${byName.get(name)?.reason ?? "check not emitted"}`,
       );
     }
-    assert.deepEqual(report.blockingIssues, [], "no blocking issue may remain");
-    assert.equal(report.status, "ready", "the plate is certifiable");
+    assert.equal(byName.get("reconstruction_certification_evidence")?.status, "fail");
+    assert.equal(report.status, "finalization_required");
+    assert.ok(report.requiredTransformations.includes("require_human_review"));
   });
 
   /* ================================================================== */

@@ -51,8 +51,9 @@ import { confirmProductionSizeForTests } from "@/test-support/confirm-production
  *       → enhancement REQUIRED (923 << 3150)
  *       → local stand-in reconstruction
  *       → 3150px-wide production PNG, height from the artwork's own proportions
- *       → uploaded-preserve validation
- *       → print_ready
+ *       → uploaded-preserve validation (geometry passes;
+ *         reconstruction_certification_evidence fails — False Print-Ready Guard)
+ *       → finalization_required (production asset may exist; NOT automatic print_ready)
  *
  * The whole run happens with `fetch`, `http`, `https`, and raw sockets trapped,
  * so an OpenAI call, a Topaz call, or a segmentation call would fail loudly
@@ -321,12 +322,22 @@ describe("Bowling acceptance regression — approved prepared artwork → print-
     );
     const report = validation!.report as unknown as PrintValidationReport;
     assert.equal(report.profile, "uploaded_preserve");
-    assert.equal(report.status, "ready", report.blockingIssues.join("; "));
+    assert.equal(
+      report.status,
+      "finalization_required",
+      report.blockingIssues.join("; "),
+    );
+    assert.equal(
+      report.checks.find((c) => c.check === "reconstruction_certification_evidence")
+        ?.status,
+      "fail",
+    );
 
     const emitted = report.checks.map((check) => check.check);
     assert.ok(emitted.includes("source_lineage"));
     assert.ok(emitted.includes("preserved_source_geometry"));
     assert.ok(emitted.includes("reconstruction_sufficiency"));
+    assert.ok(emitted.includes("reconstruction_certification_evidence"));
     assert.ok(!emitted.includes("required_wording_verification"));
     assert.ok(!emitted.includes("concept_evaluation_alignment"));
     assert.ok(!emitted.includes("brief_provenance"));
@@ -357,11 +368,9 @@ describe("Bowling acceptance regression — approved prepared artwork → print-
 
     // --- Customer-visible state --------------------------------------------
     const finished = await repo.getProject(projectId);
-    assert.equal(finished!.project.status, "print_ready");
-    assert.equal(
-      await finalArtwork.getCurrentProductionAssetId(projectId),
-      productionAsset.id,
-    );
+    assert.equal(finished!.project.status, "finalization_required");
+    // Plate exists, but delivery is withheld without ready validation.
+    assert.equal(await finalArtwork.getCurrentProductionAssetId(projectId), null);
 
     // --- AB / AC: no creative generation, and no network at all -------------
     assert.deepEqual(

@@ -64,7 +64,7 @@ describe("PrepareForPrintAction (Sprint 2M Phase 2B)", () => {
         onPrepare: () => {},
       }),
     );
-    assert.match(html, /We need to review your artwork before it can be finalized/);
+    assert.match(html, /We prepared your artwork, but it needs a quick review before we can mark/);
     assert.doesNotMatch(html, /is ready/i);
     assert.doesNotMatch(html, /Creating your print-ready artwork/);
     assert.doesNotMatch(html, /Retry Preparation/);
