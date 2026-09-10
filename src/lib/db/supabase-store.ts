@@ -20,9 +20,12 @@ import type {
   AcquisitionEntitlement,
   AcquisitionFreeConceptClaim,
   AcquisitionSession,
+  ArtworkFidelityContract,
+  ArtworkFidelityContractStatus,
   ArtworkPreparation,
   ArtworkPreparationStatus,
   ArtworkVersion,
+  ProtectedMarkType,
   SignPlanAuthorizationActor,
   SignPreparation,
   SignPreparationStatus,
@@ -64,6 +67,7 @@ import type {
 import type {
   ApproveDesignBriefInput,
   CaptureAcquisitionEmailInput,
+  CreateArtworkFidelityContractInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
@@ -90,6 +94,7 @@ import type {
   RecordPaidImageIntentFailureInput,
   ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
+  UpdateArtworkFidelityContractInput,
   UpdateArtworkPreparationInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
@@ -502,6 +507,85 @@ type DbSignPreparation = {
   created_at: string;
   updated_at: string;
 };
+
+type DbArtworkFidelityContract = {
+  id: string;
+  project_id: string;
+  status: ArtworkFidelityContractStatus;
+  source_asset_id: string;
+  source_sha256: string;
+  proposed_facts: Record<string, unknown> | null;
+  confirmed_wording: string[] | null;
+  confirmed_marks: string[] | null;
+  confirmed_by: SignPlanAuthorizationActor | null;
+  confirmed_at: string | null;
+  source_content_bounding_box_aspect_ratio: number | null;
+  contract_key: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * Maps the closed-set-but-plain-ASCII-token DB column (`'TM' | 'R' | 'C'`
+ * — see the migration's own doc comment on why the literal glyphs are
+ * never stored) to the real domain glyphs. Unknown/malformed tokens are
+ * dropped rather than guessed — fail closed, mirroring
+ * `resolveSignBackgroundTreatment`'s own discipline.
+ */
+function markTokenToGlyph(token: string): ProtectedMarkType | null {
+  if (token === "TM") return "™";
+  if (token === "R") return "®";
+  if (token === "C") return "©";
+  return null;
+}
+
+/**
+ * Phase R3B-R (independent-review repair): an explicit exhaustive switch
+ * with a `never`-checked default, rather than a final catch-all `return
+ * "C"` — a hypothetical future 4th `ProtectedMarkType` value must fail
+ * loudly at compile time (the `never` assignment) and at runtime, never
+ * silently mismap to `©`.
+ */
+function markGlyphToToken(mark: ProtectedMarkType): string {
+  switch (mark) {
+    case "™":
+      return "TM";
+    case "®":
+      return "R";
+    case "©":
+      return "C";
+    default: {
+      const exhaustiveCheck: never = mark;
+      throw new Error(`Unsupported protected mark: ${String(exhaustiveCheck)}`);
+    }
+  }
+}
+
+function mapArtworkFidelityContract(
+  row: DbArtworkFidelityContract,
+): ArtworkFidelityContract {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    status: row.status,
+    sourceAssetId: row.source_asset_id,
+    sourceSha256: row.source_sha256,
+    proposedFacts: row.proposed_facts ?? null,
+    confirmedWording: row.confirmed_wording ?? null,
+    confirmedMarks: row.confirmed_marks
+      ? row.confirmed_marks
+          .map(markTokenToGlyph)
+          .filter((mark): mark is ProtectedMarkType => mark !== null)
+      : null,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: row.confirmed_at,
+    sourceContentBoundingBoxAspectRatio:
+      row.source_content_bounding_box_aspect_ratio ?? null,
+    contractKey: row.contract_key,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 type DbDesignBriefVersion = {
   id: string;
@@ -3156,5 +3240,83 @@ export class SupabaseProjectRepository implements ProjectRepository {
       .single();
     if (error) throw error;
     return mapSignPreparation(data as DbSignPreparation);
+  }
+
+  async createArtworkFidelityContract(
+    projectId: string,
+    input: CreateArtworkFidelityContractInput,
+  ): Promise<ArtworkFidelityContract> {
+    const { data, error } = await this.client
+      .from("artwork_fidelity_contracts")
+      .insert({
+        project_id: projectId,
+        status: "proposed",
+        source_asset_id: input.sourceAssetId,
+        source_sha256: input.sourceSha256,
+        proposed_facts: input.proposedFacts,
+      })
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapArtworkFidelityContract(data as DbArtworkFidelityContract);
+  }
+
+  async getArtworkFidelityContract(
+    projectId: string,
+  ): Promise<ArtworkFidelityContract | null> {
+    const { data, error } = await this.client
+      .from("artwork_fidelity_contracts")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkFidelityContract(data as DbArtworkFidelityContract) : null;
+  }
+
+  async getArtworkFidelityContractById(
+    id: string,
+  ): Promise<ArtworkFidelityContract | null> {
+    const { data, error } = await this.client
+      .from("artwork_fidelity_contracts")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkFidelityContract(data as DbArtworkFidelityContract) : null;
+  }
+
+  async updateArtworkFidelityContract(
+    id: string,
+    patch: UpdateArtworkFidelityContractInput,
+  ): Promise<ArtworkFidelityContract> {
+    const update: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+    if (patch.status !== undefined) update.status = patch.status;
+    if (patch.proposedFacts !== undefined) update.proposed_facts = patch.proposedFacts;
+    if (patch.confirmedWording !== undefined)
+      update.confirmed_wording = patch.confirmedWording;
+    if (patch.confirmedMarks !== undefined) {
+      update.confirmed_marks = patch.confirmedMarks
+        ? patch.confirmedMarks.map(markGlyphToToken)
+        : null;
+    }
+    if (patch.confirmedBy !== undefined) update.confirmed_by = patch.confirmedBy;
+    if (patch.confirmedAt !== undefined) update.confirmed_at = patch.confirmedAt;
+    if (patch.sourceContentBoundingBoxAspectRatio !== undefined)
+      update.source_content_bounding_box_aspect_ratio =
+        patch.sourceContentBoundingBoxAspectRatio;
+    if (patch.contractKey !== undefined) update.contract_key = patch.contractKey;
+
+    const { data, error } = await this.client
+      .from("artwork_fidelity_contracts")
+      .update(update)
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapArtworkFidelityContract(data as DbArtworkFidelityContract);
   }
 }

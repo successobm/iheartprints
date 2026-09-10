@@ -758,4 +758,13 @@ export const TEST_FILES = [
   // sign_preparation_id column -- registered immediately per the
   // established discipline.
   "src/lib/db/final-artwork-job-source-identity.migration.test.ts",
+  // Universal Raster Reconstruction Phase R3B: the durable Artwork
+  // Fidelity Contract foundation -- registered immediately per the
+  // established discipline.
+  "src/capabilities/artwork-fidelity/artwork-fidelity-contract-identity.test.ts",
+  "src/capabilities/artwork-fidelity/artwork-fidelity-capability.test.ts",
+  // Phase R3B-R (independent-review repair): proves the status-consistency
+  // CHECK constraint exists and has not been weakened -- registered
+  // immediately per the established discipline.
+  "src/capabilities/artwork-fidelity/artwork-fidelity-contracts.migration.test.ts",
 ];

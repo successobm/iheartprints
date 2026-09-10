@@ -3021,3 +3021,140 @@ export interface SignPreservationTransportAttempt {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * Universal Raster Reconstruction Phase R3B: the durable Artwork Fidelity
+ * Contract foundation — see `capability-boundaries.ts`'s own
+ * "ARTWORK FIDELITY CONTRACT" section for the full architectural context
+ * (Phase R3A audit).
+ *
+ * 'proposed'  — machine-proposed facts may exist (`proposedFacts`); this
+ *               status carries NO reconstruction authority. Never usable
+ *               by a future reconstruction consumer.
+ * 'confirmed' — a customer/operator explicitly confirmed the preservation
+ *               facts. This, and ONLY this, is reconstruction authority —
+ *               and, once reached, PERMANENT for this row (Phase R3B-R,
+ *               independent-review repair): `ArtworkFidelityCapability
+ *               .confirmContract` refuses to transition an already-
+ *               `'confirmed'` row again. A correction is a NEW contract
+ *               (`proposeContract` + `confirmContract` on the new id),
+ *               never a second write to this one — mirroring
+ *               `FinalDirectionApproval`/`DesignBriefVersion`'s freeze-on-
+ *               approve, supersede-not-overwrite precedent. The current
+ *               contract for a project is simply the latest one by
+ *               `createdAt` (`getContract`'s existing resolution) — no
+ *               separate superseding flag exists or is needed.
+ *
+ * Deliberately no third status. A contract that failed to gather usable
+ * facts simply stays 'proposed' forever — mirroring `ArtworkPreparationStatus`/
+ * `SignPreparationStatus`'s own "never invent a rejected/failed state"
+ * discipline; there is nothing to fail, only something not yet confirmed.
+ * A DB-level CHECK constraint (`artwork_fidelity_contracts_confirmation
+ * _consistent`) enforces that 'proposed' rows carry no confirmation
+ * fields/contractKey and 'confirmed' rows carry all of them — never
+ * application validation alone.
+ */
+export type ArtworkFidelityContractStatus = "proposed" | "confirmed";
+
+/**
+ * Universal Raster Reconstruction Phase R3B: the closed set of protected
+ * marks this phase represents — the DIRECT regression proof from Phase R2
+ * (™ became ® in 2/2 independent reconstructions, despite an otherwise
+ * successful exact-wording constraint). Deliberately NOT a free-text
+ * "symbol" field (Phase R3A Goal 3: "do not use a generic free-text symbol
+ * field for these") and deliberately NOT a general trademark-recognition
+ * system — three real, specific glyphs a customer can look at their own
+ * artwork and confirm the presence of.
+ */
+export const PROTECTED_MARK_TYPES = ["™", "®", "©"] as const;
+export type ProtectedMarkType = (typeof PROTECTED_MARK_TYPES)[number];
+
+/**
+ * Universal Raster Reconstruction Phase R3B: the durable authority record
+ * binding a set of customer/operator-CONFIRMED artwork-preservation facts
+ * to an immutable source asset, for a FUTURE reconstruction capability to
+ * read (never mutate — see `capability-boundaries.ts`). Deliberately its
+ * own record, not fields on `ArtworkPreparation`/`SignPreparation`/
+ * `AssetRecord.metadata` — see this migration's own schema-discipline
+ * audit (`20260910120000_artwork_fidelity_contracts.sql`) for why each of
+ * those would lie about owning a genuinely shared, provider-neutral,
+ * DTF/Signs-neutral concept.
+ *
+ * ADVISORY/FOUNDATIONAL ONLY THIS PHASE. Nothing in this codebase yet
+ * creates, reads, or consumes this record from a live reconstruction path
+ * — `RasterReconstructionCapability` does not exist yet. This is the seam
+ * a future phase reads from, exactly like `resolution-sufficiency.ts` was
+ * before it.
+ */
+export interface ArtworkFidelityContract {
+  id: string;
+  projectId: string;
+  status: ArtworkFidelityContractStatus;
+  /**
+   * The immutable original source this authority is bound to. Never the
+   * customer's uploaded bytes changed in place — a different source means
+   * a new contract, mirroring `SignPreparation.originalAssetId`'s own
+   * "every later transformation derives a NEW asset" rule.
+   */
+  sourceAssetId: string;
+  /**
+   * Measured fresh from the source's own bytes at propose/confirm time —
+   * the `sourceBytesSha256` precedent (`print-validation/contracts.ts`).
+   * A future consumer re-verifies this against the CURRENT source before
+   * trusting the contract; a mismatch means the source changed underneath
+   * this authority and it must not be used.
+   */
+  sourceSha256: string;
+  /**
+   * Non-authoritative machine-proposed evidence — "I believe this artwork
+   * contains X" — kept explicitly separate from confirmed authority below.
+   * Loosely typed, narrowed at the `ArtworkFidelityCapability` boundary,
+   * exactly like `SignPreparation.inspection`/`.plan`. NEVER read as a
+   * confirmed fact by anything — the entire point of this field's
+   * separation from `confirmedWording`/`confirmedMarks` is that a model's
+   * mistaken proposal can never silently satisfy confirmed authority.
+   */
+  proposedFacts: Record<string, unknown> | null;
+  /**
+   * CONFIRMED AUTHORITY. Meaningful only when `status === "confirmed"` —
+   * and, once confirmed, IMMUTABLE (Phase R3B-R: `ArtworkFidelityCapability
+   * .confirmContract` refuses to be called a second time against an
+   * already-confirmed contract; a correction proposes and confirms a NEW
+   * contract row instead). A SET of exact required strings — deduplicated
+   * at confirmation time, order not semantically authoritative for V1 (no
+   * reading-order/placement/hierarchy field exists on this contract).
+   * Capitalization and punctuation ARE part of the authoritative fact and
+   * are NEVER normalized at rest (Phase R3A Step 11: "PROVISIONS must not
+   * silently become provisions in stored authority"). A comparison-only
+   * normalization, if ever needed by a future verification step, must stay
+   * a pure function computed FROM this field, never a second stored
+   * representation of it.
+   */
+  confirmedWording: string[] | null;
+  /** CONFIRMED AUTHORITY, immutable once confirmed (see `confirmedWording`'s own doc comment). Meaningful only when `status === "confirmed"`. Deduplicated at confirmation time. See `ProtectedMarkType`. */
+  confirmedMarks: ProtectedMarkType[] | null;
+  /** WHO confirmed it. Reuses `SignPlanAuthorizationActor` — the SAME narrow customer/operator split already established, never a personal identity (this codebase has no user-authentication layer, ARCHITECTURE.md §23). `null` means never confirmed. */
+  confirmedBy: SignPlanAuthorizationActor | null;
+  /** When confirmed. `null` means never — mirrors `SignPreparation.specConfirmedAt`'s consent-provenance discipline. */
+  confirmedAt: string | null;
+  /**
+   * Deterministic machine EVIDENCE only — never something a customer
+   * confirms (Phase R3A Step 4D). Intended for a future post-reconstruction
+   * geometry comparison (Phase R2's own bounding-box measurement). This
+   * phase stores the evidence slot without implementing automatic
+   * measurement — "do not overbuild."
+   */
+  sourceContentBoundingBoxAspectRatio: number | null;
+  /**
+   * Canonical, production-significant identity of the CONFIRMED facts —
+   * the `SignPreparation.planKey` precedent, applied to fidelity authority.
+   * `null` until confirmed: a proposed contract has no semantic authority
+   * yet to key. Every future consumer recomputes this from current durable
+   * state and compares before trusting the contract — never trusts a
+   * stored key alone. See `deriveArtworkFidelityContractKey`
+   * (`artwork-fidelity/artwork-fidelity-contract-identity.ts`).
+   */
+  contractKey: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
