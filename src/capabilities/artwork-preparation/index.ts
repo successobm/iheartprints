@@ -57,6 +57,13 @@ export type {
   RepairabilityClassification,
   RgbColor,
 } from "./contracts";
+export type {
+  ResolutionSufficiencyAssessment,
+  ResolutionSufficiencyClassification,
+  ResolutionSufficiencyEvidence,
+  ResolutionSufficiencyReasonCode,
+} from "./resolution-sufficiency";
+export { RECONSTRUCTION_SCALE_CEILING } from "./resolution-sufficiency";
 export {
   describeArtworkForCustomer,
   describeApprovedPreparation,
