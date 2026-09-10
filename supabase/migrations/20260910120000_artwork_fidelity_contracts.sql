@@ -149,7 +149,36 @@ create table if not exists public.artwork_fidelity_contracts (
   contract_key text null,
 
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+
+  -- Phase R3B-R (independent-review repair): the status-consistency
+  -- invariant a DB CHECK constraint must enforce, never application
+  -- validation alone — the exact `production_unlocks_revocation_consistent`
+  -- (`20260816120000_production_unlock.sql`) /
+  -- `payment_transactions_created_is_bound`/`_pending_is_unbound`
+  -- (`20260817120000_payment_transactions.sql`) precedent this table's own
+  -- original migration should have included and did not. 'proposed' has NO
+  -- confirmation fields and NO contract_key — a proposed contract has no
+  -- semantic authority to key yet (Section 6 of the R3B plan). 'confirmed'
+  -- has ALL of confirmed_by/confirmed_at/contract_key — confirmation is a
+  -- single atomic snapshot, never a partial one.
+  constraint artwork_fidelity_contracts_confirmation_consistent check (
+    (
+      status = 'proposed'
+      and confirmed_by is null
+      and confirmed_at is null
+      and contract_key is null
+      and confirmed_wording is null
+      and confirmed_marks is null
+    )
+    or
+    (
+      status = 'confirmed'
+      and confirmed_by is not null
+      and confirmed_at is not null
+      and contract_key is not null
+    )
+  )
 );
 
 create index if not exists artwork_fidelity_contracts_project_id_created_at_idx

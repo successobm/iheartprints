@@ -763,4 +763,8 @@ export const TEST_FILES = [
   // established discipline.
   "src/capabilities/artwork-fidelity/artwork-fidelity-contract-identity.test.ts",
   "src/capabilities/artwork-fidelity/artwork-fidelity-capability.test.ts",
+  // Phase R3B-R (independent-review repair): proves the status-consistency
+  // CHECK constraint exists and has not been weakened -- registered
+  // immediately per the established discipline.
+  "src/capabilities/artwork-fidelity/artwork-fidelity-contracts.migration.test.ts",
 ];

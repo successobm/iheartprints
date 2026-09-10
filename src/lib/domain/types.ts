@@ -3032,12 +3032,27 @@ export interface SignPreservationTransportAttempt {
  *               status carries NO reconstruction authority. Never usable
  *               by a future reconstruction consumer.
  * 'confirmed' — a customer/operator explicitly confirmed the preservation
- *               facts. This, and ONLY this, is reconstruction authority.
+ *               facts. This, and ONLY this, is reconstruction authority —
+ *               and, once reached, PERMANENT for this row (Phase R3B-R,
+ *               independent-review repair): `ArtworkFidelityCapability
+ *               .confirmContract` refuses to transition an already-
+ *               `'confirmed'` row again. A correction is a NEW contract
+ *               (`proposeContract` + `confirmContract` on the new id),
+ *               never a second write to this one — mirroring
+ *               `FinalDirectionApproval`/`DesignBriefVersion`'s freeze-on-
+ *               approve, supersede-not-overwrite precedent. The current
+ *               contract for a project is simply the latest one by
+ *               `createdAt` (`getContract`'s existing resolution) — no
+ *               separate superseding flag exists or is needed.
  *
  * Deliberately no third status. A contract that failed to gather usable
  * facts simply stays 'proposed' forever — mirroring `ArtworkPreparationStatus`/
  * `SignPreparationStatus`'s own "never invent a rejected/failed state"
  * discipline; there is nothing to fail, only something not yet confirmed.
+ * A DB-level CHECK constraint (`artwork_fidelity_contracts_confirmation
+ * _consistent`) enforces that 'proposed' rows carry no confirmation
+ * fields/contractKey and 'confirmed' rows carry all of them — never
+ * application validation alone.
  */
 export type ArtworkFidelityContractStatus = "proposed" | "confirmed";
 
@@ -3101,16 +3116,22 @@ export interface ArtworkFidelityContract {
    */
   proposedFacts: Record<string, unknown> | null;
   /**
-   * CONFIRMED AUTHORITY. Meaningful only when `status === "confirmed"`.
-   * Exact strings, in confirmation order — capitalization and punctuation
-   * are part of the authoritative fact and are NEVER normalized at rest
-   * (Phase R3A Step 11: "PROVISIONS must not silently become provisions in
-   * stored authority"). A comparison-only normalization, if ever needed by
-   * a future verification step, must stay a pure function computed FROM
-   * this field, never a second stored representation of it.
+   * CONFIRMED AUTHORITY. Meaningful only when `status === "confirmed"` —
+   * and, once confirmed, IMMUTABLE (Phase R3B-R: `ArtworkFidelityCapability
+   * .confirmContract` refuses to be called a second time against an
+   * already-confirmed contract; a correction proposes and confirms a NEW
+   * contract row instead). A SET of exact required strings — deduplicated
+   * at confirmation time, order not semantically authoritative for V1 (no
+   * reading-order/placement/hierarchy field exists on this contract).
+   * Capitalization and punctuation ARE part of the authoritative fact and
+   * are NEVER normalized at rest (Phase R3A Step 11: "PROVISIONS must not
+   * silently become provisions in stored authority"). A comparison-only
+   * normalization, if ever needed by a future verification step, must stay
+   * a pure function computed FROM this field, never a second stored
+   * representation of it.
    */
   confirmedWording: string[] | null;
-  /** CONFIRMED AUTHORITY. Meaningful only when `status === "confirmed"`. See `ProtectedMarkType`. */
+  /** CONFIRMED AUTHORITY, immutable once confirmed (see `confirmedWording`'s own doc comment). Meaningful only when `status === "confirmed"`. Deduplicated at confirmation time. See `ProtectedMarkType`. */
   confirmedMarks: ProtectedMarkType[] | null;
   /** WHO confirmed it. Reuses `SignPlanAuthorizationActor` — the SAME narrow customer/operator split already established, never a personal identity (this codebase has no user-authentication layer, ARCHITECTURE.md §23). `null` means never confirmed. */
   confirmedBy: SignPlanAuthorizationActor | null;

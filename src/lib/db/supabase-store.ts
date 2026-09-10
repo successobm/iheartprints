@@ -539,10 +539,26 @@ function markTokenToGlyph(token: string): ProtectedMarkType | null {
   return null;
 }
 
+/**
+ * Phase R3B-R (independent-review repair): an explicit exhaustive switch
+ * with a `never`-checked default, rather than a final catch-all `return
+ * "C"` — a hypothetical future 4th `ProtectedMarkType` value must fail
+ * loudly at compile time (the `never` assignment) and at runtime, never
+ * silently mismap to `©`.
+ */
 function markGlyphToToken(mark: ProtectedMarkType): string {
-  if (mark === "™") return "TM";
-  if (mark === "®") return "R";
-  return "C";
+  switch (mark) {
+    case "™":
+      return "TM";
+    case "®":
+      return "R";
+    case "©":
+      return "C";
+    default: {
+      const exhaustiveCheck: never = mark;
+      throw new Error(`Unsupported protected mark: ${String(exhaustiveCheck)}`);
+    }
+  }
 }
 
 function mapArtworkFidelityContract(

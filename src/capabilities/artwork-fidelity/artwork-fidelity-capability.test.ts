@@ -194,33 +194,80 @@ describe("ArtworkFidelityCapability", () => {
     assert.notEqual(r.contractKey, c.contractKey);
   });
 
-  it("18: a stale expected contractKey fails closed — recomputing after a confirmed fact changes no longer matches the earlier key", async () => {
+  it("18/repair: a CONFIRMED contract refuses a second confirmContract call outright — it is an immutable authority snapshot, never mutated in place", async () => {
     const { capability, projectId } = await build();
     const proposed = await capability.proposeContract(projectId, {
       sourceAssetId: "asset-1",
       sourceSha256: SHA_A,
     });
-    const v1 = await capability.confirmContract(projectId, proposed.id, {
+    await capability.confirmContract(projectId, proposed.id, {
       currentSourceSha256: SHA_A,
       confirmedWording: [],
       confirmedMarks: ["™"],
       confirmedBy: "customer",
     });
-    const expectedKeyFromV1 = v1.contractKey;
 
-    // Customer corrects TM -> R (the exact R2 regression case).
-    const v2 = await capability.confirmContract(projectId, proposed.id, {
+    await assert.rejects(
+      () =>
+        capability.confirmContract(projectId, proposed.id, {
+          currentSourceSha256: SHA_A,
+          confirmedWording: [],
+          confirmedMarks: ["®"],
+          confirmedBy: "customer",
+        }),
+      ArtworkFidelityContractStateError,
+    );
+  });
+
+  it("historical authority: correcting TM -> R produces a NEW contract; the original confirmed contract remains unchanged forever, and the current contract resolves to the correction", async () => {
+    const { capability, projectId } = await build();
+
+    // 1/2/3. Propose and confirm Contract A with TM.
+    const proposedA = await capability.proposeContract(projectId, {
+      sourceAssetId: "asset-1",
+      sourceSha256: SHA_A,
+    });
+    const contractA = await capability.confirmContract(projectId, proposedA.id, {
       currentSourceSha256: SHA_A,
-      confirmedWording: [],
+      confirmedWording: ["REGENCY"],
+      confirmedMarks: ["™"],
+      confirmedBy: "customer",
+    });
+    const keyA = contractA.contractKey;
+
+    // 4/5/6. The customer's correction: propose and confirm a SECOND,
+    // independent contract with R -- never a second write to Contract A.
+    const proposedB = await capability.proposeContract(projectId, {
+      sourceAssetId: "asset-1",
+      sourceSha256: SHA_A,
+    });
+    const contractB = await capability.confirmContract(projectId, proposedB.id, {
+      currentSourceSha256: SHA_A,
+      confirmedWording: ["REGENCY"],
       confirmedMarks: ["®"],
       confirmedBy: "customer",
     });
+    const keyB = contractB.contractKey;
 
-    assert.notEqual(v2.contractKey, expectedKeyFromV1);
-    // A future consumer holding the v1 key must fail closed — it no
-    // longer matches the contract's current, authoritative key.
-    assert.notEqual(v2.contractKey, expectedKeyFromV1);
-    assert.equal(v2.id, v1.id, "the same durable row is updated, not duplicated");
+    // ids differ; keys differ.
+    assert.notEqual(contractA.id, contractB.id);
+    assert.notEqual(keyA, keyB);
+
+    // Reloading A independently proves it was never touched by B's
+    // confirmation -- the historical authority survives intact.
+    const reloadedA = await capability.getContractById(contractA.id);
+    assert.deepEqual(reloadedA!.confirmedMarks, ["™"]);
+    assert.equal(reloadedA!.contractKey, keyA);
+    assert.equal(reloadedA!.status, "confirmed");
+
+    // The current project contract is B, the correction.
+    const current = await capability.getContract(projectId);
+    assert.equal(current!.id, contractB.id);
+    assert.deepEqual(current!.confirmedMarks, ["®"]);
+
+    // A future consumer holding the stale key A must fail closed against
+    // the current authority.
+    assert.notEqual(keyA, current!.contractKey);
   });
 
   it("confirmContract refuses when the source has changed underneath the contract (source SHA binding)", async () => {
@@ -269,5 +316,119 @@ describe("ArtworkFidelityCapability", () => {
     });
     const latest = await capability.getContract(projectId);
     assert.equal(latest!.id, proposed.id);
+  });
+
+  it("8/repair: getContract(projectId) returns the NEWEST of two real, independently confirmed contracts for the same project -- proves actual repository ordering, not only a pure helper", async () => {
+    const { capability, projectId } = await build();
+
+    const proposedA = await capability.proposeContract(projectId, {
+      sourceAssetId: "asset-1",
+      sourceSha256: SHA_A,
+    });
+    const contractA = await capability.confirmContract(projectId, proposedA.id, {
+      currentSourceSha256: SHA_A,
+      confirmedWording: ["FIRST"],
+      confirmedMarks: [],
+      confirmedBy: "customer",
+    });
+
+    const proposedB = await capability.proposeContract(projectId, {
+      sourceAssetId: "asset-1",
+      sourceSha256: SHA_A,
+    });
+    const contractB = await capability.confirmContract(projectId, proposedB.id, {
+      currentSourceSha256: SHA_A,
+      confirmedWording: ["SECOND"],
+      confirmedMarks: [],
+      confirmedBy: "customer",
+    });
+
+    const current = await capability.getContract(projectId);
+    assert.equal(current!.id, contractB.id);
+    assert.notEqual(current!.id, contractA.id);
+    assert.deepEqual(current!.confirmedWording, ["SECOND"]);
+  });
+
+  it("null vs empty round-trips through the real repository: proposed is null, confirming with [] persists and reloads as [], never null", async () => {
+    const { capability, projectId } = await build();
+    const proposed = await capability.proposeContract(projectId, {
+      sourceAssetId: "asset-1",
+      sourceSha256: SHA_A,
+    });
+    assert.equal(proposed.confirmedWording, null);
+    assert.equal(proposed.confirmedMarks, null);
+
+    const confirmed = await capability.confirmContract(projectId, proposed.id, {
+      currentSourceSha256: SHA_A,
+      confirmedWording: [],
+      confirmedMarks: [],
+      confirmedBy: "operator",
+    });
+    assert.deepEqual(confirmed.confirmedWording, []);
+    assert.deepEqual(confirmed.confirmedMarks, []);
+    assert.notEqual(confirmed.confirmedWording, null);
+    assert.notEqual(confirmed.confirmedMarks, null);
+
+    // Reload independently -- proves the [] round-trips through the
+    // repository, not merely through the in-memory return value.
+    const reloaded = await capability.getContractById(confirmed.id);
+    assert.deepEqual(reloaded!.confirmedWording, []);
+    assert.deepEqual(reloaded!.confirmedMarks, []);
+  });
+
+  it("repair: duplicate confirmed wording/marks collapse to the deduplicated set before storing and hashing", async () => {
+    const { capability, projectId } = await build();
+
+    const proposedDup = await capability.proposeContract(projectId, {
+      sourceAssetId: "asset-1",
+      sourceSha256: SHA_A,
+    });
+    const dup = await capability.confirmContract(projectId, proposedDup.id, {
+      currentSourceSha256: SHA_A,
+      confirmedWording: ["ABC", "ABC"],
+      confirmedMarks: ["™", "™"],
+      confirmedBy: "customer",
+    });
+    assert.deepEqual(dup.confirmedWording, ["ABC"]);
+    assert.deepEqual(dup.confirmedMarks, ["™"]);
+
+    const proposedSingle = await capability.proposeContract(projectId, {
+      sourceAssetId: "asset-2",
+      sourceSha256: SHA_B,
+    });
+    const single = await capability.confirmContract(projectId, proposedSingle.id, {
+      currentSourceSha256: SHA_B,
+      confirmedWording: ["ABC"],
+      confirmedMarks: ["™"],
+      confirmedBy: "customer",
+    });
+
+    // Different source binding, so the raw keys differ -- but recomputing
+    // the identity with the SAME source binding proves the duplicate-vs-
+    // single wording/marks produce the identical fidelity claim.
+    const { deriveArtworkFidelityContractKey } = await import(
+      "./artwork-fidelity-contract-identity"
+    );
+    const dupKeyWithSingleSource = deriveArtworkFidelityContractKey({
+      sourceAssetId: single.sourceAssetId,
+      sourceSha256: single.sourceSha256,
+      confirmedWording: dup.confirmedWording,
+      confirmedMarks: dup.confirmedMarks,
+      sourceContentBoundingBoxAspectRatio: single.sourceContentBoundingBoxAspectRatio,
+    });
+    assert.equal(dupKeyWithSingleSource, single.contractKey);
+
+    // Case is NOT collapsed -- "ABC" and "abc" remain distinct facts.
+    const proposedCase = await capability.proposeContract(projectId, {
+      sourceAssetId: "asset-3",
+      sourceSha256: SHA_A,
+    });
+    const caseVariant = await capability.confirmContract(projectId, proposedCase.id, {
+      currentSourceSha256: SHA_A,
+      confirmedWording: ["ABC", "abc"],
+      confirmedMarks: [],
+      confirmedBy: "customer",
+    });
+    assert.deepEqual(caseVariant.confirmedWording, ["ABC", "abc"]);
   });
 });

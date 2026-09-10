@@ -2096,11 +2096,42 @@
  * become "provisions." A comparison-only normalization, if a future
  * verification step ever needs one, must stay a pure function computed
  * FROM `confirmedWording`, never a second stored representation of it.
+ * `confirmedWording`/`confirmedMarks` are each a SET of exact facts, not a
+ * sequence with its own meaning — V1 represents no reading-order/
+ * placement/hierarchy authority at all, so `confirmContract` deduplicates
+ * literal-duplicate entries before storing (Phase R3B-R:
+ * `["ABC","ABC"]`/`["ABC"]` are the identical fidelity claim); stored
+ * order still reflects first occurrence, but `contractKey` treats it as
+ * order-insensitive.
  *
  * PROTECTED MARKS ARE A CLOSED SET (™ / ® / ©) — Phase R2's own direct
  * regression proof (™ became ® in 2/2 independent reconstructions) is why
  * this is a typed enum, never a generic free-text "symbol" field, and
  * never a general trademark-recognition system.
+ *
+ * CONFIRMED CONTRACTS ARE IMMUTABLE AUTHORITY SNAPSHOTS (Phase R3B-R,
+ * independent-review repair). `confirmContract` may be called exactly
+ * ONCE per contract — it refuses outright against an already-`"confirmed"`
+ * row. A hash-mismatch staleness check alone (comparing a stored
+ * `contractKey` against a freshly recomputed one) proves a prior authority
+ * is no longer current, but does NOT preserve what that authority actually
+ * said once a row has been overwritten — and this phase builds no
+ * downstream candidate/job record yet that would freeze its own copy the
+ * way `FinalArtworkJob.signPlanKey` does for `SignPreparation.planKey`.
+ * A correction therefore proposes and confirms a NEW contract row, never a
+ * second write to the same one — mirroring `FinalDirectionApproval`/
+ * `DesignBriefVersion`'s freeze-on-approve, supersede-not-overwrite
+ * precedent (the correct precedent for customer-confirmed creative/textual
+ * authority), not `SignPreparation.authorizedPlanKey`'s in-place-update
+ * precedent (safe there only because of the downstream job's own frozen
+ * copy). `getContract(projectId)`'s existing "latest by `createdAt`"
+ * resolution is what makes a new contract "current" — no superseding flag,
+ * no versioned pointer table. A DB-level CHECK constraint
+ * (`artwork_fidelity_contracts_confirmation_consistent`) additionally
+ * enforces the proposed/confirmed field-consistency invariant — never
+ * application validation alone, matching this repo's own
+ * `production_unlocks_revocation_consistent`/`payment_transactions
+ * _created_is_bound` precedent.
  *
  * CONTRACT IDENTITY (`contractKey`, `artwork-fidelity-contract-identity.ts`)
  * covers exactly the confirmed, production-significant facts — source
@@ -2121,8 +2152,9 @@
  * provider-prompt text only at the adapter boundary" pattern) and to
  * verify a reconstructed candidate against it. It may NOT mutate the
  * contract — confirmation is a customer/operator act, never a side effect
- * of a reconstruction attempt. Nothing in this codebase calls this
- * capability from a live request path yet.
+ * of a reconstruction attempt, and (Phase R3B-R) not even a SECOND
+ * customer/operator confirmation may mutate it. Nothing in this codebase
+ * calls this capability from a live request path yet.
  */
 
-export const CAPABILITY_BOUNDARY_VERSION = "PEA3" as const;
+export const CAPABILITY_BOUNDARY_VERSION = "PEA4" as const;

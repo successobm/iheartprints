@@ -11210,7 +11210,8 @@ R3B — ARTWORK FIDELITY CONTRACT" section for the full boundary rules
 
 - `status`: `"proposed"` (machine-proposed facts may exist; carries **no**
   reconstruction authority) or `"confirmed"` (a customer/operator
-  explicitly confirmed the facts — the *only* status with authority).
+  explicitly confirmed the facts — the *only* status with authority, and,
+  once reached, **permanent for this row** — see "Immutability", below).
 - `sourceAssetId` / `sourceSha256` — the immutable binding, set once and
   never patched; a different source is a new contract.
 - `proposedFacts` — non-authoritative machine evidence, loosely typed and
@@ -11219,10 +11220,15 @@ R3B — ARTWORK FIDELITY CONTRACT" section for the full boundary rules
   anything.
 - `confirmedWording: string[] | null` — exact strings, **never normalized
   at rest**. Capitalization and punctuation are part of the authoritative
-  fact (the direct R2 regression proof this exists to prevent).
+  fact (the direct R2 regression proof this exists to prevent). A SET of
+  required strings, not a sequence with its own meaning — V1 has no
+  reading-order/placement/hierarchy field, so `confirmContract`
+  deduplicates literal-duplicate entries before storing and `contractKey`
+  treats the set as order-insensitive.
 - `confirmedMarks: ProtectedMarkType[] | null` — a closed set (`™`/`®`/`©`
   only), never a generic free-text "symbol" field, and never a general
-  trademark-recognition system.
+  trademark-recognition system. Deduplicated the same way as
+  `confirmedWording`.
 - `confirmedBy: SignPlanAuthorizationActor | null` — reuses the SAME
   narrow `"customer" | "operator"` actor type `sign_preparations
   .authorized_by` already established, never a personal identity (this
@@ -11245,6 +11251,45 @@ R3B — ARTWORK FIDELITY CONTRACT" section for the full boundary rules
 authority (`SignQrResolutionRecord`), keyed by the same
 `sourceAssetId`/`sourceSha256` a Fidelity Contract also carries — a future
 consumer joins on that shared key rather than this table embedding a copy.
+
+### Immutability (Phase R3B-R — independent-review repair)
+
+A confirmed `ArtworkFidelityContract` is an **immutable authority
+snapshot**. `ArtworkFidelityCapability.confirmContract` may be called
+exactly once per contract — it refuses outright against a row already
+`status === "confirmed"`. This was a merge-blocking finding from the
+independent review: the original implementation updated confirmed rows in
+place, which meant a hash-mismatch `contractKey` staleness check could
+prove a prior authority was no longer current, but could not preserve what
+that authority had actually said once its own row was overwritten — this
+phase builds no downstream candidate/job record yet that would freeze its
+own copy the way `FinalArtworkJob.signPlanKey` freezes a copy of
+`SignPreparation.planKey`.
+
+The repair follows this repo's own `FinalDirectionApproval`/
+`DesignBriefVersion` freeze-on-approve, supersede-not-overwrite precedent
+— the correct match for customer-confirmed creative/textual authority —
+rather than `SignPreparation.authorizedPlanKey`'s in-place-update
+precedent (which is safe there only because of that downstream job's own
+frozen copy). A correction requires the caller to `proposeContract` again
+(a new row, bound to the same source) and `confirmContract` that new id.
+`getContract(projectId)`'s existing "latest by `createdAt`" resolution is
+sufficient to make the new contract "current" with **no code change** — no
+superseding status value, no versioned pointer table, no event sourcing.
+
+### DB-level consistency (Phase R3B-R — independent-review repair)
+
+The migration also gained
+`artwork_fidelity_contracts_confirmation_consistent`, a cross-column
+`CHECK` constraint enforcing that `'proposed'` rows carry no confirmation
+fields or `contract_key`, and `'confirmed'` rows carry all of
+`confirmed_by`/`confirmed_at`/`contract_key`. This was the OTHER
+merge-blocking finding — the original migration relied on application
+validation alone, which this repo's own precedent
+(`production_unlocks_revocation_consistent`,
+`payment_transactions_created_is_bound`/`_pending_is_unbound`,
+`final_artwork_jobs_exactly_one_authority`) already establishes is
+insufficient for this exact class of invariant.
 
 ### Schema
 
