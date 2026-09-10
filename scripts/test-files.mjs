@@ -316,6 +316,9 @@ export const TEST_FILES = [
   // closes the Content-Length-bypass gap (ARCHITECTURE.md §23 item 2).
   "src/capabilities/artwork-preparation/capped-request-body.test.ts",
   "src/capabilities/artwork-preparation/image-analysis.test.ts",
+  // Source Quality / Recoverability Analysis Phase (advisory) --
+  // registered immediately per the established discipline.
+  "src/capabilities/artwork-preparation/source-recoverability.test.ts",
   "src/capabilities/artwork-preparation/background-isolation.test.ts",
   "src/capabilities/artwork-preparation/artwork-preparation-capability.test.ts",
   "src/capabilities/artwork-preparation/bowling-upload-regression.test.ts",

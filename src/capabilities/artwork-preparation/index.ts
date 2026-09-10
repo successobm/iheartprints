@@ -57,6 +57,13 @@ export type {
   RepairabilityClassification,
   RgbColor,
 } from "./contracts";
+export type {
+  SourceRecoverabilityAssessment,
+  SourceRecoverabilityClassification,
+  SourceRecoverabilityEvidence,
+  SourceRecoverabilityReasonCode,
+} from "./source-recoverability";
+export { RECOVERABILITY_RECONSTRUCTION_CEILING } from "./source-recoverability";
 export {
   describeArtworkForCustomer,
   describeApprovedPreparation,

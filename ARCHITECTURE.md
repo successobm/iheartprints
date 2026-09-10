@@ -6952,6 +6952,201 @@ loudly instead of quietly spending money.
 
 ---
 
+## 13h2. Source Quality / Recoverability Analysis (advisory)
+
+Before iHeartPrints removes a background, spends money on a provider, or
+eventually performs true reconstruction, it needs an honest answer to a
+DIFFERENT question than repairability already answers:
+
+| Authority | Question |
+|---|---|
+| **Repairability** (§13h above) | "What preparation operation does this artwork need?" |
+| **Recoverability** (`artwork-preparation/source-recoverability.ts`) | "Does the source contain enough trustworthy visual evidence to perform that operation safely, at the size the customer actually wants?" |
+
+These stay two deliberately separate, pure functions of the same
+`ArtworkAnalysis` — never merged into one bigger classifier, and
+recoverability is never folded into `RepairabilityClassification`. A
+background can be perfectly, deterministically removable while the artwork
+underneath is nowhere near enough real pixels for the requested print, and
+an artwork can carry exactly enough real pixels while its background is too
+complex to touch automatically. Conflating the two would make it impossible
+to say which fact drove which decision — the same reason the three
+background-mask passes (§13h) stay three modules rather than one.
+
+**Low resolution is not the same thing as bad artwork.** A 1000px logo
+intended for a 14in print may be geometrically undersized but visually very
+clean and highly recoverable; a larger but degraded/ambiguous source can be
+LESS recoverable despite having more pixels. This phase's evidence is
+resolution/coverage arithmetic only — it does not yet detect compression
+artifacts, ambiguous marks, or illegible small text (see "Explicitly out of
+scope," below) — so its classification answers exactly what it can defend,
+not a general "artwork quality" verdict.
+
+### The contract
+
+```ts
+export type SourceRecoverabilityClassification = "adequate" | "recoverable" | "insufficient";
+
+export interface SourceRecoverabilityEvidence {
+  visibleWidthPx: number;      // same measurement PixelSufficiency/EnhancementDecision already use
+  requiredWidthPx: number;
+  coverageRatio: number;       // visibleWidthPx / requiredWidthPx -- the SAME field as PixelSufficiency.coverageRatio
+  enlargementFactor: number;   // 1, or 1/coverageRatio when coverageRatio < 1
+  reconstructionCeiling: number; // = RECOVERABILITY_RECONSTRUCTION_CEILING (4)
+}
+
+export interface SourceRecoverabilityAssessment {
+  classification: SourceRecoverabilityClassification;
+  reasons: SourceRecoverabilityReasonCode[];
+  evidence: SourceRecoverabilityEvidence;
+}
+
+export function classifySourceRecoverability(analysis: ArtworkAnalysis): SourceRecoverabilityAssessment | null;
+```
+
+### Intrinsic vs. size-contextual evidence — resolved the way `PixelSufficiency` already resolves it
+
+Artwork is uploaded before a print placement (and therefore a production
+size) may be known. Rather than inventing a second lifecycle split,
+recoverability reuses the EXACT one `image-analysis.ts` already has:
+`ArtworkAnalysis.pixelSufficiency` is `null` until a placement is chosen,
+and `classifySourceRecoverability` returns `null` under the identical
+condition — never guessing a default size on the customer's behalf. Once a
+placement exists (`pixelSufficiency` non-null, populated exactly as before
+— an explicit customer width, or the assumed-box containment default), a
+real classification becomes available immediately, recomputed from the SAME
+`analysis` object every time it is asked for — never a separate intrinsic
+"quality snapshot" struct at upload time.
+
+### Exact rules (every branch — no invented score)
+
+1. **No visible artwork at all** (`analysis.artworkBounds === null`) →
+   `"insufficient"`, reason `no_visible_artwork` — mirrors
+   `classifyRepairability`'s own `NOT_REPAIRABLE` trigger, the one case
+   both authorities agree is terminal for the identical reason.
+2. **`coverageRatio >= 1`** (native visible resolution already meets or
+   exceeds the target) → `"adequate"`, reason
+   `native_resolution_sufficient`. This says nothing about whether
+   background preparation is complete — that remains repairability's own,
+   separate answer.
+3. **`enlargementFactor <= RECOVERABILITY_RECONSTRUCTION_CEILING`** (4, the
+   SAME hard scale-factor ceiling `TopazTransparencyUpscaleProvider`
+   already enforces before any request is dispatched — §13d/§13i below) →
+   `"recoverable"`, reason `within_governed_reconstruction_ceiling`. This
+   does **not** mean a future reconstruction attempt will automatically
+   certify as Print Ready — the False Print-Ready Guard
+   (`reconstruction_certification_evidence`, §13i) still withholds that
+   without fidelity evidence, entirely unchanged by this phase.
+4. **Otherwise** (`enlargementFactor > 4`) → `"insufficient"`, reason
+   `exceeds_governed_reconstruction_ceiling`. No currently authorized
+   mechanism can reach the requested size from this source at all,
+   regardless of how clean it looks.
+
+`RECOVERABILITY_RECONSTRUCTION_CEILING` is defined LOCALLY in
+`artwork-preparation/source-recoverability.ts`, never imported from
+`final-artwork` — `ArtworkPreparationCapability` depends on no provider
+port at all (§13h), the identical reason `sign-preparation/resolution-
+policy.ts`'s `SIGN_RECONSTRUCTION_SCALE_CEILING` already mirrors rather
+than imports the same constant. `source-recoverability.test.ts`
+cross-checks the two values directly (test-only import, exempt from the
+capability's own runtime dependency rule) so they can never silently
+drift apart. Calibrated against the real Cochrane-class incident's own
+numbers (§13i's False Print-Ready Guard regression): a 1050px visible
+source against a 4200px (14in @ 300PPI) target is a real, audited
+enlargement factor of exactly 4.0 — this phase's own regression
+reproduces that exact ratio and confirms it lands `"recoverable"`, never
+`"adequate"`.
+
+Deliberately independent of `hasTransparency`, `backgroundIsEdgeConnected`,
+`backgroundTreatment`, and every other background-related
+`ArtworkAnalysis` field — background presence/absence is a repairability
+fact, never a recoverability one. A photo-like continuous-tone upload and a
+hard-edge logo are classified by the identical resolution arithmetic; this
+phase makes no hard-edge-vs-photo assumption anywhere.
+
+### Explicitly out of scope for this phase
+
+- **JPEG-style compression-artifact detection.** A PNG upload whose pixel
+  content was previously JPEG-compressed (re-saved as PNG before upload —
+  the only way a JPEG-shaped artifact reaches this pipeline at all, since
+  raw JPEG/WebP/GIF bytes are rejected at the format-sniffing stage, §13h)
+  is currently classified on resolution evidence alone. This can be
+  optimistic for pixel-level fidelity — a documented limitation, not a
+  silent gap. Reliable, deterministic block-artifact detection was not
+  built this phase; inventing an unproven heuristic would be exactly the
+  "sounds sophisticated" measurement this phase's own brief warned
+  against.
+- **Any hard-edge/logo-like vs. continuous-tone/photo-like coarse
+  classification.** No existing deterministic evidence in this codebase
+  reliably supports that distinction yet (the closest existing signals —
+  `edge.maxChannelStandardDeviation`/`dominantColorCoverage` — measure the
+  BORDER's own uniformity for background-removal safety, not the
+  INTERIOR content's tonal character). This phase's rules are therefore
+  deliberately content-type-agnostic rather than guessing.
+- **Tiny/illegible text detection, OCR, or any judgment about what a mark
+  or letterform actually says.** This phase does not attempt to read the
+  artwork, only to measure it.
+- **Any absolute (non-ratio) minimum source pixel floor.** No existing,
+  calibrated number in this codebase defends one
+  (`upload-limits.ts`'s `MIN_IMAGE_DIMENSION_PX = 16` is a
+  corruption/degenerate-upload floor, not a recoverability one) — and
+  evaluated against a REAL requested print size, the ratio-based ceiling
+  above already correctly reaches `"insufficient"` for a genuinely tiny
+  source without inventing a second, undefended number.
+- **The `dtf-generative-reconstruction` eligibility gate.** A separate,
+  unmerged investigation branch (`investigate/dtf-enhance-before-
+  background-removal`) already has its own `assessDtfReconstructionEligibility`
+  — a purely mechanical gate ("is the background auto-removable AND is
+  resolution insufficient") over `RepairabilityAssessment` fields alone,
+  with no visual-trustworthiness judgment at all. This phase's
+  recoverability contract is a genuinely different, complementary axis
+  ("is the source trustworthy enough"), not a duplicate — a future phase
+  could have that eligibility gate additionally consult
+  `classifySourceRecoverability`, but this phase does not wire that, and
+  does not touch that branch.
+
+### Persistence
+
+None added. `SourceRecoverabilityAssessment` is a cheap, pure function of
+`ArtworkAnalysis.pixelSufficiency` (already persisted, inside the existing
+`ArtworkPreparation.analysis` JSON) plus one constant — recomputing it on
+read is always in sync with the latest analysis and costs nothing beyond
+arithmetic. Persisting a second, derived copy would risk exactly the kind
+of staleness `RepairabilityAssessment` itself already avoids by never
+being persisted as its own blob either; both are recomputed on demand from
+`analysis` every time a caller needs them.
+
+### Authority — advisory only, this phase
+
+Nothing in this codebase calls `classifySourceRecoverability` from a live
+request path. It exists, fully tested, as the seam a future phase can read
+from — see "Future authority" below — but it does not gate
+`canPrepareAutomatically`, does not change `RepairabilityAssessment`, is
+not surfaced in `preparation-copy.ts`, and does not touch the False
+Print-Ready Guard (`reconstruction_certification_evidence`), which remains
+the sole, unweakened authority over automatic Print Ready for reconstructed
+continuous-tone uploads. No customer-facing behavior changes as a result of
+this phase.
+
+**Future authority this phase's contract is designed to support, not yet
+wired:** a later phase could read `classification === "recoverable"` as
+the missing evidence needed to route reconstruction BEFORE background
+removal (rather than after, as today) for exactly the sources this phase
+can already tell apart from `"insufficient"` ones. `RECOVERABLE` does
+**not** mean "safe to generatively redraw without review" — it means "the
+source appears to contain enough evidence to enter a governed recovery
+workflow," identical in spirit to how `review_required` never means
+"safe to execute automatically" anywhere else in this codebase. True
+generative reconstruction, an explicit customer approval workflow for it,
+and any multimodal fidelity judge remain unbuilt and out of scope; this
+phase only establishes the decision authority a future one would need to
+route into them responsibly.
+
+Provider calls: 0, structurally — this module imports nothing that could
+make one.
+
+---
+
 ## 13i. Existing Artwork → Print Ready (Phase 2: production finalization)
 
 Phase 1 ends at an approved, background-prepared transparent PNG. Phase 2
