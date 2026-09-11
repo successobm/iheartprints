@@ -780,4 +780,10 @@ export const TEST_FILES = [
   // registered immediately per the established discipline.
   "src/lib/services/artwork-fidelity-confirmation.test.ts",
   "src/app/api/projects/[projectId]/artwork-fidelity/route.test.ts",
+  // Production Acceptance Defect fix: proves the fidelity step's action
+  // controls/mark choices are real, correctly-classed elements -- see the
+  // test file's own doc comment for why this component had zero Tailwind
+  // classes in the first place -- registered immediately per the
+  // established discipline.
+  "src/components/chat/ArtworkFidelityConfirmationStep.test.tsx",
 ];
