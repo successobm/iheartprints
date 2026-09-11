@@ -45,6 +45,26 @@ import type { ArtworkFidelityView } from "@/lib/services/conversation-service";
  *   - `view.proposalStatus` distinguishes a genuine successful check that
  *     found nothing from the provider being unavailable/misconfigured/
  *     failed (Blocker 3/§6) — the two render visibly different copy.
+ *
+ * Production Acceptance Defect fix (post-merge): this component originally
+ * carried ZERO Tailwind utility classes anywhere. Tailwind's own preflight
+ * reset (active app-wide, `src/app/globals.css`) strips default browser
+ * button/form chrome, so an unclassed `<button>` renders as plain inline
+ * text and unclassed `<input type="radio">`/`<label>` pairs render cramped
+ * together with no spacing — exactly the reported production symptom. The
+ * elements were always real, functional, keyboard-accessible controls; this
+ * was a pure styling gap, never a wrong-element bug. Every class below is
+ * copied verbatim from an existing, already-shipped control in this SAME
+ * panel (`UploadedArtworkPanel.tsx`) — never a new visual design:
+ *   - primary button: `SignContextSavedStep`'s "Check my artwork" button.
+ *   - secondary/text button: the QR step's "Print as supplied" button.
+ *   - selectable choice chips: `DetailsStep`'s `PLACEMENT_OPTIONS` group
+ *     (`<button aria-pressed>` pills), extended here to cover all five mark
+ *     choices (™/®/©/None/Not sure) in one row instead of two.
+ *   - text input / card / alert styling: the same utility classes already
+ *     used throughout this file for every other field/status message.
+ * Strictly presentational — no authority/validation/routing logic changed;
+ * every state transition below is byte-identical to before this fix.
  */
 
 /**
@@ -53,13 +73,18 @@ import type { ArtworkFidelityView } from "@/lib/services/conversation-service";
  * proposal classification codes (`"TM" | "R" | "C"`, `contracts.ts`'s
  * `MarkClassificationProposal`), which are an internal proposal-schema
  * detail never surfaced to the customer or submitted as confirmed
- * authority.
+ * authority. `"NOT_SURE"` is included in this SAME rendered chip row
+ * (Production Acceptance Defect fix — previously a visually separate radio
+ * outside the option list) but remains excluded from what may ever be
+ * submitted as a confirmed mark (`handleConfirm` still only ever sends
+ * `ProtectedMarkType | "NONE"`, and `marksComplete` still blocks on it).
  */
-const MARK_OPTIONS: { value: ProtectedMarkType | "NONE"; label: string }[] = [
+const MARK_OPTIONS: { value: ProtectedMarkType | "NONE" | "NOT_SURE"; label: string }[] = [
   { value: "™", label: "™" },
   { value: "®", label: "®" },
   { value: "©", label: "©" },
   { value: "NONE", label: "None of these" },
+  { value: "NOT_SURE", label: "Not sure" },
 ];
 
 type MarkSelection = ProtectedMarkType | "NONE" | "NOT_SURE" | null;
@@ -188,103 +213,146 @@ export function ArtworkFidelityConfirmationStep(
     !checking && view !== null && wordingFields.length === 0 && markFields.length === 0;
 
   return (
-    <section aria-label="Confirm what's in your artwork">
-      <h3>Confirm what&rsquo;s in your artwork</h3>
+    <section
+      aria-label="Confirm what's in your artwork"
+      className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm"
+    >
+      <p className="text-sm font-semibold text-ink">Confirm what&rsquo;s in your artwork</p>
       {view && view.proposalStatus === "unavailable" ? (
-        <p>We couldn&rsquo;t check your artwork automatically. Please enter the text and symbols that must be preserved.</p>
+        <p className="mt-1 text-sm text-muted">
+          We couldn&rsquo;t check your artwork automatically. Please enter the text and symbols that must be preserved.
+        </p>
       ) : (
-        <p>We found the following text and symbols. Please correct anything that doesn&rsquo;t look right.</p>
+        <p className="mt-1 text-sm text-muted">
+          We found the following text and symbols. Please correct anything that doesn&rsquo;t look right.
+        </p>
       )}
 
-      {checking ? <p role="status">Checking your artwork…</p> : null}
-      {error ? <p role="alert">{error}</p> : null}
+      {checking ? (
+        <p role="status" className="mt-3 text-sm text-muted">
+          Checking your artwork…
+        </p>
+      ) : null}
+      {error ? (
+        <p
+          role="alert"
+          className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+        >
+          {error}
+        </p>
+      ) : null}
 
       {nothingToConfirm ? (
-        <p>
+        <p className="mt-3 text-sm text-muted">
           {view?.proposalStatus === "unavailable"
             ? "We couldn't check your artwork automatically, and didn't find anything to resolve below. You can still confirm if your artwork truly has no text or symbols to preserve."
             : "We checked your artwork but didn't find readable text or symbols. Please confirm what's present."}
         </p>
       ) : null}
 
-      {wordingFields.map((field, index) => (
-        <div key={field.id}>
-          <label htmlFor={`fidelity-wording-${field.id}`}>Text{wordingFields.length > 1 ? ` ${index + 1}` : ""}</label>
-          {field.readable ? null : (
-            <p>We couldn&rsquo;t clearly read this — please type what it says.</p>
-          )}
-          <input
-            id={`fidelity-wording-${field.id}`}
-            type="text"
-            value={field.value}
-            disabled={field.notPresent || submitting}
-            onChange={(e) => {
-              const next = e.target.value;
-              setWordingFields((prev) => prev.map((f) => (f.id === field.id ? { ...f, value: next } : f)));
-            }}
-          />
-          <label>
-            <input
-              type="checkbox"
-              checked={field.notPresent}
-              disabled={submitting}
-              onChange={(e) => {
-                const checked = e.target.checked;
-                setWordingFields((prev) =>
-                  prev.map((f) => (f.id === field.id ? { ...f, notPresent: checked, value: checked ? "" : f.value } : f)),
-                );
-              }}
-            />
-            This text isn&rsquo;t actually in my artwork
-          </label>
+      {wordingFields.length > 0 ? (
+        <div className="mt-3 grid gap-3">
+          {wordingFields.map((field, index) => (
+            <div key={field.id}>
+              <label htmlFor={`fidelity-wording-${field.id}`} className="block">
+                <span className="text-xs font-medium text-ink">
+                  Text{wordingFields.length > 1 ? ` ${index + 1}` : ""}
+                </span>
+                {field.readable ? null : (
+                  <p className="mt-0.5 text-xs text-muted">
+                    We couldn&rsquo;t clearly read this — please type what it says.
+                  </p>
+                )}
+                <input
+                  id={`fidelity-wording-${field.id}`}
+                  type="text"
+                  value={field.value}
+                  disabled={field.notPresent || submitting}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setWordingFields((prev) => prev.map((f) => (f.id === field.id ? { ...f, value: next } : f)));
+                  }}
+                  className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm text-ink outline-none focus:border-ink/40 disabled:opacity-50"
+                  data-testid={`artwork-fidelity-wording-input-${field.id}`}
+                />
+              </label>
+              <label className="mt-1.5 flex items-center gap-2 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={field.notPresent}
+                  disabled={submitting}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setWordingFields((prev) =>
+                      prev.map((f) => (f.id === field.id ? { ...f, notPresent: checked, value: checked ? "" : f.value } : f)),
+                    );
+                  }}
+                  className="h-4 w-4 rounded border-black/20 text-ink focus:ring-ink/40"
+                  data-testid={`artwork-fidelity-wording-exclude-${field.id}`}
+                />
+                This text isn&rsquo;t actually in my artwork
+              </label>
+            </div>
+          ))}
         </div>
-      ))}
+      ) : null}
 
       {markFields.map((field) => (
-        <fieldset key={field.id}>
-          <legend>
+        <fieldset key={field.id} className="mt-3">
+          <legend className="text-xs font-medium text-ink">
             {field.visualDescription
               ? "We found a small symbol here. Is it:"
               : "Does your artwork include a ™, ®, or © symbol?"}
           </legend>
-          {field.visualDescription ? <p>{field.visualDescription}</p> : null}
-          {MARK_OPTIONS.map((option) => (
-            <label key={option.value}>
-              <input
-                type="radio"
-                name={`fidelity-mark-${field.id}`}
-                checked={field.selection === option.value}
+          {field.visualDescription ? (
+            <p className="mt-0.5 text-xs text-muted">{field.visualDescription}</p>
+          ) : null}
+          <div className="mt-1.5 flex flex-wrap gap-2" role="radiogroup">
+            {MARK_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
                 disabled={submitting}
-                onChange={() =>
+                aria-pressed={field.selection === option.value}
+                onClick={() =>
                   setMarkFields((prev) =>
                     prev.map((f) => (f.id === field.id ? { ...f, selection: option.value } : f)),
                   )
                 }
-              />
-              {option.label}
-            </label>
-          ))}
-          <label>
-            <input
-              type="radio"
-              name={`fidelity-mark-${field.id}`}
-              checked={field.selection === "NOT_SURE"}
-              disabled={submitting}
-              onChange={() =>
-                setMarkFields((prev) => prev.map((f) => (f.id === field.id ? { ...f, selection: "NOT_SURE" } : f)))
-              }
-            />
-            Not sure
-          </label>
+                className={`rounded-full px-3 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                  field.selection === option.value
+                    ? "bg-ink text-white"
+                    : "border border-black/10 text-muted hover:border-ink/30 hover:text-ink"
+                }`}
+                data-testid={`artwork-fidelity-mark-option-${field.id}-${option.value}`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
         </fieldset>
       ))}
 
-      <button type="button" onClick={() => void handleConfirm()} disabled={!canConfirm}>
-        Confirm Artwork Details
-      </button>
-      <button type="button" onClick={onSkip} disabled={submitting}>
-        Skip for now
-      </button>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void handleConfirm()}
+          disabled={!canConfirm}
+          className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="artwork-fidelity-confirm-button"
+        >
+          Confirm Artwork Details
+        </button>
+        <button
+          type="button"
+          onClick={onSkip}
+          disabled={submitting}
+          className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          data-testid="artwork-fidelity-skip-button"
+        >
+          Skip for now
+        </button>
+      </div>
     </section>
   );
 }
