@@ -11366,20 +11366,59 @@ never trusted from a client request body, which is what makes
 ### Customer surface
 
 One route, `POST /api/projects/[projectId]/artwork-fidelity`
-(`{action: "propose" | "confirm"}`), and one shared UI step,
-`confirm_artwork_fidelity` in `uploaded-artwork-flow.ts` /
-`ArtworkFidelityConfirmationStep.tsx` — inserted at the earliest point
-BOTH the DTF and Signs paths share (before the `choose_artwork_type`
-branch), never duplicated per profile. Deliberately **not a hard gate**:
-reconstruction does not exist yet, so nothing currently requires a
-confirmed contract to proceed — the step is skippable
-(`fidelityStepDismissed`, transient/client-only) and never retroactively
-interrupts a preparation that had already reached `compare`/`approved`
-before this phase shipped. **Future gating point, not yet built:** once a
+(`{action: "propose"}` or `{action: "confirm", wordingResolutions,
+markResolutions}`), and one shared UI step, `confirm_artwork_fidelity` in
+`uploaded-artwork-flow.ts` / `ArtworkFidelityConfirmationStep.tsx` —
+inserted EXACTLY where `choose_artwork_type` itself would otherwise be
+offered, inside the same `!signArtwork && preparation.printPlacement ===
+null` window that step already lives inside, never duplicated per
+profile. A project that has already committed to a downstream DTF path
+(`printPlacement` set) or Signs path (`signArtwork` truthy — at ANY
+stage, including a fully-authorized one) can never reach this step at
+all, by construction — see `deriveUploadedArtworkStep`'s own doc comment
+at the gate site (Phase R4A-R independent-review repair: the original
+gate was positioned earlier and broader, examining only DTF-specific
+`approved`/`hasPreparedArtwork` terminal signals it had no way to check
+for Signs, and incorrectly intercepted existing in-flight Signs projects
+and mid-flow DTF projects on deploy). Deliberately **not a hard gate**
+otherwise: reconstruction does not exist yet, so nothing currently
+requires a confirmed contract to proceed for a genuinely new upload — the
+step is skippable (`fidelityStepDismissed`, transient/client-only).
+**Future gating point, not yet built:** once a
 `RasterReconstructionCapability` exists and actually needs confirmed
 authority, remove the skip escape hatch (or require `status: "confirmed"`
-specifically) so reconstruction-bound artwork cannot proceed without one —
-see `deriveUploadedArtworkStep`'s own doc comment on this step.
+specifically) so reconstruction-bound artwork cannot proceed without one.
+
+### Server-side confirmation completeness (Phase R4A-R)
+
+`confirmArtworkFidelity` no longer trusts flat `confirmedWording`/
+`confirmedMarks` arrays a client asserts. Every wording/mark entry in a
+persisted proposal carries a stable, proposal-local id (assigned once by
+`ArtworkFidelityProposalCapability` — `w0`, `w1`, ... / `m0`, `m1`, ...,
+never by the provider or the client); confirmation submits per-region
+RESOLUTIONS keyed by those ids, and `artwork-fidelity-confirmation.ts`'s
+pure `validateAndDeriveConfirmation` — loading the STORED proposal
+server-side, never trusting the client's own account of what was proposed
+— proves every proposed region received exactly one, unambiguous
+resolution before `confirmContract` is ever called. A missing, duplicate,
+blank/whitespace-only, or unknown-id resolution is rejected outright, with
+no partial mutation. When a provider proposes zero mark regions,
+`assignMarkIds` still synthesizes exactly one labeled catch-all region
+(`m0`, `classification: "cannot_determine"`) so "no marks" always requires
+one explicit customer decision (`NONE`), never a silent default from an
+empty array — applied identically whether zero marks resulted from a
+genuine successful analysis, a caught provider failure, or the safe
+placeholder, so the customer always gets exactly one mark question either
+way. `"NOT_SURE"` is excluded from the request schema's own enum entirely
+— it can never even reach the validator, let alone become authority.
+
+`ArtworkFidelityProposedFacts.proposalStatus` (`"analyzed" |
+"unavailable"`) distinguishes a genuine successful provider analysis that
+happened to find nothing from the provider never having actually run
+(misconfigured, placeholder, or a caught failure) — surfaced through
+`ArtworkFidelityView.proposalStatus` and rendered as visibly different
+copy ("We checked your artwork but didn't find..." vs. "We couldn't check
+your artwork automatically...").
 
 ### Still not built this phase
 

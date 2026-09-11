@@ -26,9 +26,33 @@
  * `schemaVersion` is stamped into every persisted `proposedFacts` payload so
  * a future change to this shape never has to guess which prompt/schema
  * produced an old, already-persisted proposal.
+ *
+ * Phase R4A-R (independent-review repair, Blockers 2/3): two additions to
+ * the shape below, both REQUIRED to make server-side confirmation
+ * completeness possible at all — see `artwork-fidelity-service.ts`'s own
+ * doc comment for how they're used:
+ *
+ *   - every wording/mark entry now carries a stable `id`, assigned ONCE by
+ *     `ArtworkFidelityProposalCapability` when a proposal is built (never by
+ *     the provider itself, which has no concept of proposal identity, and
+ *     never by the client). The id is proposal-local (unique within THIS
+ *     proposal only, not globally) and immutable for the life of the
+ *     proposal — a correction always proposes an entirely new row (existing
+ *     R3B precedent), which mints entirely new ids, never reuses old ones.
+ *     Confirmation submits RESOLUTIONS keyed by these ids so the server can
+ *     verify every proposed region was explicitly addressed, rather than
+ *     trusting array position/order (which a malformed client could reorder
+ *     or omit from without detection).
+ *   - `proposalStatus: "analyzed" | "unavailable"` distinguishes a GENUINE
+ *     successful provider analysis that happened to find zero facts from a
+ *     provider that never actually ran (misconfigured, placeholder, or
+ *     failed) — see `ArtworkFidelityProposalResult.analyzed`. An empty
+ *     `wording`/`protectedMarks` array means something different depending
+ *     on this field, and the confirmation UI/server treat the two
+ *     differently (Section 6/7 of the R4A-R task).
  */
 
-export const ARTWORK_FIDELITY_PROPOSAL_SCHEMA_VERSION = "artwork-fidelity-proposal:v1";
+export const ARTWORK_FIDELITY_PROPOSAL_SCHEMA_VERSION = "artwork-fidelity-proposal:v2";
 
 export const WORDING_READABILITY_VALUES = [
   "readable",
@@ -44,7 +68,21 @@ export type ProposalConfidence = (typeof PROPOSAL_CONFIDENCE_VALUES)[number];
 export const MARK_CLASSIFICATION_VALUES = ["TM", "R", "C", "cannot_determine"] as const;
 export type MarkClassificationProposal = (typeof MARK_CLASSIFICATION_VALUES)[number];
 
-export interface WordingFactProposal {
+/**
+ * Phase R4A-R: whether a REAL provider analysis actually ran and produced
+ * this result. `false` for the safe placeholder (misconfigured/absent
+ * credentials, or unconditionally forced under
+ * `isAutomatedTestEnvironment()`) and for any caught provider failure
+ * (network, rate limit, malformed response, timeout, auth) — `true` ONLY
+ * for a genuine, successful provider response, even one that legitimately
+ * found zero wording/marks. This is the raw, provider-level signal;
+ * `ArtworkFidelityProposedFacts.proposalStatus` is the persisted,
+ * capability-level projection of it.
+ */
+export type ProposalAnalysisStatus = "analyzed" | "unavailable";
+
+/** Raw provider-level entry — no `id` yet (the provider has no concept of proposal identity; ids are assigned once, capability-side, when a proposal is actually built). */
+export interface RawWordingFactProposal {
   /** Best-effort transcription using ONLY visibly-supported characters, or `null` when `readability` is `"cannot_read"`. Never a guessed/completed word. */
   text: string | null;
   readability: WordingReadability;
@@ -53,18 +91,34 @@ export interface WordingFactProposal {
   visibleEvidence: string;
 }
 
-export interface ProtectedMarkFactProposal {
+export interface RawProtectedMarkFactProposal {
   /** What is actually visually observed, described BEFORE classification — e.g. "letter R enclosed by a circle". Observation only, never hidden reasoning. */
   visualDescription: string;
   classification: MarkClassificationProposal;
   confidence: ProposalConfidence;
 }
 
+/**
+ * Persisted/domain shape — a `RawWordingFactProposal` plus the stable,
+ * proposal-local `id` the capability assigns. This is what
+ * `ArtworkFidelityProposedFacts.wording` actually stores, and what the
+ * confirmation UI/route/service key resolutions against.
+ */
+export interface WordingFactProposal extends RawWordingFactProposal {
+  id: string;
+}
+
+export interface ProtectedMarkFactProposal extends RawProtectedMarkFactProposal {
+  id: string;
+}
+
 export interface ArtworkFidelityProposalResult {
-  wording: WordingFactProposal[];
-  protectedMarks: ProtectedMarkFactProposal[];
+  wording: RawWordingFactProposal[];
+  protectedMarks: RawProtectedMarkFactProposal[];
   /** The provider's own request/response id, for support diagnosis only — never customer-facing, never logged with any image byte or credential. */
   providerRequestId: string | null;
+  /** See `ProposalAnalysisStatus`'s own doc comment. */
+  analyzed: boolean;
 }
 
 /**
@@ -78,6 +132,7 @@ export interface ArtworkFidelityProposalResult {
  */
 export interface ArtworkFidelityProposedFacts {
   schemaVersion: typeof ARTWORK_FIDELITY_PROPOSAL_SCHEMA_VERSION;
+  proposalStatus: ProposalAnalysisStatus;
   wording: WordingFactProposal[];
   protectedMarks: ProtectedMarkFactProposal[];
   sanitizedProvider: {
@@ -92,6 +147,9 @@ export function isArtworkFidelityProposedFacts(
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
   if (candidate.schemaVersion !== ARTWORK_FIDELITY_PROPOSAL_SCHEMA_VERSION) return false;
+  if (candidate.proposalStatus !== "analyzed" && candidate.proposalStatus !== "unavailable") {
+    return false;
+  }
   return Array.isArray(candidate.wording) && Array.isArray(candidate.protectedMarks);
 }
 

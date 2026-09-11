@@ -355,33 +355,6 @@ export function deriveUploadedArtworkStep(
   if (preparation.approved) return "approved";
   if (preparation.hasPreparedArtwork) return "compare";
 
-  // Universal Raster Reconstruction Phase R4A: the earliest SHARED seam —
-  // before the DTF/Signs branch below, and before either profile's own
-  // destructive processing (DTF background removal; Signs composition
-  // planning) has run — so this is never a profile-specific step and never
-  // duplicated. Gated on `!preparation.approved && !preparation
-  // .hasPreparedArtwork` (the two checks just above) so a preparation that
-  // has ALREADY reached those stages before this phase shipped is never
-  // retroactively interrupted; only a preparation still earlier in its own
-  // flow sees this new step, once, unless dismissed.
-  //
-  // DELIBERATELY NOT A HARD GATE (task Section 13): reconstruction does not
-  // exist yet, so nothing downstream actually consumes a confirmed
-  // Fidelity Contract — blocking every current upload on it would break
-  // valid, currently-working flows for no present benefit. `Skip for now`
-  // (transient, `fidelityStepDismissed`) lets the customer continue exactly
-  // as they could before this phase. FUTURE GATING POINT: once a
-  // `RasterReconstructionCapability` exists and actually needs confirmed
-  // authority, remove the dismiss escape hatch here (or make it require an
-  // explicit "confirmed" status rather than merely "attempted") so
-  // reconstruction-bound artwork cannot proceed without one.
-  if (
-    !input.fidelityStepDismissed &&
-    input.artworkFidelity?.status !== "confirmed"
-  ) {
-    return "confirm_artwork_fidelity";
-  }
-
   // LIVE PRODUCT BLOCKER #1: a `SignPreparation` existing is the Sign
   // path's own durable signal, exactly like `printPlacement` is the DTF
   // path's — checked FIRST and independent of the transient
@@ -419,6 +392,43 @@ export function deriveUploadedArtworkStep(
   // transient artwork-type choice decides which question comes next; no
   // choice yet means the routing question itself is the next step.
   if (!preparation.printPlacement) {
+    // Universal Raster Reconstruction Phase R4A (R4A-R repair): the fidelity
+    // confirmation step is offered EXACTLY where `choose_artwork_type`
+    // itself would otherwise be offered — inside the SAME
+    // `!signArtwork && !preparation.printPlacement` window this whole block
+    // already exists to guard (this line is reached at all only because the
+    // `if (signArtwork)` branch above did not return, so `signArtwork` is
+    // already known falsy here; `printPlacement` is null by this block's
+    // own condition). This is deliberate, not incidental: a project that has
+    // ALREADY committed to a downstream DTF path (`printPlacement` set, so
+    // this whole `if` is skipped and `review_analysis` returns below
+    // instead) or a downstream Signs path (`signArtwork` truthy, so the
+    // earlier block already returned) can NEVER reach this line, and
+    // therefore can never be retroactively intercepted by a phase shipped
+    // after that commitment was already made — R4A-R's independent-review
+    // repair (Blocker 1: existing Signs projects at any stage, and
+    // mid-flow DTF projects that had already chosen a placement, were
+    // previously redirected here in error by a broader, earlier-positioned
+    // check that examined only the DTF-specific `approved`/
+    // `hasPreparedArtwork` terminal signals and had no visibility into
+    // `signArtwork`/`printPlacement` at all).
+    //
+    // DELIBERATELY NOT A HARD GATE (task Section 13/14): reconstruction
+    // does not exist yet, so nothing downstream actually consumes a
+    // confirmed Fidelity Contract — blocking every current upload on it
+    // would break valid, currently-working flows for no present benefit.
+    // `Skip for now` (transient, `fidelityStepDismissed`) lets the customer
+    // continue exactly as they could before this phase. FUTURE GATING
+    // POINT: once a `RasterReconstructionCapability` exists and actually
+    // needs confirmed authority, remove the dismiss escape hatch here (or
+    // require `status: "confirmed"` specifically, which it already checks
+    // for) so reconstruction-bound artwork cannot proceed without one.
+    if (
+      !input.fidelityStepDismissed &&
+      input.artworkFidelity?.status !== "confirmed"
+    ) {
+      return "confirm_artwork_fidelity";
+    }
     if (input.artworkTypeChoice === "dtf") return "confirm_details";
     if (input.artworkTypeChoice === "sign") return "confirm_sign_size";
     return "choose_artwork_type";

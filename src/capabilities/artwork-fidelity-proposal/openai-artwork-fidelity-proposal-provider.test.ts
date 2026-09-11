@@ -91,6 +91,8 @@ describe("OpenAIArtworkFidelityProposalProvider — request/response", () => {
     assert.equal(result.protectedMarks.length, 1);
     assert.equal(result.protectedMarks[0]!.classification, "R");
     assert.equal(result.providerRequestId, "resp_123");
+    // Phase R4A-R: a real, successful, parsed response reports analyzed: true.
+    assert.equal(result.analyzed, true);
   });
 
   it("defensively forces text=null when readability is cannot_read, even if the provider disobeys the schema", async () => {

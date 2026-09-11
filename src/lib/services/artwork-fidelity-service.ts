@@ -36,13 +36,21 @@
  */
 
 import { getCapabilityGraph } from "@/capabilities/composition";
-import { sha256Hex, toProposedFactsRecord } from "@/capabilities/artwork-fidelity-proposal";
+import {
+  isArtworkFidelityProposedFacts,
+  sha256Hex,
+  toProposedFactsRecord,
+} from "@/capabilities/artwork-fidelity-proposal";
 import { ArtworkFidelityContractStateError } from "@/capabilities/artwork-fidelity";
-import type { ProtectedMarkType, SignPlanAuthorizationActor } from "@/lib/domain/types";
+import type { SignPlanAuthorizationActor } from "@/lib/domain/types";
 import {
   getConversation,
   type ApiProjectSnapshot,
 } from "@/lib/services/conversation-service";
+import {
+  validateAndDeriveConfirmation,
+  type ConfirmationResolutionsInput,
+} from "@/lib/services/artwork-fidelity-confirmation";
 
 export class ArtworkFidelityServiceError extends Error {
   constructor(message: string) {
@@ -130,16 +138,35 @@ export async function proposeArtworkFidelity(
   return requireSnapshot(projectId);
 }
 
-export interface ConfirmArtworkFidelityInput {
-  confirmedWording: string[];
-  confirmedMarks: ProtectedMarkType[];
+export interface ConfirmArtworkFidelityInput extends ConfirmationResolutionsInput {
   confirmedBy: SignPlanAuthorizationActor;
 }
 
 /**
  * The customer's (or operator's) explicit "Confirm what's in your artwork"
- * submission. Re-resolves and re-hashes the CURRENT source bytes server-side
- * — never trusts a client-supplied sha256 — so `ArtworkFidelityCapability
+ * submission.
+ *
+ * Phase R4A-R (independent-review repair, Blocker 2): the request no longer
+ * carries flat `confirmedWording`/`confirmedMarks` arrays the server simply
+ * trusts. It carries per-region RESOLUTIONS keyed by the stable ids the
+ * STORED proposal itself assigned — loaded here, server-side, from the
+ * contract's own `proposedFacts` (never from anything the client asserts
+ * about what was proposed). `validateAndDeriveConfirmation` then proves
+ * every proposed region was explicitly, unambiguously resolved before this
+ * function EVER calls `confirmContract` — a malformed/incomplete/direct API
+ * request throws `ArtworkFidelityConfirmationValidationError` here, before
+ * any write, exactly the "server must reject incomplete confirmation even
+ * if the UI normally prevents it" invariant the independent review found
+ * missing.
+ *
+ * A proposal that does not parse as a valid `ArtworkFidelityProposedFacts`
+ * (should not happen via the normal `proposeArtworkFidelity` path, which
+ * always writes this exact shape, but defensively guarded against corrupt/
+ * legacy data) is treated identically to "no proposal at all" — refused,
+ * never silently treated as zero required resolutions.
+ *
+ * Re-resolves and re-hashes the CURRENT source bytes server-side — never
+ * trusts a client-supplied sha256 — so `ArtworkFidelityCapability
  * .confirmContract`'s own staleness check (Section 10) is checking a real,
  * freshly-measured fact, not a value the request body merely asserted.
  *
@@ -155,17 +182,26 @@ export async function confirmArtworkFidelity(
 ): Promise<ApiProjectSnapshot> {
   const graph = getCapabilityGraph();
   const contract = await graph.artworkFidelity.getContract(projectId);
-  if (!contract) {
+  if (!contract || !isArtworkFidelityProposedFacts(contract.proposedFacts)) {
     throw new ArtworkFidelityContractStateError(
       "No artwork fidelity proposal exists yet for this project — check your artwork before confirming.",
     );
   }
+
+  // Throws ArtworkFidelityConfirmationValidationError before any write if
+  // even one proposed region was left unresolved, ambiguously resolved, or
+  // if the request references a region the stored proposal never had.
+  const derived = validateAndDeriveConfirmation(contract.proposedFacts, {
+    wordingResolutions: input.wordingResolutions,
+    markResolutions: input.markResolutions,
+  });
+
   const source = await resolveOriginalSourceBytes(projectId);
 
   await graph.artworkFidelity.confirmContract(projectId, contract.id, {
     currentSourceSha256: source.sha256,
-    confirmedWording: input.confirmedWording,
-    confirmedMarks: input.confirmedMarks,
+    confirmedWording: derived.confirmedWording,
+    confirmedMarks: derived.confirmedMarks,
     confirmedBy: input.confirmedBy,
   });
   return requireSnapshot(projectId);

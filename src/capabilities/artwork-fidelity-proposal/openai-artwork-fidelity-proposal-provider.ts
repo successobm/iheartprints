@@ -37,8 +37,8 @@ import {
   type ArtworkFidelityProposalResult,
   type MarkClassificationProposal,
   type ProposalConfidence,
-  type ProtectedMarkFactProposal,
-  type WordingFactProposal,
+  type RawProtectedMarkFactProposal,
+  type RawWordingFactProposal,
   type WordingReadability,
 } from "./contracts";
 
@@ -173,9 +173,9 @@ function isMarkClassification(value: unknown): value is MarkClassificationPropos
 }
 
 /** Defensive re-validation of the provider's own strict-schema output -- never trusts `strict: true` alone, mirroring every other provider adapter in this codebase. A malformed entry is DROPPED, never guessed into a shape. */
-function normalizeWording(value: unknown): WordingFactProposal[] {
+function normalizeWording(value: unknown): RawWordingFactProposal[] {
   if (!Array.isArray(value)) return [];
-  const result: WordingFactProposal[] = [];
+  const result: RawWordingFactProposal[] = [];
   for (const entry of value) {
     if (!entry || typeof entry !== "object") continue;
     const e = entry as Record<string, unknown>;
@@ -194,9 +194,9 @@ function normalizeWording(value: unknown): WordingFactProposal[] {
   return result;
 }
 
-function normalizeMarks(value: unknown): ProtectedMarkFactProposal[] {
+function normalizeMarks(value: unknown): RawProtectedMarkFactProposal[] {
   if (!Array.isArray(value)) return [];
-  const result: ProtectedMarkFactProposal[] = [];
+  const result: RawProtectedMarkFactProposal[] = [];
   for (const entry of value) {
     if (!entry || typeof entry !== "object") continue;
     const e = entry as Record<string, unknown>;
@@ -294,6 +294,12 @@ export class OpenAIArtworkFidelityProposalProvider
       wording: normalizeWording(obj.wording),
       protectedMarks: normalizeMarks(obj.protectedMarks),
       providerRequestId: responseId,
+      // Phase R4A-R: reaching this line means a real, successful, parsed
+      // provider response was obtained -- a genuine analysis, even one that
+      // found zero facts. Every failure path above (network, timeout,
+      // non-2xx, malformed JSON/schema) throws a `ProviderError` instead of
+      // reaching here, so `analyzed` is never reported `true` for a failure.
+      analyzed: true,
     };
   }
 

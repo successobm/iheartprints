@@ -28,6 +28,23 @@ import type { ArtworkFidelityView } from "@/lib/services/conversation-service";
  * contract", "model", "OCR", "confidence score", "provenance",
  * "contractKey", "reconstruction provider", or "semantic verification"
  * appears anywhere in this component's rendered text.
+ *
+ * Phase R4A-R (independent-review repair):
+ *   - every field carries the SAME stable `id` the server assigned when it
+ *     built the proposal (`ArtworkFidelityView.wording[].id`/
+ *     `.protectedMarks[].id`) — submitted back as `wordingResolutions`/
+ *     `markResolutions` so the server can prove every proposed region was
+ *     actually addressed, never trusting array position/order alone
+ *     (Blocker 2/§4).
+ *   - the mark question list is read directly from
+ *     `view.protectedMarks` with no client-side synthesis any more — the
+ *     server itself now guarantees at least one entry (a labeled catch-all
+ *     when nothing was detected), so what the customer sees and what the
+ *     server will validate against are always the exact same set of ids
+ *     (Blocker 2/§5).
+ *   - `view.proposalStatus` distinguishes a genuine successful check that
+ *     found nothing from the provider being unavailable/misconfigured/
+ *     failed (Blocker 3/§6) — the two render visibly different copy.
  */
 
 /**
@@ -48,8 +65,7 @@ const MARK_OPTIONS: { value: ProtectedMarkType | "NONE"; label: string }[] = [
 type MarkSelection = ProtectedMarkType | "NONE" | "NOT_SURE" | null;
 
 interface WordingFieldState {
-  /** `null` for a proposal entry with no ground truth to compare against, kept for the "correct anything that doesn't look right" prefill rule. */
-  proposedText: string | null;
+  id: string;
   readable: boolean;
   value: string;
   /** Explicit "this text is not actually in my artwork" — the safe way to resolve an entry without typing anything (Section 9). */
@@ -57,6 +73,7 @@ interface WordingFieldState {
 }
 
 interface MarkFieldState {
+  id: string;
   visualDescription: string;
   selection: MarkSelection;
 }
@@ -64,7 +81,7 @@ interface MarkFieldState {
 function initialWordingFields(view: ArtworkFidelityView | null): WordingFieldState[] {
   if (!view) return [];
   return view.wording.map((w) => ({
-    proposedText: w.text,
+    id: w.id,
     readable: w.readability === "readable",
     // Never prefill an uncertain guess — only a `readable` proposal is
     // trusted enough to prefill, and even then the customer can edit it.
@@ -75,12 +92,10 @@ function initialWordingFields(view: ArtworkFidelityView | null): WordingFieldSta
 
 function initialMarkFields(view: ArtworkFidelityView | null): MarkFieldState[] {
   if (!view) return [];
-  if (view.protectedMarks.length === 0) {
-    // No region detected at all — still one explicit question, never a
-    // silent default (Section 6/8).
-    return [{ visualDescription: "", selection: null }];
-  }
-  return view.protectedMarks.map((m) => ({ visualDescription: m.visualDescription, selection: null }));
+  // The server always returns at least one mark entry now (a labeled
+  // catch-all when nothing was detected) -- see `assignMarkIds` in
+  // `artwork-fidelity-proposal-capability.ts`. No client-side synthesis.
+  return view.protectedMarks.map((m) => ({ id: m.id, visualDescription: m.visualDescription, selection: null }));
 }
 
 export interface ArtworkFidelityConfirmationStepProps {
@@ -145,22 +160,20 @@ export function ArtworkFidelityConfirmationStep(
     if (!canConfirm) return;
     setSubmitting(true);
     setError(null);
-    const confirmedWording = wordingFields
-      .filter((f) => !f.notPresent)
-      .map((f) => f.value.trim())
-      .filter((text) => text.length > 0);
-    const confirmedMarks = Array.from(
-      new Set(
-        markFields
-          .map((f) => f.selection)
-          .filter((s): s is ProtectedMarkType => s === "™" || s === "®" || s === "©"),
-      ),
+    const wordingResolutions = wordingFields.map((f) =>
+      f.notPresent ? { id: f.id, excluded: true } : { id: f.id, text: f.value.trim() },
     );
+    const markResolutions = markFields.map((f) => ({
+      id: f.id,
+      // canConfirm already guarantees every selection is a real, non-null,
+      // non-"NOT_SURE" value at this point.
+      mark: f.selection as ProtectedMarkType | "NONE",
+    }));
     try {
       const res = await fetch(`/api/projects/${projectId}/artwork-fidelity`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "confirm", confirmedWording, confirmedMarks }),
+        body: JSON.stringify({ action: "confirm", wordingResolutions, markResolutions }),
       });
       const body = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(body.error || "We couldn't save those details. Please try again.");
@@ -171,32 +184,43 @@ export function ArtworkFidelityConfirmationStep(
     }
   }
 
+  const nothingToConfirm =
+    !checking && view !== null && wordingFields.length === 0 && markFields.length === 0;
+
   return (
     <section aria-label="Confirm what's in your artwork">
       <h3>Confirm what&rsquo;s in your artwork</h3>
-      <p>We found the following text and symbols. Please correct anything that doesn&rsquo;t look right.</p>
+      {view && view.proposalStatus === "unavailable" ? (
+        <p>We couldn&rsquo;t check your artwork automatically. Please enter the text and symbols that must be preserved.</p>
+      ) : (
+        <p>We found the following text and symbols. Please correct anything that doesn&rsquo;t look right.</p>
+      )}
 
       {checking ? <p role="status">Checking your artwork…</p> : null}
       {error ? <p role="alert">{error}</p> : null}
 
-      {!checking && wordingFields.length === 0 && markFields.length === 0 ? (
-        <p>We didn&rsquo;t find any text or symbols to confirm.</p>
+      {nothingToConfirm ? (
+        <p>
+          {view?.proposalStatus === "unavailable"
+            ? "We couldn't check your artwork automatically, and didn't find anything to resolve below. You can still confirm if your artwork truly has no text or symbols to preserve."
+            : "We checked your artwork but didn't find readable text or symbols. Please confirm what's present."}
+        </p>
       ) : null}
 
       {wordingFields.map((field, index) => (
-        <div key={index}>
-          <label htmlFor={`fidelity-wording-${index}`}>Text{wordingFields.length > 1 ? ` ${index + 1}` : ""}</label>
+        <div key={field.id}>
+          <label htmlFor={`fidelity-wording-${field.id}`}>Text{wordingFields.length > 1 ? ` ${index + 1}` : ""}</label>
           {field.readable ? null : (
             <p>We couldn&rsquo;t clearly read this — please type what it says.</p>
           )}
           <input
-            id={`fidelity-wording-${index}`}
+            id={`fidelity-wording-${field.id}`}
             type="text"
             value={field.value}
             disabled={field.notPresent || submitting}
             onChange={(e) => {
               const next = e.target.value;
-              setWordingFields((prev) => prev.map((f, i) => (i === index ? { ...f, value: next } : f)));
+              setWordingFields((prev) => prev.map((f) => (f.id === field.id ? { ...f, value: next } : f)));
             }}
           />
           <label>
@@ -207,7 +231,7 @@ export function ArtworkFidelityConfirmationStep(
               onChange={(e) => {
                 const checked = e.target.checked;
                 setWordingFields((prev) =>
-                  prev.map((f, i) => (i === index ? { ...f, notPresent: checked, value: checked ? "" : f.value } : f)),
+                  prev.map((f) => (f.id === field.id ? { ...f, notPresent: checked, value: checked ? "" : f.value } : f)),
                 );
               }}
             />
@@ -216,8 +240,8 @@ export function ArtworkFidelityConfirmationStep(
         </div>
       ))}
 
-      {markFields.map((field, index) => (
-        <fieldset key={index}>
+      {markFields.map((field) => (
+        <fieldset key={field.id}>
           <legend>
             {field.visualDescription
               ? "We found a small symbol here. Is it:"
@@ -228,12 +252,12 @@ export function ArtworkFidelityConfirmationStep(
             <label key={option.value}>
               <input
                 type="radio"
-                name={`fidelity-mark-${index}`}
+                name={`fidelity-mark-${field.id}`}
                 checked={field.selection === option.value}
                 disabled={submitting}
                 onChange={() =>
                   setMarkFields((prev) =>
-                    prev.map((f, i) => (i === index ? { ...f, selection: option.value } : f)),
+                    prev.map((f) => (f.id === field.id ? { ...f, selection: option.value } : f)),
                   )
                 }
               />
@@ -243,11 +267,11 @@ export function ArtworkFidelityConfirmationStep(
           <label>
             <input
               type="radio"
-              name={`fidelity-mark-${index}`}
+              name={`fidelity-mark-${field.id}`}
               checked={field.selection === "NOT_SURE"}
               disabled={submitting}
               onChange={() =>
-                setMarkFields((prev) => prev.map((f, i) => (i === index ? { ...f, selection: "NOT_SURE" } : f)))
+                setMarkFields((prev) => prev.map((f) => (f.id === field.id ? { ...f, selection: "NOT_SURE" } : f)))
               }
             />
             Not sure

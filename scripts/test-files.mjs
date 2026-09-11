@@ -775,4 +775,9 @@ export const TEST_FILES = [
   "src/capabilities/artwork-fidelity-proposal/openai-artwork-fidelity-proposal-provider.test.ts",
   "src/capabilities/artwork-fidelity-proposal/resolve-artwork-fidelity-proposal-provider.test.ts",
   "src/lib/services/artwork-fidelity-service.test.ts",
+  // Phase R4A-R (independent-review repair): server-side confirmation
+  // completeness validation + route-level malformed-payload coverage --
+  // registered immediately per the established discipline.
+  "src/lib/services/artwork-fidelity-confirmation.test.ts",
+  "src/app/api/projects/[projectId]/artwork-fidelity/route.test.ts",
 ];

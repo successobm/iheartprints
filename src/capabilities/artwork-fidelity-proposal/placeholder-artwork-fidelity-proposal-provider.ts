@@ -12,6 +12,11 @@
  * every detected region to be resolved; zero detected regions means the
  * customer fills in everything from scratch, exactly as if no proposal
  * capability existed at all).
+ *
+ * Phase R4A-R (independent-review repair, Blocker 3): `analyzed: false` is
+ * the explicit, typed signal that NO real analysis happened here — never to
+ * be confused with a genuine successful provider response that happens to
+ * have found nothing. See `ProposalAnalysisStatus`'s own doc comment.
  */
 
 import type {
@@ -28,6 +33,6 @@ export class PlaceholderArtworkFidelityProposalProvider
   async propose(
     _input: ArtworkFidelityProposalImageInput,
   ): Promise<ArtworkFidelityProposalResult> {
-    return { wording: [], protectedMarks: [], providerRequestId: null };
+    return { wording: [], protectedMarks: [], providerRequestId: null, analyzed: false };
   }
 }

@@ -895,16 +895,28 @@ async function resolveArtworkPreparation(
  * or the stored `proposedFacts` blob verbatim — only the fields the
  * confirmation UI needs (readability/confidence ARE surfaced; they drive
  * which fields the UI makes look uncertain, never a jargon "score").
+ *
+ * Phase R4A-R (independent-review repair): `id` on every wording/mark entry
+ * is the SAME stable, proposal-local id the server will require back in a
+ * confirmation's `wordingResolutions`/`markResolutions` — the client reads
+ * it from here, never invents its own. `proposalStatus` distinguishes a
+ * genuine successful analysis (even one that found nothing) from the
+ * provider being unavailable/misconfigured/failed (Blocker 3) — `null`
+ * only alongside a `null` `ArtworkFidelityView` itself (nothing proposed
+ * yet), never ambiguous once a contract exists.
  */
 export interface ArtworkFidelityView {
   contractId: string;
   status: ArtworkFidelityContractStatus;
+  proposalStatus: "analyzed" | "unavailable";
   wording: {
+    id: string;
     text: string | null;
     readability: "readable" | "partially_readable" | "cannot_read";
     confidence: "high" | "medium" | "low";
   }[];
   protectedMarks: {
+    id: string;
     visualDescription: string;
     classification: "TM" | "R" | "C" | "cannot_determine";
     confidence: "high" | "medium" | "low";
@@ -929,12 +941,19 @@ async function resolveArtworkFidelityView(
     return {
       contractId: contract.id,
       status: contract.status,
+      // A contract with no parseable proposedFacts (should not happen via
+      // the normal propose path; defensively guarded) reads as
+      // "unavailable" -- never silently "analyzed" for content that was
+      // never actually produced.
+      proposalStatus: facts?.proposalStatus ?? "unavailable",
       wording: (facts?.wording ?? []).map((w) => ({
+        id: w.id,
         text: w.text,
         readability: w.readability,
         confidence: w.confidence,
       })),
       protectedMarks: (facts?.protectedMarks ?? []).map((m) => ({
+        id: m.id,
         visualDescription: m.visualDescription,
         classification: m.classification,
         confidence: m.confidence,

@@ -334,13 +334,13 @@ describe("deriveUploadedArtworkStep", () => {
   });
 });
 
-describe("Universal Raster Reconstruction Phase R4A: confirm_artwork_fidelity routing", () => {
-  it("is offered once a preparation exists and no fidelity contract has been proposed yet", () => {
+describe("Universal Raster Reconstruction Phase R4A (R4A-R repair): confirm_artwork_fidelity routing", () => {
+  it("A. is offered for a new upload, before the artwork-type decision", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         artworkFidelity: null,
         fidelityStepDismissed: false,
-        preparation: preparation(),
+        preparation: preparation({ printPlacement: null }),
         signArtwork: null,
         choice: "undecided",
         artworkTypeChoice: "undecided",
@@ -355,7 +355,7 @@ describe("Universal Raster Reconstruction Phase R4A: confirm_artwork_fidelity ro
       deriveUploadedArtworkStep({
         artworkFidelity: { status: "proposed" },
         fidelityStepDismissed: false,
-        preparation: preparation(),
+        preparation: preparation({ printPlacement: null }),
         signArtwork: null,
         choice: "undecided",
         artworkTypeChoice: "undecided",
@@ -370,7 +370,7 @@ describe("Universal Raster Reconstruction Phase R4A: confirm_artwork_fidelity ro
       deriveUploadedArtworkStep({
         artworkFidelity: { status: "confirmed" },
         fidelityStepDismissed: false,
-        preparation: preparation(),
+        preparation: preparation({ printPlacement: null }),
         signArtwork: null,
         choice: "undecided",
         artworkTypeChoice: "undecided",
@@ -380,61 +380,184 @@ describe("Universal Raster Reconstruction Phase R4A: confirm_artwork_fidelity ro
     );
   });
 
-  it("does not block currently valid flows: dismissing it falls through even with no confirmed contract", () => {
+  it("does not block currently valid flows: dismissing it (for a brand-new, still-undecided upload) falls through to choose_artwork_type", () => {
     assert.equal(
       deriveUploadedArtworkStep({
         artworkFidelity: null,
         fidelityStepDismissed: true,
-        preparation: preparation({ printPlacement: "full_front" }),
+        preparation: preparation({ printPlacement: null }),
         signArtwork: null,
         choice: "undecided",
         artworkTypeChoice: "undecided",
         atProjectStart: false,
       }),
-      "review_analysis",
+      "choose_artwork_type",
     );
   });
 
-  it("takes priority over the Sign path's own steps — a single shared seam for both profiles", () => {
+  it("still resolves artworkTypeChoice to confirm_details/confirm_sign_size once the fidelity step is dismissed/confirmed", () => {
     assert.equal(
       deriveUploadedArtworkStep({
-        artworkFidelity: null,
+        artworkFidelity: { status: "confirmed" },
         fidelityStepDismissed: false,
         preparation: preparation({ printPlacement: null }),
-        signArtwork: { specConfirmed: false, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+        signArtwork: null,
         choice: "undecided",
-        artworkTypeChoice: "undecided",
+        artworkTypeChoice: "dtf",
         atProjectStart: false,
       }),
-      "confirm_artwork_fidelity",
+      "confirm_details",
+    );
+    assert.equal(
+      deriveUploadedArtworkStep({
+        artworkFidelity: null,
+        fidelityStepDismissed: true,
+        preparation: preparation({ printPlacement: null }),
+        signArtwork: null,
+        choice: "undecided",
+        artworkTypeChoice: "sign",
+        atProjectStart: false,
+      }),
+      "confirm_sign_size",
     );
   });
 
-  it("never retroactively interrupts a preparation that already reached compare/approved before this phase shipped", () => {
-    assert.equal(
-      deriveUploadedArtworkStep({
-        artworkFidelity: null,
-        fidelityStepDismissed: false,
-        preparation: preparation({ hasPreparedArtwork: true }),
-        signArtwork: null,
-        choice: "undecided",
-        artworkTypeChoice: "undecided",
-        atProjectStart: false,
-      }),
-      "compare",
-    );
-    assert.equal(
-      deriveUploadedArtworkStep({
-        artworkFidelity: null,
-        fidelityStepDismissed: false,
-        preparation: preparation({ approved: true, status: "approved", hasPreparedArtwork: true }),
-        signArtwork: null,
-        choice: "undecided",
-        artworkTypeChoice: "undecided",
-        atProjectStart: false,
-      }),
-      "approved",
-    );
+  /**
+   * R4A-R independent-review repair, Blocker 1: the ORIGINAL R4A gate was
+   * positioned before the `signArtwork`/`printPlacement` branches entirely,
+   * examining only the DTF-specific `approved`/`hasPreparedArtwork`
+   * terminal signals — which a Signs project never sets, and which a
+   * mid-flow DTF project (placement already chosen, not yet prepared)
+   * hasn't reached yet either. Both cases were incorrectly redirected to
+   * the new step. The repair narrows the gate to the EXACT
+   * `!signArtwork && preparation.printPlacement === null` window
+   * `choose_artwork_type` itself already lives inside — see
+   * `deriveUploadedArtworkStep`'s own doc comment at the gate site. Every
+   * test below is a DIRECT regression proof for that repair, executed
+   * against the real function, not inferred.
+   */
+  describe("R4A-R Blocker 1 repair: retroactivity", () => {
+    it("B. an existing DTF project with printPlacement already established does NOT see the fidelity step", () => {
+      assert.equal(
+        deriveUploadedArtworkStep({
+          artworkFidelity: null,
+          fidelityStepDismissed: false,
+          preparation: preparation({ printPlacement: "full_front" }),
+          signArtwork: null,
+          choice: "undecided",
+          artworkTypeChoice: "undecided",
+          atProjectStart: false,
+        }),
+        "review_analysis",
+      );
+    });
+
+    it("C. an existing Signs project with signArtwork already established (plan authorized) does NOT see the fidelity step", () => {
+      assert.equal(
+        deriveUploadedArtworkStep({
+          artworkFidelity: null,
+          fidelityStepDismissed: false,
+          preparation: preparation({ printPlacement: null }),
+          signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: true }, qrResolutions: null },
+          choice: "undecided",
+          artworkTypeChoice: "undecided",
+          atProjectStart: false,
+        }),
+        "sign_plan_authorized",
+      );
+    });
+
+    it("C2. an existing Signs project mid-flow (plan not yet authorized) does NOT see the fidelity step", () => {
+      assert.equal(
+        deriveUploadedArtworkStep({
+          artworkFidelity: null,
+          fidelityStepDismissed: false,
+          preparation: preparation({ printPlacement: null }),
+          signArtwork: { specConfirmed: true, hasPlan: true, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+          choice: "undecided",
+          artworkTypeChoice: "undecided",
+          atProjectStart: false,
+        }),
+        "sign_plan_review",
+      );
+    });
+
+    it("C3. an existing Signs project with an unresolved QR does NOT see the fidelity step -- the QR step still takes priority", () => {
+      assert.equal(
+        deriveUploadedArtworkStep({
+          artworkFidelity: null,
+          fidelityStepDismissed: false,
+          preparation: preparation({ printPlacement: null }),
+          signArtwork: {
+            specConfirmed: true,
+            hasPlan: true,
+            authorization: { matchesCurrentPlan: true },
+            qrResolutions: [{ regionKey: "r1", status: "needs_attention" }],
+          },
+          choice: "undecided",
+          artworkTypeChoice: "undecided",
+          atProjectStart: false,
+        }),
+        "sign_qr_needs_attention",
+      );
+    });
+
+    it("D. compare/approved states are unchanged from pre-R4A behavior", () => {
+      assert.equal(
+        deriveUploadedArtworkStep({
+          artworkFidelity: null,
+          fidelityStepDismissed: false,
+          preparation: preparation({ hasPreparedArtwork: true }),
+          signArtwork: null,
+          choice: "undecided",
+          artworkTypeChoice: "undecided",
+          atProjectStart: false,
+        }),
+        "compare",
+      );
+      assert.equal(
+        deriveUploadedArtworkStep({
+          artworkFidelity: null,
+          fidelityStepDismissed: false,
+          preparation: preparation({ approved: true, status: "approved", hasPreparedArtwork: true }),
+          signArtwork: null,
+          choice: "undecided",
+          artworkTypeChoice: "undecided",
+          atProjectStart: false,
+        }),
+        "approved",
+      );
+    });
+
+    it("E. the Signs bridge already having been created (earliest Signs stage, spec not yet confirmed) does NOT see the fidelity step", () => {
+      assert.equal(
+        deriveUploadedArtworkStep({
+          artworkFidelity: null,
+          fidelityStepDismissed: false,
+          preparation: preparation({ printPlacement: null }),
+          signArtwork: { specConfirmed: false, hasPlan: false, authorization: { matchesCurrentPlan: false }, qrResolutions: null },
+          choice: "undecided",
+          artworkTypeChoice: "undecided",
+          atProjectStart: false,
+        }),
+        "confirm_sign_size",
+      );
+    });
+
+    it("still offered for a genuinely new upload -- new-project behavior is unchanged by the repair", () => {
+      assert.equal(
+        deriveUploadedArtworkStep({
+          artworkFidelity: null,
+          fidelityStepDismissed: false,
+          preparation: preparation({ printPlacement: null }),
+          signArtwork: null,
+          choice: "undecided",
+          artworkTypeChoice: "undecided",
+          atProjectStart: false,
+        }),
+        "confirm_artwork_fidelity",
+      );
+    });
   });
 });
 

@@ -13,8 +13,11 @@ export {
   type ArtworkFidelityProposedFacts,
   type ArtworkFidelityProposalResult,
   type MarkClassificationProposal,
+  type ProposalAnalysisStatus,
   type ProposalConfidence,
   type ProtectedMarkFactProposal,
+  type RawProtectedMarkFactProposal,
+  type RawWordingFactProposal,
   type WordingFactProposal,
   type WordingReadability,
 } from "./contracts";
