@@ -108,6 +108,8 @@ describe("Create New Artwork choice (Correction A)", () => {
 
     assert.equal(
       deriveUploadedArtworkStep({
+        artworkFidelity: { status: "confirmed" },
+        fidelityStepDismissed: true,
         preparation: null,
         signArtwork: null,
         choice: "undecided",
@@ -214,6 +216,8 @@ describe("Create New Artwork choice (Correction A)", () => {
     assert.equal(atStart, false);
     assert.equal(
       deriveUploadedArtworkStep({
+        artworkFidelity: { status: "confirmed" },
+        fidelityStepDismissed: true,
         preparation: null,
         signArtwork: null,
         choice: "undecided",
@@ -274,6 +278,8 @@ describe("Create New Artwork choice (Correction A)", () => {
     // go through the Create New action.
     assert.equal(
       deriveUploadedArtworkStep({
+        artworkFidelity: { status: "confirmed" },
+        fidelityStepDismissed: true,
         preparation: null,
         signArtwork: null,
         choice: "upload_existing",

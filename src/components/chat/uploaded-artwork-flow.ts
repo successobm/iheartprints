@@ -49,6 +49,18 @@ export type UploadedArtworkStep =
   | "choose_workflow"
   /** Waiting for the customer to pick a file. */
   | "upload"
+  /**
+   * Universal Raster Reconstruction Phase R4A: "We found the following in
+   * your artwork — please correct anything that doesn't look right." Sits
+   * BEFORE the DTF/Signs branch (`choose_artwork_type`) so it is a single,
+   * shared step for both paths — never a profile-specific copy. Reachable
+   * once, before background removal (DTF) or composition planning (Signs)
+   * has had any chance to touch the evidence. Skippable: reconstruction
+   * does not exist yet, so nothing in this phase requires a confirmed
+   * Fidelity Contract to proceed — see `deriveUploadedArtworkStep`'s own
+   * doc comment on this step for the documented FUTURE gating point.
+   */
+  | "confirm_artwork_fidelity"
   /** We have their artwork; ask what kind it is before asking anything specific to either path. */
   | "choose_artwork_type"
   /** We have their artwork; we still need to know what and where we're printing. */
@@ -178,16 +190,48 @@ export const FRESH_UPLOADED_ARTWORK_UI_STATE = {
   workflowChoice: "undecided" as WorkflowChoice,
   artworkTypeChoice: "undecided" as ArtworkTypeChoice,
   reconsideringUpload: false,
+  /**
+   * Universal Raster Reconstruction Phase R4A: mirrors `reconsideringUpload`
+   * exactly — client-only, forgotten on reload/Start Over by design. It
+   * matters only in the window before the durable signal
+   * (`artworkFidelity.status === "confirmed"`) exists; forgetting it on
+   * reload correctly re-offers the step rather than durably remembering a
+   * skip the customer may not have meant to make permanent.
+   */
+  fidelityStepDismissed: false,
 } as const;
+
+/**
+ * Universal Raster Reconstruction Phase R4A: the durable signal
+ * `deriveUploadedArtworkStep` needs from `ArtworkFidelityView` — deliberately
+ * narrow, mirroring `SignArtworkFlowState`'s own shape. `null` means no
+ * fidelity contract exists yet for this project (nothing proposed).
+ */
+export interface ArtworkFidelityFlowState {
+  status: "proposed" | "confirmed";
+}
 
 export interface UploadedArtworkFlowInput {
   /** `null` for every Create New Artwork project. */
   preparation: ArtworkPreparationView | null;
   /** `null` until a Sign artwork type is chosen and the bridge into the Signs authority has completed. */
   signArtwork: SignArtworkFlowState | null;
+  /**
+   * Universal Raster Reconstruction Phase R4A: `null` until "check my
+   * artwork" has run at least once for this project.
+   */
+  artworkFidelity: ArtworkFidelityFlowState | null;
   choice: WorkflowChoice;
   /** The transient artwork-type answer — read only before either durable signal above exists. */
   artworkTypeChoice: ArtworkTypeChoice;
+  /**
+   * Universal Raster Reconstruction Phase R4A: transient, client-only —
+   * mirrors `reconsideringUpload`. `true` once the customer has explicitly
+   * chosen "Skip for now" on `confirm_artwork_fidelity` THIS session; reset
+   * on reload/Start Over by design (see `FRESH_UPLOADED_ARTWORK_UI_STATE`'s
+   * own doc comment).
+   */
+  fidelityStepDismissed: boolean;
   /**
    * True only at the very start of a project — no customer message, no
    * artwork. Offering the workflow choice later would interrupt an interview
@@ -348,6 +392,43 @@ export function deriveUploadedArtworkStep(
   // transient artwork-type choice decides which question comes next; no
   // choice yet means the routing question itself is the next step.
   if (!preparation.printPlacement) {
+    // Universal Raster Reconstruction Phase R4A (R4A-R repair): the fidelity
+    // confirmation step is offered EXACTLY where `choose_artwork_type`
+    // itself would otherwise be offered — inside the SAME
+    // `!signArtwork && !preparation.printPlacement` window this whole block
+    // already exists to guard (this line is reached at all only because the
+    // `if (signArtwork)` branch above did not return, so `signArtwork` is
+    // already known falsy here; `printPlacement` is null by this block's
+    // own condition). This is deliberate, not incidental: a project that has
+    // ALREADY committed to a downstream DTF path (`printPlacement` set, so
+    // this whole `if` is skipped and `review_analysis` returns below
+    // instead) or a downstream Signs path (`signArtwork` truthy, so the
+    // earlier block already returned) can NEVER reach this line, and
+    // therefore can never be retroactively intercepted by a phase shipped
+    // after that commitment was already made — R4A-R's independent-review
+    // repair (Blocker 1: existing Signs projects at any stage, and
+    // mid-flow DTF projects that had already chosen a placement, were
+    // previously redirected here in error by a broader, earlier-positioned
+    // check that examined only the DTF-specific `approved`/
+    // `hasPreparedArtwork` terminal signals and had no visibility into
+    // `signArtwork`/`printPlacement` at all).
+    //
+    // DELIBERATELY NOT A HARD GATE (task Section 13/14): reconstruction
+    // does not exist yet, so nothing downstream actually consumes a
+    // confirmed Fidelity Contract — blocking every current upload on it
+    // would break valid, currently-working flows for no present benefit.
+    // `Skip for now` (transient, `fidelityStepDismissed`) lets the customer
+    // continue exactly as they could before this phase. FUTURE GATING
+    // POINT: once a `RasterReconstructionCapability` exists and actually
+    // needs confirmed authority, remove the dismiss escape hatch here (or
+    // require `status: "confirmed"` specifically, which it already checks
+    // for) so reconstruction-bound artwork cannot proceed without one.
+    if (
+      !input.fidelityStepDismissed &&
+      input.artworkFidelity?.status !== "confirmed"
+    ) {
+      return "confirm_artwork_fidelity";
+    }
     if (input.artworkTypeChoice === "dtf") return "confirm_details";
     if (input.artworkTypeChoice === "sign") return "confirm_sign_size";
     return "choose_artwork_type";

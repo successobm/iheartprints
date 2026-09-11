@@ -11317,6 +11317,120 @@ reads from — exactly like `resolution-sufficiency.ts` was before it.
 
 ---
 
+## 23p. Universal Raster Reconstruction Phase R4A — Production Fidelity Proposal + Customer Confirmation
+
+Phase R4A makes the R3B foundation above USABLE from the real customer
+upload flow for the first time — proposal extraction, and the customer's
+own confirmation of it, but deliberately **not** reconstruction.
+
+**VISION PROPOSES → CUSTOMER CONFIRMS/CORRECTS → ARTWORK FIDELITY
+CONTRACT.** A vision-model proposal is never authority on its own; only an
+explicit customer (or operator) confirmation creates the immutable
+confirmed contract `ArtworkFidelityCapability.confirmContract` already
+enforced structurally at R3B/R3B-R.
+
+### `ArtworkFidelityProposalCapability` (`src/capabilities/artwork-fidelity-proposal/`)
+
+The first (and, this phase, only) provider port added to this area — sits
+ABOVE `ArtworkFidelityCapability`, never merged into it, per that
+capability's own "no provider port of any kind" structural property.
+Bytes in, a `proposedFacts`-shaped payload out (`wording[]`/
+`protectedMarks[]`, each carrying `readability`/`classification` +
+`confidence`, reimplementing the prompt/schema proven in Phase R3C/R3D
+research — see that module's own doc comments for the exact hypotheses
+encoded). Deliberately advisory-only, mirroring `ConceptEvaluationProvider`
+rather than the blocking Sign Preservation gate: a provider failure of any
+kind degrades to an empty proposal rather than ever blocking or erroring
+the customer flow — confirmation always requires explicit customer input
+regardless of whether extraction succeeded. Resolves to the real OpenAI
+provider only when `ARTWORK_FIDELITY_PROPOSAL_PROVIDER=openai` is
+configured (`artwork-fidelity-proposal-provider-config.ts`); unconditionally
+forced to the safe placeholder under `isAutomatedTestEnvironment()`, same
+discipline as every other provider resolver in this codebase.
+
+### Orchestration (`src/lib/services/artwork-fidelity-service.ts`)
+
+Composes `ArtworkPreparationCapability` (source asset resolution) +
+`AssetCapability` (server-side byte download) +
+`ArtworkFidelityProposalCapability` + `ArtworkFidelityCapability` at the
+app layer — none of those capabilities depend on each other directly. The
+source is always the customer's single original upload
+(`getOriginalAssetReference`) — the SAME immutable asset the DTF and
+(via `bridgeSignArtworkIfNeeded`) Signs paths already key off of — so
+proposal/confirmation runs once, before either profile's own destructive
+processing (DTF background removal; Signs composition planning). Source
+sha256 is always recomputed server-side, on both propose and confirm —
+never trusted from a client request body, which is what makes
+`confirmContract`'s own staleness check mean something end-to-end.
+
+### Customer surface
+
+One route, `POST /api/projects/[projectId]/artwork-fidelity`
+(`{action: "propose"}` or `{action: "confirm", wordingResolutions,
+markResolutions}`), and one shared UI step, `confirm_artwork_fidelity` in
+`uploaded-artwork-flow.ts` / `ArtworkFidelityConfirmationStep.tsx` —
+inserted EXACTLY where `choose_artwork_type` itself would otherwise be
+offered, inside the same `!signArtwork && preparation.printPlacement ===
+null` window that step already lives inside, never duplicated per
+profile. A project that has already committed to a downstream DTF path
+(`printPlacement` set) or Signs path (`signArtwork` truthy — at ANY
+stage, including a fully-authorized one) can never reach this step at
+all, by construction — see `deriveUploadedArtworkStep`'s own doc comment
+at the gate site (Phase R4A-R independent-review repair: the original
+gate was positioned earlier and broader, examining only DTF-specific
+`approved`/`hasPreparedArtwork` terminal signals it had no way to check
+for Signs, and incorrectly intercepted existing in-flight Signs projects
+and mid-flow DTF projects on deploy). Deliberately **not a hard gate**
+otherwise: reconstruction does not exist yet, so nothing currently
+requires a confirmed contract to proceed for a genuinely new upload — the
+step is skippable (`fidelityStepDismissed`, transient/client-only).
+**Future gating point, not yet built:** once a
+`RasterReconstructionCapability` exists and actually needs confirmed
+authority, remove the skip escape hatch (or require `status: "confirmed"`
+specifically) so reconstruction-bound artwork cannot proceed without one.
+
+### Server-side confirmation completeness (Phase R4A-R)
+
+`confirmArtworkFidelity` no longer trusts flat `confirmedWording`/
+`confirmedMarks` arrays a client asserts. Every wording/mark entry in a
+persisted proposal carries a stable, proposal-local id (assigned once by
+`ArtworkFidelityProposalCapability` — `w0`, `w1`, ... / `m0`, `m1`, ...,
+never by the provider or the client); confirmation submits per-region
+RESOLUTIONS keyed by those ids, and `artwork-fidelity-confirmation.ts`'s
+pure `validateAndDeriveConfirmation` — loading the STORED proposal
+server-side, never trusting the client's own account of what was proposed
+— proves every proposed region received exactly one, unambiguous
+resolution before `confirmContract` is ever called. A missing, duplicate,
+blank/whitespace-only, or unknown-id resolution is rejected outright, with
+no partial mutation. When a provider proposes zero mark regions,
+`assignMarkIds` still synthesizes exactly one labeled catch-all region
+(`m0`, `classification: "cannot_determine"`) so "no marks" always requires
+one explicit customer decision (`NONE`), never a silent default from an
+empty array — applied identically whether zero marks resulted from a
+genuine successful analysis, a caught provider failure, or the safe
+placeholder, so the customer always gets exactly one mark question either
+way. `"NOT_SURE"` is excluded from the request schema's own enum entirely
+— it can never even reach the validator, let alone become authority.
+
+`ArtworkFidelityProposedFacts.proposalStatus` (`"analyzed" |
+"unavailable"`) distinguishes a genuine successful provider analysis that
+happened to find nothing from the provider never having actually run
+(misconfigured, placeholder, or a caught failure) — surfaced through
+`ArtworkFidelityView.proposalStatus` and rendered as visibly different
+copy ("We checked your artwork but didn't find..." vs. "We couldn't check
+your artwork automatically...").
+
+### Still not built this phase
+
+`RasterReconstructionCapability`, OpenAI image editing/reconstruction,
+Topaz, an accepted clean master, a reconstruction candidate, post-
+reconstruction fidelity comparison, DTF/Signs reconstruction routing, or
+any Print Ready transition change. A confirmed `ArtworkFidelityContract`
+exists and is real, immutable authority after this phase — nothing yet
+reads it for production.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

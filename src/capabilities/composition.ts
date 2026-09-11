@@ -3,6 +3,11 @@ import type { ProjectRepository } from "@/lib/db/repository";
 
 import { createAcquisitionCapability } from "@/capabilities/acquisition";
 import { createArtworkPreparationCapability } from "@/capabilities/artwork-preparation";
+import { createArtworkFidelityCapability } from "@/capabilities/artwork-fidelity";
+import {
+  createArtworkFidelityProposalCapability,
+  resolveArtworkFidelityProposalProvider,
+} from "@/capabilities/artwork-fidelity-proposal";
 import { createSignPreparationCapability } from "@/capabilities/sign-preparation";
 import { resolveAssetStorageProvider } from "@/capabilities/asset-storage";
 import {
@@ -127,6 +132,24 @@ export interface CapabilityGraph {
    * executes a repair or changes a pixel.
    */
   signPreparation: ReturnType<typeof createSignPreparationCapability>;
+  /**
+   * Universal Raster Reconstruction Phase R3B: the durable Artwork Fidelity
+   * Contract authority foundation — proposed facts, confirmation, immutable
+   * confirmed authority, `contractKey`. Repository-only (no provider port),
+   * shared and never DTF-/Signs-prefixed. First wired into composition at
+   * Phase R4A.
+   */
+  artworkFidelity: ReturnType<typeof createArtworkFidelityCapability>;
+  /**
+   * Universal Raster Reconstruction Phase R4A: the provider-consuming
+   * adapter that turns source artwork bytes into non-authoritative
+   * `proposedFacts` for `artworkFidelity.proposeContract` to store. Resolves
+   * to the safe placeholder (empty proposal) unless
+   * `ARTWORK_FIDELITY_PROPOSAL_PROVIDER=openai` is configured — see
+   * `artwork-fidelity-proposal-provider-config.ts`. Advisory-only: never
+   * blocks, never throws for a provider failure.
+   */
+  artworkFidelityProposal: ReturnType<typeof createArtworkFidelityProposalCapability>;
 }
 
 let graph: CapabilityGraph | null = null;
@@ -296,6 +319,16 @@ export function createCapabilityGraph(
     // here, and none exists to resolve — sign inspection and planning are
     // local and deterministic by construction.
     signPreparation: createSignPreparationCapability(repo, assets),
+    // Universal Raster Reconstruction Phase R3B/R4A: repository-only, no
+    // provider port — see the field's own doc comment above.
+    artworkFidelity: createArtworkFidelityCapability(repo),
+    // Universal Raster Reconstruction Phase R4A: resolves to the real
+    // OpenAI provider only when explicitly configured; the safe
+    // placeholder otherwise (including unconditionally under
+    // `isAutomatedTestEnvironment()`).
+    artworkFidelityProposal: createArtworkFidelityProposalCapability(
+      resolveArtworkFidelityProposalProvider(),
+    ),
   };
 }
 

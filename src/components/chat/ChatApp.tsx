@@ -104,6 +104,13 @@ export function ChatApp() {
   /** Client-only "take me back a step" from the comparison/analysis surface. */
   const [reconsideringUpload, setReconsideringUpload] = useState(false);
   /**
+   * Universal Raster Reconstruction Phase R4A: "Skip for now" on
+   * `confirm_artwork_fidelity` — transient, client-only, mirrors
+   * `reconsideringUpload` exactly. See `FRESH_UPLOADED_ARTWORK_UI_STATE`'s
+   * own doc comment for why this is never durably persisted.
+   */
+  const [fidelityStepDismissed, setFidelityStepDismissed] = useState(false);
+  /**
    * Phase 1.2 / 1.3: the server's already-phrased answer to the LAST cleanup
    * action. Transient by design — it describes one action, not the project,
    * so it is never persisted and is cleared by any other action.
@@ -1365,6 +1372,7 @@ export function ChatApp() {
     setWorkflowChoice(FRESH_UPLOADED_ARTWORK_UI_STATE.workflowChoice);
     setArtworkTypeChoice(FRESH_UPLOADED_ARTWORK_UI_STATE.artworkTypeChoice);
     setReconsideringUpload(FRESH_UPLOADED_ARTWORK_UI_STATE.reconsideringUpload);
+    setFidelityStepDismissed(FRESH_UPLOADED_ARTWORK_UI_STATE.fidelityStepDismissed);
     setCleanupMessage(null);
     setCleanupPreview(null);
     await bootstrap();
@@ -1476,8 +1484,12 @@ export function ChatApp() {
           qrResolutions: snapshot.signArtwork.qrResolutions,
         }
       : null,
+    artworkFidelity: snapshot?.artworkFidelity
+      ? { status: snapshot.artworkFidelity.status }
+      : null,
     choice: workflowChoice,
     artworkTypeChoice,
+    fidelityStepDismissed,
     atProjectStart,
   });
   // "Change these details" / "Keep my original for now" step back without
@@ -1846,6 +1858,9 @@ export function ChatApp() {
                   currentPreparationImages.preparedRevision ?? preparedRevision
                 }
                 onUpload={(file) => void uploadExistingArtwork(file)}
+                artworkFidelity={snapshot?.artworkFidelity ?? null}
+                onFidelityConfirmed={() => void refresh()}
+                onSkipFidelity={() => setFidelityStepDismissed(true)}
                 onChooseArtworkType={(choice) => chooseArtworkType(choice)}
                 onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
                 onPlanSignArtwork={() => void planSignArtwork()}

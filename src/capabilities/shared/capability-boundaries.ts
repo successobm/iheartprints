@@ -2155,6 +2155,26 @@
  * of a reconstruction attempt, and (Phase R3B-R) not even a SECOND
  * customer/operator confirmation may mutate it. Nothing in this codebase
  * calls this capability from a live request path yet.
+ *
+ * PHASE R4A UPDATE: this capability itself remains exactly as described
+ * above — still zero provider dependency, still never called from a live
+ * request path directly. What changed is that a NEW, SEPARATE capability,
+ * `artwork-fidelity-proposal` (`src/capabilities/artwork-fidelity-proposal/`),
+ * was added ABOVE it (never merged into it) to supply the "future vision-
+ * extraction step" this doc comment always anticipated. `artwork-fidelity-
+ * proposal` MAY own: the provider port, prompt/schema, and mapping of a raw
+ * provider result into the `proposedFacts` shape `ArtworkFidelityCapability
+ * .proposeContract` already accepted at R3B. It MAY NOT own: confirmation,
+ * authority, or the contract row itself — it only calls
+ * `ArtworkFidelityCapability.proposeContract`, exactly like any other
+ * caller would. The app-layer service `artwork-fidelity-service.ts`
+ * composes `artwork-fidelity-proposal` + `ArtworkFidelityCapability` +
+ * `ArtworkPreparationCapability` + `AssetCapability` — cross-capability
+ * orchestration belongs there, never inside any one capability. This
+ * capability graph is now wired into `composition.ts` and reachable from a
+ * live customer route (`POST /api/projects/[projectId]/artwork-fidelity`)
+ * for the first time — see `ARCHITECTURE.md` §23p for the full picture,
+ * including what is explicitly still NOT built (reconstruction itself).
  */
 
 export const CAPABILITY_BOUNDARY_VERSION = "PEA4" as const;

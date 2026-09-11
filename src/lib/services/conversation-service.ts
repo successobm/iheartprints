@@ -4,6 +4,8 @@ import type {
   EmailCaptureResult,
 } from "@/capabilities/acquisition";
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
+import { isArtworkFidelityProposedFacts, type ArtworkFidelityProposedFacts } from "@/capabilities/artwork-fidelity-proposal";
+import type { ArtworkFidelityContractStatus, ProtectedMarkType } from "@/lib/domain/types";
 import {
   describeSignPlanForCustomer,
   type SignDefectCode,
@@ -354,6 +356,14 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * are never phrased for a customer here.
    */
   signArtwork: SignArtworkView | null;
+  /**
+   * Universal Raster Reconstruction Phase R4A: the shared fidelity
+   * proposal/confirmation state — `null` until "check my artwork" has run
+   * at least once. Shared by BOTH the DTF and Signs paths (never a
+   * profile-specific copy), bound to the same immutable original both
+   * paths key off of.
+   */
+  artworkFidelity: ArtworkFidelityView | null;
   /**
    * Sprint A4: where this session stands in the acquisition funnel, already
    * phrased for the customer. Never the persisted entitlement value, never
@@ -774,6 +784,7 @@ async function withConceptStatus(
     printReadySize: await resolvePrintReadySize(snapshot, artworkPreparation),
     artworkPreparation,
     signArtwork: await resolveSignArtworkView(snapshot.project.id),
+    artworkFidelity: await resolveArtworkFidelityView(snapshot.project.id),
     acquisition: await resolveAcquisitionView(snapshot),
     payment: await resolvePaymentView(snapshot.project.id),
     productionTreatment: await resolveProductionTreatmentView(
@@ -871,6 +882,86 @@ async function resolveArtworkPreparation(
 ): Promise<ArtworkPreparationView | null> {
   try {
     return await getCapabilityGraph().artworkPreparation.getPreparation(projectId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Universal Raster Reconstruction Phase R4A: the Artwork Fidelity
+ * Contract's customer-safe view — the latest proposal/confirmation for this
+ * project, or `null` before anything has been proposed. Deliberately never
+ * exposes `contractKey`, a provider/model name, a raw provider request id,
+ * or the stored `proposedFacts` blob verbatim — only the fields the
+ * confirmation UI needs (readability/confidence ARE surfaced; they drive
+ * which fields the UI makes look uncertain, never a jargon "score").
+ *
+ * Phase R4A-R (independent-review repair): `id` on every wording/mark entry
+ * is the SAME stable, proposal-local id the server will require back in a
+ * confirmation's `wordingResolutions`/`markResolutions` — the client reads
+ * it from here, never invents its own. `proposalStatus` distinguishes a
+ * genuine successful analysis (even one that found nothing) from the
+ * provider being unavailable/misconfigured/failed (Blocker 3) — `null`
+ * only alongside a `null` `ArtworkFidelityView` itself (nothing proposed
+ * yet), never ambiguous once a contract exists.
+ */
+export interface ArtworkFidelityView {
+  contractId: string;
+  status: ArtworkFidelityContractStatus;
+  proposalStatus: "analyzed" | "unavailable";
+  wording: {
+    id: string;
+    text: string | null;
+    readability: "readable" | "partially_readable" | "cannot_read";
+    confidence: "high" | "medium" | "low";
+  }[];
+  protectedMarks: {
+    id: string;
+    visualDescription: string;
+    classification: "TM" | "R" | "C" | "cannot_determine";
+    confidence: "high" | "medium" | "low";
+  }[];
+  confirmedWording: string[] | null;
+  confirmedMarks: ProtectedMarkType[] | null;
+  confirmedAt: string | null;
+}
+
+/** `null` when nothing has been proposed yet for this project — same advisory, never-take-down-the-snapshot discipline as `resolveSignArtworkView`. */
+async function resolveArtworkFidelityView(
+  projectId: string,
+): Promise<ArtworkFidelityView | null> {
+  try {
+    const contract = await getCapabilityGraph().artworkFidelity.getContract(projectId);
+    if (!contract) return null;
+    const facts: ArtworkFidelityProposedFacts | null = isArtworkFidelityProposedFacts(
+      contract.proposedFacts,
+    )
+      ? contract.proposedFacts
+      : null;
+    return {
+      contractId: contract.id,
+      status: contract.status,
+      // A contract with no parseable proposedFacts (should not happen via
+      // the normal propose path; defensively guarded) reads as
+      // "unavailable" -- never silently "analyzed" for content that was
+      // never actually produced.
+      proposalStatus: facts?.proposalStatus ?? "unavailable",
+      wording: (facts?.wording ?? []).map((w) => ({
+        id: w.id,
+        text: w.text,
+        readability: w.readability,
+        confidence: w.confidence,
+      })),
+      protectedMarks: (facts?.protectedMarks ?? []).map((m) => ({
+        id: m.id,
+        visualDescription: m.visualDescription,
+        classification: m.classification,
+        confidence: m.confidence,
+      })),
+      confirmedWording: contract.confirmedWording,
+      confirmedMarks: contract.confirmedMarks,
+      confirmedAt: contract.confirmedAt,
+    };
   } catch {
     return null;
   }
