@@ -110,6 +110,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   ArtworkFidelityContractConflictError,
+  ArtworkReconstructionJobConflictError,
   FreeConceptAlreadyConsumedError,
   UniqueConstraintViolationError,
 } from "./repository";
@@ -616,6 +617,9 @@ type DbArtworkReconstructionJob = {
   geometry_status: ArtworkReconstructionGeometryStatus | null;
   review_status: ArtworkReconstructionReviewStatus | null;
   reviewed_at: string | null;
+  protected_marks_reviewed: boolean | null;
+  protected_marks_reviewed_at: string | null;
+  protected_marks_reviewed_by: SignPlanAuthorizationActor | null;
   created_at: string;
   updated_at: string;
 };
@@ -645,6 +649,9 @@ function mapArtworkReconstructionJob(
     geometryStatus: row.geometry_status,
     reviewStatus: row.review_status,
     reviewedAt: row.reviewed_at,
+    protectedMarksReviewed: row.protected_marks_reviewed,
+    protectedMarksReviewedAt: row.protected_marks_reviewed_at,
+    protectedMarksReviewedBy: row.protected_marks_reviewed_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3411,7 +3418,21 @@ export class SupabaseProjectRepository implements ProjectRepository {
       })
       .select("*")
       .single();
-    if (error) throw error;
+    if (error) {
+      // Phase R5-R (independent-review repair): the migration's own
+      // `artwork_reconstruction_jobs_active_binding_uidx` partial unique
+      // index — two concurrent requests for the identical (project,
+      // source, contractKey) binding can never both create a payable job.
+      // The loser gets a typed conflict the capability resolves by
+      // re-fetching and reusing the winner's job, mirroring the existing
+      // `design_brief_versions` precedent for this exact pattern.
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "artwork_reconstruction_jobs_active_binding_uidx",
+        );
+      }
+      throw error;
+    }
     return mapArtworkReconstructionJob(data as DbArtworkReconstructionJob);
   }
 
@@ -3441,9 +3462,24 @@ export class SupabaseProjectRepository implements ProjectRepository {
     return data ? mapArtworkReconstructionJob(data as DbArtworkReconstructionJob) : null;
   }
 
+  async listArtworkReconstructionJobsForSource(
+    projectId: string,
+    sourceAssetId: string,
+  ): Promise<ArtworkReconstructionJob[]> {
+    const { data, error } = await this.client
+      .from("artwork_reconstruction_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("source_asset_id", sourceAssetId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return ((data as DbArtworkReconstructionJob[]) ?? []).map(mapArtworkReconstructionJob);
+  }
+
   async updateArtworkReconstructionJob(
     id: string,
     patch: UpdateArtworkReconstructionJobInput,
+    expectedReviewStatus?: ArtworkReconstructionReviewStatus,
   ): Promise<ArtworkReconstructionJob> {
     const update: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
@@ -3466,14 +3502,33 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (patch.geometryStatus !== undefined) update.geometry_status = patch.geometryStatus;
     if (patch.reviewStatus !== undefined) update.review_status = patch.reviewStatus;
     if (patch.reviewedAt !== undefined) update.reviewed_at = patch.reviewedAt;
+    if (patch.protectedMarksReviewed !== undefined)
+      update.protected_marks_reviewed = patch.protectedMarksReviewed;
+    if (patch.protectedMarksReviewedAt !== undefined)
+      update.protected_marks_reviewed_at = patch.protectedMarksReviewedAt;
+    if (patch.protectedMarksReviewedBy !== undefined)
+      update.protected_marks_reviewed_by = patch.protectedMarksReviewedBy;
 
-    const { data, error } = await this.client
-      .from("artwork_reconstruction_jobs")
-      .update(update)
-      .eq("id", id)
-      .select("*")
-      .single();
+    // Phase R5-R (closing Blocker 3): when `expectedReviewStatus` is given,
+    // the conditional `.eq("review_status", expectedReviewStatus)` is the
+    // ENTIRE fix — same optimistic-claim shape as
+    // `updateArtworkFidelityContract`'s own CAS. A lost race (the row's
+    // review_status already changed since the caller read it) updates zero
+    // rows; `.maybeSingle()` then returns `null` rather than throwing a
+    // generic "no rows" error, so the conflict is reported with a specific,
+    // callers-can-catch-it type.
+    let query = this.client.from("artwork_reconstruction_jobs").update(update).eq("id", id);
+    if (expectedReviewStatus !== undefined) {
+      query = query.eq("review_status", expectedReviewStatus);
+    }
+    const { data, error } = await query.select("*").maybeSingle();
     if (error) throw error;
+    if (!data) {
+      if (expectedReviewStatus !== undefined) {
+        throw new ArtworkReconstructionJobConflictError(expectedReviewStatus);
+      }
+      throw new Error("Artwork reconstruction job not found");
+    }
     return mapArtworkReconstructionJob(data as DbArtworkReconstructionJob);
   }
 

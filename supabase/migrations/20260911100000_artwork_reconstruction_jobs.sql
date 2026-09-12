@@ -113,7 +113,14 @@ create table if not exists public.artwork_reconstruction_jobs (
   -- normalization/wording-verification has run. Null until then. Never
   -- overwritten once set — a corrected/retried reconstruction is a NEW job
   -- row, mirroring how a fidelity correction is a new contract row.
-  candidate_asset_id uuid null references public.assets (id) on delete set null,
+  --
+  -- Phase R5-R (independent-review repair): `on delete restrict`, NOT
+  -- `on delete set null` — a completed job's candidate must never be
+  -- deletable out from under it (the SAME `source_asset_id` precedent
+  -- above), and `on delete set null` would conflict with the
+  -- `..._completion_consistent` CHECK below the instant it fired (a
+  -- `status = 'completed'` row requires a non-null `candidate_asset_id`).
+  candidate_asset_id uuid null references public.assets (id) on delete restrict,
 
   -- Deterministic, sanitized-only evidence computed once the candidate
   -- exists — never a raw provider body, never prompt text.
@@ -129,6 +136,25 @@ create table if not exists public.artwork_reconstruction_jobs (
   review_status text null
     check (review_status is null or review_status in ('pending_review', 'approved', 'rejected')),
   reviewed_at timestamptz null,
+
+  -- Phase R5-R (independent-review repair, Blocker 1): durable proof that
+  -- the CUSTOMER — never a machine verdict — explicitly reviewed a
+  -- confirmed protected mark before approval. Set ONLY at the instant of a
+  -- successful approval whose bound contract confirmed one or more
+  -- protected marks; left null for every other case (rejected, still
+  -- pending, or approved against a contract that confirmed NO marks —
+  -- there is nothing to attest to). A `false`/missing attestation is
+  -- REFUSED before any write happens (`RasterReconstructionCapability
+  -- .approveCandidate`'s own doc comment) — this column therefore only
+  -- ever holds `true` when non-null; it is not a place a failed or
+  -- skipped attestation is ever recorded.
+  protected_marks_reviewed boolean null,
+  protected_marks_reviewed_at timestamptz null,
+  -- Reuses the SAME narrow customer/operator actor type
+  -- `artwork_fidelity_contracts.confirmed_by` already established — never
+  -- a personal identity (this codebase has no user-authentication layer).
+  protected_marks_reviewed_by text null
+    check (protected_marks_reviewed_by is null or protected_marks_reviewed_by in ('customer', 'operator')),
 
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -151,6 +177,29 @@ create table if not exists public.artwork_reconstruction_jobs (
       and review_status is null
       and reviewed_at is null
     )
+  ),
+
+  -- Phase R5-R: the three protected-mark-review columns are written
+  -- together, atomically, or not at all — never a partial attestation
+  -- (mirrors the completion-consistency constraint's own "one atomic
+  -- snapshot, never a partial one" discipline). Whether a review was
+  -- REQUIRED for this particular job is a fact about the bound fidelity
+  -- contract (a cross-table fact a single-row CHECK cannot express), so
+  -- this constraint enforces only internal consistency; the capability
+  -- layer enforces the "required when the contract confirmed a mark"
+  -- business rule before ever reaching this row.
+  constraint artwork_reconstruction_jobs_mark_review_consistent check (
+    (
+      protected_marks_reviewed is null
+      and protected_marks_reviewed_at is null
+      and protected_marks_reviewed_by is null
+    )
+    or
+    (
+      protected_marks_reviewed is not null
+      and protected_marks_reviewed_at is not null
+      and protected_marks_reviewed_by is not null
+    )
   )
 );
 
@@ -162,6 +211,23 @@ create index if not exists artwork_reconstruction_jobs_source_asset_id_idx
 
 create index if not exists artwork_reconstruction_jobs_status_idx
   on public.artwork_reconstruction_jobs (status);
+
+-- Phase R5-R (independent-review repair): closes the paid-duplicate-request
+-- race — two concurrent "Rebuild my artwork" requests for the identical
+-- (project, source, confirmed-contract) binding must never both create a
+-- payable job. A PARTIAL unique index, not a permanent one: it excludes any
+-- row that has reached 'failed'/'cancelled' (a dead attempt frees the slot
+-- for a fresh one) or whose `review_status` is 'rejected' (the customer's
+-- explicit "not this one" must not permanently block a later "Try again"
+-- for the same still-current authority — see
+-- `RasterReconstructionCapability.requestReconstruction`'s own doc comment
+-- for the matching application-layer exclusion). Exactly one row may
+-- occupy the slot at a time: still in flight (queued/running/recoverable),
+-- awaiting review, or already approved.
+create unique index if not exists artwork_reconstruction_jobs_active_binding_uidx
+  on public.artwork_reconstruction_jobs (project_id, source_asset_id, contract_key)
+  where status not in ('failed', 'cancelled')
+    and (review_status is null or review_status <> 'rejected');
 
 -- Server-only lockdown, in the same migration that creates the table — the
 -- convention `20260811191500_server_only_rls_lockdown.sql` established and

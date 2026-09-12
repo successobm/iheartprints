@@ -786,6 +786,9 @@ export const TEST_FILES = [
   "src/capabilities/artwork-reconstruction/raster-reconstruction-worker-capability.test.ts",
   "src/capabilities/artwork-reconstruction/content-bounds-normalization.test.ts",
   "src/capabilities/artwork-fidelity-verification/artwork-fidelity-verification-capability.test.ts",
+  // Phase R5-R (independent-review repair): closes the three proven
+  // approval-authority blockers -- registered immediately.
+  "src/capabilities/artwork-reconstruction/artwork-reconstruction-jobs.migration.test.ts",
   // Production Acceptance Defect fix: proves the fidelity step's action
   // controls/mark choices are real, correctly-classed elements -- see the
   // test file's own doc comment for why this component had zero Tailwind

@@ -1257,7 +1257,7 @@ export function ChatApp() {
     );
   }
 
-  async function approveArtworkReconstruction() {
+  async function approveArtworkReconstruction(protectedMarksConfirmed: boolean) {
     if (!snapshot?.artworkReconstruction) return;
     await submitPreparationAction(
       () =>
@@ -1267,6 +1267,7 @@ export function ChatApp() {
           body: JSON.stringify({
             action: "approve",
             jobId: snapshot.artworkReconstruction!.jobId,
+            protectedMarksConfirmed,
           }),
         }),
       "Failed to approve your rebuilt artwork",
@@ -1960,7 +1961,9 @@ export function ChatApp() {
                 reconstructionCandidateImageUrl={reconstructionCandidateImageUrl}
                 reconstructionOfferDismissed={reconstructionStepDismissed}
                 onRequestReconstruction={() => void requestArtworkReconstruction()}
-                onApproveReconstruction={() => void approveArtworkReconstruction()}
+                onApproveReconstruction={(protectedMarksConfirmed) =>
+                  void approveArtworkReconstruction(protectedMarksConfirmed)
+                }
                 onRejectReconstruction={() => void rejectArtworkReconstruction()}
                 onRetryReconstruction={() => void requestArtworkReconstruction()}
                 onDismissReconstruction={() => setReconstructionStepDismissed(true)}

@@ -559,7 +559,29 @@ export type UpdateArtworkReconstructionJobInput = Partial<{
   geometryStatus: ArtworkReconstructionGeometryStatus | null;
   reviewStatus: ArtworkReconstructionReviewStatus | null;
   reviewedAt: string | null;
+  /** Phase R5-R (Blocker 1). See `ArtworkReconstructionJob.protectedMarksReviewed`'s own doc comment. */
+  protectedMarksReviewed: boolean | null;
+  protectedMarksReviewedAt: string | null;
+  protectedMarksReviewedBy: SignPlanAuthorizationActor | null;
 }>;
+
+/**
+ * Phase R5-R (independent-review repair, Blocker 3): thrown by
+ * `updateArtworkReconstructionJob` when an `expectedReviewStatus` was given
+ * and the row's CURRENT `review_status` no longer matches it at the moment
+ * of the conditional write — mirrors `ArtworkFidelityContractConflictError`
+ * exactly (same CAS-loss-is-a-typed-conflict, never a silent no-op success,
+ * discipline). Two concurrent approve/reject calls against the same
+ * `"pending_review"` row resolve to exactly one winner this way.
+ */
+export class ArtworkReconstructionJobConflictError extends Error {
+  constructor(expectedReviewStatus: ArtworkReconstructionReviewStatus) {
+    super(
+      `Artwork reconstruction job was not in the expected review status ("${expectedReviewStatus}") at the moment of update — it was already changed by another request.`,
+    );
+    this.name = "ArtworkReconstructionJobConflictError";
+  }
+}
 
 /**
  * Thrown when a repository detects a duplicate (project_id, version_number)
@@ -1600,9 +1622,33 @@ export interface ProjectRepository {
     projectId: string,
     sourceAssetId: string,
   ): Promise<ArtworkReconstructionJob | null>;
+  /**
+   * Phase R5-R (independent-review repair): the WHOLE history for this
+   * exact source, oldest first — mirrors `listFinalArtworkJobsForPreparation`'s
+   * own "return the whole history rather than one row" precedent. Needed
+   * because "the latest job" and "the current accepted clean master" are
+   * NOT the same question — see `RasterReconstructionCapability
+   * .getCurrentAcceptedMaster`.
+   */
+  listArtworkReconstructionJobsForSource(
+    projectId: string,
+    sourceAssetId: string,
+  ): Promise<ArtworkReconstructionJob[]>;
+  /**
+   * Phase R5-R (closing Blocker 3): when `expectedReviewStatus` is given,
+   * this is a compare-and-swap update — the row's CURRENT `review_status`
+   * must equal it at the moment of the write, or the whole call throws
+   * `ArtworkReconstructionJobConflictError` with NO partial mutation.
+   * Mirrors `updateArtworkFidelityContract`'s own `expectedStatus` CAS
+   * exactly. `undefined` (the default) preserves the prior unconditional-
+   * update behavior for every existing non-review-decision call site (the
+   * worker's own status/provenance updates never touch `review_status` and
+   * have no race to guard against).
+   */
   updateArtworkReconstructionJob(
     id: string,
     patch: UpdateArtworkReconstructionJobInput,
+    expectedReviewStatus?: ArtworkReconstructionReviewStatus,
   ): Promise<ArtworkReconstructionJob>;
   /** The worker's entry point — mirrors `claimNextQueuedFinalArtworkJob` exactly (same atomic-claim contract). */
   claimNextQueuedArtworkReconstructionJob(): Promise<ArtworkReconstructionJob | null>;

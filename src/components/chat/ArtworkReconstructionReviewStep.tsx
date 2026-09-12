@@ -90,7 +90,15 @@ export interface ArtworkReconstructionReviewStepProps {
   originalImageUrl: string | null;
   candidateImageUrl: string | null;
   busy?: boolean;
-  onApprove: () => void;
+  /**
+   * Phase R5-R (independent-review repair, Blocker 1): now takes the
+   * customer's actual mark-confirmation state — the SERVER is what
+   * enforces it (`RasterReconstructionCapability.approveCandidate` refuses
+   * a missing/false attestation whenever the confirmed contract lists a
+   * protected mark), but the button must actually transmit what the
+   * customer attested to, not merely disable itself locally.
+   */
+  onApprove: (protectedMarksConfirmed: boolean) => void;
   onReject: () => void;
   onRetry: () => void;
   /** "Continue without rebuilding" — client-only, never a server call, mirrors `onSkip` on the fidelity step. */
@@ -258,7 +266,7 @@ export function ArtworkReconstructionReviewStep(props: ArtworkReconstructionRevi
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <button
           type="button"
-          onClick={props.onApprove}
+          onClick={() => props.onApprove(markChecked)}
           disabled={!canApprove}
           className="rounded-full bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition enabled:hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-40"
           data-testid="artwork-reconstruction-approve-button"

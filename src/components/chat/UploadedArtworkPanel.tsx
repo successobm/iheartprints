@@ -110,7 +110,7 @@ export interface UploadedArtworkPanelProps {
   /** Client-only — hides `ArtworkReconstructionOfferBanner` and lets a stuck failed/pending `review_reconstruction` step be passed. Mirrors `fidelityStepDismissed`. */
   reconstructionOfferDismissed?: boolean;
   onRequestReconstruction?: () => void;
-  onApproveReconstruction?: () => void;
+  onApproveReconstruction?: (protectedMarksConfirmed: boolean) => void;
   onRejectReconstruction?: () => void;
   onRetryReconstruction?: () => void;
   onDismissReconstruction?: () => void;
@@ -303,7 +303,9 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           originalImageUrl={props.originalImageUrl}
           candidateImageUrl={props.reconstructionCandidateImageUrl ?? null}
           busy={busy}
-          onApprove={() => props.onApproveReconstruction?.()}
+          onApprove={(protectedMarksConfirmed) =>
+            props.onApproveReconstruction?.(protectedMarksConfirmed)
+          }
           onReject={() => props.onRejectReconstruction?.()}
           onRetry={() => props.onRetryReconstruction?.()}
           onDismiss={() => props.onDismissReconstruction?.()}

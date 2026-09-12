@@ -28,6 +28,15 @@ type RouteContext = {
  *               (source, confirmed-contract) binding.
  *   "approve"  — the customer's explicit post-reconstruction approval.
  *               Requires a completed candidate still `"pending_review"`.
+ *               Phase R5-R (independent-review repair, Blocker 1):
+ *               `protectedMarksConfirmed` is a REQUIRED wire field (never
+ *               optional at this boundary — an omitted field must read as
+ *               an explicit `false`, never as "not applicable," so a
+ *               crafted request that simply leaves it out is refused
+ *               exactly like one that sends `false`). The capability
+ *               itself is what actually decides whether a mark
+ *               confirmation was REQUIRED for this particular contract;
+ *               this schema only bounds the wire shape.
  *   "reject"   — the customer's explicit rejection. Never automatically
  *               enqueues a retry.
  *
@@ -37,7 +46,11 @@ type RouteContext = {
  */
 const bodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("request") }),
-  z.object({ action: z.literal("approve"), jobId: z.string().min(1).max(200) }),
+  z.object({
+    action: z.literal("approve"),
+    jobId: z.string().min(1).max(200),
+    protectedMarksConfirmed: z.boolean(),
+  }),
   z.object({ action: z.literal("reject"), jobId: z.string().min(1).max(200) }),
 ]);
 
@@ -48,7 +61,7 @@ function runReconstructionAction(projectId: string, action: ReconstructionAction
     case "request":
       return requestArtworkReconstruction(projectId);
     case "approve":
-      return approveArtworkReconstruction(projectId, action.jobId);
+      return approveArtworkReconstruction(projectId, action.jobId, action.protectedMarksConfirmed);
     case "reject":
       return rejectArtworkReconstruction(projectId, action.jobId);
   }

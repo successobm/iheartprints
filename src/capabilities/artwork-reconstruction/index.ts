@@ -4,6 +4,7 @@ export {
   ArtworkReconstructionStateError,
   type RasterReconstructionCapability,
   type RequestArtworkReconstructionInput,
+  type ApproveArtworkReconstructionCandidateInput,
 } from "./raster-reconstruction-capability";
 export {
   createRasterReconstructionWorkerCapability,

@@ -98,12 +98,25 @@ export async function requestArtworkReconstruction(
   return requireSnapshot(projectId);
 }
 
+/**
+ * Phase R5-R (independent-review repair, Blocker 1): `protectedMarksConfirmed`
+ * is the customer's explicit, server-enforced attestation — this route is
+ * always customer-facing, so `confirmedBy` is always `"customer"` here
+ * (mirrors `artwork-fidelity-service.ts`'s own `confirmArtworkFidelity`
+ * hardcoding `confirmedBy: "customer"` for its identical customer-facing
+ * action). An internal/operator approval surface, if one is ever built,
+ * would be a separate call site with its own `confirmedBy`, never this one.
+ */
 export async function approveArtworkReconstruction(
   projectId: string,
   jobId: string,
+  protectedMarksConfirmed: boolean,
 ): Promise<ApiProjectSnapshot> {
   const graph = getCapabilityGraph();
-  await graph.artworkReconstruction.approveCandidate(projectId, jobId);
+  await graph.artworkReconstruction.approveCandidate(projectId, jobId, {
+    protectedMarksConfirmed,
+    confirmedBy: "customer",
+  });
   return requireSnapshot(projectId);
 }
 

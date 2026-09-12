@@ -26,6 +26,7 @@ import type {
   ArtworkFidelityContractStatus,
   ArtworkPreparation,
   ArtworkReconstructionJob,
+  ArtworkReconstructionReviewStatus,
   ArtworkVersion,
   AssetRecord,
   ConversationMessage,
@@ -94,6 +95,7 @@ import type {
 } from "./repository";
 import {
   ArtworkFidelityContractConflictError,
+  ArtworkReconstructionJobConflictError,
   FreeConceptAlreadyConsumedError,
   UniqueConstraintViolationError,
 } from "./repository";
@@ -173,6 +175,18 @@ function dataFile(): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Phase R5-R (independent-review repair): mirrors the migration's own
+ * `artwork_reconstruction_jobs_active_binding_uidx` partial-unique-index
+ * predicate EXACTLY — a row "occupies the slot" for a given (project,
+ * source, contractKey) unless it has reached `'failed'`/`'cancelled'`, or
+ * was explicitly `'rejected'` by the customer (both free the slot for a
+ * fresh attempt).
+ */
+function occupiesActiveReconstructionBinding(job: ArtworkReconstructionJob): boolean {
+  return job.status !== "failed" && job.status !== "cancelled" && job.reviewStatus !== "rejected";
 }
 
 function emptyDb(): LocalDatabase {
@@ -2565,6 +2579,24 @@ export class LocalProjectRepository implements ProjectRepository {
     input: CreateArtworkReconstructionJobInput,
   ): Promise<ArtworkReconstructionJob> {
     const db = await readDb();
+
+    // Emulates the migration's partial unique index — a real concurrent
+    // race is vanishingly unlikely in a single-process local store, but the
+    // CONTRACT must match Supabase's so tests exercise the same behavior
+    // either store is configured with.
+    const conflicting = db.artworkReconstructionJobs.find(
+      (job) =>
+        job.projectId === projectId &&
+        job.sourceAssetId === input.sourceAssetId &&
+        job.contractKey === input.contractKey &&
+        occupiesActiveReconstructionBinding(job),
+    );
+    if (conflicting) {
+      throw new UniqueConstraintViolationError(
+        "artwork_reconstruction_jobs_active_binding_uidx",
+      );
+    }
+
     const timestamp = nowIso();
     const job: ArtworkReconstructionJob = {
       id: randomUUID(),
@@ -2588,6 +2620,9 @@ export class LocalProjectRepository implements ProjectRepository {
       geometryStatus: null,
       reviewStatus: null,
       reviewedAt: null,
+      protectedMarksReviewed: null,
+      protectedMarksReviewedAt: null,
+      protectedMarksReviewedBy: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -2612,13 +2647,34 @@ export class LocalProjectRepository implements ProjectRepository {
     return matches.at(-1) ?? null;
   }
 
+  async listArtworkReconstructionJobsForSource(
+    projectId: string,
+    sourceAssetId: string,
+  ): Promise<ArtworkReconstructionJob[]> {
+    const db = await readDb();
+    return db.artworkReconstructionJobs
+      .filter((job) => job.projectId === projectId && job.sourceAssetId === sourceAssetId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
   async updateArtworkReconstructionJob(
     id: string,
     patch: UpdateArtworkReconstructionJobInput,
+    expectedReviewStatus?: ArtworkReconstructionReviewStatus,
   ): Promise<ArtworkReconstructionJob> {
     const db = await readDb();
     const job = db.artworkReconstructionJobs.find((item) => item.id === id);
-    if (!job) throw new Error("Artwork reconstruction job not found");
+    // Phase R5-R (closing Blocker 3): mirrors the Supabase conditional
+    // `.eq("review_status", expectedReviewStatus)` — a single-process local
+    // store has no real concurrent-write race, but the CAS contract (throw
+    // on mismatch, never a silent no-op success) must behave identically.
+    if (expectedReviewStatus !== undefined) {
+      if (!job || job.reviewStatus !== expectedReviewStatus) {
+        throw new ArtworkReconstructionJobConflictError(expectedReviewStatus);
+      }
+    } else if (!job) {
+      throw new Error("Artwork reconstruction job not found");
+    }
 
     Object.assign(job, patch, { updatedAt: nowIso() });
     await writeDb(db);

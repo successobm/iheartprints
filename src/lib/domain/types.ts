@@ -3232,6 +3232,21 @@ export interface ArtworkReconstructionJob {
   geometryStatus: ArtworkReconstructionGeometryStatus | null;
   reviewStatus: ArtworkReconstructionReviewStatus | null;
   reviewedAt: string | null;
+  /**
+   * Phase R5-R (independent-review repair, Blocker 1): durable proof that
+   * the CUSTOMER — never a machine verdict — explicitly reviewed a
+   * confirmed protected mark before this candidate was approved. `true`
+   * only, never `false`/never persisted for a refused attestation (a
+   * missing or false attestation is refused before any write happens —
+   * see `RasterReconstructionCapability.approveCandidate`'s own doc
+   * comment). `null` whenever no review was required (still pending,
+   * rejected, or approved against a contract that confirmed NO protected
+   * marks — there is nothing to attest to).
+   */
+  protectedMarksReviewed: boolean | null;
+  protectedMarksReviewedAt: string | null;
+  /** WHO performed the mark review. Reuses `SignPlanAuthorizationActor` — the same narrow customer/operator split `ArtworkFidelityContract.confirmedBy` already uses. `null` exactly when `protectedMarksReviewed` is `null`. */
+  protectedMarksReviewedBy: SignPlanAuthorizationActor | null;
   createdAt: string;
   updatedAt: string;
 }
