@@ -110,6 +110,12 @@ export function ChatApp() {
    * own doc comment for why this is never durably persisted.
    */
   const [fidelityStepDismissed, setFidelityStepDismissed] = useState(false);
+  /** Phase R5: "Continue without rebuilding" — transient, client-only, mirrors `fidelityStepDismissed` exactly. */
+  const [reconstructionStepDismissed, setReconstructionStepDismissed] = useState(false);
+  /** Phase R5: the reconstruction candidate's signed image URL — mirrors `preparationImages`'s own "resolved by a dedicated effect" shape, but keyed only on the candidate asset id (a candidate is never re-derived in place). */
+  const [reconstructionCandidateImageUrl, setReconstructionCandidateImageUrl] = useState<
+    string | null
+  >(null);
   /**
    * Phase 1.2 / 1.3: the server's already-phrased answer to the LAST cleanup
    * action. Transient by design — it describes one action, not the project,
@@ -1231,6 +1237,59 @@ export function ChatApp() {
   }
 
   /**
+   * Phase R5: the customer's explicit "Rebuild my artwork" action (also
+   * reused for "Try again" after a failed attempt — `requestReconstruction`
+   * is idempotent and a prior failed job never blocks a fresh one). Runs
+   * one worker batch inline server-side before returning (see
+   * `artwork-reconstruction-service.ts`), so the resulting snapshot already
+   * reflects the outcome.
+   */
+  async function requestArtworkReconstruction() {
+    if (!snapshot) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-reconstruction`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "request" }),
+        }),
+      "Failed to rebuild your artwork",
+    );
+  }
+
+  async function approveArtworkReconstruction() {
+    if (!snapshot?.artworkReconstruction) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-reconstruction`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "approve",
+            jobId: snapshot.artworkReconstruction!.jobId,
+          }),
+        }),
+      "Failed to approve your rebuilt artwork",
+    );
+  }
+
+  async function rejectArtworkReconstruction() {
+    if (!snapshot?.artworkReconstruction) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/artwork-reconstruction`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "reject",
+            jobId: snapshot.artworkReconstruction!.jobId,
+          }),
+        }),
+      "Failed to save your decision",
+    );
+  }
+
+  /**
    * Intelligent Separation Phase 10 (Goal 3): `SeparationReviewPanel`
    * approves through its OWN routes, not `submitPreparationAction` — those
    * routes return a `SeparationReviewView`, not a full `ApiSnapshot`, so
@@ -1373,6 +1432,10 @@ export function ChatApp() {
     setArtworkTypeChoice(FRESH_UPLOADED_ARTWORK_UI_STATE.artworkTypeChoice);
     setReconsideringUpload(FRESH_UPLOADED_ARTWORK_UI_STATE.reconsideringUpload);
     setFidelityStepDismissed(FRESH_UPLOADED_ARTWORK_UI_STATE.fidelityStepDismissed);
+    setReconstructionStepDismissed(
+      FRESH_UPLOADED_ARTWORK_UI_STATE.reconstructionStepDismissed,
+    );
+    setReconstructionCandidateImageUrl(null);
     setCleanupMessage(null);
     setCleanupPreview(null);
     await bootstrap();
@@ -1448,6 +1511,31 @@ export function ChatApp() {
     preparedRevision,
   ]);
 
+  // Phase R5: mint a fresh signed URL for the reconstruction candidate,
+  // keyed on the candidate asset id (a candidate is never re-derived in
+  // place — a new candidate always means a new asset id).
+  const reconstructionCandidateAssetId = snapshot?.artworkReconstruction?.candidateAssetId ?? null;
+  useEffect(() => {
+    // State is not cleared here (mirrors the preparation-images effect's own
+    // precedent above) — render reads `reconstructionCandidateAssetId`
+    // alongside the URL, so a stale URL can never be shown once the id it
+    // was fetched for no longer matches.
+    if (!isClient || !snapshot || !reconstructionCandidateAssetId) return;
+    let cancelled = false;
+    const projectId = snapshot.project.id;
+    void (async () => {
+      const response = await fetch(`/api/projects/${projectId}/artwork-reconstruction/image`);
+      if (!response.ok || cancelled) return;
+      const data = (await response.json()) as { url?: string };
+      if (!cancelled) {
+        setReconstructionCandidateImageUrl(typeof data.url === "string" ? data.url : null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isClient, snapshot, reconstructionCandidateAssetId]);
+
   const phase = snapshot?.conversation.phase;
   const affordances = deriveChatAffordances({
     phase,
@@ -1487,9 +1575,16 @@ export function ChatApp() {
     artworkFidelity: snapshot?.artworkFidelity
       ? { status: snapshot.artworkFidelity.status }
       : null,
+    artworkReconstruction: snapshot?.artworkReconstruction
+      ? {
+          status: snapshot.artworkReconstruction.status,
+          reviewStatus: snapshot.artworkReconstruction.reviewStatus,
+        }
+      : null,
     choice: workflowChoice,
     artworkTypeChoice,
     fidelityStepDismissed,
+    reconstructionStepDismissed,
     atProjectStart,
   });
   // "Change these details" / "Keep my original for now" step back without
@@ -1861,6 +1956,14 @@ export function ChatApp() {
                 artworkFidelity={snapshot?.artworkFidelity ?? null}
                 onFidelityConfirmed={() => void refresh()}
                 onSkipFidelity={() => setFidelityStepDismissed(true)}
+                artworkReconstruction={snapshot?.artworkReconstruction ?? null}
+                reconstructionCandidateImageUrl={reconstructionCandidateImageUrl}
+                reconstructionOfferDismissed={reconstructionStepDismissed}
+                onRequestReconstruction={() => void requestArtworkReconstruction()}
+                onApproveReconstruction={() => void approveArtworkReconstruction()}
+                onRejectReconstruction={() => void rejectArtworkReconstruction()}
+                onRetryReconstruction={() => void requestArtworkReconstruction()}
+                onDismissReconstruction={() => setReconstructionStepDismissed(true)}
                 onChooseArtworkType={(choice) => chooseArtworkType(choice)}
                 onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
                 onPlanSignArtwork={() => void planSignArtwork()}

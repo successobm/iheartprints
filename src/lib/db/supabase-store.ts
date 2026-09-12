@@ -24,6 +24,10 @@ import type {
   ArtworkFidelityContractStatus,
   ArtworkPreparation,
   ArtworkPreparationStatus,
+  ArtworkReconstructionGeometryStatus,
+  ArtworkReconstructionJob,
+  ArtworkReconstructionJobStatus,
+  ArtworkReconstructionReviewStatus,
   ArtworkVersion,
   ProtectedMarkType,
   SignPlanAuthorizationActor,
@@ -68,6 +72,7 @@ import type {
   ApproveDesignBriefInput,
   CaptureAcquisitionEmailInput,
   CreateArtworkFidelityContractInput,
+  CreateArtworkReconstructionJobInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateAssetInput,
@@ -96,6 +101,7 @@ import type {
   UpdateArtworkEvaluationInput,
   UpdateArtworkFidelityContractInput,
   UpdateArtworkPreparationInput,
+  UpdateArtworkReconstructionJobInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
   UpdateSignPreparationInput,
@@ -103,6 +109,7 @@ import type {
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
+  ArtworkFidelityContractConflictError,
   FreeConceptAlreadyConsumedError,
   UniqueConstraintViolationError,
 } from "./repository";
@@ -582,6 +589,62 @@ function mapArtworkFidelityContract(
     sourceContentBoundingBoxAspectRatio:
       row.source_content_bounding_box_aspect_ratio ?? null,
     contractKey: row.contract_key,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+type DbArtworkReconstructionJob = {
+  id: string;
+  project_id: string;
+  source_asset_id: string;
+  source_sha256: string;
+  fidelity_contract_id: string;
+  contract_key: string;
+  status: ArtworkReconstructionJobStatus;
+  attempts: number;
+  last_error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  heartbeat_at: string | null;
+  provider_key: string | null;
+  provider_request_id: string | null;
+  provider_status: string | null;
+  provider_recovery_attempts: number;
+  candidate_asset_id: string | null;
+  wording_verified: boolean | null;
+  geometry_status: ArtworkReconstructionGeometryStatus | null;
+  review_status: ArtworkReconstructionReviewStatus | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+function mapArtworkReconstructionJob(
+  row: DbArtworkReconstructionJob,
+): ArtworkReconstructionJob {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sourceAssetId: row.source_asset_id,
+    sourceSha256: row.source_sha256,
+    fidelityContractId: row.fidelity_contract_id,
+    contractKey: row.contract_key,
+    status: row.status,
+    attempts: row.attempts,
+    lastError: row.last_error,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    heartbeatAt: row.heartbeat_at,
+    providerKey: row.provider_key,
+    providerRequestId: row.provider_request_id,
+    providerStatus: row.provider_status,
+    providerRecoveryAttempts: row.provider_recovery_attempts,
+    candidateAssetId: row.candidate_asset_id,
+    wordingVerified: row.wording_verified,
+    geometryStatus: row.geometry_status,
+    reviewStatus: row.review_status,
+    reviewedAt: row.reviewed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3289,6 +3352,7 @@ export class SupabaseProjectRepository implements ProjectRepository {
 
   async updateArtworkFidelityContract(
     id: string,
+    expectedStatus: ArtworkFidelityContractStatus,
     patch: UpdateArtworkFidelityContractInput,
   ): Promise<ArtworkFidelityContract> {
     const update: Record<string, unknown> = {
@@ -3310,13 +3374,171 @@ export class SupabaseProjectRepository implements ProjectRepository {
         patch.sourceContentBoundingBoxAspectRatio;
     if (patch.contractKey !== undefined) update.contract_key = patch.contractKey;
 
+    // Phase R5 (closing the R4B confirm-race finding): the conditional
+    // `.eq("status", expectedStatus)` is the ENTIRE fix — same optimistic-
+    // claim shape as `claimNextQueuedFinalArtworkJob`. A lost race (the row's
+    // status already changed since the caller read it) updates zero rows;
+    // `.maybeSingle()` then returns `null` rather than throwing a generic
+    // Supabase "no rows" error, so the conflict can be reported with a
+    // specific, callers-can-catch-it type instead of an opaque driver error.
     const { data, error } = await this.client
       .from("artwork_fidelity_contracts")
+      .update(update)
+      .eq("id", id)
+      .eq("status", expectedStatus)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) throw new ArtworkFidelityContractConflictError(expectedStatus);
+    return mapArtworkFidelityContract(data as DbArtworkFidelityContract);
+  }
+
+  // --- Phase R5: Confirmed-Authority Raster Reconstruction v1 ------------
+
+  async createArtworkReconstructionJob(
+    projectId: string,
+    input: CreateArtworkReconstructionJobInput,
+  ): Promise<ArtworkReconstructionJob> {
+    const { data, error } = await this.client
+      .from("artwork_reconstruction_jobs")
+      .insert({
+        project_id: projectId,
+        source_asset_id: input.sourceAssetId,
+        source_sha256: input.sourceSha256,
+        fidelity_contract_id: input.fidelityContractId,
+        contract_key: input.contractKey,
+        status: "queued",
+      })
+      .select("*")
+      .single();
+    if (error) throw error;
+    return mapArtworkReconstructionJob(data as DbArtworkReconstructionJob);
+  }
+
+  async getArtworkReconstructionJob(id: string): Promise<ArtworkReconstructionJob | null> {
+    const { data, error } = await this.client
+      .from("artwork_reconstruction_jobs")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkReconstructionJob(data as DbArtworkReconstructionJob) : null;
+  }
+
+  async getLatestArtworkReconstructionJobForSource(
+    projectId: string,
+    sourceAssetId: string,
+  ): Promise<ArtworkReconstructionJob | null> {
+    const { data, error } = await this.client
+      .from("artwork_reconstruction_jobs")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("source_asset_id", sourceAssetId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkReconstructionJob(data as DbArtworkReconstructionJob) : null;
+  }
+
+  async updateArtworkReconstructionJob(
+    id: string,
+    patch: UpdateArtworkReconstructionJobInput,
+  ): Promise<ArtworkReconstructionJob> {
+    const update: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+    if (patch.status !== undefined) update.status = patch.status;
+    if (patch.attempts !== undefined) update.attempts = patch.attempts;
+    if (patch.lastError !== undefined) update.last_error = patch.lastError;
+    if (patch.startedAt !== undefined) update.started_at = patch.startedAt;
+    if (patch.completedAt !== undefined) update.completed_at = patch.completedAt;
+    if (patch.heartbeatAt !== undefined) update.heartbeat_at = patch.heartbeatAt;
+    if (patch.providerKey !== undefined) update.provider_key = patch.providerKey;
+    if (patch.providerRequestId !== undefined)
+      update.provider_request_id = patch.providerRequestId;
+    if (patch.providerStatus !== undefined) update.provider_status = patch.providerStatus;
+    if (patch.providerRecoveryAttempts !== undefined)
+      update.provider_recovery_attempts = patch.providerRecoveryAttempts;
+    if (patch.candidateAssetId !== undefined)
+      update.candidate_asset_id = patch.candidateAssetId;
+    if (patch.wordingVerified !== undefined) update.wording_verified = patch.wordingVerified;
+    if (patch.geometryStatus !== undefined) update.geometry_status = patch.geometryStatus;
+    if (patch.reviewStatus !== undefined) update.review_status = patch.reviewStatus;
+    if (patch.reviewedAt !== undefined) update.reviewed_at = patch.reviewedAt;
+
+    const { data, error } = await this.client
+      .from("artwork_reconstruction_jobs")
       .update(update)
       .eq("id", id)
       .select("*")
       .single();
     if (error) throw error;
-    return mapArtworkFidelityContract(data as DbArtworkFidelityContract);
+    return mapArtworkReconstructionJob(data as DbArtworkReconstructionJob);
+  }
+
+  async claimNextQueuedArtworkReconstructionJob(): Promise<ArtworkReconstructionJob | null> {
+    // Same optimistic-claim shape as `claimNextQueuedFinalArtworkJob` — read
+    // the oldest due candidate, then update it conditioned on it still being
+    // in the status we read; a lost race touches zero rows and reports
+    // "nothing claimed" rather than retrying.
+    const { data: candidate, error: candidateError } = await this.client
+      .from("artwork_reconstruction_jobs")
+      .select("*")
+      .in("status", ["queued", "recoverable"])
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (candidateError) throw candidateError;
+    if (!candidate) return null;
+
+    const row = candidate as DbArtworkReconstructionJob;
+    const timestamp = new Date().toISOString();
+
+    const { data, error } = await this.client
+      .from("artwork_reconstruction_jobs")
+      .update({
+        status: "running",
+        attempts: row.attempts + 1,
+        started_at: timestamp,
+        heartbeat_at: timestamp,
+        updated_at: timestamp,
+      })
+      .eq("id", row.id)
+      .eq("status", row.status)
+      .select("*")
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkReconstructionJob(data as DbArtworkReconstructionJob) : null;
+  }
+
+  async touchArtworkReconstructionJobHeartbeat(jobId: string): Promise<void> {
+    const { error } = await this.client
+      .from("artwork_reconstruction_jobs")
+      .update({ heartbeat_at: new Date().toISOString() })
+      .eq("id", jobId);
+    if (error) throw error;
+  }
+
+  async recoverAbandonedArtworkReconstructionJobs(
+    staleAfterMs: number,
+  ): Promise<ArtworkReconstructionJob[]> {
+    const staleBefore = new Date(Date.now() - staleAfterMs).toISOString();
+
+    // Single atomic conditional UPDATE — same reasoning as
+    // `recoverAbandonedFinalArtworkJobs`: folding the staleness filter into
+    // the WHERE clause means a job that legitimately heartbeats or completes
+    // between issuing and executing this query is never double-recovered.
+    const { data, error } = await this.client
+      .from("artwork_reconstruction_jobs")
+      .update({ status: "recoverable", updated_at: new Date().toISOString() })
+      .eq("status", "running")
+      .or(
+        `and(heartbeat_at.is.null,started_at.lt.${staleBefore}),heartbeat_at.lt.${staleBefore}`,
+      )
+      .select("*");
+    if (error) throw error;
+
+    return ((data as DbArtworkReconstructionJob[]) ?? []).map(mapArtworkReconstructionJob);
   }
 }

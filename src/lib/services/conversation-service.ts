@@ -5,7 +5,13 @@ import type {
 } from "@/capabilities/acquisition";
 import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation";
 import { isArtworkFidelityProposedFacts, type ArtworkFidelityProposedFacts } from "@/capabilities/artwork-fidelity-proposal";
-import type { ArtworkFidelityContractStatus, ProtectedMarkType } from "@/lib/domain/types";
+import type {
+  ArtworkFidelityContractStatus,
+  ArtworkReconstructionGeometryStatus,
+  ArtworkReconstructionJobStatus,
+  ArtworkReconstructionReviewStatus,
+  ProtectedMarkType,
+} from "@/lib/domain/types";
 import {
   describeSignPlanForCustomer,
   type SignDefectCode,
@@ -364,6 +370,12 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * paths key off of.
    */
   artworkFidelity: ArtworkFidelityView | null;
+  /**
+   * Phase R5: the customer-safe reconstruction state for the current
+   * source — `null` until "Rebuild my artwork" has been requested at least
+   * once. See `ArtworkReconstructionView`'s own doc comment.
+   */
+  artworkReconstruction: ArtworkReconstructionView | null;
   /**
    * Sprint A4: where this session stands in the acquisition funnel, already
    * phrased for the customer. Never the persisted entitlement value, never
@@ -785,6 +797,7 @@ async function withConceptStatus(
     artworkPreparation,
     signArtwork: await resolveSignArtworkView(snapshot.project.id),
     artworkFidelity: await resolveArtworkFidelityView(snapshot.project.id),
+    artworkReconstruction: await resolveArtworkReconstructionView(snapshot.project.id),
     acquisition: await resolveAcquisitionView(snapshot),
     payment: await resolvePaymentView(snapshot.project.id),
     productionTreatment: await resolveProductionTreatmentView(
@@ -905,6 +918,28 @@ async function resolveArtworkPreparation(
  * only alongside a `null` `ArtworkFidelityView` itself (nothing proposed
  * yet), never ambiguous once a contract exists.
  */
+/**
+ * Phase R5 (Confirmed-Authority Raster Reconstruction v1): the customer-
+ * safe view of the latest `ArtworkReconstructionJob` for the current
+ * source, mirroring `ArtworkFidelityView`'s own "translate the domain
+ * record into exactly what a customer-facing step needs" role. Deliberately
+ * excludes `fidelityContractId`/`contractKey`/`providerKey`/
+ * `providerRequestId`/`providerStatus` — internal-only, never
+ * customer-facing (Section T of the R5 task).
+ *
+ * `null` when no reconstruction has ever been requested for this project's
+ * current source — same discipline as `ArtworkFidelityView`'s own `null`.
+ */
+export interface ArtworkReconstructionView {
+  jobId: string;
+  status: ArtworkReconstructionJobStatus;
+  reviewStatus: ArtworkReconstructionReviewStatus | null;
+  candidateAssetId: string | null;
+  wordingVerified: boolean | null;
+  geometryStatus: ArtworkReconstructionGeometryStatus | null;
+  lastError: string | null;
+}
+
 export interface ArtworkFidelityView {
   contractId: string;
   status: ArtworkFidelityContractStatus;
@@ -961,6 +996,33 @@ async function resolveArtworkFidelityView(
       confirmedWording: contract.confirmedWording,
       confirmedMarks: contract.confirmedMarks,
       confirmedAt: contract.confirmedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** `null` when no reconstruction has ever been requested for this project's current source — same advisory, never-take-down-the-snapshot discipline as `resolveArtworkFidelityView`. */
+async function resolveArtworkReconstructionView(
+  projectId: string,
+): Promise<ArtworkReconstructionView | null> {
+  try {
+    const graph = getCapabilityGraph();
+    const reference = await graph.artworkPreparation.getOriginalAssetReference(projectId);
+    if (!reference) return null;
+    const job = await graph.artworkReconstruction.getLatestJobForSource(
+      projectId,
+      reference.assetId,
+    );
+    if (!job) return null;
+    return {
+      jobId: job.id,
+      status: job.status,
+      reviewStatus: job.reviewStatus,
+      candidateAssetId: job.candidateAssetId,
+      wordingVerified: job.wordingVerified,
+      geometryStatus: job.geometryStatus,
+      lastError: job.lastError,
     };
   } catch {
     return null;

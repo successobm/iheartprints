@@ -113,7 +113,7 @@ describe("artwork-fidelity-service", () => {
     const projectId = await freshProjectWithUpload(graph, repo);
     await proposeArtworkFidelity(projectId);
     const contract = await graph.artworkFidelity.getContract(projectId);
-    await repo.updateArtworkFidelityContract(contract!.id, {
+    await repo.updateArtworkFidelityContract(contract!.id, "proposed", {
       proposedFacts: toProposedFactsRecord(craftedFacts(factsOverrides)),
     });
     return projectId;
@@ -357,7 +357,7 @@ describe("artwork-fidelity-service", () => {
       // `artwork-fidelity-proposal-capability.test.ts` for the capability-
       // level proof that a successful-but-empty provider result actually
       // produces `proposalStatus: "analyzed"`.
-      await repo.updateArtworkFidelityContract(contract!.id, {
+      await repo.updateArtworkFidelityContract(contract!.id, "proposed", {
         proposedFacts: toProposedFactsRecord({
           schemaVersion: "artwork-fidelity-proposal:v2",
           proposalStatus: "analyzed",

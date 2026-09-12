@@ -3158,3 +3158,80 @@ export interface ArtworkFidelityContract {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * Phase R5 (Confirmed-Authority Raster Reconstruction v1): one attempt to
+ * generatively reconstruct a degraded source artwork under a CONFIRMED
+ * `ArtworkFidelityContract`'s authority — see
+ * `RasterReconstructionCapability` (`@/capabilities/artwork-reconstruction`)
+ * and `artwork_reconstruction_jobs`' own migration comment for the full
+ * "why a new table, not an extension of `FinalArtworkJob`" reasoning.
+ *
+ * Mirrors `FinalArtworkJobStatus`'s status/claim/heartbeat/attempt-budget
+ * shape exactly, but is otherwise a DELIBERATELY narrower record: it knows
+ * nothing about DTF, Signs, physical print size, or Print Ready — see this
+ * type's own fields, none of which name a production profile.
+ */
+export type ArtworkReconstructionJobStatus =
+  | "queued"
+  | "running"
+  | "recoverable"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export const ACTIVE_ARTWORK_RECONSTRUCTION_JOB_STATUSES: readonly ArtworkReconstructionJobStatus[] =
+  ["queued", "running", "recoverable"];
+
+export function isActiveArtworkReconstructionJobStatus(
+  status: ArtworkReconstructionJobStatus,
+): boolean {
+  return ACTIVE_ARTWORK_RECONSTRUCTION_JOB_STATUSES.includes(status);
+}
+
+/**
+ * The CUSTOMER'S post-reconstruction decision — genuinely separate
+ * authority from `ArtworkReconstructionJobStatus` (which only tracks
+ * whether the PROVIDER call succeeded). See Section 17 of the R5 task:
+ * confirming what the source says BEFORE reconstruction is a different
+ * confirmation from approving the reconstructed APPEARANCE after — this is
+ * the second one, never the first. `null` until a candidate exists at all.
+ */
+export type ArtworkReconstructionReviewStatus = "pending_review" | "approved" | "rejected";
+
+/** Deterministic, sanitized-only geometry evidence — never automatic acceptance; see `content-bounds-normalization.ts`. */
+export type ArtworkReconstructionGeometryStatus = "verified" | "review_required";
+
+export interface ArtworkReconstructionJob {
+  id: string;
+  projectId: string;
+  /** The immutable original source this job reconstructs. Never patched — a different source is a different job. */
+  sourceAssetId: string;
+  /** Measured fresh at job-creation time; re-verified against the CURRENT source before every provider call — never trusted stale. */
+  sourceSha256: string;
+  /** The CONFIRMED contract this job's authority derives from. Never a `"proposed"` contract — enforced by `RasterReconstructionCapability`, not a DB constraint (verifying the referenced row's own status is an application-layer join). */
+  fidelityContractId: string;
+  /** Snapshotted from the contract's own `contractKey` at job-creation time — frozen so a later contract correction can be detected as making this job stale, mirroring `SignPreparation.planKey`. */
+  contractKey: string;
+  status: ArtworkReconstructionJobStatus;
+  attempts: number;
+  lastError: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  heartbeatAt: string | null;
+  /** Durable paid-provider request identity — mirrors `FinalArtworkJob`'s own fields exactly, same reason: a crash/race between submitting a paid request and persisting its result must never cause a second paid request on retry/recovery. */
+  providerKey: string | null;
+  providerRequestId: string | null;
+  providerStatus: string | null;
+  providerRecoveryAttempts: number;
+  /** The resulting reconstruction candidate asset, once the provider succeeds and normalization/wording-verification has run. `null` until then. Never overwritten in place — a retried/corrected reconstruction is a NEW job row. */
+  candidateAssetId: string | null;
+  /** Deterministic exact-match evidence against the contract's own `confirmedWording` — never a fuzzy/"close enough" comparison. `null` until a candidate exists. */
+  wordingVerified: boolean | null;
+  /** Deterministic aspect-ratio/content-bounds evidence — never automatic mark verification. `null` until a candidate exists. */
+  geometryStatus: ArtworkReconstructionGeometryStatus | null;
+  reviewStatus: ArtworkReconstructionReviewStatus | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}

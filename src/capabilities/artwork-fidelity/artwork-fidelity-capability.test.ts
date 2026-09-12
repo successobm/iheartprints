@@ -431,4 +431,97 @@ describe("ArtworkFidelityCapability", () => {
     });
     assert.deepEqual(caseVariant.confirmedWording, ["ABC", "abc"]);
   });
+
+  /**
+   * Phase R5 (closing the R4B confirm-race finding): proves the
+   * compare-and-swap fix — two concurrent `confirmContract` calls against
+   * the SAME `"proposed"` row resolve to exactly one winner, never a
+   * silent overwrite. Both calls are started before either awaits, so both
+   * genuinely observe `status: "proposed"` before either write lands —
+   * exactly the race the prior unconditional `.update().eq("id", id)`
+   * could not detect.
+   */
+  describe("confirmContract concurrency (R5: closing the R4B confirm-race finding)", () => {
+    it("request A confirms, request B racing the same proposed row afterward fails, and confirmed authority remains exactly A's", async () => {
+      const { capability, projectId } = await build();
+      const proposed = await capability.proposeContract(projectId, {
+        sourceAssetId: "asset-1",
+        sourceSha256: SHA_A,
+      });
+
+      const confirmA = capability.confirmContract(projectId, proposed.id, {
+        currentSourceSha256: SHA_A,
+        confirmedWording: ["REGENCY"],
+        confirmedMarks: ["™"],
+        confirmedBy: "customer",
+      });
+      const confirmB = capability.confirmContract(projectId, proposed.id, {
+        currentSourceSha256: SHA_A,
+        confirmedWording: ["REGENCY"],
+        confirmedMarks: ["®"],
+        confirmedBy: "customer",
+      });
+
+      const results = await Promise.allSettled([confirmA, confirmB]);
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+
+      // Exactly one winner, exactly one loser — never both succeeding
+      // (which would mean the second silently overwrote the first) and
+      // never both failing (which would mean a legitimate confirmation was
+      // wrongly refused).
+      assert.equal(fulfilled.length, 1, "exactly one of the two racing confirmations must succeed");
+      assert.equal(rejected.length, 1, "exactly one of the two racing confirmations must be refused as a conflict");
+
+      // The loser receives a deterministic conflict/state error, never a
+      // generic/ambiguous failure and never a silently-absorbed no-op.
+      const loser = rejected[0] as PromiseRejectedResult;
+      assert.ok(loser.reason instanceof ArtworkFidelityContractStateError);
+
+      // Confirmed authority is durably, unambiguously exactly the winner's
+      // own facts — reloaded independently, not merely the in-memory
+      // return value.
+      const reloaded = await capability.getContractById(proposed.id);
+      assert.equal(reloaded!.status, "confirmed");
+      const winnerMarks = (fulfilled[0] as PromiseFulfilledResult<Awaited<typeof confirmA>>).value
+        .confirmedMarks;
+      assert.deepEqual(reloaded!.confirmedMarks, winnerMarks);
+      // The two candidate outcomes are mutually exclusive — confirmed
+      // authority is EXACTLY one of them, never a mix of both requests'
+      // facts.
+      assert.ok(
+        (winnerMarks!.length === 1 && winnerMarks![0] === "™") ||
+          (winnerMarks!.length === 1 && winnerMarks![0] === "®"),
+      );
+    });
+
+    it("the reverse ordering also resolves to exactly one winner", async () => {
+      const { capability, projectId } = await build();
+      const proposed = await capability.proposeContract(projectId, {
+        sourceAssetId: "asset-1",
+        sourceSha256: SHA_A,
+      });
+
+      const confirmB = capability.confirmContract(projectId, proposed.id, {
+        currentSourceSha256: SHA_A,
+        confirmedWording: ["REGENCY"],
+        confirmedMarks: ["®"],
+        confirmedBy: "customer",
+      });
+      const confirmA = capability.confirmContract(projectId, proposed.id, {
+        currentSourceSha256: SHA_A,
+        confirmedWording: ["REGENCY"],
+        confirmedMarks: ["™"],
+        confirmedBy: "customer",
+      });
+
+      const results = await Promise.allSettled([confirmB, confirmA]);
+      assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+      assert.equal(results.filter((r) => r.status === "rejected").length, 1);
+
+      const reloaded = await capability.getContractById(proposed.id);
+      assert.equal(reloaded!.status, "confirmed");
+      assert.equal(reloaded!.confirmedMarks!.length, 1);
+    });
+  });
 });

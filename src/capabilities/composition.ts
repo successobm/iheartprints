@@ -8,6 +8,11 @@ import {
   createArtworkFidelityProposalCapability,
   resolveArtworkFidelityProposalProvider,
 } from "@/capabilities/artwork-fidelity-proposal";
+import {
+  createRasterReconstructionCapability,
+  createRasterReconstructionWorkerCapability,
+  resolveRasterReconstructionProvider,
+} from "@/capabilities/artwork-reconstruction";
 import { createSignPreparationCapability } from "@/capabilities/sign-preparation";
 import { resolveAssetStorageProvider } from "@/capabilities/asset-storage";
 import {
@@ -53,6 +58,7 @@ import { createRevisionIntelligenceCapability } from "@/capabilities/revision-in
 import {
   createGenerationSchedulerCapability,
   createFinalArtworkSchedulerCapability,
+  createArtworkReconstructionSchedulerCapability,
 } from "@/capabilities/worker-scheduler";
 
 export interface CapabilityGraph {
@@ -150,6 +156,26 @@ export interface CapabilityGraph {
    * blocks, never throws for a provider failure.
    */
   artworkFidelityProposal: ReturnType<typeof createArtworkFidelityProposalCapability>;
+  /**
+   * Phase R5: the thin, repository-only authority boundary over
+   * `ArtworkReconstructionJob` — requires a CONFIRMED `ArtworkFidelityContract`
+   * before a job may be created; never calls a provider itself (see
+   * `artworkReconstructionWorker`). Knows nothing about DTF/Signs/print
+   * size/Print Ready.
+   */
+  artworkReconstruction: ReturnType<typeof createRasterReconstructionCapability>;
+  /**
+   * Phase R5: the independent worker that claims and runs
+   * `ArtworkReconstructionJob`s against the configured GENERATIVE
+   * reconstruction provider — never invoked from a customer route directly
+   * (same rule as `finalArtworkWorker`), except via
+   * `artworkReconstructionScheduler.runBatch()`.
+   */
+  artworkReconstructionWorker: ReturnType<typeof createRasterReconstructionWorkerCapability>;
+  /** Phase R5: provider-neutral scheduler for `artworkReconstructionWorker` — mirrors `finalArtworkScheduler`. */
+  artworkReconstructionScheduler: ReturnType<
+    typeof createArtworkReconstructionSchedulerCapability
+  >;
 }
 
 let graph: CapabilityGraph | null = null;
@@ -248,6 +274,37 @@ export function createCapabilityGraph(
   );
   const finalArtworkScheduler = createFinalArtworkSchedulerCapability(finalArtworkWorker);
 
+  // Phase R5: resolves to the real OpenAI provider only when explicitly
+  // configured; the safe placeholder otherwise (including unconditionally
+  // under `isAutomatedTestEnvironment()`). Reused for BOTH the fidelity
+  // proposal capability (analyzing the ORIGINAL source) and the
+  // reconstruction worker's verification step (analyzing the RECONSTRUCTED
+  // candidate) — the same stateless "bytes in, wording/marks facts out"
+  // provider instance run twice, never two separately-configured adapters.
+  const artworkFidelityProposalProvider = resolveArtworkFidelityProposalProvider();
+  const artworkFidelityProposal = createArtworkFidelityProposalCapability(
+    artworkFidelityProposalProvider,
+  );
+
+  // Phase R5 (Confirmed-Authority Raster Reconstruction v1): the thin
+  // authority capability requires no provider itself (repository-only,
+  // mirrors `artworkFidelity`). The worker resolves the GENERATIVE
+  // reconstruction provider independently of every other OpenAI-backed
+  // capability in this graph (own env var, own config resolver) and
+  // reuses `artworkFidelityProposalProvider` ONLY for its verification
+  // step's wording re-check — never for reconstruction itself.
+  const artworkReconstruction = createRasterReconstructionCapability(repo);
+  const artworkReconstructionProvider = resolveRasterReconstructionProvider();
+  const artworkReconstructionWorker = createRasterReconstructionWorkerCapability(
+    repo,
+    assets,
+    artworkReconstructionProvider,
+    artworkFidelityProposalProvider,
+  );
+  const artworkReconstructionScheduler = createArtworkReconstructionSchedulerCapability(
+    artworkReconstructionWorker,
+  );
+
   // Sprint A5.3: the checkout boundary. Resolves to `provider: null` in every
   // environment that has not explicitly configured `PAYMENT_PROVIDER=stripe`
   // with a credential and a public base URL — which is all of them today, and
@@ -322,13 +379,10 @@ export function createCapabilityGraph(
     // Universal Raster Reconstruction Phase R3B/R4A: repository-only, no
     // provider port — see the field's own doc comment above.
     artworkFidelity: createArtworkFidelityCapability(repo),
-    // Universal Raster Reconstruction Phase R4A: resolves to the real
-    // OpenAI provider only when explicitly configured; the safe
-    // placeholder otherwise (including unconditionally under
-    // `isAutomatedTestEnvironment()`).
-    artworkFidelityProposal: createArtworkFidelityProposalCapability(
-      resolveArtworkFidelityProposalProvider(),
-    ),
+    artworkFidelityProposal,
+    artworkReconstruction,
+    artworkReconstructionWorker,
+    artworkReconstructionScheduler,
   };
 }
 
