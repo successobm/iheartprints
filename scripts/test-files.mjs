@@ -785,6 +785,9 @@ export const TEST_FILES = [
   "src/capabilities/artwork-reconstruction/raster-reconstruction-capability.test.ts",
   "src/capabilities/artwork-reconstruction/raster-reconstruction-worker-capability.test.ts",
   "src/capabilities/artwork-reconstruction/content-bounds-normalization.test.ts",
+  // R5 OpenAI raster reconstruction timeout readiness: narrow regression
+  // asserting the provider's default request timeout constant.
+  "src/capabilities/artwork-reconstruction/openai-raster-reconstruction-provider.test.ts",
   "src/capabilities/artwork-fidelity-verification/artwork-fidelity-verification-capability.test.ts",
   // Phase R5-R (independent-review repair): closes the three proven
   // approval-authority blockers -- registered immediately.

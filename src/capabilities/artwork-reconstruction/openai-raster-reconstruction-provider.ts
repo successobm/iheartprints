@@ -52,7 +52,7 @@ import type {
 
 const OPENAI_IMAGE_EDITS_ENDPOINT = "https://api.openai.com/v1/images/edits";
 const DEFAULT_MAX_ATTEMPTS = 3;
-const DEFAULT_TIMEOUT_MS = 60_000;
+export const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OPENAI_ERROR_FIELD_LENGTH = 300;
 /**
  * Fixed output size, mirroring `OpenAIConceptGenerationProvider`'s own
