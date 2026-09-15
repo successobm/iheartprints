@@ -61,6 +61,20 @@ export type UploadedArtworkStep =
    * doc comment on this step for the documented FUTURE gating point.
    */
   | "confirm_artwork_fidelity"
+  /**
+   * Phase R5 (Confirmed-Authority Raster Reconstruction v1): a
+   * reconstruction job exists for the current source and has not yet
+   * reached a customer-resolved review outcome (`"approved"`/`"rejected"`)
+   * — covers the in-progress/failed status view AND the compare/approve
+   * screen once a candidate exists. Sits in the SAME shared pre-branch
+   * window as `confirm_artwork_fidelity`, for the same reason: before
+   * either profile's own destructive processing has touched the evidence.
+   * Reachable only once the customer has explicitly requested
+   * reconstruction (Section G/M: never auto-entered from a resolution-
+   * insufficiency signal alone) — see `ArtworkFidelityConfirmationStep`'s
+   * own "Rebuild my artwork" action.
+   */
+  | "review_reconstruction"
   /** We have their artwork; ask what kind it is before asking anything specific to either path. */
   | "choose_artwork_type"
   /** We have their artwork; we still need to know what and where we're printing. */
@@ -199,6 +213,8 @@ export const FRESH_UPLOADED_ARTWORK_UI_STATE = {
    * skip the customer may not have meant to make permanent.
    */
   fidelityStepDismissed: false,
+  /** Phase R5: mirrors `fidelityStepDismissed` exactly — client-only, forgotten on reload/Start Over by design. Lets the customer move past a failed/pending reconstruction review without a durable "give up" signal. */
+  reconstructionStepDismissed: false,
 } as const;
 
 /**
@@ -211,6 +227,17 @@ export interface ArtworkFidelityFlowState {
   status: "proposed" | "confirmed";
 }
 
+/**
+ * Phase R5: the durable signal `deriveUploadedArtworkStep` needs from
+ * `ArtworkReconstructionView` — deliberately narrow, mirroring
+ * `ArtworkFidelityFlowState`'s own shape. `null` means "Rebuild my artwork"
+ * has never been requested for this project's current source.
+ */
+export interface ArtworkReconstructionFlowState {
+  status: "queued" | "running" | "recoverable" | "completed" | "failed" | "cancelled";
+  reviewStatus: "pending_review" | "approved" | "rejected" | null;
+}
+
 export interface UploadedArtworkFlowInput {
   /** `null` for every Create New Artwork project. */
   preparation: ArtworkPreparationView | null;
@@ -221,6 +248,13 @@ export interface UploadedArtworkFlowInput {
    * artwork" has run at least once for this project.
    */
   artworkFidelity: ArtworkFidelityFlowState | null;
+  /**
+   * Phase R5: `null`/omitted until "Rebuild my artwork" has been requested
+   * at least once for this project's current source. Optional (unlike
+   * `artworkFidelity`) so every call site that predates this phase keeps
+   * compiling unmodified — omitting it is exactly equivalent to `null`.
+   */
+  artworkReconstruction?: ArtworkReconstructionFlowState | null;
   choice: WorkflowChoice;
   /** The transient artwork-type answer — read only before either durable signal above exists. */
   artworkTypeChoice: ArtworkTypeChoice;
@@ -232,6 +266,12 @@ export interface UploadedArtworkFlowInput {
    * own doc comment).
    */
   fidelityStepDismissed: boolean;
+  /**
+   * Phase R5: mirrors `fidelityStepDismissed` exactly. Optional so every
+   * call site that predates this phase keeps compiling unmodified —
+   * omitting it is exactly equivalent to `false`.
+   */
+  reconstructionStepDismissed?: boolean;
   /**
    * True only at the very start of a project — no customer message, no
    * artwork. Offering the workflow choice later would interrupt an interview
@@ -428,6 +468,33 @@ export function deriveUploadedArtworkStep(
       input.artworkFidelity?.status !== "confirmed"
     ) {
       return "confirm_artwork_fidelity";
+    }
+    // Phase R5: a reconstruction job exists and has not yet reached a
+    // customer-resolved review outcome. Never fires unless the customer
+    // already took the explicit "Rebuild my artwork" action (this field is
+    // `null` for every project that never did) — an already-good artwork's
+    // flow is completely unaffected, and once `reviewStatus` becomes
+    // `"approved"`/`"rejected"` this stops matching and the flow continues
+    // exactly as it did before this phase.
+    // Phase R5: a reconstruction job exists (the customer already took the
+    // explicit "Rebuild my artwork" action — offered as a secondary,
+    // non-step-changing banner alongside whichever step is already
+    // showing, see `UploadedArtworkPanel`'s own `ArtworkReconstructionOfferBanner`
+    // — never auto-entered) and has not yet reached a customer-resolved
+    // review outcome. `artworkReconstruction` stays `null`/undefined for
+    // every project that never requested it, so this is a NO-OP for every
+    // existing/ordinary flow — it deliberately does NOT fire merely
+    // because fidelity was confirmed (that would re-offer this step to
+    // every uploader and break the existing, tested "confirmed fidelity
+    // falls straight through to choose_artwork_type/confirm_details"
+    // contract).
+    if (
+      !input.reconstructionStepDismissed &&
+      input.artworkReconstruction != null &&
+      input.artworkReconstruction.reviewStatus !== "approved" &&
+      input.artworkReconstruction.reviewStatus !== "rejected"
+    ) {
+      return "review_reconstruction";
     }
     if (input.artworkTypeChoice === "dtf") return "confirm_details";
     if (input.artworkTypeChoice === "sign") return "confirm_sign_size";

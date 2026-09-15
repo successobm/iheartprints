@@ -23,7 +23,10 @@ import type {
   AcquisitionFreeConceptClaim,
   AcquisitionSession,
   ArtworkFidelityContract,
+  ArtworkFidelityContractStatus,
   ArtworkPreparation,
+  ArtworkReconstructionJob,
+  ArtworkReconstructionReviewStatus,
   ArtworkVersion,
   AssetRecord,
   ConversationMessage,
@@ -56,6 +59,7 @@ import type {
   ApproveDesignBriefInput,
   CaptureAcquisitionEmailInput,
   CreateArtworkFidelityContractInput,
+  CreateArtworkReconstructionJobInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
   CreateSignPreparationInput,
@@ -84,11 +88,14 @@ import type {
   UpdateArtworkEvaluationInput,
   UpdateArtworkFidelityContractInput,
   UpdateArtworkPreparationInput,
+  UpdateArtworkReconstructionJobInput,
   UpdateFinalArtworkJobInput,
   UpdateGenerationJobInput,
   UpdateSignPreparationInput,
 } from "./repository";
 import {
+  ArtworkFidelityContractConflictError,
+  ArtworkReconstructionJobConflictError,
   FreeConceptAlreadyConsumedError,
   UniqueConstraintViolationError,
 } from "./repository";
@@ -132,6 +139,8 @@ interface LocalDatabase {
   signCandidateVisualAcceptances: SignCandidateVisualAcceptance[];
   /** Universal Raster Reconstruction Phase R3B. */
   artworkFidelityContracts: ArtworkFidelityContract[];
+  /** Phase R5: Confirmed-Authority Raster Reconstruction v1. */
+  artworkReconstructionJobs: ArtworkReconstructionJob[];
 }
 
 /**
@@ -168,6 +177,18 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/**
+ * Phase R5-R (independent-review repair): mirrors the migration's own
+ * `artwork_reconstruction_jobs_active_binding_uidx` partial-unique-index
+ * predicate EXACTLY — a row "occupies the slot" for a given (project,
+ * source, contractKey) unless it has reached `'failed'`/`'cancelled'`, or
+ * was explicitly `'rejected'` by the customer (both free the slot for a
+ * fresh attempt).
+ */
+function occupiesActiveReconstructionBinding(job: ArtworkReconstructionJob): boolean {
+  return job.status !== "failed" && job.status !== "cancelled" && job.reviewStatus !== "rejected";
+}
+
 function emptyDb(): LocalDatabase {
   return {
     projects: [],
@@ -193,6 +214,7 @@ function emptyDb(): LocalDatabase {
     signPreservationTransportAttempts: [],
     signCandidateVisualAcceptances: [],
     artworkFidelityContracts: [],
+    artworkReconstructionJobs: [],
   };
 }
 
@@ -390,6 +412,8 @@ async function readDb(): Promise<LocalDatabase> {
       signCandidateVisualAcceptances: parsed.signCandidateVisualAcceptances ?? [],
       // Universal Raster Reconstruction Phase R3B: absent in every store written before it existed.
       artworkFidelityContracts: parsed.artworkFidelityContracts ?? [],
+      // Phase R5: absent in every store written before it existed.
+      artworkReconstructionJobs: parsed.artworkReconstructionJobs ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -2529,14 +2553,180 @@ export class LocalProjectRepository implements ProjectRepository {
 
   async updateArtworkFidelityContract(
     id: string,
+    expectedStatus: ArtworkFidelityContractStatus,
     patch: UpdateArtworkFidelityContractInput,
   ): Promise<ArtworkFidelityContract> {
     const db = await readDb();
     const contract = db.artworkFidelityContracts.find((item) => item.id === id);
-    if (!contract) throw new Error("Artwork fidelity contract not found");
+    // Phase R5 (closing the R4B confirm-race finding): mirrors the Supabase
+    // conditional `.eq("status", expectedStatus)` — a single-process local
+    // store has no real concurrent-write race, but the CAS contract (throw
+    // on mismatch, never a silent no-op success) must behave identically so
+    // tests against either store prove the same invariant.
+    if (!contract || contract.status !== expectedStatus) {
+      throw new ArtworkFidelityContractConflictError(expectedStatus);
+    }
 
     Object.assign(contract, patch, { updatedAt: nowIso() });
     await writeDb(db);
     return contract;
+  }
+
+  // --- Phase R5: Confirmed-Authority Raster Reconstruction v1 ------------
+
+  async createArtworkReconstructionJob(
+    projectId: string,
+    input: CreateArtworkReconstructionJobInput,
+  ): Promise<ArtworkReconstructionJob> {
+    const db = await readDb();
+
+    // Emulates the migration's partial unique index — a real concurrent
+    // race is vanishingly unlikely in a single-process local store, but the
+    // CONTRACT must match Supabase's so tests exercise the same behavior
+    // either store is configured with.
+    const conflicting = db.artworkReconstructionJobs.find(
+      (job) =>
+        job.projectId === projectId &&
+        job.sourceAssetId === input.sourceAssetId &&
+        job.contractKey === input.contractKey &&
+        occupiesActiveReconstructionBinding(job),
+    );
+    if (conflicting) {
+      throw new UniqueConstraintViolationError(
+        "artwork_reconstruction_jobs_active_binding_uidx",
+      );
+    }
+
+    const timestamp = nowIso();
+    const job: ArtworkReconstructionJob = {
+      id: randomUUID(),
+      projectId,
+      sourceAssetId: input.sourceAssetId,
+      sourceSha256: input.sourceSha256,
+      fidelityContractId: input.fidelityContractId,
+      contractKey: input.contractKey,
+      status: "queued",
+      attempts: 0,
+      lastError: null,
+      startedAt: null,
+      completedAt: null,
+      heartbeatAt: null,
+      providerKey: null,
+      providerRequestId: null,
+      providerStatus: null,
+      providerRecoveryAttempts: 0,
+      candidateAssetId: null,
+      wordingVerified: null,
+      geometryStatus: null,
+      reviewStatus: null,
+      reviewedAt: null,
+      protectedMarksReviewed: null,
+      protectedMarksReviewedAt: null,
+      protectedMarksReviewedBy: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.artworkReconstructionJobs.push(job);
+    await writeDb(db);
+    return job;
+  }
+
+  async getArtworkReconstructionJob(id: string): Promise<ArtworkReconstructionJob | null> {
+    const db = await readDb();
+    return db.artworkReconstructionJobs.find((job) => job.id === id) ?? null;
+  }
+
+  async getLatestArtworkReconstructionJobForSource(
+    projectId: string,
+    sourceAssetId: string,
+  ): Promise<ArtworkReconstructionJob | null> {
+    const db = await readDb();
+    const matches = db.artworkReconstructionJobs
+      .filter((job) => job.projectId === projectId && job.sourceAssetId === sourceAssetId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return matches.at(-1) ?? null;
+  }
+
+  async listArtworkReconstructionJobsForSource(
+    projectId: string,
+    sourceAssetId: string,
+  ): Promise<ArtworkReconstructionJob[]> {
+    const db = await readDb();
+    return db.artworkReconstructionJobs
+      .filter((job) => job.projectId === projectId && job.sourceAssetId === sourceAssetId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async updateArtworkReconstructionJob(
+    id: string,
+    patch: UpdateArtworkReconstructionJobInput,
+    expectedReviewStatus?: ArtworkReconstructionReviewStatus,
+  ): Promise<ArtworkReconstructionJob> {
+    const db = await readDb();
+    const job = db.artworkReconstructionJobs.find((item) => item.id === id);
+    // Phase R5-R (closing Blocker 3): mirrors the Supabase conditional
+    // `.eq("review_status", expectedReviewStatus)` — a single-process local
+    // store has no real concurrent-write race, but the CAS contract (throw
+    // on mismatch, never a silent no-op success) must behave identically.
+    if (expectedReviewStatus !== undefined) {
+      if (!job || job.reviewStatus !== expectedReviewStatus) {
+        throw new ArtworkReconstructionJobConflictError(expectedReviewStatus);
+      }
+    } else if (!job) {
+      throw new Error("Artwork reconstruction job not found");
+    }
+
+    Object.assign(job, patch, { updatedAt: nowIso() });
+    await writeDb(db);
+    return job;
+  }
+
+  async claimNextQueuedArtworkReconstructionJob(): Promise<ArtworkReconstructionJob | null> {
+    const db = await readDb();
+    const candidates = db.artworkReconstructionJobs
+      .filter((job) => job.status === "queued" || job.status === "recoverable")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const job = candidates[0];
+    if (!job) return null;
+
+    const timestamp = nowIso();
+    job.status = "running";
+    job.attempts += 1;
+    job.startedAt = timestamp;
+    job.heartbeatAt = timestamp;
+    job.updatedAt = timestamp;
+    await writeDb(db);
+    return job;
+  }
+
+  async touchArtworkReconstructionJobHeartbeat(jobId: string): Promise<void> {
+    const db = await readDb();
+    const job = db.artworkReconstructionJobs.find((item) => item.id === jobId);
+    if (!job) return;
+    job.heartbeatAt = nowIso();
+    await writeDb(db);
+  }
+
+  async recoverAbandonedArtworkReconstructionJobs(
+    staleAfterMs: number,
+  ): Promise<ArtworkReconstructionJob[]> {
+    const db = await readDb();
+    const now = Date.now();
+    const recovered: ArtworkReconstructionJob[] = [];
+
+    for (const job of db.artworkReconstructionJobs) {
+      if (job.status !== "running") continue;
+      const lastHeartbeat = job.heartbeatAt
+        ? Date.parse(job.heartbeatAt)
+        : Date.parse(job.startedAt ?? job.updatedAt);
+      if (now - lastHeartbeat < staleAfterMs) continue;
+
+      job.status = "recoverable";
+      job.updatedAt = nowIso();
+      recovered.push(job);
+    }
+
+    if (recovered.length > 0) await writeDb(db);
+    return recovered;
   }
 }

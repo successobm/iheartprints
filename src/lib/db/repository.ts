@@ -5,6 +5,10 @@ import type {
   ArtworkFidelityContractStatus,
   ArtworkPreparation,
   ArtworkPreparationStatus,
+  ArtworkReconstructionGeometryStatus,
+  ArtworkReconstructionJob,
+  ArtworkReconstructionJobStatus,
+  ArtworkReconstructionReviewStatus,
   ArtworkVersion,
   AssetRecord,
   ConceptDirectionKey,
@@ -494,6 +498,90 @@ export type UpdateArtworkFidelityContractInput = Partial<{
   sourceContentBoundingBoxAspectRatio: number | null;
   contractKey: string | null;
 }>;
+
+/**
+ * Phase R5 (Confirmed-Authority Raster Reconstruction v1, closing the R4B
+ * confirm-race finding): thrown by `updateArtworkFidelityContract` when the
+ * row's CURRENT status no longer matches `expectedStatus` at the moment of
+ * the conditional write (not found, already confirmed by a concurrent
+ * request, or any other status change out from under the caller). Mirrors
+ * `FreeConceptAlreadyConsumedError`'s own role exactly: a repository-level
+ * compare-and-swap loss, thrown rather than silently returning the current
+ * (unchanged-by-this-call) row, so a losing concurrent confirmation gets a
+ * deterministic conflict instead of a false success. Callers convert it into
+ * a customer-safe refusal — see `ArtworkFidelityCapability.confirmContract`.
+ */
+export class ArtworkFidelityContractConflictError extends Error {
+  constructor(expectedStatus: ArtworkFidelityContractStatus) {
+    super(
+      `Artwork fidelity contract was not in the expected status ("${expectedStatus}") at the moment of update — it was already changed by another request.`,
+    );
+    this.name = "ArtworkFidelityContractConflictError";
+  }
+}
+
+/**
+ * Phase R5: one attempt to generatively reconstruct a source artwork under
+ * confirmed fidelity authority. `fidelityContractId`/`contractKey` are
+ * required at creation — a job always binds to an ALREADY-confirmed
+ * contract, never a placeholder to fill in later (mirrors
+ * `CreateArtworkFidelityContractInput`'s own "the immutable binding is known
+ * up front" shape). Verifying the referenced contract is actually
+ * `"confirmed"` is `RasterReconstructionCapability`'s job, not this input
+ * type's or the database's — see that capability's own doc comment.
+ */
+export interface CreateArtworkReconstructionJobInput {
+  sourceAssetId: string;
+  sourceSha256: string;
+  fidelityContractId: string;
+  contractKey: string;
+}
+
+/**
+ * Phase R5. Deliberately narrow, mirroring `UpdateArtworkFidelityContractInput`'s
+ * own discipline: `sourceAssetId`/`sourceSha256`/`fidelityContractId`/
+ * `contractKey` are never patched here — a different source or a different
+ * (corrected) contract means a new job, never a mutated one.
+ */
+export type UpdateArtworkReconstructionJobInput = Partial<{
+  status: ArtworkReconstructionJobStatus;
+  attempts: number;
+  lastError: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  heartbeatAt: string | null;
+  providerKey: string | null;
+  providerRequestId: string | null;
+  providerStatus: string | null;
+  providerRecoveryAttempts: number;
+  candidateAssetId: string | null;
+  wordingVerified: boolean | null;
+  geometryStatus: ArtworkReconstructionGeometryStatus | null;
+  reviewStatus: ArtworkReconstructionReviewStatus | null;
+  reviewedAt: string | null;
+  /** Phase R5-R (Blocker 1). See `ArtworkReconstructionJob.protectedMarksReviewed`'s own doc comment. */
+  protectedMarksReviewed: boolean | null;
+  protectedMarksReviewedAt: string | null;
+  protectedMarksReviewedBy: SignPlanAuthorizationActor | null;
+}>;
+
+/**
+ * Phase R5-R (independent-review repair, Blocker 3): thrown by
+ * `updateArtworkReconstructionJob` when an `expectedReviewStatus` was given
+ * and the row's CURRENT `review_status` no longer matches it at the moment
+ * of the conditional write — mirrors `ArtworkFidelityContractConflictError`
+ * exactly (same CAS-loss-is-a-typed-conflict, never a silent no-op success,
+ * discipline). Two concurrent approve/reject calls against the same
+ * `"pending_review"` row resolve to exactly one winner this way.
+ */
+export class ArtworkReconstructionJobConflictError extends Error {
+  constructor(expectedReviewStatus: ArtworkReconstructionReviewStatus) {
+    super(
+      `Artwork reconstruction job was not in the expected review status ("${expectedReviewStatus}") at the moment of update — it was already changed by another request.`,
+    );
+    this.name = "ArtworkReconstructionJobConflictError";
+  }
+}
 
 /**
  * Thrown when a repository detects a duplicate (project_id, version_number)
@@ -1497,8 +1585,76 @@ export interface ProjectRepository {
   /** Latest fidelity contract for the project, or `null` — mirrors `getSignPreparation`. */
   getArtworkFidelityContract(projectId: string): Promise<ArtworkFidelityContract | null>;
   getArtworkFidelityContractById(id: string): Promise<ArtworkFidelityContract | null>;
+  /**
+   * Phase R5 (closing the R4B confirm-race finding): a compare-and-swap
+   * update — `expectedStatus` must equal the row's CURRENT status at the
+   * moment of the write, or the whole call throws
+   * `ArtworkFidelityContractConflictError` with NO partial mutation. This is
+   * what makes two concurrent `confirmContract` calls against the same
+   * `"proposed"` row resolve to exactly one winner: both may read
+   * `status: "proposed"`, but only the first write's conditional `WHERE id =
+   * ... AND status = 'proposed'` actually matches a row — the second finds
+   * zero rows changed (the first already flipped it to `"confirmed"`) and
+   * throws instead of silently overwriting the winner's confirmed authority.
+   */
   updateArtworkFidelityContract(
     id: string,
+    expectedStatus: ArtworkFidelityContractStatus,
     patch: UpdateArtworkFidelityContractInput,
   ): Promise<ArtworkFidelityContract>;
+
+  // --- Phase R5: Confirmed-Authority Raster Reconstruction v1 ------------
+
+  /**
+   * Persist a new reconstruction job, bound to an already-confirmed
+   * `ArtworkFidelityContract` — see `ArtworkReconstructionJob`'s own doc
+   * comment. Always created in `status: "queued"`, with no candidate asset
+   * and no review decision yet (enforced by the migration's own
+   * `artwork_reconstruction_jobs_completion_consistent` CHECK).
+   */
+  createArtworkReconstructionJob(
+    projectId: string,
+    input: CreateArtworkReconstructionJobInput,
+  ): Promise<ArtworkReconstructionJob>;
+  getArtworkReconstructionJob(id: string): Promise<ArtworkReconstructionJob | null>;
+  /** Most recent reconstruction job for this exact source asset, or `null` — mirrors `getArtworkFidelityContract`'s "latest by createdAt" resolution. */
+  getLatestArtworkReconstructionJobForSource(
+    projectId: string,
+    sourceAssetId: string,
+  ): Promise<ArtworkReconstructionJob | null>;
+  /**
+   * Phase R5-R (independent-review repair): the WHOLE history for this
+   * exact source, oldest first — mirrors `listFinalArtworkJobsForPreparation`'s
+   * own "return the whole history rather than one row" precedent. Needed
+   * because "the latest job" and "the current accepted clean master" are
+   * NOT the same question — see `RasterReconstructionCapability
+   * .getCurrentAcceptedMaster`.
+   */
+  listArtworkReconstructionJobsForSource(
+    projectId: string,
+    sourceAssetId: string,
+  ): Promise<ArtworkReconstructionJob[]>;
+  /**
+   * Phase R5-R (closing Blocker 3): when `expectedReviewStatus` is given,
+   * this is a compare-and-swap update — the row's CURRENT `review_status`
+   * must equal it at the moment of the write, or the whole call throws
+   * `ArtworkReconstructionJobConflictError` with NO partial mutation.
+   * Mirrors `updateArtworkFidelityContract`'s own `expectedStatus` CAS
+   * exactly. `undefined` (the default) preserves the prior unconditional-
+   * update behavior for every existing non-review-decision call site (the
+   * worker's own status/provenance updates never touch `review_status` and
+   * have no race to guard against).
+   */
+  updateArtworkReconstructionJob(
+    id: string,
+    patch: UpdateArtworkReconstructionJobInput,
+    expectedReviewStatus?: ArtworkReconstructionReviewStatus,
+  ): Promise<ArtworkReconstructionJob>;
+  /** The worker's entry point — mirrors `claimNextQueuedFinalArtworkJob` exactly (same atomic-claim contract). */
+  claimNextQueuedArtworkReconstructionJob(): Promise<ArtworkReconstructionJob | null>;
+  touchArtworkReconstructionJobHeartbeat(jobId: string): Promise<void>;
+  /** Mirrors `recoverAbandonedFinalArtworkJobs` — single atomic conditional update, no select-then-write gap. */
+  recoverAbandonedArtworkReconstructionJobs(
+    staleAfterMs: number,
+  ): Promise<ArtworkReconstructionJob[]>;
 }

@@ -38,6 +38,7 @@
  *     not-found, never to another project's data.
  */
 
+import { ArtworkFidelityContractConflictError } from "@/lib/db/repository";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type {
   ArtworkFidelityContract,
@@ -283,15 +284,36 @@ export function createArtworkFidelityCapability(
       };
       const contractKey = deriveArtworkFidelityContractKey(identity);
 
-      return repo.updateArtworkFidelityContract(id, {
-        status: "confirmed",
-        confirmedWording,
-        confirmedMarks,
-        confirmedBy: input.confirmedBy,
-        confirmedAt: new Date().toISOString(),
-        sourceContentBoundingBoxAspectRatio: identity.sourceContentBoundingBoxAspectRatio,
-        contractKey,
-      });
+      // Phase R5 (closing the R4B confirm-race finding): the check above
+      // (`contract.status === "confirmed"`) is a courtesy — it lets an
+      // ordinary, non-racing caller fail fast with a clear message before
+      // any write. It is NOT what makes two concurrent confirmations safe:
+      // both could read `status: "proposed"` before either write lands. The
+      // actual safety is this conditional update — `expectedStatus:
+      // "proposed"` — which only ONE of two racing calls can ever satisfy;
+      // the loser's write touches zero rows and the repository throws
+      // `ArtworkFidelityContractConflictError`, translated here into the
+      // SAME customer-safe error type this method already throws for the
+      // non-racing case, so every caller handles one error type regardless
+      // of which check caught the conflict.
+      try {
+        return await repo.updateArtworkFidelityContract(id, "proposed", {
+          status: "confirmed",
+          confirmedWording,
+          confirmedMarks,
+          confirmedBy: input.confirmedBy,
+          confirmedAt: new Date().toISOString(),
+          sourceContentBoundingBoxAspectRatio: identity.sourceContentBoundingBoxAspectRatio,
+          contractKey,
+        });
+      } catch (error) {
+        if (error instanceof ArtworkFidelityContractConflictError) {
+          throw new ArtworkFidelityContractStateError(
+            "This contract was already confirmed or changed by another request. Reload and try again.",
+          );
+        }
+        throw error;
+      }
     },
   };
 }

@@ -139,6 +139,38 @@ describe("Release-blocker regression: automated tests never reach a real paid pr
     );
   });
 
+  it("resolveArtworkFidelityProposalProvider() with no explicit config forces the placeholder even with ARTWORK_FIDELITY_PROPOSAL_PROVIDER=openai + a real-looking OPENAI_API_KEY", async () => {
+    await withEnv(
+      { ARTWORK_FIDELITY_PROPOSAL_PROVIDER: "openai", OPENAI_API_KEY: "fake-but-present" },
+      async () => {
+        const { resolveArtworkFidelityProposalProvider } = await import(
+          "@/capabilities/artwork-fidelity-proposal"
+        );
+        const { PlaceholderArtworkFidelityProposalProvider } = await import(
+          "@/capabilities/artwork-fidelity-proposal/placeholder-artwork-fidelity-proposal-provider"
+        );
+        const provider = resolveArtworkFidelityProposalProvider();
+        assert.ok(provider instanceof PlaceholderArtworkFidelityProposalProvider);
+      },
+    );
+  });
+
+  it("Phase R5: resolveRasterReconstructionProvider() with no explicit config forces the placeholder even with RASTER_RECONSTRUCTION_PROVIDER=openai + a real-looking OPENAI_API_KEY", async () => {
+    await withEnv(
+      { RASTER_RECONSTRUCTION_PROVIDER: "openai", OPENAI_API_KEY: "fake-but-present" },
+      async () => {
+        const { resolveRasterReconstructionProvider } = await import(
+          "@/capabilities/artwork-reconstruction"
+        );
+        const { PlaceholderRasterReconstructionProvider } = await import(
+          "@/capabilities/artwork-reconstruction/placeholder-raster-reconstruction-provider"
+        );
+        const provider = resolveRasterReconstructionProvider();
+        assert.ok(provider instanceof PlaceholderRasterReconstructionProvider);
+      },
+    );
+  });
+
   describe("the exact incident path: the REAL capability graph's finalArtworkWorker", () => {
     let tempDir = "";
     let previousCwd = "";

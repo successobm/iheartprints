@@ -22,12 +22,17 @@ import type { GarmentSizeClass, PrintPlacement } from "@/lib/domain/types";
 import type { SignPlanCustomerView } from "@/capabilities/sign-preparation";
 import type {
   ArtworkFidelityView,
+  ArtworkReconstructionView,
   CustomerFinalizationStatus,
   SignArtworkView,
 } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
 import { ArtworkComparison } from "./ArtworkComparison";
 import { ArtworkFidelityConfirmationStep } from "./ArtworkFidelityConfirmationStep";
+import {
+  ArtworkReconstructionOfferBanner,
+  ArtworkReconstructionReviewStep,
+} from "./ArtworkReconstructionReviewStep";
 import CorrectionFinalReview from "./CorrectionFinalReview";
 import CorrectionWorkspace from "./CorrectionWorkspace";
 import { PREVIEW_BACKGROUND_COPY } from "./preview-background";
@@ -94,6 +99,21 @@ export interface UploadedArtworkPanelProps {
   onFidelityConfirmed?: () => void;
   /** "Skip for now" on the fidelity confirmation step — client-only, never blocks the flow (Section 13). */
   onSkipFidelity?: () => void;
+  /**
+   * Phase R5: the customer-safe reconstruction state — `null` until
+   * "Rebuild my artwork" has been requested at least once. See
+   * `ArtworkReconstructionReviewStep`.
+   */
+  artworkReconstruction?: ArtworkReconstructionView | null;
+  /** Reuses the SAME original image the compare step shows — never a second fetch of the same asset. */
+  reconstructionCandidateImageUrl?: string | null;
+  /** Client-only — hides `ArtworkReconstructionOfferBanner` and lets a stuck failed/pending `review_reconstruction` step be passed. Mirrors `fidelityStepDismissed`. */
+  reconstructionOfferDismissed?: boolean;
+  onRequestReconstruction?: () => void;
+  onApproveReconstruction?: (protectedMarksConfirmed: boolean) => void;
+  onRejectReconstruction?: () => void;
+  onRetryReconstruction?: () => void;
+  onDismissReconstruction?: () => void;
   /**
    * LIVE PRODUCT BLOCKER #1: the routing answer at `choose_artwork_type`.
    * Client-only — see `ArtworkTypeChoice`'s doc in `uploaded-artwork-flow.ts`.
@@ -276,6 +296,22 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
         />
       ) : null}
 
+      {step === "review_reconstruction" ? (
+        <ArtworkReconstructionReviewStep
+          artworkReconstruction={props.artworkReconstruction ?? null}
+          confirmedMarks={props.artworkFidelity?.confirmedMarks ?? null}
+          originalImageUrl={props.originalImageUrl}
+          candidateImageUrl={props.reconstructionCandidateImageUrl ?? null}
+          busy={busy}
+          onApprove={(protectedMarksConfirmed) =>
+            props.onApproveReconstruction?.(protectedMarksConfirmed)
+          }
+          onReject={() => props.onRejectReconstruction?.()}
+          onRetry={() => props.onRetryReconstruction?.()}
+          onDismiss={() => props.onDismissReconstruction?.()}
+        />
+      ) : null}
+
       {step === "choose_artwork_type" ? (
         <ArtworkTypeStep busy={busy} onChoose={props.onChooseArtworkType} />
       ) : null}
@@ -397,6 +433,29 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           }
         />
       ) : null}
+
+      {
+        // Phase R5: the secondary, non-step-changing offer — only in the
+        // SAME shared pre-branch window `confirm_artwork_fidelity` itself
+        // occupies (the three steps reachable immediately after it
+        // resolves), never once a profile has taken over the surface
+        // (`review_analysis`/`compare`/`approved`/any `sign_*` production
+        // step). See `ArtworkReconstructionOfferBanner`'s own doc comment.
+        (step === "choose_artwork_type" ||
+          step === "confirm_details" ||
+          step === "confirm_sign_size") &&
+        props.artworkFidelity?.status === "confirmed" &&
+        !props.artworkReconstruction &&
+        !props.reconstructionOfferDismissed ? (
+          <div className="mt-3">
+            <ArtworkReconstructionOfferBanner
+              busy={busy}
+              onRequest={() => props.onRequestReconstruction?.()}
+              onDismiss={() => props.onDismissReconstruction?.()}
+            />
+          </div>
+        ) : null
+      }
     </section>
   );
 }
