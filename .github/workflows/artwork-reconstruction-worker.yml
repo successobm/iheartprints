@@ -1,0 +1,79 @@
+# Artwork Reconstruction Recovery Worker (Phase R5 follow-up).
+#
+# RECOVERY INSURANCE ONLY -- NOT the primary execution path. A customer's
+# reconstruction request already runs its own batch inline
+# (artwork-reconstruction-service.ts -> artworkReconstructionScheduler
+# .runBatch()), so the normal interactive path never waits on this
+# workflow. What that inline call cannot cover is a job left behind by a
+# process interruption: a queued job whose request died, a recoverable
+# provider failure, or a stale "running" job after a crash/gateway
+# termination. The ALREADY-BUILT, already-secured
+#
+#   POST /api/worker/artwork-reconstruction
+#
+# endpoint sweeps exactly those (abandoned-job recovery, CAS claim, one
+# bounded batch). This workflow is pure orchestration -- when to call that
+# unmodified route -- never a second worker implementation.
+#
+# CADENCE: every five minutes (GitHub's scheduled-workflow floor), ONE
+# POST per tick. This is deliberately NOT the final-artwork workflow's
+# ~1-minute polling loop: recovery does not need it, and the next
+# scheduled tick is the normal retry opportunity. No in-run retries -- an
+# immediate second POST could only add provider-execution ambiguity.
+#
+# TIMEOUT: a reconstruction may include a provider call with a 120 s
+# timeout plus verification/upload overhead, so the HTTP client timeout is
+# 300 s. The job timeout sits just above it. The client timeout only ends
+# THIS request; it never cancels work the server already started.
+#
+# SAFETY: correctness is the database claim CAS (one winner per job), not
+# this workflow. `concurrency` only avoids piling up redundant runners, and
+# cancel-in-progress is false so a tick never cancels an in-flight (paid)
+# reconstruction run.
+#
+# SECURITY: the ONE secret is the existing `WORKER_SECRET` (same value the
+# DigitalOcean app already requires), read only via
+# `${{ secrets.WORKER_SECRET }}` and sent only as the route's own
+# `Authorization: Bearer` header. No secret VALUE appears in this file.
+
+name: Artwork Reconstruction Worker Trigger
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: artwork-reconstruction-worker-trigger
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - name: Invoke the existing artwork-reconstruction recovery endpoint once
+        env:
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          WORKER_URL: https://iheartprints-88sjr.ondigitalocean.app/api/worker/artwork-reconstruction
+        run: |
+          set -u
+
+          if [ -z "${WORKER_SECRET:-}" ]; then
+            echo "::error::The WORKER_SECRET repository secret is not configured. Add it under Settings -> Secrets and variables -> Actions, using the SAME value already configured on the DigitalOcean app."
+            exit 1
+          fi
+
+          status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$WORKER_URL" \
+            -H "Authorization: Bearer ${WORKER_SECRET}" \
+            --max-time 300) || true
+          status="${status:-000}"
+          echo "artwork-reconstruction recovery trigger -> HTTP $status"
+
+          case "$status" in
+            2??) ;;
+            *)
+              echo "::error::Artwork-reconstruction recovery worker call failed (HTTP $status; 000 = no response/timeout). Not retrying in this run -- the next scheduled tick is the recovery opportunity. Check deployment health and the WORKER_SECRET value."
+              exit 1
+              ;;
+          esac
