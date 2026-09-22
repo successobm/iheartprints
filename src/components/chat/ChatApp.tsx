@@ -23,6 +23,7 @@ import {
   type WorkflowChoice,
 } from "./uploaded-artwork-flow";
 import { UploadedArtworkPanel } from "./UploadedArtworkPanel";
+import { createSingleFlightGuard } from "./reconstruction-request-guard";
 import {
   resolveSignProductionWorkspaceUrl,
   resolveSignReviewWorkspaceUrl,
@@ -112,6 +113,14 @@ export function ChatApp() {
   const [fidelityStepDismissed, setFidelityStepDismissed] = useState(false);
   /** Phase R5: "Continue without rebuilding" — transient, client-only, mirrors `fidelityStepDismissed` exactly. */
   const [reconstructionStepDismissed, setReconstructionStepDismissed] = useState(false);
+  /**
+   * Live-acceptance repair: true only while THIS browser's own rebuild
+   * request is pending (the request is one long synchronous call). Drives
+   * the visible processing state; `reconstructionRequestGuard` is what
+   * actually prevents a second submit within the same render tick.
+   */
+  const [reconstructionRequestPending, setReconstructionRequestPending] = useState(false);
+  const reconstructionRequestGuard = useRef(createSingleFlightGuard());
   /** Phase R5: the reconstruction candidate's signed image URL — mirrors `preparationImages`'s own "resolved by a dedicated effect" shape, but keyed only on the candidate asset id (a candidate is never re-derived in place). */
   const [reconstructionCandidateImageUrl, setReconstructionCandidateImageUrl] = useState<
     string | null
@@ -1246,15 +1255,26 @@ export function ChatApp() {
    */
   async function requestArtworkReconstruction() {
     if (!snapshot) return;
-    await submitPreparationAction(
-      () =>
-        fetch(`/api/projects/${snapshot.project.id}/artwork-reconstruction`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "request" }),
-        }),
-      "Failed to rebuild your artwork",
-    );
+    const projectId = snapshot.project.id;
+    // Single-flight: the request is synchronous and every submit is a
+    // potentially paid provider call, so a repeat click while one is in
+    // flight is dropped here — before any state update could even render.
+    await reconstructionRequestGuard.current.run(async () => {
+      setReconstructionRequestPending(true);
+      try {
+        await submitPreparationAction(
+          () =>
+            fetch(`/api/projects/${projectId}/artwork-reconstruction`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "request" }),
+            }),
+          "Failed to rebuild your artwork",
+        );
+      } finally {
+        setReconstructionRequestPending(false);
+      }
+    });
   }
 
   async function approveArtworkReconstruction(protectedMarksConfirmed: boolean) {
@@ -1960,6 +1980,7 @@ export function ChatApp() {
                 artworkReconstruction={snapshot?.artworkReconstruction ?? null}
                 reconstructionCandidateImageUrl={reconstructionCandidateImageUrl}
                 reconstructionOfferDismissed={reconstructionStepDismissed}
+                reconstructionRequestPending={reconstructionRequestPending}
                 onRequestReconstruction={() => void requestArtworkReconstruction()}
                 onApproveReconstruction={(protectedMarksConfirmed) =>
                   void approveArtworkReconstruction(protectedMarksConfirmed)
