@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import type { ProtectedMarkType } from "@/lib/domain/types";
 import type { ArtworkReconstructionView } from "@/lib/services/conversation-service";
@@ -28,8 +28,54 @@ import type { ArtworkReconstructionView } from "@/lib/services/conversation-serv
  * proved automatic mark verification unreliable).
  */
 
+/**
+ * The indeterminate "we're working on it" state shown while a rebuild is in
+ * flight — both while the customer's own request is pending
+ * (`requesting`) and when a reload finds a job still queued/running/
+ * recoverable. Deliberately NOT a progress bar: the request is one
+ * synchronous call with no observable intermediate stages, so a spinner is
+ * the only truthful indicator (no percentages, no step checklist, no time
+ * remaining). No implementation vocabulary appears in this copy.
+ */
+export const RECONSTRUCTION_PROCESSING_HEADLINE = "Rebuilding your artwork…";
+export const RECONSTRUCTION_PROCESSING_DETAIL =
+  "We're rebuilding your artwork while preserving the text and details you confirmed. This can take a minute or two.";
+export const RECONSTRUCTION_PROCESSING_KEEP_OPEN = "Please keep this page open.";
+
+function ArtworkReconstructionProcessing(props: {
+  /** True while THIS browser's own request is pending (adds the keep-open note). */
+  requesting: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <section
+      aria-label="Rebuilding your artwork"
+      aria-busy="true"
+      className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm"
+      data-reconstruction-processing
+    >
+      <div className="flex items-start gap-3" role="status">
+        <span
+          aria-hidden="true"
+          className="mt-0.5 h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-black/20 border-t-ink"
+        />
+        <div>
+          <p className="text-sm font-semibold text-ink">{RECONSTRUCTION_PROCESSING_HEADLINE}</p>
+          <p className="mt-1 text-sm text-muted">{RECONSTRUCTION_PROCESSING_DETAIL}</p>
+          {props.requesting ? (
+            <p className="mt-1 text-xs text-muted">{RECONSTRUCTION_PROCESSING_KEEP_OPEN}</p>
+          ) : null}
+        </div>
+      </div>
+      {props.children}
+    </section>
+  );
+}
+
 export interface ArtworkReconstructionOfferBannerProps {
   busy?: boolean;
+  /** True while the customer's own "Rebuild my artwork" request is pending — the banner becomes the processing state and cannot be submitted again. */
+  requesting?: boolean;
   /** "Rebuild my artwork" — the explicit customer request action (Section G/M: reconstruction is never auto-triggered). */
   onRequest: () => void;
   /** A lightweight "not now" — client-only, never a server call, mirrors `onSkip` on the fidelity step. */
@@ -49,6 +95,8 @@ export interface ArtworkReconstructionOfferBannerProps {
  * replacing it, avoids that entirely.
  */
 export function ArtworkReconstructionOfferBanner(props: ArtworkReconstructionOfferBannerProps) {
+  if (props.requesting) return <ArtworkReconstructionProcessing requesting />;
+
   return (
     <section
       aria-label="Rebuild your artwork"
@@ -90,6 +138,8 @@ export interface ArtworkReconstructionReviewStepProps {
   originalImageUrl: string | null;
   candidateImageUrl: string | null;
   busy?: boolean;
+  /** True while the customer's own rebuild request (e.g. "Try again") is pending — shows the processing state instead of the stale failed/pending view. */
+  requesting?: boolean;
   /**
    * Phase R5-R (independent-review repair, Blocker 1): now takes the
    * customer's actual mark-confirmation state — the SERVER is what
@@ -125,27 +175,22 @@ export function ArtworkReconstructionReviewStep(props: ArtworkReconstructionRevi
   const canApprove =
     !busy && artworkReconstruction.reviewStatus === "pending_review" && (!requiresMarkCheck || markChecked);
 
-  if (IN_PROGRESS_STATUSES.has(artworkReconstruction.status)) {
+  if (props.requesting || IN_PROGRESS_STATUSES.has(artworkReconstruction.status)) {
     return (
-      <section
-        aria-label="Rebuilding your artwork"
-        className="rounded-2xl border border-black/8 bg-white p-4 shadow-sm"
-      >
-        <p className="text-sm font-semibold text-ink">Rebuilding your artwork</p>
-        <p role="status" className="mt-1 text-sm text-muted">
-          This can take a moment…
-        </p>
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={props.onDismiss}
-            className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline"
-            data-testid="artwork-reconstruction-dismiss-button"
-          >
-            Continue without rebuilding
-          </button>
-        </div>
-      </section>
+      <ArtworkReconstructionProcessing requesting={props.requesting === true}>
+        {props.requesting ? null : (
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={props.onDismiss}
+              className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline"
+              data-testid="artwork-reconstruction-dismiss-button"
+            >
+              Continue without rebuilding
+            </button>
+          </div>
+        )}
+      </ArtworkReconstructionProcessing>
     );
   }
 

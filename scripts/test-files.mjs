@@ -568,6 +568,11 @@ export const TEST_FILES = [
   "src/components/chat/PreviewBackgroundControl.test.tsx",
   "src/components/chat/uploaded-artwork-flow.test.ts",
   "src/components/chat/UploadedArtworkPanel.test.tsx",
+  // Phase R5 live-acceptance repair: reconstruction review outranks Signs
+  // production review, plus the in-flight processing state and its
+  // single-submit guard.
+  "src/components/chat/reconstruction-review-routing.test.tsx",
+  "src/components/chat/reconstruction-request-guard.test.ts",
   // Production Workspace Bridge: the pure resolveSignProductionWorkspaceUrl
   // gate — registered late (it was added the phase before this one and
   // missed registration then; fixed here alongside this phase's own new

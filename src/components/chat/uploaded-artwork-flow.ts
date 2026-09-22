@@ -69,6 +69,9 @@ export type UploadedArtworkStep =
    * screen once a candidate exists. Sits in the SAME shared pre-branch
    * window as `confirm_artwork_fidelity`, for the same reason: before
    * either profile's own destructive processing has touched the evidence.
+   * Live-acceptance repair: it ALSO takes precedence over every Signs
+   * production step (`sign_*`) — reconstruction review is shared, and a
+   * pending review must never be hidden behind a Signs plan-review.
    * Reachable only once the customer has explicitly requested
    * reconstruction (Section G/M: never auto-entered from a resolution-
    * insufficiency signal alone) — see `ArtworkFidelityConfirmationStep`'s
@@ -375,6 +378,31 @@ export function isRoutedToOperatorSeparationReview(
 }
 
 /**
+ * Phase R5 live-acceptance repair: whether a reconstruction job is still
+ * awaiting a customer-resolved outcome — the ONE predicate both call sites
+ * of `review_reconstruction` (the Signs branch and the shared pre-branch
+ * window) consult, so they can never drift apart. Exactly the pre-existing
+ * semantics, unchanged:
+ *
+ *   no job                      -> false (nothing was ever requested)
+ *   queued/running/recoverable  -> true  (in-progress view)
+ *   failed                      -> true  (retry / continue-without view)
+ *   completed + pending_review  -> true  (Original vs Rebuilt review)
+ *   reviewStatus approved       -> false (resolved — flow resumes)
+ *   reviewStatus rejected       -> false (resolved — flow resumes)
+ *   dismissed this session      -> false (client-only "Continue without
+ *                                  rebuilding" / "Not now")
+ */
+function reconstructionReviewIsUnresolved(input: UploadedArtworkFlowInput): boolean {
+  return (
+    !input.reconstructionStepDismissed &&
+    input.artworkReconstruction != null &&
+    input.artworkReconstruction.reviewStatus !== "approved" &&
+    input.artworkReconstruction.reviewStatus !== "rejected"
+  );
+}
+
+/**
  * The step to render, or `null` when the uploaded-artwork surface should not
  * appear at all — which is every existing Create New Artwork project, so the
  * existing flow is untouched by construction.
@@ -401,6 +429,17 @@ export function deriveUploadedArtworkStep(
   // `artworkTypeChoice`, so a reload after the bridge has run never
   // re-asks "what are we printing" for a job already identified as a sign.
   if (signArtwork) {
+    // Phase R5 live-acceptance repair: reconstruction review is a SHARED
+    // capability, not a Signs production step — a customer whose rebuilt
+    // artwork is awaiting their review must see Original vs Rebuilt BEFORE
+    // any Signs production-plan step. This branch used to return
+    // `sign_plan_review` first, so a Signs customer with a completed,
+    // pending-review candidate was routed to "Review in production
+    // workspace" (an internal-access-gated page) and could never reach the
+    // review. Once the review resolves (approved/rejected/dismissed) this
+    // check stops matching and every Signs step below is reached exactly as
+    // before — nothing about Signs routing itself changes.
+    if (reconstructionReviewIsUnresolved(input)) return "review_reconstruction";
     // Dimension-Driven Signs Refactor: the ordered physical size is the
     // ONLY question this path asks before "Check my artwork" — no
     // substrate/product-category question precedes it any more.
@@ -488,14 +527,7 @@ export function deriveUploadedArtworkStep(
     // every uploader and break the existing, tested "confirmed fidelity
     // falls straight through to choose_artwork_type/confirm_details"
     // contract).
-    if (
-      !input.reconstructionStepDismissed &&
-      input.artworkReconstruction != null &&
-      input.artworkReconstruction.reviewStatus !== "approved" &&
-      input.artworkReconstruction.reviewStatus !== "rejected"
-    ) {
-      return "review_reconstruction";
-    }
+    if (reconstructionReviewIsUnresolved(input)) return "review_reconstruction";
     if (input.artworkTypeChoice === "dtf") return "confirm_details";
     if (input.artworkTypeChoice === "sign") return "confirm_sign_size";
     return "choose_artwork_type";
