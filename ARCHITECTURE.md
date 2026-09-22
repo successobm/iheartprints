@@ -11431,6 +11431,51 @@ reads it for production.
 
 ---
 
+## 23q. Raster Reconstruction Geometry Qualification (Phase R6A)
+
+An R6A investigation found that `content-bounds-normalization.ts`'s own
+`trimToAlphaBounds`-based reconciliation (Phase R5) is, by its own
+documented contract, a no-op for a FULLY OPAQUE reconstruction candidate —
+an opaque canvas's alpha bounding box is the whole canvas by definition.
+A real, live approved candidate measured 1024×1024, fully opaque, with an
+off-center ~803×201 wordmark, which `content-bounds-normalization.ts`
+correctly reported as `geometryStatus: "review_required"` (no alpha
+evidence to trim), but which no code path could reduce to a genuine content
+box.
+
+`src/capabilities/artwork-reconstruction/geometry-qualification.ts`
+(`qualifyReconstructionGeometry`) is the deterministic, colour-based
+answer, and it is the **second, independent** crossing of the
+`artwork-preparation` capability boundary — reusing the identical pure
+engine (`analyzeArtwork` / `classifyRepairability` / `isolateBackground`)
+`sign-preparation/sign-background-removal.ts` already crosses for rigid
+signs (§16A.2, amendment 3.2, "Background treatment" above), rather than a
+third algorithm. The same safety invariant applies unchanged: background
+removal only ever removes pixels the engine has affirmative evidence
+belong to the background; any `classifyRepairability` verdict other than
+`remove_exterior` is `"abstained"`, never a destructive guess, and there is
+no generative fallback anywhere in this module. Two additional,
+reconstruction-specific guards sit on top of the shared engine's own
+verdict — content whose bounds already touch the canvas border (a
+border-connected fill cannot bound a legitimately edge-to-edge design
+safely) and, when trustworthy source-content aspect-ratio evidence exists,
+a drift check reusing `content-bounds-normalization.ts`'s own
+`RECONSTRUCTION_ASPECT_RATIO_DRIFT_TOLERANCE` rather than a second
+tolerance. The final physical content box/dimensions are produced by
+running the SAME `trimToAlphaBounds` primitive `content-bounds-
+normalization.ts` already trusts, against the real alpha `isolateBackground`
+produces — never a second, hand-rolled bounding-box computation.
+
+**Still not built this phase:** any durable, customer-facing geometry
+confirmation, any derived asset persistence/lineage, any production-
+qualified-master resolver, and no wiring into the reconstruction worker,
+Signs, or DTF. `qualifyReconstructionGeometry` is a pure function of pixels
+in, verdict out — see the R6A implementation report for why the durable
+customer-confirmation layer is gated behind a schema-migration decision
+rather than implemented here.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

@@ -794,6 +794,10 @@ export const TEST_FILES = [
   // R5 OpenAI raster reconstruction timeout readiness: narrow regression
   // asserting the provider's default request timeout constant.
   "src/capabilities/artwork-reconstruction/openai-raster-reconstruction-provider.test.ts",
+  // Phase R6A: Geometry-Qualified Clean Master v1 -- the deterministic,
+  // colour-based geometry qualification module for an opaque reconstruction
+  // candidate.
+  "src/capabilities/artwork-reconstruction/geometry-qualification.test.ts",
   "src/capabilities/artwork-fidelity-verification/artwork-fidelity-verification-capability.test.ts",
   // Phase R5-R (independent-review repair): closes the three proven
   // approval-authority blockers -- registered immediately.
