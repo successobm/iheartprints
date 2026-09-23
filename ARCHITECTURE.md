@@ -11466,13 +11466,49 @@ running the SAME `trimToAlphaBounds` primitive `content-bounds-
 normalization.ts` already trusts, against the real alpha `isolateBackground`
 produces — never a second, hand-rolled bounding-box computation.
 
-**Still not built this phase:** any durable, customer-facing geometry
-confirmation, any derived asset persistence/lineage, any production-
-qualified-master resolver, and no wiring into the reconstruction worker,
-Signs, or DTF. `qualifyReconstructionGeometry` is a pure function of pixels
-in, verdict out — see the R6A implementation report for why the durable
-customer-confirmation layer is gated behind a schema-migration decision
-rather than implemented here.
+**Durable qualification lifecycle and customer confirmation (R6A
+completion).** `qualifyReconstructionGeometry` itself remains a pure
+function of pixels in, verdict out — nothing above changed. On top of it,
+`artwork_geometry_qualifications` (its own migration) is the durable,
+CAS-protected record of ONE qualification attempt against ONE approved
+reconstruction job's candidate, mirroring `artwork_reconstruction_jobs`'
+own reasoning for why this is a separate table rather than a fourth
+authority arm on an existing one (Constitution/architecture discipline:
+`assets` is append-only and cannot hold a customer decision that arrives
+after the derivative already exists). `ArtworkGeometryQualificationCapability`
+(`artwork-geometry-qualification-capability.ts`) owns this lifecycle:
+`ensureQualification` re-verifies fidelity authority, runs the unchanged
+engine, and — only when it qualifies — uploads a NEW, append-only,
+geometry-normalized derivative asset (never overwriting the candidate or
+the original source); `confirmQualification`/`rejectQualification` are
+server-authoritative (never a client-supplied qualification/asset id) and
+CAS-protected exactly like `RasterReconstructionCapability
+.approveCandidate`/`.rejectCandidate`.
+
+This qualification lifecycle is deliberately SEPARATE authority from both
+reconstruction-appearance approval (`ArtworkReconstructionJob.reviewStatus`,
+untouched) and fidelity confirmation — three genuinely different
+questions, never collapsed into one. `getCurrentProductionQualifiedMaster
+(projectId)` is the one shared resolver that answers "is there a
+production-input-ready geometry-qualified master right now," requiring the
+full current-authority chain (current confirmed contract -> current
+accepted reconstruction, via the UNCHANGED `RasterReconstructionCapability
+.getCurrentAcceptedMaster` -> its qualification -> `qualificationStatus
+=== "confirmed"`) and returning `null` otherwise — never a stale or
+superseded row. Backfill for an already-approved candidate that predates
+this phase (e.g. one qualified under the R6A investigation's own measured
+evidence) runs through this SAME idempotent path on ordinary project load,
+never a separate script, never another provider call, never re-asking
+fidelity/wording/mark confirmation.
+
+**Still not built:** neither Signs nor DTF consumes
+`getCurrentProductionQualifiedMaster` yet — both still read the original
+source exactly as before this phase. That handoff, and any resulting Signs
+plan invalidation/replan, is R6B's own scope, deliberately not started
+here. Geometry qualification/confirmation never creates a `FinalArtworkJob`,
+never sets `print_ready`, and never authorizes a Signs plan — it is input
+authority only, completely outside `PrintValidationCapability`'s own
+sole authority over that boundary (§13i/§23n, unchanged).
 
 ---
 
