@@ -22,6 +22,10 @@ import type {
   AcquisitionSession,
   ArtworkFidelityContract,
   ArtworkFidelityContractStatus,
+  ArtworkGeometryQualification,
+  ArtworkGeometryQualificationBackgroundColor,
+  ArtworkGeometryQualificationContentBounds,
+  ArtworkGeometryQualificationStatus,
   ArtworkPreparation,
   ArtworkPreparationStatus,
   ArtworkReconstructionGeometryStatus,
@@ -72,6 +76,7 @@ import type {
   ApproveDesignBriefInput,
   CaptureAcquisitionEmailInput,
   CreateArtworkFidelityContractInput,
+  CreateArtworkGeometryQualificationInput,
   CreateArtworkReconstructionJobInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
@@ -100,6 +105,7 @@ import type {
   ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
   UpdateArtworkFidelityContractInput,
+  UpdateArtworkGeometryQualificationInput,
   UpdateArtworkPreparationInput,
   UpdateArtworkReconstructionJobInput,
   UpdateFinalArtworkJobInput,
@@ -110,6 +116,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   ArtworkFidelityContractConflictError,
+  ArtworkGeometryQualificationConflictError,
   ArtworkReconstructionJobConflictError,
   FreeConceptAlreadyConsumedError,
   UniqueConstraintViolationError,
@@ -652,6 +659,58 @@ function mapArtworkReconstructionJob(
     protectedMarksReviewed: row.protected_marks_reviewed,
     protectedMarksReviewedAt: row.protected_marks_reviewed_at,
     protectedMarksReviewedBy: row.protected_marks_reviewed_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+type DbArtworkGeometryQualification = {
+  id: string;
+  project_id: string;
+  reconstruction_job_id: string;
+  candidate_asset_id: string;
+  fidelity_contract_id: string;
+  contract_key: string;
+  classifier_verdict: string;
+  qualification_status: ArtworkGeometryQualificationStatus;
+  derived_asset_id: string | null;
+  original_canvas_width_px: number;
+  original_canvas_height_px: number;
+  content_bounds: ArtworkGeometryQualificationContentBounds | null;
+  normalized_width_px: number | null;
+  normalized_height_px: number | null;
+  content_aspect_ratio: number | null;
+  detected_background_color: ArtworkGeometryQualificationBackgroundColor | null;
+  normalization_method: string;
+  confirmed_at: string | null;
+  confirmed_by: SignPlanAuthorizationActor | null;
+  created_at: string;
+  updated_at: string;
+};
+
+function mapArtworkGeometryQualification(
+  row: DbArtworkGeometryQualification,
+): ArtworkGeometryQualification {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    reconstructionJobId: row.reconstruction_job_id,
+    candidateAssetId: row.candidate_asset_id,
+    fidelityContractId: row.fidelity_contract_id,
+    contractKey: row.contract_key,
+    classifierVerdict: row.classifier_verdict,
+    qualificationStatus: row.qualification_status,
+    derivedAssetId: row.derived_asset_id,
+    originalCanvasWidthPx: row.original_canvas_width_px,
+    originalCanvasHeightPx: row.original_canvas_height_px,
+    contentBounds: row.content_bounds,
+    normalizedWidthPx: row.normalized_width_px,
+    normalizedHeightPx: row.normalized_height_px,
+    contentAspectRatio: row.content_aspect_ratio,
+    detectedBackgroundColor: row.detected_background_color,
+    normalizationMethod: row.normalization_method,
+    confirmedAt: row.confirmed_at,
+    confirmedBy: row.confirmed_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3595,5 +3654,109 @@ export class SupabaseProjectRepository implements ProjectRepository {
     if (error) throw error;
 
     return ((data as DbArtworkReconstructionJob[]) ?? []).map(mapArtworkReconstructionJob);
+  }
+
+  // --- Phase R6A: Geometry-Qualified Clean Master v1 ----------------------
+
+  async createArtworkGeometryQualification(
+    projectId: string,
+    input: CreateArtworkGeometryQualificationInput,
+  ): Promise<ArtworkGeometryQualification> {
+    const { data, error } = await this.client
+      .from("artwork_geometry_qualifications")
+      .insert({
+        project_id: projectId,
+        reconstruction_job_id: input.reconstructionJobId,
+        candidate_asset_id: input.candidateAssetId,
+        fidelity_contract_id: input.fidelityContractId,
+        contract_key: input.contractKey,
+        classifier_verdict: input.classifierVerdict,
+        qualification_status: input.qualificationStatus,
+        derived_asset_id: input.derivedAssetId,
+        original_canvas_width_px: input.originalCanvasWidthPx,
+        original_canvas_height_px: input.originalCanvasHeightPx,
+        content_bounds: input.contentBounds,
+        normalized_width_px: input.normalizedWidthPx,
+        normalized_height_px: input.normalizedHeightPx,
+        content_aspect_ratio: input.contentAspectRatio,
+        detected_background_color: input.detectedBackgroundColor,
+        normalization_method: input.normalizationMethod,
+      })
+      .select("*")
+      .single();
+    if (error) {
+      // The migration's own `artwork_geometry_qualifications_job_uidx` —
+      // two concurrent qualification attempts for the identical
+      // reconstruction job can never both create a row. The loser gets a
+      // typed conflict the capability resolves by re-fetching and reusing
+      // the winner's row, mirroring `createArtworkReconstructionJob`'s own
+      // established pattern exactly.
+      if (error.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new UniqueConstraintViolationError(
+          "artwork_geometry_qualifications_job_uidx",
+        );
+      }
+      throw error;
+    }
+    return mapArtworkGeometryQualification(data as DbArtworkGeometryQualification);
+  }
+
+  async getArtworkGeometryQualification(id: string): Promise<ArtworkGeometryQualification | null> {
+    const { data, error } = await this.client
+      .from("artwork_geometry_qualifications")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkGeometryQualification(data as DbArtworkGeometryQualification) : null;
+  }
+
+  async getArtworkGeometryQualificationByJob(
+    reconstructionJobId: string,
+  ): Promise<ArtworkGeometryQualification | null> {
+    const { data, error } = await this.client
+      .from("artwork_geometry_qualifications")
+      .select("*")
+      .eq("reconstruction_job_id", reconstructionJobId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapArtworkGeometryQualification(data as DbArtworkGeometryQualification) : null;
+  }
+
+  async updateArtworkGeometryQualification(
+    id: string,
+    patch: UpdateArtworkGeometryQualificationInput,
+    expectedStatus?: ArtworkGeometryQualificationStatus,
+  ): Promise<ArtworkGeometryQualification> {
+    const update: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+    if (patch.qualificationStatus !== undefined)
+      update.qualification_status = patch.qualificationStatus;
+    if (patch.confirmedAt !== undefined) update.confirmed_at = patch.confirmedAt;
+    if (patch.confirmedBy !== undefined) update.confirmed_by = patch.confirmedBy;
+
+    // Mirrors `updateArtworkReconstructionJob`'s own CAS mechanism exactly:
+    // the conditional `.eq("qualification_status", expectedStatus)` is the
+    // ENTIRE fix — a lost race (the row's status already changed since the
+    // caller read it) updates zero rows, and `.maybeSingle()` returns `null`
+    // rather than throwing, so the conflict is reported with a specific,
+    // callers-can-catch-it type.
+    let query = this.client
+      .from("artwork_geometry_qualifications")
+      .update(update)
+      .eq("id", id);
+    if (expectedStatus !== undefined) {
+      query = query.eq("qualification_status", expectedStatus);
+    }
+    const { data, error } = await query.select("*").maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      if (expectedStatus !== undefined) {
+        throw new ArtworkGeometryQualificationConflictError(expectedStatus);
+      }
+      throw new Error("Artwork geometry qualification not found");
+    }
+    return mapArtworkGeometryQualification(data as DbArtworkGeometryQualification);
   }
 }

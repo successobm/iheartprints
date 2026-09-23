@@ -3250,3 +3250,77 @@ export interface ArtworkReconstructionJob {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * Phase R6A (Geometry-Qualified Clean Master v1): the durable lifecycle of
+ * ONE deterministic geometry-qualification attempt against ONE reconstruction
+ * job's approved candidate.
+ *
+ * `normalized_pending_confirmation` -> `confirmed` OR `normalized_pending_confirmation`
+ * -> `rejected` are the only customer-driven transitions, CAS-protected
+ * exactly like `ArtworkReconstructionReviewStatus`'s own
+ * `"pending_review"` -> `"approved"`/`"rejected"` (see
+ * `ArtworkGeometryQualificationConflictError`). `unusable` is reached
+ * directly at creation, never via a customer decision, whenever
+ * `qualifyReconstructionGeometry` abstained — see that module's own doc
+ * comment for why an abstention is never silently upgraded.
+ *
+ * Deliberately a SEPARATE lifecycle from `ArtworkReconstructionJob
+ * .reviewStatus` — fidelity/reconstruction-appearance approval and geometry
+ * qualification are genuinely different authorities answering genuinely
+ * different questions (R6A implementation task, "CORE INVARIANTS").
+ */
+export type ArtworkGeometryQualificationStatus =
+  | "normalized_pending_confirmation"
+  | "confirmed"
+  | "rejected"
+  | "unusable";
+
+/** Mirrors `qualifyReconstructionGeometry`'s own `GeometryQualificationContentBounds` — duplicated here (not imported) because `lib/domain/types.ts` never depends on a capability module. */
+export interface ArtworkGeometryQualificationContentBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** RGB in 0-255 — mirrors `artwork-preparation`'s own `RgbColor`, duplicated for the same reason as `ArtworkGeometryQualificationContentBounds` above. */
+export interface ArtworkGeometryQualificationBackgroundColor {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface ArtworkGeometryQualification {
+  id: string;
+  projectId: string;
+  /** The reconstruction job this qualification attempt belongs to. Exactly one qualification row may ever exist per job — see the migration's own unique index. */
+  reconstructionJobId: string;
+  /** Snapshotted from the job's own `candidateAssetId` at qualification-creation time — the immutable input this qualification measured. */
+  candidateAssetId: string;
+  /** The CONFIRMED fidelity contract current when this qualification was created — never patched. */
+  fidelityContractId: string;
+  /** Snapshotted from the contract's own `contractKey` — frozen so a later contract correction can be detected as making this qualification stale, mirroring `ArtworkReconstructionJob.contractKey` exactly. */
+  contractKey: string;
+  /** `RepairabilityClassification`'s own value, sanitized internal diagnostic only — never customer-facing, never re-typed here to avoid this domain module depending on a capability module. */
+  classifierVerdict: string;
+  qualificationStatus: ArtworkGeometryQualificationStatus;
+  /** The new, append-only, geometry-normalized derivative asset. `null` only when `qualificationStatus === "unusable"` (deterministic qualification abstained before any derivative was ever created). Never overwritten in place — never the candidate's own id. */
+  derivedAssetId: string | null;
+  originalCanvasWidthPx: number;
+  originalCanvasHeightPx: number;
+  /** `null` only when `qualificationStatus === "unusable"`. */
+  contentBounds: ArtworkGeometryQualificationContentBounds | null;
+  normalizedWidthPx: number | null;
+  normalizedHeightPx: number | null;
+  contentAspectRatio: number | null;
+  detectedBackgroundColor: ArtworkGeometryQualificationBackgroundColor | null;
+  /** `GEOMETRY_QUALIFICATION_VERSION` at the time this row was created — never re-derived, so a future algorithm change never silently reinterprets an old row. */
+  normalizationMethod: string;
+  /** The CUSTOMER'S explicit geometry confirmation — never a machine verdict. `null` until `qualificationStatus === "confirmed"`. */
+  confirmedAt: string | null;
+  /** Reuses the SAME narrow customer/operator actor type every other confirmation in this codebase uses. `null` exactly when `confirmedAt` is `null`. */
+  confirmedBy: SignPlanAuthorizationActor | null;
+  createdAt: string;
+  updatedAt: string;
+}

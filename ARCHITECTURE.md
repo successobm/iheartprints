@@ -11431,6 +11431,87 @@ reads it for production.
 
 ---
 
+## 23q. Raster Reconstruction Geometry Qualification (Phase R6A)
+
+An R6A investigation found that `content-bounds-normalization.ts`'s own
+`trimToAlphaBounds`-based reconciliation (Phase R5) is, by its own
+documented contract, a no-op for a FULLY OPAQUE reconstruction candidate —
+an opaque canvas's alpha bounding box is the whole canvas by definition.
+A real, live approved candidate measured 1024×1024, fully opaque, with an
+off-center ~803×201 wordmark, which `content-bounds-normalization.ts`
+correctly reported as `geometryStatus: "review_required"` (no alpha
+evidence to trim), but which no code path could reduce to a genuine content
+box.
+
+`src/capabilities/artwork-reconstruction/geometry-qualification.ts`
+(`qualifyReconstructionGeometry`) is the deterministic, colour-based
+answer, and it is the **second, independent** crossing of the
+`artwork-preparation` capability boundary — reusing the identical pure
+engine (`analyzeArtwork` / `classifyRepairability` / `isolateBackground`)
+`sign-preparation/sign-background-removal.ts` already crosses for rigid
+signs (§16A.2, amendment 3.2, "Background treatment" above), rather than a
+third algorithm. The same safety invariant applies unchanged: background
+removal only ever removes pixels the engine has affirmative evidence
+belong to the background; any `classifyRepairability` verdict other than
+`remove_exterior` is `"abstained"`, never a destructive guess, and there is
+no generative fallback anywhere in this module. Two additional,
+reconstruction-specific guards sit on top of the shared engine's own
+verdict — content whose bounds already touch the canvas border (a
+border-connected fill cannot bound a legitimately edge-to-edge design
+safely) and, when trustworthy source-content aspect-ratio evidence exists,
+a drift check reusing `content-bounds-normalization.ts`'s own
+`RECONSTRUCTION_ASPECT_RATIO_DRIFT_TOLERANCE` rather than a second
+tolerance. The final physical content box/dimensions are produced by
+running the SAME `trimToAlphaBounds` primitive `content-bounds-
+normalization.ts` already trusts, against the real alpha `isolateBackground`
+produces — never a second, hand-rolled bounding-box computation.
+
+**Durable qualification lifecycle and customer confirmation (R6A
+completion).** `qualifyReconstructionGeometry` itself remains a pure
+function of pixels in, verdict out — nothing above changed. On top of it,
+`artwork_geometry_qualifications` (its own migration) is the durable,
+CAS-protected record of ONE qualification attempt against ONE approved
+reconstruction job's candidate, mirroring `artwork_reconstruction_jobs`'
+own reasoning for why this is a separate table rather than a fourth
+authority arm on an existing one (Constitution/architecture discipline:
+`assets` is append-only and cannot hold a customer decision that arrives
+after the derivative already exists). `ArtworkGeometryQualificationCapability`
+(`artwork-geometry-qualification-capability.ts`) owns this lifecycle:
+`ensureQualification` re-verifies fidelity authority, runs the unchanged
+engine, and — only when it qualifies — uploads a NEW, append-only,
+geometry-normalized derivative asset (never overwriting the candidate or
+the original source); `confirmQualification`/`rejectQualification` are
+server-authoritative (never a client-supplied qualification/asset id) and
+CAS-protected exactly like `RasterReconstructionCapability
+.approveCandidate`/`.rejectCandidate`.
+
+This qualification lifecycle is deliberately SEPARATE authority from both
+reconstruction-appearance approval (`ArtworkReconstructionJob.reviewStatus`,
+untouched) and fidelity confirmation — three genuinely different
+questions, never collapsed into one. `getCurrentProductionQualifiedMaster
+(projectId)` is the one shared resolver that answers "is there a
+production-input-ready geometry-qualified master right now," requiring the
+full current-authority chain (current confirmed contract -> current
+accepted reconstruction, via the UNCHANGED `RasterReconstructionCapability
+.getCurrentAcceptedMaster` -> its qualification -> `qualificationStatus
+=== "confirmed"`) and returning `null` otherwise — never a stale or
+superseded row. Backfill for an already-approved candidate that predates
+this phase (e.g. one qualified under the R6A investigation's own measured
+evidence) runs through this SAME idempotent path on ordinary project load,
+never a separate script, never another provider call, never re-asking
+fidelity/wording/mark confirmation.
+
+**Still not built:** neither Signs nor DTF consumes
+`getCurrentProductionQualifiedMaster` yet — both still read the original
+source exactly as before this phase. That handoff, and any resulting Signs
+plan invalidation/replan, is R6B's own scope, deliberately not started
+here. Geometry qualification/confirmation never creates a `FinalArtworkJob`,
+never sets `print_ready`, and never authorizes a Signs plan — it is input
+authority only, completely outside `PrintValidationCapability`'s own
+sole authority over that boundary (§13i/§23n, unchanged).
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:

@@ -7,6 +7,7 @@ import type { ArtworkPreparationView } from "@/capabilities/artwork-preparation"
 import { isArtworkFidelityProposedFacts, type ArtworkFidelityProposedFacts } from "@/capabilities/artwork-fidelity-proposal";
 import type {
   ArtworkFidelityContractStatus,
+  ArtworkGeometryQualificationStatus,
   ArtworkReconstructionGeometryStatus,
   ArtworkReconstructionJobStatus,
   ArtworkReconstructionReviewStatus,
@@ -376,6 +377,12 @@ export type ApiProjectSnapshot = Omit<ProjectSnapshot, "artworkVersions"> & {
    * once. See `ArtworkReconstructionView`'s own doc comment.
    */
   artworkReconstruction: ArtworkReconstructionView | null;
+  /**
+   * Phase R6A: the customer-safe geometry-qualification state for the
+   * project's current accepted reconstruction — `null` until one exists.
+   * See `GeometryQualificationView`'s own doc comment.
+   */
+  geometryQualification: GeometryQualificationView | null;
   /**
    * Sprint A4: where this session stands in the acquisition funnel, already
    * phrased for the customer. Never the persisted entitlement value, never
@@ -798,6 +805,7 @@ async function withConceptStatus(
     signArtwork: await resolveSignArtworkView(snapshot.project.id),
     artworkFidelity: await resolveArtworkFidelityView(snapshot.project.id),
     artworkReconstruction: await resolveArtworkReconstructionView(snapshot.project.id),
+    geometryQualification: await resolveGeometryQualificationView(snapshot.project.id),
     acquisition: await resolveAcquisitionView(snapshot),
     payment: await resolvePaymentView(snapshot.project.id),
     productionTreatment: await resolveProductionTreatmentView(
@@ -1023,6 +1031,63 @@ async function resolveArtworkReconstructionView(
       wordingVerified: job.wordingVerified,
       geometryStatus: job.geometryStatus,
       lastError: job.lastError,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Phase R6A (Geometry-Qualified Clean Master v1): the customer-safe view of
+ * whatever geometry-qualification row belongs to the project's CURRENT
+ * accepted reconstruction. Deliberately excludes `contractKey`/
+ * `classifierVerdict`/`contentBounds`/`detectedBackgroundColor`/
+ * `normalizationMethod` — internal-only, never customer-facing (mirrors
+ * `ArtworkReconstructionView`'s own exclusion discipline exactly).
+ *
+ * `null` when there is no current accepted reconstruction at all — same
+ * advisory, never-take-down-the-snapshot discipline as every other
+ * resolver in this file.
+ */
+export interface GeometryQualificationView {
+  qualificationId: string;
+  reconstructionJobId: string;
+  status: ArtworkGeometryQualificationStatus;
+}
+
+/**
+ * Idempotently ENSURES a qualification exists for the current accepted
+ * reconstruction (the "normal customer/runtime path" backfill — R6A
+ * implementation task, Section 11/16), then reports its customer-safe
+ * view. Swallows every failure to `null`: an ordinary project with no
+ * reconstruction yet, or one whose qualification cannot currently be
+ * computed, must never break the surrounding snapshot.
+ */
+async function resolveGeometryQualificationView(
+  projectId: string,
+): Promise<GeometryQualificationView | null> {
+  try {
+    // Calls `getCapabilityGraph()` directly rather than the sibling
+    // `artwork-geometry-qualification-service.ts` facade, to avoid a
+    // circular import between the two service modules (that facade itself
+    // imports `getConversation` from THIS file) — mirrors
+    // `resolveArtworkReconstructionView`'s own identical choice above.
+    const graph = getCapabilityGraph();
+    const contract = await graph.artworkFidelity.getContract(projectId);
+    if (!contract || contract.status !== "confirmed") return null;
+    const job = await graph.artworkReconstruction.getCurrentAcceptedMaster(
+      projectId,
+      contract.sourceAssetId,
+    );
+    if (!job) return null;
+    const qualification = await graph.artworkGeometryQualification.ensureQualification(
+      projectId,
+      job.id,
+    );
+    return {
+      qualificationId: qualification.id,
+      reconstructionJobId: qualification.reconstructionJobId,
+      status: qualification.qualificationStatus,
     };
   } catch {
     return null;

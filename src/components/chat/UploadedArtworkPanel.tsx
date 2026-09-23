@@ -24,6 +24,7 @@ import type {
   ArtworkFidelityView,
   ArtworkReconstructionView,
   CustomerFinalizationStatus,
+  GeometryQualificationView,
   SignArtworkView,
 } from "@/lib/services/conversation-service";
 import type { ImagePoint } from "./artwork-click-mapping";
@@ -33,6 +34,7 @@ import {
   ArtworkReconstructionOfferBanner,
   ArtworkReconstructionReviewStep,
 } from "./ArtworkReconstructionReviewStep";
+import { GeometryConfirmationStep } from "./GeometryConfirmationStep";
 import CorrectionFinalReview from "./CorrectionFinalReview";
 import CorrectionWorkspace from "./CorrectionWorkspace";
 import { PREVIEW_BACKGROUND_COPY } from "./preview-background";
@@ -116,6 +118,18 @@ export interface UploadedArtworkPanelProps {
   onRejectReconstruction?: () => void;
   onRetryReconstruction?: () => void;
   onDismissReconstruction?: () => void;
+  /**
+   * Phase R6A: the customer-safe geometry-qualification state for the
+   * project's current accepted reconstruction — `null` until one has ever
+   * been computed. See `GeometryQualificationView`.
+   */
+  geometryQualification?: GeometryQualificationView | null;
+  /** The geometry-normalized derivative image — a SEPARATE fetch from the reconstruction candidate (different asset). */
+  geometryConfirmationImageUrl?: string | null;
+  /** Client-only — true while the derivative is still being computed (first backfill). */
+  geometryQualificationPreparing?: boolean;
+  onConfirmGeometry?: () => void;
+  onRejectGeometry?: () => void;
   /**
    * LIVE PRODUCT BLOCKER #1: the routing answer at `choose_artwork_type`.
    * Client-only — see `ArtworkTypeChoice`'s doc in `uploaded-artwork-flow.ts`.
@@ -312,6 +326,16 @@ export function UploadedArtworkPanel(props: UploadedArtworkPanelProps) {
           onReject={() => props.onRejectReconstruction?.()}
           onRetry={() => props.onRetryReconstruction?.()}
           onDismiss={() => props.onDismissReconstruction?.()}
+        />
+      ) : null}
+
+      {step === "review_geometry" ? (
+        <GeometryConfirmationStep
+          candidateImageUrl={props.geometryConfirmationImageUrl ?? null}
+          preparing={props.geometryQualificationPreparing ?? false}
+          busy={busy}
+          onConfirm={() => props.onConfirmGeometry?.()}
+          onReject={() => props.onRejectGeometry?.()}
         />
       ) : null}
 
