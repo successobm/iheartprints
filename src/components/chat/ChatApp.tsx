@@ -125,6 +125,12 @@ export function ChatApp() {
   const [reconstructionCandidateImageUrl, setReconstructionCandidateImageUrl] = useState<
     string | null
   >(null);
+  /** Phase R6A: "Continue without checking" is deliberately NOT offered on this step (see `GeometryConfirmationStep`'s own doc comment) — this flag exists only to mirror `reconstructionStepDismissed`'s reset-on-Start-Over shape, never set from a customer-facing control. */
+  const [geometryStepDismissed, setGeometryStepDismissed] = useState(false);
+  /** Phase R6A: the geometry-normalized derivative's signed image URL — mirrors `reconstructionCandidateImageUrl` exactly, keyed on the qualification id (a NEW qualification always means a new derivative asset). */
+  const [geometryConfirmationImageUrl, setGeometryConfirmationImageUrl] = useState<
+    string | null
+  >(null);
   /**
    * Phase 1.2 / 1.3: the server's already-phrased answer to the LAST cleanup
    * action. Transient by design — it describes one action, not the project,
@@ -1310,6 +1316,34 @@ export function ChatApp() {
     );
   }
 
+  /** Phase R6A: "Looks good — continue." Server-authoritative — resolves the current qualification itself; no id is sent (Section 13). */
+  async function confirmGeometryQualification() {
+    if (!snapshot?.geometryQualification) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/geometry-qualification`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "confirm" }),
+        }),
+      "Failed to save your decision",
+    );
+  }
+
+  /** Phase R6A: "Something is missing." Never mutates the derivative/candidate, never retries automatically. */
+  async function rejectGeometryQualification() {
+    if (!snapshot?.geometryQualification) return;
+    await submitPreparationAction(
+      () =>
+        fetch(`/api/projects/${snapshot.project.id}/geometry-qualification`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "reject" }),
+        }),
+      "Failed to save your decision",
+    );
+  }
+
   /**
    * Intelligent Separation Phase 10 (Goal 3): `SeparationReviewPanel`
    * approves through its OWN routes, not `submitPreparationAction` — those
@@ -1457,6 +1491,8 @@ export function ChatApp() {
       FRESH_UPLOADED_ARTWORK_UI_STATE.reconstructionStepDismissed,
     );
     setReconstructionCandidateImageUrl(null);
+    setGeometryStepDismissed(false);
+    setGeometryConfirmationImageUrl(null);
     setCleanupMessage(null);
     setCleanupPreview(null);
     await bootstrap();
@@ -1557,6 +1593,27 @@ export function ChatApp() {
     };
   }, [isClient, snapshot, reconstructionCandidateAssetId]);
 
+  // Phase R6A: mint a fresh signed URL for the geometry-normalized
+  // derivative, keyed on the qualification id (a NEW qualification always
+  // means a new derivative asset).
+  const geometryQualificationId = snapshot?.geometryQualification?.qualificationId ?? null;
+  useEffect(() => {
+    if (!isClient || !snapshot || !geometryQualificationId) return;
+    let cancelled = false;
+    const projectId = snapshot.project.id;
+    void (async () => {
+      const response = await fetch(`/api/projects/${projectId}/geometry-qualification/image`);
+      if (!response.ok || cancelled) return;
+      const data = (await response.json()) as { url?: string };
+      if (!cancelled) {
+        setGeometryConfirmationImageUrl(typeof data.url === "string" ? data.url : null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isClient, snapshot, geometryQualificationId]);
+
   const phase = snapshot?.conversation.phase;
   const affordances = deriveChatAffordances({
     phase,
@@ -1602,10 +1659,14 @@ export function ChatApp() {
           reviewStatus: snapshot.artworkReconstruction.reviewStatus,
         }
       : null,
+    geometryReview: snapshot?.geometryQualification
+      ? { status: snapshot.geometryQualification.status }
+      : null,
     choice: workflowChoice,
     artworkTypeChoice,
     fidelityStepDismissed,
     reconstructionStepDismissed,
+    geometryStepDismissed,
     atProjectStart,
   });
   // "Change these details" / "Keep my original for now" step back without
@@ -1988,6 +2049,10 @@ export function ChatApp() {
                 onRejectReconstruction={() => void rejectArtworkReconstruction()}
                 onRetryReconstruction={() => void requestArtworkReconstruction()}
                 onDismissReconstruction={() => setReconstructionStepDismissed(true)}
+                geometryQualification={snapshot?.geometryQualification ?? null}
+                geometryConfirmationImageUrl={geometryConfirmationImageUrl}
+                onConfirmGeometry={() => void confirmGeometryQualification()}
+                onRejectGeometry={() => void rejectGeometryQualification()}
                 onChooseArtworkType={(choice) => chooseArtworkType(choice)}
                 onConfirmSignSize={(input) => void confirmSignArtworkSize(input)}
                 onPlanSignArtwork={() => void planSignArtwork()}

@@ -3,6 +3,10 @@ import type {
   AcquisitionSession,
   ArtworkFidelityContract,
   ArtworkFidelityContractStatus,
+  ArtworkGeometryQualification,
+  ArtworkGeometryQualificationBackgroundColor,
+  ArtworkGeometryQualificationContentBounds,
+  ArtworkGeometryQualificationStatus,
   ArtworkPreparation,
   ArtworkPreparationStatus,
   ArtworkReconstructionGeometryStatus,
@@ -580,6 +584,68 @@ export class ArtworkReconstructionJobConflictError extends Error {
       `Artwork reconstruction job was not in the expected review status ("${expectedReviewStatus}") at the moment of update — it was already changed by another request.`,
     );
     this.name = "ArtworkReconstructionJobConflictError";
+  }
+}
+
+/**
+ * Phase R6A (Geometry-Qualified Clean Master v1): one attempt to
+ * deterministically geometry-qualify an already-approved reconstruction
+ * job's candidate. `reconstructionJobId`/`candidateAssetId`/
+ * `fidelityContractId`/`contractKey` are required at creation — a
+ * qualification always binds to an already-approved job, never a
+ * placeholder to fill in later (mirrors `CreateArtworkReconstructionJobInput`'s
+ * own "the immutable binding is known up front" shape). Verifying the
+ * referenced job is actually approved is
+ * `ArtworkGeometryQualificationCapability`'s job, not this input type's or
+ * the database's.
+ */
+export interface CreateArtworkGeometryQualificationInput {
+  reconstructionJobId: string;
+  candidateAssetId: string;
+  fidelityContractId: string;
+  contractKey: string;
+  classifierVerdict: string;
+  qualificationStatus: ArtworkGeometryQualificationStatus;
+  derivedAssetId: string | null;
+  originalCanvasWidthPx: number;
+  originalCanvasHeightPx: number;
+  contentBounds: ArtworkGeometryQualificationContentBounds | null;
+  normalizedWidthPx: number | null;
+  normalizedHeightPx: number | null;
+  contentAspectRatio: number | null;
+  detectedBackgroundColor: ArtworkGeometryQualificationBackgroundColor | null;
+  normalizationMethod: string;
+}
+
+/**
+ * Phase R6A. Deliberately narrow, mirroring `UpdateArtworkReconstructionJobInput`'s
+ * own discipline: every binding/lineage/evidence field set at creation is
+ * never patched here — a different candidate or a different (corrected)
+ * contract means a new qualification row, never a mutated one. Only the
+ * customer-decision fields are ever patched, and only through the CAS path.
+ */
+export type UpdateArtworkGeometryQualificationInput = Partial<{
+  qualificationStatus: ArtworkGeometryQualificationStatus;
+  confirmedAt: string | null;
+  confirmedBy: SignPlanAuthorizationActor | null;
+}>;
+
+/**
+ * Phase R6A: thrown by `updateArtworkGeometryQualification` when an
+ * `expectedStatus` was given and the row's CURRENT `qualificationStatus`
+ * no longer matches it at the moment of the conditional write — mirrors
+ * `ArtworkReconstructionJobConflictError` exactly (same CAS-loss-is-a-
+ * typed-conflict, never a silent no-op success, discipline). Two
+ * concurrent confirm/reject calls against the same
+ * `"normalized_pending_confirmation"` row resolve to exactly one winner
+ * this way.
+ */
+export class ArtworkGeometryQualificationConflictError extends Error {
+  constructor(expectedStatus: ArtworkGeometryQualificationStatus) {
+    super(
+      `Artwork geometry qualification was not in the expected status ("${expectedStatus}") at the moment of update — it was already changed by another request.`,
+    );
+    this.name = "ArtworkGeometryQualificationConflictError";
   }
 }
 
@@ -1657,4 +1723,40 @@ export interface ProjectRepository {
   recoverAbandonedArtworkReconstructionJobs(
     staleAfterMs: number,
   ): Promise<ArtworkReconstructionJob[]>;
+
+  // --- Phase R6A: Geometry-Qualified Clean Master v1 ----------------------
+
+  /**
+   * Persist a new geometry-qualification row for an already-approved
+   * reconstruction job. Throws `UniqueConstraintViolationError` if a
+   * qualification already exists for `input.reconstructionJobId` (the
+   * migration's own `artwork_geometry_qualifications_job_uidx`) — the
+   * capability resolves that by re-fetching and reusing the winner's row,
+   * exactly like `RasterReconstructionCapability.requestReconstruction`'s
+   * own established pattern.
+   */
+  createArtworkGeometryQualification(
+    projectId: string,
+    input: CreateArtworkGeometryQualificationInput,
+  ): Promise<ArtworkGeometryQualification>;
+  getArtworkGeometryQualification(id: string): Promise<ArtworkGeometryQualification | null>;
+  /** At most one row can ever exist per job — see the migration's own unique index. */
+  getArtworkGeometryQualificationByJob(
+    reconstructionJobId: string,
+  ): Promise<ArtworkGeometryQualification | null>;
+  /**
+   * When `expectedStatus` is given, this is a compare-and-swap update — the
+   * row's CURRENT `qualificationStatus` must equal it at the moment of the
+   * write, or the whole call throws `ArtworkGeometryQualificationConflictError`
+   * with NO partial mutation. Mirrors `updateArtworkReconstructionJob`'s own
+   * `expectedReviewStatus` CAS exactly. `undefined` (the default) is never
+   * used by any current call site — every mutation of a geometry
+   * qualification is a customer decision, and every customer decision is
+   * CAS-protected.
+   */
+  updateArtworkGeometryQualification(
+    id: string,
+    patch: UpdateArtworkGeometryQualificationInput,
+    expectedStatus?: ArtworkGeometryQualificationStatus,
+  ): Promise<ArtworkGeometryQualification>;
 }

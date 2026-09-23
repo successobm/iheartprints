@@ -78,6 +78,21 @@ export type UploadedArtworkStep =
    * own "Rebuild my artwork" action.
    */
   | "review_reconstruction"
+  /**
+   * Phase R6A (Geometry-Qualified Clean Master v1): a geometry-normalized
+   * derivative exists for the current accepted reconstruction and is
+   * awaiting the customer's lightweight "does this still look complete?"
+   * confirmation. Sits in the SAME two call sites as `review_reconstruction`,
+   * immediately AFTER it — the customer must approve the rebuilt artwork's
+   * APPEARANCE (reconstruction review) before being asked whether
+   * deterministic background/canvas normalization removed anything it
+   * shouldn't have (this step); the two are genuinely different questions,
+   * never collapsed into one. Reachable only once reconstruction review has
+   * resolved AND a qualification row exists — a project with no
+   * reconstruction at all, or one that has not yet been approved, never
+   * reaches this line.
+   */
+  | "review_geometry"
   /** We have their artwork; ask what kind it is before asking anything specific to either path. */
   | "choose_artwork_type"
   /** We have their artwork; we still need to know what and where we're printing. */
@@ -218,6 +233,8 @@ export const FRESH_UPLOADED_ARTWORK_UI_STATE = {
   fidelityStepDismissed: false,
   /** Phase R5: mirrors `fidelityStepDismissed` exactly — client-only, forgotten on reload/Start Over by design. Lets the customer move past a failed/pending reconstruction review without a durable "give up" signal. */
   reconstructionStepDismissed: false,
+  /** Phase R6A: mirrors `reconstructionStepDismissed` exactly — client-only, forgotten on reload/Start Over by design. */
+  geometryStepDismissed: false,
 } as const;
 
 /**
@@ -241,6 +258,17 @@ export interface ArtworkReconstructionFlowState {
   reviewStatus: "pending_review" | "approved" | "rejected" | null;
 }
 
+/**
+ * Phase R6A: the durable signal `deriveUploadedArtworkStep` needs from
+ * `GeometryQualificationView` — deliberately narrow, mirroring
+ * `ArtworkReconstructionFlowState`'s own shape. `null` means no geometry
+ * qualification has ever been computed for this project's current accepted
+ * reconstruction (either none exists, or the backfill has not run yet).
+ */
+export interface GeometryReviewFlowState {
+  status: "normalized_pending_confirmation" | "confirmed" | "rejected" | "unusable";
+}
+
 export interface UploadedArtworkFlowInput {
   /** `null` for every Create New Artwork project. */
   preparation: ArtworkPreparationView | null;
@@ -258,6 +286,14 @@ export interface UploadedArtworkFlowInput {
    * compiling unmodified — omitting it is exactly equivalent to `null`.
    */
   artworkReconstruction?: ArtworkReconstructionFlowState | null;
+  /**
+   * Phase R6A: `null`/omitted until a geometry qualification has ever been
+   * computed for this project's current accepted reconstruction. Optional,
+   * mirroring `artworkReconstruction`'s own optionality, so every call site
+   * that predates this phase keeps compiling unmodified — omitting it is
+   * exactly equivalent to `null`.
+   */
+  geometryReview?: GeometryReviewFlowState | null;
   choice: WorkflowChoice;
   /** The transient artwork-type answer — read only before either durable signal above exists. */
   artworkTypeChoice: ArtworkTypeChoice;
@@ -275,6 +311,12 @@ export interface UploadedArtworkFlowInput {
    * omitting it is exactly equivalent to `false`.
    */
   reconstructionStepDismissed?: boolean;
+  /**
+   * Phase R6A: mirrors `reconstructionStepDismissed` exactly. Optional so
+   * every call site that predates this phase keeps compiling unmodified —
+   * omitting it is exactly equivalent to `false`.
+   */
+  geometryStepDismissed?: boolean;
   /**
    * True only at the very start of a project — no customer message, no
    * artwork. Offering the workflow choice later would interrupt an interview
@@ -403,6 +445,36 @@ function reconstructionReviewIsUnresolved(input: UploadedArtworkFlowInput): bool
 }
 
 /**
+ * Phase R6A: whether a geometry qualification exists and is still awaiting
+ * the customer's lightweight confirmation — the ONE predicate both call
+ * sites of `review_geometry` consult, mirroring
+ * `reconstructionReviewIsUnresolved`'s own single-predicate discipline
+ * exactly:
+ *
+ *   no qualification yet           -> false (nothing computed, or nothing
+ *                                     to compute — reconstruction review
+ *                                     itself is still unresolved, checked
+ *                                     first at both call sites)
+ *   normalized_pending_confirmation -> true (show the review)
+ *   confirmed                      -> false (resolved — flow resumes)
+ *   rejected                       -> false (resolved — a safe stopped
+ *                                     state, never re-offered as a step)
+ *   unusable                       -> false (deterministic qualification
+ *                                     abstained — nothing for the customer
+ *                                     to confirm; a safe stopped state,
+ *                                     never re-offered as a step)
+ *   dismissed this session         -> false (client-only, mirrors
+ *                                     `reconstructionStepDismissed`)
+ */
+function geometryReviewIsUnresolved(input: UploadedArtworkFlowInput): boolean {
+  return (
+    !input.geometryStepDismissed &&
+    input.geometryReview != null &&
+    input.geometryReview.status === "normalized_pending_confirmation"
+  );
+}
+
+/**
  * The step to render, or `null` when the uploaded-artwork surface should not
  * appear at all — which is every existing Create New Artwork project, so the
  * existing flow is untouched by construction.
@@ -440,6 +512,7 @@ export function deriveUploadedArtworkStep(
     // check stops matching and every Signs step below is reached exactly as
     // before — nothing about Signs routing itself changes.
     if (reconstructionReviewIsUnresolved(input)) return "review_reconstruction";
+    if (geometryReviewIsUnresolved(input)) return "review_geometry";
     // Dimension-Driven Signs Refactor: the ordered physical size is the
     // ONLY question this path asks before "Check my artwork" — no
     // substrate/product-category question precedes it any more.
@@ -528,6 +601,7 @@ export function deriveUploadedArtworkStep(
     // falls straight through to choose_artwork_type/confirm_details"
     // contract).
     if (reconstructionReviewIsUnresolved(input)) return "review_reconstruction";
+    if (geometryReviewIsUnresolved(input)) return "review_geometry";
     if (input.artworkTypeChoice === "dtf") return "confirm_details";
     if (input.artworkTypeChoice === "sign") return "confirm_sign_size";
     return "choose_artwork_type";

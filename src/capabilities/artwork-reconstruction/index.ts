@@ -25,3 +25,16 @@ export type {
   RasterReconstructionRequest,
   RasterReconstructionResult,
 } from "./contracts";
+export {
+  qualifyReconstructionGeometry,
+  GEOMETRY_QUALIFICATION_VERSION,
+  type GeometryQualificationOutcome,
+  type GeometryQualificationAbstainReason,
+  type GeometryQualificationContentBounds,
+} from "./geometry-qualification";
+export {
+  createArtworkGeometryQualificationCapability,
+  ArtworkGeometryQualificationAuthorityError,
+  ArtworkGeometryQualificationStateError,
+  type ArtworkGeometryQualificationCapability,
+} from "./artwork-geometry-qualification-capability";

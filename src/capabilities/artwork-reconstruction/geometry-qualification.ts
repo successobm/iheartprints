@@ -51,6 +51,7 @@ import { classifyRepairability } from "@/capabilities/artwork-preparation/repair
 import { isolateBackground } from "@/capabilities/artwork-preparation/background-isolation";
 import type {
   ArtworkBounds,
+  RepairabilityClassification,
   RepairabilityReasonCode,
   RgbColor,
 } from "@/capabilities/artwork-preparation/contracts";
@@ -96,11 +97,14 @@ export type GeometryQualificationOutcome =
       detectedBackgroundColor: RgbColor;
       backgroundTolerance: number;
       classifierReasons: RepairabilityReasonCode[];
+      /** `classifyRepairability`'s own verdict — persisted as a sanitized internal diagnostic by callers, never customer-facing. */
+      classification: RepairabilityClassification;
     }
   | {
       status: "abstained";
       reason: GeometryQualificationAbstainReason;
       classifierReasons: RepairabilityReasonCode[];
+      classification: RepairabilityClassification;
     };
 
 function touchesCanvasBorder(
@@ -149,6 +153,7 @@ export function qualifyReconstructionGeometry(
       status: "abstained",
       reason: assessment.reasons[0] ?? "no_visible_artwork",
       classifierReasons: assessment.reasons,
+      classification: assessment.classification,
     };
   }
 
@@ -160,6 +165,7 @@ export function qualifyReconstructionGeometry(
       status: "abstained",
       reason: "content_touches_canvas_border",
       classifierReasons: assessment.reasons,
+      classification: assessment.classification,
     };
   }
 
@@ -181,6 +187,7 @@ export function qualifyReconstructionGeometry(
       status: "abstained",
       reason: "no_visible_artwork",
       classifierReasons: assessment.reasons,
+      classification: assessment.classification,
     };
   }
 
@@ -193,6 +200,7 @@ export function qualifyReconstructionGeometry(
         status: "abstained",
         reason: "aspect_ratio_drift_exceeds_tolerance",
         classifierReasons: assessment.reasons,
+        classification: assessment.classification,
       };
     }
   }
@@ -209,5 +217,6 @@ export function qualifyReconstructionGeometry(
     detectedBackgroundColor: analysis.estimatedBackgroundColor,
     backgroundTolerance: analysis.backgroundTolerance,
     classifierReasons: assessment.reasons,
+    classification: assessment.classification,
   };
 }

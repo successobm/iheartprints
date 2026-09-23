@@ -572,6 +572,7 @@ export const TEST_FILES = [
   // production review, plus the in-flight processing state and its
   // single-submit guard.
   "src/components/chat/reconstruction-review-routing.test.tsx",
+  "src/components/chat/geometry-review-routing.test.tsx",
   "src/components/chat/reconstruction-request-guard.test.ts",
   // Production Workspace Bridge: the pure resolveSignProductionWorkspaceUrl
   // gate — registered late (it was added the phase before this one and
@@ -798,6 +799,8 @@ export const TEST_FILES = [
   // colour-based geometry qualification module for an opaque reconstruction
   // candidate.
   "src/capabilities/artwork-reconstruction/geometry-qualification.test.ts",
+  "src/capabilities/artwork-reconstruction/artwork-geometry-qualifications.migration.test.ts",
+  "src/capabilities/artwork-reconstruction/artwork-geometry-qualification-capability.test.ts",
   "src/capabilities/artwork-fidelity-verification/artwork-fidelity-verification-capability.test.ts",
   // Phase R5-R (independent-review repair): closes the three proven
   // approval-authority blockers -- registered immediately.

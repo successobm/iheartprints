@@ -24,6 +24,8 @@ import type {
   AcquisitionSession,
   ArtworkFidelityContract,
   ArtworkFidelityContractStatus,
+  ArtworkGeometryQualification,
+  ArtworkGeometryQualificationStatus,
   ArtworkPreparation,
   ArtworkReconstructionJob,
   ArtworkReconstructionReviewStatus,
@@ -59,6 +61,7 @@ import type {
   ApproveDesignBriefInput,
   CaptureAcquisitionEmailInput,
   CreateArtworkFidelityContractInput,
+  CreateArtworkGeometryQualificationInput,
   CreateArtworkReconstructionJobInput,
   CreateArtworkPreparationInput,
   CreateArtworkVersionInput,
@@ -87,6 +90,7 @@ import type {
   ReservePaidImageIntentInput,
   UpdateArtworkEvaluationInput,
   UpdateArtworkFidelityContractInput,
+  UpdateArtworkGeometryQualificationInput,
   UpdateArtworkPreparationInput,
   UpdateArtworkReconstructionJobInput,
   UpdateFinalArtworkJobInput,
@@ -95,6 +99,7 @@ import type {
 } from "./repository";
 import {
   ArtworkFidelityContractConflictError,
+  ArtworkGeometryQualificationConflictError,
   ArtworkReconstructionJobConflictError,
   FreeConceptAlreadyConsumedError,
   UniqueConstraintViolationError,
@@ -141,6 +146,8 @@ interface LocalDatabase {
   artworkFidelityContracts: ArtworkFidelityContract[];
   /** Phase R5: Confirmed-Authority Raster Reconstruction v1. */
   artworkReconstructionJobs: ArtworkReconstructionJob[];
+  /** Phase R6A: Geometry-Qualified Clean Master v1. */
+  artworkGeometryQualifications: ArtworkGeometryQualification[];
 }
 
 /**
@@ -215,6 +222,7 @@ function emptyDb(): LocalDatabase {
     signCandidateVisualAcceptances: [],
     artworkFidelityContracts: [],
     artworkReconstructionJobs: [],
+    artworkGeometryQualifications: [],
   };
 }
 
@@ -414,6 +422,8 @@ async function readDb(): Promise<LocalDatabase> {
       artworkFidelityContracts: parsed.artworkFidelityContracts ?? [],
       // Phase R5: absent in every store written before it existed.
       artworkReconstructionJobs: parsed.artworkReconstructionJobs ?? [],
+      // Phase R6A: absent in every store written before it existed.
+      artworkGeometryQualifications: parsed.artworkGeometryQualifications ?? [],
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
@@ -2728,5 +2738,93 @@ export class LocalProjectRepository implements ProjectRepository {
 
     if (recovered.length > 0) await writeDb(db);
     return recovered;
+  }
+
+  // --- Phase R6A: Geometry-Qualified Clean Master v1 ----------------------
+
+  async createArtworkGeometryQualification(
+    projectId: string,
+    input: CreateArtworkGeometryQualificationInput,
+  ): Promise<ArtworkGeometryQualification> {
+    const db = await readDb();
+
+    // Emulates the migration's own `artwork_geometry_qualifications_job_uidx`
+    // — a real concurrent race is vanishingly unlikely in a single-process
+    // local store, but the CONTRACT must match Supabase's so tests exercise
+    // the same behavior either store is configured with.
+    const conflicting = db.artworkGeometryQualifications.find(
+      (row) => row.reconstructionJobId === input.reconstructionJobId,
+    );
+    if (conflicting) {
+      throw new UniqueConstraintViolationError(
+        "artwork_geometry_qualifications_job_uidx",
+      );
+    }
+
+    const timestamp = nowIso();
+    const qualification: ArtworkGeometryQualification = {
+      id: randomUUID(),
+      projectId,
+      reconstructionJobId: input.reconstructionJobId,
+      candidateAssetId: input.candidateAssetId,
+      fidelityContractId: input.fidelityContractId,
+      contractKey: input.contractKey,
+      classifierVerdict: input.classifierVerdict,
+      qualificationStatus: input.qualificationStatus,
+      derivedAssetId: input.derivedAssetId,
+      originalCanvasWidthPx: input.originalCanvasWidthPx,
+      originalCanvasHeightPx: input.originalCanvasHeightPx,
+      contentBounds: input.contentBounds,
+      normalizedWidthPx: input.normalizedWidthPx,
+      normalizedHeightPx: input.normalizedHeightPx,
+      contentAspectRatio: input.contentAspectRatio,
+      detectedBackgroundColor: input.detectedBackgroundColor,
+      normalizationMethod: input.normalizationMethod,
+      confirmedAt: null,
+      confirmedBy: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.artworkGeometryQualifications.push(qualification);
+    await writeDb(db);
+    return qualification;
+  }
+
+  async getArtworkGeometryQualification(id: string): Promise<ArtworkGeometryQualification | null> {
+    const db = await readDb();
+    return db.artworkGeometryQualifications.find((row) => row.id === id) ?? null;
+  }
+
+  async getArtworkGeometryQualificationByJob(
+    reconstructionJobId: string,
+  ): Promise<ArtworkGeometryQualification | null> {
+    const db = await readDb();
+    return (
+      db.artworkGeometryQualifications.find(
+        (row) => row.reconstructionJobId === reconstructionJobId,
+      ) ?? null
+    );
+  }
+
+  async updateArtworkGeometryQualification(
+    id: string,
+    patch: UpdateArtworkGeometryQualificationInput,
+    expectedStatus?: ArtworkGeometryQualificationStatus,
+  ): Promise<ArtworkGeometryQualification> {
+    const db = await readDb();
+    const row = db.artworkGeometryQualifications.find((item) => item.id === id);
+    // Mirrors `updateArtworkReconstructionJob`'s own CAS contract exactly —
+    // throw on mismatch, never a silent no-op success.
+    if (expectedStatus !== undefined) {
+      if (!row || row.qualificationStatus !== expectedStatus) {
+        throw new ArtworkGeometryQualificationConflictError(expectedStatus);
+      }
+    } else if (!row) {
+      throw new Error("Artwork geometry qualification not found");
+    }
+
+    Object.assign(row, patch, { updatedAt: nowIso() });
+    await writeDb(db);
+    return row;
   }
 }

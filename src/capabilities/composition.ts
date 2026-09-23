@@ -9,6 +9,7 @@ import {
   resolveArtworkFidelityProposalProvider,
 } from "@/capabilities/artwork-fidelity-proposal";
 import {
+  createArtworkGeometryQualificationCapability,
   createRasterReconstructionCapability,
   createRasterReconstructionWorkerCapability,
   resolveRasterReconstructionProvider,
@@ -176,6 +177,14 @@ export interface CapabilityGraph {
   artworkReconstructionScheduler: ReturnType<
     typeof createArtworkReconstructionSchedulerCapability
   >;
+  /**
+   * Phase R6A: repository + assets, no provider port — deterministic
+   * geometry qualification of an already-approved reconstruction
+   * candidate. Depends on `artworkReconstruction` (composition, not
+   * duplication) to resolve "the current accepted master" the exact same
+   * way that capability's own tested authority logic already does.
+   */
+  artworkGeometryQualification: ReturnType<typeof createArtworkGeometryQualificationCapability>;
 }
 
 let graph: CapabilityGraph | null = null;
@@ -304,6 +313,11 @@ export function createCapabilityGraph(
   const artworkReconstructionScheduler = createArtworkReconstructionSchedulerCapability(
     artworkReconstructionWorker,
   );
+  const artworkGeometryQualification = createArtworkGeometryQualificationCapability(
+    repo,
+    assets,
+    artworkReconstruction,
+  );
 
   // Sprint A5.3: the checkout boundary. Resolves to `provider: null` in every
   // environment that has not explicitly configured `PAYMENT_PROVIDER=stripe`
@@ -383,6 +397,7 @@ export function createCapabilityGraph(
     artworkReconstruction,
     artworkReconstructionWorker,
     artworkReconstructionScheduler,
+    artworkGeometryQualification,
   };
 }
 
