@@ -11624,9 +11624,17 @@ false "one seam" claim above:**
    either the blocked or stale case.
 5. **Operator review** (`loadSignPlanOperatorReview`) — REPAIRED,
    additively. Gains a new `sourceCurrent: boolean` field (computed via the
-   same `resolveSignPlanCurrency`) so the internal review page can reflect
-   reality rather than presenting a stale plan as ordinarily actionable;
-   the actual enforcement is boundaries 3/4/6, not this advisory field.
+   same `resolveSignPlanCurrency`), and the operator page
+   (`sign-authorize/page.tsx`) consumes it through the SAME pure-decision
+   pattern the page's own doc comment establishes for every other branch:
+   `resolveSignApprovalCtaState` (`sign-authorize-page-state.ts`) returns
+   `"can_authorize" | "source_stale" | "blocked"` — `"source_stale"` never
+   renders the "Approve & Continue" action, showing a distinct, honest
+   "source has changed, re-check the artwork" message and the SAME
+   `SignCheckArtworkButton` instead. The actual enforcement remains
+   boundaries 3/4/6 (this is the view staying honest, not a second gate);
+   the review's own advisory field alone was insufficient until this page
+   actually consumed it.
 6. **Worker execution** (`FinalArtworkWorkerCapability.runSignPreparationJob`)
    — REPAIRED, two independent fixes:
    - **Source bytes**: now downloads `assets.downloadAssetBytes(plan.sourceAssetId)`
