@@ -1177,9 +1177,27 @@ async function resolveSignArtworkView(
   projectId: string,
 ): Promise<SignArtworkView | null> {
   try {
-    const preparation =
-      await getCapabilityGraph().signPreparation.getSignPreparation(projectId);
+    const graph = getCapabilityGraph();
+    let preparation = await graph.signPreparation.getSignPreparation(projectId);
     if (!preparation) return null;
+
+    // R6B: a persisted plan can go stale relative to the CURRENT Signs
+    // effective source (e.g. a Production-Qualified Clean Master became
+    // current, via image recovery, after this plan was formulated from the
+    // degraded original). Never surface analysis computed from a source
+    // that is no longer current — replan through the same safe,
+    // idempotent path "Check my artwork" already uses before building the
+    // view. `isSignPlanCurrent` is a cheap hash-only check (no re-run of
+    // inspection/planning) so an already-current plan costs one extra
+    // download+hash, never a full replan, on every snapshot fetch.
+    if (preparation.status === "planned" && preparation.plan) {
+      const current = await graph.signPreparation.isSignPlanCurrent(projectId);
+      if (!current) {
+        const outcome = await graph.signPreparation.planSignRepair(projectId);
+        preparation = outcome.preparation;
+      }
+    }
+
     return {
       orderedWidthIn: preparation.orderedWidthIn,
       orderedHeightIn: preparation.orderedHeightIn,

@@ -332,6 +332,11 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/frame-structure-model.test.ts",
   "src/capabilities/sign-preparation/sign-transform-executor-parametric-frame.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-capability.test.ts",
+  // R6B (Production-Qualified Clean Master -> Signs Authoritative Source
+  // Handoff): the effective-source resolver's full recovery-lifecycle
+  // precedence table (original / blocked / master), stale-plan detection +
+  // replan, plan identity, and authorization invalidation.
+  "src/capabilities/sign-preparation/sign-preparation-capability-effective-source.test.ts",
   // Constitution amendment 3.2 (§16A.2): optional KEEP/REMOVE background
   // treatment — the safe-removal/review-required engine reuse, and the
   // real SignPreparationCapability path (upload -> confirm spec -> set
@@ -414,6 +419,11 @@ export const TEST_FILES = [
   // — governed plan appending, preview/execution equivalence, Fit to
   // Production immediate recheck.
   "src/lib/services/sign-artwork-service.test.ts",
+  // R6B (Production-Qualified Clean Master -> Signs Authoritative Source
+  // Handoff): the conversation-service VIEW boundary — Section 33's own
+  // REGENCY REGRESSION acceptance test (stale original-bound plan must not
+  // be shown once a geometry-confirmed master exists; the snapshot replans).
+  "src/lib/services/sign-artwork-effective-source.test.ts",
   // SIGNS QR DESTINATION RESOLUTION: confirmSignQrDestination /
   // acceptSignQrPrintAsSupplied service-layer integration, run against a
   // real local-store sign pipeline (no live-DB migration dependency).

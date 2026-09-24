@@ -386,10 +386,14 @@ export function createCapabilityGraph(
       assets,
       designBrief,
     ),
-    // Signs Phase S1: repository + assets only. No provider is resolved
-    // here, and none exists to resolve — sign inspection and planning are
-    // local and deterministic by construction.
-    signPreparation: createSignPreparationCapability(repo, assets),
+    // Signs Phase S1 + R6B: repository + assets, plus (R6B) a narrow,
+    // read-only dependency on `ArtworkGeometryQualificationCapability` used
+    // ONLY for `getCurrentProductionQualifiedMaster` — the Signs effective-
+    // source handoff (see `sign-preparation-capability.ts`'s own doc). No
+    // provider is resolved here, and none exists to resolve directly —
+    // sign inspection and planning remain local and deterministic by
+    // construction.
+    signPreparation: createSignPreparationCapability(repo, assets, artworkGeometryQualification),
     // Universal Raster Reconstruction Phase R3B/R4A: repository-only, no
     // provider port — see the field's own doc comment above.
     artworkFidelity: createArtworkFidelityCapability(repo),

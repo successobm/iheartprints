@@ -2029,6 +2029,23 @@
  * serialization — never rationale text or risk classes, and never sensitive
  * to cosmetic JSON ordering. It is the future FinalArtworkJob binding key,
  * mirroring `production_treatment_key`.
+ *
+ * R6B ADDENDUM (Production-Qualified Clean Master -> Signs Authoritative
+ * Source Handoff): the ALLOWED list above gains exactly one new edge —
+ * `ArtworkGeometryQualificationCapability`, OPTIONAL, read-only, used ONLY
+ * for `getCurrentProductionQualifiedMaster(projectId)`. Nothing else about
+ * S1's boundary changes: still no provider port, still no repair execution,
+ * still no write to `ArtworkGeometryQualificationCapability`'s own tables.
+ * `resolveSignEffectiveSource` (`sign-preparation-capability.ts`) is the one
+ * seam that asks it, and only `decodeSignSource`/
+ * `assertBackgroundTreatmentReadyToPlan` consult that answer — every other
+ * S1 rule above (edge evidence, risk classes, plan identity, no repair
+ * execution) is unchanged and applies identically regardless of which
+ * asset the resolved source turns out to be. `SignPreparation
+ * .originalAssetId` remains immutable provenance; R6B never writes it, and
+ * a project with no reconstruction/recovery lifecycle plans from it exactly
+ * as before this phase. See `ARCHITECTURE.md` §23q's own R6B addendum for
+ * the full precedence table (blocked vs. master vs. original).
  */
 
 /**

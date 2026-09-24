@@ -1249,7 +1249,7 @@ to configure, disable, or accidentally call.
 | **Responsibility** | The rigid_sign_raster profile's understanding stage (Constitution §16A): ingest a sign customer's raster artwork (immutable original), record the HUMAN-confirmed ordered width AND height under a versioned sign resolution policy, deterministically inspect (geometry, truthful proportional placements, effective resolution, per-edge band classification, transparency), diagnose explicit bounded-vocabulary defects, and formulate — never execute — a persisted, ordered, closed-vocabulary `SignRepairPlan` with a canonical `planKey` (the future FinalArtworkJob binding key, per the `production_treatment_key` precedent) |
 | **Inputs** | Uploaded PNG bytes + declared content type + filename; explicit operator-confirmed ordered dimensions |
 | **Outputs** | `SignPreparation` lifecycle record (`inspected` → `planned`); immutable `customer_upload` asset; persisted `SignInspectionReport`, `SignDefect[]`, `SignRepairPlan` + `planKey` |
-| **Dependencies** | ProjectRepository, AssetCapability; pure ingress modules reused from artwork-preparation (`upload-limits.ts`, `image-decode.ts`); pure vocabulary/math from print-validation (`contracts.ts`, `effective-resolution.ts`); the live provider reconstruction bounds (4× ceiling, 1.02 headroom) imported as constants so planner and executor can never quietly disagree |
+| **Dependencies** | ProjectRepository, AssetCapability; pure ingress modules reused from artwork-preparation (`upload-limits.ts`, `image-decode.ts`); pure vocabulary/math from print-validation (`contracts.ts`, `effective-resolution.ts`); the live provider reconstruction bounds (4× ceiling, 1.02 headroom) imported as constants so planner and executor can never quietly disagree; R6B: an OPTIONAL, read-only dependency on `ArtworkGeometryQualificationCapability` (`getCurrentProductionQualifiedMaster` only) for the effective-source handoff — see §23q's R6B addendum |
 | **Owns** | Sign ordered-size authority (fail-closed: width AND height, never defaulted or inferred — §16A.2); the sign resolution-policy table (V1: rigid rectangles ≤ 24×36in, 150 PPI target / 100 PPI blocking minimum, policy-versioned, never universal); edge-evidence classification (`uniform_background` / `foreground_bleed` / `mixed_or_uncertain` — unknown never becomes safe); the repair decision hierarchy and risk classes (`auto_safe` / `review_required` / `blocked`); canonical plan identity |
 | **Must never own** | Any provider port (it has none — structurally no network); repair EXECUTION of any kind (no upscale, extension, crop, resample, flatten, or generation); Print Validation's rules; FinalArtwork orchestration; apparel placement sizing; the dormant `signage` placeholder's assumptions; any `print_ready` claim |
 
@@ -11501,14 +11501,104 @@ evidence) runs through this SAME idempotent path on ordinary project load,
 never a separate script, never another provider call, never re-asking
 fidelity/wording/mark confirmation.
 
-**Still not built:** neither Signs nor DTF consumes
-`getCurrentProductionQualifiedMaster` yet — both still read the original
-source exactly as before this phase. That handoff, and any resulting Signs
-plan invalidation/replan, is R6B's own scope, deliberately not started
-here. Geometry qualification/confirmation never creates a `FinalArtworkJob`,
+Geometry qualification/confirmation never creates a `FinalArtworkJob`,
 never sets `print_ready`, and never authorizes a Signs plan — it is input
 authority only, completely outside `PrintValidationCapability`'s own
 sole authority over that boundary (§13i/§23n, unchanged).
+
+**R6B (Signs Authoritative Source Handoff): Signs now consumes the current
+Production-Qualified Clean Master as its effective planning source.** DTF
+still does not — this phase is Signs-only, deliberately.
+
+`SignPreparationCapability` (`sign-preparation-capability.ts`) gains exactly
+one new, OPTIONAL, read-only dependency: `ArtworkGeometryQualificationCapability`,
+used ONLY for `getCurrentProductionQualifiedMaster`. This widens Signs
+Phase S1's original closed dependency allowlist (`shared/capability-
+boundaries.ts`'s own SIGNS PHASE S1 block, `ProjectRepository` +
+`AssetCapability` + pure modules only) by exactly this one edge — a
+narrow, one-directional, read-only capability→capability dependency, the
+same shape `FinalArtworkWorkerCapability`'s Phase 2E dependency on
+`ConceptEvaluationCapability` already established elsewhere in this
+codebase, never a write path and never the reverse direction.
+`composition.ts` wires it by passing the already-constructed
+`artworkGeometryQualification` capability into `createSignPreparationCapability`;
+the dependency is optional in the factory signature specifically so
+existing tests that construct the capability with two arguments continue
+unmodified (and, with the dependency omitted, resolve exactly the pre-R6B
+"always the original" behavior — the same fallback a project with no
+reconstruction lifecycle at all naturally takes).
+
+`resolveSignEffectiveSource` (private to `sign-preparation-capability.ts`,
+consulted from `decodeSignSource` and `assertBackgroundTreatmentReadyToPlan`)
+is the one place this decision is made:
+
+- **No reconstruction/recovery lifecycle for this project** (no
+  `ArtworkFidelityContract`, or a contract with no reconstruction job ever
+  requested against its `sourceAssetId`) → the immutable
+  `SignPreparation.originalAssetId` remains the Signs source, byte-for-byte
+  the pre-R6B behavior. This is also the default whenever no
+  `ArtworkGeometryQualificationCapability` was supplied at all.
+- **A lifecycle has begun but there is no CURRENT confirmed
+  Production-Qualified Clean Master** (job pending review, geometry pending
+  confirmation, geometry rejected, geometry unusable, or a superseded
+  fidelity contract with no confirmed geometry of its own yet) → `decodeSignSource`
+  throws. Signs planning/inspection/composition all fail closed through this
+  ONE seam — there is no separate "silent original fallback" code path to
+  forget. This is the hard R6B invariant: once recovery has begun, Signs
+  never silently regresses to the degraded original.
+- **A current confirmed master exists** → its own `derivedAssetId` is the
+  Signs source. `SignPreparation.originalAssetId` itself is never read,
+  compared, or overwritten by this resolution — only which bytes
+  `decodeSignSource` goes on to download/decode changes. "Current" is never
+  re-derived here; `getCurrentProductionQualifiedMaster` (§23q above) is
+  the one authority for that chain-walk, asked fresh on every planning
+  pass, exactly like this module's own pre-existing "recompute from source
+  every time, never trust stored state" discipline.
+
+**KEEP/REMOVE background treatment while a master is current.** A
+Production-Qualified Clean Master is always already a governed,
+background-isolated (transparent) derivative in its own right (§23q). While
+one is the effective source, Signs' own "remove" background-removal
+derivative — always keyed to `preparation.originalAssetId`, and therefore
+stale relative to the master — is never consulted; the master is used
+directly under either `"keep"` or `"remove"` treatment.
+`setSignBackgroundTreatment` itself is unchanged (still always re-derives
+its own derivative from the true original) — invoking it while a master is
+current is harmless (the resulting derivative is simply never read), never
+a source of drift.
+
+**Plan identity does the invalidation work; no new mechanism was added.**
+`computeSignPlanKey` already keyed on `sourceSha256`/dimensions, never
+`sourceAssetId` — so planning against a master's different bytes naturally
+produces a different `planKey`, which naturally leaves any prior
+`authorizedPlanKey` non-matching, through the SAME `matchesCurrentPlan`
+discipline `SignArtworkView`/`SignPlanOperatorReview` already had.
+
+**Stale-plan detection and replan at the view boundary.** A NEW, cheap
+capability method, `SignPreparationCapability.isSignPlanCurrent`, hashes the
+CURRENT effective source (via `decodeSignSource`, never a second/parallel
+resolution) and compares it against the persisted plan's own `sourceSha256`
+— without re-running inspection/planning. `conversation-service.ts`'s
+`resolveSignArtworkView` calls it before building the customer-facing
+snapshot and, when the persisted plan is stale, replans through the SAME
+`planSignRepair` "Check my artwork" already uses before rendering the view
+— never merely relabeling stale dimensions, and never silently continuing
+to show original-bound analysis once a master is current. This is a
+deliberate, narrow replan-on-read specifically for Signs source staleness;
+it is safe/idempotent by `planSignRepair`'s own pre-existing construction
+(recomputes from the current source and overwrites the same durable row on
+every call).
+
+**What R6B does not do.** No database migration (dynamic resolution only,
+against the existing `SignRepairPlan.sourceAssetId`/`sourceSha256`/
+`planKey`); no standalone Signs customer authorization; no Continue/Rebuild
+UX; no change to DTF, `FinalArtworkJob`, or `print_ready`; no provider call
+of any kind (Topaz/OpenAI) — `reconstruct_resolution` step SIZING recomputes
+against the master's own dimensions exactly like it already did against the
+original, but R6B itself never executes a repair or calls a provider; QR
+detection/resolution, "Compare Original," and background-removal's own
+derivative computation remain bound to `preparation.originalAssetId`
+exactly as before (untouched by this phase — reviewed, not modified).
 
 ---
 

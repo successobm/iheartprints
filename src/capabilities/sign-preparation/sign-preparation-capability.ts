@@ -26,10 +26,23 @@
  *     (§16A.2) — nothing here defaults or infers a dimension;
  *   - all reads are project-scoped; a cross-project id resolves to
  *     not-found, never to another project's data.
+ *
+ * R6B (Production-Qualified Clean Master → Signs Authoritative Source
+ * Handoff): gains exactly one new, optional, read-only dependency —
+ * `ArtworkGeometryQualificationCapability`, used ONLY for
+ * `getCurrentProductionQualifiedMaster`. When supplied, `decodeSignSource`
+ * consumes the project's CURRENT confirmed Production-Qualified Clean
+ * Master as the effective Signs source once a reconstruction/recovery
+ * lifecycle has begun for this project, and refuses to silently fall back
+ * to the immutable original while recovery is in progress without one —
+ * see `resolveSignEffectiveSource`'s own doc. `SignPreparation
+ * .originalAssetId` itself is never read as anything but immutable
+ * provenance and is never overwritten by this handoff.
  */
 
 import { createHash } from "node:crypto";
 
+import type { ArtworkGeometryQualificationCapability } from "@/capabilities/artwork-reconstruction/artwork-geometry-qualification-capability";
 import type { AssetCapability } from "@/capabilities/assets";
 import {
   decodePngUpload,
@@ -220,6 +233,17 @@ export interface SignPreparationCapability {
     designId: string,
     treatment: SignBackgroundTreatment,
   ): Promise<SignPreparation>;
+  /**
+   * R6B: a cheap staleness check for the CURRENTLY PERSISTED plan — resolves
+   * and hashes the CURRENT effective Signs source (via `decodeSignSource`,
+   * never a second/parallel resolution) and compares it against the
+   * persisted plan's own `sourceSha256`, without re-running inspection or
+   * planning. Returns `true` (nothing to invalidate) when no plan is
+   * currently persisted. Throws the same way `decodeSignSource` does when
+   * the effective source is currently blocked (recovery in progress, no
+   * current confirmed master).
+   */
+  isSignPlanCurrent(designId: string): Promise<boolean>;
 }
 
 /** Signs Phase 3B: the operator's own composition choices — everything `confirmSignCompositionPlan` needs beyond what it resolves itself (spec/policy/source lineage). */
@@ -240,6 +264,7 @@ export interface SignCompositionOperatorInput {
 export function createSignPreparationCapability(
   repo: ProjectRepository,
   assets: AssetCapability,
+  artworkGeometryQualification?: ArtworkGeometryQualificationCapability,
 ): SignPreparationCapability {
   async function loadOwned(designId: string): Promise<SignPreparation> {
     const snapshot = await repo.getProject(designId);
@@ -254,33 +279,105 @@ export function createSignPreparationCapability(
   }
 
   /**
-   * Constitution amendment 3.2: resolves and decodes the SOURCE the rest
-   * of the pipeline (inspection/planning/composition) actually operates
-   * on. Under `"keep"` (or `"remove"` with no successful removal yet)
-   * this is exactly `preparation.originalAssetId`, byte-for-byte the
-   * pre-amendment behavior. Under a governed `"remove"` with a recorded
-   * `status: "removed"` outcome BOUND to the current immutable original
-   * (`removal.sourceAssetId === preparation.originalAssetId` — a stale
-   * record computed against a since-replaced original is never trusted),
-   * this resolves to the derived, transparent PREPARED asset instead —
-   * the "governed background preparation → transparent derived prepared
-   * artwork" step the rest of the pipeline (exact canvas, QR, acceptance)
-   * then runs against unchanged. `preparation.originalAssetId` itself is
-   * NEVER read, mutated, or bypassed here — only which bytes get decoded
-   * for downstream computation changes.
+   * R6B: resolves what "the current Signs source" means, one level above
+   * `decodeSignSource`'s own KEEP/REMOVE resolution.
+   *
+   *   - No reconstruction/recovery lifecycle has ever begun for this
+   *     project (no `ArtworkFidelityContract`, or a contract with no
+   *     reconstruction job ever created against it) → the immutable
+   *     original remains the Signs source, exactly the pre-R6B behavior.
+   *   - A lifecycle HAS begun but there is no CURRENT confirmed
+   *     Production-Qualified Clean Master (pending review, geometry
+   *     pending, rejected, unusable, or superseded by a newer lifecycle
+   *     with no confirmed geometry of its own yet) → blocked. This never
+   *     silently falls back to the original once recovery is under way.
+   *   - A current confirmed master exists → it is the Signs source,
+   *     identified by the master's own `derivedAssetId`.
+   *
+   * "Current" is never re-derived here — `getCurrentProductionQualifiedMaster`
+   * (`ArtworkGeometryQualificationCapability`) already IS the one authority
+   * for that chain-walk (fidelity contract → accepted reconstruction job →
+   * geometry qualification, each re-verified against the next), so this
+   * function only asks it, never reimplements a parallel notion of
+   * "current". `SignPreparation.originalAssetId` is never read, mutated,
+   * or bypassed by this resolution — only which bytes `decodeSignSource`
+   * goes on to decode changes.
+   */
+  async function resolveSignEffectiveSource(
+    preparation: SignPreparation,
+  ): Promise<
+    | { status: "original" }
+    | { status: "master"; assetId: string }
+    | { status: "blocked"; reason: string }
+  > {
+    if (!artworkGeometryQualification) return { status: "original" };
+
+    const contract = await repo.getArtworkFidelityContract(preparation.projectId);
+    if (!contract) return { status: "original" };
+
+    const job = await repo.getLatestArtworkReconstructionJobForSource(
+      preparation.projectId,
+      contract.sourceAssetId,
+    );
+    if (!job) return { status: "original" };
+
+    const master = await artworkGeometryQualification.getCurrentProductionQualifiedMaster(
+      preparation.projectId,
+    );
+    if (!master || !master.derivedAssetId) {
+      return {
+        status: "blocked",
+        reason:
+          "This artwork is going through image recovery review. Sign preparation is paused until recovery is confirmed.",
+      };
+    }
+    return { status: "master", assetId: master.derivedAssetId };
+  }
+
+  /**
+   * Constitution amendment 3.2 + R6B: resolves and decodes the SOURCE the
+   * rest of the pipeline (inspection/planning/composition) actually
+   * operates on.
+   *
+   * R6B resolves the EFFECTIVE ORIGINAL first (`resolveSignEffectiveSource`
+   * — the immutable original, or a current Production-Qualified Clean
+   * Master when recovery has produced and confirmed one). Throws when
+   * recovery has begun but has no current confirmed master (never a
+   * silent fallback).
+   *
+   * Amendment 3.2's KEEP/REMOVE resolution then applies on top of that
+   * effective original, exactly as before, WITH ONE EXCEPTION: while a
+   * qualified master is the effective source, the Signs-owned "remove"
+   * derivative is never consulted — it is always keyed to
+   * `preparation.originalAssetId` and would be stale relative to the
+   * master, and the master is already a governed, background-isolated
+   * (transparent) derivative in its own right, so it is used directly.
+   * Under `"keep"` (or `"remove"` with no successful removal yet) against
+   * the plain original, this is exactly `preparation.originalAssetId`,
+   * byte-for-byte the pre-amendment/pre-R6B behavior.
    */
   async function decodeSignSource(
     preparation: SignPreparation,
   ): Promise<{ decoded: ReturnType<typeof decodePngUpload>; sha256: string; assetId: string }> {
-    const treatment = resolveSignBackgroundTreatment(preparation.backgroundTreatment);
-    const removal = preparation.backgroundRemoval as unknown as SignBackgroundRemovalRecord | null;
-    const useAssetId =
-      treatment === "remove" &&
-      removal?.status === "removed" &&
-      removal.preparedAssetId &&
-      removal.sourceAssetId === preparation.originalAssetId
-        ? removal.preparedAssetId
-        : preparation.originalAssetId;
+    const effectiveSource = await resolveSignEffectiveSource(preparation);
+    if (effectiveSource.status === "blocked") {
+      throw new SignPreparationStateError(effectiveSource.reason);
+    }
+
+    let useAssetId: string;
+    if (effectiveSource.status === "master") {
+      useAssetId = effectiveSource.assetId;
+    } else {
+      const treatment = resolveSignBackgroundTreatment(preparation.backgroundTreatment);
+      const removal = preparation.backgroundRemoval as unknown as SignBackgroundRemovalRecord | null;
+      useAssetId =
+        treatment === "remove" &&
+        removal?.status === "removed" &&
+        removal.preparedAssetId &&
+        removal.sourceAssetId === preparation.originalAssetId
+          ? removal.preparedAssetId
+          : preparation.originalAssetId;
+    }
 
     const downloaded = await assets.downloadAssetBytes(useAssetId);
     if (!downloaded) {
@@ -301,7 +398,15 @@ export function createSignPreparationCapability(
    * success" (never silently proceeds against an unresolved or refused
    * background-removal outcome).
    */
-  function assertBackgroundTreatmentReadyToPlan(preparation: SignPreparation): void {
+  async function assertBackgroundTreatmentReadyToPlan(preparation: SignPreparation): Promise<void> {
+    const effectiveSource = await resolveSignEffectiveSource(preparation);
+    if (effectiveSource.status !== "original") {
+      // A current master is already a governed, background-isolated
+      // derivative (or recovery is blocked, which `decodeSignSource`
+      // itself refuses) — the original-bound "remove" derivative check
+      // below does not apply either way.
+      return;
+    }
     const treatment = resolveSignBackgroundTreatment(preparation.backgroundTreatment);
     if (treatment !== "remove") return;
     const removal = preparation.backgroundRemoval as unknown as SignBackgroundRemovalRecord | null;
@@ -417,7 +522,7 @@ export function createSignPreparationCapability(
 
     async planSignRepair(designId) {
       const preparation = await loadOwned(designId);
-      assertBackgroundTreatmentReadyToPlan(preparation);
+      await assertBackgroundTreatmentReadyToPlan(preparation);
 
       const specResolution = resolveSignProductionSpec(preparation);
       if (specResolution.status !== "confirmed") {
@@ -686,7 +791,7 @@ export function createSignPreparationCapability(
 
     async confirmSignCompositionPlan(designId, input) {
       const preparation = await loadOwned(designId);
-      assertBackgroundTreatmentReadyToPlan(preparation);
+      await assertBackgroundTreatmentReadyToPlan(preparation);
 
       const specResolution = resolveSignProductionSpec(preparation);
       if (specResolution.status !== "confirmed") {
@@ -847,6 +952,14 @@ export function createSignPreparationCapability(
         }
       }
       return updated;
+    },
+
+    async isSignPlanCurrent(designId) {
+      const preparation = await loadOwned(designId);
+      if (preparation.status !== "planned" || !preparation.plan) return true;
+      const plan = preparation.plan as unknown as SignRepairPlan;
+      const { sha256 } = await decodeSignSource(preparation);
+      return sha256 === plan.sourceSha256;
     },
   };
 }
