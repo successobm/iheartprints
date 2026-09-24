@@ -240,13 +240,13 @@ export interface SignPreparationCapability {
   ): Promise<SignPreparation>;
   /**
    * R6B: a cheap staleness check for the CURRENTLY PERSISTED plan — resolves
-   * and hashes the CURRENT effective Signs source (via `decodeSignSource`,
-   * never a second/parallel resolution) and compares it against the
-   * persisted plan's own `sourceSha256`, without re-running inspection or
-   * planning. Returns `true` (nothing to invalidate) when no plan is
-   * currently persisted. Throws the same way `decodeSignSource` does when
-   * the effective source is currently blocked (recovery in progress, no
-   * current confirmed master).
+   * the CURRENT effective Signs source's asset id (`resolveSignPlanCurrency`
+   * / `resolveSignSourceAssetId`, repository reads only, no asset download)
+   * and compares it against the persisted plan's own `sourceAssetId`,
+   * without re-running inspection, planning, or `decodeSignSource`. Returns
+   * `true` (nothing to invalidate) when no plan is currently persisted.
+   * Throws when the effective source is currently blocked (recovery in
+   * progress, no current confirmed master).
    */
   isSignPlanCurrent(designId: string): Promise<boolean>;
 }

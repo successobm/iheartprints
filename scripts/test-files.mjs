@@ -466,6 +466,14 @@ export const TEST_FILES = [
   // end-to-end through the real FinalArtworkCapability/
   // FinalArtworkWorkerCapability — never merely at the planning seam.
   "src/capabilities/final-artwork-worker/sign-r6b-authority-boundaries.test.ts",
+  // R6B repair (Cursor independent review, NEW false-lineage P1 + Important
+  // P2): production/preservation lineage records the ACTUAL execution
+  // source (never originalAssetId unconditionally), proven end-to-end
+  // through the real capabilities including a passing PrintValidation
+  // identity check; and the pre-dispatch fail-fast guard against paying
+  // for reconstruction a known transparency/KEEP mismatch would refuse
+  // anyway.
+  "src/capabilities/final-artwork-worker/sign-r6b-production-lineage.test.ts",
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",
   "src/capabilities/final-artwork-worker/exhausted-provider-result-recovery.test.ts",
   "src/capabilities/final-artwork-worker/post-provider-resume.test.ts",

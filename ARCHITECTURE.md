@@ -11715,25 +11715,66 @@ reviewed, not modified); background-removal's OWN derivative-computation
 code path (`setSignBackgroundTreatment`) is likewise untouched — only
 which bytes downstream consumers treat as current changed.
 
-**Known follow-up (P2, source-binding, deliberately deferred).** The
-recovery lifecycle's authority (`ArtworkFidelityContract.sourceAssetId`) is
-bound to `ArtworkPreparation.getOriginalAssetReference(projectId)` — the
-DTF/apparel original — while `SignPreparation.originalAssetId` is a
-SEPARATE asset row, copied byte-for-byte from that same source exactly
-once by `bridgeSignArtworkIfNeeded` (`sign-artwork-service.ts`). Nothing in
-`resolveSignEffectiveSource`/`resolveSignSourceAssetId` independently
-verifies the two are still byte-identical — the invariant is structural
-(the bridge only ever runs once per project, and both originals are
-immutable), never checked at read time. A cheap per-call verification would
-require downloading and hashing the Signs original on every currency
-check, at all six boundaries above — the exact cost this repair's
-`resolveSignSourceAssetId` deliberately eliminated (repository reads only,
-no download) to keep authorization/review-time checks cheap. Given the
-codebase has no path today that could make the two diverge (a Signs
-preparation is created exactly once, always from the bridge), this is left
-as a documented follow-up rather than added speculatively; if a future
-phase ever adds a second, non-bridged way to originate a Signs original,
-this invariant must be revisited before that phase ships.
+**Known follow-up (P2 elevated — source-binding divergence is REACHABLE
+today, correcting a prior "structurally impossible" claim).** The recovery
+lifecycle's authority (`ArtworkFidelityContract.sourceAssetId`) is bound to
+`ArtworkPreparation.getOriginalAssetReference(projectId)` — the DTF/apparel
+original — while `SignPreparation.originalAssetId` is a SEPARATE asset row,
+copied byte-for-byte from that same source exactly once by
+`bridgeSignArtworkIfNeeded` (`sign-artwork-service.ts`). An earlier version
+of this note claimed the two could never diverge because "the codebase has
+no path today that could make [them] diverge." **That claim was wrong.**
+Independent review traced an actually-reachable sequence, through existing,
+unmodified routes, with no code change required to exercise it:
+
+1. `POST /api/projects/{id}/artwork-upload` (file A) → `uploadOriginal`
+   creates `ArtworkPreparation` row₁, `originalAssetId = A`, `status:
+   "analyzed"`.
+2. Signs bridges from it (`bridgeSignArtworkIfNeeded` →
+   `SignPreparation.originalAssetId = A′`, a byte-for-byte copy of A).
+3. `POST /api/projects/{id}/artwork-upload` AGAIN (file B) — accepted,
+   because `uploadOriginal`'s own refusal gate
+   (`artwork-preparation-capability.ts`) only fires once the preparation's
+   `status === "approved"`, and Signs bridging never sets that status (only
+   the DTF-only `approvePreparedArtwork` does). This creates a SECOND
+   `ArtworkPreparation` row₂, `originalAssetId = B`.
+4. `repo.getArtworkPreparation(projectId)` — and therefore
+   `getOriginalAssetReference` — now resolves the MOST RECENTLY CREATED row
+   (row₂, per its own documented "latest by `createdAt`" contract), not the
+   one Signs bridged from.
+5. Proposing/confirming an `ArtworkFidelityContract` and building a
+   reconstruction/master lineage from this point on binds to B's bytes.
+   `SignPreparation.originalAssetId` still holds `A′` — untouched, because
+   `SignPreparation` really is a true singleton with no reset/delete path
+   (that half of the original claim was correct).
+
+No route in this sequence consults `SignPreparation` state before allowing
+the second upload — `ArtworkPreparationCapability` deliberately has no
+Signs awareness at all (§ dependency list). The gate that WOULD stop a
+customer from doing this in the ordinary product flow
+(`deriveUploadedArtworkStep`'s `confirm_artwork_fidelity` step gating in
+`uploaded-artwork-flow.ts`) is a client-side conversation-flow presentation
+concern, not server-side enforcement on any of the routes above.
+
+**Disposition for R6B:** corrected here rather than left under the false
+"structurally impossible" framing, per this repair's own scope. The actual
+RUNTIME guard remains deferred, deliberately, because no genuinely small
+fix exists: catching this cheaply would need either (a) a new field
+recording, at bridge time, which `ArtworkPreparation` row/original
+`SignPreparation` actually bridged from — new schema, a migration decision
+outside this bounded repair's authorization — or (b) a per-currency-check
+byte-level hash comparison against the Signs original, which would add an
+asset download to every one of the six authority boundaries this repair
+just made deliberately cheap (repository reads only). Neither is "a very
+small deterministic guard clearly safe to add here." Root-causing this
+properly (e.g., making `uploadOriginal` refuse a second upload the same
+unconditional way `uploadSignArtwork` already does, or changing what
+"current original" means for a project) is a genuine `ArtworkPreparation`/
+upload-lifecycle behavior change reaching well outside Signs and outside
+this repair's authorization (`AGENTS.md`: no DTF expansion, no upload
+lifecycle redesign) — an explicit follow-up for product/architecture
+ownership to decide, not something this repair should implement
+speculatively.
 
 ---
 

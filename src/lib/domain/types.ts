@@ -2881,7 +2881,12 @@ export interface SignPreservationVerification {
   id: string;
   projectId: string;
   signPreparationId: string;
-  /** The customer's immutable original upload this verification traces its lineage to. */
+  /**
+   * The asset this verification's plan/execution actually traces its
+   * lineage to — `plan.sourceAssetId` (R6B: a Production-Qualified Clean
+   * Master when the plan was formulated against one, otherwise the
+   * customer's immutable original). Not always the immutable original.
+   */
   sourceAssetId: string;
   sourceSha256: string;
   /**

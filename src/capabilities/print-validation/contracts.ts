@@ -1012,7 +1012,15 @@ export interface RigidSignPlanEvidence {
    * opaque-only behavior exactly when absent.
    */
   backgroundTreatment?: SignBackgroundTreatment;
-  /** The immutable original asset the plan was formulated against. */
+  /**
+   * The asset this execution actually ran against — `plan.sourceAssetId`,
+   * the same asset `sourceSha256` below hashes. R6B: NOT always the
+   * customer's immutable original; a plan formulated against a current
+   * Production-Qualified Clean Master carries the master's own derived
+   * asset id here instead. `SignPreparation.originalAssetId` (the
+   * customer's immutable historical provenance) is a separate, unrelated
+   * fact this evidence does not carry.
+   */
   sourceAssetId: string;
   /** SHA-256 of the exact source bytes the worker actually read before executing. */
   sourceSha256: string;

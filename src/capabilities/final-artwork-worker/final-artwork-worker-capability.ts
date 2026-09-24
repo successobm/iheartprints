@@ -2555,6 +2555,27 @@ export function createFinalArtworkWorkerCapability(
         }
 
         if (needsReconstruction && reconstructionSplit) {
+          // R6B repair (Cursor independent review, Important P2 — paid
+          // Topaz before known KEEP failure): a source that is already
+          // known-transparent under `"keep"` background treatment can
+          // never produce an opaque plate — `finalizeSignExecution`'s own
+          // output-opacity check would refuse it eventually, but only
+          // AFTER `runSignReconstructionAndContinue` below has already
+          // dispatched (and paid for) the reconstruction. Refuse here,
+          // before any provider call, using the same
+          // `hasAnyTransparentPixel`/`backgroundTreatment` check
+          // `executeSignRepairPlan`/`finalizeSignExecution` already apply
+          // — never a new policy, just moving the SAME existing check
+          // earlier for the one path (bounded reconstruction) it could
+          // never actually reach in time.
+          const backgroundTreatment = plan.backgroundTreatment ?? "keep";
+          if (backgroundTreatment !== "remove" && hasAnyTransparentPixel(decoded.image)) {
+            return {
+              outcome: "refused" as const,
+              detail:
+                'Source artwork carries transparency under the "keep" background treatment. No S2 step flattens transparency or invents a fill colour, so a legally opaque plate cannot be produced from it — refused before any paid reconstruction dispatch.',
+            };
+          }
           const reconstruction = await runSignReconstructionAndContinue(
             job,
             plan,
@@ -2696,7 +2717,18 @@ export function createFinalArtworkWorkerCapability(
             // value on an older asset means the retroactive v1
             // (pre-correction) implementation.
             executionImplementationVersion: SIGN_EXECUTION_IMPLEMENTATION_VERSION,
-            sourceAssetId: preparation.originalAssetId,
+            // R6B repair (Cursor independent review, false-lineage P1): the
+            // asset this execution ACTUALLY ran against — `plan.sourceAssetId`,
+            // exactly the id the download/currency checks above already
+            // verified and whose bytes `sourceSha256` (next line) actually
+            // hashes. Never `preparation.originalAssetId` unconditionally —
+            // for a plan formulated against a Production-Qualified Clean
+            // Master, that would record an impossible identity (an asset id
+            // paired with a different asset's hash), which
+            // `RigidSignPlanEvidence.sourceAssetId` below reuses and which
+            // preservation verification's own (already-correct)
+            // `sourceAssetId` would then never agree with.
+            sourceAssetId: plan.sourceAssetId,
             sourceSha256,
             planKey: plan.planKey,
             planSchemaVersion: plan.schemaVersion,
@@ -3066,7 +3098,14 @@ export function createFinalArtworkWorkerCapability(
       // persisted before this amendment (`plan.backgroundTreatment`
       // undefined), which is always `"keep"`.
       backgroundTreatment: plan.backgroundTreatment ?? resolveSignBackgroundTreatment(preparation.backgroundTreatment),
-      sourceAssetId: preparation.originalAssetId,
+      // R6B repair (Cursor independent review, false-lineage P1): same fix
+      // as the production-asset metadata above — the asset this execution
+      // actually ran against, matching `sourceSha256` below and matching
+      // preservation verification's own (already-correct) `sourceAssetId`,
+      // so `executed_plan_matches_recorded_plan`'s identity check can ever
+      // agree for a master-sourced plan that needed reconstruction. Never
+      // `preparation.originalAssetId` unconditionally.
+      sourceAssetId: plan.sourceAssetId,
       sourceSha256,
       planKey: plan.planKey,
       planSchemaVersion: plan.schemaVersion,
