@@ -52,6 +52,14 @@ export {
   type UploadSignArtworkInput,
 } from "./sign-preparation-capability";
 export {
+  resolveSignEffectiveSource,
+  resolveSignPlanCurrency,
+  resolveSignSourceAssetId,
+  type SignEffectiveSourceResolution,
+  type SignPlanCurrencyResolution,
+  type SignSourceAssetIdResolution,
+} from "./sign-effective-source";
+export {
   adaptGeometryStepsToActualReconstruction,
   buildSignExecutionGeometryEvidence,
   encodeSignPlate,

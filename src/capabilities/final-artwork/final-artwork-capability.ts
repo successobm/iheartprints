@@ -43,8 +43,13 @@ import type {
   StoredRequestedProductionOutput,
   TShirtDesignBrief,
 } from "@/lib/domain/types";
-import { computeSignPlanKey, isAuthorizationSufficientForRisk } from "@/capabilities/sign-preparation";
+import {
+  computeSignPlanKey,
+  isAuthorizationSufficientForRisk,
+  resolveSignPlanCurrency,
+} from "@/capabilities/sign-preparation";
 import type { SignRepairPlan } from "@/capabilities/sign-preparation";
+import type { ArtworkGeometryQualificationCapability } from "@/capabilities/artwork-reconstruction/artwork-geometry-qualification-capability";
 import {
   createAcquisitionCapability,
   type AcquisitionCapability,
@@ -479,6 +484,15 @@ export function createFinalArtworkCapability(
    * still gets the boundary.
    */
   acquisition: AcquisitionCapability = createAcquisitionCapability(repo),
+  /**
+   * R6B repair (Cursor independent review, Required Repair #2): the SAME
+   * narrow, optional, read-only dependency `SignPreparationCapability`
+   * already carries, used ONLY via the shared `resolveSignPlanCurrency` —
+   * never a second reconstruction-authority integration. `undefined`
+   * resolves every currency check to "original", identical to the pre-R6B
+   * behavior, so every existing non-Signs call site and test is unaffected.
+   */
+  artworkGeometryQualification?: ArtworkGeometryQualificationCapability,
 ): FinalArtworkCapability {
   return {
     async requestFinalArtwork(projectId, artworkVersionId) {
@@ -813,6 +827,31 @@ export function createFinalArtworkCapability(
       if (recomputedKey !== preparation.planKey || recomputedKey !== plan.planKey) {
         throw new Error(
           "The recorded repair plan could not be verified. Please re-plan this artwork.",
+        );
+      }
+
+      // R6B repair (Cursor independent review, Required Repair #2): a
+      // plan/authorization that were both valid at authorize-time can still
+      // go stale before production is actually requested — a Production-
+      // Qualified Clean Master became current, or superseded a prior one,
+      // in the gap between the two calls. Never queue production against a
+      // plan that no longer corresponds to the CURRENT Signs effective
+      // source; this is deliberately a SECOND, independent check of the
+      // same fact `authorizeSignRepairPlan` already checked (the same
+      // "belt and suspenders" discipline as the plan-key re-verification
+      // immediately above), never trusted from authorization alone.
+      const currency = await resolveSignPlanCurrency(
+        repo,
+        artworkGeometryQualification,
+        preparation,
+        plan,
+      );
+      if (currency.status === "blocked") {
+        throw new Error(currency.reason);
+      }
+      if (currency.status === "stale") {
+        throw new Error(
+          "This artwork's source has changed since this plan was authorized. Please re-plan and re-authorize before requesting production.",
         );
       }
 

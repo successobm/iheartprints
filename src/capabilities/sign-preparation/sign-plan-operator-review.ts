@@ -22,11 +22,13 @@
 import { isReconstructionIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
 import { doesSignCandidateContainQrReplacement } from "@/capabilities/final-artwork/sign-candidate-visual-acceptance";
 import { isRigidSignValidationTrulyPrintReady } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
+import type { ArtworkGeometryQualificationCapability } from "@/capabilities/artwork-reconstruction/artwork-geometry-qualification-capability";
 import type { ProjectRepository } from "@/lib/db/repository";
 import type { FinalArtworkJobStatus, SignPlanAuthorizationActor, SignPreparation } from "@/lib/domain/types";
 import { resolveSignBackgroundTreatment, type SignBackgroundTreatment } from "@/lib/domain/types";
 
 import type { SignInspectionReport, SignRepairPlan } from "./contracts";
+import { resolveSignPlanCurrency } from "./sign-effective-source";
 import { describeSignPlanForOperator, type SignPlanOperatorView } from "./sign-preparation-operator-copy";
 import type { SignBackgroundRemovalRecord } from "./sign-background-removal";
 
@@ -472,6 +474,24 @@ export type SignPlanOperatorReview =
         /** False for a stale authorization left over from a since-replanned artwork. */
         matchesCurrentPlan: boolean;
       };
+      /**
+       * R6B repair (Cursor independent review, Required Repair #3): `false`
+       * when this persisted plan no longer corresponds to the CURRENT
+       * Signs effective source — a Production-Qualified Clean Master
+       * became current, or superseded a prior one, since this plan was
+       * formulated — or when recovery is currently blocked (no current
+       * confirmed master). The operator page must not present the plan
+       * below as actionable when this is `false`; `authorizeSignRepairPlan`/
+       * `requestSignFinalArtwork` independently refuse regardless of what
+       * this page shows (the actual enforcement), but this field is what
+       * keeps the VIEW honest rather than merely relying on a later error.
+       * Computed via the SAME shared `resolveSignPlanCurrency` every other
+       * Signs authority boundary uses — never a second resolver. `true`
+       * whenever no `ArtworkGeometryQualificationCapability` was supplied
+       * (identical to every other R6B boundary's optional-dependency
+       * fallback).
+       */
+      sourceCurrent: boolean;
       production: SignPlanOperatorProductionStatus;
     };
 
@@ -479,6 +499,7 @@ export type SignPlanOperatorReview =
 export async function loadSignPlanOperatorReview(
   repo: ProjectRepository,
   projectId: string,
+  artworkGeometryQualification?: ArtworkGeometryQualificationCapability,
 ): Promise<SignPlanOperatorReview> {
   const project = await repo.getProject(projectId);
   if (!project) return { status: "not_found" };
@@ -509,6 +530,16 @@ export async function loadSignPlanOperatorReview(
 
   const production = await resolveSignProductionStatus(repo, projectId, preparation);
 
+  // R6B repair (Cursor independent review, Required Repair #3):
+  // `resolveSignPlanCurrency` never throws (unlike `decodeSignSource`) — a
+  // blocked recovery resolves to `{status: "blocked"}`, not an exception —
+  // so this stays a plain read, matching this module's own documented
+  // read-only/never-throws contract for a Server Component render. The
+  // actual enforcement lives at the authorize/request boundaries
+  // regardless of what this advisory field shows.
+  const currency = await resolveSignPlanCurrency(repo, artworkGeometryQualification, preparation, plan);
+  const sourceCurrent = currency.status === "current";
+
   return {
     status: "ready",
     orderedWidthIn,
@@ -524,6 +555,7 @@ export async function loadSignPlanOperatorReview(
       matchesCurrentPlan:
         preparation.authorizedPlanKey !== null && preparation.authorizedPlanKey === preparation.planKey,
     },
+    sourceCurrent,
     production,
   };
 }

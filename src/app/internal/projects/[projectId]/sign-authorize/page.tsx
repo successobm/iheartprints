@@ -2,6 +2,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 
 import { loadSignPlanOperatorReview } from "@/capabilities/sign-preparation";
+import { getCapabilityGraph } from "@/capabilities/composition";
 import { isInternalAccessConfigured } from "@/lib/config/internal-access-config";
 import { ACQUISITION_SESSION_COOKIE } from "@/lib/http/acquisition-session-cookie";
 import { getProjectRepository } from "@/lib/db";
@@ -19,7 +20,11 @@ import { SignQrPreservationPanel } from "./SignQrPreservationPanel";
 import { SignVisualAcceptancePanel } from "./SignVisualAcceptancePanel";
 import { SignCompositionPlanForm } from "./SignCompositionPlanForm";
 import { SignStructuralLayoutForm } from "./SignStructuralLayoutForm";
-import { resolveSignAuthorizePageState, type SignAuthorizePageState } from "./sign-authorize-page-state";
+import {
+  resolveSignApprovalCtaState,
+  resolveSignAuthorizePageState,
+  type SignAuthorizePageState,
+} from "./sign-authorize-page-state";
 import { describeSignProductionCurrentStatus, resolveSignProductionCtaState } from "./sign-production-cta-state";
 
 type PageProps = {
@@ -72,7 +77,13 @@ export default async function SignAuthorizePage({ params }: PageProps) {
   }
 
   const review =
-    configured && isInternal ? await loadSignPlanOperatorReview(getProjectRepository(), projectId) : null;
+    configured && isInternal
+      ? await loadSignPlanOperatorReview(
+          getProjectRepository(),
+          projectId,
+          getCapabilityGraph().artworkGeometryQualification,
+        )
+      : null;
 
   const pageState = resolveSignAuthorizePageState({ configured, isInternal, review });
 
@@ -152,7 +163,13 @@ function SignPlanReview({
 }) {
   const { plan, authorization } = review;
   const isAuthorized = authorization.matchesCurrentPlan && authorization.authorizedBy !== null;
-  const canAuthorize = plan.canAuthorize;
+  // R6B repair (Cursor independent review, Required Repair #3): the pure
+  // decision — see `resolveSignApprovalCtaState`'s own doc — keeps a
+  // source-stale plan from ever being presented as ordinarily actionable,
+  // using the SAME `review.sourceCurrent` every other Signs authority
+  // boundary already checks server-side, never a second resolver.
+  const approvalCtaState = resolveSignApprovalCtaState(review);
+  const canAuthorize = approvalCtaState === "can_authorize";
   const hasWorkspace = review.production.blockedCandidateAssetId !== null && review.production.fitToProduction !== null;
   // Sign Production Review Print-Ready Authority Repair: the SAME
   // authoritative CTA state `SignProductionAction`/`SignPrintReadyDownload`
@@ -236,8 +253,16 @@ function SignPlanReview({
           once already authorized — `SignProductionAction` below (in-flight/
           print-ready/retry) becomes the authoritative next state instead. */}
       {!isAuthorized ? (
-        canAuthorize ? (
+        approvalCtaState === "can_authorize" ? (
           <SignApproveAndContinueButton projectId={projectId} />
+        ) : approvalCtaState === "source_stale" ? (
+          <div className="flex flex-col gap-2">
+            <p className="text-sm text-ink" data-sign-authorize-source-stale>
+              This artwork&apos;s source has changed since this plan was formulated (image recovery is in progress,
+              or produced a newer clean master). Re-check the artwork before authorizing.
+            </p>
+            <SignCheckArtworkButton projectId={projectId} />
+          </div>
         ) : (
           <p className="text-sm text-ink" data-sign-authorize-blocked>
             The planner couldn&apos;t formulate an automatic preparation for this artwork. There is nothing to
@@ -383,8 +408,10 @@ function SignPlanReview({
                   {authorization.authorizedAt ? ` on ${new Date(authorization.authorizedAt).toLocaleString()}` : ""}.
                 </p>
               </div>
-            ) : canAuthorize ? (
+            ) : approvalCtaState === "can_authorize" ? (
               <p className="text-sm text-muted">Not yet authorized — use Approve &amp; Continue above.</p>
+            ) : approvalCtaState === "source_stale" ? (
+              <p className="text-sm text-muted">Not yet authorized — this artwork&apos;s source has changed; re-check the artwork above.</p>
             ) : (
               <p className="text-sm text-ink" data-sign-authorize-blocked>
                 The planner couldn&apos;t formulate an automatic preparation for this artwork. There is nothing to

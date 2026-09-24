@@ -332,6 +332,11 @@ export const TEST_FILES = [
   "src/capabilities/sign-preparation/frame-structure-model.test.ts",
   "src/capabilities/sign-preparation/sign-transform-executor-parametric-frame.test.ts",
   "src/capabilities/sign-preparation/sign-preparation-capability.test.ts",
+  // R6B (Production-Qualified Clean Master -> Signs Authoritative Source
+  // Handoff): the effective-source resolver's full recovery-lifecycle
+  // precedence table (original / blocked / master), stale-plan detection +
+  // replan, plan identity, and authorization invalidation.
+  "src/capabilities/sign-preparation/sign-preparation-capability-effective-source.test.ts",
   // Constitution amendment 3.2 (§16A.2): optional KEEP/REMOVE background
   // treatment — the safe-removal/review-required engine reuse, and the
   // real SignPreparationCapability path (upload -> confirm spec -> set
@@ -414,6 +419,11 @@ export const TEST_FILES = [
   // — governed plan appending, preview/execution equivalence, Fit to
   // Production immediate recheck.
   "src/lib/services/sign-artwork-service.test.ts",
+  // R6B (Production-Qualified Clean Master -> Signs Authoritative Source
+  // Handoff): the conversation-service VIEW boundary — Section 33's own
+  // REGENCY REGRESSION acceptance test (stale original-bound plan must not
+  // be shown once a geometry-confirmed master exists; the snapshot replans).
+  "src/lib/services/sign-artwork-effective-source.test.ts",
   // SIGNS QR DESTINATION RESOLUTION: confirmSignQrDestination /
   // acceptSignQrPrintAsSupplied service-layer integration, run against a
   // real local-store sign pipeline (no live-DB migration dependency).
@@ -451,6 +461,19 @@ export const TEST_FILES = [
   // the download authority and the operator review page's own peek.
   "src/capabilities/print-validation/rigid-sign-print-ready-authority.test.ts",
   "src/capabilities/final-artwork-worker/sign-final-artwork.test.ts",
+  // R6B repair (Cursor independent review, CONFIRMED P1): the authorize /
+  // production-request / worker-execution authority boundaries, proven
+  // end-to-end through the real FinalArtworkCapability/
+  // FinalArtworkWorkerCapability — never merely at the planning seam.
+  "src/capabilities/final-artwork-worker/sign-r6b-authority-boundaries.test.ts",
+  // R6B repair (Cursor independent review, NEW false-lineage P1 + Important
+  // P2): production/preservation lineage records the ACTUAL execution
+  // source (never originalAssetId unconditionally), proven end-to-end
+  // through the real capabilities including a passing PrintValidation
+  // identity check; and the pre-dispatch fail-fast guard against paying
+  // for reconstruction a known transparency/KEEP mismatch would refuse
+  // anyway.
+  "src/capabilities/final-artwork-worker/sign-r6b-production-lineage.test.ts",
   "src/capabilities/final-artwork-worker/sign-reconstruction.test.ts",
   "src/capabilities/final-artwork-worker/exhausted-provider-result-recovery.test.ts",
   "src/capabilities/final-artwork-worker/post-provider-resume.test.ts",
