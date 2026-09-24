@@ -2,6 +2,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 
 import { loadSignPlanOperatorReview } from "@/capabilities/sign-preparation";
+import { getCapabilityGraph } from "@/capabilities/composition";
 import { isInternalAccessConfigured } from "@/lib/config/internal-access-config";
 import { ACQUISITION_SESSION_COOKIE } from "@/lib/http/acquisition-session-cookie";
 import { getProjectRepository } from "@/lib/db";
@@ -72,7 +73,13 @@ export default async function SignAuthorizePage({ params }: PageProps) {
   }
 
   const review =
-    configured && isInternal ? await loadSignPlanOperatorReview(getProjectRepository(), projectId) : null;
+    configured && isInternal
+      ? await loadSignPlanOperatorReview(
+          getProjectRepository(),
+          projectId,
+          getCapabilityGraph().artworkGeometryQualification,
+        )
+      : null;
 
   const pageState = resolveSignAuthorizePageState({ configured, isInternal, review });
 

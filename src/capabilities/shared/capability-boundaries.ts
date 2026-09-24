@@ -2036,16 +2036,36 @@
  * for `getCurrentProductionQualifiedMaster(projectId)`. Nothing else about
  * S1's boundary changes: still no provider port, still no repair execution,
  * still no write to `ArtworkGeometryQualificationCapability`'s own tables.
- * `resolveSignEffectiveSource` (`sign-preparation-capability.ts`) is the one
- * seam that asks it, and only `decodeSignSource`/
- * `assertBackgroundTreatmentReadyToPlan` consult that answer — every other
- * S1 rule above (edge evidence, risk classes, plan identity, no repair
- * execution) is unchanged and applies identically regardless of which
- * asset the resolved source turns out to be. `SignPreparation
- * .originalAssetId` remains immutable provenance; R6B never writes it, and
- * a project with no reconstruction/recovery lifecycle plans from it exactly
- * as before this phase. See `ARCHITECTURE.md` §23q's own R6B addendum for
- * the full precedence table (blocked vs. master vs. original).
+ * `SignPreparation.originalAssetId` remains immutable provenance; R6B never
+ * writes it, and a project with no reconstruction/recovery lifecycle plans
+ * from it exactly as before this phase.
+ *
+ * R6B REPAIR (Cursor independent review, post-merge-request): the
+ * resolution logic itself moved out of this module's private closure into
+ * its own exported module, `sign-preparation/sign-effective-source.ts`
+ * (`resolveSignEffectiveSource`, `resolveSignSourceAssetId`,
+ * `resolveSignPlanCurrency`) — independent review found that PLANNING
+ * consulting this authority was not enough: `authorizeSignRepairPlan`
+ * (same S1 module), `FinalArtworkCapability.requestSignFinalArtwork`, and
+ * `FinalArtworkWorkerCapability`'s sign-job execution path could each
+ * authorize/queue/execute a plan that no longer corresponded to the
+ * current effective source, because none of them asked. The SAME narrow,
+ * optional, read-only `ArtworkGeometryQualificationCapability` dependency
+ * this addendum already admitted for `SignPreparationCapability` is now
+ * ALSO threaded into `FinalArtworkCapability` and
+ * `FinalArtworkWorkerCapability` (both constructed in `composition.ts`
+ * AFTER `artworkGeometryQualification` now, reordered for exactly this
+ * reason) and into `loadSignPlanOperatorReview` (a plain function, not a
+ * capability — takes it as a parameter instead). This is still one
+ * direction, still read-only, still the identical dependency shape — never
+ * a write path, never DTF/apparel-reachable (every non-Signs job path in
+ * `FinalArtworkCapability`/`FinalArtworkWorkerCapability` never touches
+ * this dependency at all). The worker's own hard-bound
+ * `assets.downloadAssetBytes(preparation.originalAssetId)` was
+ * independently found and corrected to
+ * `assets.downloadAssetBytes(plan.sourceAssetId)` — see `ARCHITECTURE.md`
+ * §23q's own R6B repair addendum for the full six-boundary precedence
+ * table and the worker fix's own explanation.
  */
 
 /**

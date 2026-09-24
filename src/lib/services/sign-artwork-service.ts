@@ -230,7 +230,7 @@ export async function setSignArtworkBackgroundTreatment(
   const graph = getCapabilityGraph();
   await graph.signPreparation.setSignBackgroundTreatment(projectId, treatment);
   const repo = getProjectRepository();
-  return loadSignPlanOperatorReview(repo, projectId);
+  return loadSignPlanOperatorReview(repo, projectId, graph.artworkGeometryQualification);
 }
 
 /**
@@ -250,7 +250,7 @@ export async function confirmOperatorStructuralLayoutForSign(
   await graph.signPreparation.confirmOperatorStructuralLayout(projectId, regions);
   await graph.signPreparation.planSignRepair(projectId);
   const repo = getProjectRepository();
-  return loadSignPlanOperatorReview(repo, projectId);
+  return loadSignPlanOperatorReview(repo, projectId, graph.artworkGeometryQualification);
 }
 
 /**
@@ -272,7 +272,7 @@ export async function confirmSignCompositionPlanForSign(
   const graph = getCapabilityGraph();
   await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
   const repo = getProjectRepository();
-  return loadSignPlanOperatorReview(repo, projectId);
+  return loadSignPlanOperatorReview(repo, projectId, graph.artworkGeometryQualification);
 }
 
 /**
@@ -1039,7 +1039,7 @@ export async function commitSignCorrections(
     await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
   }
 
-  return loadSignPlanOperatorReview(repo, projectId);
+  return loadSignPlanOperatorReview(repo, projectId, graph.artworkGeometryQualification);
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,7 +1362,7 @@ export async function applySignSafeAreaFit(projectId: string): Promise<SignPlanO
   await graph.signPreparation.confirmSignCompositionPlan(projectId, input);
 
   const repo = getProjectRepository();
-  return loadSignPlanOperatorReview(repo, projectId);
+  return loadSignPlanOperatorReview(repo, projectId, graph.artworkGeometryQualification);
 }
 
 export interface SignBlockedProductionCandidateDownload {

@@ -11510,27 +11510,73 @@ sole authority over that boundary (§13i/§23n, unchanged).
 Production-Qualified Clean Master as its effective planning source.** DTF
 still does not — this phase is Signs-only, deliberately.
 
-`SignPreparationCapability` (`sign-preparation-capability.ts`) gains exactly
-one new, OPTIONAL, read-only dependency: `ArtworkGeometryQualificationCapability`,
-used ONLY for `getCurrentProductionQualifiedMaster`. This widens Signs
-Phase S1's original closed dependency allowlist (`shared/capability-
-boundaries.ts`'s own SIGNS PHASE S1 block, `ProjectRepository` +
-`AssetCapability` + pure modules only) by exactly this one edge — a
-narrow, one-directional, read-only capability→capability dependency, the
-same shape `FinalArtworkWorkerCapability`'s Phase 2E dependency on
-`ConceptEvaluationCapability` already established elsewhere in this
-codebase, never a write path and never the reverse direction.
-`composition.ts` wires it by passing the already-constructed
-`artworkGeometryQualification` capability into `createSignPreparationCapability`;
-the dependency is optional in the factory signature specifically so
-existing tests that construct the capability with two arguments continue
-unmodified (and, with the dependency omitted, resolve exactly the pre-R6B
-"always the original" behavior — the same fallback a project with no
-reconstruction lifecycle at all naturally takes).
+**Cursor independent review (post-merge-request repair): the original R6B
+pass above wired currency checking into PLANNING only — `planSignRepair`,
+`confirmSignProductionSpec`, `confirmOperatorStructuralLayout`,
+`confirmSignCompositionPlan`, and `setSignBackgroundTreatment`'s
+re-inspection tail, all via `decodeSignSource`/
+`assertBackgroundTreatmentReadyToPlan`. Independent review confirmed a P1
+gap: `authorizeSignRepairPlan`, `FinalArtworkCapability
+.requestSignFinalArtwork`, `loadSignPlanOperatorReview`, and the
+final-artwork worker's own sign-job execution path never consulted this
+authority at all — each only re-verified that the PERSISTED plan's own
+fields hashed to its own recorded key, which stays self-consistent even
+after the plan has gone stale relative to a newer/confirmed master. Worse,
+the worker was independently found hard-bound to
+`assets.downloadAssetBytes(preparation.originalAssetId)` unconditionally —
+so even once planning correctly switched to a master, execution could
+never succeed against it (every master-sourced plan hit `source_mismatch`,
+since the worker was hashing the ORIGINAL's bytes against the MASTER's
+`plan.sourceSha256`). The paragraphs below describe the REPAIRED state; the
+false claim this replaced ("planning/inspection/composition all fail
+closed through this ONE seam") is corrected here, not merely deleted.**
 
-`resolveSignEffectiveSource` (private to `sign-preparation-capability.ts`,
-consulted from `decodeSignSource` and `assertBackgroundTreatmentReadyToPlan`)
-is the one place this decision is made:
+**The shared authority: `sign-effective-source.ts`.** The resolution logic
+itself now lives in its own module, exported (never a private closure) so
+EVERY Signs authority boundary asks the identical question the identical
+way — never a second, independently-drifting resolver:
+
+- `resolveSignEffectiveSource(repo, artworkGeometryQualification, projectId)`
+  — the original/master/blocked decision described below, unchanged in
+  substance from the first R6B pass, just relocated and exported.
+- `resolveSignSourceAssetId(repo, artworkGeometryQualification, preparation)`
+  — layers amendment 3.2's own KEEP/REMOVE asset selection on top,
+  returning the single asset id the pipeline should treat as current.
+  Repository reads only — no asset download, no pixel decode — cheap
+  enough to call from a read-only authorization/review gate, not just from
+  planning.
+- `resolveSignPlanCurrency(repo, artworkGeometryQualification, preparation, plan)`
+  — "is THIS persisted plan still current?", by comparing
+  `resolveSignSourceAssetId`'s answer against `plan.sourceAssetId`. Assets
+  in this codebase are immutable/append-only once created, so an asset-id
+  match is exactly as strong a guarantee as a byte-level hash comparison
+  here, at a fraction of the cost.
+
+`SignPreparationCapability` (`sign-preparation-capability.ts`) still carries
+the same one new, OPTIONAL, read-only dependency:
+`ArtworkGeometryQualificationCapability`, used ONLY for
+`getCurrentProductionQualifiedMaster`. This widens Signs Phase S1's
+original closed dependency allowlist (`shared/capability-boundaries.ts`'s
+own SIGNS PHASE S1 block, `ProjectRepository` + `AssetCapability` + pure
+modules only) by exactly this one edge — a narrow, one-directional,
+read-only capability→capability dependency, the same shape
+`FinalArtworkWorkerCapability`'s Phase 2E dependency on
+`ConceptEvaluationCapability` already established elsewhere in this
+codebase, never a write path and never the reverse direction. The SAME
+narrow dependency is now also threaded into `FinalArtworkCapability`,
+`FinalArtworkWorkerCapability` (both via `composition.ts`, which
+constructs `artworkGeometryQualification` — and its own dependency
+`artworkReconstruction` — BEFORE `finalArtwork`/`finalArtworkWorker` now,
+reordered for exactly this reason), and `loadSignPlanOperatorReview`
+(passed positionally by its five `sign-artwork-service.ts` call sites and
+its one Server Component render). Every one of these five new/widened call
+sites uses the OPTIONAL-dependency-omitted fallback identically: with
+`artworkGeometryQualification` absent, every currency check resolves
+"original"/"current", byte-for-byte the pre-R6B behavior — so no existing
+non-Signs test or call site changed behavior.
+
+`resolveSignEffectiveSource` is the one place the original/master/blocked
+decision is made:
 
 - **No reconstruction/recovery lifecycle for this project** (no
   `ArtworkFidelityContract`, or a contract with no reconstruction job ever
@@ -11541,19 +11587,78 @@ is the one place this decision is made:
 - **A lifecycle has begun but there is no CURRENT confirmed
   Production-Qualified Clean Master** (job pending review, geometry pending
   confirmation, geometry rejected, geometry unusable, or a superseded
-  fidelity contract with no confirmed geometry of its own yet) → `decodeSignSource`
-  throws. Signs planning/inspection/composition all fail closed through this
-  ONE seam — there is no separate "silent original fallback" code path to
-  forget. This is the hard R6B invariant: once recovery has begun, Signs
-  never silently regresses to the degraded original.
+  fidelity contract with no confirmed geometry of its own yet) → blocked.
 - **A current confirmed master exists** → its own `derivedAssetId` is the
   Signs source. `SignPreparation.originalAssetId` itself is never read,
-  compared, or overwritten by this resolution — only which bytes
-  `decodeSignSource` goes on to download/decode changes. "Current" is never
-  re-derived here; `getCurrentProductionQualifiedMaster` (§23q above) is
-  the one authority for that chain-walk, asked fresh on every planning
-  pass, exactly like this module's own pre-existing "recompute from source
-  every time, never trust stored state" discipline.
+  compared, or overwritten by this resolution — only which bytes get
+  downloaded/decoded changes. "Current" is never re-derived here;
+  `getCurrentProductionQualifiedMaster` (§23q above) is the one authority
+  for that chain-walk, asked fresh on every call, exactly like this
+  module's own pre-existing "recompute from source every time, never trust
+  stored state" discipline.
+
+**Every boundary that can authorize, queue, or execute production now
+consults this authority — six seams, one shared answer, correcting the
+false "one seam" claim above:**
+
+1. **Planning** (`decodeSignSource`/`assertBackgroundTreatmentReadyToPlan`,
+   `sign-preparation-capability.ts`) — unchanged in substance from the
+   first R6B pass; throws (fail closed) when blocked.
+2. **The customer view** (`isSignPlanCurrent` → `conversation-service.ts`'s
+   `resolveSignArtworkView`) — unchanged in substance; replans on read when
+   stale.
+3. **Authorization** (`authorizeSignRepairPlan`) — REPAIRED. Now calls
+   `resolveSignPlanCurrency` BEFORE even the idempotency short-circuit, so
+   a repeat/retried call for an already-authorized plan also fails closed
+   once source authority has moved on since the original authorization —
+   never merely because it matched itself. Blocked → throws with the
+   recovery-in-progress message; stale → throws a distinct "source has
+   changed, re-plan before authorizing" message. No `originalAssetId`
+   mutation either way.
+4. **Production request** (`FinalArtworkCapability.requestSignFinalArtwork`)
+   — REPAIRED. A SECOND, independent currency check (the same
+   "belt and suspenders" discipline this function's own plan-key
+   re-verification already used) — a plan/authorization valid at
+   authorize-time can still go stale in the gap before production is
+   actually requested. Refuses to create/queue a `FinalArtworkJob` in
+   either the blocked or stale case.
+5. **Operator review** (`loadSignPlanOperatorReview`) — REPAIRED,
+   additively. Gains a new `sourceCurrent: boolean` field (computed via the
+   same `resolveSignPlanCurrency`) so the internal review page can reflect
+   reality rather than presenting a stale plan as ordinarily actionable;
+   the actual enforcement is boundaries 3/4/6, not this advisory field.
+6. **Worker execution** (`FinalArtworkWorkerCapability.runSignPreparationJob`)
+   — REPAIRED, two independent fixes:
+   - **Source bytes**: now downloads `assets.downloadAssetBytes(plan.sourceAssetId)`
+     — the exact asset the plan was formulated against — never
+     `preparation.originalAssetId` unconditionally. This was the second,
+     independent defect the review found: even after planning correctly
+     switched to a master, execution could never succeed against it,
+     because the worker was hashing the ORIGINAL's bytes against the
+     MASTER's `plan.sourceSha256` and always hit `source_mismatch`. Fixing
+     the asset id also incidentally fixes a pre-existing, untested,
+     R6B-unrelated latent bug: a Signs `backgroundTreatment: "remove"`
+     plan's `sourceAssetId` was already the background-removal derivative
+     (never literally `preparation.originalAssetId`), so the worker's
+     unconditional original-download was already wrong before R6B for that
+     case too — now correct for both reasons via the same one-line change.
+   - **A THIRD, final re-check**: `resolveSignPlanCurrency` runs again right
+     before execution — source authority can still have moved on in the
+     gap between production request and the worker actually claiming the
+     job. Blocked/stale → `completeWithoutAsset` with a clear reason,
+     never a silent fallback and never an uncaught exception. The
+     pre-existing byte-level `sha256 !== plan.sourceSha256` check
+     immediately after download is UNCHANGED and remains a fourth,
+     independent safety net — now correctly comparing against the right
+     asset's bytes instead of the wrong one.
+
+None of repairs 3-6 add a NEW notion of "current" — all four call the exact
+same `resolveSignPlanCurrency`/`resolveSignSourceAssetId` functions
+planning and the view already used, per the review's own explicit
+instruction: "there should be ONE Signs effective-source authority rule
+reused across: planning, view, authorization, production request, operator
+review" (worker execution makes it six, not five, but the rule is the
+same).
 
 **KEEP/REMOVE background treatment while a master is current.** A
 Production-Qualified Clean Master is always already a governed,
@@ -11592,13 +11697,35 @@ every call).
 **What R6B does not do.** No database migration (dynamic resolution only,
 against the existing `SignRepairPlan.sourceAssetId`/`sourceSha256`/
 `planKey`); no standalone Signs customer authorization; no Continue/Rebuild
-UX; no change to DTF, `FinalArtworkJob`, or `print_ready`; no provider call
-of any kind (Topaz/OpenAI) — `reconstruct_resolution` step SIZING recomputes
-against the master's own dimensions exactly like it already did against the
-original, but R6B itself never executes a repair or calls a provider; QR
-detection/resolution, "Compare Original," and background-removal's own
-derivative computation remain bound to `preparation.originalAssetId`
-exactly as before (untouched by this phase — reviewed, not modified).
+UX; no change to DTF, `FinalArtworkJob` schema, or the definition of
+`print_ready`; no provider call of any kind (Topaz/OpenAI) — a plan
+requiring `reconstruct_resolution` still requires a real, non-throwing
+`SignReconstructionProvider` to actually execute, exactly as before R6B;
+QR detection/resolution and "Compare Original" remain bound to
+`preparation.originalAssetId` exactly as before (untouched by this phase —
+reviewed, not modified); background-removal's OWN derivative-computation
+code path (`setSignBackgroundTreatment`) is likewise untouched — only
+which bytes downstream consumers treat as current changed.
+
+**Known follow-up (P2, source-binding, deliberately deferred).** The
+recovery lifecycle's authority (`ArtworkFidelityContract.sourceAssetId`) is
+bound to `ArtworkPreparation.getOriginalAssetReference(projectId)` — the
+DTF/apparel original — while `SignPreparation.originalAssetId` is a
+SEPARATE asset row, copied byte-for-byte from that same source exactly
+once by `bridgeSignArtworkIfNeeded` (`sign-artwork-service.ts`). Nothing in
+`resolveSignEffectiveSource`/`resolveSignSourceAssetId` independently
+verifies the two are still byte-identical — the invariant is structural
+(the bridge only ever runs once per project, and both originals are
+immutable), never checked at read time. A cheap per-call verification would
+require downloading and hashing the Signs original on every currency
+check, at all six boundaries above — the exact cost this repair's
+`resolveSignSourceAssetId` deliberately eliminated (repository reads only,
+no download) to keep authorization/review-time checks cheap. Given the
+codebase has no path today that could make the two diverge (a Signs
+preparation is created exactly once, always from the bridge), this is left
+as a documented follow-up rather than added speculatively; if a future
+phase ever adds a second, non-bridged way to originate a Signs original,
+this invariant must be revisited before that phase ships.
 
 ---
 

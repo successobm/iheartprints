@@ -261,10 +261,25 @@ export function createCapabilityGraph(
   );
   const workerScheduler = createGenerationSchedulerCapability(generationWorker);
 
+  // Phase R5 (Confirmed-Authority Raster Reconstruction v1) + Phase R6A
+  // (Geometry-Qualified Clean Master): moved ahead of `finalArtwork`/
+  // `finalArtworkWorker` below (R6B repair, Cursor independent review) so
+  // `artworkGeometryQualification` exists in time to be threaded into both
+  // — the Signs authorize/production-request/worker-execution boundaries'
+  // own narrow, optional, read-only dependency on
+  // `getCurrentProductionQualifiedMaster`. `artworkReconstruction` itself
+  // requires no provider (repository-only, mirrors `artworkFidelity`).
+  const artworkReconstruction = createRasterReconstructionCapability(repo);
+  const artworkGeometryQualification = createArtworkGeometryQualificationCapability(
+    repo,
+    assets,
+    artworkReconstruction,
+  );
+
   // Sprint 2M Phase 2B: pure repository-backed capability, no provider/I-O
   // dependency beyond the repository itself — mirrors DesignBriefCapability's
   // shape ("sole mutation path" for its own record).
-  const finalArtwork = createFinalArtworkCapability(repo, acquisition);
+  const finalArtwork = createFinalArtworkCapability(repo, acquisition, artworkGeometryQualification);
   // Sprint 2M Phase 2C: the independent worker that actually claims and
   // runs FinalArtworkJob rows — never invoked from a customer route (same
   // rule as generationWorker/workerScheduler below).
@@ -280,6 +295,9 @@ export function createCapabilityGraph(
     finalArtworkProvider,
     printValidation,
     conceptEvaluation,
+    undefined,
+    undefined,
+    artworkGeometryQualification,
   );
   const finalArtworkScheduler = createFinalArtworkSchedulerCapability(finalArtworkWorker);
 
@@ -295,14 +313,11 @@ export function createCapabilityGraph(
     artworkFidelityProposalProvider,
   );
 
-  // Phase R5 (Confirmed-Authority Raster Reconstruction v1): the thin
-  // authority capability requires no provider itself (repository-only,
-  // mirrors `artworkFidelity`). The worker resolves the GENERATIVE
-  // reconstruction provider independently of every other OpenAI-backed
-  // capability in this graph (own env var, own config resolver) and
-  // reuses `artworkFidelityProposalProvider` ONLY for its verification
-  // step's wording re-check — never for reconstruction itself.
-  const artworkReconstruction = createRasterReconstructionCapability(repo);
+  // The worker resolves the GENERATIVE reconstruction provider
+  // independently of every other OpenAI-backed capability in this graph
+  // (own env var, own config resolver) and reuses
+  // `artworkFidelityProposalProvider` ONLY for its verification step's
+  // wording re-check — never for reconstruction itself.
   const artworkReconstructionProvider = resolveRasterReconstructionProvider();
   const artworkReconstructionWorker = createRasterReconstructionWorkerCapability(
     repo,
@@ -312,11 +327,6 @@ export function createCapabilityGraph(
   );
   const artworkReconstructionScheduler = createArtworkReconstructionSchedulerCapability(
     artworkReconstructionWorker,
-  );
-  const artworkGeometryQualification = createArtworkGeometryQualificationCapability(
-    repo,
-    assets,
-    artworkReconstruction,
   );
 
   // Sprint A5.3: the checkout boundary. Resolves to `provider: null` in every

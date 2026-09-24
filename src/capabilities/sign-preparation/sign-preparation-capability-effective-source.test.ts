@@ -369,6 +369,68 @@ describe("SignPreparationCapability — R6B effective-source handoff", () => {
   });
 
   // ---------------------------------------------------------------------
+  // R6B REPAIR (Cursor independent review, CONFIRMED P1 / Required Repair
+  // #1): authorizeSignRepairPlan must consult Signs effective-source
+  // authority, never just its own persisted plan's self-consistency.
+  // ---------------------------------------------------------------------
+
+  it("R6B repair: an UNAUTHORIZED original-sourced plan cannot be authorized once recovery has begun (pending review, no master yet)", async () => {
+    const built = await build();
+    await uploadRegencyOriginal(built);
+    const outcome = await built.capability.planSignRepair(built.projectId);
+    assert.equal(outcome.result.status, "planned");
+
+    // Recovery begins — a reconstruction job now exists, but there is no
+    // current confirmed master. The exact reviewer-reported reproduction:
+    // `planSignRepair` already refuses (proven above/elsewhere), but
+    // `authorizeSignRepairPlan` must independently refuse too, never
+    // trusting only the persisted plan's own self-consistent hash.
+    const contract = await proposeAndConfirmContract(built);
+    await requestJob(built, contract.id);
+
+    await assert.rejects(() => built.capability.authorizeSignRepairPlan(built.projectId, { authorizedBy: "operator" }));
+    const preparation = await built.capability.getSignPreparation(built.projectId);
+    assert.equal(preparation!.authorizedPlanKey, null);
+  });
+
+  it("R6B repair: an ALREADY-authorized original-sourced plan cannot be re-authorized (even idempotently) once recovery has begun", async () => {
+    const built = await build();
+    await uploadRegencyOriginal(built);
+    const outcome = await built.capability.planSignRepair(built.projectId);
+    assert.equal(outcome.result.status, "planned");
+    await built.capability.authorizeSignRepairPlan(built.projectId, { authorizedBy: "operator" });
+    const authorizedFirst = await built.capability.getSignPreparation(built.projectId);
+    assert.ok(authorizedFirst!.authorizedPlanKey);
+
+    const contract = await proposeAndConfirmContract(built);
+    await requestJob(built, contract.id);
+
+    // A repeat call — even one that would otherwise hit the idempotency
+    // short-circuit (same plan, same already-recorded authorizedPlanKey)
+    // — must still fail closed now that recovery is unresolved. Blocked
+    // authority is never "already fine because it matched itself".
+    await assert.rejects(() => built.capability.authorizeSignRepairPlan(built.projectId, { authorizedBy: "operator" }));
+  });
+
+  it("R6B repair: authorization refuses once a NEWER master has superseded the plan's own source, and succeeds again after an honest replan", async () => {
+    const built = await build();
+    await uploadRegencyOriginal(built);
+    const outcome = await built.capability.planSignRepair(built.projectId);
+    assert.equal(outcome.result.status, "planned");
+    await built.capability.authorizeSignRepairPlan(built.projectId, { authorizedBy: "operator" });
+
+    await buildConfirmedMaster(built);
+    // Deliberately no replan yet — the persisted plan is now stale.
+    await assert.rejects(() => built.capability.authorizeSignRepairPlan(built.projectId, { authorizedBy: "operator" }));
+
+    // The honest path: replan, then authorize the CURRENT plan — succeeds.
+    const replanned = await built.capability.planSignRepair(built.projectId);
+    assert.equal(replanned.result.status, "planned");
+    const authorized = await built.capability.authorizeSignRepairPlan(built.projectId, { authorizedBy: "operator" });
+    assert.equal(authorized.authorizedPlanKey, replanned.preparation.planKey);
+  });
+
+  // ---------------------------------------------------------------------
   // 31/V: AUTHORIZATION INVALIDATION
   // ---------------------------------------------------------------------
 

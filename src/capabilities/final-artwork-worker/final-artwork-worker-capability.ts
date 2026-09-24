@@ -162,6 +162,7 @@ import {
   planContainsOnlyAdmittedSteps,
   planRequiresBoundedReconstruction,
   planRequiresSemanticPreservationVerification,
+  resolveSignPlanCurrency,
   SIGN_EXECUTION_IMPLEMENTATION_VERSION,
   SIGN_RECONSTRUCTION_SCALE_CEILING,
   SIGN_REPAIR_PLAN_SCHEMA_VERSION,
@@ -174,6 +175,7 @@ import {
   type SignRepairPlan,
   type SignRepairStep,
 } from "@/capabilities/sign-preparation";
+import type { ArtworkGeometryQualificationCapability } from "@/capabilities/artwork-reconstruction/artwork-geometry-qualification-capability";
 import {
   hasSignReconstructionCapability,
   hasSignReconstructionResumeCapability,
@@ -485,6 +487,19 @@ export function createFinalArtworkWorkerCapability(
     assets,
     resolveSignPreservationSemanticProvider(undefined, repo),
   ),
+  /**
+   * R6B repair (Cursor independent review, Required Repair #4): the SAME
+   * narrow, optional, read-only dependency `SignPreparationCapability` and
+   * `FinalArtworkCapability` already carry, used ONLY via the shared
+   * `resolveSignPlanCurrency` inside `runSignPreparationJob`'s own
+   * pre-execution fence — never a second reconstruction-authority
+   * integration, and never consulted by any apparel/DTF job path.
+   * `undefined` resolves every currency check to "original", identical to
+   * the pre-R6B behavior, so every existing non-Signs call site and test is
+   * unaffected. Deliberately the LAST parameter, mirroring
+   * `signPreservation`'s own doc above.
+   */
+  artworkGeometryQualification?: ArtworkGeometryQualificationCapability,
 ): FinalArtworkWorkerCapability {
   async function withPeriodicHeartbeat<T>(
     jobId: string,
@@ -2389,6 +2404,27 @@ export function createFinalArtworkWorkerCapability(
       return;
     }
 
+    // R6B repair (Cursor independent review, Required Repair #4): a THIRD,
+    // final re-check of the same fact `authorizeSignRepairPlan` and
+    // `requestSignFinalArtwork` already checked — Signs source authority
+    // can still have moved on (a Production-Qualified Clean Master became
+    // current, or superseded a prior one) in the gap between request and
+    // this worker actually claiming the job. Never execute a plan whose
+    // current authority has changed; never silently fall back to
+    // `preparation.originalAssetId`. Uses the SAME shared resolver every
+    // other Signs boundary uses — never a fourth, independent notion of
+    // "current".
+    const currency = await resolveSignPlanCurrency(repo, artworkGeometryQualification, preparation, plan);
+    if (currency.status !== "current") {
+      await completeWithoutAsset(
+        job,
+        currency.status === "blocked"
+          ? currency.reason
+          : "This artwork's source has changed since this plan was formulated and was not executed.",
+      );
+      return;
+    }
+
     const containsOnlyAdmittedSteps = planContainsOnlyAdmittedSteps(plan);
     const needsReconstruction = planRequiresBoundedReconstruction(plan);
     const reconstructionSplit = needsReconstruction ? splitPlanAroundReconstruction(plan) : null;
@@ -2485,7 +2521,18 @@ export function createFinalArtworkWorkerCapability(
       }
 
       const result = await withPeriodicHeartbeat(job.id, async () => {
-        const downloaded = await assets.downloadAssetBytes(preparation.originalAssetId);
+        // R6B repair (Cursor independent review, Required Repair #4): the
+        // plan's OWN `sourceAssetId` — the exact asset the plan was
+        // formulated against and the currency check above just re-verified
+        // is still current — never `preparation.originalAssetId`
+        // unconditionally. Before this repair, a plan correctly sourced
+        // from a Production-Qualified Clean Master (or, pre-existing and
+        // independent of R6B, from a background-removal derivative) could
+        // never execute: this download always fetched the immutable
+        // original, which can never hash-match `plan.sourceSha256` for
+        // either case, and always failed at the `source_mismatch` check
+        // below. `SignPreparation.originalAssetId` itself is never touched.
+        const downloaded = await assets.downloadAssetBytes(plan.sourceAssetId);
         if (!downloaded) {
           return { outcome: "no_source" as const };
         }
