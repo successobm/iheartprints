@@ -1073,6 +1073,39 @@ async function resolveGeometryQualificationView(
     // imports `getConversation` from THIS file) — mirrors
     // `resolveArtworkReconstructionView`'s own identical choice above.
     const graph = getCapabilityGraph();
+
+    // Live REGENCY resume defect repair: the AUTHORITATIVE "is there a
+    // current confirmed master" answer — `getCurrentProductionQualifiedMaster`,
+    // the SAME resolver `confirmQualification`/`rejectQualification` (via
+    // `resolveCurrentQualification`) and R6B's own Signs effective-source
+    // resolution already trust — is consulted FIRST and takes precedence
+    // over the per-job read below. This view was previously derived
+    // independently: it re-picked "the current job"
+    // (`getCurrentAcceptedMaster`) and asked `ensureQualification` for
+    // THAT job specifically, which can disagree with what a confirm/reject
+    // click will actually do the moment "current" has moved on (a newer
+    // reconstruction attempt, a corrected contract, or anything else that
+    // changes which job/qualification is current between one snapshot
+    // read and the next) — the exact shape of the live defect: the view
+    // rendered an actionable "Check the cleaned artwork" card while the
+    // confirm action correctly, and separately, refused with "This artwork
+    // has already been reviewed." Asking the SAME authoritative function
+    // both places makes that disagreement structurally impossible, without
+    // touching `confirmQualification`/`rejectQualification`'s own fail-closed
+    // authority at all. Falls through to the existing per-job resolution
+    // unchanged whenever no confirmed master is current yet (nothing to
+    // short-circuit: no lifecycle, still pending, rejected, or unusable
+    // all continue to resolve exactly as before).
+    const currentMaster =
+      await graph.artworkGeometryQualification.getCurrentProductionQualifiedMaster(projectId);
+    if (currentMaster) {
+      return {
+        qualificationId: currentMaster.id,
+        reconstructionJobId: currentMaster.reconstructionJobId,
+        status: currentMaster.qualificationStatus,
+      };
+    }
+
     const contract = await graph.artworkFidelity.getContract(projectId);
     if (!contract || contract.status !== "confirmed") return null;
     const job = await graph.artworkReconstruction.getCurrentAcceptedMaster(
