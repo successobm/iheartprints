@@ -32,6 +32,24 @@
 # locking of its own; `concurrency` below only avoids piling up redundant
 # GitHub-hosted runners, never a correctness requirement.
 #
+# OBSERVABILITY (Bounded FinalArtwork Production-Execution Repair): a live
+# incident (a real Topaz job stalled for hours, see the accompanying
+# architecture audit) was masked for a long time by a run that stayed green
+# despite an HTTP 504 hidden among otherwise-successful calls -- the ONLY
+# health signal this workflow had was "did at least one of four calls
+# return 200," which a single genuine gateway/infra problem could not fail.
+# Every one of the four calls still runs to completion (a later call may
+# still succeed even after an earlier one failed, and the worker route's
+# own execution is now bounded -- see `topaz-transparency-upscale-
+# provider.ts`'s `produceBounded` -- so a normal call should never itself
+# time out), but the RUN now fails (non-zero exit, a visible red run in the
+# Actions UI) whenever ANY of the four calls returns a non-200 status, not
+# only when all four do. Recovery still does not depend on this workflow's
+# reported status: a "failed" run does not cancel or block the next
+# independently-scheduled cron tick (`concurrency.cancel-in-progress:
+# false` above), so a real infra blip is now visible AND self-heals on the
+# next tick exactly as before -- it just no longer hides inside a green run.
+#
 # SECURITY: the ONE secret this workflow needs is `WORKER_SECRET` -- the
 # SAME production secret this app's `POST /api/worker/*` routes already
 # require (see docs/deployment/final-artwork-worker.md's "Configuration"
@@ -71,6 +89,7 @@ jobs:
           fi
 
           success_count=0
+          failure_count=0
           last_status="000"
 
           # ~4 minutes of once-a-minute polling per five-minute scheduled
@@ -84,6 +103,13 @@ jobs:
             echo "final-artwork worker trigger #$i -> HTTP $last_status"
             if [ "$last_status" = "200" ]; then
               success_count=$((success_count + 1))
+            else
+              failure_count=$((failure_count + 1))
+              # Visible even before this run's final verdict -- a 504 (or
+              # any other non-200) among the four calls is recorded as a
+              # warning annotation immediately, in addition to failing the
+              # run below.
+              echo "::warning::final-artwork worker trigger #$i returned HTTP $last_status (non-200)."
             fi
             if [ "$i" -lt 4 ]; then
               sleep 60
@@ -92,5 +118,10 @@ jobs:
 
           if [ "$success_count" -eq 0 ]; then
             echo "::error::Every attempt in this run failed (last HTTP status: $last_status). Check IHEARTPRINTS deployment health and the WORKER_SECRET value."
+            exit 1
+          fi
+
+          if [ "$failure_count" -gt 0 ]; then
+            echo "::error::$failure_count of 4 worker trigger calls this run returned a non-200 status -- failing this run so the problem is visible, even though $success_count call(s) succeeded and durable jobs will still progress on the next tick. See the individual trigger log lines/annotations above for exact status codes."
             exit 1
           fi

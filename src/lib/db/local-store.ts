@@ -2128,12 +2128,15 @@ export class LocalProjectRepository implements ProjectRepository {
     return job;
   }
 
-  async claimNextQueuedFinalArtworkJob(): Promise<FinalArtworkJob | null> {
+  async claimNextQueuedFinalArtworkJob(
+    excludeJobIds: readonly string[] = [],
+  ): Promise<FinalArtworkJob | null> {
     const db = await readDb();
+    const excludeSet = new Set(excludeJobIds);
     const candidates = db.finalArtworkJobs
       .filter((job) => job.status === "queued" || job.status === "recoverable")
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    const job = candidates[0];
+    const job = candidates.find((candidate) => !excludeSet.has(candidate.id));
     if (!job) return null;
 
     // Mirrors `claimNextQueuedJob`'s comment: a single-process local store

@@ -90,6 +90,7 @@ import type {
   StoredRequestedProductionOutput,
 } from "@/lib/domain/types";
 import { printPlacementLabel } from "@/lib/domain/print-placement";
+import { wakeFinalArtworkWorker } from "@/lib/services/final-artwork-http-wake";
 import {
   maybeRecoverStrandedLocalFinalArtworkJobs,
   maybeTriggerLocalFinalArtworkWorker,
@@ -1554,6 +1555,7 @@ export async function approveFinalDirection(
     apiSnapshot,
     "approve_final_direction",
   );
+  await maybeWakeFinalArtworkWorker(apiSnapshot, "approve_final_direction");
   return apiSnapshot;
 }
 
@@ -1738,6 +1740,22 @@ function maybeKickLocalFinalArtworkWorker(
 ): void {
   if (snapshot.project.status !== "finalizing") return;
   maybeTriggerLocalFinalArtworkWorker({ projectId, reason });
+}
+
+/**
+ * Bounded FinalArtwork Production-Execution Repair: production's
+ * counterpart to `maybeKickLocalFinalArtworkWorker` above — a best-effort,
+ * bounded, authenticated wake of the same worker route, for the one
+ * environment the in-process kick deliberately never runs in. Never
+ * awaited for correctness elsewhere; its own internal timeout bounds it,
+ * and every failure is swallowed rather than thrown to the caller.
+ */
+async function maybeWakeFinalArtworkWorker(
+  snapshot: ApiProjectSnapshot,
+  reason: LocalFinalArtworkTriggerReason,
+): Promise<void> {
+  if (snapshot.project.status !== "finalizing") return;
+  await wakeFinalArtworkWorker({ reason });
 }
 
 /**

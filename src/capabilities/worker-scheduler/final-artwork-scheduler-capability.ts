@@ -68,10 +68,20 @@ export function createFinalArtworkSchedulerCapability(
     const { recoveredCount } = await worker.recoverAbandonedJobs(staleAfterMs);
 
     const processedJobIds: string[] = [];
+    // Bounded FinalArtwork Production-Execution Repair (liveness): jobs
+    // this SAME batch already found still bounded-pending. Excluding them
+    // from further claims this batch is what lets an indefinitely-pending
+    // provider request (which keeps returning to `recoverable` and
+    // therefore keeps winning "oldest due") make way for a newer,
+    // unrelated job within the batch's remaining slots, instead of that
+    // one stuck job re-winning every claim and the loop giving up early —
+    // see the repaired `claimNextQueuedFinalArtworkJob(excludeJobIds)`.
+    const pendingThisBatch: string[] = [];
     for (let i = 0; i < maxJobsPerRun; i += 1) {
-      const { processedJobId } = await worker.processNextJob();
+      const { processedJobId, pending } = await worker.processNextJob(pendingThisBatch);
       if (!processedJobId) break;
       processedJobIds.push(processedJobId);
+      if (pending) pendingThisBatch.push(processedJobId);
     }
 
     return {

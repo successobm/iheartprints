@@ -478,6 +478,57 @@ describe("SupabaseProjectRepository — final artwork worker (Sprint 2M Phase 2C
     assert.equal(second, null);
   });
 
+  it("Bounded FinalArtwork Production-Execution Repair (liveness): excludeJobIds skips the oldest due job in favor of the next-oldest one", async () => {
+    const { client } = createFakeClient();
+    const repo = new SupabaseProjectRepository(client);
+
+    // Three distinct jobs, oldest to newest, via three distinct approvals
+    // (createFinalArtworkJob is unique per project+approval — this is the
+    // only way to get multiple independently-claimable rows for one
+    // project through the public repository surface).
+    const jobs = [];
+    for (let i = 0; i < 3; i += 1) {
+      // Only one ACTIVE FinalDirectionApproval is allowed per project at a
+      // time -- supersede the previous one first so this loop can create
+      // three independently-claimable jobs for the same project.
+      await repo.supersedeActiveFinalDirectionApproval("project-1");
+      const approval = await repo.createFinalDirectionApproval("project-1", {
+        artworkVersionId: `artwork-${i}`,
+        designBriefVersionId: `version-${i}`,
+      });
+      jobs.push(
+        await repo.createFinalArtworkJob("project-1", {
+          sourceKind: "generated_concept",
+          finalDirectionApprovalId: approval.id,
+          artworkVersionId: `artwork-${i}`,
+          requestedProductionOutput: "production_png",
+          productionTreatmentKey: "standard_raster",
+          productionWidthIn: 10.5,
+        }),
+      );
+    }
+    const [oldest, middle, newest] = jobs;
+
+    // Excluding the oldest (as if it was already claimed and found
+    // bounded-pending earlier in the same batch) must claim the
+    // next-oldest, not report "nothing to claim".
+    const claimed = await repo.claimNextQueuedFinalArtworkJob([oldest!.id]);
+    assert.equal(claimed?.id, middle!.id, "must skip the excluded oldest row and claim the next-oldest due row");
+
+    // Excluding BOTH already-considered rows correctly reaches the last one.
+    const claimedNext = await repo.claimNextQueuedFinalArtworkJob([oldest!.id, middle!.id]);
+    assert.equal(claimedNext?.id, newest!.id);
+
+    // Excluding every remaining candidate correctly reports nothing to claim
+    // (never falls back to an excluded row merely because none other exist).
+    const claimedNone = await repo.claimNextQueuedFinalArtworkJob([oldest!.id, middle!.id, newest!.id]);
+    assert.equal(claimedNone, null);
+
+    // With no exclusions at all, the untouched oldest row is still claimable.
+    const claimedOldest = await repo.claimNextQueuedFinalArtworkJob();
+    assert.equal(claimedOldest?.id, oldest!.id);
+  });
+
   it("touchFinalArtworkJobHeartbeat and updateFinalArtworkJob mutate the expected fields", async () => {
     const { client } = createFakeClient();
     const repo = new SupabaseProjectRepository(client);

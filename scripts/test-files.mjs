@@ -190,6 +190,7 @@ export const TEST_FILES = [
   "src/lib/config/local-generation-trigger-policy.test.ts",
   "src/lib/services/local-generation-trigger.test.ts",
   "src/lib/services/local-final-artwork-trigger.test.ts",
+  "src/lib/services/final-artwork-http-wake.test.ts",
   "src/app/api/dev/local-generation-trigger/route.test.ts",
   "src/capabilities/composition-test-safety.test.ts",
   "src/capabilities/generation-worker/generation-worker-claim-init.test.ts",
@@ -278,6 +279,7 @@ export const TEST_FILES = [
   // for a source that already satisfies the production target.
   "src/capabilities/final-artwork-worker/topaz-provider-selection-and-invocation.test.ts",
   "src/capabilities/final-artwork-worker/topaz-download-resume-recovery.test.ts",
+  "src/capabilities/final-artwork-worker/bounded-topaz-execution.test.ts",
   "src/capabilities/final-artwork-worker/final-artwork-attempt-budget.test.ts",
   "src/capabilities/conversation/production-treatment-authorization.test.ts",
   "src/components/chat/production-treatment-dead-end.test.tsx",

@@ -50,6 +50,7 @@ import {
 import type { RgbaImage } from "./raster-transform";
 import type {
   FinalArtworkProvider,
+  FinalArtworkProviderBoundedResult,
   FinalArtworkProviderInput,
   FinalArtworkProviderIntermediateReconstruction,
   FinalArtworkProviderOutput,
@@ -746,6 +747,350 @@ export class TopazTransparencyUpscaleProvider
       return this.produceSinglePass(input, source);
     }
     return this.produceTwoPass(input, source, plan.pass1);
+  }
+
+  /**
+   * Bounded FinalArtwork Production-Execution Repair: the bounded
+   * counterpart to `produce()` above — identical routing/decode logic
+   * (deliberately duplicated rather than shared, so `produce()` and
+   * everything Signs calls through `runReconstructionPass`/`pollUntilDone`
+   * stay byte-for-byte unmodified), but every step below performs AT MOST
+   * one submit or one status check before returning, never a blocking
+   * poll loop.
+   */
+  async produceBounded(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderBoundedResult> {
+    if (input.sourceContentType !== "image/png") {
+      throw new Error(
+        `TopazTransparencyUpscaleProvider only supports image/png source assets (got "${input.sourceContentType}").`,
+      );
+    }
+
+    let source: PNG;
+    try {
+      source = PNG.sync.read(input.sourceBytes);
+    } catch (error) {
+      throw new Error(
+        `Source asset bytes could not be decoded as a PNG: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const plan: StandardRasterReconstructionPlan = input.existingIntermediateReconstruction
+      ? { kind: "two_pass", pass1: resolveMaximalSinglePassRequest(source) }
+      : planStandardRasterReconstruction(
+          { width: source.width, height: source.height, data: source.data },
+          input.sizing,
+        );
+
+    if (plan.kind === "no_visible_artwork" || plan.kind === "insufficient") {
+      throw new ProviderError("invalid_request", plan.reason, "not_dispatched");
+    }
+
+    if (plan.kind === "single_pass") {
+      return this.produceSinglePassBounded(input, source);
+    }
+    return this.produceTwoPassBounded(input, source, plan.pass1);
+  }
+
+  /** Bounded counterpart to `produceSinglePass` — see `produceBounded`'s doc comment. */
+  private async produceSinglePassBounded(
+    input: FinalArtworkProviderInput,
+    source: PNG,
+  ): Promise<FinalArtworkProviderBoundedResult> {
+    const resolved = resolveReconstructionRequest(
+      { width: source.width, height: source.height, data: source.data },
+      input.sizing,
+    );
+    if (resolved.status !== "resolved") {
+      throw new ProviderError("invalid_request", resolved.reason, "not_dispatched");
+    }
+    const targetReconstructedWidth = resolved.request.widthPx;
+    const targetReconstructedHeight = resolved.request.heightPx;
+
+    const step = await this.submitOrCheckOnce(
+      input.sourceBytes,
+      { widthPx: targetReconstructedWidth, heightPx: targetReconstructedHeight },
+      source.width,
+      source.height,
+      input.existingProviderRequest ?? null,
+      input.onProviderRequestSubmitted,
+    );
+    if (step.kind === "pending") return { status: "pending" };
+
+    const geometryCheck = validateReconstructedGeometry({
+      sourceWidthPx: source.width,
+      sourceHeightPx: source.height,
+      targetWidthPx: targetReconstructedWidth,
+      targetHeightPx: targetReconstructedHeight,
+      actualWidthPx: step.png.width,
+      actualHeightPx: step.png.height,
+    });
+    if (!geometryCheck.valid) {
+      throw new ProviderError("malformed_response", geometryCheck.reason);
+    }
+
+    const output = this.finalizeFromReconstructed(step.png, input.sizing, {
+      processId: step.processId,
+      nativeWidthPx: source.width,
+      nativeHeightPx: source.height,
+    });
+    return { status: "completed", ...output };
+  }
+
+  /**
+   * Bounded counterpart to `produceTwoPass` — see `produceBounded`'s doc
+   * comment. Mirrors its exact invariants (pass 2 sized from pass 1's REAL
+   * output, pass 1 persisted before pass 2 is ever submitted, pass 2
+   * skipped entirely when pass 1 alone already suffices), restructured so
+   * each pass's own submit/check is bounded and a single invocation
+   * returns as soon as it has done one bounded unit of work.
+   */
+  private async produceTwoPassBounded(
+    input: FinalArtworkProviderInput,
+    source: PNG,
+    pass1Request: { widthPx: number; heightPx: number },
+  ): Promise<FinalArtworkProviderBoundedResult> {
+    const existingIntermediate = input.existingIntermediateReconstruction ?? null;
+
+    if (!existingIntermediate) {
+      // Still on pass 1: submit (fresh) or check (resume) it, bounded.
+      const step = await this.submitOrCheckOnce(
+        input.sourceBytes,
+        pass1Request,
+        source.width,
+        source.height,
+        input.existingProviderRequest ?? null,
+        input.onProviderRequestSubmitted,
+      );
+      if (step.kind === "pending") return { status: "pending" };
+
+      const pass1GeometryCheck = validateReconstructedGeometry({
+        sourceWidthPx: source.width,
+        sourceHeightPx: source.height,
+        targetWidthPx: pass1Request.widthPx,
+        targetHeightPx: pass1Request.heightPx,
+        actualWidthPx: step.png.width,
+        actualHeightPx: step.png.height,
+      });
+      if (!pass1GeometryCheck.valid) {
+        throw new ProviderError("malformed_response", `First reconstruction pass: ${pass1GeometryCheck.reason}`);
+      }
+
+      const pass1Png = step.png;
+      const pass1Image: RgbaImage = { width: pass1Png.width, height: pass1Png.height, data: pass1Png.data };
+      const pass2Plan = resolveReconstructionRequest(pass1Image, input.sizing);
+      if (pass2Plan.status !== "resolved") {
+        throw new ProviderError(
+          "invalid_request",
+          `Even a second reconstruction pass is not enough: ${pass2Plan.reason}`,
+          "not_dispatched",
+        );
+      }
+
+      if (pass2Plan.request.scale <= 1) {
+        // Pass 1 alone already meets the target — finalize now, exactly
+        // like `produceTwoPass`; no intermediate persisted, no pass 2.
+        const output = this.finalizeFromReconstructed(pass1Png, input.sizing, {
+          processId: step.processId,
+          nativeWidthPx: source.width,
+          nativeHeightPx: source.height,
+        });
+        return { status: "completed", ...output };
+      }
+
+      // Pass 2 is genuinely needed: persist pass 1's validated output NOW
+      // (mirrors `produceTwoPass`'s own ordering — a crash after this
+      // resolves never re-spends pass 1's paid credit), then submit pass 2
+      // and check it once, bounded — routed through the SAME
+      // `submitOrCheckOnce` pass 2's resume branch below uses, so a pass 2
+      // that completes fast (as every existing test's fake Topaz does)
+      // finishes within this SAME invocation, exactly like the blocking
+      // `produceTwoPass` already does, while a genuinely slow pass 2
+      // (real Topaz) correctly returns pending instead of blocking.
+      const intermediate: FinalArtworkProviderIntermediateReconstruction = {
+        bytes: PNG.sync.write(pass1Png),
+        widthPx: pass1Png.width,
+        heightPx: pass1Png.height,
+        providerRequestId: step.processId,
+      };
+      await input.onIntermediateReconstructionProduced?.(intermediate);
+
+      // Pass 2 is always a fresh submission at this exact transition — the
+      // worker's own self-heal clears any pass-1-scoped `providerRequestId`
+      // before this call, mirroring `produceTwoPass`'s own reasoning.
+      const pass2Step = await this.submitOrCheckOnce(
+        PNG.sync.write(pass1Png),
+        { widthPx: pass2Plan.request.widthPx, heightPx: pass2Plan.request.heightPx },
+        pass1Png.width,
+        pass1Png.height,
+        null,
+        input.onProviderRequestSubmitted,
+      );
+      if (pass2Step.kind === "pending") return { status: "pending" };
+
+      const pass2GeometryCheckFresh = validateReconstructedGeometry({
+        sourceWidthPx: pass1Png.width,
+        sourceHeightPx: pass1Png.height,
+        targetWidthPx: pass2Plan.request.widthPx,
+        targetHeightPx: pass2Plan.request.heightPx,
+        actualWidthPx: pass2Step.png.width,
+        actualHeightPx: pass2Step.png.height,
+      });
+      if (!pass2GeometryCheckFresh.valid) {
+        throw new ProviderError("malformed_response", `Second reconstruction pass: ${pass2GeometryCheckFresh.reason}`);
+      }
+      const freshTwoPassOutput = this.finalizeFromReconstructed(pass2Step.png, input.sizing, {
+        processId: pass2Step.processId,
+        nativeWidthPx: source.width,
+        nativeHeightPx: source.height,
+      });
+      return { status: "completed", ...freshTwoPassOutput };
+    }
+
+    // Pass 1 already durably exists from a prior attempt — resume/check pass 2.
+    let pass1Png: PNG;
+    try {
+      pass1Png = PNG.sync.read(existingIntermediate.bytes);
+    } catch (error) {
+      throw new ProviderError(
+        "malformed_response",
+        `The persisted first-pass reconstruction could not be decoded as a PNG: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    const pass1Image: RgbaImage = { width: pass1Png.width, height: pass1Png.height, data: pass1Png.data };
+    const pass2Plan = resolveReconstructionRequest(pass1Image, input.sizing);
+    if (pass2Plan.status !== "resolved") {
+      throw new ProviderError(
+        "invalid_request",
+        `Even a second reconstruction pass is not enough: ${pass2Plan.reason}`,
+        "not_dispatched",
+      );
+    }
+
+    if (pass2Plan.request.scale <= 1) {
+      // Defensive mirror of `produceTwoPass`'s identical branch — pass 1
+      // alone already suffices even though a pass 2 request/intermediate
+      // exists (e.g. the sizing policy changed between attempts).
+      const output = this.finalizeFromReconstructed(pass1Png, input.sizing, {
+        processId: existingIntermediate.providerRequestId,
+        nativeWidthPx: source.width,
+        nativeHeightPx: source.height,
+      });
+      return { status: "completed", ...output };
+    }
+
+    const step = await this.submitOrCheckOnce(
+      PNG.sync.write(pass1Png),
+      { widthPx: pass2Plan.request.widthPx, heightPx: pass2Plan.request.heightPx },
+      pass1Png.width,
+      pass1Png.height,
+      input.existingProviderRequest ?? null,
+      input.onProviderRequestSubmitted,
+    );
+    if (step.kind === "pending") return { status: "pending" };
+
+    const pass2GeometryCheck = validateReconstructedGeometry({
+      sourceWidthPx: pass1Png.width,
+      sourceHeightPx: pass1Png.height,
+      targetWidthPx: pass2Plan.request.widthPx,
+      targetHeightPx: pass2Plan.request.heightPx,
+      actualWidthPx: step.png.width,
+      actualHeightPx: step.png.height,
+    });
+    if (!pass2GeometryCheck.valid) {
+      throw new ProviderError("malformed_response", `Second reconstruction pass: ${pass2GeometryCheck.reason}`);
+    }
+
+    const output = this.finalizeFromReconstructed(step.png, input.sizing, {
+      processId: step.processId,
+      nativeWidthPx: source.width,
+      nativeHeightPx: source.height,
+    });
+    return { status: "completed", ...output };
+  }
+
+  /**
+   * Bounded submit-or-check primitive shared by both bounded producers
+   * above: submits or resumes (never resubmits — same `submitOrResumePass`
+   * the blocking path uses, unmodified), then performs exactly ONE status
+   * check (never `pollUntilDone`'s loop), downloading and decoding only if
+   * that single check reports completion.
+   *
+   * A single check right after a FRESH submission (rather than
+   * unconditionally returning pending) is deliberate: Topaz occasionally
+   * completes fast enough that the very next check already sees
+   * `"Completed"`, and every existing test's fake Topaz endpoint answers
+   * `/status/` as `"Completed"` immediately, with no simulated delay — so
+   * this keeps a single bounded invocation able to finish a fast job in
+   * one call, exactly like the blocking path always could, while a
+   * genuinely slow job (real Topaz's normal 70-130s) still correctly
+   * returns pending rather than blocking to find out.
+   */
+  private async submitOrCheckOnce(
+    sourceBytes: Buffer,
+    request: { widthPx: number; heightPx: number },
+    sourceWidth: number,
+    sourceHeight: number,
+    existingProviderRequest: FinalArtworkProviderResumeContext | null,
+    onProviderRequestSubmitted: ((providerRequestId: string) => Promise<void>) | undefined,
+  ): Promise<{ kind: "pending" } | { kind: "done"; processId: string; png: PNG }> {
+    // `submitOrResumePass` itself persists a NEW request's identity (via
+    // `onProviderRequestSubmitted`) before returning, so a crash immediately
+    // after this call is already resumable without a second paid submission.
+    const processId = await this.submitOrResumePass(
+      sourceBytes,
+      request,
+      sourceWidth,
+      sourceHeight,
+      existingProviderRequest,
+      onProviderRequestSubmitted,
+    );
+
+    // Bounded: a single status check, never `pollUntilDone`'s loop.
+    const status = await withRetry(() => this.fetchStatus(processId), {
+      attempts: DEFAULT_MAX_POLL_ATTEMPTS_FOR_RETRY,
+      isRetryable: isRetryableProviderError,
+      delayMs: (attempt) => 500 * attempt,
+      sleep: this.sleepImpl,
+    });
+
+    if (status === "Failed" || status === "Cancelled") {
+      throw new ProviderError(
+        "provider_job_failed",
+        `The production reconstruction provider reported this request as "${status}".`,
+        undefined,
+        "poll",
+      );
+    }
+    if (status !== "Completed") {
+      return { kind: "pending" };
+    }
+
+    // "Fix Topaz Resume/Download Failure": same bounded, local retry of the
+    // readback step `runReconstructionPass` uses — never resubmits,
+    // `processId` is fixed, only the readback itself is retried.
+    const bytes = await withRetry(() => this.download(processId), {
+      attempts: this.downloadAttempts,
+      isRetryable: isRetryableProviderError,
+      delayMs: (attempt) => 500 * attempt,
+      sleep: this.sleepImpl,
+    });
+    let png: PNG;
+    try {
+      png = PNG.sync.read(bytes);
+    } catch (error) {
+      throw new ProviderError(
+        "malformed_response",
+        `The production reconstruction provider returned bytes that could not be decoded as a PNG: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        undefined,
+        "download",
+      );
+    }
+    return { kind: "done", processId, png };
   }
 
   /**
