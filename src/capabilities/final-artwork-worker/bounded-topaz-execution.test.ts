@@ -133,6 +133,77 @@ function buildControllableStatusFakeTopazFetch(reconstructedWidthPx: number, rec
   };
 }
 
+/**
+ * Bounded FinalArtwork Production-Execution Repair (liveness): a fake
+ * Topaz endpoint set that assigns a FRESH process id per submission
+ * (rather than one fixed id for the whole test), with independently
+ * controllable per-process status -- defaulting to permanently
+ * "Processing" unless explicitly marked "Completed". Models two or more
+ * DIFFERENT jobs' provider requests in flight at once, which
+ * `buildControllableStatusFakeTopazFetch`'s single fixed id cannot.
+ */
+function buildMultiRequestFakeTopazFetch(reconstructedWidthPx: number, reconstructedHeightPx: number) {
+  let nextProcessSeq = 0;
+  const statusByProcessId = new Map<string, "processing" | "completed">();
+  const submitCountByProcessId = new Map<string, number>();
+  const statusCallCountByProcessId = new Map<string, number>();
+
+  const impl = (async (input: string | URL | Request) => {
+    const url = typeof input === "string" ? input : input.toString();
+
+    if (url.endsWith("/tool/async")) {
+      nextProcessSeq += 1;
+      const processId = `multi-process-${nextProcessSeq}`;
+      submitCountByProcessId.set(processId, (submitCountByProcessId.get(processId) ?? 0) + 1);
+      statusByProcessId.set(processId, "processing");
+      return new Response(JSON.stringify({ process_id: processId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.includes("/status/")) {
+      const processId = url.split("/status/")[1]!;
+      statusCallCountByProcessId.set(processId, (statusCallCountByProcessId.get(processId) ?? 0) + 1);
+      const mode = statusByProcessId.get(processId) ?? "processing";
+      return new Response(JSON.stringify({ status: mode === "completed" ? "Completed" : "Processing" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.includes("/download/")) {
+      const processId = url.split("/download/")[1]!;
+      return new Response(JSON.stringify({ url: `https://cdn.example.com/bounded-output-${processId}.png` }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.startsWith("https://cdn.example.com/bounded-output-")) {
+      const png = new PNG({ width: reconstructedWidthPx, height: reconstructedHeightPx });
+      for (let i = 0; i < png.data.length; i += 4) {
+        png.data[i] = 10;
+        png.data[i + 1] = 90;
+        png.data[i + 2] = 200;
+        png.data[i + 3] = 255;
+      }
+      return new Response(new Uint8Array(PNG.sync.write(png)), {
+        status: 200,
+        headers: { "content-type": "image/png" },
+      });
+    }
+    throw new Error(`FORBIDDEN: no real network target is reachable from this test; got ${url}`);
+  }) as typeof fetch;
+
+  return {
+    fetchImpl: impl,
+    submitCountTotal: () => [...submitCountByProcessId.values()].reduce((a, b) => a + b, 0),
+    statusCallCountFor: (processId: string) => statusCallCountByProcessId.get(processId) ?? 0,
+    markCompleted: (processId: string) => {
+      statusByProcessId.set(processId, "completed");
+    },
+    knownProcessIds: () => [...submitCountByProcessId.keys()],
+  };
+}
+
 describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through the real worker", () => {
   let tempDir = "";
   let previousCwd = "";
@@ -426,5 +497,79 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
 
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job!.id);
     assert.ok(validation, "a job recovered from many benign pending checks must still reach real print validation");
+  });
+
+  it("5: an indefinitely-pending older job does not starve a newer, unrelated job within the same batch (liveness repair)", async () => {
+    // Two independent projects, created in order -- `setup()` builds a
+    // fresh `LocalProjectRepository()` each call, but both point at the
+    // SAME shared store file for this test's one temp workspace, so a
+    // single worker/scheduler sees both projects' jobs.
+    const older = await setup(400);
+    const newer = await setup(400);
+    const { repo, assets } = newer;
+
+    const expectedRequest = expectedReconstructionRequest(400);
+    const { fetchImpl, submitCountTotal, statusCallCountFor, markCompleted, knownProcessIds } =
+      buildMultiRequestFakeTopazFetch(expectedRequest.widthPx, expectedRequest.heightPx);
+
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+    });
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const printValidation = createPrintValidationCapability();
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
+    const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 5 });
+
+    // The OLDER job -- its provider request will be marked "Processing"
+    // forever in this test, modeling an indefinitely-pending Topaz job.
+    const olderRequested = await finalArtwork.requestPreparedUploadFinalArtwork(older.projectId);
+    // The NEWER job -- created after, so it is never the "oldest due" row.
+    const newerRequested = await finalArtwork.requestPreparedUploadFinalArtwork(newer.projectId);
+
+    // First batch: claims and submits the older job (fresh, iteration 1),
+    // reclaims it once more as a resume check (iteration 2, still
+    // pending) -- WITHOUT the liveness repair, the batch would stop there
+    // (or keep re-claiming the same stuck job) and never reach the newer
+    // one at all within this batch.
+    await scheduler.runBatch();
+
+    const olderAfterBatch1 = await repo.getFinalArtworkJob(olderRequested.job.id);
+    assert.equal(olderAfterBatch1?.status, "recoverable", "the indefinitely-pending job stays recoverable, never failed");
+
+    const newerAfterBatch1 = await repo.getFinalArtworkJob(newerRequested.job.id);
+    assert.notEqual(
+      newerAfterBatch1?.status,
+      "queued",
+      "the newer job must have been claimed and progressed within the SAME batch, not left untouched behind the stuck older job",
+    );
+
+    // The newer job's own provider request completes quickly.
+    assert.equal(knownProcessIds().length, 2, "both jobs must have reached a real, distinct provider submission");
+    const newerProcessId = knownProcessIds()[1]!;
+    markCompleted(newerProcessId);
+
+    // A second batch lets the newer job's own already-submitted request
+    // resolve to completion, while the older one is STILL never marked
+    // completed -- proving the older job's indefinite pendingness never
+    // blocked the newer one from reaching a real terminal outcome.
+    await scheduler.runBatch();
+
+    const newerAfterBatch2 = await repo.getFinalArtworkJob(newerRequested.job.id);
+    assert.equal(newerAfterBatch2?.status, "completed", "the newer job must reach completion despite the older one remaining stuck");
+
+    const olderAfterBatch2 = await repo.getFinalArtworkJob(olderRequested.job.id);
+    assert.equal(olderAfterBatch2?.status, "recoverable", "the older job remains legitimately pending, not failed or abandoned");
+
+    assert.equal(submitCountTotal(), 2, "exactly one submission per job across the whole test -- never resubmitted");
+    assert.ok(statusCallCountFor(newerProcessId) >= 1, "the newer job's request was genuinely checked");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(
+      newer.projectId,
+      newerAfterBatch2!.id,
+    );
+    assert.ok(validation, "the newer job must still reach real print validation");
   });
 });

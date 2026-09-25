@@ -2933,22 +2933,38 @@ export class SupabaseProjectRepository implements ProjectRepository {
     return mapFinalArtworkJob(data as DbFinalArtworkJob);
   }
 
-  async claimNextQueuedFinalArtworkJob(): Promise<FinalArtworkJob | null> {
+  async claimNextQueuedFinalArtworkJob(
+    excludeJobIds: readonly string[] = [],
+  ): Promise<FinalArtworkJob | null> {
     // Same optimistic-claim shape as `claimNextQueuedJob` — read the oldest
     // due candidate, then update it conditioned on it still being in the
     // status we read; a lost race touches zero rows and reports "nothing
     // claimed" rather than retrying.
-    const { data: candidate, error: candidateError } = await this.client
+    //
+    // Bounded FinalArtwork Production-Execution Repair (liveness): when
+    // `excludeJobIds` is non-empty, fetch a WINDOW of the oldest due rows
+    // (sized so at least one non-excluded row is guaranteed to be in it,
+    // by construction — `excludeJobIds.length` possible exclusions plus
+    // one) rather than adding a new `NOT IN` filter, and pick the first
+    // one not excluded in application code. This deliberately avoids
+    // introducing an unverified new Postgrest filter shape against live
+    // Supabase — `.select().in().order().limit()` is the exact pattern
+    // this method already used, just with a larger window.
+    const candidateLimit = excludeJobIds.length + 1;
+    const { data: candidateRows, error: candidateError } = await this.client
       .from("final_artwork_jobs")
       .select("*")
       .in("status", ["queued", "recoverable"])
       .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
+      .limit(candidateLimit);
     if (candidateError) throw candidateError;
+    const excludeSet = new Set(excludeJobIds);
+    const candidate = ((candidateRows ?? []) as DbFinalArtworkJob[]).find(
+      (row) => !excludeSet.has(row.id),
+    );
     if (!candidate) return null;
 
-    const row = candidate as DbFinalArtworkJob;
+    const row = candidate;
     const timestamp = new Date().toISOString();
 
     const { data, error } = await this.client

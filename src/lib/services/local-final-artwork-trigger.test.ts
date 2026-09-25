@@ -241,9 +241,9 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
           await new Promise<void>((resolve) => {
             releaseProvider = resolve;
           });
-          return { processedJobId: "slow-fa-job" };
+          return { processedJobId: "slow-fa-job", pending: false };
         }
-        return { processedJobId: null };
+        return { processedJobId: null, pending: false };
       },
       async recoverAbandonedJobs() {
         return { recoveredCount: 0 };

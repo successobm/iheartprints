@@ -68,23 +68,20 @@ export function createFinalArtworkSchedulerCapability(
     const { recoveredCount } = await worker.recoverAbandonedJobs(staleAfterMs);
 
     const processedJobIds: string[] = [];
-    let previousJobId: string | null = null;
+    // Bounded FinalArtwork Production-Execution Repair (liveness): jobs
+    // this SAME batch already found still bounded-pending. Excluding them
+    // from further claims this batch is what lets an indefinitely-pending
+    // provider request (which keeps returning to `recoverable` and
+    // therefore keeps winning "oldest due") make way for a newer,
+    // unrelated job within the batch's remaining slots, instead of that
+    // one stuck job re-winning every claim and the loop giving up early —
+    // see the repaired `claimNextQueuedFinalArtworkJob(excludeJobIds)`.
+    const pendingThisBatch: string[] = [];
     for (let i = 0; i < maxJobsPerRun; i += 1) {
-      const { processedJobId } = await worker.processNextJob();
+      const { processedJobId, pending } = await worker.processNextJob(pendingThisBatch);
       if (!processedJobId) break;
-      // Bounded FinalArtwork Production-Execution Repair: the ONLY way the
-      // exact same job id can be claimed twice in a row within one batch is
-      // a bounded "still pending" outcome that returned it to `recoverable`
-      // and it remains the oldest due row with nothing else queued (a
-      // terminal outcome — completed/failed/cancelled — is never reclaimed
-      // again, and a genuinely different job would have a different id).
-      // Stop here rather than burning the rest of this batch's slots
-      // re-checking a request that, by construction, cannot have finished
-      // in the instant since the last check — the next invocation (the
-      // recovery scheduler, or a later immediate wake) checks it again.
-      if (processedJobId === previousJobId) break;
       processedJobIds.push(processedJobId);
-      previousJobId = processedJobId;
+      if (pending) pendingThisBatch.push(processedJobId);
     }
 
     return {

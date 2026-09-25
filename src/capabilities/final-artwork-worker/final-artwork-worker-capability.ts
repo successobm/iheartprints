@@ -247,11 +247,23 @@ export type FinalArtworkAttemptClassification = "fresh_execution" | "resume";
 export interface FinalArtworkWorkerCapability {
   /**
    * Claims and fully runs the single oldest due job (queued or
-   * recoverable), if any exists. Safe to call repeatedly/concurrently —
-   * the underlying claim is optimistic, so at most one caller ever
-   * actually runs a given job.
+   * recoverable) not in `excludeJobIds`, if any exists. Safe to call
+   * repeatedly/concurrently — the underlying claim is optimistic, so at
+   * most one caller ever actually runs a given job.
+   *
+   * Bounded FinalArtwork Production-Execution Repair (liveness):
+   * `excludeJobIds` lets a batch loop skip a job it already claimed and
+   * found still bounded-pending earlier in the SAME batch, so an
+   * indefinitely-pending provider request cannot monopolize every claim
+   * in a batch and starve newer, unrelated jobs — see
+   * `FinalArtworkSchedulerCapability.runBatch`. `pending: true` in the
+   * result means this exact claim resolved to a clean bounded-pending
+   * outcome (the job is durably `"recoverable"` again) — the caller's
+   * signal for whether to add this id to its own exclude set.
    */
-  processNextJob(): Promise<{ processedJobId: string | null }>;
+  processNextJob(
+    excludeJobIds?: readonly string[],
+  ): Promise<{ processedJobId: string | null; pending: boolean }>;
   /** Sweeps jobs abandoned by a worker that died mid-attempt back to "recoverable". Cheap — safe on every status poll. */
   recoverAbandonedJobs(
     staleAfterMs?: number,
@@ -1448,7 +1460,21 @@ export function createFinalArtworkWorkerCapability(
         heartbeatAt: new Date().toISOString(),
         attempts: job.attempts - 1,
       };
-      if (attemptClassification === "resume") {
+      // Repair cycle 2 (independent review finding A): `effectiveJob
+      // .providerRecoveryAttempts` is a snapshot from BEFORE this claim's
+      // own provider work ran. If this exact claim also submitted a fresh
+      // paid request mid-flight (the two-pass pass-1-resume → pass-2-
+      // fresh-submit transition: `attemptClassification` is fixed as
+      // "resume" at claim time from pass 1's identity, but pass 2 gets a
+      // genuinely new `providerRequestId`), `onProviderRequestSubmitted`
+      // already durably reset `providerRecoveryAttempts` to 0 for that NEW
+      // request — refunding from the stale pre-submission snapshot would
+      // overwrite that intentional reset with the OLD request's leftover
+      // count, starting the new request's recovery budget already
+      // partially spent. Only refund when this claim did NOT submit a new
+      // request: a pure "checked an existing request, still pending" claim
+      // is the only case this refund exists for.
+      if (attemptClassification === "resume" && !submittedNewPaidRequest) {
         refund.providerRecoveryAttempts = effectiveJob.providerRecoveryAttempts - 1;
       }
       await repo.updateFinalArtworkJob(job.id, refund);
@@ -4085,11 +4111,19 @@ export function createFinalArtworkWorkerCapability(
   }
 
   const capability: FinalArtworkWorkerCapability = {
-    async processNextJob() {
-      const job = await repo.claimNextQueuedFinalArtworkJob();
-      if (!job) return { processedJobId: null };
+    async processNextJob(excludeJobIds = []) {
+      const job = await repo.claimNextQueuedFinalArtworkJob(excludeJobIds);
+      if (!job) return { processedJobId: null, pending: false };
       await runClaimedJob(job);
-      return { processedJobId: job.id };
+      // Bounded FinalArtwork Production-Execution Repair (liveness): a
+      // cheap re-read rather than threading a return value through every
+      // `runClaimedJob` dispatch target (generated_concept/prepared_upload/
+      // sign_preparation) — `"recoverable"` is set ONLY by this exact
+      // bounded-pending path (repair cycle 1's refund branch) or the
+      // stale-heartbeat sweep; either way, excluding it from further
+      // reclaim attempts within THIS batch is correct and conservative.
+      const after = await repo.getFinalArtworkJob(job.id);
+      return { processedJobId: job.id, pending: after?.status === "recoverable" };
     },
 
     async recoverAbandonedJobs(staleAfterMs = DEFAULT_FINAL_ARTWORK_STALE_JOB_MS) {

@@ -1494,8 +1494,20 @@ export interface ProjectRepository {
    * atomic-claim contract: optimistic conditional update, "only one caller
    * ever wins", real Supabase row-conditional update or the local store's
    * mutex-serialized equivalent).
+   *
+   * Bounded FinalArtwork Production-Execution Repair (liveness): `excludeJobIds`,
+   * when given, skips those specific ids even though they are the oldest
+   * due `queued`/`recoverable` rows — used within a single batch to stop
+   * an indefinitely-pending provider request (which keeps returning to
+   * `recoverable` and therefore keeps winning "oldest due") from
+   * monopolizing every claim in that batch and starving newer,
+   * unrelated jobs. Never changes claim order among the NON-excluded
+   * rows, and never excludes a row this same caller has not itself
+   * already claimed and released as pending earlier in the same batch.
    */
-  claimNextQueuedFinalArtworkJob(): Promise<FinalArtworkJob | null>;
+  claimNextQueuedFinalArtworkJob(
+    excludeJobIds?: readonly string[],
+  ): Promise<FinalArtworkJob | null>;
   touchFinalArtworkJobHeartbeat(jobId: string): Promise<void>;
   /** Mirrors `recoverAbandonedJobs` — single atomic conditional update, no select-then-write gap. */
   recoverAbandonedFinalArtworkJobs(
