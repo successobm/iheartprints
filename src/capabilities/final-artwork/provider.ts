@@ -209,7 +209,41 @@ export interface FinalArtworkProviderOutput {
   halftone?: HalftoneScreenMetadata | null;
 }
 
+/**
+ * Bounded FinalArtwork Production-Execution Repair: the result of ONE
+ * bounded unit of provider work — a single submit, or a single status
+ * check — never a full submit-and-block-until-done cycle. `"pending"`
+ * means the provider's async job has not yet finished; the caller must
+ * persist that fact and return, relying on a LATER invocation (an
+ * immediate wake, or the recovery scheduler) to check again, rather than
+ * blocking the current one.
+ */
+export type FinalArtworkProviderBoundedResult =
+  | { status: "pending" }
+  | ({ status: "completed" } & FinalArtworkProviderOutput);
+
 export interface FinalArtworkProvider {
   readonly providerKey: string;
   produce(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput>;
+  /**
+   * Bounded FinalArtwork Production-Execution Repair: an OPTIONAL bounded
+   * alternative to `produce()`. When present, `FinalArtworkWorkerCapability`
+   * calls this instead of `produce()` — it must perform AT MOST one bounded
+   * unit of provider work and return `{status:"pending"}` rather than
+   * blocking until the provider's async job completes, so a single HTTP
+   * worker invocation can never be held open for the provider's full
+   * submit/poll/download duration.
+   *
+   * A provider with no asynchronous/paid-request concept (e.g. local raster
+   * interpolation, which is already synchronous/instant) can omit this
+   * entirely — the worker falls back to calling `produce()` directly, with
+   * no change in behavior for that provider.
+   *
+   * Signs' own reconstruction paths (`SignReconstructionProvider`/
+   * `SignReconstructionResumeProvider`) are untouched by this — this method
+   * exists only on `FinalArtworkProvider`, the DTF-facing interface.
+   */
+  produceBounded?(
+    input: FinalArtworkProviderInput,
+  ): Promise<FinalArtworkProviderBoundedResult>;
 }

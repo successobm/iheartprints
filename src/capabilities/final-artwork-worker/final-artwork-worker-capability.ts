@@ -86,6 +86,8 @@ import {
 } from "@/capabilities/shared/print-placement-dimensions";
 import type {
   FinalArtworkProvider,
+  FinalArtworkProviderBoundedResult,
+  FinalArtworkProviderInput,
   FinalArtworkProviderIntermediateReconstruction,
   FinalArtworkProviderResumeContext,
 } from "@/capabilities/final-artwork/provider";
@@ -1100,6 +1102,16 @@ export function createFinalArtworkWorkerCapability(
         providerLatencyMs: number | null;
       }
     | { status: "handled" }
+    /**
+     * Bounded FinalArtwork Production-Execution Repair: the provider
+     * reported (or was just submitted and has not yet had time to report)
+     * that its async job has not finished. The job has already been
+     * durably returned to `"recoverable"` before this resolves — a LATER
+     * invocation (an immediate wake, or the recovery scheduler) checks
+     * again. Every existing caller's `if (produced.status !== "ready")
+     * return;` guard already handles this correctly with no caller change.
+     */
+    | { status: "pending" }
   > {
     const { job, sourceAsset, sizing, activeProvider } = params;
 
@@ -1280,41 +1292,52 @@ export function createFinalArtworkWorkerCapability(
     // already knows.
     let currentProviderRequestId = existingProviderRequest?.providerRequestId ?? null;
     const providerStartedAt = Date.now();
-    let output;
+    let boundedResult: FinalArtworkProviderBoundedResult;
     try {
-      output = await withPeriodicHeartbeat(job.id, () =>
-        activeProvider.produce({
-          sourceBytes: source.bytes,
-          sourceContentType: sourceAsset.contentType ?? source.contentType,
-          sizing,
-          existingProviderRequest,
-          onProviderRequestSubmitted: async (providerRequestId) => {
-            submittedNewPaidRequest = true;
-            currentProviderRequestId = providerRequestId;
-            // Persisted BEFORE the provider polls/downloads anything
-            // further — the entire point of this hook (Goal 3): a crash
-            // any time after this write is resumable without a second
-            // paid submission.
-            await repo.updateFinalArtworkJob(job.id, {
-              providerKey: activeProvider.providerKey,
-              providerRequestId,
-              providerStatus: "submitted",
-              // "Separate Provider Recovery Attempt Budget": a genuinely
-              // NEW paid request has no recovery history against it yet.
-              // Belt-and-suspenders — every path that sets a NEW
-              // `providerRequestId` here should already have reset this to
-              // `0` when the OLD one was last cleared, but this claim is
-              // the one place that actually SPENDS the new request's
-              // future recovery budget, so it is asserted explicitly here
-              // too.
-              providerRecoveryAttempts: 0,
-            });
-          },
-          existingIntermediateReconstruction,
-          onIntermediateReconstructionProduced: (result) =>
-            persistIntermediateReconstruction(job, activeProvider, params.storageGroupingId, result),
-        }),
-      );
+      const providerInput: FinalArtworkProviderInput = {
+        sourceBytes: source.bytes,
+        sourceContentType: sourceAsset.contentType ?? source.contentType,
+        sizing,
+        existingProviderRequest,
+        onProviderRequestSubmitted: async (providerRequestId) => {
+          submittedNewPaidRequest = true;
+          currentProviderRequestId = providerRequestId;
+          // Persisted BEFORE the provider polls/downloads anything
+          // further — the entire point of this hook (Goal 3): a crash
+          // any time after this write is resumable without a second
+          // paid submission.
+          await repo.updateFinalArtworkJob(job.id, {
+            providerKey: activeProvider.providerKey,
+            providerRequestId,
+            providerStatus: "submitted",
+            // "Separate Provider Recovery Attempt Budget": a genuinely
+            // NEW paid request has no recovery history against it yet.
+            // Belt-and-suspenders — every path that sets a NEW
+            // `providerRequestId` here should already have reset this to
+            // `0` when the OLD one was last cleared, but this claim is
+            // the one place that actually SPENDS the new request's
+            // future recovery budget, so it is asserted explicitly here
+            // too.
+            providerRecoveryAttempts: 0,
+          });
+        },
+        existingIntermediateReconstruction,
+        onIntermediateReconstructionProduced: (result) =>
+          persistIntermediateReconstruction(job, activeProvider, params.storageGroupingId, result),
+      };
+      // Bounded FinalArtwork Production-Execution Repair: prefer the
+      // provider's bounded entry point when it has one (Topaz does) — one
+      // submit or one status check, never a blocking poll loop. A provider
+      // with no asynchronous concept (e.g. local raster interpolation,
+      // already synchronous/instant) has no `produceBounded`, so this
+      // falls back to the unchanged `produce()` call with identical
+      // behavior for that provider.
+      boundedResult = activeProvider.produceBounded
+        ? await withPeriodicHeartbeat(job.id, () => activeProvider.produceBounded!(providerInput))
+        : {
+            status: "completed",
+            ...(await withPeriodicHeartbeat(job.id, () => activeProvider.produce(providerInput))),
+          };
     } catch (error) {
       // Sprint 2M Phase 2E (Goal 3/12): a request that reached a terminal
       // failure state AT THE PROVIDER (not merely a local/network hiccup)
@@ -1393,6 +1416,24 @@ export function createFinalArtworkWorkerCapability(
       await failJob(job, describeFinalArtworkError(error));
       return { status: "handled" };
     }
+
+    if (boundedResult.status === "pending") {
+      // Bounded FinalArtwork Production-Execution Repair: the provider's
+      // async job has not finished (or was just submitted this instant).
+      // Nothing failed — return the job to `"recoverable"` so the NEXT
+      // invocation (an immediate wake, or the recovery scheduler) claims
+      // it and checks again, rather than blocking THIS one until the
+      // provider is done. `providerKey`/`providerRequestId`/`providerStatus`
+      // were already durably persisted by `onProviderRequestSubmitted`
+      // above if this attempt just submitted — this call only updates
+      // claimability and freshness.
+      await repo.updateFinalArtworkJob(job.id, {
+        status: "recoverable",
+        heartbeatAt: new Date().toISOString(),
+      });
+      return { status: "pending" };
+    }
+    const output = boundedResult;
     const providerLatencyMs = Date.now() - providerStartedAt;
 
     logFinalArtworkPaidCallDecision({

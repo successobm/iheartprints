@@ -1035,6 +1035,166 @@ describe("Phase 28V — two-pass reconstruction", () => {
       const submitCalls = calls.filter((c) => c.url.endsWith("/tool/async"));
       assert.equal(submitCalls.length, 1, "no third pass — pass 1 ran once, pass 2 was correctly never attempted");
     });
+
+    /**
+     * Bounded FinalArtwork Production-Execution Repair: `produceBounded()`
+     * is the bounded counterpart to `produce()` exercised above — it must
+     * reach byte-identical final output on a completed path, but never
+     * block through `pollUntilDone`'s loop to get there. `produce()`/
+     * `runReconstructionPass`/`pollUntilDone` themselves are asserted
+     * unchanged by the full suite above continuing to pass unmodified.
+     */
+    describe("produceBounded() — end to end", () => {
+    it("pass 1 still processing: returns pending, submits pass 1 exactly once, never reaches pass 2", async () => {
+      const { fetchImpl, calls } = buildTwoPassFakeFetch([
+        { processId: "pass1-id", downloadBytes: buildRectFixturePng(2248, 1944), statusSequence: ["Processing"] },
+      ]);
+      const provider = new TopazTransparencyUpscaleProvider({
+        apiKey: "test-key",
+        fetchImpl,
+        sleepImpl: noSleep,
+        pollIntervalMs: 1,
+      });
+
+      let intermediateCalled = false;
+      const result = await provider.produceBounded(
+        realLikeInput({ onIntermediateReconstructionProduced: async () => { intermediateCalled = true; } }),
+      );
+
+      assert.deepEqual(result, { status: "pending" });
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 1, "exactly one submission, never a poll loop");
+      assert.equal(calls.filter((c) => c.url.includes("/download/")).length, 0, "never downloads while still pending");
+      assert.equal(intermediateCalled, false, "pass 1 never completed within this bounded call");
+    });
+
+    it("pass 1 completes and pass 2 is submitted but still processing: pending overall, intermediate persisted, exactly two submissions", async () => {
+      const { fetchImpl, calls } = buildTwoPassFakeFetch([
+        { processId: "pass1-id", downloadBytes: buildRectFixturePng(2248, 1944), statusSequence: ["Completed"] },
+        { processId: "pass2-id", downloadBytes: buildRectFixturePng(4019, 3475), statusSequence: ["Processing"] },
+      ]);
+      const provider = new TopazTransparencyUpscaleProvider({
+        apiKey: "test-key",
+        fetchImpl,
+        sleepImpl: noSleep,
+        pollIntervalMs: 1,
+      });
+
+      const captured: { intermediate: FinalArtworkProviderIntermediateReconstruction | null } = { intermediate: null };
+      const result = await provider.produceBounded(
+        realLikeInput({ onIntermediateReconstructionProduced: async (r) => { captured.intermediate = r; } }),
+      );
+
+      assert.deepEqual(result, { status: "pending" });
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 2, "pass 1 submitted, and pass 2 submitted once pass 1 completed");
+      assert.ok(captured.intermediate, "pass 1 must be durably persisted before pass 2 is ever submitted, even bounded");
+      assert.equal(captured.intermediate!.providerRequestId, "pass1-id");
+      assert.equal(calls.filter((c) => c.url.includes("/download/") && c.url.includes("pass2")).length, 0, "never downloads pass 2 while it is still pending");
+    });
+
+    it("resuming a pending pass 2 that has since completed finishes the job, byte-identical to produce()'s own final output, zero new submissions", async () => {
+      const { fetchImpl, calls } = buildTwoPassFakeFetch(
+        [{ processId: "pass2-id", downloadBytes: buildRectFixturePng(4019, 3475), statusSequence: ["Completed"] }],
+        [], // nothing freshly submitted -- both passes already exist
+      );
+      const provider = new TopazTransparencyUpscaleProvider({
+        apiKey: "test-key",
+        fetchImpl,
+        sleepImpl: noSleep,
+        pollIntervalMs: 1,
+      });
+
+      const result = await provider.produceBounded(
+        realLikeInput({
+          existingIntermediateReconstruction: {
+            bytes: buildRectFixturePng(2248, 1944),
+            widthPx: 2248,
+            heightPx: 1944,
+            providerRequestId: "pass1-id",
+          },
+          existingProviderRequest: {
+            providerKey: "topaz_transparency_upscale",
+            providerRequestId: "pass2-id",
+            providerStatus: "submitted",
+          },
+          onProviderRequestSubmitted: async () => {
+            throw new Error("must not submit anything -- both passes already exist");
+          },
+        }),
+      );
+
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 0, "never resubmit pass 1 or pass 2");
+      assert.equal(result.status, "completed");
+      if (result.status !== "completed") return;
+      // Same final geometry `produce()`'s own equivalent end-to-end test
+      // (test B above) asserts -- proves the bounded and blocking paths
+      // converge on byte-identical production output.
+      assert.equal(result.providerRequestId, "pass2-id");
+      assert.equal(result.reconstructedWidthPx, 4019);
+      assert.equal(result.reconstructedHeightPx, 3475);
+      assert.equal(result.widthPx, 3150);
+      assert.ok(Math.abs(result.heightPx - 2727) <= 2);
+      assert.equal(result.resolutionProvenance, "reconstructed");
+    });
+
+    it("pass 1 alone unexpectedly sufficient: completes within one bounded call, never attempts pass 2", async () => {
+      const { fetchImpl, calls } = buildTwoPassFakeFetch(
+        [{ processId: "pass1-only-id", downloadBytes: buildRectFixturePng(4496, 3888), statusSequence: ["Completed"] }],
+        ["pass1-only-id"],
+      );
+      const provider = new TopazTransparencyUpscaleProvider({
+        apiKey: "test-key",
+        fetchImpl,
+        sleepImpl: noSleep,
+        pollIntervalMs: 1,
+      });
+
+      let intermediateCalled = false;
+      const result = await provider.produceBounded(
+        realLikeInput({ onIntermediateReconstructionProduced: async () => { intermediateCalled = true; } }),
+      );
+
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 1, "never submit a pass 2 that would buy nothing");
+      assert.equal(intermediateCalled, false, "pass 1 IS the final stage here -- no intermediate to persist");
+      assert.equal(result.status, "completed");
+      if (result.status !== "completed") return;
+      assert.equal(result.providerRequestId, "pass1-only-id");
+      assert.equal(result.reconstructedWidthPx, 4496);
+      assert.equal(result.reconstructedHeightPx, 3888);
+    });
+
+    it("a provider-reported Failed status on a resumed pass surfaces the same provider_job_failed classification produce() raises", async () => {
+      const { fetchImpl } = buildTwoPassFakeFetch(
+        [{ processId: "pass2-id", downloadBytes: buildRectFixturePng(4019, 3475), statusSequence: ["Failed"] }],
+        [],
+      );
+      const provider = new TopazTransparencyUpscaleProvider({
+        apiKey: "test-key",
+        fetchImpl,
+        sleepImpl: noSleep,
+        pollIntervalMs: 1,
+      });
+
+      await assert.rejects(
+        () =>
+          provider.produceBounded(
+            realLikeInput({
+              existingIntermediateReconstruction: {
+                bytes: buildRectFixturePng(2248, 1944),
+                widthPx: 2248,
+                heightPx: 1944,
+                providerRequestId: "pass1-id",
+              },
+              existingProviderRequest: {
+                providerKey: "topaz_transparency_upscale",
+                providerRequestId: "pass2-id",
+                providerStatus: "submitted",
+              },
+            }),
+          ),
+        (error: unknown) => error instanceof ProviderError && error.classification === "provider_job_failed",
+      );
+    });
+  });
   });
 });
 

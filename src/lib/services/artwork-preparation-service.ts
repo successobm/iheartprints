@@ -22,6 +22,7 @@ import {
   getConversation,
   type ApiProjectSnapshot,
 } from "@/lib/services/conversation-service";
+import { wakeFinalArtworkWorker } from "@/lib/services/final-artwork-http-wake";
 import { maybeTriggerLocalFinalArtworkWorker } from "@/lib/services/local-final-artwork-trigger";
 
 export async function uploadArtwork(
@@ -189,6 +190,12 @@ export async function prepareUploadedArtworkForPrint(
       projectId,
       reason: "prepare_uploaded_artwork",
     });
+    // Bounded FinalArtwork Production-Execution Repair: production's
+    // counterpart to the interactive-dev kick above — a best-effort,
+    // bounded, authenticated wake of the same worker route. Never awaited
+    // for correctness, only for its own short timeout; failure here never
+    // fails this request.
+    await wakeFinalArtworkWorker({ reason: "prepare_uploaded_artwork" });
   }
   return snapshot;
 }

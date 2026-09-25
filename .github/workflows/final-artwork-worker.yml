@@ -32,6 +32,18 @@
 # locking of its own; `concurrency` below only avoids piling up redundant
 # GitHub-hosted runners, never a correctness requirement.
 #
+# OBSERVABILITY (Bounded FinalArtwork Production-Execution Repair): a run
+# still only FAILS (non-zero exit) when every one of the four calls fails --
+# the worker route's own execution is now bounded (see
+# `topaz-transparency-upscale-provider.ts`'s `produceBounded`), so this
+# workflow is recovery insurance, not the sole correctness mechanism, and a
+# single transient blip should not make CI flaky. But a live incident (a
+# real Topaz job stalled for hours, see the accompanying architecture audit)
+# was masked for a long time by a run that stayed green despite an HTTP 504
+# hidden among otherwise-successful calls. Every non-200 response now emits
+# a `::warning::` annotation -- visible in the Actions UI/run summary on
+# every run, searchable, never silently absorbed into a bare success count.
+#
 # SECURITY: the ONE secret this workflow needs is `WORKER_SECRET` -- the
 # SAME production secret this app's `POST /api/worker/*` routes already
 # require (see docs/deployment/final-artwork-worker.md's "Configuration"
@@ -71,6 +83,7 @@ jobs:
           fi
 
           success_count=0
+          failure_count=0
           last_status="000"
 
           # ~4 minutes of once-a-minute polling per five-minute scheduled
@@ -84,11 +97,21 @@ jobs:
             echo "final-artwork worker trigger #$i -> HTTP $last_status"
             if [ "$last_status" = "200" ]; then
               success_count=$((success_count + 1))
+            else
+              failure_count=$((failure_count + 1))
+              # Visible even on an otherwise-green run -- a 504 (or any
+              # other non-200) among the four calls must never be silently
+              # absorbed into a bare success count again.
+              echo "::warning::final-artwork worker trigger #$i returned HTTP $last_status (non-200). This run is not failing outright because a later call may still succeed, but this is worth investigating if it recurs."
             fi
             if [ "$i" -lt 4 ]; then
               sleep 60
             fi
           done
+
+          if [ "$failure_count" -gt 0 ]; then
+            echo "::warning::$failure_count of 4 worker trigger calls this run returned a non-200 status. See the individual trigger log lines/annotations above for exact status codes."
+          fi
 
           if [ "$success_count" -eq 0 ]; then
             echo "::error::Every attempt in this run failed (last HTTP status: $last_status). Check IHEARTPRINTS deployment health and the WORKER_SECRET value."
