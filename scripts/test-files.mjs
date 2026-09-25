@@ -424,6 +424,13 @@ export const TEST_FILES = [
   // REGENCY REGRESSION acceptance test (stale original-bound plan must not
   // be shown once a geometry-confirmed master exists; the snapshot replans).
   "src/lib/services/sign-artwork-effective-source.test.ts",
+  // Live REGENCY resume/routing defect (post-R6B production acceptance): a
+  // confirmed geometry qualification must never re-render as an actionable
+  // "Check the cleaned artwork" review on project reopen/resume, and a
+  // genuinely NEW recovery attempt must still show its own pending review
+  // — proven end-to-end through the real conversation snapshot and into a
+  // correctly master-sourced Signs plan.
+  "src/lib/services/geometry-qualification-resume-routing.test.ts",
   // SIGNS QR DESTINATION RESOLUTION: confirmSignQrDestination /
   // acceptSignQrPrintAsSupplied service-layer integration, run against a
   // real local-store sign pipeline (no live-DB migration dependency).
