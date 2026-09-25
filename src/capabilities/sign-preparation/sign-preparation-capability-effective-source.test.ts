@@ -475,4 +475,124 @@ describe("SignPreparationCapability — R6B effective-source handoff", () => {
     // all — R6B's Signs handoff cannot have touched it because nothing here
     // ever constructed or called one.
   });
+
+  // ---------------------------------------------------------------------
+  // 33: LIVE REGENCY REPRODUCTION (R6B second-bounded-defect investigation,
+  // live acceptance of b00cf573-f0c4-4fd3-af95-861d408d1e89)
+  // ---------------------------------------------------------------------
+
+  /**
+   * A logo/wordmark-shaped SILHOUETTE (several separate marks, never a
+   * hard rectangle) on a much larger near-white canvas — comfortable
+   * margin on every side (never touches the RAW candidate's own canvas
+   * border, so `qualifyReconstructionGeometry` classifies it
+   * `REPAIRABLE_AUTOMATICALLY` rather than abstaining), reaching the
+   * content's OWN top/bottom bounds only at scattered, non-aligned x
+   * positions. Once alpha-trimmed to content bounds (~756x236, aspect
+   * ~3.2:1 — REGENCY-shaped: badly under-resolved for a 48x24in sign,
+   * top/bottom mismatch against the 2:1 ordered aspect), this reproduces
+   * the live master's own defining property: `measureFrameStructuralModel`
+   * never finds a consistent band around all four edges (unlike a hard
+   * rectangle, which trivially does), so the top/bottom edge-dependent
+   * evidence has no frame/reflow/reconstructable-perimeter repair
+   * available — exactly the live REGENCY shape, calibrated empirically
+   * against this same real (non-provider) pipeline, never hand-guessed.
+   */
+  function regencyBlockedCandidateBytes(): Buffer {
+    const image = makeImage(1060, 460, { r: 254, g: 254, b: 254 });
+    const blue = { r: 20, g: 90, b: 160 };
+    const x0 = 80;
+    fillRect(image, x0 + 40, 80, x0 + 700, 260, blue); // main body
+    // Marks reaching the shape's own top row at scattered x — no
+    // continuous run, no consistent band.
+    fillRect(image, x0 + 10, 60, x0 + 80, 120, blue);
+    fillRect(image, x0 + 260, 60, x0 + 330, 120, blue);
+    fillRect(image, x0 + 540, 60, x0 + 620, 120, blue);
+    // Marks reaching the shape's own bottom row at DIFFERENT x than the
+    // top marks — asymmetric, so top and bottom never agree either.
+    fillRect(image, x0 + 100, 220, x0 + 180, 280, blue);
+    fillRect(image, x0 + 380, 220, x0 + 440, 280, blue);
+    fillRect(image, x0 + 680, 220, x0 + 750, 280, blue);
+    return toPngBytes(image);
+  }
+
+  it("live REGENCY reproduction: a historical-original plan goes stale once the Clean Master becomes current, and the SAME single replan action deterministically formulates the CURRENT (here: legitimately abstained) answer against the master — no second click, no fallback, no faked plan", async () => {
+    const built = await build();
+
+    // 1/2: historical original Signs source + plan exists against it.
+    const preparation = await uploadRegencyOriginal(built);
+    const originalOutcome = await built.capability.planSignRepair(built.projectId);
+    assert.equal(originalOutcome.result.status, "planned");
+    const originalPlan = (originalOutcome.result as { plan: SignRepairPlan }).plan;
+    assert.equal(originalPlan.sourceAssetId, preparation.originalAssetId);
+
+    // 3/4/5: reconstruction accepted, geometry confirmed, current PQ Clean
+    // Master exists — REGENCY-shaped (aspect ~3.2:1, badly under-resolved,
+    // logo-silhouette content that never forms a measurable frame).
+    const contract = await proposeAndConfirmContract(built);
+    const job = await requestJob(built, contract.id);
+    const candidateAssetId = await uploadCandidate(built, regencyBlockedCandidateBytes(), "regency-blocked-candidate");
+    await completeJobPendingReview(built, job.id, candidateAssetId);
+    const approved = await approveJob(built, job.id);
+    await built.qualification.ensureQualification(built.projectId, approved.id);
+    const confirmed = await built.qualification.confirmQualification(built.projectId, "customer");
+    assert.ok(confirmed.derivedAssetId);
+    // The exact aspect/under-resolution shape the live acceptance found:
+    // top/bottom padding required (never left/right), and even the 4x
+    // reconstruction ceiling is needed to approach the policy minimum.
+    assert.ok(confirmed.contentAspectRatio! > 2, "ordered 48x24 is 2:1; the master must be more elongated to require top/bottom padding");
+
+    // 6: the historical original-sourced plan is now stale.
+    assert.equal(await built.capability.isSignPlanCurrent(built.projectId), false);
+
+    // 7: the operator/customer invokes the ONE existing "check/replan"
+    // action — `planSignRepair`, the SAME function both the customer's
+    // "Check my artwork" and the operator's "Check this artwork" routes
+    // call (`sign-artwork-service.ts` / the internal plan route).
+    const replanned = await built.capability.planSignRepair(built.projectId);
+
+    // 8/9: this SAME single call is the entire "replan" transition — no
+    // second, different action exists or is required to reach the CURRENT
+    // answer. It planned against the CURRENT effective source, which here
+    // (see this fixture's own doc) legitimately concludes BLOCKED — a real,
+    // pre-existing, documented planner scope limit
+    // (`reconstruct_perimeter_structure` never coexists with
+    // `reconstruct_resolution` in the same plan — `sign-repair-planner.ts`'s
+    // own doc), never an R6B authority/replan defect. The planner is never
+    // faked into a successful plan it did not actually formulate.
+    assert.equal(replanned.result.status, "blocked");
+    assert.equal(replanned.result.plan, null);
+    assert.equal(replanned.preparation.plan, null);
+    assert.equal(replanned.preparation.planKey, null);
+    const blockingDefect = replanned.result.defects.find(
+      (defect) => defect.code === "perimeter_structure_at_extension_edge" && defect.severity === "blocking",
+    );
+    assert.ok(blockingDefect, "expected the exact live abstention reason (edge-dependent content, no admitted repair)");
+
+    // 4/5 (R6B contract): the replan attempt itself was genuinely run
+    // against the CURRENT Clean Master, never the stale original — proven
+    // via the SAME source-resolution authority `authorizeSignRepairPlan`/
+    // the operator review page use (never re-derived independently here).
+    const { resolveSignSourceAssetId } = await import("./sign-effective-source");
+    const resolvedSource = await resolveSignSourceAssetId(built.repo, built.qualification, preparation);
+    assert.deepEqual(resolvedSource, { status: "resolved", assetId: confirmed.derivedAssetId });
+    assert.notEqual(confirmed.derivedAssetId, preparation.originalAssetId);
+
+    // 14: originalAssetId remains immutable throughout.
+    const reloaded = await built.capability.getSignPreparation(built.projectId);
+    assert.equal(reloaded!.originalAssetId, preparation.originalAssetId);
+
+    // 16: no second identical action is required merely to reach this
+    // (honest, final) answer — repeating it is safe and reproduces the
+    // IDENTICAL verdict, never drifting, never silently succeeding on a
+    // later attempt.
+    const secondAttempt = await built.capability.planSignRepair(built.projectId);
+    assert.equal(secondAttempt.result.status, "blocked");
+    assert.equal(secondAttempt.preparation.plan, null);
+
+    // 15: no provider call occurs during planning — no provider port of any
+    // kind is wired into this test's capability graph at all (see this
+    // file's own top-of-file doc), so "zero provider calls" is true by
+    // construction here, not by assertion.
+  });
 });
