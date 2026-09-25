@@ -218,9 +218,12 @@ resolve to exactly one winner.
   attempts against an already-paid provider request — both exist to bound
   genuine crash/failure loops, never to bound ordinary bounded-pending
   polling (see "Bounded provider execution" below — a clean pending
-  outcome refunds exactly what it charged, so it never counts against
-  either budget; only a claim that actually crashed or genuinely erred
-  keeps its charge).
+  outcome never leaves either budget worse off than before that claim:
+  either it refunds exactly the charge it made, or — at the two-pass
+  pass-1→pass-2 transition, where the SAME claim also submits a genuinely
+  new paid request — the fresh request's own already-reset-to-0 recovery
+  budget is left untouched rather than refunded over. Only a claim that
+  actually crashed or genuinely erred keeps its charge).
 - Recovery never duplicates a production asset: a job that already
   produced its production PNG (`AssetRecord.finalArtworkJobId` +
   `productionRole === "production_png"`) short-circuits straight to
@@ -272,10 +275,13 @@ accepts an `excludeJobIds` list; the scheduler's batch loop adds a job's
 id to that list the moment it sees a bounded-pending outcome for it
 THIS batch, so the REST of that batch's claim slots go to other,
 unrelated jobs instead of re-checking the same not-yet-finished request
-repeatedly. This bounds starvation WITHIN one batch/invocation; it does
-not (yet) bound how long a single provider request may legitimately stay
-pending across MANY separate invocations/batches — see the open question
-below.
+repeatedly. This bounds starvation caused by ONE stuck job within a
+single batch/invocation — with `maxJobsPerRun` (default 5) or more
+SIMULTANEOUSLY-pending older jobs, every batch slot can still go to that
+older set before a newer job is ever reached, until enough of them
+resolve. It also does not (yet) bound how long a single provider request
+may legitimately stay pending across MANY separate invocations/batches —
+see the open question below.
 
 **Open question, deliberately not answered by this repair:** what should
 eventually happen to a Topaz request that never reaches `Completed`/

@@ -204,6 +204,102 @@ function buildMultiRequestFakeTopazFetch(reconstructedWidthPx: number, reconstru
   };
 }
 
+/**
+ * Repair-cycle-2 regression (Fix A -- recovery-budget refund arithmetic):
+ * an "echo back exactly what was requested" fake -- each submission's
+ * `/download/` result is sized to EXACTLY the `output_width`/`output_height`
+ * this exact submission asked for (read straight off the real `FormData`
+ * `TopazTransparencyUpscaleProvider.submit()` builds, never a hand-computed
+ * guess), so a genuine two-pass job's pass 1 and pass 2 requests are always
+ * honored precisely regardless of the confirmed print size/source fixture
+ * used to drive it through the real worker -- no risk of a validation
+ * rejection from a hardcoded dimension drifting out of sync with the real
+ * sizing policy's own arithmetic.
+ *
+ * `insetRatio` matters: a real reconstruction upscales proportionally, so
+ * its visible-content-to-canvas ratio stays constant across passes. A
+ * uniformly opaque fake output (visible content = the whole canvas) would
+ * make every pass look immediately sufficient and never trigger pass 2 --
+ * this fake instead reproduces the SAME centered-square-inset shape
+ * `preparedTransparentPngOfWidth` uses, scaled to each requested canvas
+ * size, so `resolveReconstructionRequest` measures the same relative
+ * "still not enough" gap after pass 1 that a real reconstruction would.
+ */
+function buildEchoingFakeTopazFetch(insetRatio: number) {
+  let nextProcessSeq = 0;
+  const statusByProcessId = new Map<string, "processing" | "completed">();
+  const dimsByProcessId = new Map<string, { widthPx: number; heightPx: number }>();
+  const submitCountByProcessId = new Map<string, number>();
+
+  const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+
+    if (url.endsWith("/tool/async")) {
+      const form = init?.body as FormData;
+      const widthPx = Number(form.get("output_width"));
+      const heightPx = Number(form.get("output_height"));
+      nextProcessSeq += 1;
+      const processId = `echo-process-${nextProcessSeq}`;
+      submitCountByProcessId.set(processId, (submitCountByProcessId.get(processId) ?? 0) + 1);
+      statusByProcessId.set(processId, "processing");
+      dimsByProcessId.set(processId, { widthPx, heightPx });
+      return new Response(JSON.stringify({ process_id: processId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.includes("/status/")) {
+      const processId = url.split("/status/")[1]!;
+      const mode = statusByProcessId.get(processId) ?? "processing";
+      return new Response(JSON.stringify({ status: mode === "completed" ? "Completed" : "Processing" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.includes("/download/")) {
+      const processId = url.split("/download/")[1]!;
+      return new Response(JSON.stringify({ url: `https://cdn.example.com/echo-output-${processId}.png` }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.startsWith("https://cdn.example.com/echo-output-")) {
+      const processId = url.slice("https://cdn.example.com/echo-output-".length, -".png".length);
+      const dims = dimsByProcessId.get(processId)!;
+      const png = new PNG({ width: dims.widthPx, height: dims.heightPx });
+      const visibleWidthPx = Math.round(dims.widthPx * insetRatio);
+      const visibleHeightPx = Math.round(dims.heightPx * insetRatio);
+      const insetX = Math.floor((dims.widthPx - visibleWidthPx) / 2);
+      const insetY = Math.floor((dims.heightPx - visibleHeightPx) / 2);
+      for (let y = 0; y < dims.heightPx; y += 1) {
+        for (let x = 0; x < dims.widthPx; x += 1) {
+          const idx = (dims.widthPx * y + x) << 2;
+          const inArtwork =
+            x >= insetX && x < insetX + visibleWidthPx && y >= insetY && y < insetY + visibleHeightPx;
+          png.data[idx] = 10;
+          png.data[idx + 1] = 90;
+          png.data[idx + 2] = 200;
+          png.data[idx + 3] = inArtwork ? 255 : 0;
+        }
+      }
+      return new Response(new Uint8Array(PNG.sync.write(png)), {
+        status: 200,
+        headers: { "content-type": "image/png" },
+      });
+    }
+    throw new Error(`FORBIDDEN: no real network target is reachable from this test; got ${url}`);
+  }) as typeof fetch;
+
+  return {
+    fetchImpl: impl,
+    submitCountTotal: () => [...submitCountByProcessId.values()].reduce((a, b) => a + b, 0),
+    markCompleted: (processId: string) => {
+      statusByProcessId.set(processId, "completed");
+    },
+    knownProcessIds: () => [...submitCountByProcessId.keys()],
+  };
+}
+
 describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through the real worker", () => {
   let tempDir = "";
   let previousCwd = "";
@@ -571,5 +667,88 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
       newerAfterBatch2!.id,
     );
     assert.ok(validation, "the newer job must still reach real print validation");
+  });
+
+  it("6: two-pass pass-1(resume)->pass-2(fresh-submit) transition starts the new request's recovery budget at exactly 0, even with retained genuine-failure charges beforehand (repair-cycle-2 arithmetic regression)", async () => {
+    // A small inset relative to the 1200x1200 canvas against sleeve sizing
+    // (3in @ 300 PPI = 900px target) empirically routes through two-pass
+    // (planStandardRasterReconstruction: pass 1 at the 4x ceiling against
+    // the source's full 1200x1200 frame, still short of 900px against a
+    // 150px visible inset once accounting for its own alpha-trim margin).
+    const artworkWidthPx = 150;
+    const { repo, assets, projectId } = await setup(artworkWidthPx);
+
+    const { fetchImpl, submitCountTotal, markCompleted, knownProcessIds } = buildEchoingFakeTopazFetch(
+      artworkWidthPx / CANVAS_PX,
+    );
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+    });
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const printValidation = createPrintValidationCapability();
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
+
+    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+
+    // Claim 1: fresh execution -- submits PASS 1 and checks it once (still
+    // "processing" by construction), returns pending. Confirms the fixture
+    // genuinely routes through two-pass (a single "echo-process-*" id is
+    // submitted for pass 1 only at this point).
+    await worker.processNextJob();
+    assert.equal(knownProcessIds().length, 1, "pass 1 must be the only submission so far");
+    const pass1Id = knownProcessIds()[0]!;
+
+    // Simulate two RETAINED genuine-failure charges already accumulated
+    // against this exact pass-1 request from earlier real worker crashes
+    // (mid-resume process deaths -- never reaching the benign-pending
+    // refund line at all) -- the exact precondition reviewer 2 identified
+    // as missing coverage. Seeded directly rather than replaying two real
+    // crashes, which this fixture cannot otherwise simulate.
+    await repo.updateFinalArtworkJob(requested.job.id, { providerRecoveryAttempts: 2 });
+
+    // Pass 1 has genuinely finished at the (fake) provider.
+    markCompleted(pass1Id);
+
+    // Claim 2: RESUMES pass 1 (existingProviderRequest matches, so
+    // attemptClassification is fixed as "resume" for this whole claim,
+    // charging providerRecoveryAttempts 2->3 up front) -- pass 1's status
+    // check finds it Completed, downloads it, and the SAME invocation
+    // immediately submits a genuinely NEW pass-2 request (submittedNewPaidRequest
+    // becomes true mid-claim), whose own onProviderRequestSubmitted hook
+    // resets providerRecoveryAttempts to 0. Pass 2's own status check
+    // (still "processing") returns the overall claim as pending.
+    await worker.processNextJob();
+
+    assert.equal(knownProcessIds().length, 2, "pass 2 must now have been submitted");
+    const pass2Id = knownProcessIds()[1]!;
+    assert.notEqual(pass2Id, pass1Id);
+
+    const job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job?.status, "recoverable");
+    assert.equal(job?.providerRequestId, pass2Id, "the job must now be keyed to pass 2's fresh request");
+    // THE regression: without the repair-cycle-2 fix, this would read 2
+    // (the stale pre-submission recovery snapshot, 3, refunded by 1) --
+    // never the fresh reset's true value.
+    assert.equal(
+      job?.providerRecoveryAttempts,
+      0,
+      "pass 2's brand-new paid request must start its recovery budget at exactly 0, " +
+        "never clobbered by refunding the OLD (pass 1) request's retained charges",
+    );
+    assert.equal(submitCountTotal(), 2, "exactly one submission per pass -- pass 1 resumed, never resubmitted");
+
+    // The job must still be able to complete normally afterward, proving
+    // the fix didn't just move the bug rather than eliminate it.
+    markCompleted(pass2Id);
+    await worker.processNextJob();
+    const completed = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(completed?.status, "completed");
+    assert.equal(submitCountTotal(), 2, "completion must never require a third submission");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, completed!.id);
+    assert.ok(validation, "a two-pass job recovered through this exact transition must still reach real print validation");
   });
 });
