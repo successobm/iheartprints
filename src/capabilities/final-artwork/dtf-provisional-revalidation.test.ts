@@ -179,6 +179,13 @@ describe("Restore Completed Print-Ready Download Flow -- revalidation without a 
 
     // --- 1. The genuine, original run: sufficient source, no provider call, completes ready.
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    // Phase 2 (post-provider durable checkpoint): the first invocation
+    // acquires/persists the production asset and checkpoints -- it does
+    // not also run validation/completion in the same call.
+    await worker.processNextJob();
+    const afterCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterCheckpoint?.status, "recoverable");
+
     await worker.processNextJob();
 
     const afterFirstRun = await repo.getFinalArtworkJob(requested.job.id);

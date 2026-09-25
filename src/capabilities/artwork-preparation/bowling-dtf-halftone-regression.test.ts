@@ -176,6 +176,13 @@ describe(
       // certification withhold → finalization_required, never print_ready.
       const standard = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
       await worker.processNextJob();
+      // Phase 2 (post-provider durable checkpoint): the first invocation
+      // freshly persists the production asset and checkpoints to
+      // "recoverable" immediately after, without running validation or the
+      // project transition. A second invocation is required to find that
+      // already-persisted asset via `resolveExistingProductionAsset` and
+      // drain straight through to `finalization_required`.
+      await worker.processNextJob();
       const afterStandard = await repo.getProject(projectId);
       assert.equal(afterStandard!.project.status, "finalization_required");
       const standardValidation = await repo.getLatestProductionAssetValidationForJob(

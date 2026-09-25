@@ -98,7 +98,6 @@ import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { decideEnhancement } from "@/capabilities/final-artwork/enhancement-decision";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
 import { HalftoneDtfProvider } from "@/capabilities/final-artwork/halftone-dtf-provider";
-import type { HalftoneScreenMetadata } from "@/capabilities/final-artwork/halftone-screen";
 import {
   isReconstructionIntermediateAsset,
   productionAssetMatchesEffectiveTarget,
@@ -1115,13 +1114,22 @@ export function createFinalArtworkWorkerCapability(
       }
     | { status: "handled" }
     /**
-     * Bounded FinalArtwork Production-Execution Repair: the provider
-     * reported (or was just submitted and has not yet had time to report)
-     * that its async job has not finished. The job has already been
-     * durably returned to `"recoverable"` before this resolves — a LATER
-     * invocation (an immediate wake, or the recovery scheduler) checks
-     * again. Every existing caller's `if (produced.status !== "ready")
-     * return;` guard already handles this correctly with no caller change.
+     * Bounded FinalArtwork Production-Execution Repair: "not ready yet, try
+     * again later" — covers TWO distinct cases, both durably checkpointed
+     * back to `"recoverable"` before this resolves, so every existing
+     * caller's `if (produced.status !== "ready") return;` guard already
+     * handles both correctly with no caller change:
+     *
+     * 1. The provider reported (or was just submitted and has not yet had
+     *    time to report) that its async job has not finished.
+     * 2. Phase 2 (post-provider durable checkpoint): the provider's result
+     *    was already acquired and a production asset was already durably
+     *    created THIS invocation — but this invocation deliberately stops
+     *    here rather than also running measurement/validation/completion
+     *    in the same call. The NEXT invocation's `resolveExistingProductionAsset`
+     *    check (top of this function) finds that asset and proceeds
+     *    straight to `finishValidatedJob` — never re-acquiring, never
+     *    re-uploading.
      */
     | { status: "pending" }
   > {
@@ -1303,7 +1311,6 @@ export function createFinalArtworkWorkerCapability(
     // redundant re-read of the job row solely to log what this attempt
     // already knows.
     let currentProviderRequestId = existingProviderRequest?.providerRequestId ?? null;
-    const providerStartedAt = Date.now();
     let boundedResult: FinalArtworkProviderBoundedResult;
     try {
       const providerInput: FinalArtworkProviderInput = {
@@ -1429,30 +1436,21 @@ export function createFinalArtworkWorkerCapability(
       return { status: "handled" };
     }
 
-    if (boundedResult.status === "pending") {
-      // Bounded FinalArtwork Production-Execution Repair: the provider's
-      // async job has not finished (or was just submitted this instant).
-      // Nothing failed — return the job to `"recoverable"` so the NEXT
-      // invocation (an immediate wake, or the recovery scheduler) claims
-      // it and checks again, rather than blocking THIS one until the
-      // provider is done. `providerKey`/`providerRequestId`/`providerStatus`
-      // were already durably persisted by `onProviderRequestSubmitted`
-      // above if this attempt just submitted — this call only updates
-      // claimability and freshness.
-      //
-      // Repair cycle 1 (independent review finding): a clean "still
-      // pending" outcome is NOT a recovery from failure or a crashed
-      // attempt — it is the expected, successful result of one bounded
-      // status check, and this exact claim reached this line without
-      // throwing. Charging `attempts`/`providerRecoveryAttempts` for it
-      // anyway silently exhausts both finite budgets within a handful of
-      // ordinary polls — a live-reproducible regression: a normal
-      // ~70-130s Topaz job was left permanently, unrecoverably failed
-      // within about a minute of enqueue, well before the provider had
-      // even finished. Refund exactly the charge THIS claim made — a
-      // genuine crash mid-resume never reaches this line at all, so that
-      // case still correctly keeps (and eventually exhausts) its charge,
-      // preserving the original crash-loop protection.
+    // Bounded FinalArtwork Production-Execution Repair: shared by BOTH
+    // durable-checkpoint sites below (provider still working; provider
+    // done and asset already durably persisted THIS invocation). Neither
+    // case is a recovery from failure or a crashed attempt — both reach
+    // this helper only after this exact claim's own work concluded
+    // cleanly, without throwing. Charging `attempts`/`providerRecoveryAttempts`
+    // for either anyway silently exhausts both finite budgets within a
+    // handful of ordinary invocations — a live-reproducible regression: a
+    // normal job was left permanently, unrecoverably failed well before
+    // the provider (or the post-provider pipeline) had even finished.
+    // Refund exactly the charge THIS claim made — a genuine crash mid-
+    // resume never reaches this helper at all, so that case still
+    // correctly keeps (and eventually exhausts) its charge, preserving
+    // the original crash-loop protection.
+    async function checkpointAndDeferToNextInvocation(): Promise<{ status: "pending" }> {
       const refund: Partial<
         Pick<FinalArtworkJob, "status" | "heartbeatAt" | "attempts" | "providerRecoveryAttempts">
       > = {
@@ -1472,16 +1470,26 @@ export function createFinalArtworkWorkerCapability(
       // overwrite that intentional reset with the OLD request's leftover
       // count, starting the new request's recovery budget already
       // partially spent. Only refund when this claim did NOT submit a new
-      // request: a pure "checked an existing request, still pending" claim
-      // is the only case this refund exists for.
+      // request.
       if (attemptClassification === "resume" && !submittedNewPaidRequest) {
         refund.providerRecoveryAttempts = effectiveJob.providerRecoveryAttempts - 1;
       }
       await repo.updateFinalArtworkJob(job.id, refund);
       return { status: "pending" };
     }
+
+    if (boundedResult.status === "pending") {
+      // The provider's async job has not finished (or was just submitted
+      // this instant). Return the job to `"recoverable"` so the NEXT
+      // invocation (an immediate wake, or the recovery scheduler) claims
+      // it and checks again, rather than blocking THIS one until the
+      // provider is done. `providerKey`/`providerRequestId`/`providerStatus`
+      // were already durably persisted by `onProviderRequestSubmitted`
+      // above if this attempt just submitted — this call only updates
+      // claimability and freshness.
+      return checkpointAndDeferToNextInvocation();
+    }
     const output = boundedResult;
-    const providerLatencyMs = Date.now() - providerStartedAt;
 
     logFinalArtworkPaidCallDecision({
       projectId: job.projectId,
@@ -1519,9 +1527,12 @@ export function createFinalArtworkWorkerCapability(
     // it is persisted purely as a foundation for a later phase.
     const dtfCoverage = measureDtfCoverageForPlate(output.bytes, output.normalization);
 
-    let productionAsset: AssetRecord;
     try {
-      productionAsset = await assets.uploadProductionAsset(job.projectId, {
+      // Phase 2 (post-provider durable checkpoint): the created record
+      // itself is never consumed here — this invocation checkpoints and
+      // returns immediately after (see below); a LATER invocation finds it
+      // via `resolveExistingProductionAsset` (top of this function).
+      await assets.uploadProductionAsset(job.projectId, {
         // Groups this job's production deliverable(s) under one storage
         // folder — a stable internal id, never a filename convention and
         // never anything a customer supplied (Goal 10 / Goal 18).
@@ -1586,23 +1597,21 @@ export function createFinalArtworkWorkerCapability(
       await repo.updateFinalArtworkJob(job.id, { providerStatus: "completed" });
     }
 
-    return {
-      status: "ready",
-      productionAsset,
-      provenance: {
-        resolutionProvenance: output.resolutionProvenance,
-        nativeWidthPx: output.nativeWidthPx,
-        nativeHeightPx: output.nativeHeightPx,
-        reconstructedWidthPx: output.reconstructedWidthPx,
-        reconstructedHeightPx: output.reconstructedHeightPx,
-        preservesApprovedContent: output.preservesApprovedContent,
-        providerRequestId: output.providerRequestId,
-        normalization: toNormalizationSummary(output.normalization, sizing),
-        halftone: toHalftoneEvidence(output.halftone ?? null),
-        dtfFeatureIntegrity,
-      },
-      providerLatencyMs,
-    };
+    // Phase 2 (post-provider durable checkpoint): the production asset
+    // now durably exists in `assets`/storage — `resolveExistingProductionAsset`
+    // (top of this function) will find it on any later claim. This
+    // invocation deliberately stops HERE rather than also running
+    // validation/completion/project-transition in the same call — that
+    // tail is itself real work (deterministic local computation plus
+    // several DB writes) that does not need to share this invocation's
+    // remaining time budget with the network/storage I/O already spent
+    // acquiring the provider result and uploading it. A live production
+    // incident (a real HTTP 504 from the platform gateway, ~30s into an
+    // invocation that had already durably reused the existing provider
+    // request with zero resubmission) is what proved this tail needed
+    // its own checkpoint rather than assuming "the provider work was the
+    // only slow part."
+    return checkpointAndDeferToNextInvocation();
   }
 
   /**
@@ -4059,12 +4068,6 @@ export function createFinalArtworkWorkerCapability(
       report: report as unknown as Record<string, unknown>,
     });
 
-    await repo.updateFinalArtworkJob(job.id, {
-      status: "completed",
-      lastError: report.status === "ready" ? null : summarizeReportForInternalLog(report),
-      completedAt: new Date().toISOString(),
-    });
-
     logFinalArtworkReconstructionOutcome({
       projectId: job.projectId,
       finalArtworkJobId: job.id,
@@ -4102,12 +4105,36 @@ export function createFinalArtworkWorkerCapability(
       providerLatencyMs: params.providerLatencyMs,
     });
 
+    // Phase 2 (completed-job/project-transition crash-gap repair): the
+    // PROJECT transition happens BEFORE the JOB is marked terminal,
+    // deliberately reversed from this function's original order. If
+    // interrupted between the two, the job is left `"running"` — NOT
+    // terminal — so the existing stale-heartbeat sweep reclaims it, and a
+    // later invocation naturally re-enters this exact function (the
+    // production asset already exists, so `resolveExistingProductionAsset`
+    // routes straight back here) and completes the job for real. No new
+    // reconciliation sweep needed: this reordering makes the EXISTING
+    // claim/reclaim machinery the reconciliation path, since a job that
+    // reached `"completed"` was, by construction, never reachable again to
+    // fix up a stranded project transition. Both writes below remain
+    // individually idempotent (`maybeTransitionProjectStatus` re-checks
+    // job currency and is a safe repeat write; marking a job `"completed"`
+    // a second time — reached only via a stale reclaim, never concurrently
+    // — is likewise a safe repeat write), so re-running either or both on
+    // a later attempt is harmless.
+    //
     // Goal 11/Q: only a "ready" authoritative report may ever justify
     // print_ready; anything else stays honestly finalization_required.
     await maybeTransitionProjectStatus(
       job,
       report.status === "ready" ? "print_ready" : "finalization_required",
     );
+
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "completed",
+      lastError: report.status === "ready" ? null : summarizeReportForInternalLog(report),
+      completedAt: new Date().toISOString(),
+    });
   }
 
   const capability: FinalArtworkWorkerCapability = {
@@ -4518,38 +4545,6 @@ function withOperationTiming<T>(label: string, fn: () => Promise<T>): Promise<T>
 }
 
 /**
- * Print-Ready Normalization Phase 1: maps the Final Artwork provider's own
- * normalization metadata onto the provider-neutral summary Print Validation
- * consumes. Print Validation must never depend on the Final Artwork
- * capability's types (ARCHITECTURE.md dependency direction), so this worker —
- * which legitimately knows both — is the one place the two shapes meet.
- *
- * `widthToleranceIn` comes from the placement policy rather than the provider:
- * how closely a plate must match its target width is a production-policy
- * decision, never a provider's to declare.
- */
-function toNormalizationSummary(
-  normalization: ProductionNormalizationMetadata,
-  sizing: PlacementSizingPolicy,
-): ProductionNormalizationSummary {
-  return {
-    strategy: normalization.strategy,
-    alphaBBoxWidthPx: normalization.alphaBBoxWidthPx,
-    alphaBBoxHeightPx: normalization.alphaBBoxHeightPx,
-    trimmedWidthPx: normalization.trimmedWidthPx,
-    trimmedHeightPx: normalization.trimmedHeightPx,
-    artworkOccupancy: normalization.artworkOccupancy,
-    targetWidthIn: normalization.targetWidthIn,
-    widthToleranceIn: sizing.widthToleranceIn,
-    targetPpi: normalization.targetPpi,
-    intendedWidthIn: normalization.intendedWidthIn,
-    intendedHeightIn: normalization.intendedHeightIn,
-    constrainedBy: normalization.constrainedBy,
-    densityPixelsPerMetre: normalization.densityPixelsPerMetre,
-  };
-}
-
-/**
  * Reads a normalization summary back off an already-persisted production
  * asset (the Goal 16 idempotent-retry path). Returns `null` for anything that
  * is not a complete, numerically valid record — a partially-recorded plate is
@@ -4561,38 +4556,6 @@ function toNormalizationSummary(
  * plate must match its target width is a production-policy decision, not a
  * property of the file.
  */
-/**
- * Print'em All Phase 2: the provider's screen metadata, as the provider-
- * neutral evidence Print Validation consumes.
- *
- * A projection rather than a pass-through, mirroring `toNormalizationSummary`.
- * The engine's metadata carries working figures validation has no business
- * seeing (cell area, mean requested coverage); the evidence carries exactly
- * the facts a check recomputes from.
- */
-function toHalftoneEvidence(
-  metadata: HalftoneScreenMetadata | null,
-): HalftoneProductionEvidence | null {
-  if (!metadata) return null;
-  return {
-    algorithmVersion: metadata.algorithmVersion,
-    lpi: metadata.lpi,
-    angleDeg: metadata.angleDeg,
-    dotShape: metadata.dotShape,
-    midtone: metadata.midtone,
-    chokePx: metadata.chokePx,
-    garmentHex: metadata.garmentHex,
-    targetPpi: metadata.targetPpi,
-    cellPx: metadata.cellPx,
-    achievedLpi: metadata.achievedLpi,
-    minDotRadiusPx: metadata.minDotRadiusPx,
-    screenWidthPx: metadata.screenWidthPx,
-    screenHeightPx: metadata.screenHeightPx,
-    visiblePixelCount: metadata.visiblePixelCount,
-    inkedPixelFraction: metadata.inkedPixelFraction,
-  };
-}
-
 /**
  * Reads screen evidence back off a persisted plate.
  *

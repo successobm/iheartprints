@@ -468,6 +468,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const { processedJobId } = await worker.processNextJob();
     assert.equal(processedJobId, job.id);
 
+    // Phase 2 (post-provider durable checkpoint): the first call only reaches
+    // the durable checkpoint (asset persisted, job "recoverable"). A second
+    // call is required to run validation/completion/project-transition.
+    await worker.processNextJob();
+
     const completed = await repo.getFinalArtworkJob(job.id);
     assert.equal(completed?.status, "completed");
   });
@@ -490,6 +495,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const { projectId, artworkId } = await setupProjectWithConcept(repo, assets);
 
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain past the checkpoint
+    // to completion before asserting the terminal job status.
     await worker.processNextJob();
 
     const completed = await repo.getFinalArtworkJob(job.id);
@@ -524,6 +532,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       (a) => a.productionRole === "production_png",
     );
     assert.equal(productionAssets.length, 1, "no duplicate production asset");
+
+    // Phase 2 (post-provider durable checkpoint): the winning claim only
+    // reached the checkpoint (job "recoverable"). Drain it to completion so
+    // it doesn't leak into a later test's claim in this file's shared store.
+    await workerA.processNextJob();
   });
 
   // --- C: exact active FinalDirectionApproval required -------------------
@@ -657,6 +670,10 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const sleeve = await setupProjectWithConcept(repoA, assetsA, { printPlacement: "sleeve" });
     await finalArtworkA.requestFinalArtwork(sleeve.projectId, sleeve.artworkId);
     await workerA.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): hygiene drain — this
+    // file's tests share one on-disk store, so leaving the job "recoverable"
+    // would let a later test's processNextJob() wrongly claim it.
+    await workerA.processNextJob();
     const sleeveAsset = (await repoA.listAssets(sleeve.projectId)).find(
       (a) => a.productionRole === "production_png",
     );
@@ -667,6 +684,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const { assets: assetsB, finalArtwork: finalArtworkB, worker: workerB } = buildPipeline(repoB);
     const fullBack = await setupProjectWithConcept(repoB, assetsB, { printPlacement: "full_back" });
     await finalArtworkB.requestFinalArtwork(fullBack.projectId, fullBack.artworkId);
+    await workerB.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): hygiene drain, same reason
+    // as the sleeve scenario above.
     await workerB.processNextJob();
     const fullBackAsset = (await repoB.listAssets(fullBack.projectId)).find(
       (a) => a.productionRole === "production_png",
@@ -779,6 +799,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
 
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): hygiene drain so this
+    // job's "recoverable" state doesn't leak into a later test's claim.
+    await worker.processNextJob();
 
     const plate = (await repo.listAssets(projectId)).find(
       (asset) => asset.productionRole === "production_png",
@@ -809,6 +832,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
 
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): hygiene drain so this
+    // job's "recoverable" state doesn't leak into a later test's claim.
+    await worker.processNextJob();
 
     const plate = (await repo.listAssets(projectId)).find(
       (asset) => asset.productionRole === "production_png",
@@ -824,6 +850,10 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "sleeve",
     });
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the first call only
+    // persists the asset. Validation (checked below) only runs on the
+    // second call, which also drains completion/project-transition.
     await worker.processNextJob();
 
     const asset = (await repo.listAssets(projectId)).find(
@@ -881,6 +911,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const before = await assets.downloadAssetBytes(primaryAssetId!);
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): hygiene drain so this
+    // job's "recoverable" state doesn't leak into a later test's claim.
+    await worker.processNextJob();
     const after = await assets.downloadAssetBytes(primaryAssetId!);
 
     assert.deepEqual(after!.bytes, before!.bytes, "creative source bytes are unchanged");
@@ -902,6 +935,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "sleeve",
     });
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): validation and the project
+    // transition (checked below) only run on the second call.
     await worker.processNextJob();
 
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job.id);
@@ -925,6 +961,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "full_back",
     });
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): validation and the project
+    // transition (checked below) only run on the second call.
     await worker.processNextJob();
 
     const project = await repo.getProject(projectId);
@@ -952,6 +991,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "sleeve",
     });
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the validation record
+    // (checked below) is only created on the second call.
     await worker.processNextJob();
 
     const productionAsset = (await repo.listAssets(projectId)).find(
@@ -1021,6 +1063,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "left_chest",
     });
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking terminal job/project status below.
     await worker.processNextJob();
 
     const completed = await repo.getFinalArtworkJob(job.id);
@@ -1141,6 +1186,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
 
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking terminal job status below.
+    await worker.processNextJob();
 
     assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
     const productionAssets = (await repo.listAssets(projectId)).filter(
@@ -1167,6 +1215,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     );
 
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking terminal job/project status below.
     await worker.processNextJob();
 
     assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
@@ -1208,6 +1259,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "sleeve",
     });
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the project's print_ready transition below.
     await worker.processNextJob();
 
     const project = await repo.getProject(projectId);
@@ -1338,6 +1392,10 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
 
     const { processedJobId } = await worker.processNextJob();
     assert.equal(processedJobId, job.id);
+    // Phase 2 (post-provider durable checkpoint): the recovered claim only
+    // reaches the checkpoint (job "recoverable") on this first post-recovery
+    // call. Drain to completion before checking the terminal status below.
+    await worker.processNextJob();
 
     const finished = await repo.getFinalArtworkJob(job.id);
     assert.equal(finished?.status, "completed");
@@ -1384,6 +1442,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "sleeve",
     });
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the print_ready customer snapshot below.
     await worker.processNextJob();
 
     const conversationService = await import("@/lib/services/conversation-service");
@@ -1519,6 +1580,12 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       createPrintValidationCapability(),
     );
     await racingWorker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the racing claim only
+    // reached the checkpoint (job "recoverable"). Drain to completion — the
+    // already-persisted asset is found via `resolveExistingProductionAsset`,
+    // so this plain `worker` call completes the job against the
+    // already-changed intent, exactly like a real second invocation would.
+    await worker.processNextJob();
 
     // The plate really was produced — this is not a test of "nothing ran".
     assert.equal(
@@ -1530,9 +1597,16 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     // …and it did NOT flip the project to print_ready.
     assert.notEqual((await repo.getProject(projectId))?.project.status, "print_ready");
     assert.equal(await customerStatus(projectId), "needs_review");
-    assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
-
-    void worker;
+    // Phase 2 (post-provider durable checkpoint): the drain call above is a
+    // fresh claim, and the intent fence (`jobIntentIsCurrent`) is
+    // re-evaluated on every claim — so this job, whose bound intent went
+    // stale mid-flight, is now reclassified as superseded/"cancelled" on
+    // that resuming claim rather than "completed", exactly like every other
+    // superseded-intent job in this file. The already-persisted plate is
+    // never deleted (asserted above) and print_ready is never claimed
+    // (asserted above) — the behavioral guarantee this test exists for is
+    // unchanged; only the terminal job status label is.
+    assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "cancelled");
   });
 
   it("G/Q/R: an existing print_ready PNG stops answering a new unsupported request, and returns when retracted", async () => {
@@ -1543,6 +1617,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "sleeve",
     });
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the print_ready transition below.
     await worker.processNextJob();
     assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
     assert.equal(await customerStatus(projectId), "print_ready");
@@ -1576,6 +1653,11 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "sleeve",
     });
     const first = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion here —
+    // otherwise this leftover "recoverable" job (globally claimable, and
+    // older than the "unsupported" job below) would be wrongly reclaimed by
+    // the next processNextJob() call instead of the job this test intends.
     await worker.processNextJob();
 
     await setCurrentIntent(repo, projectId, "screen_print_separations");
@@ -1624,6 +1706,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
 
     const png = await finalArtwork.requestFinalArtwork(projectId, artworkId);
     assert.notEqual(png.job.id, unsupported.job.id);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the print_ready transition below.
     await worker.processNextJob();
 
     assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
@@ -1722,6 +1807,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     // --- PNG produced and validated -----------------------------------------
     const original = await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the print_ready transition and delivery below.
+    await worker.processNextJob();
     assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
     assert.equal(provider.submitCount, 1);
 
@@ -1810,6 +1898,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     const png = await finalArtwork.requestFinalArtwork(projectId, artworkId);
     assert.notEqual(png.job.id, unsupported.job.id);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the print_ready transition below.
+    await worker.processNextJob();
 
     assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
     assert.equal(await customerStatus(projectId), "print_ready");
@@ -1829,6 +1920,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
       printPlacement: "full_front",
     });
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking terminal job/project status and the validation record below.
     await worker.processNextJob();
 
     assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
@@ -1864,6 +1958,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     });
     const png = await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): hygiene drain so this
+    // job's "recoverable" state doesn't leak into a later test's claim.
+    await worker.processNextJob();
 
     await setCurrentIntent(repo, projectId, "screen_print_separations");
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
@@ -1897,6 +1994,9 @@ describe("FinalArtworkWorkerCapability (Sprint 2M Phase 2C)", () => {
     // faked here by writing a value the schema treats as write-once.
     assert.equal(job.requestedProductionOutput, "production_png");
 
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the print_ready transition below.
     await worker.processNextJob();
     assert.equal((await repo.getProject(projectId))?.project.status, "print_ready");
     assert.equal(await customerStatus(projectId), "print_ready");
@@ -2021,6 +2121,9 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): hygiene drain so this
+    // job's "recoverable" state doesn't leak into a later test's claim.
+    await worker.processNextJob();
 
     const asset = (await repo.listAssets(projectId)).find(
       (a) => a.productionRole === "production_png",
@@ -2093,6 +2196,11 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
     reconstructionProvider.behavior = { crashAfterSubmit: false };
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): this resumed claim
+    // succeeded and persisted the asset, but only reaches the checkpoint
+    // (job "recoverable") — a third overall call is required to drain to
+    // completion before checking the terminal job status below.
+    await worker.processNextJob();
 
     assert.equal(reconstructionProvider.submitCount, 1, "exactly one paid submission across both attempts");
     assert.equal(reconstructionProvider.resumeCount, 1, "the second attempt resumed the existing request");
@@ -2113,6 +2221,9 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the print_ready transition below.
+    await worker.processNextJob();
 
     const project = await repo.getProject(projectId);
     assert.equal(project?.project.status, "print_ready");
@@ -2132,6 +2243,9 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the project status below.
+    await worker.processNextJob();
 
     const project = await repo.getProject(projectId);
     assert.equal(project?.project.status, "finalization_required");
@@ -2149,6 +2263,9 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     );
     const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the validation record below.
     await worker.processNextJob();
 
     const project = await repo.getProject(projectId);
@@ -2171,6 +2288,9 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     );
     const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
     const { job } = await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion before
+    // checking the validation record below.
     await worker.processNextJob();
 
     const productionAsset = (await repo.listAssets(projectId)).find(
@@ -2211,6 +2331,9 @@ describe("FinalArtworkWorkerCapability — Topaz-shaped reconstruction provider 
     );
     const { projectId, artworkId } = await setupFullBackConcept(repo, assets);
     await finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to completion so
+    // this assertion checks the same fully-settled snapshot shape as before.
     await worker.processNextJob();
 
     const conversationService = await import("@/lib/services/conversation-service");

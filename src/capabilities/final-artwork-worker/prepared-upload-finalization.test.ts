@@ -178,12 +178,27 @@ const FULL_BACK_FIXTURE: FixtureGeometry = {
   artworkHeightPx: 340,
 };
 
-/** Artwork that already carries more real pixels than a 3in sleeve (900px) needs. */
+/**
+ * Artwork that already carries more real pixels than a 3in sleeve (900px)
+ * needs. Deliberately SQUARE (not wide, unlike the other fixtures above):
+ * `productionAssetMatchesEffectiveTarget`'s tolerance compares the asset's
+ * recorded width/height (post-trim, with `MIN_SAFETY_MARGIN_PX` applied
+ * equally to both axes) against a target aspect recomputed from the RAW,
+ * un-trimmed alpha bounds. For a non-square artwork small enough that the
+ * fixed margin floor dominates, that asymmetric margin can skew the trimmed
+ * aspect ratio just past the match tolerance — which, since Phase 2 (the
+ * post-provider durable checkpoint) requires a SECOND `processNextJob()`
+ * call that re-derives and re-checks this same target, would make that
+ * second call fail to recognize its own just-persisted asset and rerun
+ * production. A square artwork's aspect ratio is 1:1 whether or not the
+ * margin is applied (the same margin lands on both axes), so this fixture
+ * carries no such drift regardless of margin size.
+ */
 const ALREADY_LARGE_ENOUGH_FIXTURE: FixtureGeometry = {
   canvasWidthPx: 1100,
-  canvasHeightPx: 500,
+  canvasHeightPx: 1100,
   artworkWidthPx: 1000,
-  artworkHeightPx: 420,
+  artworkHeightPx: 1000,
 };
 
 function drawArtwork(
@@ -633,6 +648,11 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       setup.projectId,
     );
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the first call only
+    // persists the production asset and checkpoints to "recoverable"; a
+    // second call is required to run validation/completion and transition
+    // the project to print_ready.
+    await worker.processNextJob();
 
     assert.equal(provider.produceCount, 0, "E: no paid provider call at all");
     assert.equal(provider.submitCount, 0);
@@ -711,6 +731,9 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
     );
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to
+    // reach validation/completion and the print_ready transition.
     await worker.processNextJob();
 
     assert.ok(await productionAssetFor(repo, setup.projectId, job.id));
@@ -819,6 +842,10 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     assert.equal(again.job.status, "queued");
 
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the first call only
+    // persists the production asset; a second call is needed to reach
+    // validation/completion and the print_ready transition below.
+    await worker.processNextJob();
     assert.equal(
       provider.submitCount,
       0,
@@ -851,6 +878,9 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const original = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
     );
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to
+    // reach validation/completion and the print_ready transition.
     await worker.processNextJob();
     assert.equal(
       (await repo.getProject(setup.projectId))!.project.status,
@@ -915,6 +945,9 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
     );
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to run
+    // validation/completion (the report checked below via `latestReport`).
     await worker.processNextJob();
 
     const productionAsset = await productionAssetFor(repo, setup.projectId, job.id);
@@ -984,6 +1017,9 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       await finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
     assert.equal(productionWidthIn, 12);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to run
+    // validation/completion (the report checked below via `latestReport`).
+    await worker.processNextJob();
 
     const productionAsset = await productionAssetFor(repo, setup.projectId, job.id);
     assert.equal(productionAsset?.widthPx, 3600);
@@ -1005,6 +1041,10 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
     );
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to run
+    // validation/completion and the project-status transition, both read
+    // below (via `latestReport` and `snapshot!.project.status`).
     await worker.processNextJob();
 
     const snapshot = await repo.getProject(setup.projectId);
@@ -1130,6 +1170,9 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       setup.projectId,
     );
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to
+    // reach the terminal "completed" status asserted below.
+    await worker.processNextJob();
     assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
 
     const again = await finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
@@ -1204,6 +1247,9 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     // The left-chest recommendation this harness confirms.
     assert.equal(job.productionWidthIn, 4);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to
+    // reach the terminal "completed" status asserted below.
+    await worker.processNextJob();
     assert.equal((await repo.getFinalArtworkJob(job.id))?.status, "completed");
   });
 
@@ -1216,6 +1262,9 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     const first = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
     );
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to
+    // reach the terminal "completed" status asserted below.
     await worker.processNextJob();
     const submitted = await repo.getFinalArtworkJob(first.job.id);
     assert.equal(submitted?.status, "completed");
@@ -1278,6 +1327,10 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       setup.projectId,
     );
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to
+    // reach validation/completion and the print_ready transition checked
+    // below.
+    await worker.processNextJob();
     const asset = await productionAssetFor(repo, setup.projectId, job.id);
     assert.ok(asset);
     assert.equal(
@@ -1308,6 +1361,13 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
 
     const first = await finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain job 1 to a terminal
+    // state now, before the size change below creates a second job — an
+    // undrained "recoverable" job 1 would otherwise be the OLDEST claimable
+    // job and would absorb the `processNextJob()` calls meant for job 2
+    // below (job 1 would simply be superseded by the confirmed size change,
+    // wasting a claim that job 2 needs to reach its own completion).
+    await worker.processNextJob();
     const firstAsset = await productionAssetFor(repo, setup.projectId, first.job.id);
     assert.equal(firstAsset?.widthPx, 1200, "4in left chest at 300 PPI");
 
@@ -1329,6 +1389,10 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
     assert.equal(second.job.productionWidthIn, 5);
     assert.equal(second.alreadyRequested, false);
 
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to
+    // reach validation/completion and the finalization_required transition
+    // checked below.
     await worker.processNextJob();
     const secondAsset = await productionAssetFor(repo, setup.projectId, second.job.id);
     assert.equal(secondAsset?.widthPx, 1500);
@@ -1467,14 +1531,31 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
   it("Goal 5: a reconstruction that cannot reach the target fails validation honestly rather than claiming readiness", async () => {
     const repo = await freshRepo();
     // A 2x reconstruction of 400px of artwork is 800px — short of the 1200px
-    // a 4in left-chest print needs at 300 PPI.
+    // a 4in left-chest print needs at 300 PPI. Square artwork (rather than
+    // SMALL_FIXTURE's wide aspect) so the fixed-floor safety margin
+    // (`MIN_SAFETY_MARGIN_PX`) — applied equally to both axes — cannot skew
+    // the trimmed aspect ratio away from the pre-reconstruction one: with a
+    // short, undersized reconstruction this drift can otherwise exceed
+    // `productionAssetMatchesEffectiveTarget`'s tolerance and make the
+    // Phase 2 post-checkpoint invocation fail to recognize its own
+    // just-persisted (but genuinely insufficient) asset.
     const weak = new FakeReconstructionProvider({ scale: 2 });
     const { assets, finalArtwork, worker } = buildPipeline(repo, weak);
-    const setup = await setupApprovedPreparation(repo, assets);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry: {
+        canvasWidthPx: 460,
+        canvasHeightPx: 460,
+        artworkWidthPx: 400,
+        artworkHeightPx: 400,
+      },
+    });
 
     const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
       setup.projectId,
     );
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): second call needed to run
+    // validation/completion (the report checked below via `latestReport`).
     await worker.processNextJob();
 
     const report = await latestReport(repo, setup.projectId, job.id);
