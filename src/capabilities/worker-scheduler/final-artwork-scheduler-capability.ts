@@ -68,10 +68,23 @@ export function createFinalArtworkSchedulerCapability(
     const { recoveredCount } = await worker.recoverAbandonedJobs(staleAfterMs);
 
     const processedJobIds: string[] = [];
+    let previousJobId: string | null = null;
     for (let i = 0; i < maxJobsPerRun; i += 1) {
       const { processedJobId } = await worker.processNextJob();
       if (!processedJobId) break;
+      // Bounded FinalArtwork Production-Execution Repair: the ONLY way the
+      // exact same job id can be claimed twice in a row within one batch is
+      // a bounded "still pending" outcome that returned it to `recoverable`
+      // and it remains the oldest due row with nothing else queued (a
+      // terminal outcome — completed/failed/cancelled — is never reclaimed
+      // again, and a genuinely different job would have a different id).
+      // Stop here rather than burning the rest of this batch's slots
+      // re-checking a request that, by construction, cannot have finished
+      // in the instant since the last check — the next invocation (the
+      // recovery scheduler, or a later immediate wake) checks it again.
+      if (processedJobId === previousJobId) break;
       processedJobIds.push(processedJobId);
+      previousJobId = processedJobId;
     }
 
     return {

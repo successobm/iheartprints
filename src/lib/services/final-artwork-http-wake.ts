@@ -40,9 +40,25 @@ import { getWorkerSecret } from "@/lib/config/worker-config";
  * whose timeout behavior this repair could not verify from the repository.
  * Overridable via `FINAL_ARTWORK_WAKE_URL` for any deployment topology where
  * loopback is not reachable.
+ *
+ * Aborting THIS SIDE's fetch on timeout only stops us from waiting on the
+ * response — it does not, and is not intended to, cancel the server-side
+ * `runBatch()` the route kicked off; that batch keeps running to whatever
+ * conclusion it reaches on its own. This call's only job is to get the
+ * route invoked promptly, not to observe or control its outcome.
  */
 
-const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
+/**
+ * Repair cycle 1 (independent review follow-up): short enough that this
+ * best-effort call never meaningfully delays the customer-facing enqueue
+ * request it's attached to. This only needs to bound how long we wait for
+ * the route to ACCEPT the request, not to observe its outcome — the route's
+ * own execution is bounded (see `produceBounded`), but a full batch (up to
+ * `MAX_GENERATION_JOBS_PER_RUN` jobs, each a real Topaz submit/check/
+ * upload) can still take longer than is reasonable to hold a customer
+ * request open for.
+ */
+const DEFAULT_WAKE_TIMEOUT_MS = 1_500;
 const DEFAULT_LOOPBACK_PORT = "3000";
 
 export interface WakeFinalArtworkWorkerOptions {

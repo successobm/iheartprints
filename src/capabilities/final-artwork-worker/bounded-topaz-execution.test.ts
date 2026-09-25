@@ -16,7 +16,11 @@ import {
 } from "@/capabilities/final-artwork/topaz-transparency-upscale-provider";
 import { PRINT_PLACEMENT_SIZING_POLICY } from "@/capabilities/shared/print-placement-dimensions";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
-import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capability";
+import { createFinalArtworkSchedulerCapability } from "@/capabilities/worker-scheduler";
+import {
+  createFinalArtworkWorkerCapability,
+  MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS,
+} from "./final-artwork-worker-capability";
 
 /**
  * Bounded FinalArtwork Production-Execution Repair: end-to-end, through the
@@ -353,5 +357,74 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed");
     assert.equal(submitCount(), 1, "still exactly one submission after four invocations total");
+  });
+
+  it("4: MANY pending checks across real scheduler batches never exhaust the recovery/attempt budgets or falsely fail the job (repair-cycle regression)", async () => {
+    const { repo, assets, projectId } = await setup(400);
+    const expectedRequest = expectedReconstructionRequest(400);
+    const { fetchImpl, submitCount, setStatusMode } = buildControllableStatusFakeTopazFetch(
+      expectedRequest.widthPx,
+      expectedRequest.heightPx,
+    );
+
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+    });
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const printValidation = createPrintValidationCapability();
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
+    // The REAL scheduler layer, not raw `processNextJob()` calls -- this is
+    // the shape production actually uses (an immediate wake or a GitHub
+    // Actions tick calls `runBatch()`, which loops up to `maxJobsPerRun`
+    // claims with no delay between them). An earlier version of this
+    // repair returned a still-pending job straight to "recoverable" with
+    // no budget accounting, which meant `runBatch()`'s own tight loop
+    // could reclaim and charge the SAME still-processing job's recovery
+    // budget up to `maxJobsPerRun` times in a single batch, and a couple of
+    // batches were enough to exhaust `MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS`
+    // and permanently, falsely fail a job that was never actually broken.
+    const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 5 });
+
+    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+
+    // Enough batches that, without the repair-cycle-1 budget refund, this
+    // job's `providerRecoveryAttempts` would have been charged well past
+    // `MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS` purely from benign pending
+    // checks. (With the same-job-twice-in-a-row batch guard also added in
+    // this repair cycle, each batch claims this lone stuck job at most
+    // twice -- once fresh, then once more as a resume before the guard
+    // stops the loop -- so 6 batches comfortably exceeds the ceiling of
+    // `MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS` resume-classified claims on the
+    // unfixed accounting.)
+    for (let batch = 0; batch < 6; batch += 1) {
+      await scheduler.runBatch();
+    }
+
+    let job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.notEqual(job?.status, "failed", "repeated benign pending checks must never falsely fail the job");
+    assert.ok(
+      job && ["recoverable", "running"].includes(job.status),
+      `expected the job still active (recoverable/running), got "${job?.status}"`,
+    );
+    assert.ok(
+      (job?.providerRecoveryAttempts ?? 0) < MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS,
+      `providerRecoveryAttempts must stay below the ceiling for benign pending checks, got ${job?.providerRecoveryAttempts}`,
+    );
+    assert.equal(submitCount(), 1, "still exactly one paid submission after many pending batches");
+
+    // The provider job finishes for real -- the SAME job must still be able
+    // to complete normally, proving the budget was never actually spent.
+    setStatusMode("completed");
+    await scheduler.runBatch();
+
+    job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job?.status, "completed", "the job must complete normally once the provider is actually done");
+    assert.equal(submitCount(), 1, "completion must never have required a second paid submission");
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job!.id);
+    assert.ok(validation, "a job recovered from many benign pending checks must still reach real print validation");
   });
 });

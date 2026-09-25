@@ -1427,10 +1427,31 @@ export function createFinalArtworkWorkerCapability(
       // were already durably persisted by `onProviderRequestSubmitted`
       // above if this attempt just submitted — this call only updates
       // claimability and freshness.
-      await repo.updateFinalArtworkJob(job.id, {
+      //
+      // Repair cycle 1 (independent review finding): a clean "still
+      // pending" outcome is NOT a recovery from failure or a crashed
+      // attempt — it is the expected, successful result of one bounded
+      // status check, and this exact claim reached this line without
+      // throwing. Charging `attempts`/`providerRecoveryAttempts` for it
+      // anyway silently exhausts both finite budgets within a handful of
+      // ordinary polls — a live-reproducible regression: a normal
+      // ~70-130s Topaz job was left permanently, unrecoverably failed
+      // within about a minute of enqueue, well before the provider had
+      // even finished. Refund exactly the charge THIS claim made — a
+      // genuine crash mid-resume never reaches this line at all, so that
+      // case still correctly keeps (and eventually exhausts) its charge,
+      // preserving the original crash-loop protection.
+      const refund: Partial<
+        Pick<FinalArtworkJob, "status" | "heartbeatAt" | "attempts" | "providerRecoveryAttempts">
+      > = {
         status: "recoverable",
         heartbeatAt: new Date().toISOString(),
-      });
+        attempts: job.attempts - 1,
+      };
+      if (attemptClassification === "resume") {
+        refund.providerRecoveryAttempts = effectiveJob.providerRecoveryAttempts - 1;
+      }
+      await repo.updateFinalArtworkJob(job.id, refund);
       return { status: "pending" };
     }
     const output = boundedResult;
