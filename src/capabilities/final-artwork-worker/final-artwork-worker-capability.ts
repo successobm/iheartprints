@@ -92,7 +92,12 @@ import type {
   FinalArtworkProviderResumeContext,
 } from "@/capabilities/final-artwork/provider";
 import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwork/production-normalization";
-import { computeAlphaBounds, DEFAULT_ALPHA_THRESHOLD } from "@/capabilities/final-artwork/alpha-trim";
+import {
+  computeAlphaBounds,
+  DEFAULT_ALPHA_THRESHOLD,
+  SAFETY_MARGIN_FRACTION,
+  trimToAlphaBounds,
+} from "@/capabilities/final-artwork/alpha-trim";
 import { hasAnyTransparentPixel } from "@/capabilities/final-artwork/raster-transform";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { decideEnhancement } from "@/capabilities/final-artwork/enhancement-decision";
@@ -1143,6 +1148,59 @@ export function createFinalArtworkWorkerCapability(
         provenance: provenanceFromExistingAsset(existing, sizing),
         providerLatencyMs: null,
       };
+    }
+
+    // Independent-review mandatory loop guard: `resolveExistingProductionAsset`
+    // just found NO candidate matching `targetIn` — normally either "nothing
+    // exists yet" (proceed below, the ordinary first pass) or "the confirmed
+    // size genuinely changed" (proceed below, a legitimate new asset for a
+    // new, DIFFERENT target — Phase 28T's own stale-envelope case, where an
+    // OLD asset from a since-superseded confirmed size correctly fails this
+    // match and a NEW one is correctly created alongside it). Distinguish
+    // those from a THIRD, anomalous case: an asset already exists for this
+    // exact job and source, explicitly recorded (at ITS OWN creation time)
+    // against the intended width/height THIS SAME re-derivation JUST
+    // computed for the CURRENT confirmed size — i.e. nothing about the
+    // request changed, yet the pixel-level match
+    // (`productionAssetMatchesEffectiveTarget`) still disagrees with the
+    // asset's own recorded intent. That is never explainable by a
+    // legitimate resize (a resize always changes the recorded intended
+    // width or height, which is exactly what this check keys off, unlike
+    // `job.productionWidthIn` alone — WIDTH-only, frozen at enqueue, and
+    // structurally blind to a height-only envelope change, e.g. Phase 28T's
+    // own 10.5x10.5 -> 10.5x14 case). Silently resubmitting the provider and
+    // creating/adopting yet another asset here would either loop
+    // indefinitely against an undiscovered geometry disagreement or
+    // accumulate duplicate rows. Fail explicitly with a diagnostic instead —
+    // an operator can then investigate, rather than the worker guessing.
+    if (params.targetIn) {
+      const priorAssets = await withOperationTiming(
+        "produceProductionAsset.loopGuard.listAssetsForFinalArtworkJob",
+        () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
+      );
+      const staleAuthorityMatch = priorAssets.find((asset) => {
+        if (asset.finalArtworkJobId !== job.id) return false;
+        if (asset.productionRole !== "production_png") return false;
+        if (isReconstructionIntermediateAsset(asset)) return false;
+        const meta = asset.metadata as Record<string, unknown> | null;
+        if (meta?.sourceAssetId !== sourceAsset.id) return false;
+        const normalization = meta?.normalization as Record<string, unknown> | null | undefined;
+        const recordedWidthIn = normalization?.intendedWidthIn;
+        const recordedHeightIn = normalization?.intendedHeightIn;
+        return (
+          typeof recordedWidthIn === "number" &&
+          typeof recordedHeightIn === "number" &&
+          Math.abs(recordedWidthIn - params.targetIn!.widthIn) < 0.01 &&
+          Math.abs(recordedHeightIn - params.targetIn!.heightIn) < 0.01
+        );
+      });
+      if (staleAuthorityMatch) {
+        await failJob(
+          job,
+          `Production asset authority mismatch: asset ${staleAuthorityMatch.id} already exists for this exact job and source, explicitly recorded against the SAME intended width/height this claim just re-derived, but its pixel geometry still does not match. Refusing to silently reproduce it.`,
+        );
+        return { status: "handled" };
+      }
     }
 
     // --- Phase 28V (Section 7/8): does a two-pass reconstruction's PASS 1
@@ -3824,10 +3882,23 @@ export function createFinalArtworkWorkerCapability(
     // same amount the plate itself is later corrected. Source and target
     // share one aspect ratio by construction, so checking the contained
     // WIDTH alone is equivalent to checking both axes.
+    //
+    // Independent-review repair: sized from `marginedWidthPx`/`marginedHeightPx`
+    // (the SAME post-trim geometry `normalizeProductionRaster` actually
+    // produces the plate from), never the raw, un-margined alpha bbox. The
+    // artwork-edge safety margin is a FIXED pixel amount applied to BOTH
+    // axes (`safetyMarginPxFor`) -- for a non-square bbox that shifts the
+    // aspect ratio measurably (more so the more elongated the artwork),
+    // so deriving `contained` from the raw bbox instead of the margined one
+    // silently computed a different aspect ratio than the plate this job
+    // will actually persist. That drift previously made this SAME job's own
+    // later crash-recovery re-check (`targetIn` below) reject the asset it
+    // had itself just durably created, on nothing more than its own aspect
+    // ratio disagreeing with itself between the two computations.
     const contained = resolveWidthConstrainedSizing(
       sizing,
-      measured.alphaBBoxWidthPx,
-      measured.alphaBBoxHeightPx,
+      measured.marginedWidthPx,
+      measured.marginedHeightPx,
     );
 
     // Recorded either way, because the two questions are independent and only
@@ -3856,6 +3927,52 @@ export function createFinalArtworkWorkerCapability(
       : enhancement.requiresReconstruction
         ? provider
         : localNormalizationProvider;
+
+    // Independent-review repair (crash-recovery re-check target, separate
+    // from `contained` above): a RECONSTRUCTION provider normalizes the
+    // artwork it itself produced -- an UPSCALED image at a scale this
+    // function cannot know in advance -- never this prepared source
+    // directly. `safetyMarginPxFor`'s margin is `max(MIN_SAFETY_MARGIN_PX,
+    // ceil(longestSide * SAFETY_MARGIN_FRACTION))`: the FLOOR half of that
+    // is a fixed pixel count, NOT scale-linear, so a margin computed on the
+    // small pre-reconstruction source (where the floor usually dominates)
+    // does not scale up to the margin the reconstructed (much larger) image
+    // will independently receive (where the floor usually no longer
+    // dominates) -- using `contained` (floor-inclusive margin, sized from
+    // THIS source) here would silently predict a different aspect ratio
+    // than reconstruction actually produces.
+    //
+    // The FRACTIONAL half (`SAFETY_MARGIN_FRACTION * longestSide`), by
+    // contrast, IS scale-linear by construction, and reconstruction is an
+    // exact proportional scale (`resolveReconstructionRequest`'s own
+    // contract) -- so applying the fractional term alone (never the floor)
+    // to the pre-reconstruction bbox predicts the post-reconstruction
+    // margin far more accurately than either the raw (zero-margin) bbox or
+    // the floor-inclusive one. Proven directly (`scripts/diagnose-margin
+    // -drift.mts`): across reconstruction scale factors 2x-5x on this
+    // module's own fixture geometry, the fractional-only prediction lands
+    // within 0-0.4% of the real produced asset's height, against 1.3-2.4%
+    // for the raw-bbox alternative -- comfortably inside this module's own
+    // existing reconstruction-drift tolerance (see `production-request
+    // -identity.ts`'s 2%/0.02in figures, themselves calibrated for a
+    // DIFFERENT reconstruction noise source, "+0.13%"-"1.3%" edge-softening
+    // drift) rather than a new, unrelated widening.
+    //
+    // A halftone plate never reconstructs (`HalftoneDtfProvider` normalizes
+    // this exact source directly, like the local path), so it uses the
+    // exact margined target just like the no-reconstruction case.
+    const willReconstructBeforeNormalizing = !halftone && enhancement.requiresReconstruction;
+    const reconstructionMarginEstimatePx = Math.max(
+      1,
+      Math.ceil(Math.max(measured.alphaBBoxWidthPx, measured.alphaBBoxHeightPx) * SAFETY_MARGIN_FRACTION),
+    );
+    const recheckTarget = willReconstructBeforeNormalizing
+      ? resolveWidthConstrainedSizing(
+          sizing,
+          measured.alphaBBoxWidthPx + 2 * reconstructionMarginEstimatePx,
+          measured.alphaBBoxHeightPx + 2 * reconstructionMarginEstimatePx,
+        )
+      : contained;
 
     // Phase 28I Section 9(I)/10: purely diagnostic — see
     // `logFinalArtworkEnhancementProviderGap`'s own doc comment. Fires only
@@ -3905,14 +4022,14 @@ export function createFinalArtworkWorkerCapability(
         // geometry — so a plate can be matched to an intent without a join.
         productionWidthIn: intendedPrintWidthIn,
       },
-      // Phase 28T: `contained` above is already this exact request's
+      // Phase 28T: `recheckTarget` above is already this exact request's
       // effective resolved size, freshly measured from the REAL current
       // source bytes (even more precise than `final-artwork-capability.ts`'s
       // own cached-analysis-bounds version of the same computation) — reused
       // here rather than re-derived, so the crash-recovery short-circuit
       // above can tell a genuinely-current existing asset apart from a
       // stale one left over from before the confirmed envelope changed.
-      targetIn: { widthIn: contained.widthIn, heightIn: contained.heightIn, targetPpi: sizing.targetPpi },
+      targetIn: { widthIn: recheckTarget.widthIn, heightIn: recheckTarget.heightIn, targetPpi: sizing.targetPpi },
     });
     if (produced.status !== "ready") return;
     const { productionAsset, provenance, providerLatencyMs } = produced;
@@ -3991,6 +4108,17 @@ export function createFinalArtworkWorkerCapability(
    * normalization uses, so the "did the geometry survive?" check downstream
    * compares one measurement against another rather than two different
    * definitions of "visible".
+   *
+   * Independent-review repair: also runs `trimToAlphaBounds` (the EXACT
+   * function `normalizeProductionRaster` itself calls) over this same
+   * decoded image, so `marginedWidthPx`/`marginedHeightPx` below are
+   * byte-for-byte the same geometry the production asset will actually be
+   * sized from -- never a second, re-derived approximation of the margin.
+   * The raw `alphaBBoxWidthPx`/`alphaBBoxHeightPx` fields are preserved
+   * unchanged for their existing consumers (`decideEnhancement`'s "how many
+   * real source pixels exist" question, and the `uploadedPreserve` audit
+   * trail) -- neither of those is a target-geometry question, so neither
+   * should be margined.
    */
   async function measurePreparedSource(
     job: FinalArtworkJob,
@@ -3998,6 +4126,9 @@ export function createFinalArtworkWorkerCapability(
   ): Promise<{
     alphaBBoxWidthPx: number;
     alphaBBoxHeightPx: number;
+    /** The margined (post-trim) dimensions `normalizeProductionRaster` will actually produce the plate from. */
+    marginedWidthPx: number;
+    marginedHeightPx: number;
     sha256: string;
   } | null> {
     const downloaded = await assets.downloadAssetBytes(preparedAssetId);
@@ -4032,9 +4163,24 @@ export function createFinalArtworkWorkerCapability(
       return null;
     }
 
+    // `trim` cannot disagree with `bounds` above on visibility -- both read
+    // the same pixels at the same threshold; this call exists purely to
+    // capture the SAME margined geometry `normalizeProductionRaster` will
+    // independently (but identically) compute.
+    const trim = trimToAlphaBounds({ width: decoded.width, height: decoded.height, data: decoded.data });
+    if (trim.status !== "trimmed") {
+      await completeWithoutAsset(
+        job,
+        "The prepared artwork contains no visible pixels to produce print-ready artwork from.",
+      );
+      return null;
+    }
+
     return {
       alphaBBoxWidthPx: bounds.width,
       alphaBBoxHeightPx: bounds.height,
+      marginedWidthPx: trim.metadata.trimmedWidthPx,
+      marginedHeightPx: trim.metadata.trimmedHeightPx,
       sha256: createHash("sha256").update(downloaded.bytes).digest("hex"),
     };
   }

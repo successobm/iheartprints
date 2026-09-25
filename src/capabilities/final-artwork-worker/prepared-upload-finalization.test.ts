@@ -178,27 +178,12 @@ const FULL_BACK_FIXTURE: FixtureGeometry = {
   artworkHeightPx: 340,
 };
 
-/**
- * Artwork that already carries more real pixels than a 3in sleeve (900px)
- * needs. Deliberately SQUARE (not wide, unlike the other fixtures above):
- * `productionAssetMatchesEffectiveTarget`'s tolerance compares the asset's
- * recorded width/height (post-trim, with `MIN_SAFETY_MARGIN_PX` applied
- * equally to both axes) against a target aspect recomputed from the RAW,
- * un-trimmed alpha bounds. For a non-square artwork small enough that the
- * fixed margin floor dominates, that asymmetric margin can skew the trimmed
- * aspect ratio just past the match tolerance — which, since Phase 2 (the
- * post-provider durable checkpoint) requires a SECOND `processNextJob()`
- * call that re-derives and re-checks this same target, would make that
- * second call fail to recognize its own just-persisted asset and rerun
- * production. A square artwork's aspect ratio is 1:1 whether or not the
- * margin is applied (the same margin lands on both axes), so this fixture
- * carries no such drift regardless of margin size.
- */
+/** Artwork that already carries more real pixels than a 3in sleeve (900px) needs. */
 const ALREADY_LARGE_ENOUGH_FIXTURE: FixtureGeometry = {
   canvasWidthPx: 1100,
-  canvasHeightPx: 1100,
+  canvasHeightPx: 500,
   artworkWidthPx: 1000,
-  artworkHeightPx: 1000,
+  artworkHeightPx: 420,
 };
 
 function drawArtwork(
@@ -1531,23 +1516,11 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
   it("Goal 5: a reconstruction that cannot reach the target fails validation honestly rather than claiming readiness", async () => {
     const repo = await freshRepo();
     // A 2x reconstruction of 400px of artwork is 800px — short of the 1200px
-    // a 4in left-chest print needs at 300 PPI. Square artwork (rather than
-    // SMALL_FIXTURE's wide aspect) so the fixed-floor safety margin
-    // (`MIN_SAFETY_MARGIN_PX`) — applied equally to both axes — cannot skew
-    // the trimmed aspect ratio away from the pre-reconstruction one: with a
-    // short, undersized reconstruction this drift can otherwise exceed
-    // `productionAssetMatchesEffectiveTarget`'s tolerance and make the
-    // Phase 2 post-checkpoint invocation fail to recognize its own
-    // just-persisted (but genuinely insufficient) asset.
+    // a 4in left-chest print needs at 300 PPI.
     const weak = new FakeReconstructionProvider({ scale: 2 });
     const { assets, finalArtwork, worker } = buildPipeline(repo, weak);
     const setup = await setupApprovedPreparation(repo, assets, {
-      geometry: {
-        canvasWidthPx: 460,
-        canvasHeightPx: 460,
-        artworkWidthPx: 400,
-        artworkHeightPx: 400,
-      },
+      geometry: SMALL_FIXTURE,
     });
 
     const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
@@ -1604,5 +1577,193 @@ describe("Prepared-upload finalization (Existing Artwork → Print Ready Phase 2
       [],
       "a create_new job never appears under any preparation",
     );
+  });
+
+  // --- Independent review repair: non-square geometry round-trips ----------
+  //
+  // Regression coverage for the independent-review blocker: Phase 2's
+  // mandatory second invocation (checkpoint -> recognize -> finalize) must
+  // recognize the SAME production asset it just durably created, for
+  // artwork whose aspect ratio is genuinely non-square -- never only for a
+  // square fixture, which cannot exercise the margin/aspect-ratio drift the
+  // review found. Each geometry here is "already sufficient" (no paid
+  // reconstruction needed), so the crash-recovery re-check
+  // (`resolveExistingProductionAsset`/`productionAssetMatchesEffectiveTarget`)
+  // is exercised on its own, isolated from reconstruction's own separate
+  // margin-prediction repair (covered instead by "Goal 5" and the "M/N"
+  // family above, both restored to their original non-square fixtures).
+  async function assertGeometryRoundTrip(
+    geometry: FixtureGeometry,
+    printPlacement: PrintPlacement,
+  ) {
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry,
+      printPlacement,
+    });
+
+    const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+
+    // Invocation 1: acquires/persists the production asset and checkpoints.
+    await worker.processNextJob();
+    const checkpointed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(checkpointed?.status, "recoverable", "first invocation only reaches the checkpoint");
+    const afterCheckpoint = await repo.listAssets(setup.projectId);
+    const checkpointedAssets = afterCheckpoint.filter(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png",
+    );
+    assert.equal(checkpointedAssets.length, 1, "exactly one production asset exists after the checkpoint");
+    assert.equal(
+      await repo.getLatestProductionAssetValidationForJob(setup.projectId, job.id),
+      null,
+      "no validation has run yet -- the checkpoint invocation stops before it",
+    );
+    assert.equal(provider.produceCount, 0, "already-sufficient artwork never reaches the paid provider");
+    assert.equal(local.calls, 1, "the local normalization-only path ran exactly once so far");
+
+    // Invocation 2: MUST recognize the SAME asset via the freshly re-derived
+    // target -- never silently reproduce it -- then validate/complete/transition.
+    await worker.processNextJob();
+    const completed = await repo.getFinalArtworkJob(job.id);
+    assert.equal(completed?.status, "completed");
+    assert.equal(local.calls, 1, "recognizing the existing asset never re-runs local normalization");
+    assert.equal(provider.produceCount, 0, "recognizing the existing asset never reaches the paid provider either");
+
+    const afterCompletion = await repo.listAssets(setup.projectId);
+    const completedAssets = afterCompletion.filter(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png",
+    );
+    assert.equal(completedAssets.length, 1, "still exactly one production asset -- the SAME one, never a second");
+    assert.equal(
+      completedAssets[0]!.id,
+      checkpointedAssets[0]!.id,
+      "invocation 2 recognized the EXACT SAME asset invocation 1 created, not a new one",
+    );
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(setup.projectId, job.id);
+    assert.ok(validation, "invocation 2 ran real print validation");
+    assert.equal(validation!.assetId, checkpointedAssets[0]!.id);
+
+    const project = await repo.getProject(setup.projectId);
+    assert.notEqual(project!.project.status, "finalizing", "the project transitioned out of finalizing");
+
+    // Invocation 3+: a completed job is terminal -- repeated/duplicate
+    // invocations (e.g. a stray scheduler tick) must never touch it again.
+    await worker.processNextJob();
+    await worker.processNextJob();
+    const afterExtraInvocations = await repo.listAssets(setup.projectId);
+    const finalAssets = afterExtraInvocations.filter(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png",
+    );
+    assert.equal(finalAssets.length, 1, "repeated invocations after completion never create a duplicate asset row");
+    assert.equal(local.calls, 1, "repeated invocations after completion never re-run normalization");
+    assert.equal(provider.produceCount, 0, "repeated invocations after completion never reach the paid provider");
+
+    return { repo, setup, job, productionAsset: completedAssets[0]! };
+  }
+
+  it("Wide (>=3:1) prepared-upload artwork: checkpoint then recognized, validated, and finalized with no duplicate asset", async () => {
+    const { productionAsset } = await assertGeometryRoundTrip(
+      { canvasWidthPx: 3450, canvasHeightPx: 1250, artworkWidthPx: 3300, artworkHeightPx: 1100 },
+      "full_back",
+    );
+    assert.ok(
+      productionAsset.widthPx! / productionAsset.heightPx! > 2.9,
+      "sanity: the produced plate is genuinely wide, not squared off",
+    );
+  });
+
+  it("Tall (>=3:1) prepared-upload artwork: checkpoint then recognized, validated, and finalized with no duplicate asset", async () => {
+    const { productionAsset } = await assertGeometryRoundTrip(
+      { canvasWidthPx: 1650, canvasHeightPx: 4650, artworkWidthPx: 1500, artworkHeightPx: 4500 },
+      "full_back",
+    );
+    assert.ok(
+      productionAsset.heightPx! / productionAsset.widthPx! > 2.9,
+      "sanity: the produced plate is genuinely tall, not squared off",
+    );
+  });
+
+  it("Ordinary 2:1 prepared-upload artwork: checkpoint then recognized, validated, and finalized with no duplicate asset", async () => {
+    const { productionAsset } = await assertGeometryRoundTrip(
+      { canvasWidthPx: 3450, canvasHeightPx: 1800, artworkWidthPx: 3300, artworkHeightPx: 1650 },
+      "full_back",
+    );
+    const ratio = productionAsset.widthPx! / productionAsset.heightPx!;
+    assert.ok(ratio > 1.9 && ratio < 2.1, `sanity: the produced plate is genuinely ~2:1 (got ${ratio})`);
+  });
+
+  it("Square prepared-upload artwork: checkpoint then recognized, validated, and finalized with no duplicate asset", async () => {
+    const { productionAsset } = await assertGeometryRoundTrip(
+      { canvasWidthPx: 1100, canvasHeightPx: 1100, artworkWidthPx: 1000, artworkHeightPx: 1000 },
+      "sleeve",
+    );
+    assert.equal(productionAsset.widthPx, productionAsset.heightPx, "sanity: the produced plate is genuinely square");
+  });
+
+  // --- Independent review repair: mandatory loop guard ----------------------
+  it("Mandatory loop guard: a production asset already recorded against the freshly re-derived target, but whose pixels still disagree, fails explicitly instead of silently reproducing", async () => {
+    const geometry = { canvasWidthPx: 1100, canvasHeightPx: 500, artworkWidthPx: 1000, artworkHeightPx: 420 };
+    const repo = await freshRepo();
+    const provider = new FakeReconstructionProvider();
+    const local = new CountingLocalProvider();
+    const { assets, finalArtwork, worker } = buildPipeline(repo, provider, local);
+    const setup = await setupApprovedPreparation(repo, assets, {
+      geometry,
+      printPlacement: "sleeve",
+    });
+    const { job } = await finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+
+    // Plant a "poisoned" production asset BEFORE the worker ever runs:
+    // recorded (in its own `normalization` metadata) against EXACTLY the
+    // intended width/height a fresh claim will independently re-derive for
+    // this geometry (900x386px @ 300 PPI -> 3.000in x 1.28667in -- computed
+    // directly from this same fixture, matching this file's other
+    // already-sufficient-artwork assertions), but persisted at a materially
+    // DIFFERENT actual pixel size. No legitimate code path can produce this
+    // shape (a real asset's recorded intent and its own pixels always
+    // agree) -- it exists here purely to simulate the one anomaly the loop
+    // guard exists for: recorded intent matches, pixels don't.
+    const poisoned = await assets.uploadProductionAsset(setup.projectId, {
+      conceptId: `prepared-${setup.preparationId}`,
+      bytes: preparedArtworkPng(geometry),
+      contentType: "image/png",
+      widthPx: 500,
+      heightPx: 500,
+      hasTransparency: true,
+      finalArtworkJobId: job.id,
+      productionRole: "production_png",
+      metadata: {
+        sourceAssetId: setup.preparedAssetId,
+        productionWidthIn: job.productionWidthIn,
+        normalization: {
+          intendedWidthIn: 3.0,
+          intendedHeightIn: 386 / 300,
+        },
+      },
+    });
+
+    await worker.processNextJob();
+
+    const after = await repo.getFinalArtworkJob(job.id);
+    assert.equal(after?.status, "failed", "the loop guard must fail the job explicitly, never silently reproduce");
+    assert.match(
+      after?.lastError ?? "",
+      /Production asset authority mismatch/,
+      "the diagnostic must identify this as an authority mismatch, not a generic failure",
+    );
+    assert.equal(provider.produceCount, 0, "the loop guard fires before any provider work");
+    assert.equal(local.calls, 0, "the loop guard fires before any local normalization work either");
+
+    const allAssets = (await repo.listAssets(setup.projectId)).filter(
+      (a) => a.finalArtworkJobId === job.id && a.productionRole === "production_png",
+    );
+    assert.equal(allAssets.length, 1, "no second (or third) asset is ever created -- only the one planted here");
+    assert.equal(allAssets[0]!.id, poisoned.id);
   });
 });

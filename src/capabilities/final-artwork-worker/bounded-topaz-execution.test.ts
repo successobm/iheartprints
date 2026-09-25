@@ -984,4 +984,94 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, completed!.id);
     assert.ok(validation, "reconciliation must still run authoritative PrintValidation");
   });
+
+  it("10: the exact real-job recovery-budget case (providerRecoveryAttempts=4, MAX=5): resume charges to 5, checkpoint refunds to 4, next claim resolves the existing asset before any further provider work and completes", async () => {
+    const { repo, assets, projectId } = await setup(400);
+    const expectedRequest = expectedReconstructionRequest(400);
+    const { fetchImpl, submitCount, setStatusMode } = buildControllableStatusFakeTopazFetch(
+      expectedRequest.widthPx,
+      expectedRequest.heightPx,
+    );
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+    });
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const printValidation = createPrintValidationCapability();
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
+
+    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+
+    // Claim 1: fresh submission, still processing -- pending, providerRequestId
+    // durably persisted. Mirrors how the real job first acquired its request.
+    await worker.processNextJob();
+    const afterFresh = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterFresh?.status, "recoverable");
+    assert.equal(afterFresh?.providerRequestId, FIXED_PROCESS_ID);
+
+    // Seed EXACTLY the real production job's current state: four prior
+    // genuine recovery charges already retained (job
+    // 67816e21-fa9a-408f-ac45-916e679fd8c4's actual providerRecoveryAttempts
+    // at review time), one below the MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS(5)
+    // ceiling -- so the next resume claim is legitimately still allowed.
+    await repo.updateFinalArtworkJob(requested.job.id, { providerRecoveryAttempts: 4 });
+
+    // The provider genuinely finishes.
+    setStatusMode("completed");
+
+    // Claim 2: RESUMES the persisted request. Classification is "resume",
+    // so the claim charges providerRecoveryAttempts 4 -> 5 up front (at the
+    // ceiling) BEFORE attempting anything -- then finds Completed, downloads,
+    // uploads the production asset, and reaches the durable checkpoint.
+    await worker.processNextJob();
+
+    const afterCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterCheckpoint?.status, "recoverable");
+    assert.equal(afterCheckpoint?.providerRequestId, FIXED_PROCESS_ID, "still the SAME request -- never resubmitted, never changed, never a new job");
+    assert.equal(submitCount(), 1, "exactly one paid submission across both claims");
+    // THE exact regression the live incident hit: reaching the checkpoint
+    // after a resume neutralizes (refunds) that claim's own charge -- the
+    // counter returns to its PRE-claim value (4), never left stranded at
+    // the ceiling (5) purely for needing a second invocation to acquire an
+    // already-completed provider result.
+    assert.equal(
+      afterCheckpoint?.providerRecoveryAttempts,
+      4,
+      "the resume claim's own charge (4->5) is refunded back to 4 at the checkpoint -- never left at the ceiling",
+    );
+
+    const checkpointedAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(checkpointedAssets.length, 1);
+
+    // Claim 3: the NEXT invocation must resolve the already-existing,
+    // already-checkpointed production asset via `resolveExistingProductionAsset`
+    // -- BEFORE any provider budget check or provider call -- and finalize
+    // directly. No additional recovery charge, no additional submission.
+    await worker.processNextJob();
+
+    const completed = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(completed?.status, "completed", "the job completes using its existing recovery budget, no reset, no special-casing");
+    assert.equal(submitCount(), 1, "finalizing from the existing asset never required a second paid submission");
+    assert.equal(
+      completed?.providerRecoveryAttempts,
+      4,
+      "resolving the existing asset and finalizing never touches the recovery budget at all",
+    );
+
+    const finalAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+      (a) => a.productionRole === "production_png",
+    );
+    assert.equal(finalAssets.length, 1, "still exactly the one asset created at the checkpoint -- never a duplicate");
+    assert.equal(finalAssets[0]!.id, checkpointedAssets[0]!.id);
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, completed!.id);
+    assert.ok(validation, "the job reaches real print validation using its existing recovery budget");
+
+    const project = await repo.getProject(projectId);
+    assert.notEqual(project?.project.status, "finalizing", "the project transitioned out of finalizing");
+  });
 });
