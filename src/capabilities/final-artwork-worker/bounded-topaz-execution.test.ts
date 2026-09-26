@@ -1000,9 +1000,33 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     });
     const finalArtwork = createFinalArtworkCapability(repo);
     const printValidation = createPrintValidationCapability();
-    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
+
+    // Test-side-only instrumentation (no production code touched, no
+    // encapsulation weakened): records every `providerRecoveryAttempts`
+    // value this job's row is EVER written with, in order, purely by
+    // observing the repository's own public write surface. This is what
+    // lets the intermediate charged-to-5 state (written, then immediately
+    // overwritten by the checkpoint's own refund, within the SAME claim)
+    // be proven to have genuinely occurred, rather than merely inferred
+    // from the before/after values.
+    const recoveryAttemptsWriteHistory: number[] = [];
+    const observedRepo: typeof repo = new Proxy(repo, {
+      get(target, prop, receiver) {
+        if (prop === "updateFinalArtworkJob") {
+          return async (jobId: string, patch: Parameters<typeof repo.updateFinalArtworkJob>[1]) => {
+            if (jobId === requestedJobId && typeof patch.providerRecoveryAttempts === "number") {
+              recoveryAttemptsWriteHistory.push(patch.providerRecoveryAttempts);
+            }
+            return target.updateFinalArtworkJob(jobId, patch);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const worker = createFinalArtworkWorkerCapability(observedRepo, assets, provider, printValidation);
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    const requestedJobId = requested.job.id;
 
     // Claim 1: fresh submission, still processing -- pending, providerRequestId
     // durably persisted. Mirrors how the real job first acquired its request.
@@ -1017,6 +1041,7 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     // at review time), one below the MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS(5)
     // ceiling -- so the next resume claim is legitimately still allowed.
     await repo.updateFinalArtworkJob(requested.job.id, { providerRecoveryAttempts: 4 });
+    recoveryAttemptsWriteHistory.length = 0; // only claim 2's own writes matter below.
 
     // The provider genuinely finishes.
     setStatusMode("completed");
@@ -1026,6 +1051,15 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     // ceiling) BEFORE attempting anything -- then finds Completed, downloads,
     // uploads the production asset, and reaches the durable checkpoint.
     await worker.processNextJob();
+
+    // Proves the intermediate charged state was REALLY written (not just
+    // inferable from before/after), and that it was written strictly
+    // before the refund that follows it in the same claim.
+    assert.deepEqual(
+      recoveryAttemptsWriteHistory,
+      [5, 4],
+      "claim 2 must durably charge providerRecoveryAttempts to 5 BEFORE the checkpoint refunds it back to 4 -- both writes, in order",
+    );
 
     const afterCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(afterCheckpoint?.status, "recoverable");
