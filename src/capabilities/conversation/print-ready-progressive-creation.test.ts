@@ -320,6 +320,20 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
       // No throw -- the request is genuinely accepted.
       const result = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
       assert.ok(result.job);
+
+      // Bounded FinalArtwork Production-Execution Repair (Blocker 4 --
+      // one-job-per-invocation is now structural, never merely a config
+      // default): this job MUST be drained before the test ends, exactly
+      // like every other test in this file already does. Left "queued", it
+      // is the OLDEST-due job in the shared on-disk store from this point
+      // on, so a LATER test's own fixed-count `runBatch()` calls would keep
+      // claiming THIS job instead of its own -- the exact hazard "Raster
+      // print_ready -> Halftone available" already calls out in its own
+      // comment above, missed here until a real cross-test failure (test
+      // D) surfaced it once the scheduler stopped opportunistically
+      // draining multiple queued jobs per call.
+      await graph.finalArtworkScheduler.runBatch();
+      await graph.finalArtworkScheduler.runBatch();
     });
 
     it("the HTTP route surfaces the rejection as a 409 with the safe error code, never a 500", async () => {

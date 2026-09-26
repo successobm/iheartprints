@@ -516,7 +516,7 @@ describe("Separate Provider Recovery Attempt Budget", () => {
   });
 
   // --- 4: resume download transient failure --------------------------------
-  it("4: a resume whose download transiently fails is deferred to a later invocation WITHOUT spending any recovery attempt (Repair 8 -- this is the root-cause fix, not merely bounded resilience)", async () => {
+  it("4: a resume whose download transiently fails defers to a later invocation WITHOUT failing the job outright, but DOES spend one recovery attempt (Blocker 2 correction: a controlled, complete claim that caught a transient error is bounded by the SAME ceiling a genuine failure already is -- never an unconditional free pass)", async () => {
     const { repo, assets, projectId } = await setup(400);
     const expectedRequest = expectedReconstructionRequest(400);
     const { fetchImpl, submitCount, setDownloadMode } = buildSinglePassFakeTopazFetch(
@@ -552,13 +552,15 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     assert.equal(afterStatusCheckpoint?.providerRecoveryAttempts, 0);
 
     // Claim 2: resume, download step -- an ECONNRESET (ProviderError
-    // classification "network", stage "download") is exactly the shape the
-    // audit found could permanently strand a healthy job's recovery budget
-    // merely because a transport hiccup interrupted an otherwise-safe,
-    // freely-retriable read. Repair 8's fix: this is caught and deferred
-    // EXACTLY like an ordinary "still pending" outcome -- the claim's own
-    // charge is refunded, not spent, and the persisted provider identity is
-    // untouched so a later claim resumes this exact stage from scratch.
+    // classification "network", stage "download") is a controlled,
+    // COMPLETE claim (the catch block ran; a decision was made), never an
+    // interrupted one (contrast the Pedro-class gateway kill, which never
+    // reaches any code at all). Deferred to a later invocation -- never
+    // failed outright, never resubmitted -- but this claim's own recovery
+    // charge is NOT refunded: an unconditional free pass here is exactly
+    // what let a PERSISTENT transient condition defer forever with the
+    // budget never moving (Blocker 2). A single blip still only costs the
+    // SAME one unit a genuine failure of this claim would have cost.
     setDownloadMode("fail_transiently");
     await worker.processNextJob();
 
@@ -568,13 +570,15 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     assert.equal(job?.providerRequestId, SYNTHETIC_PROCESS_ID);
     assert.equal(
       job?.providerRecoveryAttempts,
-      0,
-      "THE root-cause fix: an infrastructure hiccup during a safe, freely-retriable download must NOT consume the recovery budget at all",
+      1,
+      "Blocker 2: a transient hiccup on a resume claim IS bounded by the recovery budget -- exactly one unit spent, never refunded for free",
     );
-    assert.equal(submitCount(), 0);
+    assert.equal(submitCount(), 0, "still never a paid submission -- only status/download were attempted, both non-billable reads");
 
     // The condition clears -- the SAME job, on a LATER claim, completes
-    // normally with zero duplicate submissions and zero budget spent.
+    // normally with zero duplicate submissions. The ONE genuine hiccup's
+    // charge is retained (never touched again), exactly like a genuine
+    // failure's charge would be.
     setDownloadMode("succeed");
     await worker.processNextJob(); // download -> intermediate checkpoint
     await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
@@ -582,8 +586,148 @@ describe("Separate Provider Recovery Attempt Budget", () => {
 
     const completed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(completed?.status, "completed");
-    assert.equal(completed?.providerRecoveryAttempts, 0, "the entire recovered lifecycle never spent the recovery budget");
+    assert.equal(completed?.providerRecoveryAttempts, 1, "the one transient hiccup's charge is retained even after the job completes normally");
     assert.equal(submitCount(), 0, "zero paid submissions across the entire deferred-then-recovered lifecycle");
+  });
+
+  // --- 4b: persistent transient conditions eventually reach a bounded terminal outcome ---
+  it("4b: a PERSISTENT transient condition (never a single blip) is NOT an unbounded loop -- repeated status timeouts, then repeated download timeouts, each eventually exhaust the recovery budget and fail the job explicitly, without ever resubmitting", async () => {
+    const { repo, assets, projectId } = await setup(400);
+    const expectedRequest = expectedReconstructionRequest(400);
+    const { fetchImpl, submitCount, calls } = buildSinglePassFakeTopazFetch(
+      SYNTHETIC_PROCESS_ID,
+      expectedRequest.widthPx,
+      expectedRequest.heightPx,
+    );
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+      // A tiny but real per-call timeout -- the exact mechanism this repair
+      // added to `fetchStatus()`/`download()`'s metadata fetch, which
+      // previously had none at all.
+      statusTimeoutMs: 5,
+    });
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, createPrintValidationCapability());
+
+    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(requested.job.id, {
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: SYNTHETIC_PROCESS_ID,
+      providerStatus: "submitted",
+      providerRecoveryAttempts: 0,
+    });
+
+    // A fake whose /status/ endpoint HANGS until aborted -- it never
+    // resolves or rejects ON ITS OWN, so the ONLY thing that can ever end
+    // the call is this adapter's own `statusTimeoutMs`-bounded
+    // `AbortController` (which this fake DOES respect, exactly like a real
+    // `fetch` would). This is exactly "repeated status timeout": every
+    // single claim times out the SAME way, with no external clock
+    // advancing anything for it.
+    const hangingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/status/")) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            const err = new Error("This operation was aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        });
+      }
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    const hangingProvider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl: hangingFetch,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+      statusTimeoutMs: 5,
+    });
+    const hangingWorker = createFinalArtworkWorkerCapability(repo, assets, hangingProvider, createPrintValidationCapability());
+
+    for (let i = 1; i <= MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS; i += 1) {
+      await hangingWorker.processNextJob();
+      const job = await repo.getFinalArtworkJob(requested.job.id);
+      assert.equal(job?.status, "recoverable", `repeated status timeout ${i} defers -- never fails the job outright while budget remains`);
+      assert.equal(job?.providerRecoveryAttempts, i, `status-timeout deferral ${i} spends exactly one recovery unit`);
+      assert.equal(job?.providerRequestId, SYNTHETIC_PROCESS_ID, "never resubmitted while the status endpoint keeps timing out");
+    }
+    assert.equal(submitCount(), 0, "a persistently-timing-out status endpoint must never be papered over with a fresh paid submission");
+
+    // One more claim: the recovery budget is now exhausted -- the SAME
+    // "could not be recovered" terminal failure a truly broken/genuinely-
+    // failing request would already reach, reached here purely from
+    // repeated (never single) transient timeouts.
+    await hangingWorker.processNextJob();
+    const exhausted = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(exhausted?.status, "failed");
+    assert.match(exhausted?.lastError ?? "", /could not be recovered after/i);
+    assert.equal(exhausted?.providerRecoveryAttempts, MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS);
+    assert.equal(submitCount(), 0);
+
+    // A genuinely different real-world shape of the SAME class of problem:
+    // repeated DOWNLOAD timeouts (never status) also converge on the same
+    // bounded outcome -- proven independently on a FRESH job/request so the
+    // two scenarios never interact.
+    const requested2 = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    const SECOND_PROCESS_ID = "synthetic-test-process-id-0002";
+    await repo.updateFinalArtworkJob(requested2.job.id, {
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: SECOND_PROCESS_ID,
+      // Already past the status checkpoint -- this scenario is specifically
+      // about the DOWNLOAD step's own repeated timeout.
+      providerStatus: "result_ready",
+      providerRecoveryAttempts: 0,
+    });
+    const hangingDownloadFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/download/") && !url.startsWith("https://cdn.example.com/")) {
+        // The metadata call succeeds (returns a result URL) -- the actual
+        // bytes fetch is what hangs (until aborted) below.
+        return new Response(JSON.stringify({ url: `https://cdn.example.com/${SECOND_PROCESS_ID}.png` }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === `https://cdn.example.com/${SECOND_PROCESS_ID}.png`) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            const err = new Error("This operation was aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        });
+      }
+      throw new Error(`FORBIDDEN: no real network target is reachable from this test; got ${url}`);
+    }) as typeof fetch;
+    const hangingDownloadProvider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl: hangingDownloadFetch,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+      downloadTimeoutMs: 5,
+    });
+    const hangingDownloadWorker = createFinalArtworkWorkerCapability(
+      repo,
+      assets,
+      hangingDownloadProvider,
+      createPrintValidationCapability(),
+    );
+
+    for (let i = 1; i <= MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS; i += 1) {
+      await hangingDownloadWorker.processNextJob();
+      const job = await repo.getFinalArtworkJob(requested2.job.id);
+      assert.equal(job?.status, "recoverable", `repeated download-bytes timeout ${i} defers -- never fails the job outright while budget remains`);
+      assert.equal(job?.providerRecoveryAttempts, i, `download-timeout deferral ${i} spends exactly one recovery unit`);
+    }
+    await hangingDownloadWorker.processNextJob();
+    const exhausted2 = await repo.getFinalArtworkJob(requested2.job.id);
+    assert.equal(exhausted2?.status, "failed");
+    assert.match(exhausted2?.lastError ?? "", /could not be recovered after/i);
   });
 
   // --- 5: resume eventually succeeds ---------------------------------------
@@ -872,7 +1016,7 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       };
     }
 
-    it("8a: a transient pass-1 download failure defers (Repair 8 -- never spends the recovery budget) and resumes PASS 1 (never jumps to pass 2); once recovered, pass 2 submits fresh and completes -- each pass submitted exactly once", async () => {
+    it("8a: a transient pass-1 download failure defers (never fails the job outright) and resumes PASS 1 (never jumps to pass 2), spending exactly one recovery attempt (Blocker 2); once recovered, pass 2 submits fresh and completes -- each pass submitted exactly once", async () => {
       const { repo, assets, projectId } = await setup(TWO_PASS_ARTWORK_WIDTH_PX);
       const { pass1, pass2 } = buildTwoPassSpecs();
       const fake = buildTwoPassFakeTopazFetch(pass1, pass2);
@@ -898,15 +1042,17 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       assert.equal(fake.submitCount(), 1, "only pass 1 was ever submitted so far");
 
       // Claim 2: resume pass 1, download step -- an ECONNRESET is a
-      // transient infrastructure hiccup (Repair 8), never a genuine
-      // failure: it defers to a later invocation WITHOUT spending any
-      // recovery attempt and WITHOUT ever touching pass 1's identity.
+      // transient infrastructure hiccup (never a genuine failure): it
+      // defers to a later invocation WITHOUT failing the job outright and
+      // WITHOUT ever touching pass 1's identity -- but (Blocker 2
+      // correction) DOES spend one recovery attempt, exactly like a
+      // genuine failure of this same claim would.
       fake.setDownloadMode(PASS1_ID, "fail_transiently");
       await worker.processNextJob();
       const afterTransientHiccup = await repo.getFinalArtworkJob(requested.job.id);
       assert.equal(afterTransientHiccup?.status, "recoverable", "a transient download hiccup must never fail the job outright");
       assert.equal(afterTransientHiccup?.providerRequestId, PASS1_ID, "pass 1's own identity is preserved -- never accidentally jumps to pass 2");
-      assert.equal(afterTransientHiccup?.providerRecoveryAttempts, 0, "a transient hiccup must never spend the recovery budget");
+      assert.equal(afterTransientHiccup?.providerRecoveryAttempts, 1, "Blocker 2: a transient hiccup IS bounded by the recovery budget -- one unit spent");
       assert.equal(fake.submitCount(), 1, "still only pass 1 submitted -- a deferred download is never a dispatch");
 
       // Retry: the underlying condition clears. Claim 3 downloads pass 1's
@@ -939,7 +1085,7 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       assert.ok(validation, "a recovered two-pass reconstruction proceeds through real print validation");
     });
 
-    it("8b: a transient pass-2 download failure (after pass 1 already durably persisted) defers (Repair 8) and resumes PASS 2 without resubmitting either pass", async () => {
+    it("8b: a transient pass-2 download failure (after pass 1 already durably persisted) defers and resumes PASS 2 without resubmitting either pass, spending exactly one recovery attempt (Blocker 2)", async () => {
       const { repo, assets, projectId } = await setup(TWO_PASS_ARTWORK_WIDTH_PX);
       const { pass1, pass2 } = buildTwoPassSpecs();
       const fake = buildTwoPassFakeTopazFetch(pass1, pass2);
@@ -969,15 +1115,15 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       assert.equal(intermediatesAfterLeadUp.length, 1, "pass 1's intermediate exists; pass 2's has not been downloaded yet");
 
       // Claim 4: resume pass 2, download step -- an ECONNRESET is a
-      // transient infrastructure hiccup (Repair 8): it defers to a later
-      // invocation WITHOUT spending any recovery attempt and WITHOUT
-      // resubmitting either pass.
+      // transient infrastructure hiccup: it defers to a later invocation
+      // WITHOUT failing the job outright and WITHOUT resubmitting either
+      // pass -- but (Blocker 2 correction) DOES spend one recovery attempt.
       fake.setDownloadMode(PASS2_ID, "fail_transiently");
       await worker.processNextJob();
       const afterTransientHiccup = await repo.getFinalArtworkJob(requested.job.id);
       assert.equal(afterTransientHiccup?.status, "recoverable", "a transient download hiccup must never fail the job outright");
       assert.equal(afterTransientHiccup?.providerRequestId, PASS2_ID, "pass 1 already completed and persisted -- the job's identity belongs to pass 2");
-      assert.equal(afterTransientHiccup?.providerRecoveryAttempts, 0, "a transient hiccup must never spend the recovery budget");
+      assert.equal(afterTransientHiccup?.providerRecoveryAttempts, 1, "Blocker 2: a transient hiccup IS bounded by the recovery budget -- one unit spent");
 
       // Retry: pass 2's download recovers.
       fake.setDownloadMode(PASS2_ID, "succeed");

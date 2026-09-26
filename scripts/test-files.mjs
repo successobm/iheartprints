@@ -280,6 +280,8 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork-worker/topaz-provider-selection-and-invocation.test.ts",
   "src/capabilities/final-artwork-worker/topaz-download-resume-recovery.test.ts",
   "src/capabilities/final-artwork-worker/bounded-topaz-execution.test.ts",
+  "src/capabilities/final-artwork-worker/bounded-short-step-lifecycle.test.ts",
+  "src/capabilities/final-artwork-worker/stale-provider-result-intermediate.test.ts",
   "src/capabilities/final-artwork-worker/final-artwork-attempt-budget.test.ts",
   "src/capabilities/conversation/production-treatment-authorization.test.ts",
   "src/components/chat/production-treatment-dead-end.test.tsx",

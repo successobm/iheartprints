@@ -258,9 +258,7 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
         return { outcome: "refused" as const, reason: "no_sign_preparation" as const };
       },
     };
-    const scheduler = createFinalArtworkSchedulerCapability(slowWorker, {
-      maxJobsPerRun: 5,
-    });
+    const scheduler = createFinalArtworkSchedulerCapability(slowWorker);
     const graph = getCapabilityGraph();
     graph.finalArtworkScheduler = scheduler;
 
@@ -288,9 +286,17 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
     const batch = await result.batchPromise;
     assert.deepEqual(batch.processedJobIds, ["slow-fa-job"]);
     await result.followUpPromise;
-    assert.ok(
-      processNextJobCalls >= 3,
-      "follow-up runBatch after an in-flight batch must tick again",
+    // One-Job-Per-Invocation Repair: each `runBatch()` call now makes
+    // exactly ONE `processNextJob()` call (never a drain-the-queue loop) --
+    // call #1 (the in-flight batch) claims the slow job; call #2 (the
+    // follow-up batch, chained after the in-flight one settles) finds the
+    // queue empty. Two calls, not three, is the correct count under the
+    // new architecture -- what matters is that the follow-up genuinely
+    // ticked AGAIN rather than being skipped.
+    assert.equal(
+      processNextJobCalls,
+      2,
+      "follow-up runBatch after an in-flight batch must tick again, exactly once, per the one-job-per-invocation contract",
     );
     await drainCapabilityGraphForTests();
   });

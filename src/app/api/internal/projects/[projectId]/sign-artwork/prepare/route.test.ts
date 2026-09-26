@@ -138,6 +138,13 @@ describe("POST /api/internal/projects/[projectId]/sign-artwork/prepare", () => {
 
     const project = await repo.getProject(projectId);
     assert.equal(project!.project.status, "finalizing");
+
+    // Bounded FinalArtwork Production-Execution Repair (Blocker 4 --
+    // one-job-per-invocation is now structural): drain this job AFTER the
+    // assertion above, so it does not strand a permanently-queued job in
+    // this describe block's shared on-disk store for a later test's own
+    // `runBatch()` call to claim instead of its own.
+    await graph.finalArtworkScheduler.runBatch();
   });
 
   it("double click / reload: reuses the SAME job — one FinalArtworkJob per (sign preparation, plan key)", async () => {
@@ -166,6 +173,11 @@ describe("POST /api/internal/projects/[projectId]/sign-artwork/prepare", () => {
     const preparation = await graph.signPreparation.getSignPreparation(projectId);
     const jobs = await repo.listFinalArtworkJobsForSignPreparation(projectId, preparation!.id);
     assert.equal(jobs.length, 1, "exactly one job exists for this preparation");
+
+    // Bounded FinalArtwork Production-Execution Repair (Blocker 4 --
+    // one-job-per-invocation is now structural): drain hygiene, same
+    // reasoning as the preceding test.
+    await graph.finalArtworkScheduler.runBatch();
   });
 
   it("returns 404 for a project that does not exist", async () => {

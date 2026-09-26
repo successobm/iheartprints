@@ -932,6 +932,22 @@ export function createFinalArtworkWorkerCapability(
   }
 
   /**
+   * Stale Provider-Result Intermediate Repair: the exact durable
+   * "production intent" fields the intermediate resolver below judges a
+   * candidate against — deliberately the SAME fields (minus
+   * `providerRequestId`; see that field's own note below) the pre-existing
+   * final-asset durable-identity loop guard already uses, reused rather
+   * than reinvented, per that repair's own mandate.
+   */
+  interface CurrentProductionIdentity {
+    sourceAssetId: string;
+    sourceBytesSha256: unknown;
+    providerKey: string;
+    productionWidthIn: number | null;
+    confirmedMaxHeightIn: number | null;
+  }
+
+  /**
    * Bounded FinalArtwork Production-Execution Repair (short-step
    * follow-up) — Repair 4's durable download checkpoint: the durable proof
    * that the LAST provider pass's raw result has already been downloaded
@@ -943,34 +959,122 @@ export function createFinalArtworkWorkerCapability(
    * download step is NEVER repeated once its output is durably stored: a
    * later claim that finds this goes straight to normalize/measure/upload,
    * never re-checking provider status and never re-downloading.
+   *
+   * Stale Provider-Result Intermediate Repair (real independent-review
+   * finding): a candidate's mere EXISTENCE is no longer sufficient to adopt
+   * it. `resolvePreparedUploadJob`/`resolveSignJob`-style revival can bring
+   * the SAME job row back to `"queued"` after the confirmed production
+   * size (or the source artwork itself) changed underneath it — an
+   * intermediate downloaded for the OLD intent must never be silently
+   * normalized and shipped as though it answers the NEW one (two concrete
+   * failure modes: a shrunk target that no longer needs Topaz at all would
+   * otherwise still adopt the old reconstructed raster; a grown target
+   * would otherwise adopt a raster too small for it, and validation's
+   * eventual refusal would never trigger the fresh reconstruction the new
+   * target actually needs). So every candidate is checked against
+   * `currentIdentity` — the SAME fields the final-asset guard already
+   * demands — and only a candidate that matches EVERY one is `"current"`;
+   * `job.id`+role+marker+a recorded `providerRequestId` narrow the
+   * CANDIDATE SET, never the adoption decision by themselves. When one or
+   * more candidates exist but none match, the caller retires the job's
+   * provider identity (see `produceProductionAsset`'s own call site) so
+   * the NEXT claim classifies fresh for the CURRENT intent — the SAME
+   * self-heal shape `resolveExistingIntermediateReconstruction`'s own
+   * pass-1 check already uses for an analogous "stale identity" case.
+   *
+   * Scoped to the job's OWN currently-active provider-request slot
+   * (`job.providerRequestId`) — deliberately NEVER a scan across every
+   * intermediate this job has ever produced across its whole lifetime.
+   * The first version of this repair scanned all historical candidates,
+   * which meant a candidate built from a RETIRED request (one
+   * `job.providerRequestId` had already moved on from, via an earlier
+   * claim's own self-heal, or a request this job's active slot never even
+   * pointed at) kept answering `"stale"` forever — repeatedly wiping out a
+   * genuinely fresh, unrelated, currently in-flight submission on EVERY
+   * subsequent claim, before it could ever reach its own download and
+   * complete. Scoping to the active slot means a self-heal, once
+   * performed, can never re-fire against the same now-irrelevant history:
+   * the next claim's `job.providerRequestId` is either `null` (nothing to
+   * resolve) or the NEW request's own id (no candidate yet, or a
+   * genuinely current one once downloaded).
+   *
+   * Multiple historical candidates for the same job are possible (an old,
+   * retired intermediate the job's active slot no longer points at, plus a
+   * new, current one) — this function only ever looks at the ONE
+   * candidate for the CURRENT active slot; the others are simply never
+   * consulted again. A stale candidate is never deleted — it remains
+   * harmless historical evidence, exactly like every other superseded
+   * asset in this codebase.
    */
   async function resolveExistingProviderResultIntermediate(
     job: FinalArtworkJob,
-  ): Promise<{ asset: AssetRecord; providerRequestId: string; nativeWidthPx: number | null; nativeHeightPx: number | null } | null> {
-    const existingAssets = await withOperationTiming(
-      "resolveExistingProviderResultIntermediate.listAssetsForFinalArtworkJob",
-      () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
-    );
-    const candidate = existingAssets.find(
-      (asset) =>
-        asset.finalArtworkJobId === job.id &&
-        asset.productionRole === "production_png" &&
-        isProviderResultIntermediateAsset(asset),
-    );
-    if (!candidate) return null;
+    currentIdentity: CurrentProductionIdentity,
+  ): Promise<
+    | { outcome: "none" }
+    | { outcome: "stale" }
+    | {
+        outcome: "current";
+        asset: AssetRecord;
+        providerRequestId: string;
+        nativeWidthPx: number | null;
+        nativeHeightPx: number | null;
+      }
+  > {
+    if (job.providerRequestId === null) return { outcome: "none" };
+    const candidate = await findProviderResultIntermediateAssetByProviderRequestId(job, job.providerRequestId);
+    if (!candidate) return { outcome: "none" };
+
     const meta = candidate.metadata as Record<string, unknown> | null | undefined;
     const providerRequestId = typeof meta?.providerRequestId === "string" ? meta.providerRequestId : null;
     // Defensive: a malformed/legacy row with the marker but no recorded
     // request id carries no audit value and cannot be trusted as proof of
     // a specific paid submission — mirrors
     // `resolveExistingIntermediateReconstruction`'s identical guard.
-    if (!providerRequestId) return null;
-    return {
-      asset: candidate,
-      providerRequestId,
-      nativeWidthPx: typeof meta?.nativeWidthPx === "number" ? meta.nativeWidthPx : null,
-      nativeHeightPx: typeof meta?.nativeHeightPx === "number" ? meta.nativeHeightPx : null,
-    };
+    if (!providerRequestId) return { outcome: "none" };
+    const identityMatches =
+      meta?.sourceAssetId === currentIdentity.sourceAssetId &&
+      (meta?.sourceBytesSha256 ?? null) === currentIdentity.sourceBytesSha256 &&
+      meta?.providerKey === currentIdentity.providerKey &&
+      (meta?.productionWidthIn ?? null) === currentIdentity.productionWidthIn &&
+      (meta?.confirmedMaxHeightIn ?? null) === currentIdentity.confirmedMaxHeightIn;
+    if (identityMatches) {
+      return {
+        outcome: "current",
+        asset: candidate,
+        providerRequestId,
+        nativeWidthPx: typeof meta?.nativeWidthPx === "number" ? meta.nativeWidthPx : null,
+        nativeHeightPx: typeof meta?.nativeHeightPx === "number" ? meta.nativeHeightPx : null,
+      };
+    }
+    return { outcome: "stale" };
+  }
+
+  /**
+   * Idempotency helper for `persistProviderResultIntermediate` ONLY —
+   * unlike `resolveExistingProviderResultIntermediate`, this deliberately
+   * does NOT judge staleness: within a single claim that just downloaded
+   * `downloaded.providerRequestId` for the CURRENT production intent, the
+   * only question left is "did an earlier, interrupted attempt at THIS
+   * SAME download already upload it?" — answered by the download's own
+   * known, just-obtained request id, never by re-deriving identity.
+   */
+  async function findProviderResultIntermediateAssetByProviderRequestId(
+    job: FinalArtworkJob,
+    providerRequestId: string,
+  ): Promise<AssetRecord | null> {
+    const existingAssets = await withOperationTiming(
+      "findProviderResultIntermediateAssetByProviderRequestId.listAssetsForFinalArtworkJob",
+      () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
+    );
+    return (
+      existingAssets.find(
+        (asset) =>
+          asset.finalArtworkJobId === job.id &&
+          asset.productionRole === "production_png" &&
+          isProviderResultIntermediateAsset(asset) &&
+          (asset.metadata as Record<string, unknown> | null | undefined)?.providerRequestId === providerRequestId,
+      ) ?? null
+    );
   }
 
   /**
@@ -980,8 +1084,7 @@ export function createFinalArtworkWorkerCapability(
    * an internal, non-customer-facing asset (mirrors
    * `persistIntermediateReconstruction`'s exact pattern: reused
    * `production_png` role, distinguished purely by metadata marker — no
-   * migration), then clears the job's single outstanding-request slot,
-   * since no further provider contact is needed for this job's
+   * migration), since no further provider contact is needed for this job's
    * reconstruction — only local normalize/measure/upload remains.
    *
    * Idempotent: re-running this for a download whose result was already
@@ -994,10 +1097,13 @@ export function createFinalArtworkWorkerCapability(
    * LAST pass's result), so there is no "outstanding-request slot" to free.
    * Keeping them intact preserves "still keyed to the ORIGINAL paid
    * request" as an observable, diagnostic-only fact all the way through
-   * finalization — `resolveExistingProviderResultIntermediate`'s own check
-   * (run BEFORE classification, at the top of `produceProductionAsset`)
-   * already ensures no later claim ever re-reads them for a provider
-   * decision once this intermediate exists.
+   * finalization.
+   *
+   * Records the SAME durable-identity fields
+   * `resolveExistingProviderResultIntermediate` will later demand a match
+   * against (`sourceBytesSha256`/`productionWidthIn`/`confirmedMaxHeightIn`)
+   * — this is the ONE write site for those fields, so they can never drift
+   * from what the resolver later checks them against.
    */
   async function persistProviderResultIntermediate(
     job: FinalArtworkJob,
@@ -1005,9 +1111,10 @@ export function createFinalArtworkWorkerCapability(
     storageGroupingId: string,
     sourceAsset: AssetRecord,
     downloaded: FinalArtworkProviderDownloadedResult,
+    currentIdentity: CurrentProductionIdentity,
   ): Promise<void> {
-    const existing = await resolveExistingProviderResultIntermediate(job);
-    if (!existing || existing.providerRequestId !== downloaded.providerRequestId) {
+    const existing = await findProviderResultIntermediateAssetByProviderRequestId(job, downloaded.providerRequestId);
+    if (!existing) {
       await withOperationTiming("persistProviderResultIntermediate.uploadProductionAsset", () =>
         assets.uploadProductionAsset(job.projectId, {
           conceptId: storageGroupingId,
@@ -1025,6 +1132,9 @@ export function createFinalArtworkWorkerCapability(
             providerKey: activeProvider.providerKey,
             providerRequestId: downloaded.providerRequestId,
             sourceAssetId: sourceAsset.id,
+            sourceBytesSha256: currentIdentity.sourceBytesSha256,
+            productionWidthIn: currentIdentity.productionWidthIn,
+            confirmedMaxHeightIn: currentIdentity.confirmedMaxHeightIn,
             nativeWidthPx: downloaded.nativeWidthPx,
             nativeHeightPx: downloaded.nativeHeightPx,
           },
@@ -1254,6 +1364,7 @@ export function createFinalArtworkWorkerCapability(
     | { status: "pending" }
   > {
     const { job, sourceAsset, sizing, activeProvider } = params;
+    let effectiveJob = job;
 
     const existing = await resolveExistingProductionAsset(job, params.targetIn);
     if (existing) {
@@ -1266,17 +1377,21 @@ export function createFinalArtworkWorkerCapability(
     }
 
     // Independent-review mandatory loop guard (2nd review: redesigned to be
-    // INDEPENDENT of predicted output geometry). `resolveExistingProductionAsset`
-    // just found no candidate whose PIXEL geometry matches `targetIn` — this
-    // could mean the pixel-geometry PREDICTION itself is wrong (exactly the
-    // class of bug the first two independent reviews found and repaired,
-    // and the reason this guard must never rely on that same prediction to
-    // decide whether an asset is trustworthy). So before treating this as
-    // "nothing exists yet" or "a legitimate resize", check for a DURABLE
-    // PRODUCTION IDENTITY match instead: does an existing, non-intermediate
-    // production asset for this exact job already carry EVERY one of the
-    // following, matching this exact claim's own values EXACTLY (never a
-    // tolerance-based/derived comparison)?
+    // INDEPENDENT of predicted output geometry) — and, since the Bounded
+    // FinalArtwork Production-Execution Repair's short-step follow-up
+    // (Stale Provider-Result Intermediate Repair), the SAME durable
+    // identity ALSO gates whether an internal download-stage intermediate
+    // (below) may be adopted, never just a finished production asset.
+    // `resolveExistingProductionAsset` just found no FINAL asset whose
+    // PIXEL geometry matches `targetIn` — this could mean the pixel-geometry
+    // PREDICTION itself is wrong (exactly the class of bug the first two
+    // independent reviews found and repaired, and the reason this guard
+    // must never rely on that same prediction to decide whether an asset is
+    // trustworthy). So before treating this as "nothing exists yet" or "a
+    // legitimate resize", this is the DURABLE PRODUCTION IDENTITY this
+    // exact claim is answering for — every candidate asset (final OR
+    // intermediate) is judged against it, matching EXACTLY (never a
+    // tolerance-based/derived comparison):
     //
     //   - the exact same source asset id
     //   - the exact same source bytes (SHA-256)
@@ -1294,27 +1409,28 @@ export function createFinalArtworkWorkerCapability(
     //     here)
     //
     // If every one of those agrees, nothing about the request has changed
-    // since this asset was created — the ONLY way `productionAssetMatchesEffectiveTarget`
-    // could still disagree is a geometry-prediction error, not a genuinely
+    // since a matching asset was created — the ONLY way
+    // `productionAssetMatchesEffectiveTarget` could still disagree (for a
+    // FINAL asset) is a geometry-prediction error, not a genuinely
     // different or stale asset. Authority this strong is adopted directly
     // (never re-downloaded, never resubmitted, never duplicated) rather
     // than failed: the asset IS proven correct, independent of whether this
-    // invocation's own pixel-target math happens to agree with it. Only
-    // when no such full match exists does this fall through to ordinary
-    // processing below, which correctly creates a new asset for what is
-    // then either the first attempt or a genuinely different request.
+    // invocation's own pixel-target math happens to agree with it.
+    const currentProductionIdentity = {
+      sourceAssetId: sourceAsset.id,
+      sourceBytesSha256: (
+        (params.extraAssetMetadata as { uploadedPreserve?: { sourceBytesSha256?: unknown } })
+          .uploadedPreserve?.sourceBytesSha256 ?? null
+      ),
+      providerKey: activeProvider.providerKey,
+      productionWidthIn: job.productionWidthIn,
+      confirmedMaxHeightIn:
+        typeof params.extraAssetMetadata.confirmedMaxHeightIn === "number"
+          ? params.extraAssetMetadata.confirmedMaxHeightIn
+          : null,
+    };
+
     if (params.targetIn) {
-      const currentIdentity = {
-        sourceAssetId: sourceAsset.id,
-        sourceBytesSha256: (
-          (params.extraAssetMetadata as { uploadedPreserve?: { sourceBytesSha256?: unknown } })
-            .uploadedPreserve?.sourceBytesSha256
-        ),
-        providerKey: activeProvider.providerKey,
-        providerRequestId: job.providerRequestId,
-        productionWidthIn: params.extraAssetMetadata.productionWidthIn,
-        confirmedMaxHeightIn: params.extraAssetMetadata.confirmedMaxHeightIn,
-      };
       const priorAssets = await withOperationTiming(
         "produceProductionAsset.loopGuard.listAssetsForFinalArtworkJob",
         () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
@@ -1327,12 +1443,12 @@ export function createFinalArtworkWorkerCapability(
         const meta = asset.metadata as Record<string, unknown> | null;
         const uploadedPreserve = meta?.uploadedPreserve as { sourceBytesSha256?: unknown } | null | undefined;
         return (
-          meta?.sourceAssetId === currentIdentity.sourceAssetId &&
-          uploadedPreserve?.sourceBytesSha256 === currentIdentity.sourceBytesSha256 &&
-          meta?.providerKey === currentIdentity.providerKey &&
-          (meta?.providerRequestId ?? null) === currentIdentity.providerRequestId &&
-          meta?.productionWidthIn === currentIdentity.productionWidthIn &&
-          meta?.confirmedMaxHeightIn === currentIdentity.confirmedMaxHeightIn
+          meta?.sourceAssetId === currentProductionIdentity.sourceAssetId &&
+          (uploadedPreserve?.sourceBytesSha256 ?? null) === currentProductionIdentity.sourceBytesSha256 &&
+          meta?.providerKey === currentProductionIdentity.providerKey &&
+          (meta?.providerRequestId ?? null) === job.providerRequestId &&
+          meta?.productionWidthIn === currentProductionIdentity.productionWidthIn &&
+          meta?.confirmedMaxHeightIn === currentProductionIdentity.confirmedMaxHeightIn
         );
       });
       if (durableIdentityMatch) {
@@ -1346,17 +1462,49 @@ export function createFinalArtworkWorkerCapability(
     }
 
     // Bounded FinalArtwork Production-Execution Repair (short-step
-    // follow-up) — Repair 6/7: the LAST provider pass's raw result may
-    // already be durably downloaded and geometry-validated (Repair 4's own
-    // checkpoint, `persistProviderResultIntermediate`). When it is, this
+    // follow-up) — Repair 6/7, corrected by the Stale Provider-Result
+    // Intermediate Repair: the LAST provider pass's raw result may already
+    // be durably downloaded and geometry-validated (Repair 4's own
+    // checkpoint, `persistProviderResultIntermediate`). When a candidate
+    // exists AND still answers `currentProductionIdentity` above, this
     // claim's ENTIRE job is local normalize/measure/upload — it must never
     // re-check provider status or re-download merely because this
     // invocation starts later than the download did. Checked BEFORE the
     // two-pass self-heal/classification/budget-charge block below: this
     // claim never touches the provider or either attempt budget at all.
-    const existingProviderResultIntermediate = await resolveExistingProviderResultIntermediate(job);
-    if (existingProviderResultIntermediate) {
-      return finalizeFromProviderResultIntermediate(params, existingProviderResultIntermediate);
+    //
+    // A candidate that EXISTS but no longer matches (the confirmed size or
+    // source changed underneath this job between claims — e.g.
+    // `resolvePreparedUploadJob`'s own stale-target revival) is never
+    // adopted, and is never mistaken for an in-flight resume either: its
+    // provider identity is retired here, exactly like the two-pass pass-1
+    // self-heal immediately below retires a stale pass-1 identity, so
+    // classification correctly starts the CURRENT production intent fresh
+    // — a smaller confirmed size correctly routes to local normalization
+    // again, and a larger one correctly submits a genuinely new
+    // reconstruction request, instead of either silently adopting pixels
+    // that answer a question nobody is asking any more.
+    const providerResultIntermediateLookup = await resolveExistingProviderResultIntermediate(
+      job,
+      currentProductionIdentity,
+    );
+    if (providerResultIntermediateLookup.outcome === "current") {
+      return finalizeFromProviderResultIntermediate(params, providerResultIntermediateLookup);
+    }
+    if (providerResultIntermediateLookup.outcome === "stale") {
+      await repo.updateFinalArtworkJob(job.id, {
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      });
+      effectiveJob = {
+        ...effectiveJob,
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      };
     }
 
     // --- Phase 28V (Section 7/8): does a two-pass reconstruction's PASS 1
@@ -1375,7 +1523,6 @@ export function createFinalArtworkWorkerCapability(
     // `source`, so nothing here changes what a fresh-execution-exhausted
     // claim costs: it still fails before any asset bytes are read.
     const existingIntermediate = await resolveExistingIntermediateReconstruction(job, "apparelSelfHeal");
-    let effectiveJob = job;
     if (
       existingIntermediate &&
       effectiveJob.providerRequestId !== null &&
@@ -1526,6 +1673,16 @@ export function createFinalArtworkWorkerCapability(
     // already knows.
     let currentProviderRequestId = existingProviderRequest?.providerRequestId ?? null;
     let boundedResult: FinalArtworkProviderBoundedResult;
+    logFinalArtworkWorkerStage({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      providerKey: activeProvider.providerKey,
+      stage:
+        existingProviderRequest?.providerStatus === FINAL_ARTWORK_PROVIDER_STATUS.resultReady
+          ? "provider_download_started"
+          : "provider_status_check_started",
+      elapsedMs: null,
+    });
     try {
       const providerInput: FinalArtworkProviderInput = {
         sourceBytes: source.bytes,
@@ -1596,7 +1753,7 @@ export function createFinalArtworkWorkerCapability(
           stage: (error as ProviderError).stage ?? "unknown",
           sanitizedError: describeFinalArtworkError(error),
         });
-        return checkpointAndDeferToNextInvocation();
+        return deferTransientFailureWithoutBudgetRefund();
       }
 
       // Sprint 2M Phase 2E (Goal 3/12): a request that reached a terminal
@@ -1716,6 +1873,68 @@ export function createFinalArtworkWorkerCapability(
         refund.providerRecoveryAttempts = effectiveJob.providerRecoveryAttempts - 1;
       }
       await repo.updateFinalArtworkJob(job.id, refund);
+      if (refund.providerRecoveryAttempts !== undefined) {
+        logFinalArtworkWorkerStage({
+          projectId: job.projectId,
+          finalArtworkJobId: job.id,
+          providerKey: activeProvider.providerKey,
+          stage: "recovery_charge_refunded",
+          elapsedMs: null,
+        });
+      }
+      return { status: "pending" };
+    }
+
+    /**
+     * Unbounded Transient-Deferral Loop Repair (independent-review finding):
+     * the ORIGINAL "always refund a transient poll/download hiccup"
+     * treatment (via `checkpointAndDeferToNextInvocation` above) fixed the
+     * Pedro-class problem (a gateway kill BEFORE any code could run to
+     * decide anything) but overcorrected — a claim that DID run to
+     * completion and explicitly caught a transient `ProviderError`
+     * (`isBoundedTransientPollOrDownloadFailure`) is a controlled, complete
+     * outcome, not an interrupted one, and unconditionally refunding it
+     * meant a PERSISTENT transient condition (a sustained 5xx, a download
+     * that always exceeds its timeout, a rate limit that never clears)
+     * could defer forever with neither budget ever moving — never reaching
+     * ANY terminal state.
+     *
+     * This is the fix: leave EXACTLY the one budget this claim's own
+     * classification already charges UNREFUNDED — `providerRecoveryAttempts`
+     * for a resume claim (never `attempts`, which is not load-bearing for a
+     * resume claim's own ceiling), or `attempts` for a fresh_execution claim
+     * (there is no `providerRecoveryAttempts` charge to leave unrefunded on
+     * that side). A single blip is still cheap — it costs only ONE unit of
+     * whichever budget already governs this claim's classification, the
+     * SAME unit a genuine failure of that same claim would have cost — but
+     * a request that keeps failing transiently, claim after claim, now
+     * reaches the SAME "could not be recovered after N attempts"/"exceeded
+     * maximum finalization attempts" terminal failure a truly broken
+     * request already would, via the EXISTING, entirely unmodified ceiling
+     * checks at the top of this function. Never calls `failJob` directly —
+     * the job stays `"recoverable"` and the scheduler keeps retrying it
+     * automatically (no customer-facing "failed" state, no "Retry
+     * Preparation" click needed) right up until the ceiling itself refuses
+     * the next claim.
+     */
+    async function deferTransientFailureWithoutBudgetRefund(): Promise<{ status: "pending" }> {
+      const patch: Partial<Pick<FinalArtworkJob, "status" | "heartbeatAt" | "attempts">> = {
+        status: "recoverable",
+        heartbeatAt: new Date().toISOString(),
+      };
+      if (attemptClassification === "resume") {
+        // `providerRecoveryAttempts` was already charged for this claim
+        // (before the resume was attempted) and is deliberately left
+        // charged here — `attempts` is never load-bearing for a resume
+        // claim's own ceiling, so it is refunded exactly like any other
+        // clean outcome.
+        patch.attempts = job.attempts - 1;
+      }
+      // else (fresh_execution): `attempts` was already charged at claim
+      // time and is deliberately left charged — this transient deferral is
+      // bounded by the SAME `MAX_FINAL_ARTWORK_ATTEMPTS` ceiling a genuine
+      // fresh-execution failure already is.
+      await repo.updateFinalArtworkJob(job.id, patch);
       return { status: "pending" };
     }
 
@@ -1768,6 +1987,7 @@ export function createFinalArtworkWorkerCapability(
         params.storageGroupingId,
         sourceAsset,
         boundedResult,
+        currentProductionIdentity,
       );
       logFinalArtworkWorkerStage({
         projectId: job.projectId,
@@ -1847,6 +2067,13 @@ export function createFinalArtworkWorkerCapability(
     // `dtf_*` Print Validation checks unemitted for this asset, exactly as
     // they are for any plate produced before this phase existed.
     const normalizeStartedAt = Date.now();
+    logFinalArtworkWorkerStage({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      providerKey: activeProvider.providerKey,
+      stage: "normalize_started",
+      elapsedMs: null,
+    });
     const dtfFeatureIntegrity = output.halftone
       ? null
       : measureDtfFeatureIntegrity(output.bytes, output.normalization);
@@ -1871,6 +2098,13 @@ export function createFinalArtworkWorkerCapability(
     });
 
     const uploadStartedAt = Date.now();
+    logFinalArtworkWorkerStage({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      providerKey: activeProvider.providerKey,
+      stage: "production_asset_upload_started",
+      elapsedMs: null,
+    });
     try {
       // Phase 2 (post-provider durable checkpoint): the created record
       // itself is never consumed here — this invocation checkpoints and
@@ -2005,6 +2239,52 @@ export function createFinalArtworkWorkerCapability(
   ): Promise<{ status: "handled" } | { status: "pending" }> {
     const { job, sourceAsset, sizing, activeProvider } = params;
 
+    // Unbounded Normalize Crash-Loop Repair (independent-review finding):
+    // this path is reached BEFORE classification/budget-charging even runs
+    // (see its own call site in `produceProductionAsset`), so a process
+    // death/crash anywhere in this function's own work (storage readback,
+    // PNG decode, normalize, measure, encode, upload) would otherwise
+    // reclaim and retry indefinitely (once per stale-heartbeat sweep) with
+    // no terminal outcome ever reached.
+    //
+    // Deliberately bounds by `providerRecoveryAttempts` (checked/charged
+    // here, refunded in this function's own checkpoint below on success —
+    // see `checkpointRefund`), NEVER `attempts`/`MAX_FINAL_ARTWORK_ATTEMPTS`:
+    // `job.attempts` is a GENERIC, whole-job-lifetime counter that can
+    // already be legitimately elevated for reasons that have nothing to do
+    // with normalizing THIS intermediate (e.g. several genuine resume-side
+    // struggles earlier in this SAME job's life, each already correctly
+    // bounded by its own `providerRecoveryAttempts` ceiling at the time) —
+    // reusing the fresh-execution ceiling here would incorrectly fail a
+    // perfectly healthy resume-recovered job the instant its generic
+    // `attempts` count happened to exceed 3, regardless of whether
+    // normalizing had ever failed even once. `providerRecoveryAttempts` is
+    // untouched by every other code path once an intermediate exists
+    // (`persistProviderResultIntermediate` never writes it, and this is the
+    // only remaining stage), so it is free to serve this exact "how many
+    // consecutive claims have failed to normalize THIS intermediate"
+    // question, using the SAME more-generous, resume-shaped ceiling this
+    // whole continuation already resembles.
+    if (job.providerRecoveryAttempts >= MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS) {
+      logFinalArtworkAttemptBudgetExhausted({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        attempts: job.attempts,
+        classification: "resume",
+        providerKey: activeProvider.providerKey,
+        hasProviderRequestId: true,
+        freshExecutionBudget: null,
+        recoveryBudget: { used: job.providerRecoveryAttempts, max: MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS },
+      });
+      await failJob(
+        job,
+        `This reconstruction's already-downloaded result could not be normalized after ${MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS} attempts. It was never re-downloaded or resubmitted -- the persisted intermediate itself may need manual attention.`,
+      );
+      return { status: "handled" };
+    }
+    const chargedRecoveryAttempts = job.providerRecoveryAttempts + 1;
+    await repo.updateFinalArtworkJob(job.id, { providerRecoveryAttempts: chargedRecoveryAttempts });
+
     const downloadStartedAt = Date.now();
     const bytesRead = await withOperationTiming(
       "finalizeFromProviderResultIntermediate.downloadAssetBytes",
@@ -2087,11 +2367,17 @@ export function createFinalArtworkWorkerCapability(
       storageGroupingId: params.storageGroupingId,
       extraAssetMetadata: params.extraAssetMetadata,
       output: boundedResult,
-      // No provider claim/budget charge happened on this path at all (this
-      // claim never reached the classification/budget block) — only the
-      // generic per-claim `attempts` counter (charged unconditionally at
-      // DB-claim time) needs refunding here.
-      checkpointRefund: { attempts: job.attempts - 1 },
+      // This claim never reached the EARLIER classification/budget block
+      // (produceProductionAsset's own, for status-check/download claims) —
+      // but it DID charge its own `providerRecoveryAttempts` unit just
+      // above (the Unbounded Normalize Crash-Loop Repair), and, like every
+      // other claim, had the generic per-claim `attempts` counter charged
+      // unconditionally at DB-claim time. Both are refunded here on this
+      // clean, successful conclusion — net zero on success, exactly like
+      // every other checkpoint in this file, and only genuinely REPEATED
+      // failures at this exact stage (never reaching this refund) let the
+      // charge accumulate toward its ceiling.
+      checkpointRefund: { attempts: job.attempts - 1, providerRecoveryAttempts: chargedRecoveryAttempts - 1 },
     });
   }
 
@@ -3051,6 +3337,13 @@ export function createFinalArtworkWorkerCapability(
           (asset) =>
             asset.productionRole === "production_png" &&
             !isReconstructionIntermediateAsset(asset) &&
+            // Stale Provider-Result Intermediate Repair: same defensive
+            // exclusion `resolveExistingProductionAsset` already applies
+            // above — architecturally unreachable for a sign job today
+            // (only the apparel Topaz path ever creates this marker), kept
+            // here anyway so this sibling-search never drifts from that
+            // shared invariant if that ever changes.
+            !isProviderResultIntermediateAsset(asset) &&
             signExecutionImplementationVersionOf(asset) === SIGN_EXECUTION_IMPLEMENTATION_VERSION,
         ) ?? null;
       if (currentImplementationSibling) {
@@ -4685,7 +4978,21 @@ export function createFinalArtworkWorkerCapability(
   }): Promise<void> {
     const { job, artwork, sourceAsset, productionAsset, provenance } = params;
 
+    logFinalArtworkWorkerStage({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      providerKey: params.providerKey,
+      stage: "validation_started",
+      elapsedMs: null,
+    });
     const report = printValidation.validateArtwork(params.validationInput);
+    logFinalArtworkWorkerStage({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      providerKey: params.providerKey,
+      stage: "validation_completed",
+      elapsedMs: null,
+    });
 
     // Goal 12: append-only — a retried/recovered attempt inserting one more
     // (deterministic, harmless) validation row is acceptable, mirroring how
@@ -4764,12 +5071,26 @@ export function createFinalArtworkWorkerCapability(
       lastError: report.status === "ready" ? null : summarizeReportForInternalLog(report),
       completedAt: new Date().toISOString(),
     });
+    logFinalArtworkWorkerStage({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      providerKey: params.providerKey,
+      stage: "job_completed",
+      elapsedMs: null,
+    });
   }
 
   const capability: FinalArtworkWorkerCapability = {
     async processNextJob(excludeJobIds = []) {
       const job = await repo.claimNextQueuedFinalArtworkJob(excludeJobIds);
       if (!job) return { processedJobId: null, pending: false };
+      logFinalArtworkWorkerStage({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        providerKey: job.providerKey,
+        stage: "job_claimed",
+        elapsedMs: null,
+      });
       await runClaimedJob(job);
       // Bounded FinalArtwork Production-Execution Repair (liveness): a
       // cheap re-read rather than threading a return value through every

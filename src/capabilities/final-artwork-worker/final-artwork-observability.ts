@@ -224,5 +224,8 @@ export interface FinalArtworkBoundedTransientDeferralLogDetails {
 export function logFinalArtworkBoundedTransientDeferral(
   details: FinalArtworkBoundedTransientDeferralLogDetails,
 ): void {
-  console.warn("[final-artwork-worker] transient poll/download hiccup deferred to a later claim, no budget consumed", details);
+  console.warn(
+    "[final-artwork-worker] transient poll/download hiccup deferred to a later claim -- recovery budget charged, never an unconditional free pass (Blocker 2 correction)",
+    details,
+  );
 }

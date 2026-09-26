@@ -70,8 +70,23 @@ function expectedReconstructionRequest(artworkWidthPx: number) {
 
 const FIXED_PROCESS_ID = "01a0d701-mandatory-test-process-id";
 
-/** A fake Topaz endpoint set whose status can be reconfigured between claims. */
-function buildFakeTopazFetch(reconstructedWidthPx: number, reconstructedHeightPx: number) {
+/**
+ * A fake Topaz endpoint set whose status can be reconfigured between
+ * claims. `insetRatio` (visible artwork width / full canvas width) is
+ * preserved in the "reconstructed" output — mirroring
+ * `bounded-topaz-execution.test.ts`'s own echoing-fake pattern — so the
+ * final production PNG genuinely carries transparent pixels around the
+ * artwork, exactly like a real proportional Topaz upscale of a real
+ * transparent source would. An UNIFORMLY OPAQUE fake output (this file's
+ * own earlier version) fails apparel's real transparency-required check and
+ * can never honestly reach `"ready"`/`"print_ready"` — the Strengthened
+ * Ready/Validation Assertions repair needs a fixture that genuinely CAN.
+ */
+function buildFakeTopazFetch(
+  reconstructedWidthPx: number,
+  reconstructedHeightPx: number,
+  insetRatio: number = 400 / CANVAS_PX,
+) {
   let submitCount = 0;
   let statusCallCount = 0;
   let downloadCount = 0;
@@ -103,11 +118,19 @@ function buildFakeTopazFetch(reconstructedWidthPx: number, reconstructedHeightPx
     if (url === "https://cdn.example.com/mandatory-output.png") {
       downloadCount += 1;
       const png = new PNG({ width: reconstructedWidthPx, height: reconstructedHeightPx });
-      for (let i = 0; i < png.data.length; i += 4) {
-        png.data[i] = 10;
-        png.data[i + 1] = 90;
-        png.data[i + 2] = 200;
-        png.data[i + 3] = 255;
+      const visibleWidthPx = Math.round(reconstructedWidthPx * insetRatio);
+      const visibleHeightPx = Math.round(reconstructedHeightPx * insetRatio);
+      const insetX = Math.floor((reconstructedWidthPx - visibleWidthPx) / 2);
+      const insetY = Math.floor((reconstructedHeightPx - visibleHeightPx) / 2);
+      for (let y = 0; y < reconstructedHeightPx; y += 1) {
+        for (let x = 0; x < reconstructedWidthPx; x += 1) {
+          const idx = (reconstructedWidthPx * y + x) << 2;
+          const inArtwork = x >= insetX && x < insetX + visibleWidthPx && y >= insetY && y < insetY + visibleHeightPx;
+          png.data[idx] = 10;
+          png.data[idx + 1] = 90;
+          png.data[idx + 2] = 200;
+          png.data[idx + 3] = inArtwork ? 255 : 0;
+        }
       }
       return new Response(new Uint8Array(PNG.sync.write(png)), {
         status: 200,
@@ -126,6 +149,50 @@ function buildFakeTopazFetch(reconstructedWidthPx: number, reconstructedHeightPx
       statusMode = mode;
     },
   };
+}
+
+/**
+ * Strengthened Ready/Validation Assertions repair: the exact, deterministic
+ * authoritative outcome every fixture in this file converges on. A
+ * prepared-upload job resolved through a genuine PAID RECONSTRUCTION
+ * provider (`resolutionProvenance: "reconstructed"`) is DELIBERATELY,
+ * PERMANENTLY withheld from automatic `print_ready` by the
+ * `reconstruction_certification_evidence` guard
+ * (`print-validation/contracts.ts`'s own "False Print-Ready Guard" —
+ * provider super-resolution pixel count is not, by itself, proof of visual
+ * fidelity) — `finalization_required` is therefore the CORRECT terminal
+ * state for every fixture in this file, never a looser stand-in for
+ * "ready". Asserts every OTHER check genuinely passes, so
+ * `reconstruction_certification_evidence` is provably the ONE, EXPECTED
+ * reason, never a symptom of some other, unintended defect.
+ */
+function assertReconstructedUploadedPreserveGuardOnly(
+  validation: { status: string; assetId: string; report: unknown } | null,
+  productionAssetId: string,
+): void {
+  assert.ok(validation);
+  assert.equal(
+    validation!.status,
+    "finalization_required",
+    "the exact expected authoritative validation status for a reconstructed uploaded-preserve plate",
+  );
+  assert.equal(
+    validation!.assetId,
+    productionAssetId,
+    "the validation's own target is the ACTUAL production asset this lifecycle just produced",
+  );
+  const checks = (validation!.report as { checks: { check: string; status: string; severity: string }[] }).checks;
+  const failingChecks = checks.filter((c) => c.status === "fail");
+  assert.deepEqual(
+    failingChecks.map((c) => c.check),
+    ["reconstruction_certification_evidence"],
+    "the False Print-Ready Guard must be the ONE and ONLY failing check -- every other check (transparency, geometry, sufficiency, DTF feature integrity) must genuinely pass",
+  );
+  assert.equal(
+    checks.find((c) => c.check === "reconstruction_certification_evidence")?.severity,
+    "blocking",
+    "the guard is blocking, not merely a warning -- this is exactly why the project lands on finalization_required rather than print_ready",
+  );
 }
 
 describe("Bounded FinalArtwork Production-Execution Repair -- mandatory Topaz lifecycle + Pedro-shape regression", () => {
@@ -298,16 +365,19 @@ describe("Bounded FinalArtwork Production-Execution Repair -- mandatory Topaz li
       assert.equal(submitCount(), 0, "still zero submissions across the entire lifecycle");
       assert.equal(downloadCount(), 1, "still exactly one download across the entire lifecycle");
 
-      const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job!.id);
-      assert.ok(validation, "validation correct");
-
-      const project = await repo.getProject(projectId);
-      assert.notEqual(project?.project.status, "finalizing", "project transitioned");
-
       const finalProductionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
         (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
       );
       assert.equal(finalProductionAssets.length, 1, "still exactly one production asset -- never duplicated");
+
+      // Strengthened Ready/Validation Assertions repair: assert the EXACT
+      // expected authoritative state, not merely "a validation exists" /
+      // "the project moved off finalizing" -- see
+      // `assertReconstructedUploadedPreserveGuardOnly`'s own doc comment.
+      const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job!.id);
+      assertReconstructedUploadedPreserveGuardOnly(validation, finalProductionAssets[0]!.id);
+      const project = await repo.getProject(projectId);
+      assert.equal(project?.project.status, "finalization_required", "the exact expected Print Ready state for this fixture");
     });
 
     it("fresh submission fixture: submit count = 1 maximum across the entire lifecycle", async () => {
@@ -343,8 +413,15 @@ describe("Bounded FinalArtwork Production-Execution Repair -- mandatory Topaz li
       const job = await repo.getFinalArtworkJob(requested.job.id);
       assert.equal(job?.status, "completed");
 
+      const finalProductionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+        (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
+      );
+      assert.equal(finalProductionAssets.length, 1);
+
       const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job!.id);
-      assert.ok(validation);
+      assertReconstructedUploadedPreserveGuardOnly(validation, finalProductionAssets[0]!.id);
+      const project = await repo.getProject(projectId);
+      assert.equal(project?.project.status, "finalization_required", "the exact expected Print Ready state for this fixture");
     });
   });
 

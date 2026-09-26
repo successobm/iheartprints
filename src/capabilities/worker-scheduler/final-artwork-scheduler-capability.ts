@@ -1,41 +1,61 @@
 import type { FinalArtworkWorkerCapability } from "@/capabilities/final-artwork-worker";
 import { DEFAULT_FINAL_ARTWORK_STALE_JOB_MS } from "@/capabilities/final-artwork-worker";
-import { getMaxGenerationJobsPerRun } from "@/lib/config/worker-config";
 
 /**
  * Sprint 2M Phase 2C: provider-neutral scheduler layer for `FinalArtworkJob`
- * — mirrors `GenerationSchedulerCapability` exactly (recover, then claim in
- * a bounded loop, then stop), a deliberate near-duplicate rather than a
- * shared generic scheduler, since the two job queues (`generation_jobs`,
+ * — mirrors `GenerationSchedulerCapability`'s OVERALL shape (recover, then
+ * claim), a deliberate near-duplicate rather than a shared generic
+ * scheduler, since the two job queues (`generation_jobs`,
  * `final_artwork_jobs`) are independent tables with independent claim
- * methods and independent worker capabilities. Reuses
- * `MAX_GENERATION_JOBS_PER_RUN`/`getMaxGenerationJobsPerRun` — one shared
- * "how many jobs per invocation" knob is enough; the two worker types are
- * never mixed in the same batch.
+ * methods and independent worker capabilities.
+ *
+ * One-Job-Per-Invocation Repair (independent-review finding, Bounded
+ * FinalArtwork Production-Execution Repair's short-step follow-up): this
+ * scheduler DELIBERATELY DIVERGES from `GenerationSchedulerCapability`'s own
+ * "claim up to `maxJobsPerRun` jobs in a bounded loop" shape and no longer
+ * takes a `maxJobsPerRun` option at all. Audit finding: even after every
+ * individual bounded provider step was made short, `runBatch()`'s own loop
+ * could still claim and advance SEVERAL DIFFERENT jobs sequentially within
+ * ONE HTTP worker invocation (`maxJobsPerRun` defaulted to 5) — each an
+ * independent, provider-touching bounded step — reintroducing exactly the
+ * "one HTTP request can still run long" risk the short-step split exists to
+ * eliminate, just spread across jobs instead of within one. The structural
+ * fix is not a smaller configured limit (a knob can always be turned back
+ * up, silently reintroducing the risk) but removing the loop itself: one
+ * `runBatch()` call recovers abandoned jobs (cheap, no provider I/O), then
+ * claims and advances AT MOST ONE eligible job, then returns. A second
+ * eligible job waits for a SEPARATE invocation — the immediate wake fired
+ * for THAT job's own enqueue, or the next recovery-scheduler tick — never
+ * this same HTTP request.
  */
 
 export interface FinalArtworkSchedulerRunResult {
-  /** IDs of jobs actually claimed and run during this batch — internal only, never returned by the HTTP endpoint. */
+  /** IDs of jobs actually claimed and run during this batch — internal only, never returned by the HTTP endpoint. At most one entry — see this module's own "One-Job-Per-Invocation Repair" doc comment. */
   processedJobIds: string[];
   /** How many previously-abandoned jobs this batch's recovery sweep flipped back to recoverable. */
   recoveredCount: number;
-  /** `true` if the batch stopped because it hit the per-run job limit, not because the queue was empty. */
+  /**
+   * `true` whenever this call actually claimed and advanced a job (i.e.
+   * `processedJobIds.length === 1`) — kept, with this adjusted meaning, so
+   * existing diagnostic/log call sites (`local-final-artwork-trigger.ts`)
+   * that already read this field for logging purposes keep working
+   * unchanged. Never gates control flow anywhere in this codebase.
+   */
   limitReached: boolean;
 }
 
 export interface FinalArtworkSchedulerOptions {
-  /** Defaults to `getMaxGenerationJobsPerRun()` — override only for tests. */
-  maxJobsPerRun?: number;
   /** Defaults to `DEFAULT_FINAL_ARTWORK_STALE_JOB_MS` — override only for tests. */
   staleAfterMs?: number;
 }
 
 export interface FinalArtworkSchedulerCapability {
   /**
-   * Recovers abandoned jobs, then claims and runs up to `maxJobsPerRun`
-   * queued/recoverable jobs, stopping early the moment the queue is empty.
-   * Safe to call concurrently with itself — an overlapping call joins the
-   * batch already in flight rather than starting a second one.
+   * Recovers abandoned jobs, then claims and advances AT MOST ONE
+   * queued/recoverable job — see this module's own "One-Job-Per-Invocation
+   * Repair" doc comment. Safe to call concurrently with itself — an
+   * overlapping call joins the batch already in flight rather than
+   * starting a second one.
    */
   runBatch(): Promise<FinalArtworkSchedulerRunResult>;
   /**
@@ -58,7 +78,6 @@ export function createFinalArtworkSchedulerCapability(
   worker: FinalArtworkWorkerCapability,
   options: FinalArtworkSchedulerOptions = {},
 ): FinalArtworkSchedulerCapability {
-  const maxJobsPerRun = options.maxJobsPerRun ?? getMaxGenerationJobsPerRun();
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_FINAL_ARTWORK_STALE_JOB_MS;
 
   let activeBatch: Promise<FinalArtworkSchedulerRunResult> | null = null;
@@ -67,27 +86,25 @@ export function createFinalArtworkSchedulerCapability(
   async function doRunBatch(): Promise<FinalArtworkSchedulerRunResult> {
     const { recoveredCount } = await worker.recoverAbandonedJobs(staleAfterMs);
 
-    const processedJobIds: string[] = [];
-    // Bounded FinalArtwork Production-Execution Repair (liveness): jobs
-    // this SAME batch already found still bounded-pending. Excluding them
-    // from further claims this batch is what lets an indefinitely-pending
-    // provider request (which keeps returning to `recoverable` and
-    // therefore keeps winning "oldest due") make way for a newer,
-    // unrelated job within the batch's remaining slots, instead of that
-    // one stuck job re-winning every claim and the loop giving up early —
-    // see the repaired `claimNextQueuedFinalArtworkJob(excludeJobIds)`.
-    const pendingThisBatch: string[] = [];
-    for (let i = 0; i < maxJobsPerRun; i += 1) {
-      const { processedJobId, pending } = await worker.processNextJob(pendingThisBatch);
-      if (!processedJobId) break;
-      processedJobIds.push(processedJobId);
-      if (pending) pendingThisBatch.push(processedJobId);
-    }
+    // One-Job-Per-Invocation Repair: exactly one claim, never a loop. The
+    // pre-existing liveness mechanism this claim's own `excludeJobIds`
+    // argument feeds (`claimNextQueuedFinalArtworkJob`'s exclusion of a job
+    // this SAME batch already found bounded-pending) has nothing left to do
+    // with only one claim per batch — no exclusion list is needed when
+    // there is no second claim in this same call to skip a stuck job for —
+    // so it is always empty here. Liveness across a genuinely stuck job is
+    // now guaranteed structurally instead: THAT job's own repeated claims
+    // never monopolize more than one HTTP invocation each, so a newer job's
+    // own immediate wake (or the next recovery tick) is never starved
+    // behind it.
+    const { processedJobId, pending } = await worker.processNextJob([]);
+    const processedJobIds = processedJobId ? [processedJobId] : [];
+    void pending; // no exclusion list to feed on a later claim within this same batch — see the doc comment above.
 
     return {
       processedJobIds,
       recoveredCount,
-      limitReached: processedJobIds.length >= maxJobsPerRun,
+      limitReached: processedJobIds.length > 0,
     };
   }
 

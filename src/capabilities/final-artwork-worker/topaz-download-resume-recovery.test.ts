@@ -248,7 +248,7 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     return { repo, assets, projectId };
   }
 
-  it("1: a download that fails on the bounded download claim defers to a later invocation WITHOUT failing the job (Repair 8) -- the ECONNRESET shape is a transient hiccup, never a genuine failure", async () => {
+  it("1: a download that fails on the bounded download claim defers to a later invocation WITHOUT failing the job outright -- the ECONNRESET shape is a transient hiccup, never a genuine failure, but (Blocker 2 correction) DOES spend one recovery attempt", async () => {
     const { repo, assets, projectId } = await setup(400);
     const expectedRequest = expectedReconstructionRequest(400);
     const { fetchImpl, submitCount, setDownloadMode } = buildResumableFakeTopazFetch(
@@ -277,8 +277,10 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     assert.equal(afterStatusCheckpoint?.providerRequestId, LIVE_INCIDENT_PROCESS_ID);
 
     // Claim 2: resume, download step -- an ECONNRESET is exactly the
-    // transient-infrastructure shape Repair 8 exists for: caught and
-    // deferred, never failing the job, never spending the recovery budget.
+    // transient-infrastructure shape this repair's Repair 8 exists for:
+    // caught and deferred, never failing the job outright -- but (Blocker 2
+    // correction) this IS bounded by the SAME recovery budget a genuine
+    // failure of this claim would be, so it spends exactly one unit.
     setDownloadMode("fail_transiently");
     const { errorCalls } = await captureConsoleError(() => worker.processNextJob());
 
@@ -286,7 +288,7 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     assert.equal(job?.status, "recoverable", "a transient download hiccup must never fail the job outright");
     assert.equal(job?.providerKey, "topaz_transparency_upscale", "provider identity must be preserved, never cleared, for a transient download hiccup");
     assert.equal(job?.providerRequestId, LIVE_INCIDENT_PROCESS_ID, "the paid request id must be preserved so a later claim can resume it");
-    assert.equal(job?.providerRecoveryAttempts, 0, "a transient hiccup must never spend the recovery budget");
+    assert.equal(job?.providerRecoveryAttempts, 1, "Blocker 2: a transient hiccup IS bounded by the recovery budget -- one unit spent, never an unconditional free pass");
     assert.equal(submitCount(), 1, "exactly one paid submission, despite the download hiccuping");
 
     // --- Repair 8 observability -------------------------------------------

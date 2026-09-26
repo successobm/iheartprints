@@ -46,33 +46,63 @@ function fakeWorker(
 }
 
 describe("FinalArtworkSchedulerCapability", () => {
-  it("runBatch recovers first, then drains the queue until empty", async () => {
+  it("One-Job-Per-Invocation Repair: runBatch recovers first, then claims and advances AT MOST ONE job, even though several are queued — a second, independent runBatch() call is required to advance the next one", async () => {
     const { worker, calls } = fakeWorker({ queue: ["a", "b", "c"], recoveredCount: 2 });
-    const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 10 });
+    const scheduler = createFinalArtworkSchedulerCapability(worker);
 
-    const result = await scheduler.runBatch();
-
-    assert.deepEqual(result.processedJobIds, ["a", "b", "c"]);
-    assert.equal(result.recoveredCount, 2);
-    assert.equal(result.limitReached, false);
+    const first = await scheduler.runBatch();
+    assert.deepEqual(first.processedJobIds, ["a"], "exactly one job advanced by the first HTTP-shaped invocation");
+    assert.equal(first.recoveredCount, 2);
+    assert.equal(first.limitReached, true);
     assert.equal(calls.recoverAbandonedJobs, 1);
-    // 3 successful claims + 1 final call that finds the queue empty.
-    assert.equal(calls.processNextJob, 4);
+    // Exactly one claim -- never a loop, never a second claim attempt even
+    // to discover the queue is non-empty.
+    assert.equal(calls.processNextJob, 1);
+
+    // "b" and "c" remain untouched by the first invocation -- each needs
+    // its OWN, separate runBatch() call, mirroring a separate HTTP POST /
+    // separate immediate-wake / separate recovery-scheduler tick in
+    // production.
+    const second = await scheduler.runBatch();
+    assert.deepEqual(second.processedJobIds, ["b"]);
+    assert.equal(calls.processNextJob, 2);
+
+    const third = await scheduler.runBatch();
+    assert.deepEqual(third.processedJobIds, ["c"]);
+
+    const fourth = await scheduler.runBatch();
+    assert.deepEqual(fourth.processedJobIds, [], "the queue is now genuinely empty");
+    assert.equal(fourth.limitReached, false);
   });
 
-  it("stops at maxJobsPerRun even though more jobs remain queued — the shared MAX_GENERATION_JOBS_PER_RUN knob this scheduler reuses", async () => {
-    const { worker } = fakeWorker({ queue: ["a", "b", "c", "d", "e"] });
-    const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 2 });
+  it("MULTI-JOB scheduler test: with multiple eligible jobs queued, one runBatch() invocation advances exactly one — the other eligible jobs remain untouched (queued) until a LATER invocation", async () => {
+    const { worker, calls } = fakeWorker({ queue: ["job-1", "job-2", "job-3", "job-4", "job-5"] });
+    const scheduler = createFinalArtworkSchedulerCapability(worker);
 
-    const result = await scheduler.runBatch();
+    // A single HTTP/runBatch invocation, exactly as `POST /api/worker/final-artwork`
+    // would trigger via `finalArtworkScheduler.runBatch()`.
+    const invocation1 = await scheduler.runBatch();
 
-    assert.deepEqual(result.processedJobIds, ["a", "b"]);
-    assert.equal(result.limitReached, true);
+    assert.deepEqual(invocation1.processedJobIds, ["job-1"], "invocation #1 advances exactly one job");
+    assert.equal(calls.processNextJob, 1, "exactly one claim attempt -- structurally bounded, never a loop that could discover (let alone advance) the other four");
+
+    // The other four jobs were never claimed at all by invocation #1 --
+    // each of THEM needs its own, later, independent invocation.
+    const invocation2 = await scheduler.runBatch();
+    const invocation3 = await scheduler.runBatch();
+    const invocation4 = await scheduler.runBatch();
+    const invocation5 = await scheduler.runBatch();
+    assert.deepEqual(
+      [invocation2.processedJobIds, invocation3.processedJobIds, invocation4.processedJobIds, invocation5.processedJobIds],
+      [["job-2"], ["job-3"], ["job-4"], ["job-5"]],
+      "each remaining job is advanced by its own separate, later invocation, in order -- never more than one per invocation",
+    );
+    assert.equal(calls.processNextJob, 5, "exactly one claim attempt per invocation, five invocations for five jobs");
   });
 
   it("returns an empty batch cleanly when nothing is queued — the ordinary state between customer approvals", async () => {
     const { worker } = fakeWorker({ queue: [] });
-    const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 5 });
+    const scheduler = createFinalArtworkSchedulerCapability(worker);
 
     const result = await scheduler.runBatch();
 
@@ -98,7 +128,7 @@ describe("FinalArtworkSchedulerCapability", () => {
         return { recoveredCount: 0 };
       },
     } as unknown as FinalArtworkWorkerCapability;
-    const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 5 });
+    const scheduler = createFinalArtworkSchedulerCapability(worker);
 
     assert.equal(scheduler.hasActiveBatch(), false);
     const first = scheduler.runBatch();
@@ -132,7 +162,7 @@ describe("FinalArtworkSchedulerCapability", () => {
         return { recoveredCount: 0 };
       },
     } as unknown as FinalArtworkWorkerCapability;
-    const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 1 });
+    const scheduler = createFinalArtworkSchedulerCapability(worker);
 
     const batch = scheduler.runBatch();
     await new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -156,7 +186,7 @@ describe("FinalArtworkSchedulerCapability", () => {
           return { recoveredCount: 0 };
         },
       } as unknown as FinalArtworkWorkerCapability;
-      const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 1 });
+      const scheduler = createFinalArtworkSchedulerCapability(worker);
 
       assert.equal(scheduler.isRunning(), false);
       scheduler.start(5);
@@ -181,7 +211,7 @@ describe("FinalArtworkSchedulerCapability", () => {
           return { recoveredCount: 0 };
         },
       } as unknown as FinalArtworkWorkerCapability;
-      const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 1 });
+      const scheduler = createFinalArtworkSchedulerCapability(worker);
 
       scheduler.start(1000);
       scheduler.start(1000);
@@ -199,7 +229,7 @@ describe("FinalArtworkSchedulerCapability", () => {
           return { recoveredCount: 0 };
         },
       } as unknown as FinalArtworkWorkerCapability;
-      const scheduler = createFinalArtworkSchedulerCapability(worker, { maxJobsPerRun: 1 });
+      const scheduler = createFinalArtworkSchedulerCapability(worker);
       assert.doesNotThrow(() => scheduler.stop());
     });
   });
