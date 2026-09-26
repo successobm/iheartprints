@@ -154,6 +154,11 @@ describe("GET /api/projects/[projectId]/production-artwork/image (Sprint 2M Phas
     const { projectId, artworkId, graph } = await projectAtSelectedConcept();
     await graph.finalArtwork.requestFinalArtwork(projectId, artworkId);
     await graph.finalArtworkWorker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the first call only
+    // persists the production asset and checkpoints to "recoverable"; a
+    // second call is required to run validation/completion and transition
+    // the project to print_ready.
+    await graph.finalArtworkWorker.processNextJob();
 
     const { getProjectRepository } = await import("@/lib/db");
     const repo = getProjectRepository();

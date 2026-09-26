@@ -460,6 +460,20 @@ describe("Print'em All Phase 2 — DTF halftone production", () => {
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await worker.processNextJob();
 
+    // Phase 2 (post-provider durable checkpoint): a freshly-successful claim
+    // now stops the instant its production asset is durably persisted,
+    // returning `{status:"pending"}` and leaving the job `"recoverable"`
+    // rather than running validation/completion/project-transition in the
+    // same call. A second `processNextJob()` claims that checkpointed job
+    // and carries it the rest of the way to a terminal state. A claim that
+    // instead reached a terminal state on its own (failure, or a refusal
+    // before any asset was produced) leaves nothing "recoverable" here, so
+    // this second call is a no-op for those cases.
+    const afterFirstClaim = await repo.getFinalArtworkJob(requested.job.id);
+    if (afterFirstClaim?.status === "recoverable") {
+      await worker.processNextJob();
+    }
+
     const job = (await repo.getFinalArtworkJob(requested.job.id))!;
     const validation = await repo.getLatestProductionAssetValidationForJob(
       projectId,

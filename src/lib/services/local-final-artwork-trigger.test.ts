@@ -333,6 +333,18 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
     const batch = await result.batchPromise;
     assert.deepEqual(batch.processedJobIds, [queued.id]);
 
+    // Phase 2 (post-provider durable checkpoint): the first claim durably
+    // persists the production asset and checkpoints to "recoverable"
+    // instead of running validation/completion in the same call — a second
+    // trigger through the same mechanism is required to reach a terminal
+    // job status.
+    const followUp = maybeTriggerLocalFinalArtworkWorker({
+      projectId,
+      reason: "prepare_uploaded_artwork",
+      policy: { allowed: true },
+    });
+    await followUp.batchPromise;
+
     const claimed = await repo.getFinalArtworkJob(queued.id);
     assert.ok(claimed);
     assert.ok(
@@ -351,9 +363,8 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
       "@/capabilities/composition"
     );
     const { projectId, preparationService } = await reachApprovedPreparedUpload();
-    const { maybeRecoverStrandedLocalFinalArtworkJobs } = await import(
-      "./local-final-artwork-trigger"
-    );
+    const { maybeRecoverStrandedLocalFinalArtworkJobs, maybeTriggerLocalFinalArtworkWorker } =
+      await import("./local-final-artwork-trigger");
 
     await preparationService.prepareUploadedArtworkForPrint(projectId);
 
@@ -375,6 +386,23 @@ describe("maybeTriggerLocalFinalArtworkWorker", () => {
     assert.equal(result.accepted, true);
     assert.ok(result.batchPromise);
     await result.batchPromise;
+
+    // Phase 2 (post-provider durable checkpoint): the recovery claim above
+    // durably persists the production asset and checkpoints to
+    // "recoverable" — refunding this claim's own `attempts` charge back to
+    // 0 in the same move, since it is not a crash/retry (see
+    // `checkpointAndDeferToNextInvocation` in the capability). The job is no
+    // longer `"queued"`, so `maybeRecoverStrandedLocalFinalArtworkJobs`
+    // itself won't re-claim it (its stranded-job gate requires `"queued"`);
+    // draining past the checkpoint to a terminal, attempts-bumped state
+    // uses the general local trigger instead, same as a real subsequent
+    // poll/reload would.
+    const followUp = maybeTriggerLocalFinalArtworkWorker({
+      projectId,
+      reason: "project_reload",
+      policy: { allowed: true },
+    });
+    await followUp.batchPromise;
 
     const after = await repo.getFinalArtworkJob(queued!.id);
     assert.notEqual(after?.status, "queued");

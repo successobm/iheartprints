@@ -92,13 +92,17 @@ import type {
   FinalArtworkProviderResumeContext,
 } from "@/capabilities/final-artwork/provider";
 import type { ProductionNormalizationMetadata } from "@/capabilities/final-artwork/production-normalization";
-import { computeAlphaBounds, DEFAULT_ALPHA_THRESHOLD } from "@/capabilities/final-artwork/alpha-trim";
+import {
+  computeAlphaBounds,
+  DEFAULT_ALPHA_THRESHOLD,
+  SAFETY_MARGIN_FRACTION,
+  trimToAlphaBounds,
+} from "@/capabilities/final-artwork/alpha-trim";
 import { hasAnyTransparentPixel } from "@/capabilities/final-artwork/raster-transform";
 import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { decideEnhancement } from "@/capabilities/final-artwork/enhancement-decision";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
 import { HalftoneDtfProvider } from "@/capabilities/final-artwork/halftone-dtf-provider";
-import type { HalftoneScreenMetadata } from "@/capabilities/final-artwork/halftone-screen";
 import {
   isReconstructionIntermediateAsset,
   productionAssetMatchesEffectiveTarget,
@@ -1115,13 +1119,22 @@ export function createFinalArtworkWorkerCapability(
       }
     | { status: "handled" }
     /**
-     * Bounded FinalArtwork Production-Execution Repair: the provider
-     * reported (or was just submitted and has not yet had time to report)
-     * that its async job has not finished. The job has already been
-     * durably returned to `"recoverable"` before this resolves — a LATER
-     * invocation (an immediate wake, or the recovery scheduler) checks
-     * again. Every existing caller's `if (produced.status !== "ready")
-     * return;` guard already handles this correctly with no caller change.
+     * Bounded FinalArtwork Production-Execution Repair: "not ready yet, try
+     * again later" — covers TWO distinct cases, both durably checkpointed
+     * back to `"recoverable"` before this resolves, so every existing
+     * caller's `if (produced.status !== "ready") return;` guard already
+     * handles both correctly with no caller change:
+     *
+     * 1. The provider reported (or was just submitted and has not yet had
+     *    time to report) that its async job has not finished.
+     * 2. Phase 2 (post-provider durable checkpoint): the provider's result
+     *    was already acquired and a production asset was already durably
+     *    created THIS invocation — but this invocation deliberately stops
+     *    here rather than also running measurement/validation/completion
+     *    in the same call. The NEXT invocation's `resolveExistingProductionAsset`
+     *    check (top of this function) finds that asset and proceeds
+     *    straight to `finishValidatedJob` — never re-acquiring, never
+     *    re-uploading.
      */
     | { status: "pending" }
   > {
@@ -1135,6 +1148,85 @@ export function createFinalArtworkWorkerCapability(
         provenance: provenanceFromExistingAsset(existing, sizing),
         providerLatencyMs: null,
       };
+    }
+
+    // Independent-review mandatory loop guard (2nd review: redesigned to be
+    // INDEPENDENT of predicted output geometry). `resolveExistingProductionAsset`
+    // just found no candidate whose PIXEL geometry matches `targetIn` — this
+    // could mean the pixel-geometry PREDICTION itself is wrong (exactly the
+    // class of bug the first two independent reviews found and repaired,
+    // and the reason this guard must never rely on that same prediction to
+    // decide whether an asset is trustworthy). So before treating this as
+    // "nothing exists yet" or "a legitimate resize", check for a DURABLE
+    // PRODUCTION IDENTITY match instead: does an existing, non-intermediate
+    // production asset for this exact job already carry EVERY one of the
+    // following, matching this exact claim's own values EXACTLY (never a
+    // tolerance-based/derived comparison)?
+    //
+    //   - the exact same source asset id
+    //   - the exact same source bytes (SHA-256)
+    //   - the exact same provider key
+    //   - the exact same provider request id (or both null, for a
+    //     never-paid provider) -- the strongest available signal for a
+    //     reconstruction job, since a resumed paid request deterministically
+    //     reconstructs the identical image every time
+    //   - the exact same frozen confirmed production width
+    //     (`job.productionWidthIn`)
+    //   - the exact same confirmed box max height
+    //     (`confirmedMaxHeightIn`, recorded at the asset's own creation --
+    //     WIDTH alone cannot detect a height-only envelope change, e.g.
+    //     Phase 28T's own 10.5x10.5 -> 10.5x14 case, which must NOT match
+    //     here)
+    //
+    // If every one of those agrees, nothing about the request has changed
+    // since this asset was created — the ONLY way `productionAssetMatchesEffectiveTarget`
+    // could still disagree is a geometry-prediction error, not a genuinely
+    // different or stale asset. Authority this strong is adopted directly
+    // (never re-downloaded, never resubmitted, never duplicated) rather
+    // than failed: the asset IS proven correct, independent of whether this
+    // invocation's own pixel-target math happens to agree with it. Only
+    // when no such full match exists does this fall through to ordinary
+    // processing below, which correctly creates a new asset for what is
+    // then either the first attempt or a genuinely different request.
+    if (params.targetIn) {
+      const currentIdentity = {
+        sourceAssetId: sourceAsset.id,
+        sourceBytesSha256: (
+          (params.extraAssetMetadata as { uploadedPreserve?: { sourceBytesSha256?: unknown } })
+            .uploadedPreserve?.sourceBytesSha256
+        ),
+        providerKey: activeProvider.providerKey,
+        providerRequestId: job.providerRequestId,
+        productionWidthIn: params.extraAssetMetadata.productionWidthIn,
+        confirmedMaxHeightIn: params.extraAssetMetadata.confirmedMaxHeightIn,
+      };
+      const priorAssets = await withOperationTiming(
+        "produceProductionAsset.loopGuard.listAssetsForFinalArtworkJob",
+        () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
+      );
+      const durableIdentityMatch = priorAssets.find((asset) => {
+        if (asset.finalArtworkJobId !== job.id) return false;
+        if (asset.productionRole !== "production_png") return false;
+        if (isReconstructionIntermediateAsset(asset)) return false;
+        const meta = asset.metadata as Record<string, unknown> | null;
+        const uploadedPreserve = meta?.uploadedPreserve as { sourceBytesSha256?: unknown } | null | undefined;
+        return (
+          meta?.sourceAssetId === currentIdentity.sourceAssetId &&
+          uploadedPreserve?.sourceBytesSha256 === currentIdentity.sourceBytesSha256 &&
+          meta?.providerKey === currentIdentity.providerKey &&
+          (meta?.providerRequestId ?? null) === currentIdentity.providerRequestId &&
+          meta?.productionWidthIn === currentIdentity.productionWidthIn &&
+          meta?.confirmedMaxHeightIn === currentIdentity.confirmedMaxHeightIn
+        );
+      });
+      if (durableIdentityMatch) {
+        return {
+          status: "ready",
+          productionAsset: durableIdentityMatch,
+          provenance: provenanceFromExistingAsset(durableIdentityMatch, sizing),
+          providerLatencyMs: null,
+        };
+      }
     }
 
     // --- Phase 28V (Section 7/8): does a two-pass reconstruction's PASS 1
@@ -1303,7 +1395,6 @@ export function createFinalArtworkWorkerCapability(
     // redundant re-read of the job row solely to log what this attempt
     // already knows.
     let currentProviderRequestId = existingProviderRequest?.providerRequestId ?? null;
-    const providerStartedAt = Date.now();
     let boundedResult: FinalArtworkProviderBoundedResult;
     try {
       const providerInput: FinalArtworkProviderInput = {
@@ -1429,30 +1520,21 @@ export function createFinalArtworkWorkerCapability(
       return { status: "handled" };
     }
 
-    if (boundedResult.status === "pending") {
-      // Bounded FinalArtwork Production-Execution Repair: the provider's
-      // async job has not finished (or was just submitted this instant).
-      // Nothing failed — return the job to `"recoverable"` so the NEXT
-      // invocation (an immediate wake, or the recovery scheduler) claims
-      // it and checks again, rather than blocking THIS one until the
-      // provider is done. `providerKey`/`providerRequestId`/`providerStatus`
-      // were already durably persisted by `onProviderRequestSubmitted`
-      // above if this attempt just submitted — this call only updates
-      // claimability and freshness.
-      //
-      // Repair cycle 1 (independent review finding): a clean "still
-      // pending" outcome is NOT a recovery from failure or a crashed
-      // attempt — it is the expected, successful result of one bounded
-      // status check, and this exact claim reached this line without
-      // throwing. Charging `attempts`/`providerRecoveryAttempts` for it
-      // anyway silently exhausts both finite budgets within a handful of
-      // ordinary polls — a live-reproducible regression: a normal
-      // ~70-130s Topaz job was left permanently, unrecoverably failed
-      // within about a minute of enqueue, well before the provider had
-      // even finished. Refund exactly the charge THIS claim made — a
-      // genuine crash mid-resume never reaches this line at all, so that
-      // case still correctly keeps (and eventually exhausts) its charge,
-      // preserving the original crash-loop protection.
+    // Bounded FinalArtwork Production-Execution Repair: shared by BOTH
+    // durable-checkpoint sites below (provider still working; provider
+    // done and asset already durably persisted THIS invocation). Neither
+    // case is a recovery from failure or a crashed attempt — both reach
+    // this helper only after this exact claim's own work concluded
+    // cleanly, without throwing. Charging `attempts`/`providerRecoveryAttempts`
+    // for either anyway silently exhausts both finite budgets within a
+    // handful of ordinary invocations — a live-reproducible regression: a
+    // normal job was left permanently, unrecoverably failed well before
+    // the provider (or the post-provider pipeline) had even finished.
+    // Refund exactly the charge THIS claim made — a genuine crash mid-
+    // resume never reaches this helper at all, so that case still
+    // correctly keeps (and eventually exhausts) its charge, preserving
+    // the original crash-loop protection.
+    async function checkpointAndDeferToNextInvocation(): Promise<{ status: "pending" }> {
       const refund: Partial<
         Pick<FinalArtworkJob, "status" | "heartbeatAt" | "attempts" | "providerRecoveryAttempts">
       > = {
@@ -1472,16 +1554,26 @@ export function createFinalArtworkWorkerCapability(
       // overwrite that intentional reset with the OLD request's leftover
       // count, starting the new request's recovery budget already
       // partially spent. Only refund when this claim did NOT submit a new
-      // request: a pure "checked an existing request, still pending" claim
-      // is the only case this refund exists for.
+      // request.
       if (attemptClassification === "resume" && !submittedNewPaidRequest) {
         refund.providerRecoveryAttempts = effectiveJob.providerRecoveryAttempts - 1;
       }
       await repo.updateFinalArtworkJob(job.id, refund);
       return { status: "pending" };
     }
+
+    if (boundedResult.status === "pending") {
+      // The provider's async job has not finished (or was just submitted
+      // this instant). Return the job to `"recoverable"` so the NEXT
+      // invocation (an immediate wake, or the recovery scheduler) claims
+      // it and checks again, rather than blocking THIS one until the
+      // provider is done. `providerKey`/`providerRequestId`/`providerStatus`
+      // were already durably persisted by `onProviderRequestSubmitted`
+      // above if this attempt just submitted — this call only updates
+      // claimability and freshness.
+      return checkpointAndDeferToNextInvocation();
+    }
     const output = boundedResult;
-    const providerLatencyMs = Date.now() - providerStartedAt;
 
     logFinalArtworkPaidCallDecision({
       projectId: job.projectId,
@@ -1519,9 +1611,12 @@ export function createFinalArtworkWorkerCapability(
     // it is persisted purely as a foundation for a later phase.
     const dtfCoverage = measureDtfCoverageForPlate(output.bytes, output.normalization);
 
-    let productionAsset: AssetRecord;
     try {
-      productionAsset = await assets.uploadProductionAsset(job.projectId, {
+      // Phase 2 (post-provider durable checkpoint): the created record
+      // itself is never consumed here — this invocation checkpoints and
+      // returns immediately after (see below); a LATER invocation finds it
+      // via `resolveExistingProductionAsset` (top of this function).
+      await assets.uploadProductionAsset(job.projectId, {
         // Groups this job's production deliverable(s) under one storage
         // folder — a stable internal id, never a filename convention and
         // never anything a customer supplied (Goal 10 / Goal 18).
@@ -1586,23 +1681,21 @@ export function createFinalArtworkWorkerCapability(
       await repo.updateFinalArtworkJob(job.id, { providerStatus: "completed" });
     }
 
-    return {
-      status: "ready",
-      productionAsset,
-      provenance: {
-        resolutionProvenance: output.resolutionProvenance,
-        nativeWidthPx: output.nativeWidthPx,
-        nativeHeightPx: output.nativeHeightPx,
-        reconstructedWidthPx: output.reconstructedWidthPx,
-        reconstructedHeightPx: output.reconstructedHeightPx,
-        preservesApprovedContent: output.preservesApprovedContent,
-        providerRequestId: output.providerRequestId,
-        normalization: toNormalizationSummary(output.normalization, sizing),
-        halftone: toHalftoneEvidence(output.halftone ?? null),
-        dtfFeatureIntegrity,
-      },
-      providerLatencyMs,
-    };
+    // Phase 2 (post-provider durable checkpoint): the production asset
+    // now durably exists in `assets`/storage — `resolveExistingProductionAsset`
+    // (top of this function) will find it on any later claim. This
+    // invocation deliberately stops HERE rather than also running
+    // validation/completion/project-transition in the same call — that
+    // tail is itself real work (deterministic local computation plus
+    // several DB writes) that does not need to share this invocation's
+    // remaining time budget with the network/storage I/O already spent
+    // acquiring the provider result and uploading it. A live production
+    // incident (a real HTTP 504 from the platform gateway, ~30s into an
+    // invocation that had already durably reused the existing provider
+    // request with zero resubmission) is what proved this tail needed
+    // its own checkpoint rather than assuming "the provider work was the
+    // only slow part."
+    return checkpointAndDeferToNextInvocation();
   }
 
   /**
@@ -3815,10 +3908,35 @@ export function createFinalArtworkWorkerCapability(
     // same amount the plate itself is later corrected. Source and target
     // share one aspect ratio by construction, so checking the contained
     // WIDTH alone is equivalent to checking both axes.
-    const contained = resolveWidthConstrainedSizing(
+    //
+    // Independent-review repair #2 finding: `decideEnhancement` (below) has
+    // its OWN, DIFFERENT semantic contract — its own doc comment is explicit
+    // that `sourceVisibleWidthPx` must be the RAW, un-margined alpha-bbox
+    // width ("Transparent padding is not resolution"), matching what
+    // Phase 1's `artwork-preparation/image-analysis.ts` already told the
+    // customer before they approved, so the two can never disagree. The
+    // artwork-edge safety MARGIN is a print-edge-safety allowance, never a
+    // resolution/detail question, so it must play no part in "does this
+    // artwork need a paid reconstruction" -- a margined `contained` here
+    // would silently inflate `targetWidthIn` by a few pixels and could flip
+    // that decision right at the threshold for no resolution-related
+    // reason. `containedForEnhancementDecision` (raw bbox) exists
+    // SEPARATELY, and ONLY, for that decision; `contained` (margined,
+    // below) is the DIFFERENT geometry the crash-recovery re-check
+    // (`recheckTarget` further down) needs, sized from
+    // `marginedWidthPx`/`marginedHeightPx` -- the SAME post-trim geometry
+    // `normalizeProductionRaster` actually produces the plate from, so that
+    // re-check's own aspect ratio never disagrees with the plate it is
+    // checking against.
+    const containedForEnhancementDecision = resolveWidthConstrainedSizing(
       sizing,
       measured.alphaBBoxWidthPx,
       measured.alphaBBoxHeightPx,
+    );
+    const contained = resolveWidthConstrainedSizing(
+      sizing,
+      measured.marginedWidthPx,
+      measured.marginedHeightPx,
     );
 
     // Recorded either way, because the two questions are independent and only
@@ -3827,7 +3945,7 @@ export function createFinalArtworkWorkerCapability(
     // logging, even on a path that will not buy one.
     const enhancement = decideEnhancement({
       sourceVisibleWidthPx: measured.alphaBBoxWidthPx,
-      targetWidthIn: contained.widthIn,
+      targetWidthIn: containedForEnhancementDecision.widthIn,
       targetPpi: sizing.targetPpi,
     });
 
@@ -3847,6 +3965,71 @@ export function createFinalArtworkWorkerCapability(
       : enhancement.requiresReconstruction
         ? provider
         : localNormalizationProvider;
+
+    // Independent-review repair (crash-recovery re-check target, separate
+    // from `contained` above): a RECONSTRUCTION provider normalizes the
+    // artwork it itself produced -- an UPSCALED image at a scale this
+    // function cannot know in advance -- never this prepared source
+    // directly. `safetyMarginPxFor`'s margin is `max(MIN_SAFETY_MARGIN_PX,
+    // ceil(longestSide * SAFETY_MARGIN_FRACTION))`: the FLOOR half of that
+    // is a fixed pixel count, NOT scale-linear, so a margin computed on the
+    // small pre-reconstruction source (where the floor usually dominates)
+    // does not scale up to the margin the reconstructed (much larger) image
+    // will independently receive (where the floor usually no longer
+    // dominates) -- using `contained` (floor-inclusive margin, sized from
+    // THIS source) here would silently predict a different aspect ratio
+    // than reconstruction actually produces.
+    //
+    // The FRACTIONAL half (`SAFETY_MARGIN_FRACTION * longestSide`), by
+    // contrast, IS scale-linear by construction, and reconstruction is an
+    // exact proportional scale (`resolveReconstructionRequest`'s own
+    // contract) -- so applying the fractional term alone (never the floor)
+    // to the pre-reconstruction bbox predicts the post-reconstruction
+    // margin far more accurately than either the raw (zero-margin) bbox or
+    // the floor-inclusive one.
+    //
+    // Independent-review repair #2: that fractional term must ALSO be
+    // clamped PER SIDE against the padding actually available around the
+    // bbox, exactly like `trimToAlphaBounds`'s own `appliedMarginPx` does
+    // (`Math.min(requestedMarginPx, bbox.left)` etc) -- otherwise artwork
+    // that touches or nearly touches a canvas edge on one or more sides
+    // gets an estimate that assumes margin room the real, clamped trim will
+    // never actually have. This clamping is provably safe to compute in
+    // PRE-reconstruction pixels despite not knowing the reconstruction
+    // scale factor S ahead of time: a uniform proportional reconstruction
+    // scales the bbox AND the available padding on every side by the exact
+    // same S, and `min` is scale-invariant under positive scaling
+    // (`min(S*a, S*b) = S*min(a,b)`) -- so the clamping RATIO computed here
+    // in pre-reconstruction pixels is exactly the ratio production
+    // normalization will independently apply post-reconstruction, and
+    // `resolveWidthConstrainedSizing` below only ever consumes the
+    // resulting ASPECT RATIO, never the absolute pixel counts. Proven
+    // directly (`scripts/diagnose-margin-drift.mts`) against every
+    // edge-touching shape the independent review modeled (sleeve/full_back
+    // at 3:1, 2.5:1, 2:1, 1:3, and asymmetric single-edge padding, all at a
+    // 4x reconstruction scale): this clamped, per-side estimate lands at
+    // EXACTLY 0% drift in every case, against the review's reported
+    // 2.05%-4.41% for the unclamped, symmetric estimate this replaces.
+    //
+    // A halftone plate never reconstructs (`HalftoneDtfProvider` normalizes
+    // this exact source directly, like the local path), so it uses the
+    // exact margined target just like the no-reconstruction case.
+    const willReconstructBeforeNormalizing = !halftone && enhancement.requiresReconstruction;
+    const reconstructionRequestedMarginPx = Math.max(
+      1,
+      Math.ceil(Math.max(measured.alphaBBoxWidthPx, measured.alphaBBoxHeightPx) * SAFETY_MARGIN_FRACTION),
+    );
+    const reconstructionClampedMarginLeftPx = Math.min(reconstructionRequestedMarginPx, measured.availablePaddingLeftPx);
+    const reconstructionClampedMarginTopPx = Math.min(reconstructionRequestedMarginPx, measured.availablePaddingTopPx);
+    const reconstructionClampedMarginRightPx = Math.min(reconstructionRequestedMarginPx, measured.availablePaddingRightPx);
+    const reconstructionClampedMarginBottomPx = Math.min(reconstructionRequestedMarginPx, measured.availablePaddingBottomPx);
+    const recheckTarget = willReconstructBeforeNormalizing
+      ? resolveWidthConstrainedSizing(
+          sizing,
+          measured.alphaBBoxWidthPx + reconstructionClampedMarginLeftPx + reconstructionClampedMarginRightPx,
+          measured.alphaBBoxHeightPx + reconstructionClampedMarginTopPx + reconstructionClampedMarginBottomPx,
+        )
+      : contained;
 
     // Phase 28I Section 9(I)/10: purely diagnostic — see
     // `logFinalArtworkEnhancementProviderGap`'s own doc comment. Fires only
@@ -3895,15 +4078,23 @@ export function createFinalArtworkWorkerCapability(
         // The production size this plate was actually made for, alongside the
         // geometry — so a plate can be matched to an intent without a join.
         productionWidthIn: intendedPrintWidthIn,
+        // Independent-review repair (durable production identity): the
+        // confirmed BOX MAX HEIGHT this exact claim's `sizing` was resolved
+        // against -- `job.productionWidthIn` alone (frozen at enqueue)
+        // cannot detect a height-only envelope change (Phase 28T's own
+        // 10.5x10.5 -> 10.5x14 case), so `produceProductionAsset`'s durable
+        // identity check (independent of predicted pixel geometry) compares
+        // THIS recorded value against the CURRENT `sizing.maxHeightIn`.
+        confirmedMaxHeightIn: sizing.maxHeightIn,
       },
-      // Phase 28T: `contained` above is already this exact request's
+      // Phase 28T: `recheckTarget` above is already this exact request's
       // effective resolved size, freshly measured from the REAL current
       // source bytes (even more precise than `final-artwork-capability.ts`'s
       // own cached-analysis-bounds version of the same computation) — reused
       // here rather than re-derived, so the crash-recovery short-circuit
       // above can tell a genuinely-current existing asset apart from a
       // stale one left over from before the confirmed envelope changed.
-      targetIn: { widthIn: contained.widthIn, heightIn: contained.heightIn, targetPpi: sizing.targetPpi },
+      targetIn: { widthIn: recheckTarget.widthIn, heightIn: recheckTarget.heightIn, targetPpi: sizing.targetPpi },
     });
     if (produced.status !== "ready") return;
     const { productionAsset, provenance, providerLatencyMs } = produced;
@@ -3982,6 +4173,17 @@ export function createFinalArtworkWorkerCapability(
    * normalization uses, so the "did the geometry survive?" check downstream
    * compares one measurement against another rather than two different
    * definitions of "visible".
+   *
+   * Independent-review repair: also runs `trimToAlphaBounds` (the EXACT
+   * function `normalizeProductionRaster` itself calls) over this same
+   * decoded image, so `marginedWidthPx`/`marginedHeightPx` below are
+   * byte-for-byte the same geometry the production asset will actually be
+   * sized from -- never a second, re-derived approximation of the margin.
+   * The raw `alphaBBoxWidthPx`/`alphaBBoxHeightPx` fields are preserved
+   * unchanged for their existing consumers (`decideEnhancement`'s "how many
+   * real source pixels exist" question, and the `uploadedPreserve` audit
+   * trail) -- neither of those is a target-geometry question, so neither
+   * should be margined.
    */
   async function measurePreparedSource(
     job: FinalArtworkJob,
@@ -3989,6 +4191,26 @@ export function createFinalArtworkWorkerCapability(
   ): Promise<{
     alphaBBoxWidthPx: number;
     alphaBBoxHeightPx: number;
+    /** The margined (post-trim) dimensions `normalizeProductionRaster` will actually produce the plate from. */
+    marginedWidthPx: number;
+    marginedHeightPx: number;
+    /**
+     * Independent-review repair (reconstruction-path margin clamping): the
+     * actual source-canvas padding available on each side of the alpha
+     * bbox, BEFORE any margin is applied — exactly the four quantities
+     * `trimToAlphaBounds`'s own `appliedMarginPx` clamps its per-side
+     * margin against (`Math.min(requestedMarginPx, bbox.left)` etc). A
+     * uniform proportional reconstruction (`replicateScaled`'s and
+     * Topaz's own contract) scales every one of these four quantities by
+     * the exact same factor as the bbox itself, so the CLAMPING RATIO on
+     * each side is scale-invariant even though the reconstruction scale
+     * itself is unknown ahead of time — see `runPreparedUploadJob`'s own
+     * reconstruction-path `recheckTarget` derivation for how this is used.
+     */
+    availablePaddingLeftPx: number;
+    availablePaddingTopPx: number;
+    availablePaddingRightPx: number;
+    availablePaddingBottomPx: number;
     sha256: string;
   } | null> {
     const downloaded = await assets.downloadAssetBytes(preparedAssetId);
@@ -4023,9 +4245,28 @@ export function createFinalArtworkWorkerCapability(
       return null;
     }
 
+    // `trim` cannot disagree with `bounds` above on visibility -- both read
+    // the same pixels at the same threshold; this call exists purely to
+    // capture the SAME margined geometry `normalizeProductionRaster` will
+    // independently (but identically) compute.
+    const trim = trimToAlphaBounds({ width: decoded.width, height: decoded.height, data: decoded.data });
+    if (trim.status !== "trimmed") {
+      await completeWithoutAsset(
+        job,
+        "The prepared artwork contains no visible pixels to produce print-ready artwork from.",
+      );
+      return null;
+    }
+
     return {
       alphaBBoxWidthPx: bounds.width,
       alphaBBoxHeightPx: bounds.height,
+      marginedWidthPx: trim.metadata.trimmedWidthPx,
+      marginedHeightPx: trim.metadata.trimmedHeightPx,
+      availablePaddingLeftPx: bounds.left,
+      availablePaddingTopPx: bounds.top,
+      availablePaddingRightPx: decoded.width - bounds.right,
+      availablePaddingBottomPx: decoded.height - bounds.bottom,
       sha256: createHash("sha256").update(downloaded.bytes).digest("hex"),
     };
   }
@@ -4057,12 +4298,6 @@ export function createFinalArtworkWorkerCapability(
       assetId: productionAsset.id,
       status: report.status,
       report: report as unknown as Record<string, unknown>,
-    });
-
-    await repo.updateFinalArtworkJob(job.id, {
-      status: "completed",
-      lastError: report.status === "ready" ? null : summarizeReportForInternalLog(report),
-      completedAt: new Date().toISOString(),
     });
 
     logFinalArtworkReconstructionOutcome({
@@ -4102,12 +4337,36 @@ export function createFinalArtworkWorkerCapability(
       providerLatencyMs: params.providerLatencyMs,
     });
 
+    // Phase 2 (completed-job/project-transition crash-gap repair): the
+    // PROJECT transition happens BEFORE the JOB is marked terminal,
+    // deliberately reversed from this function's original order. If
+    // interrupted between the two, the job is left `"running"` — NOT
+    // terminal — so the existing stale-heartbeat sweep reclaims it, and a
+    // later invocation naturally re-enters this exact function (the
+    // production asset already exists, so `resolveExistingProductionAsset`
+    // routes straight back here) and completes the job for real. No new
+    // reconciliation sweep needed: this reordering makes the EXISTING
+    // claim/reclaim machinery the reconciliation path, since a job that
+    // reached `"completed"` was, by construction, never reachable again to
+    // fix up a stranded project transition. Both writes below remain
+    // individually idempotent (`maybeTransitionProjectStatus` re-checks
+    // job currency and is a safe repeat write; marking a job `"completed"`
+    // a second time — reached only via a stale reclaim, never concurrently
+    // — is likewise a safe repeat write), so re-running either or both on
+    // a later attempt is harmless.
+    //
     // Goal 11/Q: only a "ready" authoritative report may ever justify
     // print_ready; anything else stays honestly finalization_required.
     await maybeTransitionProjectStatus(
       job,
       report.status === "ready" ? "print_ready" : "finalization_required",
     );
+
+    await repo.updateFinalArtworkJob(job.id, {
+      status: "completed",
+      lastError: report.status === "ready" ? null : summarizeReportForInternalLog(report),
+      completedAt: new Date().toISOString(),
+    });
   }
 
   const capability: FinalArtworkWorkerCapability = {
@@ -4518,38 +4777,6 @@ function withOperationTiming<T>(label: string, fn: () => Promise<T>): Promise<T>
 }
 
 /**
- * Print-Ready Normalization Phase 1: maps the Final Artwork provider's own
- * normalization metadata onto the provider-neutral summary Print Validation
- * consumes. Print Validation must never depend on the Final Artwork
- * capability's types (ARCHITECTURE.md dependency direction), so this worker —
- * which legitimately knows both — is the one place the two shapes meet.
- *
- * `widthToleranceIn` comes from the placement policy rather than the provider:
- * how closely a plate must match its target width is a production-policy
- * decision, never a provider's to declare.
- */
-function toNormalizationSummary(
-  normalization: ProductionNormalizationMetadata,
-  sizing: PlacementSizingPolicy,
-): ProductionNormalizationSummary {
-  return {
-    strategy: normalization.strategy,
-    alphaBBoxWidthPx: normalization.alphaBBoxWidthPx,
-    alphaBBoxHeightPx: normalization.alphaBBoxHeightPx,
-    trimmedWidthPx: normalization.trimmedWidthPx,
-    trimmedHeightPx: normalization.trimmedHeightPx,
-    artworkOccupancy: normalization.artworkOccupancy,
-    targetWidthIn: normalization.targetWidthIn,
-    widthToleranceIn: sizing.widthToleranceIn,
-    targetPpi: normalization.targetPpi,
-    intendedWidthIn: normalization.intendedWidthIn,
-    intendedHeightIn: normalization.intendedHeightIn,
-    constrainedBy: normalization.constrainedBy,
-    densityPixelsPerMetre: normalization.densityPixelsPerMetre,
-  };
-}
-
-/**
  * Reads a normalization summary back off an already-persisted production
  * asset (the Goal 16 idempotent-retry path). Returns `null` for anything that
  * is not a complete, numerically valid record — a partially-recorded plate is
@@ -4561,38 +4788,6 @@ function toNormalizationSummary(
  * plate must match its target width is a production-policy decision, not a
  * property of the file.
  */
-/**
- * Print'em All Phase 2: the provider's screen metadata, as the provider-
- * neutral evidence Print Validation consumes.
- *
- * A projection rather than a pass-through, mirroring `toNormalizationSummary`.
- * The engine's metadata carries working figures validation has no business
- * seeing (cell area, mean requested coverage); the evidence carries exactly
- * the facts a check recomputes from.
- */
-function toHalftoneEvidence(
-  metadata: HalftoneScreenMetadata | null,
-): HalftoneProductionEvidence | null {
-  if (!metadata) return null;
-  return {
-    algorithmVersion: metadata.algorithmVersion,
-    lpi: metadata.lpi,
-    angleDeg: metadata.angleDeg,
-    dotShape: metadata.dotShape,
-    midtone: metadata.midtone,
-    chokePx: metadata.chokePx,
-    garmentHex: metadata.garmentHex,
-    targetPpi: metadata.targetPpi,
-    cellPx: metadata.cellPx,
-    achievedLpi: metadata.achievedLpi,
-    minDotRadiusPx: metadata.minDotRadiusPx,
-    screenWidthPx: metadata.screenWidthPx,
-    screenHeightPx: metadata.screenHeightPx,
-    visiblePixelCount: metadata.visiblePixelCount,
-    inkedPixelFraction: metadata.inkedPixelFraction,
-  };
-}
-
 /**
  * Reads screen evidence back off a persisted plate.
  *

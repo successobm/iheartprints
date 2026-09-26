@@ -126,6 +126,11 @@ describe("Phase 27P — multi-variant print-ready package (real INCREDI-BOWLS)",
     // --- A/N: RUN STANDARD RASTER (fails honestly -- no migration, no algorithm change) ---
     const rasterRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): the first runBatch() call
+    // only reaches the durable checkpoint (job "recoverable") once the fresh
+    // production asset is persisted -- a second call drains it to a terminal
+    // "completed" verdict.
+    await graph.finalArtworkScheduler.runBatch();
     const rasterJob = (await repo.getFinalArtworkJob(rasterRequest.job.id))!;
 
     // P: Standard Raster's own validation is UNCHANGED -- same real check,
@@ -297,6 +302,8 @@ describe("Phase 27P — multi-variant print-ready package (real INCREDI-BOWLS)",
 
     // Raster attempt -- fails on its own, real, unrelated reason.
     const rasterRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain past the checkpoint.
     await graph.finalArtworkScheduler.runBatch();
     const rasterJob = (await repo.getFinalArtworkJob(rasterRequest.job.id))!;
     assert.equal(rasterJob.status, "completed");

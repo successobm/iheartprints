@@ -422,6 +422,9 @@ describe("Phase 28T — normal Create Print-Ready Artwork path (integration)", (
     // Request A: the OLD flat 10.5x10.5 envelope.
     await confirmProductionSizeForTests(repo, projectId, { widthIn: 10.5, boxMaxHeightIn: 10.5 });
     const requestA = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    // Phase 2 (post-provider durable checkpoint): first invocation acquires
+    // and checkpoints the production asset; a second finalizes it.
+    await worker.processNextJob();
     await worker.processNextJob();
     const jobAfterA = await repo.getFinalArtworkJob(requestA.job.id);
     assert.equal(jobAfterA!.status, "completed");
@@ -439,6 +442,7 @@ describe("Phase 28T — normal Create Print-Ready Artwork path (integration)", (
     const revivedJob = await repo.getFinalArtworkJob(requestB.job.id);
     assert.equal(revivedJob!.status, "queued");
 
+    await worker.processNextJob();
     await worker.processNextJob();
     const jobAfterB = await repo.getFinalArtworkJob(requestB.job.id);
     assert.equal(jobAfterB!.status, "completed");
@@ -465,10 +469,14 @@ describe("Phase 28T — normal Create Print-Ready Artwork path (integration)", (
 
     await confirmProductionSizeForTests(repo, projectId, { widthIn: 10.5, boxMaxHeightIn: 10.5 });
     const requestA = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    // Phase 2 (post-provider durable checkpoint): first invocation acquires
+    // and checkpoints the production asset; a second finalizes it.
+    await worker.processNextJob();
     await worker.processNextJob();
 
     await confirmProductionSizeForTests(repo, projectId, { widthIn: 10.5, boxMaxHeightIn: 14 });
     await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await worker.processNextJob();
     await worker.processNextJob();
 
     // Current state: TWO production assets exist under the same job, for

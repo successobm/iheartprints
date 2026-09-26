@@ -181,6 +181,10 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
 
     const rasterRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): the first runBatch() call
+    // only reaches the durable checkpoint (job "recoverable") once the fresh
+    // production asset is persisted -- a second call drains it to "completed".
+    await graph.finalArtworkScheduler.runBatch();
 
     const rasterJob = await repo.getFinalArtworkJob(rasterRequest.job.id);
     assert.ok(rasterJob, "a Standard Raster job must exist");
@@ -221,6 +225,10 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
       const { graph, projectId } = await readyProject();
       await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
       await graph.finalArtworkScheduler.runBatch();
+      // Phase 2 (post-provider durable checkpoint): a second call is needed
+      // to drain the job past the durable checkpoint into validation, which
+      // is what actually assigns the "needs_attention" variant status below.
+      await graph.finalArtworkScheduler.runBatch();
 
       const beforeHalftone = (await getConversation(projectId))!;
       const rasterBefore = beforeHalftone.printReadyPackage!.variants.find((v) => v.treatment === "standard_raster")!;
@@ -259,6 +267,8 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
       const { graph, repo, projectId } = await readySufficientProject();
       const rasterRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
       await graph.finalArtworkScheduler.runBatch();
+      // Phase 2 (post-provider durable checkpoint): drain past the checkpoint.
+      await graph.finalArtworkScheduler.runBatch();
       const rasterJob = await repo.getFinalArtworkJob(rasterRequest.job.id);
       assert.equal(rasterJob!.status, "completed");
 
@@ -271,6 +281,10 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
       assert.equal(treatmentRes.status, 200);
 
       const halftoneRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+      await graph.finalArtworkScheduler.runBatch();
+      // Phase 2 (post-provider durable checkpoint): drain hygiene -- leaving
+      // this job "recoverable" at test end risks a later test's runBatch()
+      // claiming it instead of its own job (shared on-disk store).
       await graph.finalArtworkScheduler.runBatch();
       const halftoneJob = await repo.getFinalArtworkJob(halftoneRequest.job.id);
       assert.ok(halftoneJob, "Halftone must be creatable once Raster is genuinely print_ready");
@@ -296,6 +310,11 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
     it("direct server request after Raster print_ready is accepted", async () => {
       const { graph, projectId } = await readySufficientProject();
       await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+      await graph.finalArtworkScheduler.runBatch();
+      // Phase 2 (post-provider durable checkpoint): Raster must actually
+      // reach print_ready (not just the durable checkpoint) before selecting
+      // Halftone, or the treatment change is correctly blocked as "still
+      // processing" -- a second call drains it.
       await graph.finalArtworkScheduler.runBatch();
       await selectHalftone(projectId);
       // No throw -- the request is genuinely accepted.
@@ -326,6 +345,10 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
 
     const first = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain to a terminal state
+    // so this test (deliberately "already completed", unlike "B (precise)"
+    // below) leaves no job mid-checkpoint for a later test to contaminate.
+    await graph.finalArtworkScheduler.runBatch();
     const second = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
 
     assert.equal(second.job.id, first.job.id, "a second request for the SAME confirmed size/treatment must return the SAME job, never a new one");
@@ -341,6 +364,8 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
   it("M: refreshing (re-reading the snapshot) preserves the true status of each variant -- no client-side state involved", async () => {
     const { graph, projectId } = await readyProject();
     await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain to a terminal state.
     await graph.finalArtworkScheduler.runBatch();
 
     const first = await getConversation(projectId);
@@ -368,11 +393,20 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
 
     // Let it actually run so the harness leaves no dangling queued job.
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): a second call is needed to
+    // drain the job past the durable checkpoint -- otherwise "no dangling
+    // queued job" would still leave one dangling mid-checkpoint instead.
+    await graph.finalArtworkScheduler.runBatch();
   });
 
   it("D: a second Create DTF Halftone Version click WHILE the first is still queued returns the SAME Halftone job, never a second one", async () => {
     const { graph, repo, projectId } = await readySufficientProject();
     await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): Raster must actually
+    // reach print_ready (not just the durable checkpoint) before selecting
+    // Halftone, or the treatment change is correctly blocked as "still
+    // processing" -- a second call drains it.
     await graph.finalArtworkScheduler.runBatch();
     await selectHalftone(projectId);
 
@@ -386,6 +420,8 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
     assert.equal(halftoneJobs.length, 1, "exactly one Halftone job must exist even before the batch has run");
 
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain hygiene.
+    await graph.finalArtworkScheduler.runBatch();
   });
 
   it("I: creating a NEW Standard Raster attempt (after a confirmed-size change) never mutates an already-completed Halftone job", async () => {
@@ -394,11 +430,15 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
     // Raster reaches print_ready (the sufficient fixture at left_chest).
     const firstRaster = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain past the checkpoint.
+    await graph.finalArtworkScheduler.runBatch();
     assert.equal((await repo.getFinalArtworkJob(firstRaster.job.id))!.status, "completed");
 
     // Halftone succeeds independently once Raster is print_ready.
     await selectHalftone(projectId);
     const halftoneRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain past the checkpoint.
     await graph.finalArtworkScheduler.runBatch();
     const halftoneJobBefore = await repo.getFinalArtworkJob(halftoneRequest.job.id);
     assert.equal(halftoneJobBefore!.status, "completed");
@@ -411,6 +451,8 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
     await selectStandardRaster(projectId);
     await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain hygiene.
+    await graph.finalArtworkScheduler.runBatch();
 
     const halftoneJobAfter = await repo.getFinalArtworkJob(halftoneRequest.job.id);
     assert.equal(halftoneJobAfter!.id, halftoneJobBefore!.id);
@@ -422,6 +464,8 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
     const { graph, repo, projectId } = await readyProject();
     const firstAttempt = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain past the checkpoint.
+    await graph.finalArtworkScheduler.runBatch();
     const firstJob = await repo.getFinalArtworkJob(firstAttempt.job.id);
     assert.equal(firstJob!.status, "completed");
 
@@ -430,6 +474,8 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
     assert.equal(sizeRes.status, 200);
 
     const secondAttempt = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain hygiene.
     await graph.finalArtworkScheduler.runBatch();
 
     assert.notEqual(secondAttempt.job.id, firstAttempt.job.id, "a genuinely different confirmed size must be a NEW job, not the same stuck refusal");
@@ -447,10 +493,14 @@ describe("Phase 28H/28I — progressive print-ready creation (Standard Raster fi
     const { graph, repo, projectId } = await readySufficientProject();
     const rasterRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain past the checkpoint.
+    await graph.finalArtworkScheduler.runBatch();
     assert.equal((await repo.getFinalArtworkJob(rasterRequest.job.id))!.status, "completed");
 
     await selectHalftone(projectId);
     const halftoneRequest = await graph.finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await graph.finalArtworkScheduler.runBatch();
+    // Phase 2 (post-provider durable checkpoint): drain hygiene.
     await graph.finalArtworkScheduler.runBatch();
 
     const rasterJob = await repo.getFinalArtworkJob(rasterRequest.job.id);

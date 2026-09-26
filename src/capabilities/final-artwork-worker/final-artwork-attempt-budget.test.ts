@@ -400,6 +400,12 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     const worker = createFinalArtworkWorkerCapability(repo, assets, provider, createPrintValidationCapability());
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    // Phase 2 (post-provider durable checkpoint): the first invocation
+    // acquires/persists the production asset and checkpoints; a second
+    // invocation is required to finalize -- also drains the job to a
+    // terminal state so it cannot be mistakenly reclaimed by a LATER
+    // test sharing this same on-disk store.
+    await worker.processNextJob();
     await worker.processNextJob();
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
@@ -472,12 +478,27 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       providerRecoveryAttempts: 0,
     });
 
+    // Phase 2 (post-provider durable checkpoint): the first invocation
+    // resumes, downloads, and checkpoints the production asset -- and,
+    // per the recovery-budget refund contract, NEUTRALIZES the recovery
+    // charge THIS claim made, since it reached real durable forward
+    // progress rather than failing. A second invocation finalizes from
+    // the now-existing asset (which never touches the recovery budget).
+    await worker.processNextJob();
+    const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(checkpointed?.status, "recoverable");
+    assert.equal(
+      checkpointed?.providerRecoveryAttempts,
+      0,
+      "reaching the checkpoint refunds the charge this resume claim made -- this is the exact real-incident regression",
+    );
+
     await worker.processNextJob();
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed", "resume must be allowed despite the exhausted fresh-execution budget");
     assert.equal(job?.providerRequestId, SYNTHETIC_PROCESS_ID);
-    assert.equal(job?.providerRecoveryAttempts, 1, "exactly one recovery attempt was spent");
+    assert.equal(job?.providerRecoveryAttempts, 0, "finalizing from the already-checkpointed asset never touches the recovery budget");
     assert.equal(submitCount(), 0, "resuming must never submit a fresh paid request");
   });
 
@@ -553,12 +574,26 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     setDownloadMode("succeed");
     const retried = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     assert.equal(retried.job.id, requested.job.id, "retry revives the SAME job");
+    // Phase 2 (post-provider durable checkpoint): this retry's resume
+    // succeeds and checkpoints -- and, per the refund contract, NEUTRALIZES
+    // the recovery charge THIS (successful) claim made, leaving only the
+    // FIRST (genuinely failed) claim's charge retained. A further
+    // invocation is required to finalize from the checkpointed asset.
+    await worker.processNextJob();
+    const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(checkpointed?.status, "recoverable");
+    assert.equal(
+      checkpointed?.providerRecoveryAttempts,
+      1,
+      "only the first, genuinely-failed claim's charge survives -- the successful resume's own charge is refunded at the checkpoint",
+    );
+
     await worker.processNextJob();
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed");
     assert.equal(job?.providerRequestId, SYNTHETIC_PROCESS_ID, "the completed job is keyed to the SAME provider request throughout");
-    assert.equal(job?.providerRecoveryAttempts, 2, "two recovery attempts spent across the two claims");
+    assert.equal(job?.providerRecoveryAttempts, 1, "the retained genuine-failure charge is never touched by finalizing from the checkpointed asset");
     assert.equal(submitCount(), 0, "zero paid submissions across the entire failed-then-recovered lifecycle");
 
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job!.id);
@@ -695,11 +730,18 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     assert.equal(recovered?.providerRecoveryAttempts, 0);
 
     // The NEXT real claim (a "recoverable" job is directly claimable) must
-    // classify as resume, exactly as it would have before the crash.
+    // classify as resume, exactly as it would have before the crash. Under
+    // Phase 2, this resume succeeds and checkpoints -- refunding its own
+    // recovery charge -- so a further invocation is required to finalize.
+    await worker.processNextJob();
+    const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(checkpointed?.status, "recoverable");
+    assert.equal(checkpointed?.providerRecoveryAttempts, 0, "the successful resume's own charge is refunded at the checkpoint");
+
     await worker.processNextJob();
     const job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed");
-    assert.equal(job?.providerRecoveryAttempts, 1);
+    assert.equal(job?.providerRecoveryAttempts, 0);
     assert.equal(submitCount(), 0, "resuming after abandoned-job recovery must never submit a fresh paid request");
   });
 
@@ -716,6 +758,11 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     // classified fresh_execution -- unaffected by the recovery model, and
     // still correctly gated by the SAME, unchanged, pre-existing ceiling.
     await repo.updateFinalArtworkJob(requested.job.id, { attempts: MAX_FINAL_ARTWORK_ATTEMPTS });
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to a terminal
+    // state regardless of outcome, so this job is never left claimable
+    // and cannot be mistakenly picked up by a later test sharing this
+    // same on-disk store.
     await worker.processNextJob();
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
@@ -782,6 +829,10 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       fake.setDownloadMode(PASS1_ID, "succeed");
       const retried = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
       assert.equal(retried.job.id, requested.job.id);
+      // Phase 2 (post-provider durable checkpoint): pass 2's own
+      // completion first checkpoints the production asset; a further
+      // invocation finalizes from it.
+      await worker.processNextJob();
       await worker.processNextJob();
 
       const job = await repo.getFinalArtworkJob(requested.job.id);
@@ -818,6 +869,9 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       // Retry: pass 2's download recovers.
       fake.setDownloadMode(PASS2_ID, "succeed");
       await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+      // Phase 2 (post-provider durable checkpoint): checkpoints first,
+      // finalizes on a further invocation.
+      await worker.processNextJob();
       await worker.processNextJob();
 
       const job = await repo.getFinalArtworkJob(requested.job.id);

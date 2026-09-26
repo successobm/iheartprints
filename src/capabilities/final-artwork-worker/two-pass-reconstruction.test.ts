@@ -321,6 +321,12 @@ describe("Phase 28V — two-pass reconstruction, worker-level idempotency (integ
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): both passes complete
+    // within this one call (the fake provider is synchronous), but the
+    // worker still checkpoints right after the FINAL production asset is
+    // durably persisted rather than also validating/completing in the same
+    // invocation. A second call is needed to reach "completed".
+    await worker.processNextJob();
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job!.status, "completed");
@@ -362,6 +368,10 @@ describe("Phase 28V — two-pass reconstruction, worker-level idempotency (integ
     await confirmProductionSizeForTests(repo, projectId, { widthIn: 10.5, boxMaxHeightIn: 14 });
 
     const first = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain the job to a
+    // terminal "completed" state before checking that a duplicate request
+    // makes zero further provider calls.
     await worker.processNextJob();
     assert.equal(provider.pass1SubmitCount, 1);
     assert.equal(provider.pass2SubmitCount, 1);
@@ -407,6 +417,13 @@ describe("Phase 28V — two-pass reconstruction, worker-level idempotency (integ
     const retried = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     assert.equal(retried.job.id, requested.job.id);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): this retry resumes pass 1
+    // (self-healed to a cleared identity) and completes pass 2 fresh, both
+    // within this one call, but the worker checkpoints right after the
+    // FINAL production asset is persisted rather than also completing the
+    // job in the same invocation. A second call is needed to reach
+    // "completed".
+    await worker.processNextJob();
 
     const afterRetry = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(afterRetry!.status, "completed");
@@ -445,6 +462,12 @@ describe("Phase 28V — two-pass reconstruction, worker-level idempotency (integ
     provider.crashDuringPass2Poll = false;
     const retried = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     assert.equal(retried.job.id, requested.job.id);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): this retry resumes pass 2
+    // (already submitted) and completes it within this one call, but the
+    // worker checkpoints right after the FINAL production asset is
+    // persisted rather than also completing the job in the same
+    // invocation. A second call is needed to reach "completed".
     await worker.processNextJob();
 
     const afterRetry = await repo.getFinalArtworkJob(requested.job.id);

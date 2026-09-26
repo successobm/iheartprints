@@ -325,6 +325,15 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     assert.equal(retried.job.id, requested.job.id, "retry must revive the SAME job, never create a new one");
 
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the retry's first call
+    // persists the recovered production asset and checkpoints to
+    // "recoverable" rather than also validating/completing in the same
+    // invocation. A second call is required to reach "completed" -- and,
+    // per this describe block's shared on-disk store (no `retireQueuedJobs`
+    // helper exists in this file), leaving this job undrained would make it
+    // the OLDEST claimable job and silently steal test 3's own
+    // `processNextJob()` calls below.
+    await worker.processNextJob();
 
     const completed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(completed?.status, "completed");

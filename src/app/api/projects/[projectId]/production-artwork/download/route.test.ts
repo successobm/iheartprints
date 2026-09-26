@@ -133,6 +133,13 @@ describe("GET /api/projects/[projectId]/production-artwork/download", () => {
     const { projectId, artworkId, graph } = await projectAtSelectedConcept();
     await graph.finalArtwork.requestFinalArtwork(projectId, artworkId);
     await graph.finalArtworkWorker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): this test doesn't assert
+    // on its own job's terminal status, but the first call above only
+    // reaches the checkpoint (job left "recoverable" -- still claimable).
+    // Drain it here so it can't be mistakenly picked up by a LATER test's
+    // own processNextJob() call, since this describe block shares one
+    // on-disk store across all its `it()` blocks.
+    await graph.finalArtworkWorker.processNextJob();
 
     const { projectId: otherProjectId } = await projectAtSelectedConcept();
     const { GET } = await import("./route");
@@ -151,6 +158,11 @@ describe("GET /api/projects/[projectId]/production-artwork/download", () => {
   it("streams bytes with a sanitized Content-Disposition filename and no internals", async () => {
     const { projectId, artworkId, graph, repo } = await projectAtSelectedConcept();
     await graph.finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await graph.finalArtworkWorker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the first invocation now
+    // stops right after persisting the production asset and returns
+    // pending; a second invocation is required to run validation/completion
+    // and transition the project to print_ready.
     await graph.finalArtworkWorker.processNextJob();
 
     const project = await repo.getProject(projectId);
@@ -182,6 +194,10 @@ describe("GET /api/projects/[projectId]/production-artwork/download", () => {
   it("M: reopening via supersede does not delete the completed production asset", async () => {
     const { projectId, artworkId, graph, repo } = await projectAtSelectedConcept();
     await graph.finalArtwork.requestFinalArtwork(projectId, artworkId);
+    await graph.finalArtworkWorker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain past the checkpoint
+    // so the production asset's job reaches a terminal "completed" state
+    // before this test simulates a later supersede.
     await graph.finalArtworkWorker.processNextJob();
 
     const before = (await repo.listAssets(projectId)).filter(

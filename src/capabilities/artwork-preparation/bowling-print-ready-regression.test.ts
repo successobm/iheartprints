@@ -267,6 +267,17 @@ describe("Bowling acceptance regression — approved prepared artwork → print-
     const { processedJobId } = await worker.processNextJob();
     assert.equal(processedJobId, request.job.id);
 
+    // Phase 2 (post-provider durable checkpoint): the first invocation
+    // durably persists the production asset via a fresh provider
+    // submission, then deliberately stops there instead of also running
+    // validation/completion/project-transition in the same call. A second
+    // invocation is required: it finds the already-persisted asset via
+    // `resolveExistingProductionAsset` and drives the job the rest of the
+    // way to its terminal, validated state.
+    const drained = await worker.processNextJob();
+    assert.equal(drained.processedJobId, request.job.id);
+    assert.equal(drained.pending, false);
+
     // --- Enhancement was required, and happened ----------------------------
     assert.equal(
       reconstruction.submitCount,

@@ -294,6 +294,15 @@ describe("Phase 28 Checkpoint Audit Section 11 -- Topaz provider selection and i
     const worker = createFinalArtworkWorkerCapability(repo, assets, wrapped, printValidation);
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): the first call persists
+    // the reconstructed production asset and checkpoints to "recoverable"
+    // rather than also validating/completing in the same invocation. A
+    // second call is required to reach "completed" -- and, per this
+    // describe block's shared on-disk store (no `retireQueuedJobs` helper
+    // exists in this file), leaving this job undrained would make it the
+    // OLDEST claimable job and silently steal a later test's own
+    // `processNextJob()` call.
+    await worker.processNextJob();
 
     const completed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(completed?.status, "completed");
@@ -330,6 +339,11 @@ describe("Phase 28 Checkpoint Audit Section 11 -- Topaz provider selection and i
 
     const worker = createFinalArtworkWorkerCapability(repo, assets, wrapped, printValidation);
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await worker.processNextJob();
+    // Phase 2 (post-provider durable checkpoint): drain to "completed" now
+    // -- see the identical note in test "1" above (this file has no
+    // `retireQueuedJobs` helper, so an undrained job here would steal a
+    // later test's own claim).
     await worker.processNextJob();
 
     const completed = await repo.getFinalArtworkJob(requested.job.id);
