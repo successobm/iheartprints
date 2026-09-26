@@ -70,6 +70,7 @@ import { describeProductionVariantStatus } from "@/capabilities/shared/productio
 import { isRigidSignValidationTrulyPrintReady } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
 import { ArtworkFinalizationRasterNotReadyError } from "./raster-not-ready-error";
 import {
+  isProviderResultIntermediateAsset,
   isReconstructionIntermediateAsset,
   productionAssetMatchesEffectiveTarget,
   resolveEffectiveProductionTargetIn,
@@ -1590,7 +1591,12 @@ async function completedJobIsStaleForTarget(
       // Phase 28V: a two-pass reconstruction's PASS 1 output is an
       // internal reconstruction-stage artifact, never proof this job
       // produced a (stale or current) customer deliverable.
-      !isReconstructionIntermediateAsset(asset),
+      !isReconstructionIntermediateAsset(asset) &&
+      // Bounded FinalArtwork Production-Execution Repair (short-step
+      // follow-up): an already-downloaded-but-not-yet-normalized provider
+      // result is EQUALLY an internal reconstruction-stage artifact, never
+      // proof of a customer deliverable.
+      !isProviderResultIntermediateAsset(asset),
   );
   if (productionAssets.length === 0) return false;
   return !productionAssets.some((asset) => productionAssetMatchesEffectiveTarget(asset, targetIn));
@@ -1682,7 +1688,12 @@ async function findProductionAssetIdForJob(
       asset.productionRole === "production_png" &&
       // Phase 28V: never present a two-pass reconstruction's internal
       // PASS 1 artifact as this job's customer-facing deliverable.
-      !isReconstructionIntermediateAsset(asset),
+      !isReconstructionIntermediateAsset(asset) &&
+      // Bounded FinalArtwork Production-Execution Repair (short-step
+      // follow-up): never present an already-downloaded-but-not-yet-
+      // normalized provider result as this job's customer-facing
+      // deliverable either — it has not been trimmed/sized/measured yet.
+      !isProviderResultIntermediateAsset(asset),
   );
   if (candidates.length === 0) return null;
 

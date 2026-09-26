@@ -48,13 +48,15 @@ import {
   type ProductionSizingRequest,
 } from "./production-normalization";
 import type { RgbaImage } from "./raster-transform";
-import type {
-  FinalArtworkProvider,
-  FinalArtworkProviderBoundedResult,
-  FinalArtworkProviderInput,
-  FinalArtworkProviderIntermediateReconstruction,
-  FinalArtworkProviderOutput,
-  FinalArtworkProviderResumeContext,
+import {
+  FINAL_ARTWORK_PROVIDER_STATUS,
+  type FinalArtworkProvider,
+  type FinalArtworkProviderBoundedResult,
+  type FinalArtworkProviderDownloadedResult,
+  type FinalArtworkProviderInput,
+  type FinalArtworkProviderIntermediateReconstruction,
+  type FinalArtworkProviderOutput,
+  type FinalArtworkProviderResumeContext,
 } from "./provider";
 import type {
   SignReconstructionProvider,
@@ -133,6 +135,18 @@ export const MAX_RECONSTRUCTION_DIM_PX = 8192;
 export const PROVIDER_MAX_RECONSTRUCTION_SCALE = 4;
 
 const DEFAULT_SUBMIT_TIMEOUT_MS = 30_000;
+/**
+ * Bounded FinalArtwork Production-Execution Repair (short-step follow-up):
+ * the audit found `fetchStatus()` and `download()`'s own metadata fetch had
+ * NO per-call timeout at all — an unbounded `fetch` with no `AbortController`,
+ * unlike every other network call this adapter makes. Both are a single
+ * lightweight JSON GET (never the large-body transfer `downloadTimeoutMs`
+ * bounds), so this reuses `DEFAULT_SUBMIT_TIMEOUT_MS`'s own existing 30s
+ * convention rather than inventing a new number or guessing at an unproven
+ * DigitalOcean gateway limit — the goal is simply "this call cannot hang
+ * indefinitely," not a specific platform-tuned figure.
+ */
+const DEFAULT_STATUS_TIMEOUT_MS = DEFAULT_SUBMIT_TIMEOUT_MS;
 /** Phase 2D observed 69.5s–128.0s for Transparency Upscale; generous margin above the worst case. */
 const DEFAULT_POLL_TIMEOUT_MS = 6 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
@@ -249,6 +263,8 @@ export interface TopazTransparencyUpscaleProviderConfig {
   pollIntervalMs?: number;
   downloadTimeoutMs?: number;
   downloadAttempts?: number;
+  /** Bounds `fetchStatus()` and `download()`'s own metadata (result-URL) fetch — see `DEFAULT_STATUS_TIMEOUT_MS`'s doc comment. */
+  statusTimeoutMs?: number;
 }
 
 interface TopazStatusPayload {
@@ -691,6 +707,7 @@ export class TopazTransparencyUpscaleProvider
   private readonly pollIntervalMs: number;
   private readonly downloadTimeoutMs: number;
   private readonly downloadAttempts: number;
+  private readonly statusTimeoutMs: number;
 
   constructor(config: TopazTransparencyUpscaleProviderConfig) {
     if (!config.apiKey) {
@@ -704,6 +721,7 @@ export class TopazTransparencyUpscaleProvider
     this.pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.downloadTimeoutMs = config.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
     this.downloadAttempts = config.downloadAttempts ?? DEFAULT_DOWNLOAD_ATTEMPTS;
+    this.statusTimeoutMs = config.statusTimeoutMs ?? DEFAULT_STATUS_TIMEOUT_MS;
   }
 
   async produce(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput> {
@@ -750,15 +768,36 @@ export class TopazTransparencyUpscaleProvider
   }
 
   /**
-   * Bounded FinalArtwork Production-Execution Repair: the bounded
-   * counterpart to `produce()` above — identical routing/decode logic
-   * (deliberately duplicated rather than shared, so `produce()` and
-   * everything Signs calls through `runReconstructionPass`/`pollUntilDone`
-   * stay byte-for-byte unmodified), but every step below performs AT MOST
-   * one submit or one status check before returning, never a blocking
-   * poll loop.
+   * Bounded FinalArtwork Production-Execution Repair (short-step
+   * follow-up): the bounded counterpart to `produce()` above — identical
+   * routing/decode logic (deliberately duplicated rather than shared, so
+   * `produce()` and everything Signs calls through
+   * `runReconstructionPass`/`pollUntilDone` stay byte-for-byte unmodified),
+   * but restructured into three genuinely separate stages, each its OWN
+   * bounded HTTP-invocation's worth of work, never chained together in one
+   * call:
+   *
+   *   1. `input.existingDownloadedResult` present -> local normalize/encode
+   *      ONLY (no network at all) -> `{status:"completed", ...}`.
+   *   2. `input.existingProviderRequest.providerStatus === "result_ready"`
+   *      -> download-and-geometry-validate ONLY (no status check, no
+   *      resubmission) -> `{status:"downloaded", ...}` (or `{status:
+   *      "pending"}` for the two-pass pass-1-done/pass-2-not-yet-submitted
+   *      transition — see `produceTwoPassBounded`).
+   *   3. Otherwise -> submit-or-resume + exactly ONE status check, NEVER
+   *      followed by a download in the same call -> `{status:"pending"}`
+   *      or `{status:"result_ready", ...}`.
+   *
+   * This is the exact boundary the audit's Repair 3/4 require: a claim that
+   * sees the provider report "Completed" must durably checkpoint that fact
+   * and return — never fall through into downloading, decoding,
+   * normalizing, measuring, and uploading within the same invocation.
    */
   async produceBounded(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderBoundedResult> {
+    if (input.existingDownloadedResult) {
+      return this.finalizeDownloadedResultBounded(input, input.existingDownloadedResult);
+    }
+
     if (input.sourceContentType !== "image/png") {
       throw new Error(
         `TopazTransparencyUpscaleProvider only supports image/png source assets (got "${input.sourceContentType}").`,
@@ -791,6 +830,37 @@ export class TopazTransparencyUpscaleProvider
     return this.produceTwoPassBounded(input, source, plan.pass1);
   }
 
+  /**
+   * Bounded FinalArtwork Production-Execution Repair (short-step
+   * follow-up): local-only normalize/encode of an already-downloaded,
+   * already-geometry-validated result. Never contacts the provider — the
+   * caller's `existingDownloadedResult` is the sole authority for this
+   * stage (mirrors `existingIntermediateReconstruction`'s "trust the
+   * persisted evidence" contract).
+   */
+  private finalizeDownloadedResultBounded(
+    input: FinalArtworkProviderInput,
+    downloaded: FinalArtworkProviderDownloadedResult,
+  ): FinalArtworkProviderBoundedResult {
+    let png: PNG;
+    try {
+      png = PNG.sync.read(downloaded.bytes);
+    } catch (error) {
+      throw new ProviderError(
+        "malformed_response",
+        `The persisted provider result could not be decoded as a PNG: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    const output = this.finalizeFromReconstructed(png, input.sizing, {
+      processId: downloaded.providerRequestId,
+      nativeWidthPx: downloaded.nativeWidthPx,
+      nativeHeightPx: downloaded.nativeHeightPx,
+    });
+    return { status: "completed", ...output };
+  }
+
   /** Bounded counterpart to `produceSinglePass` — see `produceBounded`'s doc comment. */
   private async produceSinglePassBounded(
     input: FinalArtworkProviderInput,
@@ -806,7 +876,19 @@ export class TopazTransparencyUpscaleProvider
     const targetReconstructedWidth = resolved.request.widthPx;
     const targetReconstructedHeight = resolved.request.heightPx;
 
-    const step = await this.submitOrCheckOnce(
+    const resultReady = this.resultReadyRequest(input.existingProviderRequest);
+    if (resultReady) {
+      return this.downloadCompletedBounded(resultReady, {
+        sourceWidthPx: source.width,
+        sourceHeightPx: source.height,
+        targetWidthPx: targetReconstructedWidth,
+        targetHeightPx: targetReconstructedHeight,
+        nativeWidthPx: source.width,
+        nativeHeightPx: source.height,
+      });
+    }
+
+    const step = await this.checkStatusOnce(
       input.sourceBytes,
       { widthPx: targetReconstructedWidth, heightPx: targetReconstructedHeight },
       source.width,
@@ -815,25 +897,7 @@ export class TopazTransparencyUpscaleProvider
       input.onProviderRequestSubmitted,
     );
     if (step.kind === "pending") return { status: "pending" };
-
-    const geometryCheck = validateReconstructedGeometry({
-      sourceWidthPx: source.width,
-      sourceHeightPx: source.height,
-      targetWidthPx: targetReconstructedWidth,
-      targetHeightPx: targetReconstructedHeight,
-      actualWidthPx: step.png.width,
-      actualHeightPx: step.png.height,
-    });
-    if (!geometryCheck.valid) {
-      throw new ProviderError("malformed_response", geometryCheck.reason);
-    }
-
-    const output = this.finalizeFromReconstructed(step.png, input.sizing, {
-      processId: step.processId,
-      nativeWidthPx: source.width,
-      nativeHeightPx: source.height,
-    });
-    return { status: "completed", ...output };
+    return { status: "result_ready", providerRequestId: step.processId };
   }
 
   /**
@@ -841,8 +905,8 @@ export class TopazTransparencyUpscaleProvider
    * comment. Mirrors its exact invariants (pass 2 sized from pass 1's REAL
    * output, pass 1 persisted before pass 2 is ever submitted, pass 2
    * skipped entirely when pass 1 alone already suffices), restructured so
-   * each pass's own submit/check is bounded and a single invocation
-   * returns as soon as it has done one bounded unit of work.
+   * each pass's status-check and download are each their own bounded unit
+   * of work, never chained together in one call.
    */
   private async produceTwoPassBounded(
     input: FinalArtworkProviderInput,
@@ -852,8 +916,70 @@ export class TopazTransparencyUpscaleProvider
     const existingIntermediate = input.existingIntermediateReconstruction ?? null;
 
     if (!existingIntermediate) {
-      // Still on pass 1: submit (fresh) or check (resume) it, bounded.
-      const step = await this.submitOrCheckOnce(
+      const pass1ResultReady = this.resultReadyRequest(input.existingProviderRequest);
+      if (pass1ResultReady) {
+        // Pass 1's result is ready — download it, then decide LOCALLY
+        // (cheap, no network) whether pass 1 alone now suffices or pass 2
+        // is genuinely needed. Either way this claim performs exactly one
+        // download and returns; a fresh pass-2 submission (when needed)
+        // is always a LATER, separate claim's own status-check step.
+        const downloaded = await this.downloadCompletedBounded(pass1ResultReady, {
+          sourceWidthPx: source.width,
+          sourceHeightPx: source.height,
+          targetWidthPx: pass1Request.widthPx,
+          targetHeightPx: pass1Request.heightPx,
+          nativeWidthPx: source.width,
+          nativeHeightPx: source.height,
+        });
+        if (downloaded.status !== "downloaded") return downloaded;
+
+        let pass1Png: PNG;
+        try {
+          pass1Png = PNG.sync.read(downloaded.bytes);
+        } catch (error) {
+          throw new ProviderError(
+            "malformed_response",
+            `The downloaded first-pass reconstruction could not be decoded as a PNG: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        const pass1Image: RgbaImage = { width: pass1Png.width, height: pass1Png.height, data: pass1Png.data };
+        const pass2Plan = resolveReconstructionRequest(pass1Image, input.sizing);
+        if (pass2Plan.status !== "resolved") {
+          throw new ProviderError(
+            "invalid_request",
+            `Even a second reconstruction pass is not enough: ${pass2Plan.reason}`,
+            "not_dispatched",
+          );
+        }
+
+        if (pass2Plan.request.scale <= 1) {
+          // Pass 1 alone already meets the target — this download IS the
+          // final result. No intermediate persisted, no pass 2 ever
+          // submitted.
+          return downloaded;
+        }
+
+        // Pass 2 is genuinely needed: persist pass 1's validated output NOW
+        // (mirrors `produceTwoPass`'s own ordering — a crash after this
+        // resolves never re-spends pass 1's paid credit). Pass 2's own
+        // submission is deliberately NOT made in this same call — that is
+        // its own status-check step, on a later claim, exactly like a
+        // fresh single-pass job's first claim.
+        const intermediate: FinalArtworkProviderIntermediateReconstruction = {
+          bytes: downloaded.bytes,
+          widthPx: downloaded.widthPx,
+          heightPx: downloaded.heightPx,
+          providerRequestId: downloaded.providerRequestId,
+        };
+        await input.onIntermediateReconstructionProduced?.(intermediate);
+        return { status: "pending" };
+      }
+
+      // Still on pass 1: submit (fresh) or check (resume) it, bounded —
+      // never downloads.
+      const step = await this.checkStatusOnce(
         input.sourceBytes,
         pass1Request,
         source.width,
@@ -862,88 +988,7 @@ export class TopazTransparencyUpscaleProvider
         input.onProviderRequestSubmitted,
       );
       if (step.kind === "pending") return { status: "pending" };
-
-      const pass1GeometryCheck = validateReconstructedGeometry({
-        sourceWidthPx: source.width,
-        sourceHeightPx: source.height,
-        targetWidthPx: pass1Request.widthPx,
-        targetHeightPx: pass1Request.heightPx,
-        actualWidthPx: step.png.width,
-        actualHeightPx: step.png.height,
-      });
-      if (!pass1GeometryCheck.valid) {
-        throw new ProviderError("malformed_response", `First reconstruction pass: ${pass1GeometryCheck.reason}`);
-      }
-
-      const pass1Png = step.png;
-      const pass1Image: RgbaImage = { width: pass1Png.width, height: pass1Png.height, data: pass1Png.data };
-      const pass2Plan = resolveReconstructionRequest(pass1Image, input.sizing);
-      if (pass2Plan.status !== "resolved") {
-        throw new ProviderError(
-          "invalid_request",
-          `Even a second reconstruction pass is not enough: ${pass2Plan.reason}`,
-          "not_dispatched",
-        );
-      }
-
-      if (pass2Plan.request.scale <= 1) {
-        // Pass 1 alone already meets the target — finalize now, exactly
-        // like `produceTwoPass`; no intermediate persisted, no pass 2.
-        const output = this.finalizeFromReconstructed(pass1Png, input.sizing, {
-          processId: step.processId,
-          nativeWidthPx: source.width,
-          nativeHeightPx: source.height,
-        });
-        return { status: "completed", ...output };
-      }
-
-      // Pass 2 is genuinely needed: persist pass 1's validated output NOW
-      // (mirrors `produceTwoPass`'s own ordering — a crash after this
-      // resolves never re-spends pass 1's paid credit), then submit pass 2
-      // and check it once, bounded — routed through the SAME
-      // `submitOrCheckOnce` pass 2's resume branch below uses, so a pass 2
-      // that completes fast (as every existing test's fake Topaz does)
-      // finishes within this SAME invocation, exactly like the blocking
-      // `produceTwoPass` already does, while a genuinely slow pass 2
-      // (real Topaz) correctly returns pending instead of blocking.
-      const intermediate: FinalArtworkProviderIntermediateReconstruction = {
-        bytes: PNG.sync.write(pass1Png),
-        widthPx: pass1Png.width,
-        heightPx: pass1Png.height,
-        providerRequestId: step.processId,
-      };
-      await input.onIntermediateReconstructionProduced?.(intermediate);
-
-      // Pass 2 is always a fresh submission at this exact transition — the
-      // worker's own self-heal clears any pass-1-scoped `providerRequestId`
-      // before this call, mirroring `produceTwoPass`'s own reasoning.
-      const pass2Step = await this.submitOrCheckOnce(
-        PNG.sync.write(pass1Png),
-        { widthPx: pass2Plan.request.widthPx, heightPx: pass2Plan.request.heightPx },
-        pass1Png.width,
-        pass1Png.height,
-        null,
-        input.onProviderRequestSubmitted,
-      );
-      if (pass2Step.kind === "pending") return { status: "pending" };
-
-      const pass2GeometryCheckFresh = validateReconstructedGeometry({
-        sourceWidthPx: pass1Png.width,
-        sourceHeightPx: pass1Png.height,
-        targetWidthPx: pass2Plan.request.widthPx,
-        targetHeightPx: pass2Plan.request.heightPx,
-        actualWidthPx: pass2Step.png.width,
-        actualHeightPx: pass2Step.png.height,
-      });
-      if (!pass2GeometryCheckFresh.valid) {
-        throw new ProviderError("malformed_response", `Second reconstruction pass: ${pass2GeometryCheckFresh.reason}`);
-      }
-      const freshTwoPassOutput = this.finalizeFromReconstructed(pass2Step.png, input.sizing, {
-        processId: pass2Step.processId,
-        nativeWidthPx: source.width,
-        nativeHeightPx: source.height,
-      });
-      return { status: "completed", ...freshTwoPassOutput };
+      return { status: "result_ready", providerRequestId: step.processId };
     }
 
     // Pass 1 already durably exists from a prior attempt — resume/check pass 2.
@@ -973,15 +1018,30 @@ export class TopazTransparencyUpscaleProvider
       // Defensive mirror of `produceTwoPass`'s identical branch — pass 1
       // alone already suffices even though a pass 2 request/intermediate
       // exists (e.g. the sizing policy changed between attempts).
-      const output = this.finalizeFromReconstructed(pass1Png, input.sizing, {
-        processId: existingIntermediate.providerRequestId,
+      return {
+        status: "downloaded",
+        providerRequestId: existingIntermediate.providerRequestId,
+        bytes: PNG.sync.write(pass1Png),
+        widthPx: pass1Png.width,
+        heightPx: pass1Png.height,
+        nativeWidthPx: source.width,
+        nativeHeightPx: source.height,
+      };
+    }
+
+    const pass2ResultReady = this.resultReadyRequest(input.existingProviderRequest);
+    if (pass2ResultReady) {
+      return this.downloadCompletedBounded(pass2ResultReady, {
+        sourceWidthPx: pass1Png.width,
+        sourceHeightPx: pass1Png.height,
+        targetWidthPx: pass2Plan.request.widthPx,
+        targetHeightPx: pass2Plan.request.heightPx,
         nativeWidthPx: source.width,
         nativeHeightPx: source.height,
       });
-      return { status: "completed", ...output };
     }
 
-    const step = await this.submitOrCheckOnce(
+    const step = await this.checkStatusOnce(
       PNG.sync.write(pass1Png),
       { widthPx: pass2Plan.request.widthPx, heightPx: pass2Plan.request.heightPx },
       pass1Png.width,
@@ -990,52 +1050,47 @@ export class TopazTransparencyUpscaleProvider
       input.onProviderRequestSubmitted,
     );
     if (step.kind === "pending") return { status: "pending" };
+    return { status: "result_ready", providerRequestId: step.processId };
+  }
 
-    const pass2GeometryCheck = validateReconstructedGeometry({
-      sourceWidthPx: pass1Png.width,
-      sourceHeightPx: pass1Png.height,
-      targetWidthPx: pass2Plan.request.widthPx,
-      targetHeightPx: pass2Plan.request.heightPx,
-      actualWidthPx: step.png.width,
-      actualHeightPx: step.png.height,
-    });
-    if (!pass2GeometryCheck.valid) {
-      throw new ProviderError("malformed_response", `Second reconstruction pass: ${pass2GeometryCheck.reason}`);
-    }
-
-    const output = this.finalizeFromReconstructed(step.png, input.sizing, {
-      processId: step.processId,
-      nativeWidthPx: source.width,
-      nativeHeightPx: source.height,
-    });
-    return { status: "completed", ...output };
+  /** A matching, already-confirmed-complete provider request awaiting download — `null` for anything else (no request, still-submitted, or a provider mismatch). */
+  private resultReadyRequest(
+    existingProviderRequest: FinalArtworkProviderResumeContext | null | undefined,
+  ): FinalArtworkProviderResumeContext | null {
+    if (!existingProviderRequest) return null;
+    if (existingProviderRequest.providerKey !== this.providerKey) return null;
+    return existingProviderRequest.providerStatus === FINAL_ARTWORK_PROVIDER_STATUS.resultReady
+      ? existingProviderRequest
+      : null;
   }
 
   /**
-   * Bounded submit-or-check primitive shared by both bounded producers
-   * above: submits or resumes (never resubmits — same `submitOrResumePass`
-   * the blocking path uses, unmodified), then performs exactly ONE status
-   * check (never `pollUntilDone`'s loop), downloading and decoding only if
-   * that single check reports completion.
+   * Bounded FinalArtwork Production-Execution Repair (short-step
+   * follow-up): submits or resumes (never resubmits — same
+   * `submitOrResumePass` the blocking path uses, unmodified), then performs
+   * exactly ONE status check (never `pollUntilDone`'s loop, and — since
+   * this repair — never a download either, regardless of what the check
+   * reports).
    *
-   * A single check right after a FRESH submission (rather than
-   * unconditionally returning pending) is deliberate: Topaz occasionally
-   * completes fast enough that the very next check already sees
-   * `"Completed"`, and every existing test's fake Topaz endpoint answers
-   * `/status/` as `"Completed"` immediately, with no simulated delay — so
-   * this keeps a single bounded invocation able to finish a fast job in
-   * one call, exactly like the blocking path always could, while a
-   * genuinely slow job (real Topaz's normal 70-130s) still correctly
-   * returns pending rather than blocking to find out.
+   * Deliberately a single, unretried status check (previously wrapped in a
+   * 3-attempt `withRetry`): the audit's Repair 2 found that 3 sequential
+   * retries of a call that could itself hang (no timeout existed at all)
+   * let this "bounded" step's worst case run for minutes. `fetchStatus`
+   * now carries its own hard timeout, and a single transient failure here
+   * is caught by the caller (`FinalArtworkWorkerCapability`) and treated as
+   * a benign, budget-refunded "try again on a later invocation" outcome —
+   * see `produceProductionAsset`'s handling of `isRetryableProviderError` —
+   * so resilience now comes from the cheap, frequent scheduler/wake cadence
+   * ACROSS invocations, never from retrying WITHIN one.
    */
-  private async submitOrCheckOnce(
+  private async checkStatusOnce(
     sourceBytes: Buffer,
     request: { widthPx: number; heightPx: number },
     sourceWidth: number,
     sourceHeight: number,
     existingProviderRequest: FinalArtworkProviderResumeContext | null,
     onProviderRequestSubmitted: ((providerRequestId: string) => Promise<void>) | undefined,
-  ): Promise<{ kind: "pending" } | { kind: "done"; processId: string; png: PNG }> {
+  ): Promise<{ kind: "pending" } | { kind: "result_ready"; processId: string }> {
     // `submitOrResumePass` itself persists a NEW request's identity (via
     // `onProviderRequestSubmitted`) before returning, so a crash immediately
     // after this call is already resumable without a second paid submission.
@@ -1048,13 +1103,8 @@ export class TopazTransparencyUpscaleProvider
       onProviderRequestSubmitted,
     );
 
-    // Bounded: a single status check, never `pollUntilDone`'s loop.
-    const status = await withRetry(() => this.fetchStatus(processId), {
-      attempts: DEFAULT_MAX_POLL_ATTEMPTS_FOR_RETRY,
-      isRetryable: isRetryableProviderError,
-      delayMs: (attempt) => 500 * attempt,
-      sleep: this.sleepImpl,
-    });
+    // Bounded: a single, unretried, hard-timeout-bounded status check.
+    const status = await this.fetchStatus(processId);
 
     if (status === "Failed" || status === "Cancelled") {
       throw new ProviderError(
@@ -1067,16 +1117,40 @@ export class TopazTransparencyUpscaleProvider
     if (status !== "Completed") {
       return { kind: "pending" };
     }
+    return { kind: "result_ready", processId };
+  }
 
-    // "Fix Topaz Resume/Download Failure": same bounded, local retry of the
-    // readback step `runReconstructionPass` uses — never resubmits,
-    // `processId` is fixed, only the readback itself is retried.
-    const bytes = await withRetry(() => this.download(processId), {
-      attempts: this.downloadAttempts,
-      isRetryable: isRetryableProviderError,
-      delayMs: (attempt) => 500 * attempt,
-      sleep: this.sleepImpl,
-    });
+  /**
+   * Bounded FinalArtwork Production-Execution Repair (short-step
+   * follow-up): downloads and decodes an ALREADY-confirmed-`Completed`
+   * request's result — never checks status, never submits. `processId` is
+   * fixed and this never resubmits, so calling this repeatedly (across
+   * separate claims) is always safe.
+   *
+   * Deliberately a single, unretried download (previously wrapped in a
+   * 3-attempt `withRetry`, each attempt itself up to `downloadTimeoutMs`) —
+   * the audit's Repair 5 found up to 3x2 minutes could elapse inside one
+   * "bounded" invocation. `download()` still carries its own hard timeouts
+   * (metadata fetch: `statusTimeoutMs`; bytes fetch: `downloadTimeoutMs`),
+   * so this single attempt is still guaranteed to return; a transient
+   * failure is caught by the caller and treated as a benign,
+   * budget-refunded "try again on a later invocation" outcome, exactly like
+   * `checkStatusOnce` above — never a multi-minute retry loop held open
+   * inside one HTTP request.
+   */
+  private async downloadCompletedBounded(
+    resultReady: FinalArtworkProviderResumeContext,
+    geometry: {
+      sourceWidthPx: number;
+      sourceHeightPx: number;
+      targetWidthPx: number;
+      targetHeightPx: number;
+      nativeWidthPx: number;
+      nativeHeightPx: number;
+    },
+  ): Promise<FinalArtworkProviderBoundedResult> {
+    const processId = resultReady.providerRequestId;
+    const bytes = await this.download(processId);
     let png: PNG;
     try {
       png = PNG.sync.read(bytes);
@@ -1090,7 +1164,26 @@ export class TopazTransparencyUpscaleProvider
         "download",
       );
     }
-    return { kind: "done", processId, png };
+    const geometryCheck = validateReconstructedGeometry({
+      sourceWidthPx: geometry.sourceWidthPx,
+      sourceHeightPx: geometry.sourceHeightPx,
+      targetWidthPx: geometry.targetWidthPx,
+      targetHeightPx: geometry.targetHeightPx,
+      actualWidthPx: png.width,
+      actualHeightPx: png.height,
+    });
+    if (!geometryCheck.valid) {
+      throw new ProviderError("malformed_response", geometryCheck.reason, undefined, "download");
+    }
+    return {
+      status: "downloaded",
+      providerRequestId: processId,
+      bytes: PNG.sync.write(png),
+      widthPx: png.width,
+      heightPx: png.height,
+      nativeWidthPx: geometry.nativeWidthPx,
+      nativeHeightPx: geometry.nativeHeightPx,
+    };
   }
 
   /**
@@ -1686,12 +1779,29 @@ export class TopazTransparencyUpscaleProvider
   }
 
   private async fetchStatus(processId: string): Promise<string> {
+    // Bounded FinalArtwork Production-Execution Repair (short-step
+    // follow-up): the audit found this call had NO timeout at all — a hang
+    // here could block indefinitely, undermining every other bound this
+    // adapter carefully applies elsewhere. Never itself a billable
+    // dispatch, so an abort is honestly `not_dispatched`, same reasoning as
+    // the network catch immediately below.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.statusTimeoutMs);
     let response: Response;
     try {
       response = await this.fetchImpl(`${TOPAZ_API_BASE}/status/${processId}`, {
         headers: { "X-API-Key": this.apiKey },
+        signal: controller.signal,
       });
     } catch (error) {
+      if (isAbortError(error)) {
+        throw new ProviderError(
+          "timeout",
+          "The production reconstruction provider's status endpoint did not respond in time.",
+          "not_dispatched",
+          "poll",
+        );
+      }
       // "Fix Topaz Resume/Download Failure": a status check is NEVER itself
       // a billable dispatch — it only reads back the state of an already
       // (or not-yet) submitted paid request — so, unlike `submit()`'s own
@@ -1709,6 +1819,8 @@ export class TopazTransparencyUpscaleProvider
         "not_dispatched",
         "poll",
       );
+    } finally {
+      clearTimeout(timeout);
     }
 
     classifyPollResponse(response.status, "poll");
@@ -1749,12 +1861,28 @@ export class TopazTransparencyUpscaleProvider
    * permits a fresh paid resubmission.
    */
   private async download(processId: string): Promise<Buffer> {
+    // Bounded FinalArtwork Production-Execution Repair (short-step
+    // follow-up): the audit found this metadata fetch had NO timeout at
+    // all, unlike the bytes fetch a few lines below (`downloadTimeoutMs`).
+    // Reuses `statusTimeoutMs` — the SAME "single lightweight JSON GET"
+    // convention `fetchStatus` uses, since this call is that exact shape.
+    const metaController = new AbortController();
+    const metaTimeout = setTimeout(() => metaController.abort(), this.statusTimeoutMs);
     let metaResponse: Response;
     try {
       metaResponse = await this.fetchImpl(`${TOPAZ_API_BASE}/download/${processId}`, {
         headers: { "X-API-Key": this.apiKey },
+        signal: metaController.signal,
       });
     } catch (error) {
+      if (isAbortError(error)) {
+        throw new ProviderError(
+          "timeout",
+          "The production reconstruction provider's download endpoint did not respond in time.",
+          "not_dispatched",
+          "download",
+        );
+      }
       // Same reasoning as `fetchStatus`'s catch above: reading back result
       // metadata is never itself billable, so this is honestly
       // `not_dispatched` — never `dispatched_ambiguous` by default.
@@ -1764,6 +1892,8 @@ export class TopazTransparencyUpscaleProvider
         "not_dispatched",
         "download",
       );
+    } finally {
+      clearTimeout(metaTimeout);
     }
     classifyPollResponse(metaResponse.status, "download");
 

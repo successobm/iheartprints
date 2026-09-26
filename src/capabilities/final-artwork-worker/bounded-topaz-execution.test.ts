@@ -11,6 +11,10 @@ import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
 import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
 import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
 import {
+  isProviderResultIntermediateAsset,
+  isReconstructionIntermediateAsset,
+} from "@/capabilities/final-artwork/production-request-identity";
+import {
   resolveReconstructionRequest,
   TopazTransparencyUpscaleProvider,
 } from "@/capabilities/final-artwork/topaz-transparency-upscale-provider";
@@ -470,23 +474,46 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     // The provider job has since finished on Topaz's own side.
     setStatusMode("completed");
 
-    // A second invocation (an immediate wake, or the recovery scheduler)
-    // reclaims the SAME job -- `claimNextQueuedFinalArtworkJob` claims
-    // `recoverable` rows immediately, no 15-minute wait required. Under the
-    // Phase 2 post-provider checkpoint, THIS invocation acquires and
-    // durably persists the production asset, then checkpoints back to
-    // "recoverable" rather than also finalizing in the same call.
+    // Bounded FinalArtwork Production-Execution Repair (short-step
+    // follow-up): a claim that finds the provider now `Completed` durably
+    // checkpoints `providerStatus: "result_ready"` and defers -- it must
+    // never fall through into downloading within this same invocation.
+    await worker.processNextJob();
+    const resultReady = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(resultReady?.status, "recoverable");
+    assert.equal(resultReady?.providerStatus, "result_ready", "the status-check step durably checkpoints completion before ever downloading");
+    assert.equal(submitCount(), 1, "still no re-submission merely from checking status");
+
+    // A later invocation downloads the (already-confirmed-complete) result
+    // and persists it as an internal intermediate -- still not the final
+    // production asset, and still not finalized. The paid request's
+    // identity is kept intact (never cleared) -- this is the LAST pass, so
+    // there is no further submission to make room for.
+    await worker.processNextJob();
+    const downloaded = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(downloaded?.status, "recoverable");
+    assert.equal(downloaded?.providerRequestId, FIXED_PROCESS_ID, "the download checkpoint keeps the paid request's identity intact");
+    const afterDownloadAssets = await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id);
+    assert.equal(
+      afterDownloadAssets.filter((a) => a.productionRole === "production_png").length,
+      1,
+      "the downloaded raw result is persisted (as an internal intermediate), but is never a candidate final production asset",
+    );
+
+    // A later invocation normalizes/measures/uploads the production asset
+    // from that intermediate and checkpoints -- it does not finalize in the
+    // same call (Phase 2's own invariant, now one step further downstream).
     await worker.processNextJob();
     const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(checkpointed?.status, "recoverable", "acquiring the provider result checkpoints, it does not finalize in the same call");
 
-    // A third invocation finds the already-checkpointed asset and finalizes.
+    // A final invocation finds the already-checkpointed asset and finalizes.
     await worker.processNextJob();
 
     const completed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(completed?.status, "completed");
-    assert.equal(completed?.providerRequestId, FIXED_PROCESS_ID, "still keyed to the ORIGINAL paid request");
-    assert.equal(submitCount(), 1, "exactly one paid submission across ALL THREE invocations -- resumed, never resubmitted");
+    assert.equal(completed?.providerRequestId, FIXED_PROCESS_ID, "still keyed to the ORIGINAL paid request, all the way through finalization");
+    assert.equal(submitCount(), 1, "exactly one paid submission across every invocation -- resumed, never resubmitted");
 
     const validation = await repo.getLatestProductionAssetValidationForJob(projectId, completed!.id);
     assert.ok(validation, "a resumed-and-completed reconstruction must still proceed through real print validation");
@@ -527,18 +554,31 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     assert.equal(statusCallCount(), 3, "one status check per invocation");
 
     setStatusMode("completed");
-    // Fourth invocation: acquires and checkpoints the production asset
-    // (Phase 2 -- does not finalize in the same call).
+    // Fourth invocation: status check finds "Completed" -> checkpoints
+    // `providerStatus: "result_ready"` (never downloads in this call).
+    await worker.processNextJob();
+    job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job?.status, "recoverable");
+    assert.equal(job?.providerStatus, "result_ready");
+
+    // Fifth invocation: downloads the result and persists the internal
+    // intermediate (never normalizes in this call).
     await worker.processNextJob();
     job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "recoverable");
 
-    // Fifth invocation: finds the checkpointed asset and finalizes.
+    // Sixth invocation: normalizes/uploads the production asset and
+    // checkpoints (Phase 2 -- does not finalize in the same call).
+    await worker.processNextJob();
+    job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job?.status, "recoverable");
+
+    // Seventh invocation: finds the checkpointed asset and finalizes.
     await worker.processNextJob();
 
     job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed");
-    assert.equal(submitCount(), 1, "still exactly one submission after five invocations total");
+    assert.equal(submitCount(), 1, "still exactly one submission after seven invocations total");
   });
 
   it("4: MANY pending checks across real scheduler batches never exhaust the recovery/attempt budgets or falsely fail the job (repair-cycle regression)", async () => {
@@ -600,14 +640,28 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     // The provider job finishes for real -- the SAME job must still be able
     // to complete normally, proving the budget was never actually spent.
     setStatusMode("completed");
-    // First batch: acquires and checkpoints the production asset (Phase 2
-    // -- the batch's own exclude-list guard means this same batch cannot
-    // also reach the finalize step, since nothing else is queued).
+    // First batch: status check finds "Completed" -> checkpoints
+    // `providerStatus: "result_ready"` (the batch's own exclude-list guard
+    // means this same batch cannot also reach a later step, since nothing
+    // else is queued).
+    await scheduler.runBatch();
+    job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job?.status, "recoverable");
+    assert.equal(job?.providerStatus, "result_ready");
+
+    // Second batch: downloads the result and persists the internal
+    // intermediate.
     await scheduler.runBatch();
     job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "recoverable");
 
-    // Second batch: finds the checkpointed asset and finalizes.
+    // Third batch: normalizes/uploads the production asset and checkpoints
+    // (Phase 2 -- does not finalize in the same batch).
+    await scheduler.runBatch();
+    job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job?.status, "recoverable");
+
+    // Fourth batch: finds the checkpointed asset and finalizes.
     await scheduler.runBatch();
 
     job = await repo.getFinalArtworkJob(requested.job.id);
@@ -672,39 +726,53 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
 
     // A second batch lets the newer job's own already-submitted request
     // resolve -- within this same batch the older job is reclaimed first
-    // (still stuck), then the newer job is reclaimed and reaches the
-    // Phase 2 checkpoint (asset acquired, but not yet finalized), while
-    // the older one is STILL never marked completed -- proving the older
-    // job's indefinite pendingness never blocked the newer one's progress.
+    // (still stuck), then the newer job is reclaimed, its status check
+    // finds "Completed", and it checkpoints `providerStatus: "result_ready"`
+    // (never downloading in this same batch) -- while the older one is
+    // STILL never marked completed, proving the older job's indefinite
+    // pendingness never blocked the newer one's progress.
     await scheduler.runBatch();
 
     const newerAfterBatch2 = await repo.getFinalArtworkJob(newerRequested.job.id);
-    assert.equal(newerAfterBatch2?.status, "recoverable", "the newer job reaches the checkpoint within batch 2");
+    assert.equal(newerAfterBatch2?.status, "recoverable", "the newer job reaches the status checkpoint within batch 2");
+    assert.equal(newerAfterBatch2?.providerStatus, "result_ready");
 
     const olderAfterBatch2 = await repo.getFinalArtworkJob(olderRequested.job.id);
     assert.equal(olderAfterBatch2?.status, "recoverable", "the older job remains legitimately pending, not failed or abandoned");
 
-    // A third batch finalizes the newer job from its already-checkpointed
+    // A third batch downloads the newer job's result and persists the
+    // internal intermediate (never normalizing in this same batch).
+    await scheduler.runBatch();
+    const newerAfterBatch3 = await repo.getFinalArtworkJob(newerRequested.job.id);
+    assert.equal(newerAfterBatch3?.status, "recoverable", "the newer job reaches the download checkpoint within batch 3");
+
+    // A fourth batch normalizes/uploads the newer job's production asset
+    // and checkpoints (still not finalized).
+    await scheduler.runBatch();
+    const newerAfterBatch4 = await repo.getFinalArtworkJob(newerRequested.job.id);
+    assert.equal(newerAfterBatch4?.status, "recoverable", "the newer job reaches the production-asset checkpoint within batch 4");
+
+    // A fifth batch finalizes the newer job from its already-checkpointed
     // production asset.
     await scheduler.runBatch();
 
-    const newerAfterBatch3 = await repo.getFinalArtworkJob(newerRequested.job.id);
-    assert.equal(newerAfterBatch3?.status, "completed", "the newer job must reach completion despite the older one remaining stuck");
+    const newerAfterBatch5 = await repo.getFinalArtworkJob(newerRequested.job.id);
+    assert.equal(newerAfterBatch5?.status, "completed", "the newer job must reach completion despite the older one remaining stuck");
 
-    const olderAfterBatch3 = await repo.getFinalArtworkJob(olderRequested.job.id);
-    assert.equal(olderAfterBatch3?.status, "recoverable", "the older job remains legitimately pending, not failed or abandoned");
+    const olderAfterBatch5 = await repo.getFinalArtworkJob(olderRequested.job.id);
+    assert.equal(olderAfterBatch5?.status, "recoverable", "the older job remains legitimately pending, not failed or abandoned");
 
     assert.equal(submitCountTotal(), 2, "exactly one submission per job across the whole test -- never resubmitted");
     assert.ok(statusCallCountFor(newerProcessId) >= 1, "the newer job's request was genuinely checked");
 
     const validation = await repo.getLatestProductionAssetValidationForJob(
       newer.projectId,
-      newerAfterBatch3!.id,
+      newerAfterBatch5!.id,
     );
     assert.ok(validation, "the newer job must still reach real print validation");
   });
 
-  it("6: two-pass pass-1(resume)->pass-2(fresh-submit) transition starts the new request's recovery budget at exactly 0, even with retained genuine-failure charges beforehand (repair-cycle-2 arithmetic regression)", async () => {
+  it("6: two-pass pass-1(resume)->pass-2(fresh-submit) transition starts the new request's recovery budget at exactly 0, even with retained genuine-failure charges beforehand (repair-cycle-2 arithmetic regression, now split across the status/download/pass-2-submit steps)", async () => {
     // A small inset relative to the 1200x1200 canvas against sleeve sizing
     // (3in @ 300 PPI = 900px target) empirically routes through two-pass
     // (planStandardRasterReconstruction: pass 1 at the 4x ceiling against
@@ -747,28 +815,56 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     // Pass 1 has genuinely finished at the (fake) provider.
     markCompleted(pass1Id);
 
-    // Claim 2: RESUMES pass 1 (existingProviderRequest matches, so
-    // attemptClassification is fixed as "resume" for this whole claim,
-    // charging providerRecoveryAttempts 2->3 up front) -- pass 1's status
-    // check finds it Completed, downloads it, and the SAME invocation
-    // immediately submits a genuinely NEW pass-2 request (submittedNewPaidRequest
-    // becomes true mid-claim), whose own onProviderRequestSubmitted hook
-    // resets providerRecoveryAttempts to 0. Pass 2's own status check
-    // (still "processing") returns the overall claim as pending.
+    // Claim 2: RESUMES pass 1 (attemptClassification = "resume", charging
+    // providerRecoveryAttempts 2->3 up front) -- pass 1's status check finds
+    // it Completed, and durably checkpoints `providerStatus: "result_ready"`
+    // for pass 1 -- never downloading in this same invocation. The charge
+    // is neutralized (3->2) at this checkpoint, exactly like the
+    // single-pass case.
+    await worker.processNextJob();
+    const afterPass1StatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterPass1StatusCheckpoint?.status, "recoverable");
+    assert.equal(afterPass1StatusCheckpoint?.providerStatus, "result_ready");
+    assert.equal(afterPass1StatusCheckpoint?.providerRecoveryAttempts, 2);
+    assert.equal(knownProcessIds().length, 1, "still only pass 1 submitted -- a status check is never a dispatch");
+
+    // Claim 3: RESUMES pass 1 again (a SECOND resume-classified claim,
+    // charging 2->3 up front again) -- downloads pass 1's now-confirmed
+    // result, decides LOCALLY that pass 2 is genuinely needed, and persists
+    // pass 1 as the existing `pass1_intermediate` marker (clearing the
+    // job's outstanding-request slot) -- still never submitting pass 2 in
+    // this same invocation. The charge is neutralized again (3->2).
+    await worker.processNextJob();
+    const afterPass1Download = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterPass1Download?.status, "recoverable");
+    assert.equal(afterPass1Download?.providerRecoveryAttempts, 2);
+    assert.equal(afterPass1Download?.providerRequestId, null, "pass 1's identity is retired once its result is durably persisted, freeing the slot for pass 2");
+    assert.equal(knownProcessIds().length, 1, "still only pass 1 submitted -- downloading an already-confirmed result is never a dispatch");
+    const pass1IntermediateAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+      isReconstructionIntermediateAsset,
+    );
+    assert.equal(pass1IntermediateAssets.length, 1, "pass 1's validated output is durably persisted as the two-pass intermediate");
+
+    // Claim 4: now fresh_execution (pass 1's identity was already cleared) --
+    // finds pass 1's persisted intermediate, computes pass 2's request
+    // against pass 1's REAL output, and submits pass 2 (a genuinely NEW
+    // paid request) + checks it once (still "processing" by construction).
+    // `onProviderRequestSubmitted` resets providerRecoveryAttempts to 0 for
+    // this brand-new request.
     await worker.processNextJob();
 
     assert.equal(knownProcessIds().length, 2, "pass 2 must now have been submitted");
     const pass2Id = knownProcessIds()[1]!;
     assert.notEqual(pass2Id, pass1Id);
 
-    const job = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(job?.status, "recoverable");
-    assert.equal(job?.providerRequestId, pass2Id, "the job must now be keyed to pass 2's fresh request");
+    const afterPass2Submit = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterPass2Submit?.status, "recoverable");
+    assert.equal(afterPass2Submit?.providerRequestId, pass2Id, "the job must now be keyed to pass 2's fresh request");
     // THE regression: without the repair-cycle-2 fix, this would read 2
     // (the stale pre-submission recovery snapshot, 3, refunded by 1) --
     // never the fresh reset's true value.
     assert.equal(
-      job?.providerRecoveryAttempts,
+      afterPass2Submit?.providerRecoveryAttempts,
       0,
       "pass 2's brand-new paid request must start its recovery budget at exactly 0, " +
         "never clobbered by refunding the OLD (pass 1) request's retained charges",
@@ -778,10 +874,33 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     // The job must still be able to complete normally afterward, proving
     // the fix didn't just move the bug rather than eliminate it.
     markCompleted(pass2Id);
+
+    // Claim 5: RESUMES pass 2 -- status check finds it Completed, durably
+    // checkpoints `providerStatus: "result_ready"` for pass 2.
+    await worker.processNextJob();
+    const afterPass2StatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterPass2StatusCheckpoint?.status, "recoverable");
+    assert.equal(afterPass2StatusCheckpoint?.providerStatus, "result_ready");
+
+    // Claim 6: RESUMES pass 2 again -- downloads it (pass 2 is always the
+    // FINAL pass in this V1 two-pass architecture) and persists the result
+    // as the internal "ready to normalize" intermediate.
+    await worker.processNextJob();
+    const afterPass2Download = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterPass2Download?.status, "recoverable");
+    const providerResultIntermediates = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+      isProviderResultIntermediateAsset,
+    );
+    assert.equal(providerResultIntermediates.length, 1);
+
+    // Claim 7: normalizes/measures/uploads the production asset from that
+    // intermediate and checkpoints -- pass 2's completion first reaches
+    // this checkpoint, still not finalized in the same call.
     await worker.processNextJob();
     const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(checkpointed?.status, "recoverable", "pass 2's completion first reaches the Phase 2 checkpoint");
+    assert.equal(checkpointed?.status, "recoverable", "pass 2's completion reaches the production-asset checkpoint before finalizing");
 
+    // Claim 8: finalizes.
     await worker.processNextJob();
     const completed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(completed?.status, "completed");
@@ -793,7 +912,7 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
 
   // --- Phase 2: post-provider durable checkpoint ---------------------------
 
-  it("7: provider completion checkpoints the production asset and returns pending WITHOUT running validation/completion in the same invocation", async () => {
+  it("7: provider completion checkpoints in three separate bounded steps (status, download, normalize/upload) and returns pending WITHOUT running validation/completion in any of them", async () => {
     const { repo, assets, projectId } = await setup(400);
     const expectedRequest = expectedReconstructionRequest(400);
     const { fetchImpl, submitCount, setStatusMode } = buildControllableStatusFakeTopazFetch(
@@ -818,28 +937,59 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     const before = await repo.getFinalArtworkJob(requested.job.id);
 
+    // Step 1: submit + one status check -> already "Completed" -> durably
+    // checkpoints `providerStatus: "result_ready"` and returns. Never
+    // downloads in this same invocation.
     await worker.processNextJob();
 
-    const afterCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(afterCheckpoint?.status, "recoverable", "checkpointed, not left running and not completed");
+    const afterStatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterStatusCheckpoint?.status, "recoverable", "checkpointed, not left running and not completed");
+    assert.equal(afterStatusCheckpoint?.providerStatus, "result_ready");
     assert.equal(submitCount(), 1, "exactly one submission");
 
-    const assetsAfterCheckpoint = await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id);
-    const productionAssets = assetsAfterCheckpoint.filter((a) => a.productionRole === "production_png");
-    assert.equal(productionAssets.length, 1, "the production asset must already be durably persisted at checkpoint time");
-
-    const validationAfterCheckpoint = await repo.getLatestProductionAssetValidationForJob(projectId, requested.job.id);
-    assert.equal(validationAfterCheckpoint, null, "validation must NOT run in the same invocation as the checkpoint");
-
-    const projectAfterCheckpoint = await repo.getProject(projectId);
-    assert.equal(projectAfterCheckpoint?.project.status, "finalizing", "project must not transition in the checkpointing invocation");
+    const assetsAfterStatusCheckpoint = await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id);
+    assert.equal(assetsAfterStatusCheckpoint.length, 0, "no asset of any kind exists until the result is actually downloaded");
 
     // This claim was fresh_execution (no prior provider request), so the
     // recovery budget was never charged in the first place -- confirm
     // nothing regressed it.
-    assert.equal(afterCheckpoint?.providerRecoveryAttempts, before?.providerRecoveryAttempts ?? 0);
+    assert.equal(afterStatusCheckpoint?.providerRecoveryAttempts, before?.providerRecoveryAttempts ?? 0);
 
-    // A second invocation resumes from the checkpointed asset and finishes.
+    // Step 2: download-only -> persists the internal, non-customer-facing
+    // intermediate and returns. Never normalizes/measures/uploads the
+    // production asset in this same invocation.
+    await worker.processNextJob();
+
+    const afterDownloadCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterDownloadCheckpoint?.status, "recoverable");
+    const assetsAfterDownload = await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id);
+    assert.equal(assetsAfterDownload.length, 1, "the downloaded result is now durably persisted, as an internal intermediate");
+    assert.ok(isProviderResultIntermediateAsset(assetsAfterDownload[0]!), "the download checkpoint's asset is the internal intermediate marker, never the customer deliverable");
+
+    const validationAfterDownload = await repo.getLatestProductionAssetValidationForJob(projectId, requested.job.id);
+    assert.equal(validationAfterDownload, null, "validation must NOT run merely because the raw result was downloaded");
+
+    // Step 3: normalize/measure/upload the production asset from the
+    // intermediate, then checkpoint -- still never validating/completing in
+    // the same call.
+    await worker.processNextJob();
+
+    const afterAssetCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterAssetCheckpoint?.status, "recoverable", "checkpointed, not left running and not completed");
+
+    const assetsAfterAssetCheckpoint = await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id);
+    const productionAssets = assetsAfterAssetCheckpoint.filter(
+      (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
+    );
+    assert.equal(productionAssets.length, 1, "the FINAL production asset must already be durably persisted at checkpoint time");
+
+    const validationAfterAssetCheckpoint = await repo.getLatestProductionAssetValidationForJob(projectId, requested.job.id);
+    assert.equal(validationAfterAssetCheckpoint, null, "validation must NOT run in the same invocation as the asset checkpoint");
+
+    const projectAfterCheckpoint = await repo.getProject(projectId);
+    assert.equal(projectAfterCheckpoint?.project.status, "finalizing", "project must not transition in any of the checkpointing invocations");
+
+    // Step 4: a final invocation resumes from the checkpointed asset and finishes.
     await worker.processNextJob();
 
     const completed = await repo.getFinalArtworkJob(requested.job.id);
@@ -848,7 +998,7 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
 
     const finalAssets = await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id);
     assert.equal(
-      finalAssets.filter((a) => a.productionRole === "production_png").length,
+      finalAssets.filter((a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a)).length,
       1,
       "the finalize invocation must reuse the checkpointed asset, never create a second one",
     );
@@ -860,7 +1010,7 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     assert.notEqual(project?.project.status, "finalizing", "project must transition once validation actually ran");
   });
 
-  it("8: reaching the checkpoint after RESUMING an existing provider request neutralizes that claim's recovery charge (the exact real-incident shape)", async () => {
+  it("8: reaching each checkpoint after RESUMING an existing provider request neutralizes that claim's own recovery charge (the exact real-incident shape, now split across the status and download steps)", async () => {
     const { repo, assets, projectId } = await setup(400);
     const expectedRequest = expectedReconstructionRequest(400);
     const { fetchImpl, submitCount, setStatusMode } = buildControllableStatusFakeTopazFetch(
@@ -883,37 +1033,67 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
 
-    // Claim 1: fresh submission, still processing -- pending.
+    // Claim 1: fresh submission, still processing -- pending. Fresh
+    // execution, so no recovery charge yet.
     await worker.processNextJob();
     const afterFresh = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(afterFresh?.status, "recoverable");
     assert.equal(afterFresh?.providerRequestId, FIXED_PROCESS_ID);
+    assert.equal(afterFresh?.providerRecoveryAttempts, 0);
 
     // Now it's genuinely done at the (fake) provider.
     setStatusMode("completed");
 
     // Claim 2: RESUMES the persisted request (classification = "resume",
-    // charging providerRecoveryAttempts before the resume is attempted),
-    // finds it Completed, uploads the production asset, and checkpoints.
+    // charging providerRecoveryAttempts before the check is attempted),
+    // finds it Completed, and durably checkpoints `providerStatus:
+    // "result_ready"` -- never downloading in this same invocation.
     await worker.processNextJob();
 
-    const afterCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(afterCheckpoint?.status, "recoverable");
-    assert.equal(afterCheckpoint?.providerRequestId, FIXED_PROCESS_ID, "still the SAME request -- never resubmitted");
-    assert.equal(submitCount(), 1, "exactly one submission across both claims");
-    // THE regression this test guards: reaching the checkpoint after a
-    // resume must neutralize (refund) that claim's recovery charge --
+    const afterStatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterStatusCheckpoint?.status, "recoverable");
+    assert.equal(afterStatusCheckpoint?.providerRequestId, FIXED_PROCESS_ID, "still the SAME request -- never resubmitted");
+    assert.equal(afterStatusCheckpoint?.providerStatus, "result_ready");
+    assert.equal(submitCount(), 1, "exactly one submission across every claim so far");
+    // THE regression this test guards: reaching a durable checkpoint after
+    // a resume must neutralize (refund) THAT claim's own recovery charge --
     // without this, a healthy job could be charged toward
-    // MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS purely for needing a second
-    // invocation to acquire an already-completed provider result.
+    // MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS purely for needing another
+    // invocation to advance an already-completed provider result one more
+    // bounded step.
     assert.equal(
-      afterCheckpoint?.providerRecoveryAttempts,
+      afterStatusCheckpoint?.providerRecoveryAttempts,
       0,
-      "the resume claim's recovery charge must be neutralized once it reaches the durable checkpoint",
+      "the resume claim's recovery charge must be neutralized once it reaches the durable status checkpoint",
     );
 
+    // Claim 3: RESUMES again (a SECOND resume-classified claim, since the
+    // job still carries a matching providerKey/providerRequestId) -- this
+    // time downloads the already-confirmed-complete result and persists it
+    // as an internal intermediate, again neutralizing its own charge.
+    await worker.processNextJob();
+
+    const afterDownloadCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterDownloadCheckpoint?.status, "recoverable");
+    assert.equal(
+      afterDownloadCheckpoint?.providerRecoveryAttempts,
+      0,
+      "the second resume claim's own recovery charge must ALSO be neutralized once it reaches the download checkpoint",
+    );
+    const intermediateAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+      isProviderResultIntermediateAsset,
+    );
+    assert.equal(intermediateAssets.length, 1);
+
+    // Claim 4: finds the intermediate, normalizes/uploads the production
+    // asset, and checkpoints -- this claim never touches the provider or
+    // either attempt budget at all.
+    await worker.processNextJob();
+    const afterAssetCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterAssetCheckpoint?.status, "recoverable");
+
     const productionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
-      (a) => a.productionRole === "production_png",
+      (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
     );
     assert.equal(productionAssets.length, 1);
 
@@ -945,10 +1125,18 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
 
-    // Reach the checkpoint (production asset durably exists; job "recoverable").
-    await worker.processNextJob();
+    // Reach the FINAL production-asset checkpoint -- now three bounded
+    // steps (status -> download -> normalize/upload), each returning the
+    // job to "recoverable".
+    await worker.processNextJob(); // status check -> result_ready checkpoint
+    await worker.processNextJob(); // download -> intermediate checkpoint
+    await worker.processNextJob(); // normalize/upload -> asset checkpoint
     const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(checkpointed?.status, "recoverable");
+    const checkpointedProductionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+      (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
+    );
+    assert.equal(checkpointedProductionAssets.length, 1, "the FINAL production asset must already be durably persisted");
 
     // Simulate a real invocation that claimed the job (running, fresh
     // heartbeat) and was interrupted SOMEWHERE during finalize -- before
@@ -974,7 +1162,7 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     assert.equal(submitCount(), 1, "reconciliation must never resubmit to the provider");
 
     const productionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
-      (a) => a.productionRole === "production_png",
+      (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
     );
     assert.equal(productionAssets.length, 1, "reconciliation must never create a second production asset");
 
@@ -1048,8 +1236,9 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
 
     // Claim 2: RESUMES the persisted request. Classification is "resume",
     // so the claim charges providerRecoveryAttempts 4 -> 5 up front (at the
-    // ceiling) BEFORE attempting anything -- then finds Completed, downloads,
-    // uploads the production asset, and reaches the durable checkpoint.
+    // ceiling) BEFORE attempting anything -- then finds Completed, and
+    // durably checkpoints `providerStatus: "result_ready"` (never
+    // downloading in this same invocation).
     await worker.processNextJob();
 
     // Proves the intermediate charged state was REALLY written (not just
@@ -1058,30 +1247,68 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     assert.deepEqual(
       recoveryAttemptsWriteHistory,
       [5, 4],
-      "claim 2 must durably charge providerRecoveryAttempts to 5 BEFORE the checkpoint refunds it back to 4 -- both writes, in order",
+      "claim 2 must durably charge providerRecoveryAttempts to 5 BEFORE the status checkpoint refunds it back to 4 -- both writes, in order",
     );
 
-    const afterCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(afterCheckpoint?.status, "recoverable");
-    assert.equal(afterCheckpoint?.providerRequestId, FIXED_PROCESS_ID, "still the SAME request -- never resubmitted, never changed, never a new job");
-    assert.equal(submitCount(), 1, "exactly one paid submission across both claims");
-    // THE exact regression the live incident hit: reaching the checkpoint
-    // after a resume neutralizes (refunds) that claim's own charge -- the
-    // counter returns to its PRE-claim value (4), never left stranded at
-    // the ceiling (5) purely for needing a second invocation to acquire an
-    // already-completed provider result.
+    const afterStatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterStatusCheckpoint?.status, "recoverable");
+    assert.equal(afterStatusCheckpoint?.providerRequestId, FIXED_PROCESS_ID, "still the SAME request -- never resubmitted, never changed, never a new job");
+    assert.equal(afterStatusCheckpoint?.providerStatus, "result_ready");
+    assert.equal(submitCount(), 1, "exactly one paid submission across every claim so far");
+    // THE exact regression the live incident hit: reaching a durable
+    // checkpoint after a resume neutralizes (refunds) that claim's own
+    // charge -- the counter returns to its PRE-claim value (4), never left
+    // stranded at the ceiling (5) purely for needing another invocation to
+    // advance an already-completed provider result one more bounded step.
     assert.equal(
-      afterCheckpoint?.providerRecoveryAttempts,
+      afterStatusCheckpoint?.providerRecoveryAttempts,
       4,
-      "the resume claim's own charge (4->5) is refunded back to 4 at the checkpoint -- never left at the ceiling",
+      "the resume claim's own charge (4->5) is refunded back to 4 at the status checkpoint -- never left at the ceiling",
     );
 
+    // Claim 3: RESUMES again (a SECOND resume-classified claim -- the job
+    // still carries the SAME matching providerKey/providerRequestId, now
+    // with `providerStatus: "result_ready"`), charging 4 -> 5 up front a
+    // SECOND time, downloading the result, persisting it as an internal
+    // intermediate, and neutralizing this claim's own charge exactly the
+    // same way.
+    recoveryAttemptsWriteHistory.length = 0;
+    await worker.processNextJob();
+
+    assert.deepEqual(
+      recoveryAttemptsWriteHistory,
+      [5, 4],
+      "claim 3 (the download step) must ALSO durably charge providerRecoveryAttempts to 5 before refunding it back to 4 -- the same real-incident arithmetic applies to every resume-classified bounded step, not only the first",
+    );
+
+    const afterDownloadCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterDownloadCheckpoint?.status, "recoverable");
+    assert.equal(
+      afterDownloadCheckpoint?.providerRecoveryAttempts,
+      4,
+      "the second resume claim's own charge is ALSO refunded back to 4 at the download checkpoint",
+    );
+    const intermediateAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+      isProviderResultIntermediateAsset,
+    );
+    assert.equal(intermediateAssets.length, 1);
+
+    // Claim 4: finds the intermediate and normalizes/uploads the production
+    // asset -- this claim never classifies a provider attempt at all, so it
+    // makes NO providerRecoveryAttempts writes of its own.
+    recoveryAttemptsWriteHistory.length = 0;
+    await worker.processNextJob();
+    assert.deepEqual(
+      recoveryAttemptsWriteHistory,
+      [],
+      "normalizing from an already-downloaded intermediate never touches the recovery budget at all",
+    );
     const checkpointedAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
-      (a) => a.productionRole === "production_png",
+      (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
     );
     assert.equal(checkpointedAssets.length, 1);
 
-    // Claim 3: the NEXT invocation must resolve the already-existing,
+    // Claim 5: the NEXT invocation must resolve the already-existing,
     // already-checkpointed production asset via `resolveExistingProductionAsset`
     // -- BEFORE any provider budget check or provider call -- and finalize
     // directly. No additional recovery charge, no additional submission.
@@ -1097,7 +1324,7 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
     );
 
     const finalAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
-      (a) => a.productionRole === "production_png",
+      (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
     );
     assert.equal(finalAssets.length, 1, "still exactly the one asset created at the checkpoint -- never a duplicate");
     assert.equal(finalAssets[0]!.id, checkpointedAssets[0]!.id);

@@ -1067,7 +1067,7 @@ describe("Phase 28V — two-pass reconstruction", () => {
       assert.equal(intermediateCalled, false, "pass 1 never completed within this bounded call");
     });
 
-    it("pass 1 completes and pass 2 is submitted but still processing: pending overall, intermediate persisted, exactly two submissions", async () => {
+    it("pass 1 completes and pass 2 is submitted but still processing: each stage its own bounded call, intermediate persisted, exactly two submissions, never chaining status+download+submit in one call", async () => {
       const { fetchImpl, calls } = buildTwoPassFakeFetch([
         { processId: "pass1-id", downloadBytes: buildRectFixturePng(2248, 1944), statusSequence: ["Completed"] },
         { processId: "pass2-id", downloadBytes: buildRectFixturePng(4019, 3475), statusSequence: ["Processing"] },
@@ -1079,19 +1079,50 @@ describe("Phase 28V — two-pass reconstruction", () => {
         pollIntervalMs: 1,
       });
 
-      const captured: { intermediate: FinalArtworkProviderIntermediateReconstruction | null } = { intermediate: null };
-      const result = await provider.produceBounded(
-        realLikeInput({ onIntermediateReconstructionProduced: async (r) => { captured.intermediate = r; } }),
-      );
+      // Bounded call 1: fresh submit + one status check for pass 1 -- already
+      // "Completed", but this call must checkpoint that fact and return
+      // WITHOUT downloading in the same call (Repair 3's mandatory boundary).
+      const step1 = await provider.produceBounded(realLikeInput());
+      assert.deepEqual(step1, { status: "result_ready", providerRequestId: "pass1-id" });
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 1, "only pass 1 submitted so far");
+      assert.equal(calls.filter((c) => c.url.includes("/download/")).length, 0, "never downloads on the status-check call");
 
-      assert.deepEqual(result, { status: "pending" });
-      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 2, "pass 1 submitted, and pass 2 submitted once pass 1 completed");
+      // Bounded call 2: pass 1's result is ready -- download it. Pass 2 is
+      // genuinely needed, so this persists pass 1 as the two-pass
+      // intermediate and returns "pending" WITHOUT submitting pass 2 in the
+      // same call (Repair 4's mandatory boundary).
+      const captured: { intermediate: FinalArtworkProviderIntermediateReconstruction | null } = { intermediate: null };
+      const step2 = await provider.produceBounded(
+        realLikeInput({
+          existingProviderRequest: { providerKey: "topaz_transparency_upscale", providerRequestId: "pass1-id", providerStatus: "result_ready" },
+          onIntermediateReconstructionProduced: async (r) => { captured.intermediate = r; },
+        }),
+      );
+      assert.deepEqual(step2, { status: "pending" });
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 1, "downloading pass 1's already-confirmed result is never itself a dispatch");
       assert.ok(captured.intermediate, "pass 1 must be durably persisted before pass 2 is ever submitted, even bounded");
       assert.equal(captured.intermediate!.providerRequestId, "pass1-id");
+
+      // Bounded call 3: pass 1's intermediate now exists (no existing
+      // provider request -- self-heal already cleared it) -- submits pass 2
+      // fresh against pass 1's REAL output, and checks it once (still
+      // "Processing" by construction).
+      const step3 = await provider.produceBounded(
+        realLikeInput({
+          existingIntermediateReconstruction: {
+            bytes: captured.intermediate!.bytes,
+            widthPx: captured.intermediate!.widthPx,
+            heightPx: captured.intermediate!.heightPx,
+            providerRequestId: captured.intermediate!.providerRequestId,
+          },
+        }),
+      );
+      assert.deepEqual(step3, { status: "pending" });
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 2, "pass 2 submitted once pass 1's intermediate exists");
       assert.equal(calls.filter((c) => c.url.includes("/download/") && c.url.includes("pass2")).length, 0, "never downloads pass 2 while it is still pending");
     });
 
-    it("resuming a pending pass 2 that has since completed finishes the job, byte-identical to produce()'s own final output, zero new submissions", async () => {
+    it("resuming a pending pass 2 that has since completed finishes the job across three bounded steps (status -> download -> finalize), byte-identical to produce()'s own final output, zero new submissions", async () => {
       const { fetchImpl, calls } = buildTwoPassFakeFetch(
         [{ processId: "pass2-id", downloadBytes: buildRectFixturePng(4019, 3475), statusSequence: ["Completed"] }],
         [], // nothing freshly submitted -- both passes already exist
@@ -1102,15 +1133,18 @@ describe("Phase 28V — two-pass reconstruction", () => {
         sleepImpl: noSleep,
         pollIntervalMs: 1,
       });
+      const pass1Intermediate: FinalArtworkProviderIntermediateReconstruction = {
+        bytes: buildRectFixturePng(2248, 1944),
+        widthPx: 2248,
+        heightPx: 1944,
+        providerRequestId: "pass1-id",
+      };
 
-      const result = await provider.produceBounded(
+      // Bounded call 1: resume pass 2, status check only -- finds
+      // "Completed" and checkpoints, never downloading in this same call.
+      const step1 = await provider.produceBounded(
         realLikeInput({
-          existingIntermediateReconstruction: {
-            bytes: buildRectFixturePng(2248, 1944),
-            widthPx: 2248,
-            heightPx: 1944,
-            providerRequestId: "pass1-id",
-          },
+          existingIntermediateReconstruction: pass1Intermediate,
           existingProviderRequest: {
             providerKey: "topaz_transparency_upscale",
             providerRequestId: "pass2-id",
@@ -1121,22 +1155,48 @@ describe("Phase 28V — two-pass reconstruction", () => {
           },
         }),
       );
-
+      assert.deepEqual(step1, { status: "result_ready", providerRequestId: "pass2-id" });
       assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 0, "never resubmit pass 1 or pass 2");
-      assert.equal(result.status, "completed");
-      if (result.status !== "completed") return;
+
+      // Bounded call 2: resume pass 2, download step -- pass 2 is always the
+      // FINAL pass, so this yields the downloaded (not yet normalized) result.
+      const step2 = await provider.produceBounded(
+        realLikeInput({
+          existingIntermediateReconstruction: pass1Intermediate,
+          existingProviderRequest: {
+            providerKey: "topaz_transparency_upscale",
+            providerRequestId: "pass2-id",
+            providerStatus: "result_ready",
+          },
+        }),
+      );
+      assert.equal(step2.status, "downloaded");
+      if (step2.status !== "downloaded") return;
+      assert.equal(step2.providerRequestId, "pass2-id");
+      assert.equal(step2.widthPx, 4019);
+      assert.equal(step2.heightPx, 3475);
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 0, "downloading an already-confirmed result is never a dispatch");
+
+      // Bounded call 3: the downloaded result is normalized/encoded locally
+      // -- no further provider contact of any kind.
+      const step3 = await provider.produceBounded(
+        realLikeInput({ existingDownloadedResult: step2 }),
+      );
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 0, "finalizing an already-downloaded result never contacts the provider");
+      assert.equal(step3.status, "completed");
+      if (step3.status !== "completed") return;
       // Same final geometry `produce()`'s own equivalent end-to-end test
       // (test B above) asserts -- proves the bounded and blocking paths
       // converge on byte-identical production output.
-      assert.equal(result.providerRequestId, "pass2-id");
-      assert.equal(result.reconstructedWidthPx, 4019);
-      assert.equal(result.reconstructedHeightPx, 3475);
-      assert.equal(result.widthPx, 3150);
-      assert.ok(Math.abs(result.heightPx - 2727) <= 2);
-      assert.equal(result.resolutionProvenance, "reconstructed");
+      assert.equal(step3.providerRequestId, "pass2-id");
+      assert.equal(step3.reconstructedWidthPx, 4019);
+      assert.equal(step3.reconstructedHeightPx, 3475);
+      assert.equal(step3.widthPx, 3150);
+      assert.ok(Math.abs(step3.heightPx - 2727) <= 2);
+      assert.equal(step3.resolutionProvenance, "reconstructed");
     });
 
-    it("pass 1 alone unexpectedly sufficient: completes within one bounded call, never attempts pass 2", async () => {
+    it("pass 1 alone unexpectedly sufficient: never attempts pass 2, across the status/download/finalize bounded steps", async () => {
       const { fetchImpl, calls } = buildTwoPassFakeFetch(
         [{ processId: "pass1-only-id", downloadBytes: buildRectFixturePng(4496, 3888), statusSequence: ["Completed"] }],
         ["pass1-only-id"],
@@ -1149,17 +1209,37 @@ describe("Phase 28V — two-pass reconstruction", () => {
       });
 
       let intermediateCalled = false;
-      const result = await provider.produceBounded(
+      // Bounded call 1: fresh submit + status check -- already "Completed",
+      // checkpoints without downloading.
+      const step1 = await provider.produceBounded(
         realLikeInput({ onIntermediateReconstructionProduced: async () => { intermediateCalled = true; } }),
       );
-
+      assert.deepEqual(step1, { status: "result_ready", providerRequestId: "pass1-only-id" });
       assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 1, "never submit a pass 2 that would buy nothing");
-      assert.equal(intermediateCalled, false, "pass 1 IS the final stage here -- no intermediate to persist");
-      assert.equal(result.status, "completed");
-      if (result.status !== "completed") return;
-      assert.equal(result.providerRequestId, "pass1-only-id");
-      assert.equal(result.reconstructedWidthPx, 4496);
-      assert.equal(result.reconstructedHeightPx, 3888);
+
+      // Bounded call 2: downloads pass 1's result and, computing pass 2's
+      // need against pass 1's REAL output, finds pass 1 alone already
+      // sufficient -- this download IS the final (not-yet-normalized) result.
+      const step2 = await provider.produceBounded(
+        realLikeInput({
+          existingProviderRequest: { providerKey: "topaz_transparency_upscale", providerRequestId: "pass1-only-id", providerStatus: "result_ready" },
+          onIntermediateReconstructionProduced: async () => { intermediateCalled = true; },
+        }),
+      );
+      assert.equal(step2.status, "downloaded");
+      if (step2.status !== "downloaded") return;
+      assert.equal(step2.providerRequestId, "pass1-only-id");
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 1, "still never a pass 2 submission");
+      assert.equal(intermediateCalled, false, "pass 1 IS the final stage here -- no two-pass intermediate to persist");
+
+      // Bounded call 3: normalize/encode locally from the downloaded result.
+      const step3 = await provider.produceBounded(realLikeInput({ existingDownloadedResult: step2 }));
+      assert.equal(calls.filter((c) => c.url.endsWith("/tool/async")).length, 1, "finalizing never contacts the provider");
+      assert.equal(step3.status, "completed");
+      if (step3.status !== "completed") return;
+      assert.equal(step3.providerRequestId, "pass1-only-id");
+      assert.equal(step3.reconstructedWidthPx, 4496);
+      assert.equal(step3.reconstructedHeightPx, 3888);
     });
 
     it("a provider-reported Failed status on a resumed pass surfaces the same provider_job_failed classification produce() raises", async () => {

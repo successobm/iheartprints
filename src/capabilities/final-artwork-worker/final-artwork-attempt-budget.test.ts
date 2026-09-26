@@ -400,13 +400,18 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     const worker = createFinalArtworkWorkerCapability(repo, assets, provider, createPrintValidationCapability());
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-    // Phase 2 (post-provider durable checkpoint): the first invocation
-    // acquires/persists the production asset and checkpoints; a second
-    // invocation is required to finalize -- also drains the job to a
-    // terminal state so it cannot be mistakenly reclaimed by a LATER
-    // test sharing this same on-disk store.
-    await worker.processNextJob();
-    await worker.processNextJob();
+    // Bounded FinalArtwork Production-Execution Repair (short-step
+    // follow-up): the provider's own completion is now its own checkpoint
+    // (status -> "result_ready"), downloading is its own checkpoint (an
+    // internal intermediate asset), and normalizing/uploading the
+    // production asset is a THIRD checkpoint before finalizing -- four
+    // invocations total to drain a fresh job to "completed". Also drains
+    // the job to a terminal state so it cannot be mistakenly reclaimed by a
+    // LATER test sharing this same on-disk store.
+    await worker.processNextJob(); // status check -> result_ready checkpoint
+    await worker.processNextJob(); // download -> intermediate checkpoint
+    await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+    await worker.processNextJob(); // finalize
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed");
@@ -478,22 +483,30 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       providerRecoveryAttempts: 0,
     });
 
-    // Phase 2 (post-provider durable checkpoint): the first invocation
-    // resumes, downloads, and checkpoints the production asset -- and,
-    // per the recovery-budget refund contract, NEUTRALIZES the recovery
-    // charge THIS claim made, since it reached real durable forward
-    // progress rather than failing. A second invocation finalizes from
-    // the now-existing asset (which never touches the recovery budget).
-    await worker.processNextJob();
-    const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(checkpointed?.status, "recoverable");
+    // Bounded FinalArtwork Production-Execution Repair (short-step
+    // follow-up): the resume now advances in THREE separate, individually
+    // recovery-budget-neutralizing checkpoints (status -> download ->
+    // normalize/upload) before a fourth invocation finalizes.
+    await worker.processNextJob(); // resume: status check -> result_ready checkpoint
+    const afterStatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterStatusCheckpoint?.status, "recoverable");
     assert.equal(
-      checkpointed?.providerRecoveryAttempts,
+      afterStatusCheckpoint?.providerRecoveryAttempts,
       0,
-      "reaching the checkpoint refunds the charge this resume claim made -- this is the exact real-incident regression",
+      "reaching the status checkpoint refunds the charge this resume claim made -- this is the exact real-incident regression",
     );
 
-    await worker.processNextJob();
+    await worker.processNextJob(); // resume: download -> intermediate checkpoint
+    const afterDownloadCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterDownloadCheckpoint?.status, "recoverable");
+    assert.equal(afterDownloadCheckpoint?.providerRecoveryAttempts, 0, "reaching the download checkpoint ALSO refunds that claim's own charge");
+
+    await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+    const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(checkpointed?.status, "recoverable");
+    assert.equal(checkpointed?.providerRecoveryAttempts, 0, "normalizing from the intermediate never touches the recovery budget");
+
+    await worker.processNextJob(); // finalize
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed", "resume must be allowed despite the exhausted fresh-execution budget");
@@ -503,7 +516,7 @@ describe("Separate Provider Recovery Attempt Budget", () => {
   });
 
   // --- 4: resume download transient failure --------------------------------
-  it("4: a resume whose download transiently fails on every bounded local attempt preserves the provider request and spends one recovery attempt", async () => {
+  it("4: a resume whose download transiently fails is deferred to a later invocation WITHOUT spending any recovery attempt (Repair 8 -- this is the root-cause fix, not merely bounded resilience)", async () => {
     const { repo, assets, projectId } = await setup(400);
     const expectedRequest = expectedReconstructionRequest(400);
     const { fetchImpl, submitCount, setDownloadMode } = buildSinglePassFakeTopazFetch(
@@ -511,7 +524,6 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       expectedRequest.widthPx,
       expectedRequest.heightPx,
     );
-    setDownloadMode("fail_transiently");
     const provider = new TopazTransparencyUpscaleProvider({
       apiKey: "test-key-not-real",
       fetchImpl,
@@ -530,18 +542,52 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       providerRecoveryAttempts: 0,
     });
 
+    // Claim 1: resume, status check only -- finds "Completed" and
+    // checkpoints `providerStatus: "result_ready"`. The download failure
+    // mode configured below is never even reached by this claim.
+    await worker.processNextJob();
+    const afterStatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterStatusCheckpoint?.status, "recoverable");
+    assert.equal(afterStatusCheckpoint?.providerStatus, "result_ready");
+    assert.equal(afterStatusCheckpoint?.providerRecoveryAttempts, 0);
+
+    // Claim 2: resume, download step -- an ECONNRESET (ProviderError
+    // classification "network", stage "download") is exactly the shape the
+    // audit found could permanently strand a healthy job's recovery budget
+    // merely because a transport hiccup interrupted an otherwise-safe,
+    // freely-retriable read. Repair 8's fix: this is caught and deferred
+    // EXACTLY like an ordinary "still pending" outcome -- the claim's own
+    // charge is refunded, not spent, and the persisted provider identity is
+    // untouched so a later claim resumes this exact stage from scratch.
+    setDownloadMode("fail_transiently");
     await worker.processNextJob();
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(job?.status, "failed");
-    assert.equal(job?.providerKey, "topaz_transparency_upscale", "provider identity preserved on a transient download failure");
+    assert.equal(job?.status, "recoverable", "a transient download hiccup defers to a later invocation -- it must never fail the job outright");
+    assert.equal(job?.providerKey, "topaz_transparency_upscale", "provider identity preserved");
     assert.equal(job?.providerRequestId, SYNTHETIC_PROCESS_ID);
-    assert.equal(job?.providerRecoveryAttempts, 1, "recoverable under the separate recovery budget -- one unit spent, four remain");
+    assert.equal(
+      job?.providerRecoveryAttempts,
+      0,
+      "THE root-cause fix: an infrastructure hiccup during a safe, freely-retriable download must NOT consume the recovery budget at all",
+    );
     assert.equal(submitCount(), 0);
+
+    // The condition clears -- the SAME job, on a LATER claim, completes
+    // normally with zero duplicate submissions and zero budget spent.
+    setDownloadMode("succeed");
+    await worker.processNextJob(); // download -> intermediate checkpoint
+    await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+    await worker.processNextJob(); // finalize
+
+    const completed = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(completed?.status, "completed");
+    assert.equal(completed?.providerRecoveryAttempts, 0, "the entire recovered lifecycle never spent the recovery budget");
+    assert.equal(submitCount(), 0, "zero paid submissions across the entire deferred-then-recovered lifecycle");
   });
 
   // --- 5: resume eventually succeeds ---------------------------------------
-  it("5: after a transient resume failure, a later retry with the same provider request succeeds -- zero duplicate submissions, pipeline continues to output", async () => {
+  it("5: after a GENUINE resume failure (a malformed download, never a mere transport hiccup), a later retry with the same provider request succeeds -- zero duplicate submissions, pipeline continues to output", async () => {
     const { repo, assets, projectId } = await setup(400);
     const expectedRequest = expectedReconstructionRequest(400);
     const { fetchImpl, submitCount, setDownloadMode } = buildSinglePassFakeTopazFetch(
@@ -549,7 +595,6 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       expectedRequest.widthPx,
       expectedRequest.heightPx,
     );
-    setDownloadMode("fail_transiently");
     const provider = new TopazTransparencyUpscaleProvider({
       apiKey: "test-key-not-real",
       fetchImpl,
@@ -564,21 +609,32 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       attempts: MAX_FINAL_ARTWORK_ATTEMPTS + 1,
       providerKey: "topaz_transparency_upscale",
       providerRequestId: SYNTHETIC_PROCESS_ID,
-      providerStatus: "submitted",
+      // Already past the status-check checkpoint (a genuinely transient
+      // network blip during THAT step is Repair 8's own concern, covered by
+      // test 4) -- this test is specifically about a GENUINE download-step
+      // failure (`permanently_gone`, a 404 -> `malformed_response`, never
+      // `network`/`rate_limited`/`unavailable`/`timeout`), which correctly
+      // still spends a recovery attempt.
+      providerStatus: "result_ready",
       providerRecoveryAttempts: 0,
     });
+    setDownloadMode("permanently_gone");
     await worker.processNextJob();
-    assert.equal((await repo.getFinalArtworkJob(requested.job.id))?.status, "failed");
+    const afterGenuineFailure = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterGenuineFailure?.status, "failed");
+    assert.equal(afterGenuineFailure?.providerRecoveryAttempts, 1, "a genuinely malformed/gone download result correctly spends a recovery attempt");
 
     // The user clicks Retry Preparation once the underlying condition clears.
     setDownloadMode("succeed");
     const retried = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     assert.equal(retried.job.id, requested.job.id, "retry revives the SAME job");
-    // Phase 2 (post-provider durable checkpoint): this retry's resume
-    // succeeds and checkpoints -- and, per the refund contract, NEUTRALIZES
-    // the recovery charge THIS (successful) claim made, leaving only the
-    // FIRST (genuinely failed) claim's charge retained. A further
-    // invocation is required to finalize from the checkpointed asset.
+    // Bounded FinalArtwork Production-Execution Repair (short-step
+    // follow-up): this retry's resume downloads successfully and
+    // checkpoints the internal intermediate -- and, per the refund
+    // contract, NEUTRALIZES the recovery charge THIS (successful) claim
+    // made, leaving only the FIRST (genuinely failed) claim's charge
+    // retained. Two further invocations are required to normalize/upload
+    // and then finalize.
     await worker.processNextJob();
     const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(checkpointed?.status, "recoverable");
@@ -588,7 +644,8 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       "only the first, genuinely-failed claim's charge survives -- the successful resume's own charge is refunded at the checkpoint",
     );
 
-    await worker.processNextJob();
+    await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+    await worker.processNextJob(); // finalize
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed");
@@ -649,7 +706,11 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     await repo.updateFinalArtworkJob(requested.job.id, {
       providerKey: "topaz_transparency_upscale",
       providerRequestId: SYNTHETIC_PROCESS_ID,
-      providerStatus: "submitted",
+      // Seeded past the status-check checkpoint -- this test is specifically
+      // about the DOWNLOAD step's own genuine (never transient) failure mode
+      // exhausting the recovery budget; the status-check step's own
+      // Repair-8 handling is covered by test 4.
+      providerStatus: "result_ready",
       providerRecoveryAttempts: 0,
     });
 
@@ -731,14 +792,21 @@ describe("Separate Provider Recovery Attempt Budget", () => {
 
     // The NEXT real claim (a "recoverable" job is directly claimable) must
     // classify as resume, exactly as it would have before the crash. Under
-    // Phase 2, this resume succeeds and checkpoints -- refunding its own
-    // recovery charge -- so a further invocation is required to finalize.
-    await worker.processNextJob();
+    // this repair, that resume advances one bounded step at a time
+    // (status -> download -> normalize/upload), each refunding its own
+    // recovery charge, before a final invocation finalizes.
+    await worker.processNextJob(); // resume: status check -> result_ready checkpoint
+    const afterStatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterStatusCheckpoint?.status, "recoverable");
+    assert.equal(afterStatusCheckpoint?.providerRecoveryAttempts, 0, "the successful resume's own charge is refunded at the status checkpoint");
+
+    await worker.processNextJob(); // resume: download -> intermediate checkpoint
     const checkpointed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(checkpointed?.status, "recoverable");
-    assert.equal(checkpointed?.providerRecoveryAttempts, 0, "the successful resume's own charge is refunded at the checkpoint");
+    assert.equal(checkpointed?.providerRecoveryAttempts, 0, "the successful resume's own charge is ALSO refunded at the download checkpoint");
 
-    await worker.processNextJob();
+    await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+    await worker.processNextJob(); // finalize
     const job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "completed");
     assert.equal(job?.providerRecoveryAttempts, 0);
@@ -804,11 +872,10 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       };
     }
 
-    it("8a: a transient pass-1 download failure resumes PASS 1 (never jumps to pass 2); once recovered, pass 2 submits fresh and completes -- each pass submitted exactly once", async () => {
+    it("8a: a transient pass-1 download failure defers (Repair 8 -- never spends the recovery budget) and resumes PASS 1 (never jumps to pass 2); once recovered, pass 2 submits fresh and completes -- each pass submitted exactly once", async () => {
       const { repo, assets, projectId } = await setup(TWO_PASS_ARTWORK_WIDTH_PX);
       const { pass1, pass2 } = buildTwoPassSpecs();
       const fake = buildTwoPassFakeTopazFetch(pass1, pass2);
-      fake.setDownloadMode(PASS1_ID, "fail_transiently");
       const provider = new TopazTransparencyUpscaleProvider({
         apiKey: "test-key-not-real",
         fetchImpl: fake.fetchImpl,
@@ -819,37 +886,63 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       const worker = createFinalArtworkWorkerCapability(repo, assets, provider, createPrintValidationCapability());
 
       const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+
+      // Claim 1: fresh submit + status check for pass 1 -- the fixture's
+      // status endpoint answers "Completed" immediately, so this checkpoints
+      // `providerStatus: "result_ready"` for pass 1 without ever attempting
+      // a download yet.
       await worker.processNextJob();
-      const afterFirst = await repo.getFinalArtworkJob(requested.job.id);
-      assert.equal(afterFirst?.status, "failed");
-      assert.equal(afterFirst?.providerRequestId, PASS1_ID, "pass 1's own identity is preserved -- never accidentally jumps to pass 2");
+      const afterPass1StatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+      assert.equal(afterPass1StatusCheckpoint?.status, "recoverable");
+      assert.equal(afterPass1StatusCheckpoint?.providerRequestId, PASS1_ID);
       assert.equal(fake.submitCount(), 1, "only pass 1 was ever submitted so far");
 
-      // Retry: the underlying condition clears.
+      // Claim 2: resume pass 1, download step -- an ECONNRESET is a
+      // transient infrastructure hiccup (Repair 8), never a genuine
+      // failure: it defers to a later invocation WITHOUT spending any
+      // recovery attempt and WITHOUT ever touching pass 1's identity.
+      fake.setDownloadMode(PASS1_ID, "fail_transiently");
+      await worker.processNextJob();
+      const afterTransientHiccup = await repo.getFinalArtworkJob(requested.job.id);
+      assert.equal(afterTransientHiccup?.status, "recoverable", "a transient download hiccup must never fail the job outright");
+      assert.equal(afterTransientHiccup?.providerRequestId, PASS1_ID, "pass 1's own identity is preserved -- never accidentally jumps to pass 2");
+      assert.equal(afterTransientHiccup?.providerRecoveryAttempts, 0, "a transient hiccup must never spend the recovery budget");
+      assert.equal(fake.submitCount(), 1, "still only pass 1 submitted -- a deferred download is never a dispatch");
+
+      // Retry: the underlying condition clears. Claim 3 downloads pass 1's
+      // result for real and persists it as the two-pass intermediate.
       fake.setDownloadMode(PASS1_ID, "succeed");
-      const retried = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-      assert.equal(retried.job.id, requested.job.id);
-      // Phase 2 (post-provider durable checkpoint): pass 2's own
-      // completion first checkpoints the production asset; a further
-      // invocation finalizes from it.
+      await worker.processNextJob();
+
+      // Claim 4: now fresh_execution (pass 1's identity was retired once its
+      // result was durably persisted) -- submits pass 2 fresh against pass
+      // 1's REAL output, and checks it once (also immediately "Completed").
+      await worker.processNextJob();
+      const afterPass2StatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+      assert.equal(afterPass2StatusCheckpoint?.providerRequestId, PASS2_ID, "the job is now keyed to pass 2's fresh request");
+      assert.deepEqual(fake.submittedIds(), [PASS1_ID, PASS2_ID], "exactly one submission for each pass, in order -- no duplicates");
+      assert.equal(fake.submitCount(), 2);
+
+      // Claim 5: downloads pass 2's result and persists it as the
+      // ready-to-normalize intermediate. Claim 6: normalizes/uploads the
+      // production asset. Claim 7: finalizes.
+      await worker.processNextJob();
       await worker.processNextJob();
       await worker.processNextJob();
 
       const job = await repo.getFinalArtworkJob(requested.job.id);
       assert.equal(job?.status, "completed");
       assert.equal(job?.providerRequestId, PASS2_ID, "the completed job is keyed to pass 2's own request, not pass 1's retired one");
-      assert.deepEqual(fake.submittedIds(), [PASS1_ID, PASS2_ID], "exactly one submission for each pass, in order -- no duplicates");
-      assert.equal(fake.submitCount(), 2);
+      assert.equal(fake.submitCount(), 2, "still exactly one submission per pass across the entire recovered lifecycle");
 
       const validation = await repo.getLatestProductionAssetValidationForJob(projectId, job!.id);
       assert.ok(validation, "a recovered two-pass reconstruction proceeds through real print validation");
     });
 
-    it("8b: a transient pass-2 download failure (after pass 1 already durably persisted) resumes PASS 2 without resubmitting either pass", async () => {
+    it("8b: a transient pass-2 download failure (after pass 1 already durably persisted) defers (Repair 8) and resumes PASS 2 without resubmitting either pass", async () => {
       const { repo, assets, projectId } = await setup(TWO_PASS_ARTWORK_WIDTH_PX);
       const { pass1, pass2 } = buildTwoPassSpecs();
       const fake = buildTwoPassFakeTopazFetch(pass1, pass2);
-      fake.setDownloadMode(PASS2_ID, "fail_transiently");
       const provider = new TopazTransparencyUpscaleProvider({
         apiKey: "test-key-not-real",
         fetchImpl: fake.fetchImpl,
@@ -860,28 +953,46 @@ describe("Separate Provider Recovery Attempt Budget", () => {
       const worker = createFinalArtworkWorkerCapability(repo, assets, provider, createPrintValidationCapability());
 
       const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+
+      // Claims 1-3 drive pass 1 to its durable intermediate and pass 2 to
+      // its own "result_ready" checkpoint, exactly as in test 8a's
+      // non-failing lead-up.
+      await worker.processNextJob(); // pass 1: submit + status -> result_ready checkpoint
+      await worker.processNextJob(); // pass 1: download -> pass1_intermediate persisted
+      await worker.processNextJob(); // pass 2: submit + status -> result_ready checkpoint
+      assert.deepEqual(fake.submittedIds(), [PASS1_ID, PASS2_ID], "both passes were genuinely submitted once each so far");
+
+      const assetsAfterLeadUp = await repo.listAssets(projectId);
+      const intermediatesAfterLeadUp = assetsAfterLeadUp.filter(
+        (a) => (a.metadata as Record<string, unknown> | undefined)?.reconstructionStage,
+      );
+      assert.equal(intermediatesAfterLeadUp.length, 1, "pass 1's intermediate exists; pass 2's has not been downloaded yet");
+
+      // Claim 4: resume pass 2, download step -- an ECONNRESET is a
+      // transient infrastructure hiccup (Repair 8): it defers to a later
+      // invocation WITHOUT spending any recovery attempt and WITHOUT
+      // resubmitting either pass.
+      fake.setDownloadMode(PASS2_ID, "fail_transiently");
       await worker.processNextJob();
-      const afterFirst = await repo.getFinalArtworkJob(requested.job.id);
-      assert.equal(afterFirst?.status, "failed");
-      assert.equal(afterFirst?.providerRequestId, PASS2_ID, "pass 1 already completed and persisted -- the job's identity now belongs to pass 2");
-      assert.deepEqual(fake.submittedIds(), [PASS1_ID, PASS2_ID], "both passes were genuinely submitted once each, in this single first claim");
+      const afterTransientHiccup = await repo.getFinalArtworkJob(requested.job.id);
+      assert.equal(afterTransientHiccup?.status, "recoverable", "a transient download hiccup must never fail the job outright");
+      assert.equal(afterTransientHiccup?.providerRequestId, PASS2_ID, "pass 1 already completed and persisted -- the job's identity belongs to pass 2");
+      assert.equal(afterTransientHiccup?.providerRecoveryAttempts, 0, "a transient hiccup must never spend the recovery budget");
 
       // Retry: pass 2's download recovers.
       fake.setDownloadMode(PASS2_ID, "succeed");
-      await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-      // Phase 2 (post-provider durable checkpoint): checkpoints first,
-      // finalizes on a further invocation.
-      await worker.processNextJob();
-      await worker.processNextJob();
+      await worker.processNextJob(); // resume pass 2: download -> provider-result intermediate persisted
+      await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+      await worker.processNextJob(); // finalize
 
       const job = await repo.getFinalArtworkJob(requested.job.id);
       assert.equal(job?.status, "completed");
       assert.equal(job?.providerRequestId, PASS2_ID);
-      assert.equal(fake.submitCount(), 2, "still exactly one submission per pass across BOTH claims -- pass 1 is never resubmitted merely because pass 2's download failed");
+      assert.equal(fake.submitCount(), 2, "still exactly one submission per pass across the entire recovered lifecycle -- pass 1 is never resubmitted merely because pass 2's download hiccuped");
 
       const assetsList = await repo.listAssets(projectId);
       const intermediates = assetsList.filter((a) => (a.metadata as Record<string, unknown> | undefined)?.reconstructionStage);
-      assert.equal(intermediates.length, 1, "pass 1's intermediate is persisted exactly once, never duplicated by the pass-2 retry");
+      assert.equal(intermediates.length, 2, "pass 1's two-pass intermediate AND pass 2's ready-to-normalize intermediate, each persisted exactly once");
     });
   });
 });

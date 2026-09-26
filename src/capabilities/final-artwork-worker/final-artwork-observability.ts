@@ -154,3 +154,75 @@ export function logFinalArtworkAttemptBudgetExhausted(
 ): void {
   console.error("[final-artwork-worker] attempt budget exhausted", details);
 }
+
+/**
+ * Bounded FinalArtwork Production-Execution Repair (short-step follow-up,
+ * Repair 1 — observability): the audit could not identify which stage a
+ * production HTTP 504 failed inside, because no stage-level timing existed
+ * anywhere in this pipeline. This is the minimum structured instrumentation
+ * needed to answer that the next time: one whitelisted-field log line per
+ * durable-state-machine stage, with elapsed milliseconds for whichever
+ * stages have a meaningful duration.
+ *
+ * Same discipline as every other function in this file: whitelisted fields
+ * only, never a spread of a richer object. Never logs a provider secret,
+ * a signed storage/download URL, artwork bytes, or customer-sensitive
+ * content — `providerRequestId` is an internal diagnostic id, not a secret,
+ * same as elsewhere in this module.
+ */
+export type FinalArtworkWorkerStage =
+  | "job_claimed"
+  | "provider_status_check_started"
+  | "provider_status_check_completed"
+  | "provider_download_started"
+  | "provider_download_completed"
+  | "provider_result_intermediate_persisted"
+  | "normalize_started"
+  | "normalize_completed"
+  | "production_asset_upload_started"
+  | "production_asset_upload_completed"
+  | "production_asset_row_persisted"
+  | "checkpoint_persisted"
+  | "recovery_charge_refunded"
+  | "validation_started"
+  | "validation_completed"
+  | "job_completed";
+
+export interface FinalArtworkWorkerStageLogDetails {
+  projectId: string;
+  finalArtworkJobId: string;
+  providerKey: string | null;
+  stage: FinalArtworkWorkerStage;
+  /** Milliseconds spent in the operation this stage event closes out — `null` for a stage marker with no meaningful duration of its own (e.g. `job_claimed`). */
+  elapsedMs: number | null;
+}
+
+export function logFinalArtworkWorkerStage(details: FinalArtworkWorkerStageLogDetails): void {
+  console.info("[final-artwork-worker] stage", details);
+}
+
+/**
+ * Bounded FinalArtwork Production-Execution Repair (short-step follow-up,
+ * Repair 8): fires when a TRANSIENT infrastructure hiccup (network blip,
+ * rate limit, provider unavailable, or this repair's own new per-call
+ * timeout) during the bounded status-check or download step is deferred to
+ * a later claim rather than failing the job — the recovery-budget charge
+ * this claim made is refunded exactly like an ordinary "still pending"
+ * outcome. Distinct from `logFinalArtworkProviderFailure`, which fires only
+ * when a claim genuinely fails the job; this is the opposite signal —
+ * proof that a transport hiccup did NOT consume budget it shouldn't have.
+ */
+export interface FinalArtworkBoundedTransientDeferralLogDetails {
+  projectId: string;
+  finalArtworkJobId: string;
+  providerKey: string;
+  providerRequestId: string | null;
+  stage: string;
+  sanitizedError: string;
+}
+
+export function logFinalArtworkBoundedTransientDeferral(
+  details: FinalArtworkBoundedTransientDeferralLogDetails,
+): void {
+  console.warn("[final-artwork-worker] transient poll/download hiccup deferred to a later claim, no budget consumed", details);
+}

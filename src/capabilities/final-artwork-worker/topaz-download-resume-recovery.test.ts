@@ -248,14 +248,13 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     return { repo, assets, projectId };
   }
 
-  it("1: download failing on every bounded attempt fails the job honestly and preserves the paid provider request id", async () => {
+  it("1: a download that fails on the bounded download claim defers to a later invocation WITHOUT failing the job (Repair 8) -- the ECONNRESET shape is a transient hiccup, never a genuine failure", async () => {
     const { repo, assets, projectId } = await setup(400);
     const expectedRequest = expectedReconstructionRequest(400);
     const { fetchImpl, submitCount, setDownloadMode } = buildResumableFakeTopazFetch(
       expectedRequest.widthPx,
       expectedRequest.heightPx,
     );
-    setDownloadMode("fail_transiently"); // fails EVERY attempt within the bounded local retry too
 
     const provider = new TopazTransparencyUpscaleProvider({
       apiKey: "test-key-not-real",
@@ -268,39 +267,108 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+
+    // Claim 1: fresh submit + status check -- the fixture's status endpoint
+    // answers "Completed" immediately, so this checkpoints `providerStatus:
+    // "result_ready"` without ever attempting a download.
+    await worker.processNextJob();
+    const afterStatusCheckpoint = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterStatusCheckpoint?.status, "recoverable");
+    assert.equal(afterStatusCheckpoint?.providerRequestId, LIVE_INCIDENT_PROCESS_ID);
+
+    // Claim 2: resume, download step -- an ECONNRESET is exactly the
+    // transient-infrastructure shape Repair 8 exists for: caught and
+    // deferred, never failing the job, never spending the recovery budget.
+    setDownloadMode("fail_transiently");
     const { errorCalls } = await captureConsoleError(() => worker.processNextJob());
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(job?.status, "failed");
-    assert.match(job?.lastError ?? "", /could not be fetched/i);
-    assert.equal(job?.providerKey, "topaz_transparency_upscale", "provider identity must be preserved, never cleared, for a download failure");
-    assert.equal(job?.providerRequestId, LIVE_INCIDENT_PROCESS_ID, "the paid request id must be preserved so a retry can resume it");
-    assert.equal(submitCount(), 1, "exactly one paid submission, despite the download failing");
+    assert.equal(job?.status, "recoverable", "a transient download hiccup must never fail the job outright");
+    assert.equal(job?.providerKey, "topaz_transparency_upscale", "provider identity must be preserved, never cleared, for a transient download hiccup");
+    assert.equal(job?.providerRequestId, LIVE_INCIDENT_PROCESS_ID, "the paid request id must be preserved so a later claim can resume it");
+    assert.equal(job?.providerRecoveryAttempts, 0, "a transient hiccup must never spend the recovery budget");
+    assert.equal(submitCount(), 1, "exactly one paid submission, despite the download hiccuping");
 
-    // --- Phase 4 observability -------------------------------------------
-    assert.equal(errorCalls.length, 1, "exactly one failure log for this one failed job");
-    const [, details] = errorCalls[0] as [string, Record<string, unknown>];
+    // --- Repair 8 observability -------------------------------------------
+    // No FAILURE log for this — it never failed. The deferral itself is
+    // logged distinctly (`logFinalArtworkBoundedTransientDeferral`, via
+    // `console.warn`), captured separately below.
+    assert.equal(errorCalls.length, 0, "a transient, deferred hiccup must never log as a job failure");
+
+    // Drain the job to a terminal state so it cannot be mistakenly reclaimed
+    // by a LATER test sharing this same on-disk store.
+    setDownloadMode("succeed");
+    await worker.processNextJob(); // download -> intermediate checkpoint
+    await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+    await worker.processNextJob(); // finalize
+    const drained = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(drained?.status, "completed");
+  });
+
+  it("1b: the SAME transient-deferral logs a distinct, whitelisted-field warning (never a failure log)", async () => {
+    const { repo, assets, projectId } = await setup(400);
+    const expectedRequest = expectedReconstructionRequest(400);
+    const { fetchImpl, setDownloadMode } = buildResumableFakeTopazFetch(
+      expectedRequest.widthPx,
+      expectedRequest.heightPx,
+    );
+
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+    });
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const printValidation = createPrintValidationCapability();
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
+
+    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await worker.processNextJob(); // status check -> result_ready checkpoint
+
+    setDownloadMode("fail_transiently");
+    const original = console.warn;
+    const warnCalls: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnCalls.push(args);
+    };
+    try {
+      await worker.processNextJob();
+    } finally {
+      console.warn = original;
+    }
+
+    const deferralCall = warnCalls.find(
+      (args) => typeof args[0] === "string" && args[0].includes("transient poll/download hiccup"),
+    );
+    assert.ok(deferralCall, "the deferral must be logged distinctly from a failure");
+    const [, details] = deferralCall as [string, Record<string, unknown>];
     assert.equal(details.projectId, projectId);
     assert.equal(details.finalArtworkJobId, requested.job.id);
     assert.equal(details.providerKey, "topaz_transparency_upscale");
     assert.equal(details.providerRequestId, LIVE_INCIDENT_PROCESS_ID);
     assert.equal(details.stage, "download");
-    assert.match(String(details.sanitizedError), /could not be fetched/i);
-    assert.equal(details.submittedNewPaidRequest, true, "this attempt genuinely made the one fresh submission");
-    assert.equal(details.attemptedResume, false, "this was a first attempt, not a resume");
     // Never a secret, a URL, or a stack trace.
     assert.doesNotMatch(JSON.stringify(details), /test-key-not-real/);
     assert.doesNotMatch(JSON.stringify(details), /cdn\.example\.com/);
+
+    // Drain the job to a terminal state so it cannot be mistakenly reclaimed
+    // by a LATER test sharing this same on-disk store.
+    setDownloadMode("succeed");
+    await worker.processNextJob(); // download -> intermediate checkpoint
+    await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+    await worker.processNextJob(); // finalize
+    const job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job?.status, "completed");
   });
 
-  it("2: retrying after that failure resumes the SAME job and SAME provider request, and a since-recovered download completes it -- zero duplicate paid submissions", async () => {
+  it("2: retrying after a GENUINE download failure (never a mere transient hiccup -- that's test 1) resumes the SAME job and SAME provider request, and a since-recovered download completes it -- zero duplicate paid submissions", async () => {
     const { repo, assets, projectId } = await setup(400);
     const expectedRequest = expectedReconstructionRequest(400);
     const { fetchImpl, submitCount, setDownloadMode } = buildResumableFakeTopazFetch(
       expectedRequest.widthPx,
       expectedRequest.heightPx,
     );
-    setDownloadMode("fail_transiently");
 
     const provider = new TopazTransparencyUpscaleProvider({
       apiKey: "test-key-not-real",
@@ -313,6 +381,12 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await worker.processNextJob(); // status check -> result_ready checkpoint
+
+    // A genuinely malformed/gone result (never `network`/`rate_limited`/
+    // `unavailable`/`timeout` -- Repair 8's transient-deferral carve-out
+    // never applies here) correctly fails the job outright.
+    setDownloadMode("permanently_gone");
     await worker.processNextJob();
     const failed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(failed?.status, "failed");
@@ -324,16 +398,16 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     const retried = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
     assert.equal(retried.job.id, requested.job.id, "retry must revive the SAME job, never create a new one");
 
-    await worker.processNextJob();
-    // Phase 2 (post-provider durable checkpoint): the retry's first call
-    // persists the recovered production asset and checkpoints to
-    // "recoverable" rather than also validating/completing in the same
-    // invocation. A second call is required to reach "completed" -- and,
-    // per this describe block's shared on-disk store (no `retireQueuedJobs`
-    // helper exists in this file), leaving this job undrained would make it
-    // the OLDEST claimable job and silently steal test 3's own
-    // `processNextJob()` calls below.
-    await worker.processNextJob();
+    await worker.processNextJob(); // resume: download -> intermediate checkpoint
+    // Bounded FinalArtwork Production-Execution Repair (short-step
+    // follow-up): the retry's download checkpoints the internal
+    // intermediate; normalize/upload is its own further checkpoint before
+    // finalizing -- and, per this describe block's shared on-disk store (no
+    // `retireQueuedJobs` helper exists in this file), leaving this job
+    // undrained would make it the OLDEST claimable job and silently steal
+    // test 3's own `processNextJob()` calls below.
+    await worker.processNextJob(); // normalize/upload -> production-asset checkpoint
+    await worker.processNextJob(); // finalize
 
     const completed = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(completed?.status, "completed");
@@ -364,6 +438,7 @@ describe("Fix Topaz Resume/Download Failure -- end-to-end through the real worke
     const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
 
     const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await worker.processNextJob(); // status check -> result_ready checkpoint (Topaz's own status is genuinely "Completed"; only the download is gone)
     await worker.processNextJob();
     let job = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(job?.status, "failed");
