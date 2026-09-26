@@ -840,6 +840,69 @@ describe("Separate Provider Recovery Attempt Budget", () => {
     assert.equal(calls.length, 0, "the refusal happens before any Topaz endpoint is contacted -- no wasted poll/download either");
   });
 
+  // --- 6b: Unbounded Normalize Crash-Loop Repair (independent-review -------
+  // finding, Blocker 3): distinct from test 6 above, which exhausts the
+  // ORIGINAL top-level ceiling in `produceProductionAsset` for a job that
+  // never even reached a downloaded intermediate. This proves the SEPARATE
+  // ceiling `finalizeFromProviderResultIntermediate` itself checks, for a
+  // job that HAS a real, genuinely-downloaded, valid intermediate -- the
+  // exact "already-downloaded result, but normalizing it keeps crashing"
+  // shape Blocker 3 exists for. A true process death cannot be staged
+  // inside a single synchronous test process; the durable STATE N real
+  // crashes would leave behind (the charge from each, with nothing after it
+  // ever running) is reproduced directly, mirroring test 6's own established
+  // technique for the sibling ceiling.
+  it("6b: repeated crash-during-normalize against an already-downloaded intermediate reaches a bounded terminal failure -- the ceiling check fires BEFORE any storage/provider work, never an unbounded retry loop", async () => {
+    const { repo, assets, projectId } = await setup(400);
+    const expectedRequest = expectedReconstructionRequest(400);
+    const { fetchImpl, submitCount, calls } = buildSinglePassFakeTopazFetch(
+      SYNTHETIC_PROCESS_ID,
+      expectedRequest.widthPx,
+      expectedRequest.heightPx,
+    );
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+    });
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, createPrintValidationCapability());
+
+    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    // Claim 1: submit + status -> result_ready checkpoint.
+    await worker.processNextJob();
+    // Claim 2: download -> a REAL, valid, geometry-checked intermediate is
+    // durably persisted. `providerRecoveryAttempts` is untouched by this
+    // step (only `finalizeFromProviderResultIntermediate` ever charges it).
+    await worker.processNextJob();
+    const afterDownload = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(afterDownload?.status, "recoverable");
+    assert.equal(afterDownload?.providerRecoveryAttempts, 0);
+    assert.equal(submitCount(), 1);
+    const callsAfterDownload = calls.length;
+
+    // The durable state exactly N real, repeated crashes-during-normalize
+    // would leave behind: each one charged the counter (before attempting
+    // any risky work) and then the process died before anything else ran.
+    await repo.updateFinalArtworkJob(requested.job.id, {
+      providerRecoveryAttempts: MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS,
+    });
+
+    // The NEXT real claim must refuse -- explicitly, terminally -- without
+    // ever touching storage or the provider again.
+    await worker.processNextJob();
+
+    const job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job?.status, "failed", "a normalize crash-loop reaches a bounded terminal outcome, never retries forever");
+    assert.match(job?.lastError ?? "", /could not be normalized after/i);
+    assert.equal(job?.providerKey, "topaz_transparency_upscale", "identity preserved even at exhaustion -- the intermediate itself is never discarded");
+    assert.equal(job?.providerRequestId, SYNTHETIC_PROCESS_ID);
+    assert.equal(job?.providerRecoveryAttempts, MAX_FINAL_ARTWORK_RECOVERY_ATTEMPTS, "the budget is not spent further once already exhausted");
+    assert.equal(submitCount(), 1, "an exhausted normalize-recovery budget must never fall back to a fresh paid submission");
+    assert.equal(calls.length, callsAfterDownload, "the refusal happens before any further Topaz endpoint contact -- the already-downloaded intermediate is never re-fetched either");
+  });
+
   // --- 7: permanently unavailable provider result --------------------------
   it("7: a permanently-gone provider result fails explicitly on every retry and never resubmits, until the recovery budget itself is exhausted", async () => {
     const { repo, assets, projectId } = await setup(400);

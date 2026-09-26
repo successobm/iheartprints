@@ -2170,6 +2170,13 @@ export function createFinalArtworkWorkerCapability(
       projectId: job.projectId,
       finalArtworkJobId: job.id,
       providerKey: activeProvider.providerKey,
+      stage: "production_asset_upload_completed",
+      elapsedMs: Date.now() - uploadStartedAt,
+    });
+    logFinalArtworkWorkerStage({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      providerKey: activeProvider.providerKey,
       stage: "production_asset_row_persisted",
       elapsedMs: Date.now() - uploadStartedAt,
     });
@@ -2208,6 +2215,22 @@ export function createFinalArtworkWorkerCapability(
       stage: "checkpoint_persisted",
       elapsedMs: null,
     });
+    if (params.checkpointRefund.providerRecoveryAttempts !== undefined) {
+      // Independent-review finding (non-blocking observability gap): this
+      // is the ONLY place a successful `providerRecoveryAttempts` refund
+      // happens for either of `finalizeProducedOutput`'s two call sites
+      // (the direct `produceProductionAsset` "completed" outcome AND
+      // Blocker 3's `finalizeFromProviderResultIntermediate` normalize
+      // path) -- logging it here once covers both, rather than
+      // duplicating the same log at each call site.
+      logFinalArtworkWorkerStage({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        providerKey: activeProvider.providerKey,
+        stage: "recovery_charge_refunded",
+        elapsedMs: null,
+      });
+    }
     return { status: "pending" };
   }
 

@@ -403,6 +403,22 @@ describe("Stale Provider-Result Intermediate Repair -- negative identity tests",
       },
     });
 
+    // Independent-review finding (repair-cycle-2 correction): the injected
+    // asset's `providerRequestId` must ALSO be the job's own CURRENTLY
+    // ACTIVE slot, or `resolveExistingProviderResultIntermediate` never
+    // even looks at it (it only ever inspects the ONE candidate matching
+    // `job.providerRequestId` -- see that function's own doc comment) and
+    // this test would silently prove nothing about the `sourceAssetId`
+    // comparison specifically. Setting the job's own fields to match is
+    // the same direct-DB-manipulation technique already used elsewhere in
+    // this codebase (e.g. `sign-artwork-service.test.ts`) to set up a
+    // precise starting state without re-deriving it through a slower,
+    // less targeted real flow.
+    await repo.updateFinalArtworkJob(requested.job.id, {
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: "injected-wrong-source-process-id",
+    });
+
     const { fetchImpl, submittedIds } = buildFreshPerSubmissionFakeTopazFetch();
     const provider = new TopazTransparencyUpscaleProvider({
       apiKey: "test-key-not-real",
@@ -415,13 +431,15 @@ describe("Stale Provider-Result Intermediate Repair -- negative identity tests",
     await worker.processNextJob();
     const afterClaim = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(afterClaim?.status, "recoverable");
-    assert.notEqual(afterClaim?.providerRequestId, "injected-wrong-source-process-id", "the wrong-source intermediate's request id must never become this job's active identity");
+    assert.notEqual(afterClaim?.providerRequestId, "injected-wrong-source-process-id", "the wrong-source intermediate's request id must never remain this job's active identity -- the identity mismatch must self-heal it");
     const productionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
       (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
     );
     assert.equal(productionAssets.length, 0, "no production asset was fabricated from the wrong-source intermediate");
     // A genuinely fresh submission proceeds instead, against THIS job's
-    // real, correct source.
+    // real, correct source, within the SAME claim the self-heal happened
+    // in (matching test A's own established "self-heal and resubmit
+    // together" behavior).
     assert.equal(submittedIds().length, 1, "a genuinely new submission was made for the CORRECT source, never resuming/trusting the injected one");
   });
 
@@ -462,6 +480,14 @@ describe("Stale Provider-Result Intermediate Repair -- negative identity tests",
       },
     });
 
+    // See test C's identical comment: the injected asset's
+    // `providerRequestId` must ALSO be the job's own currently active
+    // slot, or the comparison this test claims to exercise never runs.
+    await repo.updateFinalArtworkJob(requested.job.id, {
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: "injected-wrong-sha-process-id",
+    });
+
     const { fetchImpl, submittedIds } = buildFreshPerSubmissionFakeTopazFetch();
     const provider = new TopazTransparencyUpscaleProvider({
       apiKey: "test-key-not-real",
@@ -474,7 +500,7 @@ describe("Stale Provider-Result Intermediate Repair -- negative identity tests",
     await worker.processNextJob();
     const afterClaim = await repo.getFinalArtworkJob(requested.job.id);
     assert.equal(afterClaim?.status, "recoverable");
-    assert.notEqual(afterClaim?.providerRequestId, "injected-wrong-sha-process-id");
+    assert.notEqual(afterClaim?.providerRequestId, "injected-wrong-sha-process-id", "the wrong-content-hash intermediate's request id must never remain this job's active identity -- the identity mismatch must self-heal it");
     const productionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
       (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
     );

@@ -206,11 +206,18 @@ export function logFinalArtworkWorkerStage(details: FinalArtworkWorkerStageLogDe
  * Repair 8): fires when a TRANSIENT infrastructure hiccup (network blip,
  * rate limit, provider unavailable, or this repair's own new per-call
  * timeout) during the bounded status-check or download step is deferred to
- * a later claim rather than failing the job — the recovery-budget charge
- * this claim made is refunded exactly like an ordinary "still pending"
- * outcome. Distinct from `logFinalArtworkProviderFailure`, which fires only
- * when a claim genuinely fails the job; this is the opposite signal —
- * proof that a transport hiccup did NOT consume budget it shouldn't have.
+ * a later claim rather than failing the job. Unbounded Transient-Deferral
+ * Loop Repair (Blocker 2 correction): the recovery-budget charge this
+ * claim's own classification already made is deliberately LEFT CHARGED
+ * (never refunded) here — a PERSISTENT transient condition must still
+ * reach the existing recovery-attempt ceiling, never defer forever with
+ * neither budget ever moving. Only a claim that never ran at all (an
+ * external interruption before any code executed) is genuinely free; this
+ * function fires for a claim that DID run and caught a transient error, so
+ * it always costs one unit. Distinct from `logFinalArtworkProviderFailure`,
+ * which fires only when a claim genuinely fails the job; this is the
+ * intermediate signal — a controlled, bounded deferral, neither a clean
+ * success nor a terminal failure.
  */
 export interface FinalArtworkBoundedTransientDeferralLogDetails {
   projectId: string;
