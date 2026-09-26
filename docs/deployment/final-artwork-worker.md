@@ -300,21 +300,34 @@ invocation:
   always safe to retry on a later invocation and was never itself a paid
   dispatch.
 
-**Liveness — one stuck job cannot starve newer ones.** A provider request
-that stays pending for a long time is, by construction, always the
-"oldest due" `queued`/`recoverable` row, and would otherwise keep
-winning every claim in every batch forever. `claimNextQueuedFinalArtworkJob`
-accepts an `excludeJobIds` list; the scheduler's batch loop adds a job's
-id to that list the moment it sees a bounded-pending outcome for it
-THIS batch, so the REST of that batch's claim slots go to other,
-unrelated jobs instead of re-checking the same not-yet-finished request
-repeatedly. This bounds starvation caused by ONE stuck job within a
-single batch/invocation — with `maxJobsPerRun` (default 5) or more
-SIMULTANEOUSLY-pending older jobs, every batch slot can still go to that
-older set before a newer job is ever reached, until enough of them
-resolve. It also does not (yet) bound how long a single provider request
-may legitimately stay pending across MANY separate invocations/batches —
-see the open question below.
+**Liveness — one stuck job cannot starve newer ones.** Each HTTP
+invocation claims and advances AT MOST ONE job (One-Job-Per-Invocation
+Repair — no `maxJobsPerRun` config exists any more; the loop that option
+controlled was removed entirely, not merely defaulted down). That alone
+is not sufficient for liveness: a provider request that stays pending
+across many invocations would, by pure `created_at` ordering, always be
+the "oldest due" `queued`/`recoverable` row and would keep winning every
+single invocation's one claim forever, starving every other queued job
+indefinitely — reproduced during an independent review as 10 consecutive
+invocations all reclaiming the same pending job while a newer job was
+never claimed once.
+
+Queue Starvation Repair: `claimNextQueuedFinalArtworkJob` orders
+candidates by `heartbeat_at` ascending (nulls first for a job never yet
+claimed), `created_at` only as a tiebreaker — never `created_at` alone.
+Claiming a job durably touches its own `heartbeat_at` (already true
+before this repair, for every claim), so the very act of claiming it
+makes it the FRESHEST row; the next invocation naturally prefers
+whichever OTHER eligible job has gone longest without being touched. For
+two simultaneously-pending jobs this alternates them across successive
+invocations; for three or more it rotates fairly through all of them in
+least-recently-serviced order. No new column, migration, or queue
+infrastructure — the existing `heartbeat_at` column, already written on
+every claim and every checkpoint, is the entire mechanism. It does not
+(yet) bound how long a single provider request may legitimately stay
+pending in total across many invocations before something gives up on
+it entirely — see the open question below, which is about THAT ceiling,
+not about fairness among jobs.
 
 **Open question, deliberately not answered by this repair:** what should
 eventually happen to a Topaz request that never reaches `Completed`/

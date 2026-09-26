@@ -1495,15 +1495,31 @@ export interface ProjectRepository {
    * ever wins", real Supabase row-conditional update or the local store's
    * mutex-serialized equivalent).
    *
-   * Bounded FinalArtwork Production-Execution Repair (liveness): `excludeJobIds`,
-   * when given, skips those specific ids even though they are the oldest
-   * due `queued`/`recoverable` rows — used within a single batch to stop
-   * an indefinitely-pending provider request (which keeps returning to
-   * `recoverable` and therefore keeps winning "oldest due") from
-   * monopolizing every claim in that batch and starving newer,
-   * unrelated jobs. Never changes claim order among the NON-excluded
-   * rows, and never excludes a row this same caller has not itself
-   * already claimed and released as pending earlier in the same batch.
+   * "Oldest due" is LEAST-RECENTLY-TOUCHED, not literally oldest-created:
+   * candidates are ordered by `heartbeatAt` ascending (a row never yet
+   * claimed sorts as if maximally overdue), `createdAt` breaking ties.
+   * Queue Starvation Repair (independent-review finding): claiming by
+   * `createdAt` alone let an indefinitely-pending provider request (its
+   * `heartbeatAt` bumped on every claim, but `createdAt` frozen forever)
+   * win "oldest due" on literally every subsequent HTTP invocation,
+   * starving every other queued job — reproduced with 10 consecutive
+   * invocations all reclaiming the same pending job. Ordering by
+   * `heartbeatAt` instead means a claim makes its OWN row the freshest,
+   * so the next invocation naturally prefers whichever OTHER eligible job
+   * has gone longest untouched, rotating fairly through however many are
+   * queued (never requiring more than the existing `heartbeatAt` column).
+   *
+   * Bounded FinalArtwork Production-Execution Repair (liveness):
+   * `excludeJobIds`, when given, ADDITIONALLY skips those specific ids for
+   * THIS ONE CALL, regardless of what the ordering above would otherwise
+   * pick. Since the one-job-per-HTTP-invocation repair (Blocker 4), the
+   * ONLY production caller (`FinalArtworkSchedulerCapability`) always
+   * passes an empty list — a single invocation claims at most one job, so
+   * there is never a same-batch prior claim of its own to exclude. The
+   * parameter remains available for a caller (or a future one) with a
+   * genuine same-call reason to skip specific rows; it is never what
+   * fairness ACROSS invocations relies on any more — that is the ordering
+   * above.
    */
   claimNextQueuedFinalArtworkJob(
     excludeJobIds?: readonly string[],

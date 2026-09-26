@@ -2133,9 +2133,32 @@ export class LocalProjectRepository implements ProjectRepository {
   ): Promise<FinalArtworkJob | null> {
     const db = await readDb();
     const excludeSet = new Set(excludeJobIds);
+    // Queue Starvation Repair (independent-review finding): claim order is
+    // by LEAST-RECENTLY-TOUCHED (`heartbeatAt`, falling back to `createdAt`
+    // for a job never yet claimed), never by `createdAt` alone. Sorting by
+    // `createdAt` alone meant a genuinely provider-pending job (its
+    // `heartbeatAt` bumped on every claim, but its `createdAt` frozen at
+    // creation forever) stayed the "oldest due" candidate on EVERY
+    // subsequent invocation, monopolizing every claim indefinitely and
+    // starving every other queued job — reproduced with 10 consecutive
+    // invocations all reclaiming the SAME pending job while a newer one
+    // never got claimed even once. `heartbeatAt` is durable, already
+    // written on every claim (see below) and every checkpoint, and
+    // requires no new column/migration/infra: once a job is claimed, it
+    // becomes the FRESHEST job, so the next invocation naturally prefers
+    // whichever ELIGIBLE job has gone longest without being touched --
+    // for two jobs this alternates them; for three or more it rotates
+    // through all of them in least-recently-serviced order. A job never
+    // yet claimed (`heartbeatAt === null`) falls back to its own
+    // `createdAt`, preserving today's exact ordering for the common case
+    // where nothing is starving anything.
+    const priorityOf = (job: FinalArtworkJob) => job.heartbeatAt ?? job.createdAt;
     const candidates = db.finalArtworkJobs
       .filter((job) => job.status === "queued" || job.status === "recoverable")
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      .sort((a, b) => {
+        const cmp = priorityOf(a).localeCompare(priorityOf(b));
+        return cmp !== 0 ? cmp : a.createdAt.localeCompare(b.createdAt);
+      });
     const job = candidates.find((candidate) => !excludeSet.has(candidate.id));
     if (!job) return null;
 

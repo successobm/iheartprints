@@ -92,11 +92,26 @@ export function createFinalArtworkSchedulerCapability(
     // this SAME batch already found bounded-pending) has nothing left to do
     // with only one claim per batch — no exclusion list is needed when
     // there is no second claim in this same call to skip a stuck job for —
-    // so it is always empty here. Liveness across a genuinely stuck job is
-    // now guaranteed structurally instead: THAT job's own repeated claims
-    // never monopolize more than one HTTP invocation each, so a newer job's
-    // own immediate wake (or the next recovery tick) is never starved
-    // behind it.
+    // so it is always empty here.
+    //
+    // Queue Starvation Repair (independent-review finding — CORRECTS a
+    // claim this comment used to make): one-job-per-invocation ALONE does
+    // NOT guarantee liveness across invocations. Claiming "oldest due" by
+    // `createdAt` meant a genuinely provider-pending job (repeatedly
+    // reclaimed, its `heartbeatAt` bumped every time, but its `createdAt`
+    // frozen at creation forever) stayed the oldest-due candidate on
+    // EVERY subsequent invocation — a newer job's own immediate wake would
+    // still just reclaim the SAME pending job, never its own, because
+    // "oldest due" never changed. Reproduced: 10 consecutive invocations
+    // all reclaiming one pending job while a second, newer job never got
+    // claimed once. Fairness now lives in `claimNextQueuedFinalArtworkJob`
+    // itself: claim order is by LEAST-RECENTLY-TOUCHED (`heartbeatAt`),
+    // not literally oldest-created, so claiming a job makes IT the
+    // freshest and the next invocation naturally prefers whichever OTHER
+    // eligible job has gone longest untouched — see that method's own doc
+    // comment for the full reasoning. This scheduler needed no change of
+    // its own for that repair; it inherits the fix purely by calling the
+    // same claim method it always did.
     const { processedJobId, pending } = await worker.processNextJob([]);
     const processedJobIds = processedJobId ? [processedJobId] : [];
     void pending; // no exclusion list to feed on a later claim within this same batch — see the doc comment above.

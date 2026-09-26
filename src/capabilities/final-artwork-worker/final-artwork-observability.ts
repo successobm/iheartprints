@@ -177,6 +177,7 @@ export type FinalArtworkWorkerStage =
   | "provider_download_started"
   | "provider_download_completed"
   | "provider_result_intermediate_persisted"
+  | "intermediate_readback_completed"
   | "normalize_started"
   | "normalize_completed"
   | "production_asset_upload_started"

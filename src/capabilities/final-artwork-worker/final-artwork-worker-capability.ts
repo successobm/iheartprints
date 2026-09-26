@@ -1091,13 +1091,32 @@ export function createFinalArtworkWorkerCapability(
    * persisted (a crash landed between the upload below and this function's
    * next call) never uploads a second copy.
    *
-   * Deliberately does NOT clear `job.providerKey`/`providerRequestId` —
-   * unlike `persistIntermediateReconstruction`'s two-pass self-heal, there
-   * is no further provider submission ever coming for this job (this is the
-   * LAST pass's result), so there is no "outstanding-request slot" to free.
-   * Keeping them intact preserves "still keyed to the ORIGINAL paid
-   * request" as an observable, diagnostic-only fact all the way through
-   * finalization.
+   * Two-Pass Shrink Loop Repair (independent-review finding): ALWAYS sets
+   * `job.providerKey`/`providerRequestId` to point at `downloaded`'s own
+   * identity, unconditionally (never merely "left alone", and applied
+   * every call, not only on first upload, so a crash between the upload
+   * and this write still self-heals on retry). This is never a resubmission
+   * risk: by the time this function runs, no further provider contact is
+   * EVER coming for this job (this is the LAST pass's result) — the only
+   * question is which id the job's own active slot names.
+   *
+   * For a SINGLE-PASS job this is a no-op in practice: `job.providerRequestId`
+   * already equals `downloaded.providerRequestId` (never cleared before a
+   * single-pass download). For a TWO-PASS job where pass 1 alone turns out
+   * to be sufficient (a shrunk confirmed size after pass 1 was already
+   * persisted and its slot freed by `persistIntermediateReconstruction`),
+   * `job.providerRequestId` is `null` at this point — leaving it null
+   * orphaned the intermediate this function had just persisted, because
+   * `resolveExistingProviderResultIntermediate` refuses to look for
+   * anything when `job.providerRequestId` is `null` (by design — see that
+   * function's own doc comment on why it is scoped to the job's own active
+   * slot rather than scanning history). Every subsequent claim then
+   * re-entered this same "pass 1 suffices" branch, re-persisted the
+   * (already-idempotent) intermediate, and returned to `"recoverable"`
+   * forever — an unbounded convergence loop that never charged or refunded
+   * any budget, so no existing ceiling ever caught it. Setting the job's
+   * own slot HERE, unconditionally, is what makes the NEXT claim's lookup
+   * find this exact intermediate and finalize it.
    *
    * Records the SAME durable-identity fields
    * `resolveExistingProviderResultIntermediate` will later demand a match
@@ -1140,6 +1159,16 @@ export function createFinalArtworkWorkerCapability(
           },
         }),
       );
+    }
+    // See this function's own doc comment (Two-Pass Shrink Loop Repair):
+    // unconditional, every call — including the idempotent-retry branch
+    // above, so a crash between the upload and this write still
+    // self-heals the job's own slot on the next attempt.
+    if (job.providerKey !== activeProvider.providerKey || job.providerRequestId !== downloaded.providerRequestId) {
+      await repo.updateFinalArtworkJob(job.id, {
+        providerKey: activeProvider.providerKey,
+        providerRequestId: downloaded.providerRequestId,
+      });
     }
   }
 
@@ -1673,16 +1702,25 @@ export function createFinalArtworkWorkerCapability(
     // already knows.
     let currentProviderRequestId = existingProviderRequest?.providerRequestId ?? null;
     let boundedResult: FinalArtworkProviderBoundedResult;
-    logFinalArtworkWorkerStage({
-      projectId: job.projectId,
-      finalArtworkJobId: job.id,
-      providerKey: activeProvider.providerKey,
-      stage:
-        existingProviderRequest?.providerStatus === FINAL_ARTWORK_PROVIDER_STATUS.resultReady
-          ? "provider_download_started"
-          : "provider_status_check_started",
-      elapsedMs: null,
-    });
+    // Observability Label Repair (independent-review finding): a provider
+    // with NO asynchronous concept at all (no `produceBounded` — e.g.
+    // `local_raster_interpolation`) never makes a status-check or download
+    // request to anything; it computes its whole result synchronously,
+    // in-process, in the `produce()` fallback below. Logging
+    // `provider_status_check_started` for that claim would misdescribe a
+    // local computation as network activity that never happened.
+    if (activeProvider.produceBounded) {
+      logFinalArtworkWorkerStage({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        providerKey: activeProvider.providerKey,
+        stage:
+          existingProviderRequest?.providerStatus === FINAL_ARTWORK_PROVIDER_STATUS.resultReady
+            ? "provider_download_started"
+            : "provider_status_check_started",
+        elapsedMs: null,
+      });
+    }
     try {
       const providerInput: FinalArtworkProviderInput = {
         sourceBytes: source.bytes,
@@ -1981,6 +2019,21 @@ export function createFinalArtworkWorkerCapability(
       // asset and defer normalize/measure/upload to a LATER claim — this
       // invocation must never fall through into normalizing in the same
       // call.
+      //
+      // Observability Label Repair (independent-review finding): the
+      // ACTUAL provider download completed inside `activeProvider
+      // .produceBounded()`'s own call, above -- this is that outcome's
+      // OWN event (no separately-measurable elapsed time is available
+      // from out here, unlike the local-only storage readback this stage
+      // name is deliberately distinct from — see
+      // `finalizeFromProviderResultIntermediate`'s `intermediate_readback_completed`).
+      logFinalArtworkWorkerStage({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        providerKey: activeProvider.providerKey,
+        stage: "provider_download_completed",
+        elapsedMs: null,
+      });
       await persistProviderResultIntermediate(
         job,
         activeProvider,
@@ -2329,7 +2382,13 @@ export function createFinalArtworkWorkerCapability(
       projectId: job.projectId,
       finalArtworkJobId: job.id,
       providerKey: activeProvider.providerKey,
-      stage: "provider_download_completed",
+      // Observability Label Repair (independent-review finding): this is a
+      // LOCAL STORAGE readback of an already-downloaded, already-persisted
+      // intermediate -- never a provider download (no network call to the
+      // provider happens here at all). `provider_download_completed` is
+      // reserved for the ACTUAL provider-download outcome, logged where
+      // that outcome is handled in `produceProductionAsset` below.
+      stage: "intermediate_readback_completed",
       elapsedMs: Date.now() - downloadStartedAt,
     });
 
