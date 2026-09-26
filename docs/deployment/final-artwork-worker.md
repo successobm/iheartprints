@@ -249,9 +249,12 @@ orphaned with a real paid request nobody was checking on anymore.
 
 `TopazTransparencyUpscaleProvider.produceBounded()` (preferred over the
 older, still-present, still fully-blocking `produce()` whenever a
-provider implements it) does AT MOST one of: submit a fresh request and
-persist its identity, or check an existing request's status ONCE — never
-`pollUntilDone`'s loop. Three outcomes per invocation:
+provider implements it) does AT MOST ONE of: submit a fresh request and
+persist its identity, check an existing request's status ONCE, download
+an already-confirmed-complete result, or locally normalize an
+already-downloaded result — never `pollUntilDone`'s loop, and never more
+than one of those four in the same invocation. Four outcomes per
+invocation:
 
 - **Still pending** — the job returns to `"recoverable"` and the
   invocation returns quickly (well under any plausible gateway timeout).
@@ -260,12 +263,42 @@ persist its identity, or check an existing request's status ONCE — never
   asynchronous concept and has no `produceBounded` — the worker falls
   back to its unchanged, already-instant `produce()`, so this whole
   section is Topaz-specific.
-- **Complete** — the worker continues through the SAME download →
-  production-asset-upload → authoritative Print Validation path this
-  document already describes, unchanged.
+- **Result ready** (Bounded FinalArtwork Production-Execution Repair,
+  short-step follow-up) — the provider's status check reported
+  completion THIS invocation, but nothing has been downloaded yet. The
+  worker durably persists `providerStatus: "result_ready"` and returns —
+  a genuine live incident (a real production job, stuck at
+  `providerRecoveryAttempts` 5/5 after an infrastructure interruption)
+  proved that falling straight through into downloading a multi-megabyte
+  result, decoding it, normalizing it, measuring it, and uploading it —
+  all in the SAME invocation that just confirmed completion — was itself
+  long enough to be cut off by the platform gateway, permanently
+  stranding a recovery-budget charge that was never genuinely earned. A
+  LATER invocation performs the download as its own, separate bounded
+  step.
+- **Downloaded** — a later invocation, seeing `providerStatus:
+  "result_ready"`, downloads and geometry-validates the raw result and
+  the worker persists it as an internal, non-customer-facing intermediate
+  asset (the SAME `production_png`-role-plus-metadata-marker pattern the
+  two-pass reconstruction's own `pass1_intermediate` already uses — no
+  migration) — then returns, still without normalizing/measuring/
+  uploading the production asset in this same invocation.
+- **Complete** — reached either by a provider with no bounded/async
+  concept (via the `produce()` fallback) or by a LATER invocation that
+  finds the already-downloaded intermediate: it normalizes/measures and
+  continues through the SAME production-asset-upload → authoritative
+  Print Validation path this document already describes, unchanged. This
+  invocation never re-checks provider status and never re-downloads.
 - **A real, non-transient failure** — the SAME fail-closed handling this
   document already describes (`"failed"`, provider identity cleared only
-  on a provably-dead request).
+  on a provably-dead request). A TRANSIENT infrastructure hiccup during
+  the status-check or download step (a network blip, a rate limit, or
+  this repair's own new per-call timeout firing) is explicitly NOT
+  treated as this kind of failure — it is caught and deferred exactly
+  like the "still pending" outcome, refunding whatever recovery-budget
+  charge that claim made, since checking status or re-downloading is
+  always safe to retry on a later invocation and was never itself a paid
+  dispatch.
 
 **Liveness — one stuck job cannot starve newer ones.** A provider request
 that stays pending for a long time is, by construction, always the

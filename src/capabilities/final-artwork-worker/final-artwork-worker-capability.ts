@@ -5170,6 +5170,13 @@ const describeFinalArtworkError = describeOperationError;
 function isBoundedTransientPollOrDownloadFailure(error: unknown): boolean {
   if (!(error instanceof ProviderError)) return false;
   if (error.stage !== "poll" && error.stage !== "download") return false;
+  // Defense in depth: every current throw site at these two stages already
+  // hard-codes (or defaults to) `not_dispatched` for these classifications —
+  // see `fetchStatus`/`download`'s own catch blocks and `classifyPollResponse`
+  // in `topaz-transparency-upscale-provider.ts` — but this guard makes that
+  // an explicit, enforced precondition rather than an implicit one a future
+  // throw site could silently violate.
+  if (error.dispatch !== "not_dispatched") return false;
   return (
     error.classification === "network" ||
     error.classification === "rate_limited" ||

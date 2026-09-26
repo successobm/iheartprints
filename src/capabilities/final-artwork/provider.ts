@@ -50,7 +50,14 @@ export interface FinalArtworkProviderResumeContext {
    */
   providerKey: string;
   providerRequestId: string;
-  /** Last known raw provider status string, if any — informational only. */
+  /**
+   * Last known raw provider status string, if any. Bounded FinalArtwork
+   * Production-Execution Repair (short-step follow-up): no longer purely
+   * informational — a value of `FINAL_ARTWORK_PROVIDER_STATUS.resultReady`
+   * is the sole signal a bounded provider uses to skip straight to its
+   * download step rather than re-checking status (see `resultReadyRequest`
+   * in `topaz-transparency-upscale-provider.ts`).
+   */
   providerStatus: string | null;
 }
 
