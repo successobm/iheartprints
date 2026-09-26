@@ -282,7 +282,14 @@ invocation:
   asset (the SAME `production_png`-role-plus-metadata-marker pattern the
   two-pass reconstruction's own `pass1_intermediate` already uses — no
   migration) — then returns, still without normalizing/measuring/
-  uploading the production asset in this same invocation.
+  uploading the production asset in this same invocation. The
+  intermediate records the production identity it answers (source asset,
+  source bytes hash, provider key, confirmed width and max height).
+  A provider request id alone is not its identity: a two-pass job's
+  already-paid pass-1 result can be reused under several successive
+  confirmed sizes, so saving and adopting both select the record whose
+  identity matches the CURRENT intent, never merely one with the same
+  request id.
 - **Complete** — reached either by a provider with no bounded/async
   concept (via the `produce()` fallback) or by a LATER invocation that
   finds the already-downloaded intermediate: it normalizes/measures and

@@ -10,15 +10,8 @@ import { confirmProductionSizeForTests } from "@/test-support/confirm-production
 import { DataUriAssetStorageProvider } from "@/capabilities/asset-storage";
 import { createAssetCapability, PngThumbnailGenerator } from "@/capabilities/assets";
 import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
-import {
-  isProviderResultIntermediateAsset,
-  PROVIDER_RESULT_INTERMEDIATE_STAGE_MARKER,
-} from "@/capabilities/final-artwork/production-request-identity";
-import {
-  resolveReconstructionRequest,
-  TopazTransparencyUpscaleProvider,
-} from "@/capabilities/final-artwork/topaz-transparency-upscale-provider";
-import { PRINT_PLACEMENT_SIZING_POLICY } from "@/capabilities/shared/print-placement-dimensions";
+import { isProviderResultIntermediateAsset } from "@/capabilities/final-artwork/production-request-identity";
+import { TopazTransparencyUpscaleProvider } from "@/capabilities/final-artwork/topaz-transparency-upscale-provider";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capability";
 
@@ -40,12 +33,13 @@ import { createFinalArtworkWorkerCapability } from "./final-artwork-worker-capab
  *      the REAL product flow (a second worker instance configured with a
  *      different provider key).
  *   C/D. `sourceAssetId` / `sourceBytesSha256` differ from the current
- *      claim's own source -- via direct injection of an intermediate-marked
- *      asset carrying a deliberately wrong identity (the same
- *      `assets.uploadProductionAsset` call the real worker itself uses,
- *      not a hand-rolled repo mutation), proving the RESOLVER's own
- *      comparison — not merely "how such a row could arise" — is what is
- *      under test.
+ *      claim's own source -- via injection of a clone of a GENUINE,
+ *      worker-persisted intermediate's metadata with exactly that ONE
+ *      field changed (asserted), plus a C0 control proving an unmodified
+ *      clone IS adopted, so each test reaches the comparison it names.
+ *   E/F. Several intermediates sharing one providerRequestId (Double-Shrink
+ *      Repair): the one matching the current identity is selected in
+ *      either insertion order; when none matches, none is selected.
  *
  * In every case: the stale intermediate is never adopted, the job's own
  * provider identity is self-healed (never left pointing at a resubmission
@@ -69,16 +63,6 @@ function preparedTransparentPngOfWidth(artworkWidthPx: number): Buffer {
     }
   }
   return PNG.sync.write(png);
-}
-
-function expectedReconstructionRequest(artworkWidthPx: number, widthIn = 3) {
-  const png = PNG.sync.read(preparedTransparentPngOfWidth(artworkWidthPx));
-  const outcome = resolveReconstructionRequest(
-    { width: png.width, height: png.height, data: png.data },
-    { ...PRINT_PLACEMENT_SIZING_POLICY.sleeve, targetWidthIn: widthIn },
-  );
-  if (outcome.status !== "resolved") throw new Error(`fixture is not reconstructible: ${outcome.status}`);
-  return outcome.request;
 }
 
 function opaquePngOf(widthPx: number, heightPx: number): Buffer {
@@ -369,56 +353,15 @@ describe("Stale Provider-Result Intermediate Repair -- negative identity tests",
     void preparedAssetId;
   });
 
-  it("C: sourceAssetId on the intermediate disagrees with the current claim's own source asset -- injected directly (the real uploadProductionAsset path), never adopted", async () => {
-    const { repo, assets, projectId } = await setup(400);
-    const expectedRequest = expectedReconstructionRequest(400);
-
-    const finalArtwork = createFinalArtworkCapability(repo);
-    const printValidation = createPrintValidationCapability();
-    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
-
-    // Inject a "provider-result intermediate" for THIS job whose recorded
-    // `sourceAssetId` deliberately does NOT match this job's real source
-    // asset -- the exact shape a data-integrity anomaly (or a future bug
-    // this test exists to catch regressions in) would produce.
-    await assets.uploadProductionAsset(projectId, {
-      conceptId: `stale-source-${requested.job.id}`,
-      bytes: opaquePngOf(expectedRequest.widthPx, expectedRequest.heightPx),
-      contentType: "image/png",
-      widthPx: expectedRequest.widthPx,
-      heightPx: expectedRequest.heightPx,
-      hasTransparency: true,
-      finalArtworkJobId: requested.job.id,
-      productionRole: "production_png",
-      metadata: {
-        reconstructionStage: PROVIDER_RESULT_INTERMEDIATE_STAGE_MARKER,
-        providerKey: "topaz_transparency_upscale",
-        providerRequestId: "injected-wrong-source-process-id",
-        sourceAssetId: "00000000-0000-0000-0000-000000000000", // never this job's real source
-        sourceBytesSha256: null,
-        productionWidthIn: requested.job.productionWidthIn,
-        confirmedMaxHeightIn: null,
-        nativeWidthPx: CANVAS_PX,
-        nativeHeightPx: CANVAS_PX,
-      },
-    });
-
-    // Independent-review finding (repair-cycle-2 correction): the injected
-    // asset's `providerRequestId` must ALSO be the job's own CURRENTLY
-    // ACTIVE slot, or `resolveExistingProviderResultIntermediate` never
-    // even looks at it (it only ever inspects the ONE candidate matching
-    // `job.providerRequestId` -- see that function's own doc comment) and
-    // this test would silently prove nothing about the `sourceAssetId`
-    // comparison specifically. Setting the job's own fields to match is
-    // the same direct-DB-manipulation technique already used elsewhere in
-    // this codebase (e.g. `sign-artwork-service.test.ts`) to set up a
-    // precise starting state without re-deriving it through a slower,
-    // less targeted real flow.
-    await repo.updateFinalArtworkJob(requested.job.id, {
-      providerKey: "topaz_transparency_upscale",
-      providerRequestId: "injected-wrong-source-process-id",
-    });
-
+  /**
+   * Drives a real job until the worker itself persists a GENUINE
+   * provider-result intermediate, whose metadata is therefore the exact
+   * current production identity. Injected records clone that metadata, so
+   * every identity field a test does not deliberately mutate is equal to
+   * the current identity by construction -- never hand-guessed.
+   */
+  async function driveToGenuineProviderResultIntermediate() {
+    const ctx = await setup(400);
     const { fetchImpl, submittedIds } = buildFreshPerSubmissionFakeTopazFetch();
     const provider = new TopazTransparencyUpscaleProvider({
       apiKey: "test-key-not-real",
@@ -426,85 +369,125 @@ describe("Stale Provider-Result Intermediate Repair -- negative identity tests",
       sleepImpl: async () => {},
       pollIntervalMs: 1,
     });
-    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
+    const worker = createFinalArtworkWorkerCapability(ctx.repo, ctx.assets, provider, createPrintValidationCapability());
+    const requested = await createFinalArtworkCapability(ctx.repo).requestPreparedUploadFinalArtwork(ctx.projectId);
+    const jobId = requested.job.id;
 
-    await worker.processNextJob();
-    const afterClaim = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(afterClaim?.status, "recoverable");
-    assert.notEqual(afterClaim?.providerRequestId, "injected-wrong-source-process-id", "the wrong-source intermediate's request id must never remain this job's active identity -- the identity mismatch must self-heal it");
-    const productionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
-      (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
+    await worker.processNextJob(); // submit + status -> result_ready
+    await worker.processNextJob(); // download -> genuine intermediate persisted
+    const genuineIntermediates = (await ctx.repo.listAssetsForFinalArtworkJob(ctx.projectId, jobId)).filter(
+      isProviderResultIntermediateAsset,
     );
-    assert.equal(productionAssets.length, 0, "no production asset was fabricated from the wrong-source intermediate");
-    // A genuinely fresh submission proceeds instead, against THIS job's
-    // real, correct source, within the SAME claim the self-heal happened
-    // in (matching test A's own established "self-heal and resubmit
-    // together" behavior).
-    assert.equal(submittedIds().length, 1, "a genuinely new submission was made for the CORRECT source, never resuming/trusting the injected one");
+    assert.equal(genuineIntermediates.length, 1);
+    const genuine = genuineIntermediates[0]!;
+    const genuineBytes = await ctx.assets.downloadAssetBytes(genuine.id);
+    assert.ok(genuineBytes && genuine.widthPx !== null && genuine.heightPx !== null);
+    assert.equal(submittedIds().length, 1);
+    const genuineMeta = genuine.metadata as Record<string, unknown>;
+
+    let injectedSeq = 0;
+    async function inject(providerRequestId: string, overrides: Record<string, unknown>) {
+      injectedSeq += 1;
+      const metadata: Record<string, unknown> = { ...genuineMeta, providerRequestId, ...overrides };
+      const differingIdentityFields = ["sourceAssetId", "sourceBytesSha256", "providerKey", "productionWidthIn", "confirmedMaxHeightIn"].filter(
+        (field) => metadata[field] !== genuineMeta[field],
+      );
+      assert.deepEqual(differingIdentityFields, Object.keys(overrides), "only the deliberately overridden identity field(s) may differ from the current identity");
+      await ctx.assets.uploadProductionAsset(ctx.projectId, {
+        conceptId: `injected-${jobId}-${injectedSeq}`,
+        bytes: genuineBytes!.bytes,
+        contentType: "image/png",
+        widthPx: genuine.widthPx!,
+        heightPx: genuine.heightPx!,
+        hasTransparency: true,
+        finalArtworkJobId: jobId,
+        productionRole: "production_png",
+        metadata,
+      });
+    }
+
+    const finalProductionAssets = async () =>
+      (await ctx.repo.listAssetsForFinalArtworkJob(ctx.projectId, jobId)).filter(
+        (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
+      );
+
+    /** Points the job's active slot at `providerRequestId` (the only candidates the resolver ever inspects) and runs one claim. */
+    async function claimWithActiveSlot(providerRequestId: string) {
+      await ctx.repo.updateFinalArtworkJob(jobId, {
+        providerKey: String(genuineMeta.providerKey),
+        providerRequestId,
+      });
+      await worker.processNextJob();
+      return ctx.repo.getFinalArtworkJob(jobId);
+    }
+
+    async function assertAdopted(providerRequestId: string) {
+      const after = await claimWithActiveSlot(providerRequestId);
+      assert.equal(after?.providerRequestId, providerRequestId, "an adopted current intermediate keeps its own slot");
+      assert.equal((await finalProductionAssets()).length, 1, "the current intermediate was adopted and normalized into a production asset");
+      assert.equal(submittedIds().length, 1, "adoption never submits");
+    }
+
+    async function assertRejected(providerRequestId: string) {
+      const after = await claimWithActiveSlot(providerRequestId);
+      assert.equal(after?.status, "recoverable");
+      assert.notEqual(after?.providerRequestId, providerRequestId, "a stale intermediate's request id never remains the active identity");
+      assert.equal((await finalProductionAssets()).length, 0, "nothing was normalized from a stale intermediate");
+      assert.equal(submittedIds().length, 2, "the current intent is served by a genuinely new submission, never by the stale record");
+    }
+
+    return { genuineMeta, inject, assertAdopted, assertRejected };
+  }
+
+  it("C0 (control for C/D): an injected clone of the genuine intermediate with NO identity field changed IS adopted -- proves C/D's clones reach the identity comparison and differ only in the field each mutates", async () => {
+    const { inject, assertAdopted } = await driveToGenuineProviderResultIntermediate();
+    await inject("injected-exact-clone", {});
+    await assertAdopted("injected-exact-clone");
   });
 
-  it("D: sourceBytesSha256 on the intermediate disagrees with the current claim's own source bytes -- injected directly, never adopted", async () => {
-    const { repo, assets, projectId } = await setup(400);
-    const expectedRequest = expectedReconstructionRequest(400);
+  it("C: ONLY sourceAssetId differs from the current identity -- never adopted", async () => {
+    const { genuineMeta, inject, assertRejected } = await driveToGenuineProviderResultIntermediate();
+    assert.equal(typeof genuineMeta.sourceAssetId, "string");
+    await inject("injected-wrong-source", { sourceAssetId: "00000000-0000-0000-0000-000000000000" });
+    await assertRejected("injected-wrong-source");
+  });
 
-    const finalArtwork = createFinalArtworkCapability(repo);
-    const printValidation = createPrintValidationCapability();
-    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+  it("D: ONLY sourceBytesSha256 differs from the current identity -- never adopted", async () => {
+    const { genuineMeta, inject, assertRejected } = await driveToGenuineProviderResultIntermediate();
+    const wrongSha = "f".repeat(64);
+    assert.notEqual(genuineMeta.sourceBytesSha256, wrongSha);
+    await inject("injected-wrong-sha", { sourceBytesSha256: wrongSha });
+    await assertRejected("injected-wrong-sha");
+  });
 
-    // Same job, same (correct) sourceAssetId, but a WRONG recorded
-    // `sourceBytesSha256` -- models the artwork having been re-processed
-    // (background re-removed, etc.) under the SAME asset id between the
-    // intermediate's own creation and this claim.
-    const sourceAsset = await repo.getAssetById(
-      (await repo.getArtworkPreparation(projectId))!.preparedAssetId!,
-    );
-    await assets.uploadProductionAsset(projectId, {
-      conceptId: `stale-sha-${requested.job.id}`,
-      bytes: opaquePngOf(expectedRequest.widthPx, expectedRequest.heightPx),
-      contentType: "image/png",
-      widthPx: expectedRequest.widthPx,
-      heightPx: expectedRequest.heightPx,
-      hasTransparency: true,
-      finalArtworkJobId: requested.job.id,
-      productionRole: "production_png",
-      metadata: {
-        reconstructionStage: PROVIDER_RESULT_INTERMEDIATE_STAGE_MARKER,
-        providerKey: "topaz_transparency_upscale",
-        providerRequestId: "injected-wrong-sha-process-id",
-        sourceAssetId: sourceAsset?.id ?? null,
-        sourceBytesSha256: "0000000000000000000000000000000000000000000000000000000000000",
-        productionWidthIn: requested.job.productionWidthIn,
-        confirmedMaxHeightIn: null,
-        nativeWidthPx: CANVAS_PX,
-        nativeHeightPx: CANVAS_PX,
-      },
+  /**
+   * Double-Shrink Repair: several intermediates can share ONE
+   * providerRequestId (the same paid result reused under successive
+   * production intents). Selection is by recorded identity, never by
+   * insertion order.
+   */
+  for (const order of ["stale-first", "current-first"] as const) {
+    it(`E (${order}): two intermediates share one providerRequestId -- the one matching the CURRENT identity is selected regardless of insertion order`, async () => {
+      const { genuineMeta, inject, assertAdopted } = await driveToGenuineProviderResultIntermediate();
+      const staleHeight = typeof genuineMeta.confirmedMaxHeightIn === "number" ? genuineMeta.confirmedMaxHeightIn + 0.5 : 7.25;
+      const injectStale = () => inject("shared-request", { confirmedMaxHeightIn: staleHeight });
+      const injectCurrent = () => inject("shared-request", {});
+      if (order === "stale-first") {
+        await injectStale();
+        await injectCurrent();
+      } else {
+        await injectCurrent();
+        await injectStale();
+      }
+      await assertAdopted("shared-request");
     });
+  }
 
-    // See test C's identical comment: the injected asset's
-    // `providerRequestId` must ALSO be the job's own currently active
-    // slot, or the comparison this test claims to exercise never runs.
-    await repo.updateFinalArtworkJob(requested.job.id, {
-      providerKey: "topaz_transparency_upscale",
-      providerRequestId: "injected-wrong-sha-process-id",
-    });
-
-    const { fetchImpl, submittedIds } = buildFreshPerSubmissionFakeTopazFetch();
-    const provider = new TopazTransparencyUpscaleProvider({
-      apiKey: "test-key-not-real",
-      fetchImpl,
-      sleepImpl: async () => {},
-      pollIntervalMs: 1,
-    });
-    const worker = createFinalArtworkWorkerCapability(repo, assets, provider, printValidation);
-
-    await worker.processNextJob();
-    const afterClaim = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(afterClaim?.status, "recoverable");
-    assert.notEqual(afterClaim?.providerRequestId, "injected-wrong-sha-process-id", "the wrong-content-hash intermediate's request id must never remain this job's active identity -- the identity mismatch must self-heal it");
-    const productionAssets = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
-      (a) => a.productionRole === "production_png" && !isProviderResultIntermediateAsset(a),
-    );
-    assert.equal(productionAssets.length, 0, "no production asset was fabricated from the wrong-content-hash intermediate");
-    assert.equal(submittedIds().length, 1, "a genuinely new submission was made, never resuming/trusting the injected one");
+  it("F: two intermediates share one providerRequestId and NEITHER matches the current identity -- neither is selected", async () => {
+    const { genuineMeta, inject, assertRejected } = await driveToGenuineProviderResultIntermediate();
+    const base = typeof genuineMeta.confirmedMaxHeightIn === "number" ? genuineMeta.confirmedMaxHeightIn : 6;
+    await inject("shared-request", { confirmedMaxHeightIn: base + 0.5 });
+    await inject("shared-request", { confirmedMaxHeightIn: base + 1 });
+    await assertRejected("shared-request");
   });
 });

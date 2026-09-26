@@ -1005,6 +1005,16 @@ export function createFinalArtworkWorkerCapability(
    * consulted again. A stale candidate is never deleted — it remains
    * harmless historical evidence, exactly like every other superseded
    * asset in this codebase.
+   *
+   * Double-Shrink Repair (final Cursor gate finding): a provider request id
+   * alone is NOT a provider-result intermediate's identity. A two-pass
+   * job's already-paid pass-1 result is legitimately reused under each
+   * later production intent it still satisfies, so several intermediates
+   * can share the active slot's `providerRequestId`, each recording a
+   * different production identity. Among those candidates the one whose
+   * recorded identity matches `currentIdentity` is `"current"` regardless
+   * of insertion order; `"stale"` only when candidates exist and none
+   * matches.
    */
   async function resolveExistingProviderResultIntermediate(
     job: FinalArtworkJob,
@@ -1021,59 +1031,63 @@ export function createFinalArtworkWorkerCapability(
       }
   > {
     if (job.providerRequestId === null) return { outcome: "none" };
-    const candidate = await findProviderResultIntermediateAssetByProviderRequestId(job, job.providerRequestId);
-    if (!candidate) return { outcome: "none" };
+    const candidates = await listProviderResultIntermediatesByProviderRequestId(job, job.providerRequestId);
+    if (candidates.length === 0) return { outcome: "none" };
 
-    const meta = candidate.metadata as Record<string, unknown> | null | undefined;
-    const providerRequestId = typeof meta?.providerRequestId === "string" ? meta.providerRequestId : null;
-    // Defensive: a malformed/legacy row with the marker but no recorded
-    // request id carries no audit value and cannot be trusted as proof of
-    // a specific paid submission — mirrors
-    // `resolveExistingIntermediateReconstruction`'s identical guard.
-    if (!providerRequestId) return { outcome: "none" };
-    const identityMatches =
+    const current = candidates.find((candidate) =>
+      providerResultIntermediateMatchesIdentity(candidate, currentIdentity),
+    );
+    if (!current) return { outcome: "stale" };
+    const meta = current.metadata as Record<string, unknown> | null | undefined;
+    return {
+      outcome: "current",
+      asset: current,
+      providerRequestId: job.providerRequestId,
+      nativeWidthPx: typeof meta?.nativeWidthPx === "number" ? meta.nativeWidthPx : null,
+      nativeHeightPx: typeof meta?.nativeHeightPx === "number" ? meta.nativeHeightPx : null,
+    };
+  }
+
+  /**
+   * The ONE identity predicate shared by save-side idempotency
+   * (`persistProviderResultIntermediate`) and read-side adoption
+   * (`resolveExistingProviderResultIntermediate`), so the two can never
+   * disagree about whether a record answers the current production intent.
+   */
+  function providerResultIntermediateMatchesIdentity(
+    asset: AssetRecord,
+    currentIdentity: CurrentProductionIdentity,
+  ): boolean {
+    const meta = asset.metadata as Record<string, unknown> | null | undefined;
+    return (
       meta?.sourceAssetId === currentIdentity.sourceAssetId &&
       (meta?.sourceBytesSha256 ?? null) === currentIdentity.sourceBytesSha256 &&
       meta?.providerKey === currentIdentity.providerKey &&
       (meta?.productionWidthIn ?? null) === currentIdentity.productionWidthIn &&
-      (meta?.confirmedMaxHeightIn ?? null) === currentIdentity.confirmedMaxHeightIn;
-    if (identityMatches) {
-      return {
-        outcome: "current",
-        asset: candidate,
-        providerRequestId,
-        nativeWidthPx: typeof meta?.nativeWidthPx === "number" ? meta.nativeWidthPx : null,
-        nativeHeightPx: typeof meta?.nativeHeightPx === "number" ? meta.nativeHeightPx : null,
-      };
-    }
-    return { outcome: "stale" };
+      (meta?.confirmedMaxHeightIn ?? null) === currentIdentity.confirmedMaxHeightIn
+    );
   }
 
   /**
-   * Idempotency helper for `persistProviderResultIntermediate` ONLY —
-   * unlike `resolveExistingProviderResultIntermediate`, this deliberately
-   * does NOT judge staleness: within a single claim that just downloaded
-   * `downloaded.providerRequestId` for the CURRENT production intent, the
-   * only question left is "did an earlier, interrupted attempt at THIS
-   * SAME download already upload it?" — answered by the download's own
-   * known, just-obtained request id, never by re-deriving identity.
+   * Every provider-result intermediate this job has recorded for
+   * `providerRequestId` — possibly several, one per production identity
+   * the same paid result was reused under. Callers select by identity via
+   * `providerResultIntermediateMatchesIdentity`, never by position.
    */
-  async function findProviderResultIntermediateAssetByProviderRequestId(
+  async function listProviderResultIntermediatesByProviderRequestId(
     job: FinalArtworkJob,
     providerRequestId: string,
-  ): Promise<AssetRecord | null> {
+  ): Promise<AssetRecord[]> {
     const existingAssets = await withOperationTiming(
-      "findProviderResultIntermediateAssetByProviderRequestId.listAssetsForFinalArtworkJob",
+      "listProviderResultIntermediatesByProviderRequestId.listAssetsForFinalArtworkJob",
       () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
     );
-    return (
-      existingAssets.find(
-        (asset) =>
-          asset.finalArtworkJobId === job.id &&
-          asset.productionRole === "production_png" &&
-          isProviderResultIntermediateAsset(asset) &&
-          (asset.metadata as Record<string, unknown> | null | undefined)?.providerRequestId === providerRequestId,
-      ) ?? null
+    return existingAssets.filter(
+      (asset) =>
+        asset.finalArtworkJobId === job.id &&
+        asset.productionRole === "production_png" &&
+        isProviderResultIntermediateAsset(asset) &&
+        (asset.metadata as Record<string, unknown> | null | undefined)?.providerRequestId === providerRequestId,
     );
   }
 
@@ -1132,7 +1146,13 @@ export function createFinalArtworkWorkerCapability(
     downloaded: FinalArtworkProviderDownloadedResult,
     currentIdentity: CurrentProductionIdentity,
   ): Promise<void> {
-    const existing = await findProviderResultIntermediateAssetByProviderRequestId(job, downloaded.providerRequestId);
+    // Double-Shrink Repair: idempotent only for the SAME request AND the
+    // SAME current identity. A record for this request under a stale
+    // identity is history, never a reason to skip persisting the current
+    // one (see `resolveExistingProviderResultIntermediate`).
+    const existing = (
+      await listProviderResultIntermediatesByProviderRequestId(job, downloaded.providerRequestId)
+    ).find((candidate) => providerResultIntermediateMatchesIdentity(candidate, currentIdentity));
     if (!existing) {
       await withOperationTiming("persistProviderResultIntermediate.uploadProductionAsset", () =>
         assets.uploadProductionAsset(job.projectId, {
@@ -1163,13 +1183,14 @@ export function createFinalArtworkWorkerCapability(
     // See this function's own doc comment (Two-Pass Shrink Loop Repair):
     // unconditional, every call — including the idempotent-retry branch
     // above, so a crash between the upload and this write still
-    // self-heals the job's own slot on the next attempt.
-    if (job.providerKey !== activeProvider.providerKey || job.providerRequestId !== downloaded.providerRequestId) {
-      await repo.updateFinalArtworkJob(job.id, {
-        providerKey: activeProvider.providerKey,
-        providerRequestId: downloaded.providerRequestId,
-      });
-    }
+    // self-heals the job's own slot on the next attempt. Never guarded by
+    // comparing against `job`: that is the claim-time snapshot, and the
+    // stale self-heal earlier in this same claim may already have cleared
+    // the durable slot it still shows as set.
+    await repo.updateFinalArtworkJob(job.id, {
+      providerKey: activeProvider.providerKey,
+      providerRequestId: downloaded.providerRequestId,
+    });
   }
 
   /**

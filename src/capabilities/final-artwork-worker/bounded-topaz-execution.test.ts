@@ -1112,7 +1112,7 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
       // pinned at "recoverable"; this proves the SAME starting shape now
       // reaches a real terminal state within a small, bounded number of
       // claims instead.
-      let finalJob = afterShrinkClaim;
+      let finalJob: Awaited<ReturnType<typeof repo.getFinalArtworkJob>> = afterShrinkClaim;
       for (let i = 0; i < 10 && finalJob?.status !== "completed" && finalJob?.status !== "failed"; i += 1) {
         await worker.processNextJob();
         finalJob = await repo.getFinalArtworkJob(jobId);
@@ -1157,6 +1157,108 @@ describe("Bounded FinalArtwork Production-Execution Repair -- end-to-end through
       );
     });
   }
+
+  /**
+   * Double-Shrink Provider-Result Intermediate Repair (final Cursor gate
+   * finding): after 6b's first shrink persists a pass-1-keyed
+   * provider-result intermediate for the 1.5in identity, a SECOND shrink
+   * (to 1in) before that intermediate is normalized must still converge.
+   * The same already-paid pass-1 result is legitimately reused under the
+   * new intent, so two provider-result intermediates end up sharing one
+   * `providerRequestId` -- save-side idempotency and read-side adoption
+   * must both key on the CURRENT production identity, not the request id
+   * alone. Pre-repair, the save side found the stale 1.5in record by
+   * request id, never persisted a 1in one, and the job's slot oscillated
+   * null <-> pass-1 id forever with both budgets pinned at 0.
+   */
+  async function assertDoubleShrinkConverges(options: { crashBeforeRepoint: boolean }) {
+    const { repo, projectId, jobId, fetchStubs, worker } = await driveTwoPassJobToPass1PersistedThenShrink(1.5);
+    const pass1Id = fetchStubs.knownProcessIds()[0]!;
+    const { confirmProductionSizeForTests } = await import("@/test-support/confirm-production-size");
+
+    const providerResultIntermediates = async () =>
+      (await repo.listAssetsForFinalArtworkJob(projectId, jobId)).filter(isProviderResultIntermediateAsset);
+    const finalProductionAssets = async () =>
+      (await repo.listAssetsForFinalArtworkJob(projectId, jobId)).filter(
+        (a) => a.productionRole === "production_png" && !isReconstructionIntermediateAsset(a) && !isProviderResultIntermediateAsset(a),
+      );
+
+    // Claim 4: first shrink -- pass 1 reused, a 1.5in-identity intermediate persisted, slot -> pass 1.
+    await worker.processNextJob();
+    const afterFirstShrink = await repo.getFinalArtworkJob(jobId);
+    assert.equal(afterFirstShrink?.providerRequestId, pass1Id);
+    const firstIntermediates = await providerResultIntermediates();
+    assert.equal(firstIntermediates.length, 1);
+    const firstShrinkHeight = (firstIntermediates[0]!.metadata as Record<string, unknown>).confirmedMaxHeightIn;
+    assert.equal((await finalProductionAssets()).length, 0, "the 1.5in intermediate has NOT been normalized yet");
+
+    // Second shrink, BEFORE normalization/finalization.
+    await confirmProductionSizeForTests(repo, projectId, { widthIn: 3, boxMaxHeightIn: 1 });
+
+    // Claim 5: the 1.5in intermediate is stale -> slot cleared -> pass 1
+    // reused locally -> a NEW intermediate carrying the 1in identity.
+    await worker.processNextJob();
+    const afterSecondShrinkClaim = await repo.getFinalArtworkJob(jobId);
+    assert.equal(afterSecondShrinkClaim?.status, "recoverable");
+    const secondIntermediates = await providerResultIntermediates();
+    assert.equal(secondIntermediates.length, 2, "a NEW intermediate for the current identity must be persisted, never skipped because the stale one shares its request id");
+    const heights = secondIntermediates.map((a) => (a.metadata as Record<string, unknown>).confirmedMaxHeightIn);
+    assert.equal(new Set(heights).size, 2, "the two intermediates record DIFFERENT production identities");
+    assert.ok(heights.includes(firstShrinkHeight), "the stale 1.5in record is retained as history, never deleted");
+    for (const asset of secondIntermediates) {
+      assert.equal((asset.metadata as Record<string, unknown>).providerRequestId, pass1Id, "both intermediates are the SAME already-paid pass-1 result");
+    }
+    assert.equal(afterSecondShrinkClaim?.providerRequestId, pass1Id, "the slot points at the pass-1 request the CURRENT intermediate was built from");
+    assert.equal((await finalProductionAssets()).length, 0, "the stale 1.5in intermediate was never adopted and normalized");
+
+    if (options.crashBeforeRepoint) {
+      // Models a crash after the new intermediate's upload but before the
+      // slot repoint landed: the stale self-heal had already durably
+      // cleared the slot earlier in that claim.
+      await repo.updateFinalArtworkJob(jobId, { providerKey: null, providerRequestId: null, providerStatus: null });
+    }
+
+    const observedSlots: Array<string | null> = [];
+    let finalJob = await repo.getFinalArtworkJob(jobId);
+    for (let i = 0; i < 10 && finalJob?.status !== "completed" && finalJob?.status !== "failed"; i += 1) {
+      await worker.processNextJob();
+      finalJob = await repo.getFinalArtworkJob(jobId);
+      observedSlots.push(finalJob?.providerRequestId ?? null);
+    }
+
+    assert.equal(finalJob?.status, "completed", `must converge, never oscillate (slots observed: ${JSON.stringify(observedSlots)})`);
+    assert.ok(observedSlots.length <= 4, `must converge within a small bounded number of claims (took ${observedSlots.length})`);
+    assert.equal(fetchStubs.submitCountTotal(), 1, "exactly ONE paid submission across both shrinks -- pass 1 is reused, never resubmitted, pass 2 never submitted");
+    assert.equal((await providerResultIntermediates()).length, 2, "idempotent: re-persisting the SAME request under the SAME current identity never uploads another copy");
+    assert.ok((finalJob?.attempts ?? 0) <= 2, `attempts must not sit in a refund loop (got ${finalJob?.attempts})`);
+    assert.equal(finalJob?.providerRecoveryAttempts, 0, "providerRecoveryAttempts must not sit in a refund loop");
+
+    const finals = await finalProductionAssets();
+    assert.equal(finals.length, 1, "exactly one authoritative final production asset");
+    assert.notEqual(
+      (finals[0]!.metadata as Record<string, unknown>).confirmedMaxHeightIn,
+      firstShrinkHeight,
+      "the final asset answers the CURRENT (1in) intent, never the stale 1.5in one",
+    );
+
+    const validation = await repo.getLatestProductionAssetValidationForJob(projectId, jobId);
+    assert.ok(validation);
+    assert.equal(validation!.status, "finalization_required");
+    const report = validation!.report as unknown as { checks: Array<{ check: string; status: string; severity: string }> };
+    assert.deepEqual(
+      report.checks.filter((c) => c.status !== "pass" && c.severity === "blocking").map((c) => c.check),
+      ["reconstruction_certification_evidence"],
+      "only the permanent reconstruction-certification guard blocks print_ready (see 6b)",
+    );
+  }
+
+  it("6c: DOUBLE shrink (1.5in, then 1in before normalization) converges with exactly one paid submission -- the final Cursor gate's exact reproduction", async () => {
+    await assertDoubleShrinkConverges({ crashBeforeRepoint: false });
+  });
+
+  it("6d: DOUBLE shrink with a crash after the current intermediate's upload but before the slot repoint self-heals without another submission or a duplicate intermediate", async () => {
+    await assertDoubleShrinkConverges({ crashBeforeRepoint: true });
+  });
 
   // --- Phase 2: post-provider durable checkpoint ---------------------------
 
