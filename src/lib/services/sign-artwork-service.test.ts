@@ -1146,6 +1146,14 @@ describe("sign-artwork-service: Fix \"Try Again\" Retry Eligibility Phase (real 
     assert.equal(revived.lastError, null);
     assert.equal(revived.completedAt, null);
     assert.equal(revived.startedAt, null);
+
+    // Bounded FinalArtwork Production-Execution Repair (Blocker 4 --
+    // one-job-per-invocation is now structural): drain this revived job
+    // AFTER the assertions above (which depend on it being "queued"), so
+    // it does not strand a permanently-queued job in this describe
+    // block's shared on-disk store for a later test's own `runBatch()`
+    // call to claim instead of its own.
+    await graph.finalArtworkScheduler.runBatch();
   });
 
   it("a completed job WITH a genuine blocked candidate (state 6) is never blindly re-queued — the existing, protected Wand/correction behavior", async () => {

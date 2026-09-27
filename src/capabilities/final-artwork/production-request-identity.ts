@@ -151,3 +151,33 @@ export function isReconstructionIntermediateAsset(
   const metadata = asset.metadata as Record<string, unknown> | null | undefined;
   return metadata?.reconstructionStage === RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER;
 }
+
+/**
+ * Bounded FinalArtwork Production-Execution Repair (short-step follow-up) —
+ * a SECOND, DISTINCT internal-reconstruction-stage marker, deliberately not
+ * unified with `RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER` above: that marker
+ * means "a two-pass job's PASS 1 is done and pass 2 still needs to run
+ * (another provider submission is coming)"; this one means "the LAST
+ * provider pass' raw result has been downloaded and durably persisted, and
+ * no further provider contact is needed — only local normalize/measure/
+ * upload remains." Two different facts about a job's progress, checked by
+ * two different call sites (`resolveExistingIntermediateReconstruction` vs.
+ * `resolveExistingProviderResultIntermediate` in
+ * `final-artwork-worker-capability.ts`) that must never be confused with one
+ * another — unifying them into one marker would make a fresh two-pass pass-1
+ * download indistinguishable from a finished, ready-to-normalize result.
+ *
+ * Reuses the SAME `production_png` role + metadata-marker pattern as
+ * `RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER` for the identical reason: no
+ * migration (`production_role` carries a DB `CHECK` constraint enumerating
+ * exactly three values). Never a candidate final deliverable — see
+ * `resolveExistingProductionAsset`'s own filter, which excludes both markers.
+ */
+export const PROVIDER_RESULT_INTERMEDIATE_STAGE_MARKER = "provider_result_intermediate";
+
+export function isProviderResultIntermediateAsset(
+  asset: Pick<AssetRecord, "metadata">,
+): boolean {
+  const metadata = asset.metadata as Record<string, unknown> | null | undefined;
+  return metadata?.reconstructionStage === PROVIDER_RESULT_INTERMEDIATE_STAGE_MARKER;
+}

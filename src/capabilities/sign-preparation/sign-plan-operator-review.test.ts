@@ -266,6 +266,14 @@ describe("loadSignPlanOperatorReview — production status", () => {
     assert.equal(review.production.inFlight, true);
     assert.equal(review.production.printReady, false);
     assert.equal(review.production.needsAttention, false);
+
+    // Bounded FinalArtwork Production-Execution Repair (Blocker 4 --
+    // one-job-per-invocation is now structural): drain this job AFTER the
+    // assertions above (which depend on it being "queued"), so it does not
+    // strand a permanently-queued job in this describe block's shared
+    // on-disk store for a later test's own `runBatch()` call to claim
+    // instead of its own.
+    await graph.finalArtworkScheduler.runBatch();
   });
 
   it("prepared and failed: failed true, nothing else", async () => {

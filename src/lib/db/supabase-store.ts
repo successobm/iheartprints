@@ -2950,11 +2950,22 @@ export class SupabaseProjectRepository implements ProjectRepository {
     // introducing an unverified new Postgrest filter shape against live
     // Supabase — `.select().in().order().limit()` is the exact pattern
     // this method already used, just with a larger window.
+    //
+    // Queue Starvation Repair (independent-review finding): "oldest due"
+    // is now `heartbeat_at` ascending (nulls first), never `created_at`
+    // alone — see `LocalProjectRepository`'s identical fix for the full
+    // reasoning. A job never yet claimed has `heartbeat_at IS NULL`;
+    // `nullsFirst` treats that as maximally overdue, exactly matching the
+    // in-memory implementation's `heartbeatAt ?? createdAt` fallback.
+    // `created_at` remains the tiebreaker for equal (including
+    // both-null) priority, preserving today's ordering when nothing is
+    // starving anything.
     const candidateLimit = excludeJobIds.length + 1;
     const { data: candidateRows, error: candidateError } = await this.client
       .from("final_artwork_jobs")
       .select("*")
       .in("status", ["queued", "recoverable"])
+      .order("heartbeat_at", { ascending: true, nullsFirst: true })
       .order("created_at", { ascending: true })
       .limit(candidateLimit);
     if (candidateError) throw candidateError;

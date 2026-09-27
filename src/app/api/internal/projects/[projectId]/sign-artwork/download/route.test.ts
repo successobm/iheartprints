@@ -105,12 +105,25 @@ describe("GET /api/internal/projects/[projectId]/sign-artwork/download", () => {
     await graph.signPreparation.planSignRepair(projectId);
     await graph.signPreparation.authorizeSignRepairPlan(projectId, { authorizedBy: "operator" });
     await graph.finalArtwork.requestSignFinalArtwork(projectId);
-    // Deliberately never run the worker/scheduler.
+    // Deliberately never run the worker/scheduler -- BEFORE the assertion
+    // below, which is exactly the "still in flight" state this test exists
+    // to prove a 404 for.
 
     const internalSession = await graph.acquisition.resolveOrCreateSession(null);
     await repo.grantInternalEntitlement(internalSession.id);
     const res = await get(projectId, cookieHeaderFor(internalSession.sessionToken));
     assert.equal(res.status, 404);
+
+    // Bounded FinalArtwork Production-Execution Repair (Blocker 4 --
+    // one-job-per-invocation is now structural): drain this job AFTER the
+    // assertion above, so it does not strand a permanently-queued job in
+    // this describe block's shared on-disk store. Left queued, it is the
+    // OLDEST-due job from this point on, so a LATER test's own
+    // `runBatch()` call would keep claiming THIS job instead of its own
+    // (exactly what broke "prepared and genuinely print-ready" below once
+    // the scheduler stopped opportunistically draining multiple queued
+    // jobs per call).
+    await graph.finalArtworkScheduler.runBatch();
   });
 
   it("an internal session cannot reach another project's data by forging the id — a garbage id is 404", async () => {

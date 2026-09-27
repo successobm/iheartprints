@@ -249,9 +249,12 @@ orphaned with a real paid request nobody was checking on anymore.
 
 `TopazTransparencyUpscaleProvider.produceBounded()` (preferred over the
 older, still-present, still fully-blocking `produce()` whenever a
-provider implements it) does AT MOST one of: submit a fresh request and
-persist its identity, or check an existing request's status ONCE — never
-`pollUntilDone`'s loop. Three outcomes per invocation:
+provider implements it) does AT MOST ONE of: submit a fresh request and
+persist its identity, check an existing request's status ONCE, download
+an already-confirmed-complete result, or locally normalize an
+already-downloaded result — never `pollUntilDone`'s loop, and never more
+than one of those four in the same invocation. Four outcomes per
+invocation:
 
 - **Still pending** — the job returns to `"recoverable"` and the
   invocation returns quickly (well under any plausible gateway timeout).
@@ -260,28 +263,78 @@ persist its identity, or check an existing request's status ONCE — never
   asynchronous concept and has no `produceBounded` — the worker falls
   back to its unchanged, already-instant `produce()`, so this whole
   section is Topaz-specific.
-- **Complete** — the worker continues through the SAME download →
-  production-asset-upload → authoritative Print Validation path this
-  document already describes, unchanged.
+- **Result ready** (Bounded FinalArtwork Production-Execution Repair,
+  short-step follow-up) — the provider's status check reported
+  completion THIS invocation, but nothing has been downloaded yet. The
+  worker durably persists `providerStatus: "result_ready"` and returns —
+  a genuine live incident (a real production job, stuck at
+  `providerRecoveryAttempts` 5/5 after an infrastructure interruption)
+  proved that falling straight through into downloading a multi-megabyte
+  result, decoding it, normalizing it, measuring it, and uploading it —
+  all in the SAME invocation that just confirmed completion — was itself
+  long enough to be cut off by the platform gateway, permanently
+  stranding a recovery-budget charge that was never genuinely earned. A
+  LATER invocation performs the download as its own, separate bounded
+  step.
+- **Downloaded** — a later invocation, seeing `providerStatus:
+  "result_ready"`, downloads and geometry-validates the raw result and
+  the worker persists it as an internal, non-customer-facing intermediate
+  asset (the SAME `production_png`-role-plus-metadata-marker pattern the
+  two-pass reconstruction's own `pass1_intermediate` already uses — no
+  migration) — then returns, still without normalizing/measuring/
+  uploading the production asset in this same invocation. The
+  intermediate records the production identity it answers (source asset,
+  source bytes hash, provider key, confirmed width and max height).
+  A provider request id alone is not its identity: a two-pass job's
+  already-paid pass-1 result can be reused under several successive
+  confirmed sizes, so saving and adopting both select the record whose
+  identity matches the CURRENT intent, never merely one with the same
+  request id.
+- **Complete** — reached either by a provider with no bounded/async
+  concept (via the `produce()` fallback) or by a LATER invocation that
+  finds the already-downloaded intermediate: it normalizes/measures and
+  continues through the SAME production-asset-upload → authoritative
+  Print Validation path this document already describes, unchanged. This
+  invocation never re-checks provider status and never re-downloads.
 - **A real, non-transient failure** — the SAME fail-closed handling this
   document already describes (`"failed"`, provider identity cleared only
-  on a provably-dead request).
+  on a provably-dead request). A TRANSIENT infrastructure hiccup during
+  the status-check or download step (a network blip, a rate limit, or
+  this repair's own new per-call timeout firing) is explicitly NOT
+  treated as this kind of failure — it is caught and deferred exactly
+  like the "still pending" outcome, refunding whatever recovery-budget
+  charge that claim made, since checking status or re-downloading is
+  always safe to retry on a later invocation and was never itself a paid
+  dispatch.
 
-**Liveness — one stuck job cannot starve newer ones.** A provider request
-that stays pending for a long time is, by construction, always the
-"oldest due" `queued`/`recoverable` row, and would otherwise keep
-winning every claim in every batch forever. `claimNextQueuedFinalArtworkJob`
-accepts an `excludeJobIds` list; the scheduler's batch loop adds a job's
-id to that list the moment it sees a bounded-pending outcome for it
-THIS batch, so the REST of that batch's claim slots go to other,
-unrelated jobs instead of re-checking the same not-yet-finished request
-repeatedly. This bounds starvation caused by ONE stuck job within a
-single batch/invocation — with `maxJobsPerRun` (default 5) or more
-SIMULTANEOUSLY-pending older jobs, every batch slot can still go to that
-older set before a newer job is ever reached, until enough of them
-resolve. It also does not (yet) bound how long a single provider request
-may legitimately stay pending across MANY separate invocations/batches —
-see the open question below.
+**Liveness — one stuck job cannot starve newer ones.** Each HTTP
+invocation claims and advances AT MOST ONE job (One-Job-Per-Invocation
+Repair — no `maxJobsPerRun` config exists any more; the loop that option
+controlled was removed entirely, not merely defaulted down). That alone
+is not sufficient for liveness: a provider request that stays pending
+across many invocations would, by pure `created_at` ordering, always be
+the "oldest due" `queued`/`recoverable` row and would keep winning every
+single invocation's one claim forever, starving every other queued job
+indefinitely — reproduced during an independent review as 10 consecutive
+invocations all reclaiming the same pending job while a newer job was
+never claimed once.
+
+Queue Starvation Repair: `claimNextQueuedFinalArtworkJob` orders
+candidates by `heartbeat_at` ascending (nulls first for a job never yet
+claimed), `created_at` only as a tiebreaker — never `created_at` alone.
+Claiming a job durably touches its own `heartbeat_at` (already true
+before this repair, for every claim), so the very act of claiming it
+makes it the FRESHEST row; the next invocation naturally prefers
+whichever OTHER eligible job has gone longest without being touched. For
+two simultaneously-pending jobs this alternates them across successive
+invocations; for three or more it rotates fairly through all of them in
+least-recently-serviced order. No new column, migration, or queue
+infrastructure — the existing `heartbeat_at` column, already written on
+every claim and every checkpoint, is the entire mechanism. It does not
+(yet) bound how long a single provider request may legitimately stay
+pending in total across many invocations before something gives up on
+it entirely — see the open question below, which is about THAT ceiling,
+not about fairness among jobs.
 
 **Open question, deliberately not answered by this repair:** what should
 eventually happen to a Topaz request that never reaches `Completed`/

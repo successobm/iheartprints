@@ -128,7 +128,13 @@ function createFakeClient() {
   class JobBuilder {
     private eqFilters: Array<{ col: string; val: unknown }> = [];
     private inFilters: Array<{ col: string; vals: unknown[] }> = [];
-    private ordered = false;
+    // Queue Starvation Repair: a real, multi-key order tracker -- the
+    // production code now chains `.order("heartbeat_at", {ascending,
+    // nullsFirst}).order("created_at", {ascending})`, and this fake must
+    // actually apply both keys (nulls-first included) to genuinely test
+    // the repaired claim ordering, not merely record that SOME order() was
+    // called.
+    private orderKeys: Array<{ col: string; ascending: boolean; nullsFirst: boolean }> = [];
     private limitCount: number | null = null;
     constructor(
       private readonly op: "select" | "insert" | "update",
@@ -142,8 +148,12 @@ function createFakeClient() {
       this.inFilters.push({ col, vals });
       return this;
     }
-    order() {
-      this.ordered = true;
+    order(col: string, opts?: { ascending?: boolean; nullsFirst?: boolean }) {
+      this.orderKeys.push({
+        col,
+        ascending: opts?.ascending ?? true,
+        nullsFirst: opts?.nullsFirst ?? false,
+      });
       return this;
     }
     limit(count: number) {
@@ -159,6 +169,21 @@ function createFakeClient() {
     async single() {
       return this.run();
     }
+    private applyOrder(rows: FakeJobRow[]): FakeJobRow[] {
+      if (this.orderKeys.length === 0) return rows;
+      return [...rows].sort((a, b) => {
+        for (const key of this.orderKeys) {
+          const av = (a as unknown as Record<string, unknown>)[key.col] as string | null;
+          const bv = (b as unknown as Record<string, unknown>)[key.col] as string | null;
+          if (av === bv) continue;
+          if (av === null) return key.nullsFirst ? -1 : 1;
+          if (bv === null) return key.nullsFirst ? 1 : -1;
+          const cmp = av.localeCompare(bv);
+          return key.ascending ? cmp : -cmp;
+        }
+        return 0;
+      });
+    }
     /**
      * Sprint A2 Correction 2: an approval may now own more than one job (one
      * per requested production output), so the store awaits the builder
@@ -172,10 +197,7 @@ function createFakeClient() {
       return Promise.resolve(this.runList()).then(resolve);
     }
     private runList(): { data: FakeJobRow[]; error: null } {
-      let matched = jobs.filter((r) => this.matches(r));
-      if (this.ordered) {
-        matched = [...matched].sort((a, b) => a.created_at.localeCompare(b.created_at));
-      }
+      let matched = this.applyOrder(jobs.filter((r) => this.matches(r)));
       if (this.limitCount !== null) matched = matched.slice(0, this.limitCount);
       return { data: matched, error: null };
     }
@@ -190,8 +212,7 @@ function createFakeClient() {
     }
     private async run() {
       if (this.op === "select") {
-        let matched = jobs.filter((r) => this.matches(r));
-        if (this.ordered) matched = [...matched].sort((a, b) => a.created_at.localeCompare(b.created_at));
+        let matched = this.applyOrder(jobs.filter((r) => this.matches(r)));
         if (this.limitCount !== null) matched = matched.slice(0, this.limitCount);
         return { data: matched[0] ?? null, error: null };
       }
@@ -527,6 +548,69 @@ describe("SupabaseProjectRepository — final artwork worker (Sprint 2M Phase 2C
     // With no exclusions at all, the untouched oldest row is still claimable.
     const claimedOldest = await repo.claimNextQueuedFinalArtworkJob();
     assert.equal(claimedOldest?.id, oldest!.id);
+  });
+
+  it("Queue Starvation Repair (independent-review finding): claim order is by LEAST-RECENTLY-TOUCHED (heartbeat_at), not created_at alone -- a repeatedly-reclaimed pending job never permanently monopolizes every claim", async () => {
+    const { client } = createFakeClient();
+    const repo = new SupabaseProjectRepository(client);
+
+    const jobs = [];
+    for (let i = 0; i < 3; i += 1) {
+      await repo.supersedeActiveFinalDirectionApproval("project-1");
+      const approval = await repo.createFinalDirectionApproval("project-1", {
+        artworkVersionId: `artwork-${i}`,
+        designBriefVersionId: `version-${i}`,
+      });
+      jobs.push(
+        await repo.createFinalArtworkJob("project-1", {
+          sourceKind: "generated_concept",
+          finalDirectionApprovalId: approval.id,
+          artworkVersionId: `artwork-${i}`,
+          requestedProductionOutput: "production_png",
+          productionTreatmentKey: "standard_raster",
+          productionWidthIn: 10.5,
+        }),
+      );
+    }
+    const [oldest, middle, newest] = jobs;
+
+    // First pass: all three start `heartbeat_at IS NULL`, so this falls
+    // back to `created_at` -- the SAME order as before this repair.
+    const first = await repo.claimNextQueuedFinalArtworkJob();
+    assert.equal(first?.id, oldest!.id, "first claim: creation order, exactly as before this repair");
+
+    // Model the oldest job coming back "still pending" -- released back to
+    // `recoverable` WITHOUT clearing `heartbeatAt` (mirrors
+    // `checkpointAndDeferToNextInvocation`'s own real shape: the claim
+    // durably touched `heartbeat_at`, and a benign-pending outcome leaves
+    // that touch in place).
+    await repo.updateFinalArtworkJob(first!.id, { status: "recoverable" });
+
+    // The SECOND claim must NOT reclaim the oldest job merely because it
+    // is still the oldest-CREATED row -- it was JUST touched, so it is now
+    // the FRESHEST row. `middle` and `newest` have never been touched
+    // (`heartbeat_at` still null), so one of THEM is claimed instead. This
+    // is the exact bug: pre-repair, `oldest` would win this claim too,
+    // and every claim after it, forever.
+    const second = await repo.claimNextQueuedFinalArtworkJob();
+    assert.notEqual(second?.id, oldest!.id, "the just-claimed, still-pending job must never win the VERY NEXT claim too -- that is the starvation bug this repair closes");
+    assert.equal(second?.id, middle!.id, "the next-oldest-created, never-yet-touched row is claimed instead");
+
+    await repo.updateFinalArtworkJob(second!.id, { status: "recoverable" });
+
+    // Third claim: `oldest` and `middle` have each been touched once now;
+    // `newest` has never been touched at all, so it is the most overdue.
+    const third = await repo.claimNextQueuedFinalArtworkJob();
+    assert.equal(third?.id, newest!.id, "the last never-touched row is claimed before any already-touched row is revisited");
+
+    await repo.updateFinalArtworkJob(third!.id, { status: "recoverable" });
+
+    // Fourth claim: all three have now been touched exactly once, in
+    // order oldest -> middle -> newest. Fair rotation revisits `oldest`
+    // first (it has gone the LONGEST without being touched) -- never
+    // permanently excluded, never skipped forever.
+    const fourth = await repo.claimNextQueuedFinalArtworkJob();
+    assert.equal(fourth?.id, oldest!.id, "fair rotation eventually revisits the first job again -- it is never starved out permanently");
   });
 
   it("touchFinalArtworkJobHeartbeat and updateFinalArtworkJob mutate the expected fields", async () => {
