@@ -427,6 +427,109 @@ describe("Provider Intermediate Storage-Key Collision Repair -- production-artif
   });
 
   /**
+   * THE DEPLOYMENT SHAPE. Independent-review finding: the live-incident
+   * test above reproduces the failure from scratch, so by the time its
+   * plate uploads, its intermediate already sits at the NEW
+   * `provider-result-intermediate-{digest}.png` key. The job this repair
+   * exists to rescue does not look like that — its intermediate was
+   * written by the PRE-REPAIR code and sits at the LEGACY bare
+   * `.../production.png`, which is exactly the key the plate used to want.
+   *
+   * That is the case that must work on the day this deploys, so it is
+   * pinned here rather than reasoned about: the legacy intermediate is
+   * adopted from its DB row (never from a recomputed path), its bytes are
+   * read back from the legacy key untouched, the plate lands somewhere
+   * else, and no provider is contacted.
+   */
+  it("legacy intermediate at the pre-repair `production.png` key: adopted from its DB row, read back intact, and the new plate lands elsewhere -- zero provider calls", async () => {
+    const { repo, assets, storage, projectId, preparationId } = await setupPreparedUpload(400);
+    const expectedRequest = expectedReconstructionRequest(400);
+    const { fetchImpl, submitCount, downloadCount } = buildFakeTopazFetch(
+      expectedRequest.widthPx,
+      expectedRequest.heightPx,
+    );
+
+    const provider = new TopazTransparencyUpscaleProvider({
+      apiKey: "test-key-not-real",
+      fetchImpl,
+      sleepImpl: async () => {},
+      pollIntervalMs: 1,
+    });
+    const finalArtwork = createFinalArtworkCapability(repo);
+    const worker = createFinalArtworkWorkerCapability(
+      repo,
+      assets,
+      provider,
+      createPrintValidationCapability(),
+    );
+
+    const requested = await finalArtwork.requestPreparedUploadFinalArtwork(projectId);
+    await repo.updateFinalArtworkJob(requested.job.id, {
+      providerKey: "topaz_transparency_upscale",
+      providerRequestId: EXISTING_PAID_PROCESS_ID,
+      providerStatus: "submitted",
+    });
+
+    // Claims 1-2 produce a GENUINE worker-written intermediate, so its
+    // durable identity metadata is real rather than hand-authored.
+    await worker.processNextJob();
+    await worker.processNextJob();
+    const genuine = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).find(
+      isProviderResultIntermediateAsset,
+    );
+    assert.ok(genuine, "a genuine provider-result intermediate was persisted");
+
+    // Rewrite it into the PRE-REPAIR shape: same bytes, same identity
+    // metadata, but living at the bare legacy key the old code produced.
+    const intermediateBytes = await storage.download(genuine!.storageKey!);
+    await storage.delete(genuine!.storageKey!);
+    await assets.deleteAsset(genuine!.id);
+    const legacy = await assets.uploadProductionAsset(projectId, {
+      conceptId: `prepared-upload-${preparationId}`,
+      // Deliberately omitted -- this is what the pre-repair code did.
+      bytes: intermediateBytes,
+      contentType: "image/png",
+      widthPx: genuine!.widthPx,
+      heightPx: genuine!.heightPx,
+      hasTransparency: true,
+      finalArtworkJobId: requested.job.id,
+      productionRole: "production_png",
+      metadata: genuine!.metadata as Record<string, unknown>,
+    });
+    const legacyKey = `projects/${projectId}/concepts/prepared-upload-${preparationId}/production.png`;
+    assert.equal(legacy.storageKey, legacyKey, "the fixture really is at the pre-repair key");
+
+    // Claim 3: readback + normalize + upload the plate.
+    await worker.processNextJob();
+    const afterUpload = await repo.getFinalArtworkJob(requested.job.id);
+    assert.notEqual(
+      afterUpload?.status,
+      "failed",
+      `the plate must not collide with a LEGACY-keyed intermediate; lastError=${afterUpload?.lastError ?? "(none)"}`,
+    );
+
+    const plates = (await repo.listAssetsForFinalArtworkJob(projectId, requested.job.id)).filter(
+      (asset) =>
+        asset.productionRole === "production_png" &&
+        !isProviderResultIntermediateAsset(asset) &&
+        !isReconstructionIntermediateAsset(asset),
+    );
+    assert.equal(plates.length, 1, "exactly one authoritative plate");
+    assert.notEqual(plates[0]!.storageKey, legacyKey, "the plate never wants the legacy key again");
+    assert.deepEqual(
+      await storage.download(legacyKey),
+      intermediateBytes,
+      "the legacy intermediate's bytes are untouched -- adopted by DB row, never overwritten or re-keyed",
+    );
+
+    // Claim 4: validation -> completed.
+    await worker.processNextJob();
+    assert.equal((await repo.getFinalArtworkJob(requested.job.id))?.status, "completed");
+    assert.equal(submitCount(), 0, "a legacy-keyed resume submits nothing");
+    assert.equal(downloadCount(), 1, "and re-downloads nothing after its original download");
+  });
+
+  /**
    * Double-Shrink Repair, now on create-only storage: the SAME paid
    * provider result is legitimately re-persisted as a SECOND intermediate
    * when the confirmed production envelope changes underneath an in-flight

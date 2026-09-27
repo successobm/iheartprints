@@ -11824,14 +11824,22 @@ Two rules hold it together:
    (`resolveExistingIntermediateReconstruction` adopts the first
    marker-bearing asset for the job regardless of request id), which is
    intended — a self-healed job that submits a new pass-1 request writes a
-   new object rather than colliding; for the plate the tuple is the produced
-   artifact's own observable identity rather than a copy of the durable-intent
-   loop guard's fields, and it is finer than that guard in practice because an
-   immutable source determines its bytes, the transformation method determines
-   the provider 1:1, and an envelope change that actually binds moves the
-   produced geometry — while an envelope change that does **not** bind leaves
-   the effective target unchanged, so `resolveExistingProductionAsset` adopts
-   the existing plate and no upload is attempted at all.
+   new object rather than colliding; the plate is the ONE class where the rule is
+   **not met literally**, and the exception is stated rather than papered
+   over — its tuple is the produced artifact's own observable identity, while
+   the durable-intent loop guard additionally compares `productionWidthIn`
+   and `confirmedMaxHeightIn`. In every reachable case that gap costs
+   nothing: an envelope change that binds moves the produced geometry and
+   therefore the key, and one that does **not** bind leaves the effective
+   target unchanged, so `resolveExistingProductionAsset` adopts the existing
+   plate and no upload is attempted. The residual case — a geometry
+   *prediction* drift large enough to make that adoption miss, combined with
+   a non-binding envelope change — lands two plates on one key, and is
+   survivable only because both carry byte-identical pixels, so the upload
+   self-heals onto the object already there. The cost is a duplicate asset
+   row over one object, never a failed job and never a wrong deliverable.
+   Widening the tuple to close it would move every plate key, so it is a
+   deliberate future change needing its own migration story.
 2. **Determinism** — the stem is a pure function of that pair: no clock, no
    counter, no attempt number, no insertion order. A retry of the same
    logical artifact recomputes the same key, which is what keeps

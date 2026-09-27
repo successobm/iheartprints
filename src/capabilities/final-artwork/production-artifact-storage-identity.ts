@@ -44,16 +44,27 @@ import { createHash } from "node:crypto";
  *        the key separates per request. That is deliberate — a job that
  *        self-heals and submits a genuinely new pass-1 request writes a
  *        genuinely new object rather than colliding.
- *      - `final_plate` — the tuple is the produced artifact's own
- *        observable identity (source, transform, provider result, produced
- *        geometry) rather than a copy of the durable-intent loop guard's
- *        fields. It is finer than that guard in practice because an
- *        immutable source asset determines its bytes, the transformation
- *        method determines the provider, and any envelope change that
- *        actually binds moves the produced geometry — while an envelope
- *        change that does NOT bind leaves the effective target unchanged,
- *        so `resolveExistingProductionAsset` adopts the existing plate and
- *        no upload is attempted at all.
+ *      - `final_plate` — the ONE class where rule 1 is not met literally,
+ *        and the exception is stated rather than papered over. The tuple is
+ *        the produced artifact's own observable identity (source,
+ *        transform, provider result, produced geometry); the durable-intent
+ *        loop guard additionally compares `productionWidthIn` and
+ *        `confirmedMaxHeightIn`, which the key omits. In every reachable
+ *        case that gap costs nothing: an envelope change that actually
+ *        binds moves the produced geometry and therefore the key, and one
+ *        that does NOT bind leaves the effective target unchanged, so
+ *        `resolveExistingProductionAsset` adopts the existing plate and no
+ *        upload is attempted at all. The residual case — a geometry
+ *        PREDICTION drift large enough to make that adoption miss, combined
+ *        with a non-binding envelope change — lands two plates on one key,
+ *        and is survivable rather than fatal only because both carry
+ *        byte-identical pixels (same immutable source, same resolved
+ *        sizing), so `uploadStorageWithSelfHealAndBoundedRetry` adopts the
+ *        object already there. The cost is a duplicate asset ROW over one
+ *        object, never a failed job and never a wrong deliverable. Widening
+ *        the tuple to close it is a deliberate future change: it would move
+ *        every plate key, so it needs its own decision and its own
+ *        migration story for in-flight jobs.
  *
  *   2. DETERMINISM — the key is a pure function of that pair. No clock, no
  *      randomness, no attempt counter, no insertion order. A retry of the
@@ -139,8 +150,19 @@ const IDENTITY_DIGEST_LENGTH = 12;
  *      smuggled into one, and `["a", "b"]` would then encode identically to
  *      a single field containing the separator. A length prefix has no such
  *      hole, needs no assumption about what an identity value may contain,
- *      and — unlike a raw control byte — keeps this module plain ASCII, so
- *      git and ripgrep treat it as the reviewable text it needs to be.
+ *      and — unlike a raw control byte — keeps every executable line and
+ *      every encoding literal here ordinary printable text, so git and
+ *      ripgrep treat this module as the reviewable source it needs to be
+ *      rather than as a binary blob.
+ *
+ * Injective over JS strings, which is the level every real identity field
+ * lives at. Two caveats, both unreachable today and recorded so a future
+ * field type does not inherit a guarantee that was never made: the digest
+ * consumes UTF-8, so a LONE SURROGATE and U+FFFD hash alike (every live
+ * field is a UUID, a hard-coded provider/method constant, a SHA-256 hex
+ * string or a finite number, and the one `unknown` — `sourceBytesSha256` —
+ * comes back out of Postgres `jsonb`, which rejects lone surrogates
+ * outright); and `-0` and `0` both stringify to `n:0`.
  *
  * `GOLDEN_PRODUCTION_ARTIFACT_STEMS` below pins the resulting keys against
  * literal expected values, because a silent change here is uniquely
