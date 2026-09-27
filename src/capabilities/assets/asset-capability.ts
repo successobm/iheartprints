@@ -287,6 +287,37 @@ export interface UploadConceptAssetResult {
 export interface UploadProductionAssetInput {
   /** Internal storage-grouping id — see `AssetStorageProvider`'s `UploadAssetInput.conceptId` doc. */
   conceptId: string;
+  /**
+   * Provider Intermediate Storage-Key Collision Repair: the file stem that
+   * distinguishes THIS logical artifact from every other artifact sharing
+   * the same `conceptId` grouping — see
+   * `final-artwork/production-artifact-storage-identity.ts` for the
+   * contract and the live incident that forced it.
+   *
+   * A grouping id alone is NOT a storage identity. Several semantically
+   * distinct artifacts legitimately belong to one job/preparation (a
+   * two-pass reconstruction's pass-1 output, the downloaded provider
+   * result, the authoritative plate, and successive plates for a changed
+   * production envelope); before this field they all resolved to one
+   * `production.png` object, and create-only storage (`upsert: false`)
+   * turned that aliasing into a hard, unrecoverable upload failure.
+   *
+   * MUST be deterministic for a given logical artifact — never a clock,
+   * a counter, or a random value — or the self-heal/idempotency guarantees
+   * around this upload stop holding.
+   *
+   * Omitting it keeps the historical bare `production` stem, which is only
+   * safe for a caller whose `conceptId` is itself unique per artifact — the
+   * Signs plate (`sign-{jobId}-{executionImplementationVersion}`) is the
+   * one caller that genuinely is. `sign-qr-preservation-service.ts`'s two
+   * correction uploads use a `Date.now()`-suffixed grouping, which is
+   * unique per CALL rather than per artifact: they cannot collide, but they
+   * are also not self-healable (a crash between the storage write and
+   * `createAsset` orphans the object and a retry writes another). That is
+   * pre-existing behavior on an operator-invoked one-shot path, noted here
+   * rather than changed, because it is outside this repair's scope.
+   */
+  storageArtifactFileStem?: string;
   bytes: Buffer;
   contentType: string;
   widthPx: number | null;
@@ -469,7 +500,7 @@ export function createAssetCapability(
       const uploadInput = {
         projectId: designId,
         conceptId: input.conceptId,
-        fileName: `production${extensionForContentType(input.contentType)}`,
+        fileName: `${input.storageArtifactFileStem ?? "production"}${extensionForContentType(input.contentType)}`,
         bytes: input.bytes,
         contentType: input.contentType,
       };

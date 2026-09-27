@@ -11778,6 +11778,115 @@ speculatively.
 
 ---
 
+## 23r. Production-Artifact Storage Identity (Provider Intermediate Storage-Key Collision Repair)
+
+A FinalArtwork job's **storage grouping id** is a folder, never an identity.
+Several semantically distinct artifacts legitimately belong to one job, and
+`AssetStorageProvider.upload` is create-only (`upsert: false`) on every real
+backend — so two artifacts that resolve to one object key is not a
+last-writer-wins overwrite, it is a hard, unrecoverable upload failure.
+
+**Live incident.** Controlled production acceptance of the short-bounded
+worker (prepared-upload job `67816e21…`) advanced cleanly through
+`provider_download_completed` → `provider_result_intermediate_persisted`,
+then died on the next batch at `production_asset_upload_started` with
+`"The resource already exists"` — 1 durable intermediate, 0 authoritative
+production assets. The provider-result intermediate and the authoritative
+plate were both written under the same `conceptId`
+(`prepared-upload-{artworkPreparationId}`) and the same implicit
+`production.png` filename, so `buildObjectKey` gave both the single object
+`projects/{projectId}/concepts/{grouping}/production.png`. Splitting provider
+download and normalization into separate durable stages is what first put
+both writes inside one job's lifetime and made the latent aliasing reachable.
+
+**Contract** (`final-artwork/production-artifact-storage-identity.ts`;
+`UploadProductionAssetInput.storageArtifactFileStem`). Every artifact a
+FinalArtwork job persists through `uploadProductionAsset` carries a file stem
+derived from `(artifact class, logical identity)`:
+
+| Artifact class | Stem | Logical identity |
+|---|---|---|
+| Pass-1 reconstruction intermediate | `pass1-intermediate-{digest}` | provider key + provider request id |
+| Provider-result intermediate | `provider-result-intermediate-{digest}` | provider request id + provider key + source asset id + source bytes sha256 + productionWidthIn + confirmedMaxHeightIn |
+| Authoritative production plate | `production-{digest}` | source asset id + transformation method + provider request id + produced pixel geometry |
+
+Two rules hold it together:
+
+1. **Separation** — the key must be at least as **fine** as the durable
+   adoption check that decides whether an existing artifact may stand in for
+   the one about to be written. Anything adoption treats as a genuine
+   difference must move the key, or a write adoption correctly refused to
+   skip collides with the artifact it refused. The converse is deliberately
+   **not** claimed. Per class: for the provider-result intermediate the
+   tuple is exactly what `providerResultIntermediateMatchesIdentity` plus
+   the `providerRequestId` list filter compare, field for field; for the
+   pass-1 intermediate the key is **finer** than adoption
+   (`resolveExistingIntermediateReconstruction` adopts the first
+   marker-bearing asset for the job regardless of request id), which is
+   intended — a self-healed job that submits a new pass-1 request writes a
+   new object rather than colliding; for the plate the tuple is the produced
+   artifact's own observable identity rather than a copy of the durable-intent
+   loop guard's fields, and it is finer than that guard in practice because an
+   immutable source determines its bytes, the transformation method determines
+   the provider 1:1, and an envelope change that actually binds moves the
+   produced geometry — while an envelope change that does **not** bind leaves
+   the effective target unchanged, so `resolveExistingProductionAsset` adopts
+   the existing plate and no upload is attempted at all.
+2. **Determinism** — the stem is a pure function of that pair: no clock, no
+   counter, no attempt number, no insertion order. A retry of the same
+   logical artifact recomputes the same key, which is what keeps
+   `uploadStorageWithSelfHealAndBoundedRetry`'s "did my own prior attempt's
+   bytes already land here?" self-heal meaningful and every crash-resume
+   idempotent.
+
+This is **separation, never destruction**: `upsert: true`, deleting or
+overwriting an intermediate before the final upload, randomized filenames,
+and suppressing the collision error are all explicitly rejected. Historical
+durable intermediates stay exactly where they are, byte-identical, as the
+audit evidence for a paid provider request that they are (§6.11, Version
+Everything). Class membership in storage remains a convenience for operators
+reading a bucket listing — `metadata.reconstructionStage` stays the single
+authority deciding what is internal, and every read path that selects "the"
+deliverable still filters on it, never on a path.
+
+The identity tuple is encoded with a **type tag** (so `null` and the
+string `"null"`, or `10.5` and `"10.5"`, stay distinct) and a **length
+prefix** per field (so a field's own content can never forge a field
+boundary — a bare separator character cannot give that guarantee, since any
+separator a value may contain, a value may smuggle). The resulting stems are
+pinned by `GOLDEN_PRODUCTION_ARTIFACT_STEMS` against literal expected values:
+a silent change to the encoding throws nothing and fails no
+self-consistency test, yet would strand every object already written and
+break every crash-resume's ability to find its own prior bytes.
+
+Two callers deliberately keep the bare historical `production` stem because
+their `conceptId` already separates them: the Signs plate
+(`sign-{jobId}-{executionImplementationVersion}`) and
+`sign-qr-preservation-service.ts`'s two operator-invoked correction uploads.
+The latter two use a `Date.now()` grouping, unique per *call* rather than per
+artifact — they cannot collide, but they are also not self-healable. That is
+pre-existing behavior on a one-shot operator path, recorded here rather than
+changed.
+
+Beyond the observed incident the same contract closes three further aliases
+that were reachable on create-only storage: a two-pass job's pass-1
+intermediate versus its provider-result intermediate; two provider-result
+intermediates for the same paid result under a CHANGED confirmed envelope
+(the Double-Shrink case); and two authoritative plates for a job revived
+against a changed target (Phase 28T's 10.5×10.5 → 10.5×14 shape). Signs
+artifacts were already separated by their own grouping ids
+(`sign-{jobId}-{executionImplementationVersion}` for the plate) and are
+unchanged, except that a Signs pass-1 intermediate now inherits the same
+per-request stem.
+
+Regression coverage runs on `StrictUniqueKeyAssetStorageProvider`
+(`final-artwork-worker/production-artifact-storage-identity.test.ts`). The
+overwrite-friendly filesystem and data-URI backends every other worker suite
+uses are exactly what hid this defect class; they must never be substituted
+back into these tests.
+
+---
+
 ## 24. Current Limitations
 
 Verified against the implementation:
