@@ -106,6 +106,7 @@ import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { decideEnhancement } from "@/capabilities/final-artwork/enhancement-decision";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
 import { HalftoneDtfProvider } from "@/capabilities/final-artwork/halftone-dtf-provider";
+import { productionArtifactStorageFileStem } from "@/capabilities/final-artwork/production-artifact-storage-identity";
 import {
   isProviderResultIntermediateAsset,
   isReconstructionIntermediateAsset,
@@ -902,6 +903,18 @@ export function createFinalArtworkWorkerCapability(
       await withOperationTiming("persistIntermediateReconstruction.uploadProductionAsset", () =>
         assets.uploadProductionAsset(job.projectId, {
           conceptId: storageGroupingId,
+          // Provider Intermediate Storage-Key Collision Repair: a pass-1
+          // intermediate is its own artifact class, and one job can hold
+          // SEVERAL of them — the skip check immediately above only reuses
+          // an existing one when its `providerRequestId` matches, so a
+          // self-healed job that submitted a genuinely new pass-1 request
+          // persists a genuinely new intermediate. That identity
+          // (provider + request id) is exactly what the skip check reads,
+          // so key-equality and adoption-equality are the same question.
+          storageArtifactFileStem: productionArtifactStorageFileStem({
+            artifactClass: "pass1_intermediate",
+            identity: [activeProvider.providerKey, result.providerRequestId],
+          }),
           bytes: result.bytes,
           contentType: "image/png",
           widthPx: result.widthPx,
@@ -1157,6 +1170,33 @@ export function createFinalArtworkWorkerCapability(
       await withOperationTiming("persistProviderResultIntermediate.uploadProductionAsset", () =>
         assets.uploadProductionAsset(job.projectId, {
           conceptId: storageGroupingId,
+          // Provider Intermediate Storage-Key Collision Repair: THE key
+          // that collided in production. Its identity is the exact tuple
+          // the `existing` lookup immediately above adopts on —
+          // `providerRequestId` (the list filter) plus every field
+          // `providerResultIntermediateMatchesIdentity` compares — so two
+          // intermediates share a storage object if and only if one would
+          // have been adopted in place of the other. The Double-Shrink case
+          // (the same paid result re-persisted under a genuinely CHANGED
+          // production envelope) is therefore a different key, not a
+          // collision, and the earlier envelope's intermediate survives
+          // untouched as the audit evidence it is.
+          storageArtifactFileStem: productionArtifactStorageFileStem({
+            artifactClass: "provider_result_intermediate",
+            identity: [
+              downloaded.providerRequestId,
+              currentIdentity.providerKey,
+              currentIdentity.sourceAssetId,
+              // Passed through EXACTLY as the adoption check compares it
+              // (it is `unknown` there too) — independent-review finding:
+              // coercing a non-string to `null` here would make the key
+              // COARSER than the identity check, so two identities the
+              // check calls different could share one object.
+              currentIdentity.sourceBytesSha256,
+              currentIdentity.productionWidthIn,
+              currentIdentity.confirmedMaxHeightIn,
+            ],
+          }),
           bytes: downloaded.bytes,
           contentType: "image/png",
           widthPx: downloaded.widthPx,
@@ -2189,6 +2229,29 @@ export function createFinalArtworkWorkerCapability(
         // folder — a stable internal id, never a filename convention and
         // never anything a customer supplied (Goal 10 / Goal 18).
         conceptId: params.storageGroupingId,
+        // Provider Intermediate Storage-Key Collision Repair: the grouping
+        // above is a FOLDER, never an identity — this job's internal
+        // intermediates live in it too. The authoritative plate keeps the
+        // historical `production` stem (it stays the obvious deliverable in
+        // a storage listing) and adds the identity that makes it its own
+        // object: which source it was actually built from, by which
+        // transform, from which provider result, at which produced
+        // geometry. Deterministic in every term, so a crash between the
+        // storage write and the `createAsset` row self-heals onto the same
+        // object; distinct in the terms that genuinely change the artifact,
+        // so a job revived against a CHANGED confirmed envelope (Phase 28T's
+        // own 10.5x10.5 -> 10.5x14 shape) produces a new plate instead of
+        // being blocked by the plate made for the old one.
+        storageArtifactFileStem: productionArtifactStorageFileStem({
+          artifactClass: "final_plate",
+          identity: [
+            sourceAsset.id,
+            output.transformationMethod,
+            output.providerRequestId ?? null,
+            output.widthPx,
+            output.heightPx,
+          ],
+        }),
         bytes: output.bytes,
         contentType: output.contentType,
         widthPx: output.widthPx,
