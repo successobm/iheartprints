@@ -807,6 +807,7 @@ export function createFinalArtworkCapability(
         normalizeProductionIntent(snapshot.brief.requestedProductionOutput),
         productionTreatmentKey,
         effectiveTargetIn,
+        effectiveSource.assetId,
       );
 
       // Same rule as the create_new path (Sprint 2M Phase 2G Goal 8): only
@@ -1615,6 +1616,58 @@ async function resolveCurrentMatchingProductionJob(
  * exactly as `jobIntentIsCurrent`'s own legacy-width abstention already
  * does.
  */
+/**
+ * DTF-R1 (independent re-review): "has the artwork this job's plates were
+ * built from been superseded since?"
+ *
+ * The request-side twin of the worker's own adoption fence
+ * (`productionAssetSourceStillCurrent`), asking the identical question of
+ * the identical evidence — each plate's OWN recorded
+ * `uploadedPreserve.preparedAssetId`, never a prediction — so the two
+ * boundaries can never drift apart about what "a different source" means.
+ *
+ * Asked of the NEWEST plate only, never "does any plate name a different
+ * source". A job that has already produced a current-source plate keeps its
+ * older, superseded one on file forever (produced files are not retracted),
+ * so an `any` reading would report "superseded" permanently and re-queue
+ * the job on every single request — a livelock, and the first cut of this
+ * function did exactly that. The newest plate is the one delivery resolves
+ * to (`findProductionAssetIdForJob`, `resolveSatisfiedProductionDelivery`),
+ * so it is also the one whose lineage decides whether this job still owes
+ * the customer a run.
+ *
+ * `false` whenever there is nothing to compare: no resolved source (every
+ * non-prepared-upload caller), no plates yet, or a plate that cannot name
+ * its source. "We did not write it down" is not evidence that the artwork
+ * changed, exactly as it is not evidence that it did not.
+ */
+async function completedJobSourceSuperseded(
+  repo: ProjectRepository,
+  projectId: string,
+  jobId: string,
+  currentSourceAssetId: string | null,
+): Promise<boolean> {
+  if (!currentSourceAssetId) return false;
+  const assets = await repo.listAssets(projectId);
+  const plates = assets.filter(
+    (asset) =>
+      asset.finalArtworkJobId === jobId &&
+      asset.productionRole === "production_png" &&
+      !isReconstructionIntermediateAsset(asset) &&
+      !isProviderResultIntermediateAsset(asset),
+  );
+  if (plates.length === 0) return false;
+  const newest = plates.reduce((latest, asset) =>
+    asset.createdAt > latest.createdAt ? asset : latest,
+  );
+  const lineage = (newest.metadata as Record<string, unknown> | null | undefined)
+    ?.uploadedPreserve as { preparedAssetId?: unknown } | undefined;
+  return (
+    typeof lineage?.preparedAssetId === "string" &&
+    lineage.preparedAssetId !== currentSourceAssetId
+  );
+}
+
 async function completedJobIsStaleForTarget(
   repo: ProjectRepository,
   projectId: string,
@@ -1972,6 +2025,15 @@ async function resolvePreparedUploadJob(
    * this phase.
    */
   effectiveTargetIn: EffectiveProductionTargetIn | null,
+  /**
+   * DTF-R1: the asset THIS request resolved as the production source (the
+   * clean master's derivative, or the prepared asset). Used only to tell a
+   * certification withhold about the same artwork apart from one whose
+   * artwork has since been superseded — see
+   * `completedJobSourceSuperseded`. `null` preserves exactly the
+   * pre-DTF-R1 behavior.
+   */
+  currentSourceAssetId: string | null = null,
 ): Promise<{ job: FinalArtworkJob; alreadyRequested: boolean }> {
   const existingJobs = await repo.listFinalArtworkJobsForPreparation(
     projectId,
@@ -2023,10 +2085,41 @@ async function resolvePreparedUploadJob(
       // without changing the certification evidence. Leave the completed job
       // as-is (`alreadyRequested: true`) so the customer stays on needs_review
       // without burning another credit.
+      //
+      // DTF-R1 (independent re-review): "the same size/artwork" is the
+      // whole premise, and it stops holding the moment the ARTWORK moves.
+      // The Pedro-class project is precisely this shape — a plate built
+      // from the degraded upload, Print Ready withheld on
+      // `reconstruction_certification_evidence`, project
+      // `finalization_required` — and it is the shape the clean-master
+      // handoff exists to serve. Once recovery confirms a master, the next
+      // request resolves CASE C correctly, and without this exemption
+      // `resolvePreparedUploadJob` would still hand back the completed job
+      // untouched: no worker run, no clean-master plate, ever. The withhold
+      // would have quietly cancelled the phase for the only projects that
+      // needed it.
+      //
+      // So the withhold still suppresses revival for the case it was
+      // written for — asking the SAME artwork the same question again,
+      // which would re-spend a credit to reach the identical verdict — and
+      // never for a job whose source has since been superseded. Judged on
+      // the plate's OWN recorded lineage against the source this request
+      // resolved, the same comparison the worker's own adoption fence
+      // makes, so the two can never disagree about what "a different
+      // source" means.
+      const certificationWithholdSourceSuperseded =
+        latestValidation !== null &&
+        (await completedJobSourceSuperseded(
+          repo,
+          projectId,
+          existing.id,
+          currentSourceAssetId,
+        ));
       const terminalCertificationWithhold =
         latestValidation !== null &&
         latestValidation.status !== "ready" &&
-        validationReportHasFailedCertificationEvidence(latestValidation.report);
+        validationReportHasFailedCertificationEvidence(latestValidation.report) &&
+        !certificationWithholdSourceSuperseded;
       const revalidationWorthwhile =
         latestValidation !== null &&
         latestValidation.status !== "ready" &&

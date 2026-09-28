@@ -12,12 +12,17 @@ import { createArtworkGeometryQualificationCapability } from "@/capabilities/art
 import { createRasterReconstructionCapability } from "@/capabilities/artwork-reconstruction/raster-reconstruction-capability";
 import { createFinalArtworkCapability } from "@/capabilities/final-artwork";
 import { LocalRasterInterpolationProvider } from "@/capabilities/final-artwork/local-raster-provider";
+import {
+  encodeProductionPng,
+  normalizeProductionRaster,
+} from "@/capabilities/final-artwork/production-normalization";
 import type {
   FinalArtworkProvider,
   FinalArtworkProviderInput,
   FinalArtworkProviderOutput,
 } from "@/capabilities/final-artwork/provider";
 import { resolvePreparedUploadEffectiveSource } from "@/capabilities/final-artwork/prepared-upload-effective-source";
+import { ArtworkFinalizationRecoveryUnresolvedError } from "@/capabilities/final-artwork/recovery-unresolved-error";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import type { PrintValidationReport } from "@/capabilities/print-validation/contracts";
 import type { ProjectRepository } from "@/lib/db/repository";
@@ -69,17 +74,64 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
   });
 
   /**
-   * A reconstruction provider that must never be called on any DTF-R1 path.
-   * It throws rather than returning a plausible result, so a silent
-   * duplicate-reconstruction regression fails loudly instead of producing a
-   * quietly-wrong plate.
+   * A faithful LOCAL stand-in for a provider-hosted reconstruction — an
+   * exact integer pixel replication (so alpha bounds scale exactly), then
+   * the same shared production normalization the real adapter runs. No
+   * network, no credit, no provider account: "zero paid calls" is true by
+   * construction in this file, and `calls` is what makes "zero DISPATCHES"
+   * an assertion rather than a hope.
+   *
+   * Most scenarios assert `calls === 0`. Two deliberately do not — the
+   * Pedro-shaped scenario and the undersized-master scenario both need a
+   * reconstruction to genuinely happen, and a provider that merely threw
+   * could not express them.
    */
-  class NeverCalledReconstructionProvider implements FinalArtworkProvider {
-    readonly providerKey = "dtf_r1_never_called_reconstruction";
+  class CountingReconstructionProvider implements FinalArtworkProvider {
+    readonly providerKey = "dtf_r1_local_reconstruction";
     calls = 0;
-    async produce(): Promise<FinalArtworkProviderOutput> {
+    private static readonly SCALE = 5;
+
+    async produce(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput> {
       this.calls += 1;
-      throw new Error("DTF-R1 must never dispatch a reconstruction provider");
+      const requestId = `dtf-r1-reconstruction-${this.calls}`;
+      await input.onProviderRequestSubmitted?.(requestId);
+
+      const source = PNG.sync.read(input.sourceBytes);
+      const scale = CountingReconstructionProvider.SCALE;
+      const width = source.width * scale;
+      const height = source.height * scale;
+      const data = Buffer.alloc(width * height * 4);
+      for (let y = 0; y < height; y += 1) {
+        const sourceRow = Math.floor(y / scale) * source.width;
+        for (let x = 0; x < width; x += 1) {
+          const from = (sourceRow + Math.floor(x / scale)) * 4;
+          const to = (y * width + x) * 4;
+          data[to] = source.data[from]!;
+          data[to + 1] = source.data[from + 1]!;
+          data[to + 2] = source.data[from + 2]!;
+          data[to + 3] = source.data[from + 3]!;
+        }
+      }
+      const normalized = normalizeProductionRaster({ width, height, data }, input.sizing);
+      if (normalized.status !== "normalized") throw new Error(normalized.reason);
+      const encoded = encodeProductionPng(normalized.result);
+
+      return {
+        bytes: encoded.bytes,
+        contentType: "image/png",
+        widthPx: normalized.result.image.width,
+        heightPx: normalized.result.image.height,
+        hasTransparency: encoded.hasTransparency,
+        nativeWidthPx: source.width,
+        nativeHeightPx: source.height,
+        reconstructedWidthPx: width,
+        reconstructedHeightPx: height,
+        resolutionProvenance: "reconstructed",
+        transformationMethod: "dtf_r1_local_reconstruction_v1",
+        preservesApprovedContent: false,
+        providerRequestId: requestId,
+        normalization: normalized.result.metadata,
+      };
     }
   }
 
@@ -131,7 +183,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       assets,
       reconstruction,
     );
-    const provider = new NeverCalledReconstructionProvider();
+    const provider = new CountingReconstructionProvider();
     const localProvider = new CountingLocalProvider();
     const finalArtwork = createFinalArtworkCapability(repo, undefined, qualification);
     const worker = createFinalArtworkWorkerCapability(
@@ -152,6 +204,8 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       finalArtwork,
       worker,
       provider,
+      /** The same instance, named for what it is at the two call sites that need it to run. */
+      reconstructor: provider,
       localProvider,
     };
   }
@@ -206,20 +260,33 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
    */
   const CANDIDATE_CANVAS = { w: 2000, h: 900, aw: 1800, ah: 800 };
 
-  function originalUploadPng(): Buffer {
-    return rectPng(ORIGINAL_CANVAS.w, ORIGINAL_CANVAS.h, ORIGINAL_CANVAS.aw, ORIGINAL_CANVAS.ah, 255);
+  /**
+   * An original whose prepared derivative is HONESTLY short of the plate:
+   * 400px of visible artwork against a 1200px target. The only fixture that
+   * legitimately reaches a reconstruction provider, and the shape the
+   * Pedro-class scenario needs.
+   */
+  const UNDERSIZED_CANVAS = { w: 500, h: 240, aw: 400, ah: 180 };
+  /** A recovered candidate that qualifies into a master still short of the target. */
+  const SMALL_CANDIDATE_CANVAS = { w: 700, h: 320, aw: 600, ah: 260 };
+
+  type Canvas = { w: number; h: number; aw: number; ah: number };
+
+  function originalUploadPng(canvas: Canvas = ORIGINAL_CANVAS): Buffer {
+    return rectPng(canvas.w, canvas.h, canvas.aw, canvas.ah, 255);
   }
-  function preparedArtworkPng(): Buffer {
-    return rectPng(ORIGINAL_CANVAS.w, ORIGINAL_CANVAS.h, ORIGINAL_CANVAS.aw, ORIGINAL_CANVAS.ah, 0);
+  function preparedArtworkPng(canvas: Canvas = ORIGINAL_CANVAS): Buffer {
+    return rectPng(canvas.w, canvas.h, canvas.aw, canvas.ah, 0);
   }
-  function candidatePng(): Buffer {
-    return rectPng(CANDIDATE_CANVAS.w, CANDIDATE_CANVAS.h, CANDIDATE_CANVAS.aw, CANDIDATE_CANVAS.ah, 255);
+  function candidatePng(canvas: Canvas = CANDIDATE_CANVAS): Buffer {
+    return rectPng(canvas.w, canvas.h, canvas.aw, canvas.ah, 255);
   }
 
   /** Drives a project to exactly "an approved prepared upload, size confirmed". */
   async function setupApprovedPreparation(
     repo: ProjectRepository,
     assets: ReturnType<typeof buildPipeline>["assets"],
+    canvas: Canvas = ORIGINAL_CANVAS,
   ) {
     await retireQueuedJobs(repo);
 
@@ -234,10 +301,10 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
     const original = await assets.uploadCustomerArtwork(projectId, {
       conceptId: "upload-original",
-      bytes: originalUploadPng(),
+      bytes: originalUploadPng(canvas),
       contentType: "image/png",
-      widthPx: ORIGINAL_CANVAS.w,
-      heightPx: ORIGINAL_CANVAS.h,
+      widthPx: canvas.w,
+      heightPx: canvas.h,
       hasTransparency: false,
       kind: "customer_upload",
       metadata: { originalFilename: "team-logo.png" },
@@ -246,15 +313,15 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     const preparation = await repo.createArtworkPreparation(projectId, {
       originalAssetId: original.id,
       originalFilename: "team-logo.png",
-      analysis: { widthPx: ORIGINAL_CANVAS.w, heightPx: ORIGINAL_CANVAS.h },
+      analysis: { widthPx: canvas.w, heightPx: canvas.h },
     });
 
     const prepared = await assets.uploadCustomerArtwork(projectId, {
       conceptId: `prepared-${preparation.id}`,
-      bytes: preparedArtworkPng(),
+      bytes: preparedArtworkPng(canvas),
       contentType: "image/png",
-      widthPx: ORIGINAL_CANVAS.w,
-      heightPx: ORIGINAL_CANVAS.h,
+      widthPx: canvas.w,
+      heightPx: canvas.h,
       hasTransparency: true,
       kind: "png",
       metadata: { derivedFromAssetId: original.id },
@@ -336,6 +403,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     originalAssetId: string,
     candidateLabel = "recovered-candidate",
     existingLifecycle?: Awaited<ReturnType<typeof beginRecoveryLifecycle>>,
+    candidateCanvas: Canvas = CANDIDATE_CANVAS,
   ) {
     // Reuse a lifecycle this scenario already began, when it has one.
     // Proposing a SECOND contract would supersede the first and make the
@@ -348,10 +416,10 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     const { contract, job } = started;
     const uploaded = await built.assets.uploadConceptImage(projectId, {
       conceptId: candidateLabel,
-      bytes: candidatePng(),
+      bytes: candidatePng(candidateCanvas),
       contentType: "image/png",
-      widthPx: CANDIDATE_CANVAS.w,
-      heightPx: CANDIDATE_CANVAS.h,
+      widthPx: candidateCanvas.w,
+      heightPx: candidateCanvas.h,
       hasTransparency: false,
       providerKey: "test",
       generationJobId: null,
@@ -502,9 +570,21 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       /image recovery review/,
     );
 
+    // The TYPE matters as much as the message: a bare `Error` here reaches
+    // the API route's generic branch, which logs "Failed to run an artwork
+    // preparation action" and answers 500. Unresolved production authority
+    // is not a processing failure, and the transport must not say it is.
     await assert.rejects(
       () => built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId),
-      /image recovery review/,
+      (error: unknown) => {
+        assert.ok(
+          error instanceof ArtworkFinalizationRecoveryUnresolvedError,
+          "CASE B must refuse with the typed, route-mappable error",
+        );
+        assert.equal(error.safeErrorCode, "ARTWORK_RECOVERY_UNRESOLVED");
+        assert.match(error.message, /image recovery review/);
+        return true;
+      },
     );
 
     // No job was created at all, so nothing can later be finalized from the
@@ -834,13 +914,12 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       setup.projectId,
       again.job.productionTreatmentKey ?? STANDARD_RASTER_TREATMENT_KEY,
     );
-    if (variant.asset) {
-      assert.equal(
-        variant.asset.id,
-        assetsForJob[1]!.id,
-        "the read model must surface the current source's plate, never the superseded one",
-      );
-    }
+    assert.ok(variant.asset, "the variant read model must resolve a plate at all");
+    assert.equal(
+      variant.asset!.id,
+      assetsForJob[1]!.id,
+      "the read model must surface the current source's plate, never the superseded one",
+    );
   });
 
   it("E: a plate the job built from the CURRENT source is still adopted on retry (no false drift)", async () => {
@@ -918,6 +997,116 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     assert.ok(asset, "a plate is finally produced, from the clean master");
     assert.equal(recordedLineage(asset!).preparedAssetId, derivedAssetId);
     assert.equal(built.provider.calls, 0);
+  });
+
+  it("the PEDRO-CLASS project reaches CASE C: a certification withhold does not outlive its source", async () => {
+    const repo = await freshRepo();
+    const built = { ...buildPipeline(repo), repo };
+    // A source too small for the target, so the first run genuinely
+    // reconstructs and validation withholds on
+    // `reconstruction_certification_evidence` — the exact Pedro Back shape.
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    const first = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, first.job.id);
+
+    const firstReport = await latestReport(repo, setup.projectId, first.job.id);
+    assert.notEqual(firstReport.status, "ready", "Print Ready is withheld, as it must be");
+    assert.equal(
+      firstReport.checks.find(
+        (check) => check.check === "reconstruction_certification_evidence",
+      )!.status,
+      "fail",
+    );
+    const snapshotAfterFirst = await repo.getProject(setup.projectId);
+    assert.equal(snapshotAfterFirst!.project.status, "finalization_required");
+    assert.equal(built.reconstructor.calls, 1, "the first run really did reconstruct");
+
+    // Recovery now resolves. THE REGRESSION: `terminalCertificationWithhold`
+    // exists to stop a completed, certification-withheld job from being
+    // re-queued to re-spend a credit reaching the identical verdict about
+    // the identical artwork. Its premise dies the moment the artwork moves.
+    // Without the source-superseded exemption, this request resolves CASE C
+    // correctly and STILL hands back the completed job — so the clean master
+    // never reaches production for the one project shape this whole phase
+    // was built for.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+    );
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    assert.equal(
+      again.alreadyRequested,
+      false,
+      "a withhold about superseded artwork must not block the clean master",
+    );
+    assert.equal(again.job.status, "queued");
+
+    await drainJob(built.worker, repo, again.job.id);
+
+    const assetsForJob = (await repo.listAssets(setup.projectId))
+      .filter(
+        (asset) =>
+          asset.finalArtworkJobId === again.job.id &&
+          asset.productionRole === "production_png",
+      )
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    const newest = assetsForJob[assetsForJob.length - 1]!;
+    assert.equal(recordedLineage(newest).preparedAssetId, derivedAssetId);
+    assert.equal(
+      recordedLineage(newest).sourceAuthority,
+      "production_qualified_clean_master",
+    );
+
+    // ...and it is STILL not print_ready. Reaching CASE C is not the same
+    // as certifying the result: the master's own pixels remain
+    // provider-manufactured and uncertified.
+    const secondReport = await latestReport(repo, setup.projectId, again.job.id);
+    assert.notEqual(secondReport.status, "ready", "Print Ready must be withheld");
+    assert.match(
+      secondReport.checks.find(
+        (check) => check.check === "reconstruction_certification_evidence",
+      )!.reason,
+      /recovered clean master/,
+    );
+  });
+
+  it("an UNDERSIZED clean master flows through the ordinary enhancement decision", async () => {
+    const repo = await freshRepo();
+    const built = { ...buildPipeline(repo), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets);
+    // A master with fewer pixels than the plate needs. DTF-R1 must not
+    // special-case it: the master is simply the source, and the existing
+    // enhancement decision applies to it exactly as it would to any other
+    // source. This is the spend-relevant path — the only DTF-R1 scenario in
+    // which a provider is legitimately reached at all.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "undersized-candidate",
+      undefined,
+      SMALL_CANDIDATE_CANVAS,
+    );
+
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, requested.job.id);
+
+    const asset = await productionAssetFor(repo, setup.projectId, requested.job.id);
+    assert.ok(asset, "the plate is produced from the master, via reconstruction");
+    const lineage = recordedLineage(asset!);
+    assert.equal(lineage.preparedAssetId, derivedAssetId, "reconstructed FROM the master");
+    assert.equal(lineage.sourceAuthority, "production_qualified_clean_master");
+    assert.equal(lineage.enhancement, "reconstructed");
+    assert.equal(
+      built.reconstructor.calls,
+      1,
+      "exactly one reconstruction — DTF never re-runs the recovery lifecycle's own",
+    );
+
+    const report = await latestReport(repo, setup.projectId, requested.job.id);
+    assert.notEqual(report.status, "ready", "Print Ready must be withheld");
   });
 
   // =========================================================================

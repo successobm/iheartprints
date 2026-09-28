@@ -11799,7 +11799,7 @@ was already on file.
 
 `final-artwork/prepared-upload-effective-source.ts` —
 `resolvePreparedUploadEffectiveSource(repo, artworkGeometryQualification,
-{ projectId, preparedAssetId })`. Structurally the apparel twin of
+{ projectId, originalAssetId, preparedAssetId })`. Structurally the apparel twin of
 `sign-preparation/sign-effective-source.ts`: one exported function, asked
 identically by every boundary, never re-implemented at a call site.
 Repository reads plus one capability read — no asset download, no pixel
@@ -11807,7 +11807,7 @@ decode, no provider, no write.
 
 | Lifecycle state | Resolver | DTF source |
 | --- | --- | --- |
-| No `ArtworkFidelityContract`, or no reconstruction job against its `sourceAssetId` | `{ status: "prepared" }` | `preparedAssetId` — byte-for-byte pre-DTF-R1 behavior |
+| No `ArtworkFidelityContract`; or its `sourceAssetId` is not this preparation's `originalAssetId`; or no reconstruction job against that `sourceAssetId` | `{ status: "prepared" }` | `preparedAssetId` — byte-for-byte pre-DTF-R1 behavior |
 | Lifecycle begun, no current confirmed PQCM (queued/running job, candidate pending review, candidate rejected, geometry pending confirmation, geometry rejected, `"unusable"`, superseded authority) | `{ status: "blocked" }` | **none — production blocked.** Never a fallback to `preparedAssetId` |
 | Current confirmed PQCM | `{ status: "master" }` | the qualification's own `derivedAssetId` |
 
@@ -11819,6 +11819,38 @@ qualification row → `"confirmed"` → a derivative asset — and every `null` 
 returns is treated as "not eligible". DTF adds no second notion of an
 approved reconstruction, launches no reconstruction of its own, and contacts
 no provider on this path.
+
+**The lifecycle must be about THIS artwork**, which is why
+`originalAssetId` is part of the question rather than implied by the
+project. A fidelity contract binds to
+`getOriginalAssetReference(projectId)` — the preparation's
+`originalAssetId` — when it is proposed, but `uploadOriginal` permits a
+second upload while a preparation is unapproved, and that creates a NEW
+preparation row while leaving the old contract, reconstruction job and
+qualification in place. Without the equality check the project's latest
+contract could describe a DISCARDED upload, and the resolver would hand DTF
+a master derived from artwork the customer replaced — pixels of the wrong
+design, recorded beside an `originalAssetId` they do not descend from,
+which `checkSourceLineage` cannot catch (it only proves source ≠ original).
+Equality holds in every ordinary case, so the check costs nothing; a
+mismatch means no lifecycle has begun *for this artwork*, and it also
+removes the mirror-image false block.
+
+**A certification withhold does not survive a source change.**
+`resolvePreparedUploadJob`'s `terminalCertificationWithhold` refuses to
+revive a completed job whose Print Ready was withheld on
+`reconstruction_certification_evidence`, because re-asking the same
+question about the same artwork would re-spend a credit to reach the
+identical verdict. That premise stops holding when the artwork moves — and
+the Pedro-class project is exactly that shape: a plate from the degraded
+upload, `finalization_required`, then recovery confirms a master. Without
+an exemption the next request would resolve CASE C correctly and still hand
+back the completed job untouched, so no clean-master plate would ever be
+produced for the very projects this phase exists to serve.
+`completedJobSourceSuperseded` is the exemption: the request-side twin of
+the worker's adoption fence, asking the identical question of the identical
+evidence (each plate's own recorded `uploadedPreserve.preparedAssetId`) so
+the two boundaries cannot drift apart.
 
 **Fail-closed on an unwired capability** (deliberately stricter than
 `resolveSignEffectiveSource`, which returns "original"). Detecting *whether a
