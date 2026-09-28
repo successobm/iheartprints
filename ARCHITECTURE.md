@@ -11838,8 +11838,19 @@ unaffected.
   resolver's own customer sentence.
 - **Worker time** — `FinalArtworkWorkerCapability`'s `runPreparedUploadJob`,
   resolved again from scratch immediately before execution. `blocked` →
-  `completeWithoutAsset` (the governed "this cannot be auto-finalized"
-  terminal state, never a manufactured processing failure).
+  `cancelJob` plus a `finalization_required` transition.
+
+**Why `cancelJob` and not `completeWithoutAsset`.** Completion-without-an-asset
+is documented as an *honest, terminal, non-retryable* verdict, and
+`resolvePreparedUploadJob` believes it: a completed job with no production
+asset and no validation row is never revived. Using it here would have made
+CASE C permanently unreachable for the very projects this phase serves —
+blocked while recovery was pending, then still blocked after the master was
+confirmed, with no way to re-request. "Recovery has not resolved yet" is the
+opposite of terminal. `cancelJob` is the primitive the two authority-changed
+conditions directly above it already use (preparation no longer approved;
+approved version mismatch), and `resolvePreparedUploadJob` revives a
+`cancelled` job when the customer comes back.
 
 **No resolved asset id is frozen onto the job.** A request is permission to
 produce, never a permanent authorization of one specific asset, so there is
@@ -11850,12 +11861,30 @@ plate for a job on pixel geometry alone (`resolveExistingProductionAsset`).
 That is sound while a source cannot move underneath a live job — true for the
 prepared authority, where re-preparing also produces a new `ArtworkVersion`
 and the existing `preparedArtworkVersionId` binding cancels the job first. It
-is NOT true for a clean master, which can be superseded with the
-`ArtworkPreparation` row untouched. `preparedUploadPriorSourceDrift` compares
-each existing plate's OWN recorded lineage
-(`uploadedPreserve.preparedAssetId`) against the just-resolved current source
-and refuses to adopt, re-validate or deliver a plate built from a superseded
-one.
+is NOT true for a clean master, which can be superseded, or become current
+where none was before, with the `ArtworkPreparation` row untouched. Geometry
+is then silent: the plate's *size* is identical either way, only its pixels
+differ. So `productionAssetSourceStillCurrent` judges each candidate against
+its OWN recorded lineage (`uploadedPreserve.preparedAssetId`) and refuses to
+adopt one the current run did not build.
+
+Refused, **not blocked**: the job goes on to produce a plate from the current
+source, additively, exactly as Phase 28T's stale-target revival already does.
+Blocking instead would leave the superseded plate and its `ready` validation
+on file, where the next request's `reconcileCompletedProductionState` would
+re-publish it as `print_ready` — defeating the fence entirely. Retracting the
+older plate is not an option either: `resolveCurrentMatchingProductionJob`'s
+own Goal 21 note forbids retroactively invalidating produced files. Two plates
+at the same physical size can now share one job, so
+`findProductionAssetIdForJob` takes the NEWEST target-matching candidate
+rather than an arbitrary one, and apparel delivery independently requires the
+latest validation to name that exact asset.
+
+A plate that cannot name its source (legacy/malformed metadata) is left
+exactly as trustworthy as it was before this phase — "we did not write it
+down" is not evidence of drift any more than it is evidence of currency, and
+`produceProductionAsset`'s durable-identity guard (which already compared
+`sourceAssetId`) still judges it.
 
 ### Provenance, validation and the certification boundary
 
@@ -11913,12 +11942,17 @@ hard gate is unchanged; it simply now sees the correct source's verdict.
 
 **Residual, deliberately not fixed here.** A clean master is the
 qualification's transparent, background-isolated derivative, so it is a valid
-continuous-tone apparel source. If one ever is not, the worker's existing
-transparency fence refuses honestly (`completeWithoutAsset`) rather than
-printing an opaque plate — DTF-R1 adds no background removal to compensate,
-which would be a preparation redesign. `production-treatment/preview`
-(a non-production preview surface) still reads `preparedAssetId` directly;
-it produces no plate and makes no readiness claim.
+continuous-tone apparel source. Note that the worker's `hasTransparency`
+fence cannot act as a backstop for it: `ensureQualification` records
+`hasTransparency: true` on every derivative it uploads, so the fence reads
+`true` regardless of the pixels. The real guarantee is upstream —
+`qualifyReconstructionGeometry` abstains (`"unusable"`, no derivative, no
+PQCM) unless `classifyRepairability` returned `remove_exterior`, and
+`isolateBackground` genuinely writes alpha 0. DTF-R1 adds no background
+removal of its own, which would be a preparation redesign.
+`production-treatment/preview` (a non-production preview surface) still reads
+`preparedAssetId` directly; it produces no plate and makes no readiness
+claim.
 
 ## 23r. Production-Artifact Storage Identity (Provider Intermediate Storage-Key Collision Repair)
 

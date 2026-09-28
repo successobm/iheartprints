@@ -663,6 +663,7 @@ export const TEST_FILES = [
   // bowling end-to-end acceptance regression.
   "src/capabilities/final-artwork/enhancement-decision.test.ts",
   "src/capabilities/print-validation/uploaded-preserve-profile.test.ts",
+  "src/capabilities/print-validation/clean-master-certification.test.ts",
   "src/capabilities/final-artwork-worker/prepared-upload-finalization.test.ts",
   "src/capabilities/final-artwork-worker/dtf-r1-clean-master-handoff.test.ts",
   "src/capabilities/artwork-preparation/bowling-print-ready-regression.test.ts",

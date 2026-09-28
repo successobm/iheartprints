@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { ArtworkPreparationStateError } from "@/capabilities/artwork-preparation";
 import { ArtworkFinalizationRasterNotReadyError } from "@/capabilities/final-artwork/raster-not-ready-error";
+import { ArtworkFinalizationRecoveryUnresolvedError } from "@/capabilities/final-artwork/recovery-unresolved-error";
 import { getPersistenceMode } from "@/lib/db";
 import { PRINT_PLACEMENT_LABELS } from "@/lib/domain/print-placement";
 import type { PrintPlacement } from "@/lib/domain/types";
@@ -150,6 +151,18 @@ export async function POST(request: Request, context: RouteContext) {
     // malfunction), so it gets its own 409 with a stable, machine-readable
     // `safeErrorCode` rather than falling into the generic 500 branch below.
     if (error instanceof ArtworkFinalizationRasterNotReadyError) {
+      return NextResponse.json(
+        { error: error.message, safeErrorCode: error.safeErrorCode },
+        { status: 409 },
+      );
+    }
+
+    // DTF-R1: the clean-master handoff's CASE B refusal — recovery has begun
+    // for this artwork and has not resolved yet, so production is paused.
+    // Same 409 + stable machine-readable code as the gate above, and for the
+    // same reason: an expected business-rule refusal is not a server
+    // malfunction and must not be logged or answered as one.
+    if (error instanceof ArtworkFinalizationRecoveryUnresolvedError) {
       return NextResponse.json(
         { error: error.message, safeErrorCode: error.safeErrorCode },
         { status: 409 },

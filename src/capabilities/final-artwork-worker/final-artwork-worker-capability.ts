@@ -825,9 +825,57 @@ export function createFinalArtworkWorkerCapability(
    * one — seePhase 28T's own report) preserves EXACTLY the pre-Phase-28T
    * behavior: the first matching asset, trusted unconditionally.
    */
+  /**
+   * DTF-R1 (independent-review repair, BLOCKING #2): "was this plate built
+   * from the source this run is actually working from?"
+   *
+   * `resolveExistingProductionAsset` adopts a plate for a job on PIXEL
+   * GEOMETRY alone, and every caller before DTF-R1 was entitled to: a
+   * source could not move underneath a live job. For the prepared
+   * authority that still holds — re-preparing also produces a new
+   * `ArtworkVersion`, and `runPreparedUploadJob`'s `preparedArtworkVersionId`
+   * binding cancels the job first. A Production-Qualified Clean Master
+   * carries no such binding: it can be superseded, or become current where
+   * none was before, with the `ArtworkPreparation` row untouched. Geometry
+   * is then silent, because the plate's SIZE is identical either way —
+   * only its pixels differ.
+   *
+   * Adopting such a plate would validate one asset while the run declares
+   * another as its source, so it is refused. Refused, not blocked: the job
+   * simply goes on to produce a plate from the current source, additively,
+   * exactly as Phase 28T's own stale-target revival already does. (The
+   * first implementation blocked the whole job instead, which left the
+   * superseded plate and its `ready` validation on file — where the next
+   * request happily re-published it as `print_ready`, defeating the fence
+   * entirely.)
+   *
+   * Judged against the plate's OWN recorded lineage, never a prediction. A
+   * plate that cannot name its source (legacy/malformed) is left exactly as
+   * trustworthy as it was before this phase — `produceProductionAsset`'s
+   * durable-identity machinery still judges it — because "we did not write
+   * it down" is not evidence of drift any more than it is evidence of
+   * currency.
+   */
+  function productionAssetSourceStillCurrent(
+    asset: AssetRecord,
+    currentSourceAssetId: string | null,
+  ): boolean {
+    if (!currentSourceAssetId) return true;
+    const lineage = (asset.metadata as Record<string, unknown> | null | undefined)
+      ?.uploadedPreserve as { preparedAssetId?: unknown } | undefined;
+    if (typeof lineage?.preparedAssetId !== "string") return true;
+    return lineage.preparedAssetId === currentSourceAssetId;
+  }
+
   async function resolveExistingProductionAsset(
     job: FinalArtworkJob,
     targetIn: EffectiveProductionTargetIn | null,
+    /**
+     * DTF-R1: the asset this run resolved as its source, for the
+     * prepared-upload path. `null` (every other caller) preserves exactly
+     * the pre-DTF-R1 behavior.
+     */
+    currentSourceAssetId: string | null = null,
   ): Promise<AssetRecord | null> {
     const existingAssets = await withOperationTiming(
       "resolveExistingProductionAsset.listAssetsForFinalArtworkJob",
@@ -846,65 +894,16 @@ export function createFinalArtworkWorkerCapability(
         // result is EQUALLY an internal reconstruction-stage artifact, never
         // a candidate final deliverable — see
         // `resolveExistingProviderResultIntermediate`.
-        !isProviderResultIntermediateAsset(asset),
+        !isProviderResultIntermediateAsset(asset) &&
+        // DTF-R1: never adopt a plate built from a source this run is no
+        // longer working from — see `productionAssetSourceStillCurrent`.
+        productionAssetSourceStillCurrent(asset, currentSourceAssetId),
     );
     if (candidates.length === 0) return null;
     if (!targetIn) return candidates[0]!;
     return candidates.find((asset) => productionAssetMatchesEffectiveTarget(asset, targetIn)) ?? null;
   }
 
-  /**
-   * DTF-R1 — "did this job already produce a plate from a source that is no
-   * longer the authoritative one?"
-   *
-   * `resolveExistingProductionAsset` above adopts an existing plate for this
-   * job on PIXEL GEOMETRY alone. That is sound whenever the source cannot
-   * move underneath a live job, which was true for every apparel path
-   * before DTF-R1: a re-prepared upload also produces a new
-   * `ArtworkVersion`, and `runPreparedUploadJob`'s own
-   * `preparedArtworkVersionId` binding cancels the job before it ever gets
-   * here. A Production-Qualified Clean Master carries no such binding — it
-   * can be superseded (or its qualification rejected) with the
-   * `ArtworkPreparation` row untouched — so geometry alone would happily
-   * re-adopt, re-validate and deliver a plate built from a master the
-   * system has since moved off.
-   *
-   * Returns an internal reason string when drift is proven, `null`
-   * otherwise. Compared against the plate's OWN recorded lineage
-   * (`uploadedPreserve.preparedAssetId` — the asset whose pixels the
-   * transform actually consumed), never against a predicted id: a plate
-   * that cannot name its source is a legacy/malformed row this fence
-   * deliberately does not invent a verdict about, and the durable
-   * production-identity machinery inside `produceProductionAsset` still
-   * judges it exactly as it did before this phase.
-   */
-  async function preparedUploadPriorSourceDrift(
-    job: FinalArtworkJob,
-    currentSourceAssetId: string,
-  ): Promise<string | null> {
-    const existingAssets = await withOperationTiming(
-      "preparedUploadPriorSourceDrift.listAssetsForFinalArtworkJob",
-      () => repo.listAssetsForFinalArtworkJob(job.projectId, job.id),
-    );
-    const drifted = existingAssets.some((asset) => {
-      if (asset.finalArtworkJobId !== job.id) return false;
-      if (asset.productionRole !== "production_png") return false;
-      if (isReconstructionIntermediateAsset(asset)) return false;
-      if (isProviderResultIntermediateAsset(asset)) return false;
-      const lineage = (asset.metadata as Record<string, unknown> | null | undefined)
-        ?.uploadedPreserve as { preparedAssetId?: unknown } | undefined;
-      return (
-        typeof lineage?.preparedAssetId === "string" &&
-        lineage.preparedAssetId !== currentSourceAssetId
-      );
-    });
-    if (!drifted) return null;
-    return (
-      "This artwork's authoritative source changed while production was in progress, " +
-      "so the plate produced from the previous source was not delivered. " +
-      "Request print-ready production again to build from the current source."
-    );
-  }
 
   /**
    * Phase 28V (Section 7/8) — the durable proof that a two-pass
@@ -1524,7 +1523,20 @@ export function createFinalArtworkWorkerCapability(
     const { job, sourceAsset, sizing, activeProvider } = params;
     let effectiveJob = job;
 
-    const existing = await resolveExistingProductionAsset(job, params.targetIn);
+    // DTF-R1 (independent-review repair, BLOCKING #2): the crash/retry
+    // counterpart of the worker's own source re-resolution. `sourceAsset`
+    // is what THIS run resolved, so a plate whose recorded lineage names a
+    // different asset is not this run's work and is never adopted,
+    // re-validated or delivered as if it were. Harmless for every other
+    // caller: an asset with no `uploadedPreserve` lineage (create_new,
+    // Signs) is judged exactly as before. The durable-identity guard below
+    // already compared `sourceAssetId`; this closes the earlier
+    // short-circuit that ran before it.
+    const existing = await resolveExistingProductionAsset(
+      job,
+      params.targetIn,
+      sourceAsset.id,
+    );
     if (existing) {
       return {
         status: "ready",
@@ -4734,15 +4746,37 @@ export function createFinalArtworkWorkerCapability(
     const effectiveSource = await resolvePreparedUploadEffectiveSource(
       repo,
       artworkGeometryQualification,
-      { projectId: job.projectId, preparedAssetId: preparation.preparedAssetId },
+      {
+        projectId: job.projectId,
+        originalAssetId: preparation.originalAssetId,
+        preparedAssetId: preparation.preparedAssetId,
+      },
     );
     if (effectiveSource.status === "blocked") {
-      // Governed blocking semantics, never a manufactured failure: the
-      // worker reached an honest, definitive conclusion ("this cannot be
-      // auto-finalized right now"), exactly as the Signs worker's own
-      // currency fence does. Nothing crashed and no processing failed —
-      // production authority is unresolved.
-      await completeWithoutAsset(job, effectiveSource.reason);
+      // Independent-review repair (BLOCKING #1): CANCELLED, not COMPLETED.
+      //
+      // The first implementation used `completeWithoutAsset`, whose own
+      // contract is explicit that completion-without-an-asset means an
+      // "HONEST, TERMINAL, non-retryable verdict" — and
+      // `resolvePreparedUploadJob` believes it: a completed job with no
+      // production asset and no validation row is never revived, so this
+      // job identity (preparation, width, output, treatment) could NEVER
+      // produce a plate again, even after the clean master was confirmed.
+      // CASE C became permanently unreachable for exactly the projects
+      // this phase exists to serve.
+      //
+      // "Recovery has not resolved yet" is the opposite of terminal, and
+      // this is precisely the shape of the two authority-changed
+      // conditions immediately above (`preparation.status !== "approved"`,
+      // and the approved-version mismatch) — both of which correctly use
+      // `cancelJob`, and both of which `resolvePreparedUploadJob` revives
+      // when the customer comes back. Same primitive, same reason.
+      await cancelJob(job, effectiveSource.reason);
+      // ...and the project must not be left sitting in `"finalizing"` with
+      // no claimable work behind it. `finalization_required` is the honest
+      // reading: this needs a human decision (finish recovery review), not
+      // that anything failed.
+      await maybeTransitionProjectStatus(job, "finalization_required");
       return;
     }
     const sourceAuthority: PreparedUploadSourceAuthority = effectiveSource.authority;
@@ -4780,21 +4814,6 @@ export function createFinalArtworkWorkerCapability(
       return;
     }
 
-    // DTF-R1 — the crash/retry counterpart of the fence above.
-    // `produceProductionAsset` adopts an existing production asset for this
-    // job on geometry alone (`resolveExistingProductionAsset`), which is
-    // correct while the source cannot change underneath a job — true for
-    // the prepared authority, where a re-prepared asset also produces a new
-    // `ArtworkVersion` and the binding check above already cancelled the
-    // job. It is NOT true for a clean master, which can be superseded with
-    // no `ArtworkPreparation` change at all. So an asset this job already
-    // produced from a source that is no longer the current one is never
-    // adopted, re-validated, or delivered.
-    const priorSourceDrift = await preparedUploadPriorSourceDrift(job, sourceAsset.id);
-    if (priorSourceDrift) {
-      await completeWithoutAsset(job, priorSourceDrift);
-      return;
-    }
 
     // Production requirements come from the production context the customer
     // stated in the upload flow. There is no `designDescription` — for

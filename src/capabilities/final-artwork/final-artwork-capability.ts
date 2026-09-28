@@ -70,6 +70,7 @@ import {
 import { describeProductionVariantStatus } from "@/capabilities/shared/production-variant";
 import { isRigidSignValidationTrulyPrintReady } from "@/capabilities/print-validation/rigid-sign-print-ready-authority";
 import { ArtworkFinalizationRasterNotReadyError } from "./raster-not-ready-error";
+import { ArtworkFinalizationRecoveryUnresolvedError } from "./recovery-unresolved-error";
 import {
   isProviderResultIntermediateAsset,
   isReconstructionIntermediateAsset,
@@ -713,10 +714,19 @@ export function createFinalArtworkCapability(
       const effectiveSource = await resolvePreparedUploadEffectiveSource(
         repo,
         artworkGeometryQualification,
-        { projectId, preparedAssetId: preparation.preparedAssetId },
+        {
+          projectId,
+          originalAssetId: preparation.originalAssetId,
+          preparedAssetId: preparation.preparedAssetId,
+        },
       );
       if (effectiveSource.status === "blocked") {
-        throw new Error(effectiveSource.reason);
+        // Independent-review repair (NON-BLOCKING #5): a typed error, so
+        // the API boundary can answer "your artwork is in recovery review"
+        // as a refusal rather than logging it as a crash and returning 500.
+        // Unresolved production authority is not a processing failure, and
+        // the transport must not say it is.
+        throw new ArtworkFinalizationRecoveryUnresolvedError(effectiveSource.reason);
       }
 
       // Production size is read from the project's own persisted authority,
@@ -1727,8 +1737,24 @@ async function findProductionAssetIdForJob(
   if (candidates.length === 0) return null;
 
   if (targetIn) {
-    const matching = candidates.find((asset) => productionAssetMatchesEffectiveTarget(asset, targetIn));
-    if (matching) return matching.id;
+    const matching = candidates.filter((asset) =>
+      productionAssetMatchesEffectiveTarget(asset, targetIn),
+    );
+    // DTF-R1: NEWEST of the matching candidates, not an arbitrary one.
+    //
+    // Phase 28T's own case (two plates at DIFFERENT geometries) is
+    // unaffected — only one ever matches, so newest-of-one is the same
+    // answer it always gave. What changes is the case DTF-R1 introduces:
+    // a job that produced a plate from one authoritative source and then,
+    // after the source moved, produced another at the SAME physical size.
+    // Geometry cannot separate those, and "whichever the asset list
+    // happened to yield first" is not an answer — the current source's
+    // plate is, and it is the later one by construction.
+    if (matching.length > 0) {
+      return matching.reduce((newest, asset) =>
+        asset.createdAt > newest.createdAt ? asset : newest,
+      ).id;
+    }
   }
 
   return candidates.reduce((newest, asset) =>

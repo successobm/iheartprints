@@ -128,7 +128,9 @@ export const PREPARED_UPLOAD_RECOVERY_UNRESOLVED_REASON =
 export async function resolvePreparedUploadEffectiveSource(
   repo: ProjectRepository,
   artworkGeometryQualification: ArtworkGeometryQualificationCapability | undefined,
-  preparation: Pick<ArtworkPreparation, "projectId"> & { preparedAssetId: string },
+  preparation: Pick<ArtworkPreparation, "projectId" | "originalAssetId"> & {
+    preparedAssetId: string;
+  },
 ): Promise<PreparedUploadEffectiveSource> {
   const prepared = {
     status: "prepared",
@@ -138,6 +140,29 @@ export async function resolvePreparedUploadEffectiveSource(
 
   const contract = await repo.getArtworkFidelityContract(preparation.projectId);
   if (!contract) return prepared;
+
+  // Independent-review repair (BLOCKING #3): the lifecycle must be about
+  // THIS artwork, not merely about this project.
+  //
+  // A fidelity contract binds to `getOriginalAssetReference(projectId)` —
+  // i.e. `ArtworkPreparation.originalAssetId` — at the moment it is
+  // proposed (`artwork-fidelity-service.ts`). But `uploadOriginal` permits
+  // a second upload while a preparation is not yet approved, and that
+  // creates a NEW preparation row while leaving the old contract,
+  // reconstruction job and qualification in place. Without this check the
+  // project's latest contract could describe a DISCARDED upload, and the
+  // resolver would hand DTF a master derived from artwork the customer
+  // replaced — pixels of the wrong design, recorded beside an
+  // `originalAssetId` they do not descend from. `checkSourceLineage` could
+  // not catch it either: it only proves source != original.
+  //
+  // Equality is the invariant in every ordinary case, so this costs
+  // nothing when the lifecycle genuinely belongs to this artwork. A
+  // mismatch means no lifecycle has begun FOR THIS ARTWORK, which is
+  // CASE A — and that also removes the mirror-image false block, where a
+  // re-upload with no fidelity proposal of its own would otherwise be
+  // frozen out of production by a stale predecessor's lifecycle.
+  if (contract.sourceAssetId !== preparation.originalAssetId) return prepared;
 
   const job = await repo.getLatestArtworkReconstructionJobForSource(
     preparation.projectId,

@@ -21,6 +21,7 @@ import { resolvePreparedUploadEffectiveSource } from "@/capabilities/final-artwo
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
 import type { PrintValidationReport } from "@/capabilities/print-validation/contracts";
 import type { ProjectRepository } from "@/lib/db/repository";
+import { STANDARD_RASTER_TREATMENT_KEY } from "@/lib/domain/types";
 import { cleanupTempWorkspace } from "@/test-support/cleanup-temp-workspace";
 import { confirmProductionSizeForTests } from "@/test-support/confirm-production-size";
 
@@ -334,8 +335,17 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     projectId: string,
     originalAssetId: string,
     candidateLabel = "recovered-candidate",
+    existingLifecycle?: Awaited<ReturnType<typeof beginRecoveryLifecycle>>,
   ) {
-    const { contract, job } = await beginRecoveryLifecycle(built, projectId, originalAssetId);
+    // Reuse a lifecycle this scenario already began, when it has one.
+    // Proposing a SECOND contract would supersede the first and make the
+    // reconstruction unapprovable ("the confirmed fidelity contract has
+    // changed since this artwork was rebuilt") — which is correct
+    // behavior, and exactly what scenario D exercises on purpose.
+    const started =
+      existingLifecycle ??
+      (await beginRecoveryLifecycle(built, projectId, originalAssetId));
+    const { contract, job } = started;
     const uploaded = await built.assets.uploadConceptImage(projectId, {
       conceptId: candidateLabel,
       bytes: candidatePng(),
@@ -436,6 +446,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     const preparation = await repo.getArtworkPreparation(setup.projectId);
     const resolved = await resolvePreparedUploadEffectiveSource(repo, built.qualification, {
       projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
       preparedAssetId: preparation!.preparedAssetId!,
     });
     assert.equal(resolved.status, "prepared");
@@ -464,6 +475,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
     const resolved = await resolvePreparedUploadEffectiveSource(repo, undefined, {
       projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
       preparedAssetId: setup.preparedAssetId,
     });
     assert.equal(resolved.status, "prepared");
@@ -481,6 +493,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
     const resolved = await resolvePreparedUploadEffectiveSource(repo, built.qualification, {
       projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
       preparedAssetId: setup.preparedAssetId,
     });
     assert.equal(resolved.status, "blocked");
@@ -541,6 +554,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
     const resolved = await resolvePreparedUploadEffectiveSource(repo, built.qualification, {
       projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
       preparedAssetId: setup.preparedAssetId,
     });
     assert.equal(
@@ -562,6 +576,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
     const resolved = await resolvePreparedUploadEffectiveSource(repo, undefined, {
       projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
       preparedAssetId: setup.preparedAssetId,
     });
     assert.equal(resolved.status, "blocked");
@@ -582,7 +597,11 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     await drainJob(built.worker, repo, requested.job.id);
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(job!.status, "completed");
+    assert.equal(
+      job!.status,
+      "cancelled",
+      "unresolved authority is transient: a cancelled job is revivable, a completed one is not",
+    );
     assert.match(job!.lastError ?? "", /image recovery review/);
     assert.equal(
       await productionAssetFor(repo, setup.projectId, requested.job.id),
@@ -611,6 +630,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
     const resolved = await resolvePreparedUploadEffectiveSource(repo, built.qualification, {
       projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
       preparedAssetId: setup.preparedAssetId,
     });
     assert.equal(resolved.status, "master");
@@ -685,7 +705,11 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     await drainJob(built.worker, repo, requested.job.id);
 
     const job = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(job!.status, "completed");
+    assert.equal(
+      job!.status,
+      "cancelled",
+      "unresolved authority is transient: a cancelled job is revivable, a completed one is not",
+    );
     assert.match(job!.lastError ?? "", /image recovery review/);
     assert.equal(
       await productionAssetFor(repo, setup.projectId, requested.job.id),
@@ -712,6 +736,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
     const atRequest = await resolvePreparedUploadEffectiveSource(repo, built.qualification, {
       projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
       preparedAssetId: setup.preparedAssetId,
     });
     assert.equal(atRequest.status, "prepared");
@@ -764,20 +789,193 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
     await drainJob(built.worker, repo, requested.job.id);
 
-    const job = await repo.getFinalArtworkJob(requested.job.id);
-    assert.equal(job!.status, "completed");
-    assert.match(job!.lastError ?? "", /authoritative source changed/);
-    // The stale plate was neither re-validated nor re-delivered, and no new
-    // plate was silently produced beside it.
+    // The stale plate is NOT adopted — a plate built from the pre-recovery
+    // source must never be re-validated and handed over as the result of a
+    // run whose declared source is the clean master. It is also not
+    // retracted (produced files are never retroactively invalidated), so
+    // the job now owns two plates and the CURRENT one is the master's.
+    const assetsForJob = (await repo.listAssets(setup.projectId))
+      .filter(
+        (asset) =>
+          asset.finalArtworkJobId === requested.job.id &&
+          asset.productionRole === "production_png",
+      )
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    assert.equal(assetsForJob.length, 2, "the new plate is additive, not a rewrite");
+    assert.equal(recordedLineage(assetsForJob[0]!).preparedAssetId, setup.preparedAssetId);
+    assert.equal(recordedLineage(assetsForJob[1]!).preparedAssetId, derivedAssetId);
+    assert.equal(
+      recordedLineage(assetsForJob[1]!).sourceAuthority,
+      "production_qualified_clean_master",
+    );
+
+    // Validation follows the plate that was actually produced — never the
+    // stale one left on file.
+    const validation = await repo.getLatestProductionAssetValidationForJob(
+      setup.projectId,
+      requested.job.id,
+    );
+    assert.equal(validation!.assetId, assetsForJob[1]!.id);
+    assert.equal(built.provider.calls, 0);
+
+    // ...and the stale plate can never be re-published as the current
+    // deliverable by a later request. This is the regression that matters:
+    // the first implementation blocked the job instead, which left the
+    // superseded plate and its `ready` validation on file for the next
+    // request to promote straight back to `print_ready`.
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    const snapshot = await repo.getProject(setup.projectId);
+    assert.notEqual(
+      snapshot!.project.status,
+      "print_ready",
+      "the pre-recovery plate must not become the project's current deliverable",
+    );
+    const variant = await built.finalArtwork.resolveProductionVariantState(
+      setup.projectId,
+      again.job.productionTreatmentKey ?? STANDARD_RASTER_TREATMENT_KEY,
+    );
+    if (variant.asset) {
+      assert.equal(
+        variant.asset.id,
+        assetsForJob[1]!.id,
+        "the read model must surface the current source's plate, never the superseded one",
+      );
+    }
+  });
+
+  it("E: a plate the job built from the CURRENT source is still adopted on retry (no false drift)", async () => {
+    const repo = await freshRepo();
+    const built = { ...buildPipeline(repo), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets);
+
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, requested.job.id);
+    const firstAsset = await productionAssetFor(repo, setup.projectId, requested.job.id);
+    assert.ok(firstAsset);
+
+    // Revived with NOTHING about the source changed — the ordinary
+    // crash/retry case. The lineage fence must be silent here, or every
+    // legitimate resume would start duplicating plates.
+    await repo.updateFinalArtworkJob(requested.job.id, {
+      status: "queued",
+      lastError: null,
+      completedAt: null,
+    });
+    await drainJob(built.worker, repo, requested.job.id);
+
     const assetsForJob = (await repo.listAssets(setup.projectId)).filter(
       (asset) =>
         asset.finalArtworkJobId === requested.job.id &&
         asset.productionRole === "production_png",
     );
-    assert.equal(assetsForJob.length, 1);
-    assert.equal(recordedLineage(assetsForJob[0]!).preparedAssetId, setup.preparedAssetId);
-    assert.notEqual(recordedLineage(assetsForJob[0]!).preparedAssetId, derivedAssetId);
+    assert.equal(assetsForJob.length, 1, "the existing plate is reused, never duplicated");
+    assert.equal(assetsForJob[0]!.id, firstAsset!.id);
     assert.equal(built.provider.calls, 0);
+  });
+
+  it("B: a blocked job is REVIVABLE — production succeeds once the master is confirmed", async () => {
+    const repo = await freshRepo();
+    const built = { ...buildPipeline(repo), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets);
+
+    // Requested before recovery, blocked by the worker after it began.
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    const lifecycle = await beginRecoveryLifecycle(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+    );
+    await drainJob(built.worker, repo, requested.job.id);
+
+    const blocked = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(
+      blocked!.status,
+      "cancelled",
+      "an unresolved-authority block is transient, never a terminal verdict",
+    );
+
+    // Recovery resolves. The customer presses Create Print-Ready Artwork
+    // again — and this must actually produce the plate. The first
+    // implementation used `completeWithoutAsset` here, which
+    // `resolvePreparedUploadJob` treats as terminal and never revives, so
+    // this exact request came back `alreadyRequested` against a dead job
+    // and CASE C was unreachable forever.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "revivable-candidate",
+      lifecycle,
+    );
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    assert.equal(again.alreadyRequested, false, "the blocked job must be revived");
+    assert.equal(again.job.id, requested.job.id);
+    assert.equal(again.job.status, "queued");
+
+    await drainJob(built.worker, repo, again.job.id);
+
+    const asset = await productionAssetFor(repo, setup.projectId, again.job.id);
+    assert.ok(asset, "a plate is finally produced, from the clean master");
+    assert.equal(recordedLineage(asset!).preparedAssetId, derivedAssetId);
+    assert.equal(built.provider.calls, 0);
+  });
+
+  // =========================================================================
+  // LIFECYCLE OWNERSHIP — the lifecycle must be about THIS artwork
+  // =========================================================================
+
+  it("a recovery lifecycle belonging to a REPLACED upload never becomes this artwork's source", async () => {
+    const repo = await freshRepo();
+    const built = { ...buildPipeline(repo), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets);
+
+    // A full, genuine recovery lineage — for an artwork that is NOT the one
+    // this preparation descends from. `uploadOriginal` permits a second
+    // upload while a preparation is unapproved, which creates a new
+    // preparation row and leaves the old contract/job/qualification behind,
+    // so a project really can carry a lifecycle for a discarded upload.
+    const discarded = await built.assets.uploadCustomerArtwork(setup.projectId, {
+      conceptId: "discarded-original",
+      bytes: originalUploadPng(),
+      contentType: "image/png",
+      widthPx: ORIGINAL_CANVAS.w,
+      heightPx: ORIGINAL_CANVAS.h,
+      hasTransparency: false,
+      kind: "customer_upload",
+      metadata: { originalFilename: "replaced.png" },
+    });
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      discarded.id,
+      "discarded-candidate",
+    );
+
+    const resolved = await resolvePreparedUploadEffectiveSource(repo, built.qualification, {
+      projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
+      preparedAssetId: setup.preparedAssetId,
+    });
+    assert.equal(
+      resolved.status,
+      "prepared",
+      "a lifecycle bound to a different original is not this artwork's lifecycle",
+    );
+
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, requested.job.id);
+
+    const asset = await productionAssetFor(repo, setup.projectId, requested.job.id);
+    assert.ok(asset);
+    const recorded = recordedLineage(asset!);
+    assert.equal(
+      recorded.preparedAssetId,
+      setup.preparedAssetId,
+      "the plate must carry THIS artwork's pixels, never a stranger master's",
+    );
+    assert.notEqual(recorded.preparedAssetId, derivedAssetId);
+    assert.equal(recorded.originalAssetId, setup.originalAssetId);
+    assert.equal(recorded.sourceAuthority, "prepared_upload");
   });
 
   // =========================================================================
@@ -803,7 +1001,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     assert.equal(built.provider.calls, 0);
 
     const report = await latestReport(repo, setup.projectId, requested.job.id);
-    assert.notEqual(report.status, "print_ready");
+    assert.notEqual(report.status, "ready", "Print Ready must be withheld");
     const certification = report.checks.find(
       (check) => check.check === "reconstruction_certification_evidence",
     );
