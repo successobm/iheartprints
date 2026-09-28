@@ -2037,6 +2037,18 @@ export function createFinalArtworkWorkerCapability(
       return { status: "pending" };
     }
 
+    // Download Crash-Boundary Diagnostics: closes out the whole provider
+    // span `provider_download_started` opened, BEFORE any outcome branch —
+    // so a death inside the provider is distinguishable from a death on the
+    // way to persistence. See `final-artwork/provider-stage-log.ts`.
+    logFinalArtworkWorkerStage({
+      projectId: job.projectId,
+      finalArtworkJobId: job.id,
+      providerKey: activeProvider.providerKey,
+      stage: "provider_bounded_step_completed",
+      elapsedMs: null,
+    });
+
     if (boundedResult.status === "pending") {
       // The provider's async job has not finished (or more provider work
       // remains — e.g. a two-pass job whose pass 1 just got persisted but
@@ -2093,6 +2105,15 @@ export function createFinalArtworkWorkerCapability(
         finalArtworkJobId: job.id,
         providerKey: activeProvider.providerKey,
         stage: "provider_download_completed",
+        elapsedMs: null,
+      });
+      // Download Crash-Boundary Diagnostics: the persistence boundary —
+      // everything before this line is still non-durable.
+      logFinalArtworkWorkerStage({
+        projectId: job.projectId,
+        finalArtworkJobId: job.id,
+        providerKey: activeProvider.providerKey,
+        stage: "provider_result_intermediate_persist_started",
         elapsedMs: null,
       });
       await persistProviderResultIntermediate(

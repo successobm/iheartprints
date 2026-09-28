@@ -42,6 +42,7 @@ import {
 import { resolveWidthConstrainedSizing } from "@/capabilities/shared/print-placement-dimensions";
 
 import { trimToAlphaBounds, type AlphaTrimOptions } from "./alpha-trim";
+import { logFinalArtworkProviderStage } from "./provider-stage-log";
 import {
   encodeProductionPng,
   normalizeProductionRaster,
@@ -804,6 +805,17 @@ export class TopazTransparencyUpscaleProvider
       );
     }
 
+    // Download Crash-Boundary Diagnostics: boundary markers only — see
+    // `provider-stage-log.ts`. Ordering, error handling and allocation are
+    // unchanged; `decodeStartedAt` is a local number, not a copy of anything.
+    const stageRequestId = input.existingProviderRequest?.providerRequestId ?? null;
+    logFinalArtworkProviderStage({
+      stage: "source_png_decode_started",
+      providerKey: this.providerKey,
+      providerRequestId: stageRequestId,
+      byteCount: input.sourceBytes.length,
+    });
+    const decodeStartedAt = Date.now();
     let source: PNG;
     try {
       source = PNG.sync.read(input.sourceBytes);
@@ -812,13 +824,33 @@ export class TopazTransparencyUpscaleProvider
         `Source asset bytes could not be decoded as a PNG: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    logFinalArtworkProviderStage({
+      stage: "source_png_decode_completed",
+      providerKey: this.providerKey,
+      providerRequestId: stageRequestId,
+      widthPx: source.width,
+      heightPx: source.height,
+      elapsedMs: Date.now() - decodeStartedAt,
+    });
 
+    logFinalArtworkProviderStage({
+      stage: "reconstruction_plan_started",
+      providerKey: this.providerKey,
+      providerRequestId: stageRequestId,
+    });
+    const planStartedAt = Date.now();
     const plan: StandardRasterReconstructionPlan = input.existingIntermediateReconstruction
       ? { kind: "two_pass", pass1: resolveMaximalSinglePassRequest(source) }
       : planStandardRasterReconstruction(
           { width: source.width, height: source.height, data: source.data },
           input.sizing,
         );
+    logFinalArtworkProviderStage({
+      stage: "reconstruction_plan_completed",
+      providerKey: this.providerKey,
+      providerRequestId: stageRequestId,
+      elapsedMs: Date.now() - planStartedAt,
+    });
 
     if (plan.kind === "no_visible_artwork" || plan.kind === "insufficient") {
       throw new ProviderError("invalid_request", plan.reason, "not_dispatched");
@@ -866,10 +898,25 @@ export class TopazTransparencyUpscaleProvider
     input: FinalArtworkProviderInput,
     source: PNG,
   ): Promise<FinalArtworkProviderBoundedResult> {
+    // Download Crash-Boundary Diagnostics: this call contains the SECOND
+    // full-canvas `trimToAlphaBounds` pass — see `provider-stage-log.ts`.
+    const stageRequestId = input.existingProviderRequest?.providerRequestId ?? null;
+    logFinalArtworkProviderStage({
+      stage: "reconstruction_request_resolve_started",
+      providerKey: this.providerKey,
+      providerRequestId: stageRequestId,
+    });
+    const resolveStartedAt = Date.now();
     const resolved = resolveReconstructionRequest(
       { width: source.width, height: source.height, data: source.data },
       input.sizing,
     );
+    logFinalArtworkProviderStage({
+      stage: "reconstruction_request_resolve_completed",
+      providerKey: this.providerKey,
+      providerRequestId: stageRequestId,
+      elapsedMs: Date.now() - resolveStartedAt,
+    });
     if (resolved.status !== "resolved") {
       throw new ProviderError("invalid_request", resolved.reason, "not_dispatched");
     }
@@ -1151,6 +1198,14 @@ export class TopazTransparencyUpscaleProvider
   ): Promise<FinalArtworkProviderBoundedResult> {
     const processId = resultReady.providerRequestId;
     const bytes = await this.download(processId);
+    // Download Crash-Boundary Diagnostics — see `provider-stage-log.ts`.
+    logFinalArtworkProviderStage({
+      stage: "result_png_decode_started",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+      byteCount: bytes.length,
+    });
+    const resultDecodeStartedAt = Date.now();
     let png: PNG;
     try {
       png = PNG.sync.read(bytes);
@@ -1164,6 +1219,20 @@ export class TopazTransparencyUpscaleProvider
         "download",
       );
     }
+    logFinalArtworkProviderStage({
+      stage: "result_png_decode_completed",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+      widthPx: png.width,
+      heightPx: png.height,
+      elapsedMs: Date.now() - resultDecodeStartedAt,
+    });
+
+    logFinalArtworkProviderStage({
+      stage: "result_geometry_validation_started",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+    });
     const geometryCheck = validateReconstructedGeometry({
       sourceWidthPx: geometry.sourceWidthPx,
       sourceHeightPx: geometry.sourceHeightPx,
@@ -1172,13 +1241,38 @@ export class TopazTransparencyUpscaleProvider
       actualWidthPx: png.width,
       actualHeightPx: png.height,
     });
+    logFinalArtworkProviderStage({
+      stage: "result_geometry_validation_completed",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+    });
     if (!geometryCheck.valid) {
       throw new ProviderError("malformed_response", geometryCheck.reason, undefined, "download");
     }
+    // Hoisted out of the returned object literal ONLY so the encode can be
+    // bracketed. Same expression, same single evaluation, same position in
+    // the sequence relative to every other statement — the remaining literal
+    // fields are plain reads with no side effects.
+    logFinalArtworkProviderStage({
+      stage: "result_png_encode_started",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+      widthPx: png.width,
+      heightPx: png.height,
+    });
+    const encodeStartedAt = Date.now();
+    const encodedBytes = PNG.sync.write(png);
+    logFinalArtworkProviderStage({
+      stage: "result_png_encode_completed",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+      byteCount: encodedBytes.length,
+      elapsedMs: Date.now() - encodeStartedAt,
+    });
     return {
       status: "downloaded",
       providerRequestId: processId,
-      bytes: PNG.sync.write(png),
+      bytes: encodedBytes,
       widthPx: png.width,
       heightPx: png.height,
       nativeWidthPx: geometry.nativeWidthPx,
@@ -1868,6 +1962,15 @@ export class TopazTransparencyUpscaleProvider
     // convention `fetchStatus` uses, since this call is that exact shape.
     const metaController = new AbortController();
     const metaTimeout = setTimeout(() => metaController.abort(), this.statusTimeoutMs);
+    // Download Crash-Boundary Diagnostics: the FIRST outbound provider call
+    // on this path. Neither the endpoint URL nor `X-API-Key` is ever logged —
+    // see `provider-stage-log.ts`.
+    logFinalArtworkProviderStage({
+      stage: "download_metadata_fetch_started",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+    });
+    const metaStartedAt = Date.now();
     let metaResponse: Response;
     try {
       metaResponse = await this.fetchImpl(`${TOPAZ_API_BASE}/download/${processId}`, {
@@ -1895,6 +1998,13 @@ export class TopazTransparencyUpscaleProvider
     } finally {
       clearTimeout(metaTimeout);
     }
+    logFinalArtworkProviderStage({
+      stage: "download_metadata_fetch_responded",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+      httpStatus: metaResponse.status,
+      elapsedMs: Date.now() - metaStartedAt,
+    });
     classifyPollResponse(metaResponse.status, "download");
 
     let meta: { url?: unknown; download_url?: unknown };
@@ -1961,6 +2071,14 @@ export class TopazTransparencyUpscaleProvider
     // size-capped body read below, never just the header fetch.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.downloadTimeoutMs);
+    // Download Crash-Boundary Diagnostics: the signed result link. The URL
+    // is NEVER logged, in whole or in part — status and declared length only.
+    logFinalArtworkProviderStage({
+      stage: "download_result_bytes_fetch_started",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+    });
+    const bytesStartedAt = Date.now();
     let abortedForSize = false;
     let imageResponse: Response;
     try {
@@ -1993,6 +2111,23 @@ export class TopazTransparencyUpscaleProvider
       );
     } finally {
       clearTimeout(timeout);
+    }
+    {
+      // `Number(null)` is `0`, and a logged "declared 0 bytes" would read as
+      // "the provider said the body is empty" during exactly the incident
+      // this instrumentation exists for. An ABSENT header must log as
+      // `null`, never as a number.
+      const declaredHeader = imageResponse.headers.get("content-length");
+      const declared = declaredHeader === null ? null : Number(declaredHeader);
+      logFinalArtworkProviderStage({
+        stage: "download_result_bytes_headers_received",
+        providerKey: this.providerKey,
+        providerRequestId: processId,
+        httpStatus: imageResponse.status,
+        declaredContentLengthBytes:
+          declared !== null && Number.isFinite(declared) ? declared : null,
+        elapsedMs: Date.now() - bytesStartedAt,
+      });
     }
     if (imageResponse.status >= 300 && imageResponse.status < 400) {
       throw new ProviderError(
@@ -2043,6 +2178,14 @@ export class TopazTransparencyUpscaleProvider
         );
       }
     }
+    // Download Crash-Boundary Diagnostics: where the result is materialised
+    // into one Buffer — see `provider-stage-log.ts`.
+    logFinalArtworkProviderStage({
+      stage: "download_result_body_buffering_started",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+    });
+    const bufferingStartedAt = Date.now();
     let buffer: Buffer;
     try {
       buffer = await readResponseBodyWithSizeCap(
@@ -2077,6 +2220,13 @@ export class TopazTransparencyUpscaleProvider
         "download",
       );
     }
+    logFinalArtworkProviderStage({
+      stage: "download_result_body_buffering_completed",
+      providerKey: this.providerKey,
+      providerRequestId: processId,
+      byteCount: buffer.length,
+      elapsedMs: Date.now() - bufferingStartedAt,
+    });
     if (buffer.length === 0) {
       throw new ProviderError(
         "malformed_response",
