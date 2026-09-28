@@ -69,13 +69,39 @@ export type FinalArtworkProviderStage =
   /** `readResponseBodyWithSizeCap` — where the result is materialised into one Buffer. */
   | "download_result_body_buffering_started"
   | "download_result_body_buffering_completed"
-  | "result_png_decode_started"
-  | "result_png_decode_completed"
+  /**
+   * Pre-Durability PNG Decode Removal: `inspectPngStructure` — IHDR read plus
+   * whole-body CRC/structure verification, O(1) in memory. This REPLACED a
+   * full `PNG.sync.read` (measured at 880.80 MiB peak RSS on a representative
+   * 13220x4952 result) at the pre-durability boundary.
+   */
+  | "result_header_inspect_started"
+  | "result_header_inspect_completed"
   | "result_geometry_validation_started"
   | "result_geometry_validation_completed"
-  /** `PNG.sync.write` — the full synchronous re-encode performed before anything is durable. */
-  | "result_png_encode_started"
-  | "result_png_encode_completed";
+  /**
+   * A full `PNG.sync.read`. Repair #1's comment here claimed this was
+   * reached only from `finalizeDownloadedResultBounded`, which was wrong —
+   * two-pass pass-1 planning decoded as well (Cursor follow-up #1, corrected
+   * here). Repair #2 removed BOTH: finalization now streams
+   * (`result_streaming_normalize_*`) and pass-1 planning now streams
+   * (`pass1_streaming_scan_*`). These markers remain for the bounded
+   * fallback only — a SMALL raster in an encoding the streaming reader
+   * cannot handle. An oversized one in such an encoding is refused instead.
+   */
+  | "result_png_decode_started"
+  | "result_png_decode_completed"
+  /**
+   * Memory-Bounded Oversized Provider Result Finalization: the streaming
+   * normalize that REPLACED that full decode on the finalization path. Holds
+   * the production-sized destination plus two source rows instead of the
+   * whole raster.
+   */
+  | "result_streaming_normalize_started"
+  | "result_streaming_normalize_completed"
+  /** Two-pass pass 1: streaming alpha scan that replaced a full decode purely to plan pass 2. */
+  | "pass1_streaming_scan_started"
+  | "pass1_streaming_scan_completed";
 
 /**
  * Whitelisted fields only — see this module's own "SECRET SAFETY" note.

@@ -181,12 +181,14 @@ describe("provider stage logging — crash-boundary diagnostics", () => {
       "download_result_bytes_headers_received",
       "download_result_body_buffering_started",
       "download_result_body_buffering_completed",
-      "result_png_decode_started",
-      "result_png_decode_completed",
+      // Pre-Durability PNG Decode Removal: the full `PNG.sync.read` +
+      // `PNG.sync.write` pair that used to sit here is gone. Geometry now
+      // comes from the IHDR, and the provider's bytes are persisted as-is,
+      // so this path no longer decodes or re-encodes the result at all.
+      "result_header_inspect_started",
+      "result_header_inspect_completed",
       "result_geometry_validation_started",
       "result_geometry_validation_completed",
-      "result_png_encode_started",
-      "result_png_encode_completed",
     ]);
   });
 
@@ -280,6 +282,9 @@ describe("provider stage logging — crash-boundary diagnostics", () => {
     // to provide.
     const stages = stagesFrom(lines);
     assert.ok(stages.includes("download_result_body_buffering_completed"));
-    assert.equal(stages.includes("result_png_decode_completed"), false);
+    // The magic-byte check inside `download()` rejects this before the
+    // header inspector is ever reached, so the trail stops exactly there.
+    assert.equal(stages.includes("result_header_inspect_started"), false);
+    assert.equal(stages.includes("result_png_decode_started"), false);
   });
 });
