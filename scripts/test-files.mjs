@@ -492,6 +492,18 @@ export const TEST_FILES = [
   "src/capabilities/final-artwork-worker/sign-preservation-worker-orchestration.test.ts",
   "src/capabilities/final-artwork-worker/sign-print-ready-lifecycle.test.ts",
   "src/capabilities/final-artwork/topaz-download-security.test.ts",
+  // Pre-Durability PNG Decode Removal (Repair #1) and Memory-Bounded
+  // Oversized Provider Result Finalization (Repair #2). Registered here
+  // because this list is explicit, not a glob: without these lines the
+  // suites below pass locally when run by hand and never run in
+  // `npm run test` at all. Repair #1 shipped without registering its
+  // three files — that gap is closed here rather than left for a later
+  // change to rediscover.
+  "src/capabilities/final-artwork/png-structure.test.ts",
+  "src/capabilities/final-artwork/provider-stage-log.test.ts",
+  "src/capabilities/final-artwork/pre-durability-decode-removal.test.ts",
+  "src/capabilities/final-artwork/production-normalization-streaming.test.ts",
+  "src/capabilities/final-artwork/bounded-oversized-finalization.test.ts",
   // LIVE PRODUCT BLOCKER #1/#3/#4/#4A/#4B: registered together — discovered
   // during Blocker #4B that none of these had ever been added to this list,
   // so `npm test` never actually ran them despite being reported as part of

@@ -131,10 +131,27 @@ export function normalizeProductionRaster(
 
   const resampled = resampleExact(trim.image, resolution.widthPx, resolution.heightPx);
 
+  return buildNormalizedOutcome(trim.metadata, resolution, resampled.image, resampled.contentScale);
+}
+
+/**
+ * Memory-Bounded Oversized Provider Result Finalization: the ONE place the
+ * normalization metadata is assembled, so the in-memory path above and the
+ * streaming path in `production-normalization-streaming.ts` can never drift
+ * into reporting different provenance for the same pixels.
+ */
+export function buildNormalizedOutcome(
+  trimMetadata: AlphaTrimMetadata,
+  resolution: ReturnType<typeof resolveWidthConstrainedSizing>,
+  image: RgbaImage,
+  contentScale: number,
+): NormalizeProductionRasterOutcome {
+  const trim = { metadata: trimMetadata };
+  const resampled = { contentScale };
   return {
     status: "normalized",
     result: {
-      image: resampled.image,
+      image,
       metadata: {
         strategy: resolution.strategy,
         sourceWidthPx: trim.metadata.originalWidthPx,

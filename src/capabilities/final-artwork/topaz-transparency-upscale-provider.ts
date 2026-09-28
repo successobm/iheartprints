@@ -41,8 +41,13 @@ import {
 
 import { resolveWidthConstrainedSizing } from "@/capabilities/shared/print-placement-dimensions";
 
-import { trimToAlphaBounds, type AlphaTrimOptions } from "./alpha-trim";
+import { trimToAlphaBounds, type AlphaTrimMetadata, type AlphaTrimOptions } from "./alpha-trim";
 import { inspectPngStructure } from "./png-structure";
+import { assessPngStreamSupport } from "./png-stream";
+import {
+  deriveStreamingTrimGeometry,
+  normalizeProductionRasterFromPngBytes,
+} from "./production-normalization-streaming";
 import { logFinalArtworkProviderStage } from "./provider-stage-log";
 import {
   encodeProductionPng,
@@ -205,6 +210,18 @@ const DEFAULT_DOWNLOAD_ATTEMPTS = 3;
  */
 export const MAX_PROVIDER_RESULT_DOWNLOAD_BYTES = 64 * 1024 * 1024; // 64 MiB = 67,108,864 bytes
 
+/**
+ * Memory-Bounded Oversized Provider Result Finalization: the largest raster
+ * this runtime will materialize in full through pngjs, reached ONLY for an
+ * encoding the streaming reader cannot handle (interlaced, palette,
+ * greyscale). 16 Mpx is ~64 MiB of RGBA plus pngjs working set — survivable
+ * inside the 512 MiB production container with room to spare, and far below
+ * the ~65 Mpx that killed it three times. A larger non-streamable result is
+ * refused rather than attempted; that refusal is recoverable, because the
+ * durable intermediate stays intact and no provider request is consumed.
+ */
+export const MAX_FULL_DECODE_FALLBACK_PIXELS = 16_000_000;
+
 /** The 8-byte PNG signature (RFC 2083 §3.1) — the unconditional decision of whether downloaded bytes are an admitted raster, independent of any Content-Type header. */
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -364,6 +381,30 @@ export function resolveReconstructionRequest(
   if (trim.status === "no_visible_artwork") {
     return { status: "no_visible_artwork", reason: trim.reason };
   }
+  return resolveReconstructionRequestFromGeometry(
+    { sourceWidthPx: source.width, sourceHeightPx: source.height, trim: trim.metadata },
+    sizing,
+  );
+}
+
+/**
+ * Memory-Bounded Oversized Provider Result Finalization: the arithmetic half
+ * of `resolveReconstructionRequest`, split out so a caller that already
+ * knows the geometry — e.g. a STREAMING scan of an oversized pass-1 result
+ * — can plan pass 2 without decoding the raster to rediscover it. Pure;
+ * identical inputs give identical answers, which is what keeps the two-pass
+ * plan unchanged.
+ */
+export function resolveReconstructionRequestFromGeometry(
+  geometry: {
+    sourceWidthPx: number;
+    sourceHeightPx: number;
+    trim: Pick<AlphaTrimMetadata, "trimmedWidthPx" | "trimmedHeightPx" | "alphaBBox">;
+  },
+  sizing: ProductionSizingRequest,
+): ResolveReconstructionOutcome {
+  const source = { width: geometry.sourceWidthPx, height: geometry.sourceHeightPx };
+  const trim = { metadata: geometry.trim };
 
   // The SAME resolver normalization will run after reconstruction. Aspect
   // ratio survives a proportional upscale, so resolving it from the source's
@@ -797,7 +838,7 @@ export class TopazTransparencyUpscaleProvider
    */
   async produceBounded(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderBoundedResult> {
     if (input.existingDownloadedResult) {
-      return this.finalizeDownloadedResultBounded(input, input.existingDownloadedResult);
+      return await this.finalizeDownloadedResultBounded(input, input.existingDownloadedResult);
     }
 
     if (input.sourceContentType !== "image/png") {
@@ -871,7 +912,144 @@ export class TopazTransparencyUpscaleProvider
    * stage (mirrors `existingIntermediateReconstruction`'s "trust the
    * persisted evidence" contract).
    */
-  private finalizeDownloadedResultBounded(
+  private async finalizeDownloadedResultBounded(
+    input: FinalArtworkProviderInput,
+    downloaded: FinalArtworkProviderDownloadedResult,
+  ): Promise<FinalArtworkProviderBoundedResult> {
+    // Memory-Bounded Oversized Provider Result Finalization: the DURABLE
+    // intermediate is normalized straight from its PNG bytes, holding only
+    // the production-sized destination plus two source rows. A 4x Topaz
+    // result (13220x4952) cost ~800 MiB through `PNG.sync.read` here; it
+    // now costs roughly the size of the plate itself. Pixels, dimensions
+    // and metadata are byte-identical to the in-memory path — asserted in
+    // `production-normalization-streaming.test.ts`, not assumed.
+    const support = assessPngStreamSupport(downloaded.bytes);
+    if (support.supported) {
+      logFinalArtworkProviderStage({
+        stage: "result_streaming_normalize_started",
+        providerKey: this.providerKey,
+        providerRequestId: downloaded.providerRequestId,
+        byteCount: downloaded.bytes.length,
+        widthPx: support.header.widthPx,
+        heightPx: support.header.heightPx,
+      });
+      const startedAt = Date.now();
+      const normalized = await normalizeProductionRasterFromPngBytes(downloaded.bytes, input.sizing);
+      logFinalArtworkProviderStage({
+        stage: "result_streaming_normalize_completed",
+        providerKey: this.providerKey,
+        providerRequestId: downloaded.providerRequestId,
+        elapsedMs: Date.now() - startedAt,
+      });
+      const output = this.finalizeFromNormalized(
+        normalized,
+        support.header.widthPx,
+        support.header.heightPx,
+        {
+          processId: downloaded.providerRequestId,
+          nativeWidthPx: downloaded.nativeWidthPx,
+          nativeHeightPx: downloaded.nativeHeightPx,
+        },
+      );
+      return { status: "completed", ...output };
+    }
+
+    // Encoding this reader cannot stream (interlaced, palette, greyscale).
+    // Falling back to a full decode is safe ONLY while the raster is small
+    // enough that materializing it cannot exhaust the container — otherwise
+    // refusing is the honest outcome, and it is recoverable: the durable
+    // intermediate is untouched and no provider request is consumed.
+    if (
+      support.header &&
+      support.header.widthPx * support.header.heightPx > MAX_FULL_DECODE_FALLBACK_PIXELS
+    ) {
+      throw new ProviderError(
+        "malformed_response",
+        `The persisted provider result is ${support.header.widthPx}x${support.header.heightPx} in an encoding this ` +
+          `runtime cannot process without materializing the whole raster (${support.reason}); ` +
+          `refusing rather than risking the container.`,
+      );
+    }
+    return this.finalizeDownloadedResultInMemory(input, downloaded);
+  }
+
+  /**
+   * Memory-Bounded Oversized Provider Result Finalization: a pass-1 result's
+   * alpha geometry, obtained by streaming rather than by decoding it. This
+   * is ALL that pass-2 planning ever needed from pass 1 — the raster itself
+   * was decoded only to rediscover numbers a single forward scan yields.
+   *
+   * Falls back to a full decode only for a small raster in an encoding the
+   * streaming reader cannot handle, and refuses an oversized one outright
+   * rather than risking the container. Error classification matches the
+   * decode it replaces, so retry/recovery behaviour is unchanged.
+   */
+  private async scanPass1Geometry(
+    bytes: Buffer,
+    providerRequestId: string,
+    origin: "downloaded" | "persisted",
+  ): Promise<{ widthPx: number; heightPx: number; trim: AlphaTrimMetadata }> {
+    const describe = origin === "downloaded" ? "downloaded" : "persisted";
+    const support = assessPngStreamSupport(bytes);
+    if (support.supported) {
+      logFinalArtworkProviderStage({
+        stage: "pass1_streaming_scan_started",
+        providerKey: this.providerKey,
+        providerRequestId,
+        byteCount: bytes.length,
+        widthPx: support.header.widthPx,
+        heightPx: support.header.heightPx,
+      });
+      const startedAt = Date.now();
+      const geometry = await deriveStreamingTrimGeometry(bytes);
+      if (geometry.status === "no_visible_artwork") {
+        throw new ProviderError("malformed_response", geometry.reason);
+      }
+      logFinalArtworkProviderStage({
+        stage: "pass1_streaming_scan_completed",
+        providerKey: this.providerKey,
+        providerRequestId,
+        elapsedMs: Date.now() - startedAt,
+      });
+      return {
+        widthPx: support.header.widthPx,
+        heightPx: support.header.heightPx,
+        trim: geometry.trimMetadata,
+      };
+    }
+
+    if (
+      support.header &&
+      support.header.widthPx * support.header.heightPx > MAX_FULL_DECODE_FALLBACK_PIXELS
+    ) {
+      throw new ProviderError(
+        "malformed_response",
+        `The ${describe} first-pass reconstruction is ${support.header.widthPx}x${support.header.heightPx} in an ` +
+          `encoding this runtime cannot process without materializing the whole raster (${support.reason}); ` +
+          `refusing rather than risking the container.`,
+      );
+    }
+
+    let png: PNG;
+    try {
+      png = PNG.sync.read(bytes);
+    } catch (error) {
+      throw new ProviderError(
+        "malformed_response",
+        `The ${describe} first-pass reconstruction could not be decoded as a PNG: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    const trim = trimToAlphaBounds({ width: png.width, height: png.height, data: png.data });
+    if (trim.status === "no_visible_artwork") {
+      throw new ProviderError("malformed_response", trim.reason);
+    }
+    return { widthPx: png.width, heightPx: png.height, trim: trim.metadata };
+  }
+
+  /** The unchanged pngjs path — reached only for small rasters in a non-streamable encoding. */
+  private finalizeDownloadedResultInMemory(
     input: FinalArtworkProviderInput,
     downloaded: FinalArtworkProviderDownloadedResult,
   ): FinalArtworkProviderBoundedResult {
@@ -1003,19 +1181,22 @@ export class TopazTransparencyUpscaleProvider
         });
         if (downloaded.status !== "downloaded") return downloaded;
 
-        let pass1Png: PNG;
-        try {
-          pass1Png = PNG.sync.read(downloaded.bytes);
-        } catch (error) {
-          throw new ProviderError(
-            "malformed_response",
-            `The downloaded first-pass reconstruction could not be decoded as a PNG: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-        const pass1Image: RgbaImage = { width: pass1Png.width, height: pass1Png.height, data: pass1Png.data };
-        const pass2Plan = resolveReconstructionRequest(pass1Image, input.sizing);
+        // Memory-Bounded Oversized Provider Result Finalization: pass 1 is
+        // itself a 4x provider result. Planning pass 2 needs only its alpha
+        // geometry, so scan it streaming instead of materializing it.
+        const pass1Geometry = await this.scanPass1Geometry(
+          downloaded.bytes,
+          downloaded.providerRequestId,
+          "downloaded",
+        );
+        const pass2Plan = resolveReconstructionRequestFromGeometry(
+          {
+            sourceWidthPx: pass1Geometry.widthPx,
+            sourceHeightPx: pass1Geometry.heightPx,
+            trim: pass1Geometry.trim,
+          },
+          input.sizing,
+        );
         if (pass2Plan.status !== "resolved") {
           throw new ProviderError(
             "invalid_request",
@@ -1062,20 +1243,21 @@ export class TopazTransparencyUpscaleProvider
     }
 
     // Pass 1 already durably exists from a prior attempt — resume/check pass 2.
-    let pass1Png: PNG;
-    try {
-      pass1Png = PNG.sync.read(existingIntermediate.bytes);
-    } catch (error) {
-      throw new ProviderError(
-        "malformed_response",
-        `The persisted first-pass reconstruction could not be decoded as a PNG: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-
-    const pass1Image: RgbaImage = { width: pass1Png.width, height: pass1Png.height, data: pass1Png.data };
-    const pass2Plan = resolveReconstructionRequest(pass1Image, input.sizing);
+    // Same streaming treatment for an ADOPTED durable pass-1 intermediate:
+    // planning pass 2 needs its alpha geometry, never its raster.
+    const pass1Geometry = await this.scanPass1Geometry(
+      existingIntermediate.bytes,
+      existingIntermediate.providerRequestId,
+      "persisted",
+    );
+    const pass2Plan = resolveReconstructionRequestFromGeometry(
+      {
+        sourceWidthPx: pass1Geometry.widthPx,
+        sourceHeightPx: pass1Geometry.heightPx,
+        trim: pass1Geometry.trim,
+      },
+      input.sizing,
+    );
     if (pass2Plan.status !== "resolved") {
       throw new ProviderError(
         "invalid_request",
@@ -1091,9 +1273,12 @@ export class TopazTransparencyUpscaleProvider
       return {
         status: "downloaded",
         providerRequestId: existingIntermediate.providerRequestId,
-        bytes: PNG.sync.write(pass1Png),
-        widthPx: pass1Png.width,
-        heightPx: pass1Png.height,
+        // The intermediate's OWN bytes. Re-encoding them through pngjs
+        // required decoding the whole 4x raster first and produced a
+        // functionally identical PNG — pure cost, now removed.
+        bytes: existingIntermediate.bytes,
+        widthPx: pass1Geometry.widthPx,
+        heightPx: pass1Geometry.heightPx,
         nativeWidthPx: source.width,
         nativeHeightPx: source.height,
       };
@@ -1102,8 +1287,8 @@ export class TopazTransparencyUpscaleProvider
     const pass2ResultReady = this.resultReadyRequest(input.existingProviderRequest);
     if (pass2ResultReady) {
       return this.downloadCompletedBounded(pass2ResultReady, {
-        sourceWidthPx: pass1Png.width,
-        sourceHeightPx: pass1Png.height,
+        sourceWidthPx: pass1Geometry.widthPx,
+        sourceHeightPx: pass1Geometry.heightPx,
         targetWidthPx: pass2Plan.request.widthPx,
         targetHeightPx: pass2Plan.request.heightPx,
         nativeWidthPx: source.width,
@@ -1112,10 +1297,12 @@ export class TopazTransparencyUpscaleProvider
     }
 
     const step = await this.checkStatusOnce(
-      PNG.sync.write(pass1Png),
+      // Submit pass 1's own bytes, unmodified — the provider receives the
+      // exact artifact we paid for rather than a re-encode of it.
+      existingIntermediate.bytes,
       { widthPx: pass2Plan.request.widthPx, heightPx: pass2Plan.request.heightPx },
-      pass1Png.width,
-      pass1Png.height,
+      pass1Geometry.widthPx,
+      pass1Geometry.heightPx,
       input.existingProviderRequest ?? null,
       input.onProviderRequestSubmitted,
     );
@@ -1749,10 +1936,27 @@ export class TopazTransparencyUpscaleProvider
       { width: reconstructed.width, height: reconstructed.height, data: reconstructed.data },
       sizing,
     );
+    return this.finalizeFromNormalized(normalized, reconstructed.width, reconstructed.height, provenance);
+  }
+
+  /**
+   * Memory-Bounded Oversized Provider Result Finalization: everything after
+   * normalization, shared verbatim by the in-memory and streaming paths so
+   * the assembled output contract cannot drift between them.
+   * `reconstructedWidthPx`/`reconstructedHeightPx` are ALWAYS the provider's
+   * own result dimensions — never a post-processing size.
+   */
+  private finalizeFromNormalized(
+    normalized: ReturnType<typeof normalizeProductionRaster>,
+    reconstructedWidthPx: number,
+    reconstructedHeightPx: number,
+    provenance: { processId: string; nativeWidthPx: number; nativeHeightPx: number },
+  ): FinalArtworkProviderOutput {
     if (normalized.status === "no_visible_artwork") {
       throw new ProviderError("malformed_response", normalized.reason);
     }
     const encoded = encodeProductionPng(normalized.result);
+    const reconstructed = { width: reconstructedWidthPx, height: reconstructedHeightPx };
 
     return {
       bytes: encoded.bytes,

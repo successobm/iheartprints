@@ -80,14 +80,28 @@ export type FinalArtworkProviderStage =
   | "result_geometry_validation_started"
   | "result_geometry_validation_completed"
   /**
-   * The full `PNG.sync.read` still required to NORMALIZE a result — now
-   * reached only from `finalizeDownloadedResultBounded`, i.e. against an
-   * already-DURABLE intermediate read back from storage, never against bytes
-   * that exist only in this process. This is where the large allocation now
-   * lives; it is deliberately out of scope for the decode-removal repair.
+   * A full `PNG.sync.read`. Repair #1's comment here claimed this was
+   * reached only from `finalizeDownloadedResultBounded`, which was wrong —
+   * two-pass pass-1 planning decoded as well (Cursor follow-up #1, corrected
+   * here). Repair #2 removed BOTH: finalization now streams
+   * (`result_streaming_normalize_*`) and pass-1 planning now streams
+   * (`pass1_streaming_scan_*`). These markers remain for the bounded
+   * fallback only — a SMALL raster in an encoding the streaming reader
+   * cannot handle. An oversized one in such an encoding is refused instead.
    */
   | "result_png_decode_started"
-  | "result_png_decode_completed";
+  | "result_png_decode_completed"
+  /**
+   * Memory-Bounded Oversized Provider Result Finalization: the streaming
+   * normalize that REPLACED that full decode on the finalization path. Holds
+   * the production-sized destination plus two source rows instead of the
+   * whole raster.
+   */
+  | "result_streaming_normalize_started"
+  | "result_streaming_normalize_completed"
+  /** Two-pass pass 1: streaming alpha scan that replaced a full decode purely to plan pass 2. */
+  | "pass1_streaming_scan_started"
+  | "pass1_streaming_scan_completed";
 
 /**
  * Whitelisted fields only — see this module's own "SECRET SAFETY" note.
