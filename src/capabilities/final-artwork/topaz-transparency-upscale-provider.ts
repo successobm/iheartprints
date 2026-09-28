@@ -42,6 +42,7 @@ import {
 import { resolveWidthConstrainedSizing } from "@/capabilities/shared/print-placement-dimensions";
 
 import { trimToAlphaBounds, type AlphaTrimOptions } from "./alpha-trim";
+import { inspectPngStructure } from "./png-structure";
 import { logFinalArtworkProviderStage } from "./provider-stage-log";
 import {
   encodeProductionPng,
@@ -874,6 +875,20 @@ export class TopazTransparencyUpscaleProvider
     input: FinalArtworkProviderInput,
     downloaded: FinalArtworkProviderDownloadedResult,
   ): FinalArtworkProviderBoundedResult {
+    // Pre-Durability PNG Decode Removal: the full decode still happens HERE,
+    // deliberately and in scope-limited fashion — but now against a DURABLE
+    // intermediate read back from storage, never against a paid result that
+    // exists only in this process's memory. A failure here is a recoverable
+    // read-back failure; it no longer loses the provider result.
+    logFinalArtworkProviderStage({
+      stage: "result_png_decode_started",
+      providerKey: this.providerKey,
+      providerRequestId: downloaded.providerRequestId,
+      byteCount: downloaded.bytes.length,
+      widthPx: downloaded.widthPx,
+      heightPx: downloaded.heightPx,
+    });
+    const decodeStartedAt = Date.now();
     let png: PNG;
     try {
       png = PNG.sync.read(downloaded.bytes);
@@ -885,6 +900,14 @@ export class TopazTransparencyUpscaleProvider
         }`,
       );
     }
+    logFinalArtworkProviderStage({
+      stage: "result_png_decode_completed",
+      providerKey: this.providerKey,
+      providerRequestId: downloaded.providerRequestId,
+      widthPx: png.width,
+      heightPx: png.height,
+      elapsedMs: Date.now() - decodeStartedAt,
+    });
     const output = this.finalizeFromReconstructed(png, input.sizing, {
       processId: downloaded.providerRequestId,
       nativeWidthPx: downloaded.nativeWidthPx,
@@ -1198,34 +1221,43 @@ export class TopazTransparencyUpscaleProvider
   ): Promise<FinalArtworkProviderBoundedResult> {
     const processId = resultReady.providerRequestId;
     const bytes = await this.download(processId);
-    // Download Crash-Boundary Diagnostics — see `provider-stage-log.ts`.
+
+    // Pre-Durability PNG Decode Removal. This step used to `PNG.sync.read`
+    // the whole result purely to obtain a width and a height for
+    // `validateReconstructedGeometry`, then `PNG.sync.write` it back — 813
+    // MiB of transient allocation, measured, on a 512 MiB container, all
+    // BEFORE anything durable existed. The dimensions live in the IHDR;
+    // reading them costs 8 bytes. `inspectPngStructure` additionally
+    // CRC-verifies every chunk and proves the body is complete, so the
+    // corruption check the full decode incidentally provided is preserved
+    // rather than dropped — see `png-structure.ts` for exactly what is and
+    // is not covered.
     logFinalArtworkProviderStage({
-      stage: "result_png_decode_started",
+      stage: "result_header_inspect_started",
       providerKey: this.providerKey,
       providerRequestId: processId,
       byteCount: bytes.length,
     });
-    const resultDecodeStartedAt = Date.now();
-    let png: PNG;
-    try {
-      png = PNG.sync.read(bytes);
-    } catch (error) {
+    const inspectStartedAt = Date.now();
+    const inspected = inspectPngStructure(bytes);
+    if (inspected.status !== "ok") {
+      // Same classification and the same `"download"` stage the full decode
+      // raised, so every existing transient/terminal failure path, budget
+      // refund and retry decision behaves identically.
       throw new ProviderError(
         "malformed_response",
-        `The production reconstruction provider returned bytes that could not be decoded as a PNG: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `The production reconstruction provider returned bytes that are not a valid PNG: ${inspected.reason}.`,
         undefined,
         "download",
       );
     }
     logFinalArtworkProviderStage({
-      stage: "result_png_decode_completed",
+      stage: "result_header_inspect_completed",
       providerKey: this.providerKey,
       providerRequestId: processId,
-      widthPx: png.width,
-      heightPx: png.height,
-      elapsedMs: Date.now() - resultDecodeStartedAt,
+      widthPx: inspected.widthPx,
+      heightPx: inspected.heightPx,
+      elapsedMs: Date.now() - inspectStartedAt,
     });
 
     logFinalArtworkProviderStage({
@@ -1233,13 +1265,16 @@ export class TopazTransparencyUpscaleProvider
       providerKey: this.providerKey,
       providerRequestId: processId,
     });
+    // UNCHANGED geometry policy — the same function, the same inputs, only
+    // the source of `actualWidthPx`/`actualHeightPx` differs (IHDR rather
+    // than a decoded raster; the IHDR is where pngjs read them from too).
     const geometryCheck = validateReconstructedGeometry({
       sourceWidthPx: geometry.sourceWidthPx,
       sourceHeightPx: geometry.sourceHeightPx,
       targetWidthPx: geometry.targetWidthPx,
       targetHeightPx: geometry.targetHeightPx,
-      actualWidthPx: png.width,
-      actualHeightPx: png.height,
+      actualWidthPx: inspected.widthPx,
+      actualHeightPx: inspected.heightPx,
     });
     logFinalArtworkProviderStage({
       stage: "result_geometry_validation_completed",
@@ -1249,32 +1284,17 @@ export class TopazTransparencyUpscaleProvider
     if (!geometryCheck.valid) {
       throw new ProviderError("malformed_response", geometryCheck.reason, undefined, "download");
     }
-    // Hoisted out of the returned object literal ONLY so the encode can be
-    // bracketed. Same expression, same single evaluation, same position in
-    // the sequence relative to every other statement — the remaining literal
-    // fields are plain reads with no side effects.
-    logFinalArtworkProviderStage({
-      stage: "result_png_encode_started",
-      providerKey: this.providerKey,
-      providerRequestId: processId,
-      widthPx: png.width,
-      heightPx: png.height,
-    });
-    const encodeStartedAt = Date.now();
-    const encodedBytes = PNG.sync.write(png);
-    logFinalArtworkProviderStage({
-      stage: "result_png_encode_completed",
-      providerKey: this.providerKey,
-      providerRequestId: processId,
-      byteCount: encodedBytes.length,
-      elapsedMs: Date.now() - encodeStartedAt,
-    });
     return {
       status: "downloaded",
       providerRequestId: processId,
-      bytes: encodedBytes,
-      widthPx: png.width,
-      heightPx: png.height,
+      // THE PROVIDER'S OWN BYTES, byte-for-byte. Re-encoding them through
+      // pngjs bought nothing (the persisted intermediate is internal, never
+      // the customer deliverable) and cost a full decode plus a full encode.
+      // Keeping the original is also better provenance: the durable
+      // intermediate is now the exact artifact we paid for.
+      bytes,
+      widthPx: inspected.widthPx,
+      heightPx: inspected.heightPx,
       nativeWidthPx: geometry.nativeWidthPx,
       nativeHeightPx: geometry.nativeHeightPx,
     };

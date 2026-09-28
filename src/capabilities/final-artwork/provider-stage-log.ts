@@ -69,13 +69,25 @@ export type FinalArtworkProviderStage =
   /** `readResponseBodyWithSizeCap` — where the result is materialised into one Buffer. */
   | "download_result_body_buffering_started"
   | "download_result_body_buffering_completed"
-  | "result_png_decode_started"
-  | "result_png_decode_completed"
+  /**
+   * Pre-Durability PNG Decode Removal: `inspectPngStructure` — IHDR read plus
+   * whole-body CRC/structure verification, O(1) in memory. This REPLACED a
+   * full `PNG.sync.read` (measured at 880.80 MiB peak RSS on a representative
+   * 13220x4952 result) at the pre-durability boundary.
+   */
+  | "result_header_inspect_started"
+  | "result_header_inspect_completed"
   | "result_geometry_validation_started"
   | "result_geometry_validation_completed"
-  /** `PNG.sync.write` — the full synchronous re-encode performed before anything is durable. */
-  | "result_png_encode_started"
-  | "result_png_encode_completed";
+  /**
+   * The full `PNG.sync.read` still required to NORMALIZE a result — now
+   * reached only from `finalizeDownloadedResultBounded`, i.e. against an
+   * already-DURABLE intermediate read back from storage, never against bytes
+   * that exist only in this process. This is where the large allocation now
+   * lives; it is deliberately out of scope for the decode-removal repair.
+   */
+  | "result_png_decode_started"
+  | "result_png_decode_completed";
 
 /**
  * Whitelisted fields only — see this module's own "SECRET SAFETY" note.
