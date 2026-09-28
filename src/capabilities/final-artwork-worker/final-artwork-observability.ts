@@ -176,6 +176,19 @@ export type FinalArtworkWorkerStage =
   | "provider_status_check_completed"
   | "provider_download_started"
   | "provider_download_completed"
+  /**
+   * Download Crash-Boundary Diagnostics: `produceBounded()` RETURNED — the
+   * closing bracket for the whole provider span that `provider_download_started`
+   * opens, emitted before any outcome branch is taken. Two production
+   * attempts died somewhere inside that span (Pedro Back `5ccc9d2f-…`,
+   * DigitalOcean exit code 128) and nothing distinguished "died in the
+   * provider" from "died on the way to persistence". This marker is that
+   * distinction; the fine-grained boundaries within the span live in
+   * `final-artwork/provider-stage-log.ts`.
+   */
+  | "provider_bounded_step_completed"
+  /** Download Crash-Boundary Diagnostics: immediately before `persistProviderResultIntermediate` — the first write of the durable intermediate. */
+  | "provider_result_intermediate_persist_started"
   | "provider_result_intermediate_persisted"
   | "intermediate_readback_completed"
   | "normalize_started"
