@@ -11778,6 +11778,148 @@ speculatively.
 
 ---
 
+## 23q-DTF. DTF-R1 — Production-Qualified Clean Master → DTF Clean-Master Handoff
+
+**What changed in one sentence.** The prepared-upload (Existing Artwork →
+apparel raster / DTF) production path now resolves its production source
+through the shared recovery lifecycle instead of reading
+`ArtworkPreparation.preparedAssetId` unconditionally — closing, for DTF, the
+exact gap §23q's R6B addendum closed for Signs and explicitly left open
+("DTF still does not — this phase is Signs-only, deliberately").
+
+**Why the gap mattered.** `preparedAssetId` is a deterministic transparent
+derivative of the customer's immutable original. Once the shared recovery
+lifecycle has begun against that original, the system has already decided
+the original is not the thing to print from. Before DTF-R1, DTF neither knew
+nor asked: it would quietly finalize the pre-recovery source — the inferior
+artwork — while recovery sat unresolved, or while a confirmed clean master
+was already on file.
+
+### The one resolver
+
+`final-artwork/prepared-upload-effective-source.ts` —
+`resolvePreparedUploadEffectiveSource(repo, artworkGeometryQualification,
+{ projectId, preparedAssetId })`. Structurally the apparel twin of
+`sign-preparation/sign-effective-source.ts`: one exported function, asked
+identically by every boundary, never re-implemented at a call site.
+Repository reads plus one capability read — no asset download, no pixel
+decode, no provider, no write.
+
+| Lifecycle state | Resolver | DTF source |
+| --- | --- | --- |
+| No `ArtworkFidelityContract`, or no reconstruction job against its `sourceAssetId` | `{ status: "prepared" }` | `preparedAssetId` — byte-for-byte pre-DTF-R1 behavior |
+| Lifecycle begun, no current confirmed PQCM (queued/running job, candidate pending review, candidate rejected, geometry pending confirmation, geometry rejected, `"unusable"`, superseded authority) | `{ status: "blocked" }` | **none — production blocked.** Never a fallback to `preparedAssetId` |
+| Current confirmed PQCM | `{ status: "master" }` | the qualification's own `derivedAssetId` |
+
+"Current" is never re-derived here.
+`ArtworkGeometryQualificationCapability.getCurrentProductionQualifiedMaster`
+(§23q) remains the ONE authority for that chain-walk — project → current
+confirmed fidelity contract → current accepted reconstruction → that job's
+qualification row → `"confirmed"` → a derivative asset — and every `null` it
+returns is treated as "not eligible". DTF adds no second notion of an
+approved reconstruction, launches no reconstruction of its own, and contacts
+no provider on this path.
+
+**Fail-closed on an unwired capability** (deliberately stricter than
+`resolveSignEffectiveSource`, which returns "original"). Detecting *whether a
+lifecycle exists* needs only repository reads, so that detection is never
+gated on the optional capability. A project with a lifecycle and no
+`ArtworkGeometryQualificationCapability` **blocks**; an unwired dependency
+must not be able to reopen the silent-fallback hole this phase closes. A
+project with no lifecycle never reaches the capability at all, which is why
+every pre-existing apparel call site and test — none of which pass it — is
+unaffected.
+
+### Asked twice, on purpose (TOCTOU)
+
+- **Request time** — `FinalArtworkCapability.requestPreparedUploadFinalArtwork`,
+  before any `FinalArtworkJob` exists, so a mid-recovery project never gets a
+  queued job and never reaches a paid provider. `blocked` throws the
+  resolver's own customer sentence.
+- **Worker time** — `FinalArtworkWorkerCapability`'s `runPreparedUploadJob`,
+  resolved again from scratch immediately before execution. `blocked` →
+  `completeWithoutAsset` (the governed "this cannot be auto-finalized"
+  terminal state, never a manufactured processing failure).
+
+**No resolved asset id is frozen onto the job.** A request is permission to
+produce, never a permanent authorization of one specific asset, so there is
+no stale request-time source for the worker to pick up even by accident.
+
+**The crash/retry counterpart.** `produceProductionAsset` adopts an existing
+plate for a job on pixel geometry alone (`resolveExistingProductionAsset`).
+That is sound while a source cannot move underneath a live job — true for the
+prepared authority, where re-preparing also produces a new `ArtworkVersion`
+and the existing `preparedArtworkVersionId` binding cancels the job first. It
+is NOT true for a clean master, which can be superseded with the
+`ArtworkPreparation` row untouched. `preparedUploadPriorSourceDrift` compares
+each existing plate's OWN recorded lineage
+(`uploadedPreserve.preparedAssetId`) against the just-resolved current source
+and refuses to adopt, re-validate or deliver a plate built from a superseded
+one.
+
+### Provenance, validation and the certification boundary
+
+`UploadedPreserveEvidence.preparedAssetId` is, as it always was, *the asset
+whose pixels the transform actually consumed* — so it now carries the clean
+master's `derivedAssetId` when that is what ran. A new field,
+`sourceAuthority` (`"prepared_upload"` | `"production_qualified_clean_master"`,
+absent = `"prepared_upload"` for every plate predating it), states WHICH
+authority that id belongs to rather than leaving anyone to infer it. Source
+selection, the transform, provenance and validation therefore name one asset,
+never two.
+
+**The laundering boundary this closes.** A clean master's pixels were
+manufactured by a reconstruction provider and accepted by a person *for
+recovery* — the capability that resolves it says in as many words that it
+"never sets Print Ready, never authorizes Signs/DTF production", and no
+reconstruction-quality certification surface exists yet. But a DTF plate
+normalized from a master truthfully records `enhancement: "skipped"` and
+`resolutionProvenance: "native"` — nothing was reconstructed *in that job* —
+and would have sailed straight through
+`reconstruction_certification_evidence`, reaching automatic Print Ready by
+arriving as a *source* rather than as an *enhancement*. So that check now
+also fails on `sourceAuthority === "production_qualified_clean_master"`, for
+the halftone representation as well as continuous tone (screening an
+uncertified master renders uncertified artwork faithfully; the lattice's own
+correctness says nothing about that). `readUploadedPreserveEvidence` carries
+`sourceAuthority` across retries for the same reason — dropping it would have
+been the quietest possible way to undo the phase.
+
+Net effect, and it is the intended one: a DTF plate built from a clean master
+is **produced** and **validated**, and lands on `finalization_required` with
+`require_human_review` — never automatic `print_ready`. That is the same
+outcome the Pedro Back production test already produced correctly, preserved
+rather than weakened. DTF-R1 builds no certification surface; when an explicit
+reconstruction-quality/fidelity authority ships, that is where this withhold
+gets replaced.
+
+**`print_ready` remains profile-scoped and `PrintValidationCapability`'s sole
+authority** (§13i/§23n, unchanged). Nothing in this phase sets, relaxes, or
+widens it.
+
+### What DTF-R1 does not do
+
+No migration (dynamic resolution only — no new column, no backfill, no
+`FinalArtworkJob` schema change). No write to any recovery-lifecycle table.
+No mutation of `ArtworkPreparation.preparedAssetId` or any historical
+preparation record — they remain immutable historical truth, and the handoff
+is runtime current-authority selection only. No reconstruction logic
+duplicated into DTF, no provider/Topaz/OpenAI call added to this path, no
+human reconstruction certification, no near-sufficient-resolution or Topaz
+routing thresholds, no background-removal change, no Signs change, no Pedro
+change, no ProductionUnlock/checkout repair, no UI change. The Create New
+path is untouched — it never read `preparedAssetId`. Halftone's raster-first
+hard gate is unchanged; it simply now sees the correct source's verdict.
+
+**Residual, deliberately not fixed here.** A clean master is the
+qualification's transparent, background-isolated derivative, so it is a valid
+continuous-tone apparel source. If one ever is not, the worker's existing
+transparency fence refuses honestly (`completeWithoutAsset`) rather than
+printing an opaque plate — DTF-R1 adds no background removal to compensate,
+which would be a preparation redesign. `production-treatment/preview`
+(a non-production preview surface) still reads `preparedAssetId` directly;
+it produces no plate and makes no readiness claim.
+
 ## 23r. Production-Artifact Storage Identity (Provider Intermediate Storage-Key Collision Repair)
 
 A FinalArtwork job's **storage grouping id** is a folder, never an identity.

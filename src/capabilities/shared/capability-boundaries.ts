@@ -2066,6 +2066,38 @@
  * `assets.downloadAssetBytes(plan.sourceAssetId)` — see `ARCHITECTURE.md`
  * §23q's own R6B repair addendum for the full six-boundary precedence
  * table and the worker fix's own explanation.
+ *
+ * DTF-R1 ADDENDUM (Production-Qualified Clean Master -> DTF Clean-Master
+ * Handoff). The R6B paragraph above says this dependency is "never
+ * DTF/apparel-reachable (every non-Signs job path in
+ * `FinalArtworkCapability`/`FinalArtworkWorkerCapability` never touches
+ * this dependency at all)". That was true of R6B and is NO LONGER TRUE,
+ * deliberately: DTF-R1 makes the prepared-upload (apparel raster) path ask
+ * the SAME authority the same way, through its own single shared resolver
+ * `final-artwork/prepared-upload-effective-source.ts`
+ * (`resolvePreparedUploadEffectiveSource`) — the structural twin of
+ * `sign-effective-source.ts`, never a second reconstruction-authority
+ * integration and never a DTF-local copy of the chain-walk.
+ *
+ * Everything else about the edge is unchanged: still ONE direction, still
+ * OPTIONAL, still READ-ONLY, still only
+ * `getCurrentProductionQualifiedMaster`, still never a write to the
+ * qualification/reconstruction tables, still no provider port.
+ * `ArtworkPreparation.preparedAssetId` remains immutable historical truth —
+ * DTF-R1 never rewrites it — and a project with no reconstruction/recovery
+ * lifecycle finalizes from it exactly as before. Lifecycle DETECTION is
+ * repository-reads-only, so it is never gated on the optional capability
+ * being wired; a project WITH a lifecycle and WITHOUT the capability blocks
+ * rather than falling back (stricter than the Signs resolver, on purpose).
+ *
+ * Selecting a clean master as a production SOURCE authorizes nothing about
+ * the plate that results: `PrintValidationCapability` remains the sole
+ * authority over `print_ready`, and DTF-R1 tightens rather than relaxes it —
+ * `UploadedPreserveEvidence.sourceAuthority` makes a plate descending from a
+ * reconstruction visible to `reconstruction_certification_evidence` even
+ * when this job's own enhancement step was `"skipped"`. See
+ * `ARCHITECTURE.md` §23q-DTF for the full precedence table and the
+ * laundering boundary.
  */
 
 /**

@@ -487,6 +487,30 @@ function validate(input: PrintValidationInput): PrintValidationReport {
             requiredTransformations.add("require_human_review");
           }
         }
+
+        // DTF-R1: "Halftone is out of scope for the False Print-Ready
+        // Guard" was a statement about PROVIDER SUPER-RESOLUTION — a screen
+        // drawn at final size genuinely does not depend on it, which is why
+        // that guard does not run here. It was never a statement about a
+        // plate whose SOURCE pixels were manufactured by a reconstruction:
+        // screening an uncertified clean master produces a dot lattice
+        // faithfully rendering artwork nobody has certified, and the
+        // lattice's own correctness says nothing about that.
+        //
+        // Pushed ONLY when the condition actually applies, so no plate that
+        // could exist before DTF-R1 gains, loses, or reorders a single
+        // check.
+        if (cleanMasterCertificationRequired(input.uploadedPreserve)) {
+          const masterCertificationCheck = checkReconstructionCertificationEvidence(
+            asset,
+            input.uploadedPreserve,
+            normalization,
+          );
+          checks.push(masterCertificationCheck);
+          if (masterCertificationCheck.status !== "pass") {
+            requiredTransformations.add("require_human_review");
+          }
+        }
       } else {
         const sufficiencyCheck = checkReconstructionSufficiency(normalization);
         checks.push(sufficiencyCheck);
@@ -1779,6 +1803,26 @@ function checkSourceLineage(input: PrintValidationInput): PrintValidationCheck {
         "This production artwork records the customer's original upload as its source rather than the approved, background-prepared version of it.",
     };
   }
+  // DTF-R1: both admitted authorities are derivatives that supersede the
+  // immutable original, and the check above already proved this plate did
+  // not descend from that original. What differs between them is what must
+  // be CERTIFIED, not whether the lineage is well-formed — that question
+  // belongs to `reconstruction_certification_evidence`, which reads the
+  // same field. An unrecognized value is refused rather than silently
+  // treated as the safe one.
+  if (
+    evidence.sourceAuthority !== undefined &&
+    evidence.sourceAuthority !== "prepared_upload" &&
+    evidence.sourceAuthority !== "production_qualified_clean_master"
+  ) {
+    return {
+      check: "source_lineage",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "This production artwork records an unrecognized source authority, so what its pixels descend from cannot be established.",
+    };
+  }
   if (!/^[0-9a-f]{64}$/.test(evidence.sourceBytesSha256)) {
     return {
       check: "source_lineage",
@@ -1792,7 +1836,10 @@ function checkSourceLineage(input: PrintValidationInput): PrintValidationCheck {
     check: "source_lineage",
     status: "pass",
     severity: "blocking",
-    reason: `Production artwork derives from the customer-approved prepared artwork (content hash ${evidence.sourceBytesSha256.slice(0, 12)}…), not from the immutable original upload.`,
+    reason:
+      evidence.sourceAuthority === "production_qualified_clean_master"
+        ? `Production artwork derives from this project's current recovered clean master (content hash ${evidence.sourceBytesSha256.slice(0, 12)}…), not from the immutable original upload.`
+        : `Production artwork derives from the customer-approved prepared artwork (content hash ${evidence.sourceBytesSha256.slice(0, 12)}…), not from the immutable original upload.`,
   };
 }
 
@@ -1911,11 +1958,57 @@ function checkReconstructionSufficiency(
  * authority when that sprint ships; until then uncertain must not become
  * print_ready.
  */
+
+/**
+ * DTF-R1 — the laundering boundary.
+ *
+ * A reconstruction that arrives as a SOURCE is still a reconstruction. The
+ * shared recovery lifecycle's Production-Qualified Clean Master is a
+ * governed, human-accepted derivative of a provider raster reconstruction:
+ * its acceptance authorizes it as the artwork the pipeline should work
+ * FROM, and the capability that resolves it says so in as many words
+ * ("never sets Print Ready, never authorizes Signs/DTF production"). It is
+ * NOT reconstruction-quality certification, and no surface that produces
+ * such certification exists yet.
+ *
+ * So `sourceAuthority` is asked separately from `enhancement` /
+ * `resolutionProvenance`, which only ever describe what THIS job's own
+ * transform did. A plate normalized from a clean master truthfully records
+ * `enhancement: "skipped"` — nothing was reconstructed here — and must
+ * still have automatic Print Ready withheld, because the pixels it carries
+ * were manufactured upstream.
+ *
+ * Absent (every plate produced before the field existed) is treated as
+ * `"prepared_upload"`: those plates could only ever have had one source,
+ * and nothing about their verdicts changes.
+ */
+function cleanMasterCertificationRequired(evidence: UploadedPreserveEvidence): boolean {
+  return evidence.sourceAuthority === "production_qualified_clean_master";
+}
 function checkReconstructionCertificationEvidence(
   asset: NonNullable<PrintValidationInput["primaryAsset"]>,
   evidence: UploadedPreserveEvidence,
   normalization: ProductionNormalizationSummary,
 ): PrintValidationCheck {
+  // DTF-R1: a plate that DESCENDS from a reconstruction is in exactly the
+  // position this guard exists for, even when this job's own enhancement
+  // step did nothing. A Production-Qualified Clean Master already carries
+  // provider-manufactured pixels, so a plate normalized from one has the
+  // same unproven visual fidelity as one this pipeline reconstructed
+  // itself — and would otherwise record `enhancement: "skipped"` and
+  // `resolutionProvenance: "native"` and sail straight through.
+  if (cleanMasterCertificationRequired(evidence)) {
+    return {
+      check: "reconstruction_certification_evidence",
+      status: "fail",
+      severity: "blocking",
+      reason:
+        "This production artwork was built from a recovered clean master — artwork whose pixels a reconstruction provider produced " +
+        "and a person accepted for recovery, not for print. iHeartPrints has no authoritative reconstruction-quality/fidelity " +
+        "evidence for it, so automatic Print Ready is withheld and human review is required. This is not a claim that processing failed.",
+    };
+  }
+
   const reconstructed =
     asset.resolutionProvenance === "reconstructed" ||
     evidence.enhancement === "reconstructed";

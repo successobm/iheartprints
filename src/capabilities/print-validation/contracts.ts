@@ -786,8 +786,30 @@ export type PrintValidationProfile =
 export interface UploadedPreserveEvidence {
   /** The approved prepared `ArtworkVersion` this plate was produced from. Must equal the report's `artworkVersionId`. */
   preparedArtworkVersionId: string;
-  /** The approved prepared (transparent PNG) asset whose pixels the transform actually consumed. */
+  /** The (transparent PNG) asset whose pixels the transform actually consumed. */
   preparedAssetId: string;
+  /**
+   * DTF-R1: WHICH artwork authority `preparedAssetId` belongs to.
+   *
+   * `"prepared_upload"` (or absent, for every plate produced before this
+   * field existed) means the customer-approved prepared derivative of their
+   * own upload — the only source this path ever had.
+   * `"production_qualified_clean_master"` means the shared recovery
+   * lifecycle's current Production-Qualified Clean Master: a geometry-
+   * normalized derivative of a customer-approved RASTER RECONSTRUCTION.
+   *
+   * Recorded because the two carry materially different certainty and must
+   * not be told apart by guessing at an asset id. A clean master's pixels
+   * were manufactured by a reconstruction provider, so a plate descending
+   * from one is subject to exactly the same
+   * `reconstruction_certification_evidence` withholding as a plate this
+   * pipeline reconstructed itself — even when THIS job's own enhancement
+   * step was `"skipped"` because the master already carried enough pixels.
+   * Without this field that laundering is invisible, and an uncertified
+   * reconstruction could reach automatic Print Ready by arriving as a
+   * source rather than as an enhancement.
+   */
+  sourceAuthority?: "prepared_upload" | "production_qualified_clean_master";
   /** The customer's immutable original upload — recorded so lineage can prove it was NOT the enhancement source (Goal 6). */
   originalAssetId: string;
   /** SHA-256 of the exact prepared source bytes the transform read. Pixel-source lineage, not a fidelity claim. */

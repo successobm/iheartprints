@@ -50,6 +50,7 @@ import {
 } from "@/capabilities/sign-preparation";
 import type { SignRepairPlan } from "@/capabilities/sign-preparation";
 import type { ArtworkGeometryQualificationCapability } from "@/capabilities/artwork-reconstruction/artwork-geometry-qualification-capability";
+import { resolvePreparedUploadEffectiveSource } from "./prepared-upload-effective-source";
 import {
   createAcquisitionCapability,
   type AcquisitionCapability,
@@ -492,6 +493,14 @@ export function createFinalArtworkCapability(
    * never a second reconstruction-authority integration. `undefined`
    * resolves every currency check to "original", identical to the pre-R6B
    * behavior, so every existing non-Signs call site and test is unaffected.
+   *
+   * DTF-R1 addendum: the SAME dependency, unchanged in shape and still
+   * read-only, is now ALSO consulted by the prepared-upload (apparel/DTF)
+   * request path via `resolvePreparedUploadEffectiveSource`. A project with
+   * no recovery lifecycle never reaches it (the lifecycle is detected from
+   * repository reads alone), so every existing apparel call site and test
+   * is unaffected; a project that HAS one and is missing this dependency
+   * fails CLOSED rather than falling back.
    */
   artworkGeometryQualification?: ArtworkGeometryQualificationCapability,
 ): FinalArtworkCapability {
@@ -688,6 +697,26 @@ export function createFinalArtworkCapability(
       );
       if (!artwork || artwork.kind !== "prepared_upload") {
         throw new Error("Your prepared artwork could not be found for this project");
+      }
+
+      // DTF-R1 — THE CLEAN-MASTER HANDOFF, request side.
+      //
+      // Asked BEFORE any `FinalArtworkJob` exists, so a project whose
+      // artwork is mid-recovery never gets a queued job, never reaches a
+      // provider, and never spends a credit against a source the system
+      // has already decided is not the one to print from. The worker asks
+      // the SAME question again immediately before executing (the same
+      // "belt and suspenders" discipline the Signs path uses), because
+      // authority can move between this call and that one — so nothing
+      // here is carried forward as a permanent authorization, and no
+      // resolved asset id is frozen onto the job.
+      const effectiveSource = await resolvePreparedUploadEffectiveSource(
+        repo,
+        artworkGeometryQualification,
+        { projectId, preparedAssetId: preparation.preparedAssetId },
+      );
+      if (effectiveSource.status === "blocked") {
+        throw new Error(effectiveSource.reason);
       }
 
       // Production size is read from the project's own persisted authority,
