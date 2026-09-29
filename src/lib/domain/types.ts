@@ -2354,6 +2354,33 @@ export interface FinalArtworkJob {
   providerRequestId: string | null;
   providerStatus: string | null;
   /**
+   * DTF-R1 (Cursor Blocker 2) — WHICH SOURCE the outstanding
+   * `providerRequestId` was submitted for.
+   *
+   * Resuming a provider request is how a crashed or bounded-pending
+   * reconstruction recovers without paying twice, so the resume path
+   * trusts the slot. That was safe while a job's source could not move
+   * underneath it. DTF-R1 resolves the effective source at worker time
+   * (prepared asset -> Production-Qualified Clean Master, or one master
+   * superseding another), so a job can revive, correctly resolve a NEW
+   * source, and still resume a request submitted for the OLD one —
+   * returning the old source's pixels under the new source's provenance.
+   *
+   * Only ever read while `providerRequestId` is non-null. `null` means "no
+   * claim either way": a row written before these columns existed, which
+   * resumes exactly as it always did rather than being treated as a
+   * mismatch (that would abandon real, already-paid requests in flight at
+   * deploy). Every submission writes them, so that tolerance closes itself.
+   *
+   * Distinct from the reconstruction-stage ARTIFACTS' own identity, which
+   * lives in asset metadata (`sourceAssetId`/`sourceBytesSha256` on both
+   * the pass-1 and provider-result intermediates) and covers every window
+   * in which an artifact exists. These two columns cover the one window
+   * where none does: between submission and the first durable download.
+   */
+  providerSourceAssetId: string | null;
+  providerSourceSha256: string | null;
+  /**
    * "Separate Provider Recovery Attempt Budget": how many claims have
    * attempted to poll/download the CURRENT `providerRequestId` (never a
    * fresh paid submission) — the separate, more generous budget that lets

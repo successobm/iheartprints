@@ -2030,6 +2030,8 @@ export class LocalProjectRepository implements ProjectRepository {
       providerKey: null,
       providerRequestId: null,
       providerStatus: null,
+      providerSourceAssetId: null,
+      providerSourceSha256: null,
       providerRecoveryAttempts: 0,
       createdAt: timestamp,
       updatedAt: timestamp,

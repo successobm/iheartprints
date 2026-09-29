@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +22,7 @@ import type {
   FinalArtworkProviderInput,
   FinalArtworkProviderOutput,
 } from "@/capabilities/final-artwork/provider";
+import type { RgbaImage } from "@/capabilities/final-artwork/raster-transform";
 import { resolvePreparedUploadEffectiveSource } from "@/capabilities/final-artwork/prepared-upload-effective-source";
 import { ArtworkFinalizationRecoveryUnresolvedError } from "@/capabilities/final-artwork/recovery-unresolved-error";
 import { createPrintValidationCapability } from "@/capabilities/print-validation";
@@ -135,6 +137,133 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     }
   }
 
+  /**
+   * CURSOR BLOCKER 2 — a TWO-PASS provider that records, per call, exactly
+   * what resumable state the worker handed it.
+   *
+   * The point of this file's Blocker-2 scenarios is not "did a plate come
+   * out" but "whose pixels went in". So every call captures the SHA-256 of
+   * the `sourceBytes` it received, the SHA-256 of any
+   * `existingIntermediateReconstruction` bytes, and any
+   * `existingProviderRequest` id. A test can then assert on identity
+   * directly instead of inferring it from an outcome.
+   *
+   * Pass 1 emits an intermediate through `onIntermediateReconstructionProduced`
+   * and then throws a bounded-pending-style interruption, so a durable
+   * pass-1 intermediate genuinely exists on disk before the source moves —
+   * the real precondition, not a hand-written asset row.
+   */
+  class TwoPassRecordingProvider implements FinalArtworkProvider {
+    readonly providerKey = "dtf_r1_two_pass_recording";
+    calls: Array<{
+      sourceSha: string;
+      intermediateSha: string | null;
+      resumedRequestId: string | null;
+      submittedRequestId: string | null;
+    }> = [];
+    /** When true, pass 1 stores its intermediate and then interrupts before pass 2. */
+    interruptAfterPass1 = true;
+    /**
+     * When true, the call submits a paid request and then dies BEFORE
+     * producing an intermediate — the genuinely in-flight state, where the
+     * job's provider slot is populated and no durable artifact exists to
+     * say which source it belongs to. This is the only window the job-row
+     * binding covers, so it is the only window this mode can express.
+     */
+    interruptAfterSubmit = false;
+    private submissions = 0;
+
+    async produce(input: FinalArtworkProviderInput): Promise<FinalArtworkProviderOutput> {
+      const record = {
+        sourceSha: createHash("sha256").update(input.sourceBytes).digest("hex"),
+        intermediateSha: input.existingIntermediateReconstruction
+          ? createHash("sha256")
+              .update(input.existingIntermediateReconstruction.bytes)
+              .digest("hex")
+          : null,
+        resumedRequestId: input.existingProviderRequest?.providerRequestId ?? null,
+        submittedRequestId: null as string | null,
+      };
+      this.calls.push(record);
+
+      // Continue from a supplied pass-1 intermediate when there is one;
+      // otherwise this call IS pass 1 and must submit a paid request.
+      let working: PNG = input.existingIntermediateReconstruction
+        ? PNG.sync.read(input.existingIntermediateReconstruction.bytes)
+        : PNG.sync.read(input.sourceBytes);
+
+      if (!input.existingIntermediateReconstruction) {
+        this.submissions += 1;
+        const requestId = `two-pass-request-${this.submissions}`;
+        record.submittedRequestId = requestId;
+        await input.onProviderRequestSubmitted?.(requestId);
+
+        if (this.interruptAfterSubmit) {
+          throw new Error("simulated interruption with the request still in flight");
+        }
+
+        const pass1 = replicate(working, 2);
+        await input.onIntermediateReconstructionProduced?.({
+          bytes: PNG.sync.write(toPng(pass1)),
+          widthPx: pass1.width,
+          heightPx: pass1.height,
+          providerRequestId: requestId,
+        });
+        if (this.interruptAfterPass1) {
+          throw new Error("simulated interruption after pass 1 was durably stored");
+        }
+        working = toPng(pass1);
+      }
+
+      const finalImage = replicate(working, 3);
+      const normalized = normalizeProductionRaster(finalImage, input.sizing);
+      if (normalized.status !== "normalized") throw new Error(normalized.reason);
+      const encoded = encodeProductionPng(normalized.result);
+      return {
+        bytes: encoded.bytes,
+        contentType: "image/png",
+        widthPx: normalized.result.image.width,
+        heightPx: normalized.result.image.height,
+        hasTransparency: encoded.hasTransparency,
+        nativeWidthPx: working.width,
+        nativeHeightPx: working.height,
+        reconstructedWidthPx: finalImage.width,
+        reconstructedHeightPx: finalImage.height,
+        resolutionProvenance: "reconstructed",
+        transformationMethod: "dtf_r1_two_pass_recording_v1",
+        preservesApprovedContent: false,
+        providerRequestId:
+          record.submittedRequestId ?? record.resumedRequestId ?? "two-pass-unknown",
+        normalization: normalized.result.metadata,
+      };
+    }
+  }
+
+  /** Exact integer replication — alpha bounds scale exactly, so geometry stays predictable. */
+  function replicate(source: PNG, scale: number): RgbaImage {
+    const width = source.width * scale;
+    const height = source.height * scale;
+    const data = Buffer.alloc(width * height * 4);
+    for (let y = 0; y < height; y += 1) {
+      const sourceRow = Math.floor(y / scale) * source.width;
+      for (let x = 0; x < width; x += 1) {
+        const from = (sourceRow + Math.floor(x / scale)) * 4;
+        const to = (y * width + x) * 4;
+        data[to] = source.data[from]!;
+        data[to + 1] = source.data[from + 1]!;
+        data[to + 2] = source.data[from + 2]!;
+        data[to + 3] = source.data[from + 3]!;
+      }
+    }
+    return { width, height, data };
+  }
+
+  function toPng(image: RgbaImage): PNG {
+    const png = new PNG({ width: image.width, height: image.height });
+    image.data.copy(png.data);
+    return png;
+  }
+
   /** Counts calls without changing behavior, so "which provider ran" is observable. */
   class CountingLocalProvider implements FinalArtworkProvider {
     readonly providerKey = "local_raster_interpolation";
@@ -170,7 +299,16 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     }
   }
 
-  function buildPipeline(repo: ProjectRepository) {
+  function buildPipeline(
+    repo: ProjectRepository,
+    /**
+     * CURSOR BLOCKER 2: the Blocker-2 scenarios need a provider with REAL
+     * resumable state (a pass-1 intermediate, an outstanding request), so
+     * they inject one. Everything else keeps the single-pass counting
+     * provider and its `calls === 0` assertions.
+     */
+    reconstructionProvider?: FinalArtworkProvider & { calls?: unknown },
+  ) {
     const assets = createAssetCapability(
       repo,
       new DataUriAssetStorageProvider(),
@@ -183,7 +321,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       assets,
       reconstruction,
     );
-    const provider = new CountingReconstructionProvider();
+    const provider = reconstructionProvider ?? new CountingReconstructionProvider();
     const localProvider = new CountingLocalProvider();
     const finalArtwork = createFinalArtworkCapability(repo, undefined, qualification);
     const worker = createFinalArtworkWorkerCapability(
@@ -203,9 +341,9 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       qualification,
       finalArtwork,
       worker,
-      provider,
+      provider: provider as CountingReconstructionProvider,
       /** The same instance, named for what it is at the two call sites that need it to run. */
-      reconstructor: provider,
+      reconstructor: provider as CountingReconstructionProvider,
       localProvider,
     };
   }
@@ -373,6 +511,14 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     built: ReturnType<typeof buildPipeline> & { repo: ProjectRepository },
     projectId: string,
     originalAssetId: string,
+    /**
+     * The confirmed wording this contract asserts. It feeds
+     * `deriveArtworkFidelityContractKey`, so two lifecycles over the same
+     * bytes are only genuinely DIFFERENT authorities when their wording
+     * differs — otherwise `requestReconstruction` idempotently returns the
+     * first lifecycle's job and nothing is superseded at all.
+     */
+    confirmedWording: string[] = [],
   ) {
     const proposed = await built.fidelity.proposeContract(projectId, {
       sourceAssetId: originalAssetId,
@@ -380,7 +526,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     });
     const contract = await built.fidelity.confirmContract(projectId, proposed.id, {
       currentSourceSha256: SOURCE_SHA,
-      confirmedWording: [],
+      confirmedWording,
       confirmedMarks: [],
       confirmedBy: "customer",
     });
@@ -488,6 +634,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       preparedAssetId: string;
       sourceAuthority?: string;
       originalAssetId: string;
+      sourceBytesSha256: string;
       enhancement: string;
     };
   }
@@ -1107,6 +1254,530 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
     const report = await latestReport(repo, setup.projectId, requested.job.id);
     assert.notEqual(report.status, "ready", "Print Ready must be withheld");
+  });
+
+  // =========================================================================
+  // CURSOR BLOCKER 1 — a completed, READY job whose source moved
+  // =========================================================================
+
+  /**
+   * Reached entirely through the REAL customer request path. Nothing here
+   * hand-edits a job row into a convenient state: the plate, the `ready`
+   * validation, the `print_ready` project status and the revival all come
+   * from `requestPreparedUploadFinalArtwork` + the worker, because the
+   * defect was specifically that the REQUEST path considered the job
+   * already satisfied. A test that queued the job itself would have
+   * bypassed the exact decision under review — which is how the previous
+   * suite passed 5846/5846 while this was broken.
+   */
+  it("BLOCKER 1: a completed READY job whose source moved is revived, and the prepared plate is not republished", async () => {
+    const repo = await freshRepo();
+    const built = { ...buildPipeline(repo), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets);
+
+    // 1-2. Ordinary DTF production from preparedAssetId, all the way to a
+    // genuinely `ready` validation and a `print_ready` project.
+    const first = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, first.job.id);
+
+    const firstReport = await latestReport(repo, setup.projectId, first.job.id);
+    assert.equal(firstReport.status, "ready", "the baseline really is a ready plate");
+    const preparedPlate = await productionAssetFor(repo, setup.projectId, first.job.id);
+    assert.ok(preparedPlate);
+    assert.equal(recordedLineage(preparedPlate!).preparedAssetId, setup.preparedAssetId);
+    assert.equal(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "print_ready",
+      "the baseline really does reach print_ready",
+    );
+
+    // 3. Recovery begins and a clean master becomes authoritative.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+    );
+    assert.notEqual(derivedAssetId, setup.preparedAssetId);
+
+    // 4. The project legitimately leaves print_ready (the customer is back
+    // in the flow — e.g. reviewing the recovered artwork).
+    await repo.setProjectStatus(setup.projectId, "approved");
+
+    // 5. The SAME standard-raster job identity is requested again, through
+    // the real entry point.
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+
+    // 6-7. THE DEFECT: previously `alreadyRequested: true` with the job
+    // left `completed`, so the worker never ran.
+    assert.equal(
+      again.alreadyRequested,
+      false,
+      "a completed READY job whose source moved must not count as already satisfied",
+    );
+    assert.equal(again.job.id, first.job.id, "same unique job identity, revived in place");
+    assert.equal(again.job.status, "queued");
+
+    // 8-9. The prepared plate must not be republished as current.
+    assert.notEqual(
+      (await repo.getProject(setup.projectId))!.project.status,
+      "print_ready",
+      "the superseded prepared plate must not be reconciled back to print_ready",
+    );
+    assert.equal(
+      await built.finalArtwork.getCurrentProductionAssetId(setup.projectId),
+      null,
+      "delivery must refuse a plate whose source current authority has superseded",
+    );
+
+    await drainJob(built.worker, repo, again.job.id);
+
+    // The worker executed against the CURRENT authority.
+    const plates = (await repo.listAssets(setup.projectId))
+      .filter(
+        (asset) =>
+          asset.finalArtworkJobId === first.job.id &&
+          asset.productionRole === "production_png",
+      )
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    assert.equal(plates.length, 2, "an additive new plate, the old one untouched");
+    assert.equal(plates[0]!.id, preparedPlate!.id);
+    assert.equal(recordedLineage(plates[0]!).preparedAssetId, setup.preparedAssetId);
+    assert.equal(recordedLineage(plates[1]!).preparedAssetId, derivedAssetId);
+    assert.equal(
+      recordedLineage(plates[1]!).sourceAuthority,
+      "production_qualified_clean_master",
+    );
+
+    // TERMINATION: the newest plate now names the current source, so the
+    // revival condition has ended itself — a third request is a no-op.
+    const third = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    assert.equal(
+      third.alreadyRequested,
+      true,
+      "no infinite revival once the current-source plate exists",
+    );
+    assert.equal(third.job.status, "completed");
+  });
+
+  // =========================================================================
+  // CURSOR BLOCKER 2 — resumable reconstruction state must be source-bound
+  // =========================================================================
+
+  /**
+   * Drives a two-pass job until a REAL pass-1 intermediate is durably on
+   * disk, and asserts that it is — the precondition these scenarios are
+   * about. Returns the intermediate asset and the SHA of the bytes it
+   * holds, so a later assertion can say "the provider was never handed
+   * THESE bytes" by identity rather than by inference.
+   */
+  async function driveUntilPass1Intermediate(
+    built: ReturnType<typeof buildPipeline> & { repo: ProjectRepository },
+    projectId: string,
+    jobId: string,
+  ) {
+    await built.worker.processNextJob();
+    const intermediates = (await built.repo.listAssets(projectId)).filter(
+      (asset) =>
+        asset.finalArtworkJobId === jobId &&
+        (asset.metadata as Record<string, unknown> | null)?.reconstructionStage ===
+          "pass1_intermediate",
+    );
+    assert.equal(
+      intermediates.length,
+      1,
+      "a REAL durable pass-1 intermediate must exist before the source moves",
+    );
+    const bytes = await built.assets.downloadAssetBytes(intermediates[0]!.id);
+    assert.ok(bytes, "and its bytes must be readable");
+    return {
+      asset: intermediates[0]!,
+      sha: createHash("sha256").update(bytes!.bytes).digest("hex"),
+      meta: intermediates[0]!.metadata as Record<string, unknown>,
+    };
+  }
+
+  it("BLOCKER 2A: a pass-1 intermediate from the prepared source is never supplied for clean-master work", async () => {
+    const repo = await freshRepo();
+    const provider = new TwoPassRecordingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    const pass1 = await driveUntilPass1Intermediate(built, setup.projectId, requested.job.id);
+
+    // The intermediate really does belong to the PREPARED source.
+    assert.equal(pass1.meta.sourceAssetId, setup.preparedAssetId);
+    assert.equal(provider.calls.length, 1, "pass 1 ran once");
+    const pass1RequestId = provider.calls[0]!.submittedRequestId;
+    assert.ok(pass1RequestId);
+
+    // Authority moves to a clean master, and the job is revived.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "blocker2a-candidate",
+      undefined,
+      SMALL_CANDIDATE_CANVAS,
+    );
+    provider.interruptAfterPass1 = false;
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+
+    // THE ASSERTION THAT MATTERS: no call after the source moved was ever
+    // handed the prepared source's pass-1 bytes.
+    const afterMove = provider.calls.slice(1);
+    assert.ok(afterMove.length > 0, "the worker really did run again");
+    for (const call of afterMove) {
+      assert.notEqual(
+        call.intermediateSha,
+        pass1.sha,
+        "the prepared source's pass-1 intermediate must never reach the provider as clean-master work",
+      );
+      assert.notEqual(
+        call.resumedRequestId,
+        pass1RequestId,
+        "nor may its provider request be resumed as clean-master work",
+      );
+    }
+
+    // And the plate's lineage is internally consistent: current source id,
+    // current source SHA, current authority.
+    const plates = (await repo.listAssets(setup.projectId))
+      .filter(
+        (asset) =>
+          asset.finalArtworkJobId === again.job.id &&
+          asset.productionRole === "production_png" &&
+          (asset.metadata as Record<string, unknown> | null)?.reconstructionStage === undefined,
+      )
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    const newest = plates[plates.length - 1]!;
+    const lineage = recordedLineage(newest);
+    assert.equal(lineage.preparedAssetId, derivedAssetId);
+    assert.equal(lineage.sourceAuthority, "production_qualified_clean_master");
+    const masterBytes = await built.assets.downloadAssetBytes(derivedAssetId);
+    assert.equal(
+      lineage.sourceBytesSha256,
+      createHash("sha256").update(masterBytes!.bytes).digest("hex"),
+      "the recorded SHA must be the CURRENT source's bytes, not the old one's",
+    );
+  });
+
+  it("BLOCKER 2B: an in-flight provider request is not resumed as clean-master work", async () => {
+    const repo = await freshRepo();
+    const provider = new TwoPassRecordingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    // A request that is submitted and then interrupted BEFORE any durable
+    // artifact exists — the genuinely in-flight state. (Driving to a pass-1
+    // intermediate instead would not exercise this at all:
+    // `persistIntermediateReconstruction` clears the provider slot, so
+    // there would be no outstanding request left to wrongly resume.)
+    provider.interruptAfterSubmit = true;
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await built.worker.processNextJob();
+
+    assert.equal(provider.calls.length, 1, "a paid request really was submitted");
+    const inFlightRequestId = provider.calls[0]!.submittedRequestId;
+    assert.ok(inFlightRequestId);
+    const noArtifacts = (await repo.listAssets(setup.projectId)).filter(
+      (asset) =>
+        asset.finalArtworkJobId === requested.job.id &&
+        (asset.metadata as Record<string, unknown> | null)?.reconstructionStage !== undefined,
+    );
+    assert.equal(
+      noArtifacts.length,
+      0,
+      "and nothing durable exists to prove whose source it is — the window the job-row binding covers",
+    );
+
+    // The job genuinely holds an outstanding provider request, bound to the
+    // PREPARED source — that binding is the repair under test.
+    const midFlight = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(
+      midFlight!.providerRequestId,
+      inFlightRequestId,
+      "the request really is still outstanding on the job",
+    );
+    assert.equal(
+      midFlight!.providerSourceAssetId,
+      setup.preparedAssetId,
+      "the outstanding request records the source it was submitted for",
+    );
+    assert.ok(midFlight!.providerSourceSha256, "and the exact bytes it was submitted for");
+    const preparedBytes = await built.assets.downloadAssetBytes(setup.preparedAssetId);
+    assert.equal(
+      midFlight!.providerSourceSha256,
+      createHash("sha256").update(preparedBytes!.bytes).digest("hex"),
+    );
+
+    // Authority transitions, then the job revives.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "blocker2b-candidate",
+      undefined,
+      SMALL_CANDIDATE_CANVAS,
+    );
+    provider.interruptAfterSubmit = false;
+    provider.interruptAfterPass1 = false;
+    const callsBefore = provider.calls.length;
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+
+    // The old request was retired, not resumed: every post-move call is a
+    // FRESH submission for the current source.
+    for (const call of provider.calls.slice(callsBefore)) {
+      assert.equal(
+        call.resumedRequestId,
+        null,
+        "a request submitted for the prepared source must never be resumed as clean-master work",
+      );
+    }
+    const finalJob = await repo.getFinalArtworkJob(again.job.id);
+    assert.notEqual(
+      finalJob!.providerSourceAssetId,
+      setup.preparedAssetId,
+      "the job's binding must have moved to the current source",
+    );
+    const newest = (await repo.listAssets(setup.projectId))
+      .filter(
+        (asset) =>
+          asset.finalArtworkJobId === again.job.id &&
+          asset.productionRole === "production_png" &&
+          (asset.metadata as Record<string, unknown> | null)?.reconstructionStage === undefined,
+      )
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+      .at(-1)!;
+    assert.equal(recordedLineage(newest).preparedAssetId, derivedAssetId);
+  });
+
+  it("BLOCKER 2C: master A's reconstruction state is not reused for master B", async () => {
+    const repo = await freshRepo();
+    const provider = new TwoPassRecordingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    // Master A becomes current, and a two-pass job gets as far as a durable
+    // pass-1 intermediate built from A.
+    const lifecycleA = await beginRecoveryLifecycle(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+    );
+    const masterA = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "master-a-candidate",
+      lifecycleA,
+      SMALL_CANDIDATE_CANVAS,
+    );
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    const pass1 = await driveUntilPass1Intermediate(built, setup.projectId, requested.job.id);
+    assert.equal(
+      pass1.meta.sourceAssetId,
+      masterA.derivedAssetId,
+      "pass 1 really was built from master A",
+    );
+    const masterARequestId = provider.calls[0]!.submittedRequestId;
+
+    // Master B supersedes A: a corrected fidelity contract, a new
+    // reconstruction, a new confirmed qualification.
+    const lifecycleB = await beginRecoveryLifecycle(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      ["CORRECTED WORDING"], // a different fidelity authority, so B truly supersedes A
+    );
+    const masterB = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "master-b-candidate",
+      lifecycleB,
+      SMALL_CANDIDATE_CANVAS,
+    );
+    assert.notEqual(masterB.derivedAssetId, masterA.derivedAssetId, "B really supersedes A");
+
+    provider.interruptAfterPass1 = false;
+    const callsBefore = provider.calls.length;
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+
+    for (const call of provider.calls.slice(callsBefore)) {
+      assert.notEqual(
+        call.intermediateSha,
+        pass1.sha,
+        "master A's pass-1 bytes must never be continued from as master B work",
+      );
+      assert.notEqual(
+        call.resumedRequestId,
+        masterARequestId,
+        "nor may master A's provider request be resumed as master B work",
+      );
+    }
+
+    const newest = (await repo.listAssets(setup.projectId))
+      .filter(
+        (asset) =>
+          asset.finalArtworkJobId === again.job.id &&
+          asset.productionRole === "production_png" &&
+          (asset.metadata as Record<string, unknown> | null)?.reconstructionStage === undefined,
+      )
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+      .at(-1)!;
+    const lineage = recordedLineage(newest);
+    assert.equal(lineage.preparedAssetId, masterB.derivedAssetId);
+    assert.equal(lineage.sourceAuthority, "production_qualified_clean_master");
+    const bBytes = await built.assets.downloadAssetBytes(masterB.derivedAssetId);
+    assert.equal(
+      lineage.sourceBytesSha256,
+      createHash("sha256").update(bBytes!.bytes).digest("hex"),
+    );
+  });
+
+  // =========================================================================
+  // ATTEMPT BUDGET — authority revival must not strand a job identity
+  // =========================================================================
+
+  it("ATTEMPTS: repeated CASE B authority blocks do not permanently strand a job", async () => {
+    const repo = await freshRepo();
+    const built = { ...buildPipeline(repo), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets);
+
+    // One real recovery lifecycle, then FOUR genuine authority races on the
+    // SAME unique job identity — one more than MAX_FINAL_ARTWORK_ATTEMPTS
+    // (3). Each round is real: the customer requests while production is
+    // permitted, authority lapses before the worker claims, and the worker
+    // cancels without executing a single transform. Nothing hand-edits
+    // `attempts`, and no job is hand-queued.
+    //
+    // Authority is toggled by proposing a fresh fidelity contract (the
+    // project's current contract is then `proposed`, not `confirmed`, so
+    // `getCurrentProductionQualifiedMaster` resolves to nothing) and then
+    // confirming it with the SAME facts — which recomputes the SAME
+    // `contractKey`, so the already-approved reconstruction and its
+    // confirmed qualification become current again. That is exactly how a
+    // customer re-confirming their artwork facts behaves, and it needs no
+    // second reconstruction job (the active-binding unique index would
+    // refuse one anyway).
+    await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "attempts-candidate",
+    );
+
+    let jobId = "";
+    for (let round = 0; round < 4; round += 1) {
+      const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(
+        setup.projectId,
+      );
+      jobId = requested.job.id;
+      assert.equal(requested.job.status, "queued");
+
+      // Authority lapses in the request→worker gap.
+      const reproposed = await built.fidelity.proposeContract(setup.projectId, {
+        sourceAssetId: setup.originalAssetId,
+        sourceSha256: SOURCE_SHA,
+      });
+      assert.equal(
+        await built.qualification.getCurrentProductionQualifiedMaster(setup.projectId),
+        null,
+        "authority really has lapsed",
+      );
+
+      await drainJob(built.worker, repo, jobId);
+      const blocked = await repo.getFinalArtworkJob(jobId);
+      assert.equal(blocked!.status, "cancelled", `round ${round} blocked on authority`);
+
+      // ...and is restored, so the next round can legitimately request.
+      await built.fidelity.confirmContract(setup.projectId, reproposed.id, {
+        currentSourceSha256: SOURCE_SHA,
+        confirmedWording: [],
+        confirmedMarks: [],
+        confirmedBy: "customer",
+      });
+      assert.ok(
+        await built.qualification.getCurrentProductionQualifiedMaster(setup.projectId),
+        "authority really is current again",
+      );
+    }
+
+    const beforeFinal = await repo.getFinalArtworkJob(jobId);
+    assert.ok(
+      beforeFinal!.attempts <= 1,
+      `authority cancels must not accumulate attempts (saw ${beforeFinal!.attempts})`,
+    );
+
+    // The job identity must still be executable against current authority.
+    const finalRequest = await built.finalArtwork.requestPreparedUploadFinalArtwork(
+      setup.projectId,
+    );
+    assert.equal(finalRequest.job.id, jobId, "same unique identity throughout");
+    await drainJob(built.worker, repo, finalRequest.job.id);
+
+    const job = await repo.getFinalArtworkJob(finalRequest.job.id);
+    assert.doesNotMatch(
+      job!.lastError ?? "",
+      /Exceeded maximum finalization attempts/,
+      "authority blocks must not exhaust the execution budget",
+    );
+    const plate = await productionAssetFor(repo, setup.projectId, finalRequest.job.id);
+    assert.ok(plate, "the job still executes after repeated authority blocks");
+    assert.equal(
+      recordedLineage(plate!).sourceAuthority,
+      "production_qualified_clean_master",
+    );
+  });
+
+  it("ATTEMPTS: same-source repeated FAILURE stays bounded, and recovery budget is untouched", async () => {
+    const repo = await freshRepo();
+    class AlwaysFailingProvider implements FinalArtworkProvider {
+      readonly providerKey = "dtf_r1_always_failing";
+      calls = 0;
+      async produce(): Promise<FinalArtworkProviderOutput> {
+        this.calls += 1;
+        throw new Error("simulated reconstruction outage");
+      }
+    }
+    const provider = new AlwaysFailingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    // Undersized, so the failing RECONSTRUCTION provider is the one reached.
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    // Re-request after each failure: an ordinary retry of the same failing
+    // work against an UNCHANGED source. This must NOT rebase the budget, so
+    // the ceiling still arrives.
+    let exhausted = false;
+    for (let round = 0; round < 8 && !exhausted; round += 1) {
+      await drainJob(built.worker, repo, requested.job.id);
+      const job = await repo.getFinalArtworkJob(requested.job.id);
+      exhausted = /Exceeded maximum finalization attempts/.test(job!.lastError ?? "");
+      if (exhausted) break;
+      await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    }
+
+    const job = await repo.getFinalArtworkJob(requested.job.id);
+    assert.equal(job!.status, "failed");
+    assert.match(
+      job!.lastError ?? "",
+      /Exceeded maximum finalization attempts/,
+      "same-source failure must still exhaust its bounded budget",
+    );
+    assert.ok(
+      provider.calls < 12,
+      `no infinite retry loop (provider was called ${provider.calls} times)`,
+    );
+    assert.equal(
+      job!.providerRecoveryAttempts,
+      0,
+      "providerRecoveryAttempts semantics are unchanged — never rebased by this repair",
+    );
   });
 
   // =========================================================================

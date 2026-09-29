@@ -926,6 +926,15 @@ export function createFinalArtworkWorkerCapability(
      * itself.
      */
     callSite: "apparelSelfHeal" | "signSelfHeal" | "persist" | "postProviderResumePrecheck",
+    /**
+     * CURSOR BLOCKER 2: the production identity this claim is actually
+     * working on. When supplied, a pass-1 intermediate is only returned if
+     * it PROVABLY belongs to that identity — see
+     * `intermediateReconstructionSourceMatches`. `null` (Signs, and the
+     * `persist` call site, which is asking "did I already store THIS
+     * result?") preserves the pre-repair behavior exactly.
+     */
+    currentIdentity: CurrentProductionIdentity | null = null,
   ): Promise<{ asset: AssetRecord; providerRequestId: string } | null> {
     const existingAssets = await withOperationTiming(
       `resolveExistingIntermediateReconstruction.${callSite}.listAssetsForFinalArtworkJob`,
@@ -935,7 +944,8 @@ export function createFinalArtworkWorkerCapability(
       (asset) =>
         asset.finalArtworkJobId === job.id &&
         asset.productionRole === "production_png" &&
-        isReconstructionIntermediateAsset(asset),
+        isReconstructionIntermediateAsset(asset) &&
+        intermediateReconstructionSourceMatches(asset, currentIdentity),
     );
     if (!candidate) return null;
     const meta = candidate.metadata as Record<string, unknown> | null | undefined;
@@ -946,6 +956,81 @@ export function createFinalArtworkWorkerCapability(
     // (never as license to resubmit pass 1 blindly; see the caller).
     if (!providerRequestId) return null;
     return { asset: candidate, providerRequestId };
+  }
+
+  /**
+   * CURSOR BLOCKER 2 — does the job's outstanding provider request belong
+   * to the source this claim is working on?
+   *
+   * `null` binding means "no claim either way" and resumes exactly as
+   * before: a row written before the binding columns existed, whose
+   * request may well be a real, already-paid one still in flight. Treating
+   * those as mismatches would abandon and re-bill them. Every submission
+   * from now on writes the binding, so the tolerance closes itself as
+   * those jobs drain.
+   *
+   * The SHA is compared as well as the asset id because an asset id alone
+   * does not pin bytes — the same comparison
+   * `providerResultIntermediateMatchesIdentity` already makes, kept
+   * identical on purpose.
+   */
+  function providerRequestBelongsToCurrentSource(
+    jobRow: FinalArtworkJob,
+    currentIdentity: CurrentProductionIdentity,
+  ): boolean {
+    if (jobRow.providerSourceAssetId === null) return true; // legacy — see above
+    if (jobRow.providerSourceAssetId !== currentIdentity.sourceAssetId) return false;
+    const currentSha =
+      typeof currentIdentity.sourceBytesSha256 === "string"
+        ? currentIdentity.sourceBytesSha256
+        : null;
+    return jobRow.providerSourceSha256 === currentSha;
+  }
+
+  /**
+   * CURSOR BLOCKER 2 — a pass-1 intermediate must prove it descends from
+   * the source this claim is working on.
+   *
+   * THE DEFECT THIS CLOSES. A pass-1 intermediate is handed straight back
+   * to the provider as `existingIntermediateReconstruction`, i.e. as the
+   * PIXELS pass 2 continues from. It was matched on job id and stage marker
+   * alone, so once DTF-R1 let a job's effective source move (prepared →
+   * clean master, or master A → master B), a revived job would faithfully
+   * resolve the NEW source, then hand the provider the OLD source's pass-1
+   * bytes — and record the new source's asset id, SHA and `sourceAuthority`
+   * on the result. Pixels from A, provenance claiming B. Print Ready being
+   * withheld afterwards does not make that lineage true.
+   *
+   * The fix is deliberately the SAME identity concept
+   * `providerResultIntermediateMatchesIdentity` already uses for the
+   * provider-result intermediate — source asset id plus source bytes
+   * SHA-256 — rather than a parallel scheme, so the two reconstruction-stage
+   * artifact classes can never disagree about what "belongs to this source"
+   * means. Provider key is included for the same reason it is there: a
+   * result produced by a provider that is no longer configured is not safe
+   * to continue from.
+   *
+   * LEGACY TOLERANCE, and why it is safe here: an intermediate written
+   * before this repair records no source identity. It is treated as
+   * MATCHING, exactly preserving today's behavior for any pass-1 artifact
+   * already on disk — refusing those instead would abandon a real, already
+   * paid-for pass 1 and resubmit it. That tolerance is bounded and
+   * self-closing: every intermediate written from now on carries the
+   * identity, so the window is only as wide as the jobs in flight at
+   * deploy.
+   */
+  function intermediateReconstructionSourceMatches(
+    asset: AssetRecord,
+    currentIdentity: CurrentProductionIdentity | null,
+  ): boolean {
+    if (!currentIdentity) return true;
+    const meta = asset.metadata as Record<string, unknown> | null | undefined;
+    if (typeof meta?.sourceAssetId !== "string") return true; // legacy — see above
+    return (
+      meta.sourceAssetId === currentIdentity.sourceAssetId &&
+      (meta.sourceBytesSha256 ?? null) === currentIdentity.sourceBytesSha256 &&
+      meta.providerKey === currentIdentity.providerKey
+    );
   }
 
   /**
@@ -964,6 +1049,14 @@ export function createFinalArtworkWorkerCapability(
     activeProvider: FinalArtworkProvider,
     storageGroupingId: string,
     result: FinalArtworkProviderIntermediateReconstruction,
+    /**
+     * CURSOR BLOCKER 2: the source these pass-1 pixels actually descend
+     * from, recorded so a later claim can PROVE whether they still answer
+     * the source it is working on. `null` for the Signs call sites, whose
+     * source cannot move underneath a job the way a DTF-R1 effective
+     * source can.
+     */
+    sourceIdentity: { sourceAssetId: string; sourceBytesSha256: unknown } | null = null,
   ): Promise<void> {
     const existing = await resolveExistingIntermediateReconstruction(job, "persist");
     if (!existing || existing.providerRequestId !== result.providerRequestId) {
@@ -995,6 +1088,16 @@ export function createFinalArtworkWorkerCapability(
             reconstructionStage: RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER,
             providerKey: activeProvider.providerKey,
             providerRequestId: result.providerRequestId,
+            // CURSOR BLOCKER 2: the same two identity fields the
+            // provider-result intermediate already records, so both
+            // reconstruction-stage artifact classes answer "does this
+            // belong to the current source?" the same way.
+            ...(sourceIdentity
+              ? {
+                  sourceAssetId: sourceIdentity.sourceAssetId,
+                  sourceBytesSha256: sourceIdentity.sourceBytesSha256,
+                }
+              : {}),
           },
         }),
       );
@@ -1692,7 +1795,11 @@ export function createFinalArtworkWorkerCapability(
     // is charged. Neither this call nor the self-heal it may perform reads
     // `source`, so nothing here changes what a fresh-execution-exhausted
     // claim costs: it still fails before any asset bytes are read.
-    const existingIntermediate = await resolveExistingIntermediateReconstruction(job, "apparelSelfHeal");
+    const existingIntermediate = await resolveExistingIntermediateReconstruction(
+      job,
+      "apparelSelfHeal",
+      currentProductionIdentity,
+    );
     if (
       existingIntermediate &&
       effectiveJob.providerRequestId !== null &&
@@ -1729,6 +1836,39 @@ export function createFinalArtworkWorkerCapability(
     // (`effectiveJob.providerKey !== activeProvider.providerKey`) is
     // therefore ALSO correctly classified as "fresh": resuming against a
     // provider no longer configured would not be a safe recovery.
+    //
+    // CURSOR BLOCKER 2 — AND the request must belong to the source THIS
+    // claim is working on. `providerRequestId` proves which paid request
+    // exists; it says nothing about which artwork it was submitted for,
+    // and since DTF-R1 a prepared-upload job's effective source can move
+    // between claims. Resuming across that move returns the OLD source's
+    // pixels while the run records the NEW source's lineage.
+    //
+    // Retired rather than merely ignored: leaving the slot populated would
+    // let a later claim (or the recovery-budget accounting) still treat it
+    // as this job's in-flight request. Cleared exactly like the
+    // provider-result-intermediate staleness path immediately above,
+    // including `providerRecoveryAttempts: 0` — a cleared identity has no
+    // recovery history of its own.
+    if (
+      effectiveJob.providerRequestId !== null &&
+      !providerRequestBelongsToCurrentSource(effectiveJob, currentProductionIdentity)
+    ) {
+      await repo.updateFinalArtworkJob(job.id, {
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      });
+      effectiveJob = {
+        ...effectiveJob,
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      };
+    }
+
     const existingProviderRequest: FinalArtworkProviderResumeContext | null =
       effectiveJob.providerKey === activeProvider.providerKey && effectiveJob.providerRequestId
         ? {
@@ -1879,6 +2019,17 @@ export function createFinalArtworkWorkerCapability(
             providerKey: activeProvider.providerKey,
             providerRequestId,
             providerStatus: "submitted",
+            // CURSOR BLOCKER 2: the source this paid request is FOR,
+            // written in the same durable write as the request id itself
+            // so the two can never disagree. A later claim that resolves a
+            // different effective source can then prove this request does
+            // not belong to it, instead of resuming it and returning the
+            // old source's pixels under the new source's provenance.
+            providerSourceAssetId: currentProductionIdentity.sourceAssetId,
+            providerSourceSha256:
+              typeof currentProductionIdentity.sourceBytesSha256 === "string"
+                ? currentProductionIdentity.sourceBytesSha256
+                : null,
             // "Separate Provider Recovery Attempt Budget": a genuinely
             // NEW paid request has no recovery history against it yet.
             // Belt-and-suspenders — every path that sets a NEW
@@ -1892,7 +2043,16 @@ export function createFinalArtworkWorkerCapability(
         },
         existingIntermediateReconstruction,
         onIntermediateReconstructionProduced: (result) =>
-          persistIntermediateReconstruction(job, activeProvider, params.storageGroupingId, result),
+          persistIntermediateReconstruction(
+            job,
+            activeProvider,
+            params.storageGroupingId,
+            result,
+            {
+              sourceAssetId: currentProductionIdentity.sourceAssetId,
+              sourceBytesSha256: currentProductionIdentity.sourceBytesSha256,
+            },
+          ),
       };
       // Bounded FinalArtwork Production-Execution Repair: prefer the
       // provider's bounded entry point when it has one (Topaz does) — one

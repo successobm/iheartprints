@@ -11872,6 +11872,28 @@ unaffected.
   resolved again from scratch immediately before execution. `blocked` →
   `cancelJob` plus a `finalization_required` transition.
 
+**A completed job whose source moved is revived — whatever its validation
+said.** `resolvePreparedUploadJob` treats source supersession
+(`completedJobSourceSuperseded`, judged on the NEWEST plate's own recorded
+lineage) as a revival trigger in its own right, alongside Phase 28T's
+stale-target trigger. It is deliberately NOT a modifier on the
+certification withhold: a job that completed perfectly — `ready` validation,
+project `print_ready` — and whose source then moved to a clean master is
+otherwise "already satisfied" forever, so the worker never reruns and the
+PREPARED plate stays the current deliverable while authority says PQCM.
+That is CASE C silently not happening on the most ordinary success path.
+It terminates by construction: the revived run's plate becomes the newest,
+the predicate goes false, and a further request is a no-op.
+
+Defence in depth, without a second opinion about authority:
+`resolveSatisfiedProductionDelivery` independently refuses to publish a
+plate whose source has been superseded, so `reconcileCompletedProductionState`
+cannot reconcile one back to `print_ready` behind the revival's back. Both
+read the source from the ONE resolver, passed in by the capability
+(`currentPreparedUploadSourceAssetId`) rather than re-derived. A `blocked`
+resolution yields `null` there — blocking NEW production is DTF-R1's job;
+withdrawing an already-validated historical deliverable is not (Goal 21).
+
 **Why `cancelJob` and not `completeWithoutAsset`.** Completion-without-an-asset
 is documented as an *honest, terminal, non-retryable* verdict, and
 `resolvePreparedUploadJob` believes it: a completed job with no production
@@ -11918,6 +11940,68 @@ down" is not evidence of drift any more than it is evidence of currency, and
 `produceProductionAsset`'s durable-identity guard (which already compared
 `sourceAssetId`) still judges it.
 
+### Resumable reconstruction state is source-bound
+
+Adopting a finished plate is not the only way old pixels can reach a new
+run. A job's RESUMABLE reconstruction state — a two-pass pass-1
+intermediate, and the single outstanding provider request — is handed
+straight back to the provider, as the pixels pass 2 continues from and as
+the request to poll. Both were keyed on job identity alone, which was
+sufficient while a job's source could not move. Once DTF-R1 lets it move, a
+revived job would correctly resolve the NEW source and then continue from
+the OLD one's bytes, recording the new source's asset id, SHA and
+`sourceAuthority` on the result. Pixels from A with provenance claiming B is
+false lineage, and Print Ready being withheld afterwards does not make it
+true.
+
+Three artifact classes, one identity concept (source asset id + source
+bytes SHA-256, plus provider key):
+
+| State | Where identity lives | Enforced by |
+| --- | --- | --- |
+| Provider-result intermediate | asset metadata (already did) | `providerResultIntermediateMatchesIdentity` |
+| Pass-1 intermediate | asset metadata (added here, no migration) | `intermediateReconstructionSourceMatches` |
+| Outstanding provider request | `final_artwork_jobs.provider_source_asset_id` / `provider_source_sha256` | `providerRequestBelongsToCurrentSource` |
+
+A non-matching pass-1 intermediate is simply not returned, so it never
+reaches the provider. A non-matching outstanding request is RETIRED — slot
+cleared, `providerRecoveryAttempts` zeroed, exactly like the
+provider-result-intermediate staleness path already does — so the claim
+classifies as a fresh execution for the current source rather than
+resuming, and no later claim can mistake it for this job's in-flight work.
+
+**The one migration in this phase, and why it was unavoidable.** The two
+artifact classes carry their identity in metadata, which needs no schema
+change and covers every window in which an artifact exists. It cannot cover
+the first one: between submission and the first durable download there is no
+artifact, and the only row that exists is the job. The source cannot be
+inferred after the fact, and retiring an unprovable slot instead would
+resubmit — and re-bill — on every poll of a perfectly healthy in-flight
+request. So the binding lives next to the slot it describes. Both columns
+are nullable; `null` means "no claim either way" and resumes exactly as
+before, because treating rows written before the migration as mismatches
+would abandon real, already-paid requests in flight at deploy. Every new
+submission writes the binding, so that tolerance closes itself.
+
+### Attempt budget
+
+`attempts` increments per claim and `MAX_FINAL_ARTWORK_ATTEMPTS` bounds it,
+which is right for a job that keeps failing the same work. DTF-R1 added a
+way to consume it that is not a failed attempt at anything: the worker
+claims, finds authority unresolved, and cancels without running a transform.
+Job identity is a DB-unique tuple, so the same row is reused forever and a
+few authority races could strand a job that had never once executed.
+
+`authorityRevivalAttemptReset` rebases the fresh-execution budget on an
+AUTHORITY revival only — a source-superseded revival, or a `cancelled` job
+(fenced out by a decision) — and never on a `failed` one (it ran and broke)
+or a same-source retry, so repeated failure of the same work stays bounded
+exactly as before. `providerRecoveryAttempts` is deliberately untouched: it
+belongs to one specific paid request and its own read-back failures, nothing
+here is evidence about that, and resetting it would weaken a spend
+protection. Signs (`resolveSignJob`) already drew this distinction, so this
+is the established convention rather than a new one.
+
 ### Provenance, validation and the certification boundary
 
 `UploadedPreserveEvidence.preparedAssetId` is, as it always was, *the asset
@@ -11960,8 +12044,11 @@ widens it.
 
 ### What DTF-R1 does not do
 
-No migration (dynamic resolution only — no new column, no backfill, no
-`FinalArtworkJob` schema change). No write to any recovery-lifecycle table.
+Exactly one migration, and only the one argued for above
+(`20260928120000_final_artwork_provider_source_binding.sql`): two nullable
+columns binding an outstanding provider request to its source. Additive, no
+backfill, no data rewrite, and every source-selection decision remains
+dynamic. No write to any recovery-lifecycle table.
 No mutation of `ArtworkPreparation.preparedAssetId` or any historical
 preparation record — they remain immutable historical truth, and the handoff
 is runtime current-authority selection only. No reconstruction logic
