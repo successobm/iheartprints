@@ -935,6 +935,8 @@ export function createFinalArtworkWorkerCapability(
      * result?") preserves the pre-repair behavior exactly.
      */
     currentIdentity: CurrentProductionIdentity | null = null,
+    /** CURSOR NB-1: see `produceProductionAsset`'s own `legacySourceAssetId`. */
+    legacySourceAssetId: string | null = null,
   ): Promise<{ asset: AssetRecord; providerRequestId: string } | null> {
     const existingAssets = await withOperationTiming(
       `resolveExistingIntermediateReconstruction.${callSite}.listAssetsForFinalArtworkJob`,
@@ -945,7 +947,11 @@ export function createFinalArtworkWorkerCapability(
         asset.finalArtworkJobId === job.id &&
         asset.productionRole === "production_png" &&
         isReconstructionIntermediateAsset(asset) &&
-        intermediateReconstructionSourceMatches(asset, currentIdentity),
+        intermediateReconstructionSourceMatches(
+          asset,
+          currentIdentity,
+          legacySourceAssetId,
+        ),
     );
     if (!candidate) return null;
     const meta = candidate.metadata as Record<string, unknown> | null | undefined;
@@ -977,14 +983,46 @@ export function createFinalArtworkWorkerCapability(
   function providerRequestBelongsToCurrentSource(
     jobRow: FinalArtworkJob,
     currentIdentity: CurrentProductionIdentity,
+    legacySourceAssetId: string | null,
   ): boolean {
-    if (jobRow.providerSourceAssetId === null) return true; // legacy — see above
-    if (jobRow.providerSourceAssetId !== currentIdentity.sourceAssetId) return false;
+    const boundAsset = jobRow.providerSourceAssetId;
+    const boundSha = jobRow.providerSourceSha256;
+
+    // GENUINE LEGACY: no asset id written. The two fields are written in one
+    // update, so an absent asset id means the binding never happened — a
+    // request submitted before it existed. Interpreted as belonging to the
+    // historical `preparedAssetId` (see `legacySourceAssetId`), never as
+    // belonging to whatever happens to be current now.
+    if (boundAsset === null) {
+      if (legacySourceAssetId === null) return true; // no inference available
+      return legacySourceAssetId === currentIdentity.sourceAssetId;
+    }
+
+    if (boundAsset !== currentIdentity.sourceAssetId) return false;
+
+    // THE SHA HALF, and why it is conditional on the CURRENT identity having
+    // one rather than on the binding having one.
+    //
+    // `CurrentProductionIdentity.sourceBytesSha256` is populated from the
+    // uploaded-preserve lineage, which only the prepared-upload path records.
+    // A create_new job therefore has a legitimately NULL source SHA, and the
+    // binding faithfully stores that null — it is a complete record of a
+    // source that has no hash here, not a half-written one.
+    //
+    // Treating a null bound SHA as "partial, fail closed" is exactly the bug
+    // the existing Topaz resume suite caught: every create_new job would
+    // retire its own healthy in-flight request and SUBMIT A SECOND PAID ONE.
+    // So "partial" is judged against what this path can actually know: when
+    // the current source HAS a SHA (always, for prepared_upload — the path
+    // whose source can move, and the only one this repair is about), a bound
+    // null is genuinely malformed and fails closed. When it has none, the
+    // asset id IS the complete identity.
     const currentSha =
       typeof currentIdentity.sourceBytesSha256 === "string"
         ? currentIdentity.sourceBytesSha256
         : null;
-    return jobRow.providerSourceSha256 === currentSha;
+    if (currentSha === null) return true;
+    return boundSha === currentSha;
   }
 
   /**
@@ -1022,15 +1060,32 @@ export function createFinalArtworkWorkerCapability(
   function intermediateReconstructionSourceMatches(
     asset: AssetRecord,
     currentIdentity: CurrentProductionIdentity | null,
+    legacySourceAssetId: string | null,
   ): boolean {
     if (!currentIdentity) return true;
     const meta = asset.metadata as Record<string, unknown> | null | undefined;
-    if (typeof meta?.sourceAssetId !== "string") return true; // legacy — see above
-    return (
-      meta.sourceAssetId === currentIdentity.sourceAssetId &&
-      (meta.sourceBytesSha256 ?? null) === currentIdentity.sourceBytesSha256 &&
-      meta.providerKey === currentIdentity.providerKey
-    );
+
+    // Explicit identity always wins when present, and a partial/inconsistent
+    // record still fails closed (a missing SHA compares unequal unless the
+    // current source genuinely has none).
+    if (typeof meta?.sourceAssetId === "string") {
+      return (
+        meta.sourceAssetId === currentIdentity.sourceAssetId &&
+        (meta.sourceBytesSha256 ?? null) === currentIdentity.sourceBytesSha256 &&
+        meta.providerKey === currentIdentity.providerKey
+      );
+    }
+
+    // GENUINE LEGACY: no source identity recorded. Interpreted as the
+    // historical `preparedAssetId`, never as "matches anything current".
+    if (legacySourceAssetId === null) return true; // no inference available
+    // Provider identity is still required. "Old" does not mean "belongs to
+    // preparedAssetId under any provider": a pass-1 intermediate is pass 2's
+    // INPUT, so continuing from one produced by a different engine is not a
+    // resume — and the pre-repair metadata always recorded `providerKey`,
+    // so this costs nothing for real legacy rows.
+    if (meta?.providerKey !== currentIdentity.providerKey) return false;
+    return legacySourceAssetId === currentIdentity.sourceAssetId;
   }
 
   /**
@@ -1595,6 +1650,35 @@ export function createFinalArtworkWorkerCapability(
      * pre-Phase-28T "trust the first existing asset" behavior).
      */
     targetIn: EffectiveProductionTargetIn | null;
+    /**
+     * CURSOR NB-1 — THE SOURCE THAT PRE-REPAIR (UNBOUND) STATE MUST BE
+     * INTERPRETED AS BELONGING TO.
+     *
+     * Reconstruction state written before the source-binding repair records
+     * no source identity. Reading that absence as "matches whatever is
+     * current now" is exactly backwards: a missing identity is not evidence
+     * that an artifact belongs to a clean master that did not exist when it
+     * was written.
+     *
+     * For a `prepared_upload` job the historical truth is knowable. Before
+     * DTF-R1 the prepared-upload worker resolved its source from
+     * `preparation.preparedAssetId` unconditionally (verified against the
+     * baseline commit), so any provider work it submitted was submitted
+     * against that asset. And a job whose `preparedAssetId` has moved SINCE
+     * can never reach the resume decision at all: repointing it either moves
+     * `preparedArtworkVersionId` too (the version binding cancels the job),
+     * or moves `status` off `"approved"` (the approval check cancels it), or
+     * leaves `artwork.primaryAssetId` disagreeing with it (the
+     * source-agreement check fails it). So for any job that gets this far,
+     * the preparation's CURRENT `preparedAssetId` IS the asset its legacy
+     * state was created for.
+     *
+     * `null` for every other caller (create_new, Signs), where no such
+     * inference exists — and none is needed, because DTF-R1 does not make
+     * those sources movable. There, unbound legacy state keeps its
+     * pre-repair treatment exactly.
+     */
+    legacySourceAssetId: string | null;
   }): Promise<
     | {
         status: "ready";
@@ -1799,6 +1883,7 @@ export function createFinalArtworkWorkerCapability(
       job,
       "apparelSelfHeal",
       currentProductionIdentity,
+      params.legacySourceAssetId,
     );
     if (
       existingIntermediate &&
@@ -1852,7 +1937,11 @@ export function createFinalArtworkWorkerCapability(
     // recovery history of its own.
     if (
       effectiveJob.providerRequestId !== null &&
-      !providerRequestBelongsToCurrentSource(effectiveJob, currentProductionIdentity)
+      !providerRequestBelongsToCurrentSource(
+        effectiveJob,
+        currentProductionIdentity,
+        params.legacySourceAssetId,
+      )
     ) {
       await repo.updateFinalArtworkJob(job.id, {
         providerKey: null,
@@ -4697,6 +4786,10 @@ export function createFinalArtworkWorkerCapability(
       // concern this phase — see the Phase 28T report) — `null` preserves
       // this path's exact pre-Phase-28T behavior.
       targetIn: null,
+      // CURSOR NB-1: the create_new path has no preparation and no movable
+      // source, so there is no historical asset to interpret unbound state
+      // as — it keeps its pre-repair treatment exactly.
+      legacySourceAssetId: null,
     });
     if (produced.status !== "ready") return;
     const { productionAsset, provenance, providerLatencyMs } = produced;
@@ -5284,6 +5377,12 @@ export function createFinalArtworkWorkerCapability(
       // above can tell a genuinely-current existing asset apart from a
       // stale one left over from before the confirmed envelope changed.
       targetIn: { widthIn: recheckTarget.widthIn, heightIn: recheckTarget.heightIn, targetPpi: sizing.targetPpi },
+      // CURSOR NB-1: the asset any PRE-REPAIR reconstruction state for this
+      // job must be interpreted as belonging to. Read from the preparation
+      // this job is bound to, never from the resolved effective source —
+      // the whole point is what the state was created for, not what is
+      // current now.
+      legacySourceAssetId: preparation.preparedAssetId,
     });
     if (produced.status !== "ready") return;
     const { productionAsset, provenance, providerLatencyMs } = produced;

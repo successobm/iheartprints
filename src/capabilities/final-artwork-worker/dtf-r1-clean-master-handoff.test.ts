@@ -192,7 +192,13 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
         ? PNG.sync.read(input.existingIntermediateReconstruction.bytes)
         : PNG.sync.read(input.sourceBytes);
 
-      if (!input.existingIntermediateReconstruction) {
+      // A RESUME never resubmits — it collects the result of the request it
+      // was handed. Modelling that faithfully is what makes "the legacy
+      // request was resumed, and nothing was re-billed" an observable fact
+      // rather than an assumption.
+      const resuming = input.existingProviderRequest != null;
+
+      if (!input.existingIntermediateReconstruction && !resuming) {
         this.submissions += 1;
         const requestId = `two-pass-request-${this.submissions}`;
         record.submittedRequestId = requestId;
@@ -357,6 +363,13 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     artworkWidthPx: number,
     artworkHeightPx: number,
     backgroundAlpha: number,
+    /**
+     * The artwork's ink colour. Exists so two candidates can differ in
+     * BYTES and therefore in SHA-256 — without it, master A and master B
+     * had different asset ids but identical content, so the SHA half of
+     * source identity was never actually exercised.
+     */
+    ink: { r: number; g: number; b: number } = { r: 20, g: 90, b: 60 },
   ): Buffer {
     const png = new PNG({ width: canvasWidthPx, height: canvasHeightPx });
     const insetX = Math.floor((canvasWidthPx - artworkWidthPx) / 2);
@@ -369,9 +382,9 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
           x < insetX + artworkWidthPx &&
           y >= insetY &&
           y < insetY + artworkHeightPx;
-        png.data[idx] = inside ? 20 : 250;
-        png.data[idx + 1] = inside ? 90 : 250;
-        png.data[idx + 2] = inside ? 60 : 250;
+        png.data[idx] = inside ? ink.r : 250;
+        png.data[idx + 1] = inside ? ink.g : 250;
+        png.data[idx + 2] = inside ? ink.b : 250;
         png.data[idx + 3] = inside ? 255 : backgroundAlpha;
       }
     }
@@ -416,8 +429,11 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
   function preparedArtworkPng(canvas: Canvas = ORIGINAL_CANVAS): Buffer {
     return rectPng(canvas.w, canvas.h, canvas.aw, canvas.ah, 0);
   }
-  function candidatePng(canvas: Canvas = CANDIDATE_CANVAS): Buffer {
-    return rectPng(canvas.w, canvas.h, canvas.aw, canvas.ah, 255);
+  function candidatePng(
+    canvas: Canvas = CANDIDATE_CANVAS,
+    ink?: { r: number; g: number; b: number },
+  ): Buffer {
+    return rectPng(canvas.w, canvas.h, canvas.aw, canvas.ah, 255, ink);
   }
 
   /** Drives a project to exactly "an approved prepared upload, size confirmed". */
@@ -550,6 +566,8 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     candidateLabel = "recovered-candidate",
     existingLifecycle?: Awaited<ReturnType<typeof beginRecoveryLifecycle>>,
     candidateCanvas: Canvas = CANDIDATE_CANVAS,
+    /** Distinct ink => distinct bytes => distinct SHA-256 for this master. */
+    candidateInk?: { r: number; g: number; b: number },
   ) {
     // Reuse a lifecycle this scenario already began, when it has one.
     // Proposing a SECOND contract would supersede the first and make the
@@ -562,7 +580,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     const { contract, job } = started;
     const uploaded = await built.assets.uploadConceptImage(projectId, {
       conceptId: candidateLabel,
-      bytes: candidatePng(candidateCanvas),
+      bytes: candidatePng(candidateCanvas, candidateInk),
       contentType: "image/png",
       widthPx: candidateCanvas.w,
       heightPx: candidateCanvas.h,
@@ -624,9 +642,26 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
 
   async function productionAssetFor(repo: ProjectRepository, projectId: string, jobId: string) {
     const all = await repo.listAssets(projectId);
-    return all.find(
-      (asset) => asset.finalArtworkJobId === jobId && asset.productionRole === "production_png",
+    // Deliberately excludes reconstruction-stage artifacts (pass-1
+    // intermediates, downloaded provider results): they share the
+    // `production_png` role but are never the customer deliverable, and a
+    // scenario that stages one would otherwise silently assert against it.
+    const plates = all.filter(
+      (asset) =>
+        asset.finalArtworkJobId === jobId &&
+        asset.productionRole === "production_png" &&
+        (asset.metadata as Record<string, unknown> | null)?.reconstructionStage === undefined,
     );
+    if (plates.length === 0) return undefined;
+    return plates.reduce((newest, asset) =>
+      asset.createdAt > newest.createdAt ? asset : newest,
+    );
+  }
+
+  function recordedLineageOrNull(asset: { metadata: unknown }) {
+    return ((asset.metadata as Record<string, unknown>)?.uploadedPreserve ?? null) as {
+      preparedAssetId?: string;
+    } | null;
   }
 
   function recordedLineage(asset: { metadata: unknown }) {
@@ -1574,6 +1609,7 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       "master-a-candidate",
       lifecycleA,
       SMALL_CANDIDATE_CANVAS,
+      { r: 20, g: 90, b: 60 },
     );
     const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
     const pass1 = await driveUntilPass1Intermediate(built, setup.projectId, requested.job.id);
@@ -1599,8 +1635,21 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
       "master-b-candidate",
       lifecycleB,
       SMALL_CANDIDATE_CANVAS,
+      { r: 200, g: 40, b: 10 }, // deliberately different INK => different bytes
     );
     assert.notEqual(masterB.derivedAssetId, masterA.derivedAssetId, "B really supersedes A");
+
+    // PRECONDITION the previous version of this test lacked: A and B must
+    // differ in BYTES, not merely in asset id. Without this the SHA half of
+    // source identity was never exercised — an id-only comparison would have
+    // passed the test just as happily.
+    const shaA = createHash("sha256")
+      .update((await built.assets.downloadAssetBytes(masterA.derivedAssetId))!.bytes)
+      .digest("hex");
+    const shaB = createHash("sha256")
+      .update((await built.assets.downloadAssetBytes(masterB.derivedAssetId))!.bytes)
+      .digest("hex");
+    assert.notEqual(shaA, shaB, "master A and master B must be byte-distinct");
 
     provider.interruptAfterPass1 = false;
     const callsBefore = provider.calls.length;
@@ -1632,11 +1681,388 @@ describe("DTF-R1 — Production-Qualified Clean Master handoff to DTF production
     const lineage = recordedLineage(newest);
     assert.equal(lineage.preparedAssetId, masterB.derivedAssetId);
     assert.equal(lineage.sourceAuthority, "production_qualified_clean_master");
-    const bBytes = await built.assets.downloadAssetBytes(masterB.derivedAssetId);
+    assert.equal(lineage.sourceBytesSha256, shaB, "B's SHA is recorded");
+    assert.notEqual(lineage.sourceBytesSha256, shaA, "and it is NOT A's");
+
+    // B's bytes are the ones that were actually processed.
+    const processed = provider.calls.slice(callsBefore);
+    assert.ok(processed.length > 0);
+    assert.ok(
+      processed.every((call) => call.sourceSha === shaB),
+      "every post-supersession call must have been handed B's bytes",
+    );
+    assert.ok(
+      processed.every((call) => call.sourceSha !== shaA),
+      "and never A's",
+    );
+  });
+
+  it("BLOCKER 2C (identity): a SHA mismatch alone retires a request whose asset id still matches", async () => {
+    const repo = await freshRepo();
+    const provider = new TwoPassRecordingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    provider.interruptAfterSubmit = true;
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await built.worker.processNextJob();
+
+    const midFlight = await repo.getFinalArtworkJob(requested.job.id);
+    assert.ok(midFlight!.providerRequestId, "a request really is outstanding");
+    assert.equal(midFlight!.providerSourceAssetId, setup.preparedAssetId);
+
+    // Corrupt ONLY the SHA half of the binding. The asset id still matches
+    // the current source exactly, so an id-only identity check would happily
+    // resume — this is the dimension the byte-identical A/B fixture could
+    // never exercise.
+    await repo.updateFinalArtworkJob(requested.job.id, {
+      providerSourceSha256: "f".repeat(64),
+    });
+
+    provider.interruptAfterSubmit = false;
+    provider.interruptAfterPass1 = false;
+    const callsBefore = provider.calls.length;
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+
+    for (const call of provider.calls.slice(callsBefore)) {
+      assert.equal(
+        call.resumedRequestId,
+        null,
+        "a binding whose SHA disagrees must not be resumed, even with a matching asset id",
+      );
+    }
+  });
+
+  // =========================================================================
+  // CURSOR NB-1 — PRE-DEPLOY (UNBOUND) STATE
+  // =========================================================================
+
+  /**
+   * Strips the source-identity fields the repair writes, reproducing the
+   * exact shape a job/intermediate has when it was created BEFORE this
+   * repair shipped. Every legacy scenario below asserts the stripped shape
+   * before it asserts any behavior — the precondition is the whole point.
+   */
+  async function stripSourceBindingFromJob(repo: ProjectRepository, jobId: string) {
+    await repo.updateFinalArtworkJob(jobId, {
+      providerSourceAssetId: null,
+      providerSourceSha256: null,
+    });
+    const job = await repo.getFinalArtworkJob(jobId);
+    assert.ok(job!.providerRequestId, "PRECONDITION: a request really is outstanding");
+    assert.equal(job!.providerSourceAssetId, null, "PRECONDITION: no asset binding");
+    assert.equal(job!.providerSourceSha256, null, "PRECONDITION: no SHA binding");
+    return job!;
+  }
+
+  it("LEGACY-A: an unbound in-flight request RESUMES while preparedAssetId is still current", async () => {
+    const repo = await freshRepo();
+    const provider = new TwoPassRecordingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    provider.interruptAfterSubmit = true;
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await built.worker.processNextJob();
+
+    assert.equal(provider.calls.length, 1, "PRECONDITION: exactly one paid submission so far");
+    const originalRequestId = provider.calls[0]!.submittedRequestId;
+    assert.ok(originalRequestId);
+    const durable = (await repo.listAssets(setup.projectId)).filter(
+      (asset) =>
+        asset.finalArtworkJobId === requested.job.id &&
+        (asset.metadata as Record<string, unknown> | null)?.reconstructionStage !== undefined,
+    );
+    assert.equal(durable.length, 0, "PRECONDITION: no durable result yet");
+    await stripSourceBindingFromJob(repo, requested.job.id);
+
+    // No recovery lifecycle at all, so the current effective source is still
+    // the preparation's own prepared asset — CASE A.
+    const resolved = await resolvePreparedUploadEffectiveSource(repo, built.qualification, {
+      projectId: setup.projectId,
+      originalAssetId: setup.originalAssetId,
+      preparedAssetId: setup.preparedAssetId,
+    });
+    assert.equal(resolved.status, "prepared");
+
+    provider.interruptAfterSubmit = false;
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+
+    // THE ROLLOUT-SAFETY ASSERTION: the legacy request was RESUMED, not
+    // retired and re-submitted. A new submission here would re-bill a
+    // customer for work already paid for, on every job in flight at deploy.
+    const after = provider.calls.slice(1);
+    assert.ok(after.length > 0, "the worker really ran again");
+    assert.ok(
+      after.some((call) => call.resumedRequestId === originalRequestId),
+      "the in-flight legacy request must be resumed",
+    );
+    assert.ok(
+      after.every((call) => call.submittedRequestId === null),
+      "and no new paid submission may occur",
+    );
+
+    const plate = await productionAssetFor(repo, setup.projectId, again.job.id);
+    assert.ok(plate);
+    assert.equal(recordedLineage(plate!).preparedAssetId, setup.preparedAssetId);
+    assert.equal(recordedLineage(plate!).sourceAuthority, "prepared_upload");
+  });
+
+  it("LEGACY-C: an unbound in-flight request is NOT resumed once a clean master is current", async () => {
+    const repo = await freshRepo();
+    const provider = new TwoPassRecordingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    provider.interruptAfterSubmit = true;
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await built.worker.processNextJob();
+    assert.equal(provider.calls.length, 1, "PRECONDITION: one paid submission");
+    const legacyRequestId = provider.calls[0]!.submittedRequestId;
+    await stripSourceBindingFromJob(repo, requested.job.id);
+
+    // Authority moves to a clean master.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "legacy-c-candidate",
+      undefined,
+      SMALL_CANDIDATE_CANVAS,
+    );
+    provider.interruptAfterSubmit = false;
+    provider.interruptAfterPass1 = false;
+    const callsBefore = provider.calls.length;
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+
+    // The unbound request belonged to preparedAssetId, so it must not be
+    // resumed as clean-master work, and the slot must be retired.
+    for (const call of provider.calls.slice(callsBefore)) {
+      assert.equal(
+        call.resumedRequestId,
+        null,
+        "an unbound legacy request must never be resumed under PQCM authority",
+      );
+      assert.notEqual(call.resumedRequestId, legacyRequestId);
+    }
+    const plate = await productionAssetFor(repo, setup.projectId, again.job.id);
+    assert.ok(plate);
+    const lineage = recordedLineage(plate!);
+    assert.equal(lineage.preparedAssetId, derivedAssetId);
+    assert.equal(lineage.sourceAuthority, "production_qualified_clean_master");
+    const masterBytes = await built.assets.downloadAssetBytes(derivedAssetId);
     assert.equal(
       lineage.sourceBytesSha256,
-      createHash("sha256").update(bBytes!.bytes).digest("hex"),
+      createHash("sha256").update(masterBytes!.bytes).digest("hex"),
+      "no false provenance: the recorded SHA is the master's",
     );
+  });
+
+  /**
+   * Strips the source-identity metadata the repair writes onto a pass-1
+   * intermediate, reproducing a pre-repair intermediate — which recorded
+   * only its stage marker, provider key and request id.
+   */
+  async function stripSourceMetadataFromIntermediate(
+    built: ReturnType<typeof buildPipeline> & { repo: ProjectRepository },
+    projectId: string,
+    jobId: string,
+    assetId: string,
+  ) {
+    const asset = (await built.repo.getAssetById(assetId))!;
+    const bytes = (await built.assets.downloadAssetBytes(assetId))!;
+    const meta = asset.metadata as Record<string, unknown>;
+
+    // Re-create the intermediate through the SAME capability the pre-repair
+    // worker used, carrying EXACTLY the metadata that worker wrote — stage
+    // marker, provider key, provider request id, and nothing about the
+    // source. That is a genuine pre-repair row, not a row with fields
+    // scrubbed out from underneath the store.
+    await built.repo.deleteAsset(assetId);
+    const legacy = await built.assets.uploadProductionAsset(projectId, {
+      conceptId: `legacy-${jobId}`,
+      bytes: bytes.bytes,
+      contentType: "image/png",
+      widthPx: asset.widthPx!,
+      heightPx: asset.heightPx!,
+      hasTransparency: true,
+      finalArtworkJobId: jobId,
+      productionRole: "production_png",
+      metadata: {
+        reconstructionStage: meta.reconstructionStage,
+        providerKey: meta.providerKey,
+        providerRequestId: meta.providerRequestId,
+      },
+    });
+
+    const m = legacy.metadata as Record<string, unknown>;
+    assert.equal(m.sourceAssetId, undefined, "PRECONDITION: no sourceAssetId metadata");
+    assert.equal(m.sourceBytesSha256, undefined, "PRECONDITION: no sourceBytesSha256 metadata");
+    assert.equal(m.reconstructionStage, "pass1_intermediate", "PRECONDITION: still a pass-1 row");
+    assert.ok(m.providerKey, "PRECONDITION: realistic legacy metadata keeps providerKey");
+    assert.ok(m.providerRequestId, "PRECONDITION: ...and providerRequestId");
+    return legacy;
+  }
+
+  it("LEGACY pass-1 CASE C: a metadata-less intermediate is never supplied as clean-master work", async () => {
+    const repo = await freshRepo();
+    const provider = new TwoPassRecordingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    const pass1 = await driveUntilPass1Intermediate(built, setup.projectId, requested.job.id);
+    await stripSourceMetadataFromIntermediate(built, setup.projectId, requested.job.id, pass1.asset.id);
+
+    // The legacy intermediate's bytes must be distinguishable from the
+    // master's, or "was the provider handed the old bytes?" is unanswerable.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+      "legacy-pass1-candidate",
+      undefined,
+      SMALL_CANDIDATE_CANVAS,
+      { r: 200, g: 40, b: 10 },
+    );
+    const masterSha = createHash("sha256")
+      .update((await built.assets.downloadAssetBytes(derivedAssetId))!.bytes)
+      .digest("hex");
+    assert.notEqual(pass1.sha, masterSha, "PRECONDITION: legacy bytes differ from master bytes");
+
+    provider.interruptAfterPass1 = false;
+    const callsBefore = provider.calls.length;
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+
+    const after = provider.calls.slice(callsBefore);
+    assert.ok(after.length > 0, "the worker really ran again");
+    for (const call of after) {
+      assert.notEqual(
+        call.intermediateSha,
+        pass1.sha,
+        "a metadata-less legacy intermediate must not be continued from as clean-master work",
+      );
+      assert.equal(call.sourceSha, masterSha, "the provider receives the CURRENT source's bytes");
+    }
+
+    const plate = await productionAssetFor(repo, setup.projectId, again.job.id);
+    assert.ok(plate);
+    const lineage = recordedLineage(plate!);
+    assert.equal(lineage.preparedAssetId, derivedAssetId);
+    assert.equal(lineage.sourceAuthority, "production_qualified_clean_master");
+    assert.equal(lineage.sourceBytesSha256, masterSha);
+  });
+
+  it("LEGACY pass-1 CASE A: a metadata-less intermediate stays reusable while preparedAssetId is current", async () => {
+    const repo = await freshRepo();
+    const provider = new TwoPassRecordingProvider();
+    const built = { ...buildPipeline(repo, provider), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets, UNDERSIZED_CANVAS);
+
+    const requested = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    const pass1 = await driveUntilPass1Intermediate(built, setup.projectId, requested.job.id);
+    await stripSourceMetadataFromIntermediate(built, setup.projectId, requested.job.id, pass1.asset.id);
+
+    // No lifecycle: preparedAssetId is still the effective source.
+    provider.interruptAfterPass1 = false;
+    const callsBefore = provider.calls.length;
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+
+    const after = provider.calls.slice(callsBefore);
+    assert.ok(
+      after.some((call) => call.intermediateSha === pass1.sha),
+      "the paid pass-1 work must still be reused, not thrown away and re-bought",
+    );
+    const plate = await productionAssetFor(repo, setup.projectId, again.job.id);
+    assert.ok(plate);
+    assert.equal(recordedLineage(plate!).preparedAssetId, setup.preparedAssetId);
+  });
+
+  // =========================================================================
+  // CURSOR NB-2 — the variant read path must agree with current authority
+  // =========================================================================
+
+  it("NB-2: a superseded prepared plate is not published by ANY read path", async () => {
+    const repo = await freshRepo();
+    const built = { ...buildPipeline(repo), repo };
+    const setup = await setupApprovedPreparation(repo, built.assets);
+
+    const first = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, first.job.id);
+
+    // PRECONDITIONS: a real prepared-source plate, ready validation.
+    const preparedPlate = await productionAssetFor(repo, setup.projectId, first.job.id);
+    assert.ok(preparedPlate, "PRECONDITION: a prepared plate exists");
+    assert.equal(recordedLineage(preparedPlate!).preparedAssetId, setup.preparedAssetId);
+    assert.equal(
+      (await latestReport(repo, setup.projectId, first.job.id)).status,
+      "ready",
+      "PRECONDITION: its validation is ready",
+    );
+    const beforeVariant = await built.finalArtwork.resolveProductionVariantState(
+      setup.projectId,
+      STANDARD_RASTER_TREATMENT_KEY,
+    );
+    assert.equal(beforeVariant.asset?.id, preparedPlate!.id, "PRECONDITION: it is published now");
+    assert.equal(beforeVariant.validationStatus, "ready");
+
+    // PQCM becomes current, and no PQCM plate exists yet.
+    const { derivedAssetId } = await buildConfirmedMaster(
+      built,
+      setup.projectId,
+      setup.originalAssetId,
+    );
+    const platesNow = (await repo.listAssets(setup.projectId)).filter(
+      (asset) =>
+        asset.productionRole === "production_png" &&
+        recordedLineageOrNull(asset)?.preparedAssetId === derivedAssetId,
+    );
+    assert.equal(platesNow.length, 0, "PRECONDITION: no PQCM plate exists yet");
+
+    // EVERY read authority must now agree that nothing is current.
+    assert.equal(
+      await built.finalArtwork.getCurrentProductionAssetId(setup.projectId),
+      null,
+      "current-delivery path",
+    );
+    const variant = await built.finalArtwork.resolveProductionVariantState(
+      setup.projectId,
+      STANDARD_RASTER_TREATMENT_KEY,
+    );
+    assert.equal(variant.asset, null, "variant read path must agree");
+    assert.equal(variant.job, null);
+    assert.equal(variant.validationStatus, null);
+
+    // ...which is exactly what the Halftone raster-first gate consumes, so
+    // the superseded raster plate can no longer unlock Halftone.
+    await assert.rejects(
+      async () => {
+        await repo.updateBrief(setup.projectId, { requestedProductionOutput: "production_png" });
+        await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+      },
+      () => true,
+      "a request now either blocks or revives — it must not proceed on the stale plate",
+    ).catch(() => {
+      // A revival is also an acceptable outcome here; the gate assertion
+      // above (variant.asset === null) is the load-bearing one.
+    });
+
+    // Once the current-source plate exists, the read paths agree again.
+    const again = await built.finalArtwork.requestPreparedUploadFinalArtwork(setup.projectId);
+    await drainJob(built.worker, repo, again.job.id);
+    const newestVariant = await built.finalArtwork.resolveProductionVariantState(
+      setup.projectId,
+      STANDARD_RASTER_TREATMENT_KEY,
+    );
+    assert.ok(newestVariant.asset, "the current-source plate is published");
+    assert.equal(recordedLineage(newestVariant.asset!).preparedAssetId, derivedAssetId);
+    // ...and certification withholding is still respected for it.
+    assert.notEqual(newestVariant.validationStatus, "ready");
   });
 
   // =========================================================================

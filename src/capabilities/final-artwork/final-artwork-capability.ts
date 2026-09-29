@@ -50,7 +50,10 @@ import {
 } from "@/capabilities/sign-preparation";
 import type { SignRepairPlan } from "@/capabilities/sign-preparation";
 import type { ArtworkGeometryQualificationCapability } from "@/capabilities/artwork-reconstruction/artwork-geometry-qualification-capability";
-import { resolvePreparedUploadEffectiveSource } from "./prepared-upload-effective-source";
+import {
+  resolvePreparedUploadEffectiveSource,
+  type PreparedUploadSourceAuthority,
+} from "./prepared-upload-effective-source";
 import {
   createAcquisitionCapability,
   type AcquisitionCapability,
@@ -519,9 +522,9 @@ export function createFinalArtworkCapability(
    * retroactively invalidating production files. Blocking NEW production
    * is DTF-R1's job; withdrawing an old deliverable is not.
    */
-  async function currentPreparedUploadSourceAssetId(
+  async function currentPreparedUploadSource(
     projectId: string,
-  ): Promise<string | null> {
+  ): Promise<CurrentPreparedUploadSource | null> {
     const preparation = await repo.getArtworkPreparation(projectId);
     if (
       !preparation ||
@@ -539,7 +542,8 @@ export function createFinalArtworkCapability(
         preparedAssetId: preparation.preparedAssetId,
       },
     );
-    return resolved.status === "blocked" ? null : resolved.assetId;
+    if (resolved.status === "blocked") return null;
+    return { assetId: resolved.assetId, authority: resolved.authority };
   }
 
   return {
@@ -870,12 +874,10 @@ export function createFinalArtworkCapability(
       // resolved, so a completed job whose plate answers a superseded
       // source can never be reconciled back to `print_ready` behind the
       // revival's back.
-      await reconcileCompletedProductionState(
-        repo,
-        projectId,
-        job,
-        effectiveSource.assetId,
-      );
+      await reconcileCompletedProductionState(repo, projectId, job, {
+        assetId: effectiveSource.assetId,
+        authority: effectiveSource.authority,
+      });
 
       if (job.status === "queued" || job.status === "running" || job.status === "recoverable") {
         await repo.setProjectStatus(projectId, "finalizing");
@@ -992,7 +994,7 @@ export function createFinalArtworkCapability(
       const satisfied = await resolveSatisfiedProductionDelivery(
         repo,
         projectId,
-        await currentPreparedUploadSourceAssetId(projectId),
+        await currentPreparedUploadSource(projectId),
       );
       return satisfied?.assetId ?? null;
     },
@@ -1001,7 +1003,7 @@ export function createFinalArtworkCapability(
       return resolveSatisfiedProductionDelivery(
         repo,
         projectId,
-        await currentPreparedUploadSourceAssetId(projectId),
+        await currentPreparedUploadSource(projectId),
       );
     },
 
@@ -1111,6 +1113,34 @@ export function createFinalArtworkCapability(
         return nothing;
       }
 
+      // CURSOR NB-2 — THE VARIANT READ PATH IS FENCED BY THE SAME AUTHORITY.
+      //
+      // `resolveSatisfiedProductionDelivery` already refused a plate whose
+      // source current authority has superseded, but this per-treatment read
+      // path did not, and the two disagreeing is worse than either being
+      // wrong alone: every consumer here reaches production output by a
+      // different door. `resolveOneProductionVariant` (the package card),
+      // `getProductionArtworkDownloadForVariant` (the customer download),
+      // and the Halftone raster-first gate ALL resolve through this one
+      // function, so a superseded prepared-source plate could still be
+      // presented as ready, downloaded as current, and used to unlock
+      // Halftone — while `getCurrentProductionAssetId` correctly said there
+      // was nothing current.
+      //
+      // Deliberately NOT a second definition of supersession: it asks
+      // `completedJobPlateIsPublishable`, the same predicate over the same
+      // evidence, resolved from the same shared effective-source resolver.
+      if (
+        !(await completedJobPlateIsPublishable(
+          repo,
+          projectId,
+          job.id,
+          await currentPreparedUploadSource(projectId),
+        ))
+      ) {
+        return nothing;
+      }
+
       const assetId = await findProductionAssetIdForJob(repo, projectId, job.id, effectiveTargetIn);
       const asset = assetId ? await repo.getAssetById(assetId) : null;
       const validation = await repo.getLatestProductionAssetValidationForJob(
@@ -1196,7 +1226,7 @@ async function resolveSatisfiedProductionDelivery(
    * project, a project with no preparation, or a recovery that has not
    * resolved), and preserves this function's behavior exactly.
    */
-  currentSourceAssetId: string | null = null,
+  currentSource: CurrentPreparedUploadSource | null = null,
 ): Promise<CurrentProductionDelivery | null> {
   const snapshot = await repo.getProject(projectId);
   if (!snapshot) return null;
@@ -1236,7 +1266,7 @@ async function resolveSatisfiedProductionDelivery(
   // Not a retraction: the historical plate is untouched and still
   // downloadable through its own job. It simply stops being the answer to
   // "what is current".
-  if (await completedJobSourceSuperseded(repo, projectId, job.id, currentSourceAssetId)) {
+  if (!(await completedJobPlateIsPublishable(repo, projectId, job.id, currentSource))) {
     return null;
   }
 
@@ -1574,14 +1604,14 @@ async function reconcileCompletedProductionState(
   projectId: string,
   job: FinalArtworkJob,
   /** CURSOR BLOCKER 1: see `resolveSatisfiedProductionDelivery`'s own parameter. */
-  currentSourceAssetId: string | null = null,
+  currentSource: CurrentPreparedUploadSource | null = null,
 ): Promise<void> {
   if (job.status !== "completed") return;
 
   const satisfied = await resolveSatisfiedProductionDelivery(
     repo,
     projectId,
-    currentSourceAssetId,
+    currentSource,
   );
   if (!satisfied || satisfied.job.id !== job.id) return;
 
@@ -1766,6 +1796,17 @@ function authorityRevivalAttemptReset(
   return isAuthorityRevival ? { attempts: 0 } : {};
 }
 
+/**
+ * CURSOR NB-2: the current prepared-upload production source, with the
+ * AUTHORITY it came from — the authority matters because an unprovable
+ * plate is judged differently under a clean master than under the prepared
+ * asset (see `completedJobSourceCurrency`).
+ */
+interface CurrentPreparedUploadSource {
+  assetId: string;
+  authority: PreparedUploadSourceAuthority;
+}
+
 async function completedJobSourceSuperseded(
   repo: ProjectRepository,
   projectId: string,
@@ -1782,15 +1823,74 @@ async function completedJobSourceSuperseded(
       !isProviderResultIntermediateAsset(asset),
   );
   if (plates.length === 0) return false;
+  return completedJobSourceCurrency(plates, currentSourceAssetId) === "superseded";
+}
+
+/**
+ * CURSOR NB-2 / LEGACY PLATE NOTE — the three honest answers about whether a
+ * job's newest plate still answers the current source.
+ *
+ *   - `current`: its recorded lineage names the current source.
+ *   - `superseded`: its recorded lineage names something else.
+ *   - `unprovable`: it records no lineage at all (a plate predating the
+ *     `uploadedPreserve` evidence), so nothing can be proven either way.
+ *
+ * The three are kept distinct because the two boundaries that ask need
+ * DIFFERENT answers for `unprovable`. REVIVAL must not fire on it — a job
+ * that cannot prove its plate is stale would otherwise be re-queued on every
+ * request, forever, achieving nothing. PUBLICATION must fail closed on it,
+ * but only when the current source is a clean master: a plate that cannot
+ * name its source is not evidence that it descends from a master that did
+ * not exist when it was made. While the prepared asset is still current,
+ * an unprovable plate is presumably from it, and stays publishable exactly
+ * as before — the same historical-inference discipline NB-1 applies to
+ * reconstruction state.
+ */
+type CompletedJobSourceCurrency = "current" | "superseded" | "unprovable";
+
+function completedJobSourceCurrency(
+  plates: AssetRecord[],
+  currentSourceAssetId: string,
+): CompletedJobSourceCurrency {
   const newest = plates.reduce((latest, asset) =>
     asset.createdAt > latest.createdAt ? asset : latest,
   );
   const lineage = (newest.metadata as Record<string, unknown> | null | undefined)
     ?.uploadedPreserve as { preparedAssetId?: unknown } | undefined;
-  return (
-    typeof lineage?.preparedAssetId === "string" &&
-    lineage.preparedAssetId !== currentSourceAssetId
+  if (typeof lineage?.preparedAssetId !== "string") return "unprovable";
+  return lineage.preparedAssetId === currentSourceAssetId ? "current" : "superseded";
+}
+
+/**
+ * CURSOR NB-2 — may this completed job's plate be PUBLISHED as the project's
+ * current production output?
+ *
+ * The publication counterpart of `completedJobSourceSuperseded`, sharing its
+ * evidence and its verdict function so the two boundaries can never grow
+ * separate opinions about what "belongs to the current source" means.
+ */
+async function completedJobPlateIsPublishable(
+  repo: ProjectRepository,
+  projectId: string,
+  jobId: string,
+  currentSource: CurrentPreparedUploadSource | null,
+): Promise<boolean> {
+  if (!currentSource) return true; // create_new, or no preparation: not this question
+  const assets = await repo.listAssets(projectId);
+  const plates = assets.filter(
+    (asset) =>
+      asset.finalArtworkJobId === jobId &&
+      asset.productionRole === "production_png" &&
+      !isReconstructionIntermediateAsset(asset) &&
+      !isProviderResultIntermediateAsset(asset),
   );
+  if (plates.length === 0) return true; // nothing produced yet; other checks own that
+  const currency = completedJobSourceCurrency(plates, currentSource.assetId);
+  if (currency === "superseded") return false;
+  if (currency === "unprovable") {
+    return currentSource.authority !== "production_qualified_clean_master";
+  }
+  return true;
 }
 
 async function completedJobIsStaleForTarget(

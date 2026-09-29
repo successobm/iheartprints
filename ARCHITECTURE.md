@@ -11885,14 +11885,35 @@ That is CASE C silently not happening on the most ordinary success path.
 It terminates by construction: the revived run's plate becomes the newest,
 the predicate goes false, and a further request is a no-op.
 
-Defence in depth, without a second opinion about authority:
-`resolveSatisfiedProductionDelivery` independently refuses to publish a
-plate whose source has been superseded, so `reconcileCompletedProductionState`
-cannot reconcile one back to `print_ready` behind the revival's back. Both
-read the source from the ONE resolver, passed in by the capability
-(`currentPreparedUploadSourceAssetId`) rather than re-derived. A `blocked`
-resolution yields `null` there — blocking NEW production is DTF-R1's job;
-withdrawing an already-validated historical deliverable is not (Goal 21).
+**Every read authority is fenced, by the same predicate.** Revival alone is
+not enough: production output is reachable through several doors, and two of
+them disagreeing is worse than either being wrong on its own.
+`completedJobPlateIsPublishable` is asked by
+`resolveSatisfiedProductionDelivery` (so `reconcileCompletedProductionState`
+cannot reconcile a superseded plate back to `print_ready`) **and** by
+`resolveProductionVariantState` — which is where the package/variant card
+(`resolveOneProductionVariant`), the per-treatment customer download
+(`getProductionArtworkDownloadForVariant`) and the Halftone raster-first gate
+all resolve. Without that second fence a superseded prepared-source plate
+could still be shown as ready, downloaded as current, and used to unlock
+Halftone, while `getCurrentProductionAssetId` correctly reported nothing
+current. All of them read the source from the ONE resolver, passed in by the
+capability (`currentPreparedUploadSource`) rather than re-derived.
+
+A `blocked` resolution yields `null` there — blocking NEW production is
+DTF-R1's job; withdrawing an already-validated historical deliverable is not
+(Goal 21).
+
+**A plate with no recorded lineage is judged by the same historical
+inference.** `completedJobSourceCurrency` returns three answers, not two:
+`current`, `superseded`, and `unprovable` (a plate predating the
+`uploadedPreserve` evidence). REVIVAL deliberately does not fire on
+`unprovable` — a job that cannot prove its plate is stale would be re-queued
+on every request forever, achieving nothing. PUBLICATION fails closed on it,
+but only while a clean master is current: a plate that cannot name its source
+is not evidence that it descends from a master that did not exist when it was
+made, and while the prepared asset is still current such a plate is presumably
+from it and stays publishable exactly as before.
 
 **Why `cancelJob` and not `completeWithoutAsset`.** Completion-without-an-asset
 is documented as an *honest, terminal, non-retryable* verdict, and
@@ -11963,12 +11984,68 @@ bytes SHA-256, plus provider key):
 | Pass-1 intermediate | asset metadata (added here, no migration) | `intermediateReconstructionSourceMatches` |
 | Outstanding provider request | `final_artwork_jobs.provider_source_asset_id` / `provider_source_sha256` | `providerRequestBelongsToCurrentSource` |
 
+Both dimensions are load-bearing: a request whose bound asset id still matches
+the current source but whose bound SHA does not is retired, because an asset id
+alone does not pin bytes.
+
 A non-matching pass-1 intermediate is simply not returned, so it never
 reaches the provider. A non-matching outstanding request is RETIRED — slot
 cleared, `providerRecoveryAttempts` zeroed, exactly like the
 provider-result-intermediate staleness path already does — so the claim
 classifies as a fresh execution for the current source rather than
 resuming, and no later claim can mistake it for this job's in-flight work.
+
+**Pre-repair (unbound) state is interpreted, never assumed current.** State
+written before this repair records no source identity, and reading that
+absence as "matches whatever is current now" is exactly backwards: a missing
+identity is not evidence that an artifact belongs to a clean master that did
+not exist when it was written. For a `prepared_upload` job the historical
+truth is knowable, and it is a verified invariant rather than an assumption:
+
+- the pre-DTF-R1 worker resolved its source from
+  `preparation.preparedAssetId` unconditionally, so any provider work it
+  submitted was submitted against that asset (checked against the baseline
+  commit); and
+- a job whose `preparedAssetId` has moved since can never reach the resume
+  decision at all — repointing it either moves `preparedArtworkVersionId`
+  too (the version binding cancels the job), or moves `status` off
+  `"approved"` (the approval check cancels it), or leaves
+  `artwork.primaryAssetId` disagreeing with it (the source-agreement check
+  fails it).
+
+So unbound legacy state is interpreted as belonging to the preparation's
+current `preparedAssetId` (`legacySourceAssetId`), then compared against the
+current effective source like any other identity. While the prepared asset is
+still current, legacy state is reused and a paid in-flight request RESUMES —
+retiring it would re-bill every job in flight at deploy. Once a clean master
+is current, the same state provably does not belong to it: the intermediate is
+ignored and the request is retired.
+
+Three rules keep that inference from becoming a loophole: explicit identity
+always wins when present; a malformed binding fails closed rather than being
+reinterpreted as legacy, so new bad state can never masquerade as old; and
+legacy inference still requires provider identity, because a pass-1
+intermediate is pass 2's INPUT and continuing from one produced by a different
+engine is not a resume.
+
+"Malformed" is judged against what the path can know, and getting that wrong
+is a spend bug, not a style question.
+`CurrentProductionIdentity.sourceBytesSha256` comes from the uploaded-preserve
+lineage, which only the prepared-upload path records, so a `create_new` job
+has a legitimately NULL source SHA and the binding faithfully stores that
+null — a complete record of a source with no hash here, not a half-written
+one. A first cut treated any null bound SHA as partial-and-fail-closed, which
+made every `create_new` job retire its own healthy in-flight request and
+submit a SECOND PAID ONE; the existing Topaz resume suite caught it. So the
+SHA is compared when the CURRENT source has one — always, for prepared-upload,
+the only path whose source can move — and a bound null there is genuinely
+malformed. Where the current source has no SHA, the asset id is the whole
+identity. `create_new` and Signs
+pass no `legacySourceAssetId` — their sources are not movable, so their
+unbound state keeps its pre-repair treatment exactly.
+
+**No backfill is required**, and that is the point of the inference: legacy
+NULL is not an unknown to be repaired, it is a value that can be read.
 
 **The one migration in this phase, and why it was unavoidable.** The two
 artifact classes carry their identity in metadata, which needs no schema
@@ -11982,6 +12059,23 @@ are nullable; `null` means "no claim either way" and resumes exactly as
 before, because treating rows written before the migration as mismatches
 would abandon real, already-paid requests in flight at deploy. Every new
 submission writes the binding, so that tolerance closes itself.
+
+**DEPLOYMENT ORDER: MIGRATION FIRST, APPLICATION SECOND.** This is an
+operational requirement, not a preference. The application writes the binding
+inside the provider-submission callback — i.e. immediately AFTER a paid
+request has been submitted. If the application ran against a database without
+these columns, that write would be rejected at exactly the worst moment: the
+credit is spent, and the durable record of `providerRequestId` is lost, so the
+next claim classifies the work as fresh and submits again. Repeatedly.
+
+The order is safe in both directions:
+
+- **Migration ahead of application**: the old application never reads or
+  writes these columns, and both are nullable with no default, so a
+  migrated-but-not-yet-deployed database behaves identically for it.
+- **Application behind migration**: the new application requires the columns
+  to exist before its first provider submission, which the order guarantees.
+- **No backfill step**: legacy NULL is interpreted, not repaired (above).
 
 ### Attempt budget
 
@@ -12001,6 +12095,22 @@ belongs to one specific paid request and its own read-back failures, nothing
 here is evidence about that, and resetting it would weaken a spend
 protection. Signs (`resolveSignJob`) already drew this distinction, so this
 is the established convention rather than a new one.
+
+**Known follow-ups, deliberately not widened into here** (independent review
+rated both non-blocking, and neither is touched by the NB-1/NB-2 changes, so
+enlarging this repair to chase them would add risk without reducing any):
+
+1. `authorityRevivalAttemptReset(existing.status === "cancelled")` treats
+   EVERY cancellation as an authority revival, including a stale-intent
+   cancel. A same-source failure budget could therefore in theory be
+   laundered: fail → re-request → stale-intent cancel → request again →
+   fresh budget. Narrowing it needs a durable "why was this cancelled"
+   signal, which the job row does not currently carry, so it is a schema
+   question rather than a one-line fix.
+2. A supersession revival that produces no plate (the worker blocks again for
+   an unrelated reason) leaves the predicate true, so each customer request
+   re-queues the job. Bounded by the attempt budget and customer-driven
+   rather than a machine loop, but it is more churn than necessary.
 
 ### Provenance, validation and the certification boundary
 
