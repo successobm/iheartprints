@@ -90,13 +90,33 @@ describe("GET /api/version (production build version endpoint)", () => {
     const response = await GET();
     const body = (await response.json()) as Record<string, unknown>;
 
-    assert.notEqual(response.status, 200);
+    assert.equal(response.status, 503);
     assert.equal(body.ok, false);
     assert.equal(body.gitSha, null);
     for (const fabricated of ["unknown", "latest", "unknown-main", "production"]) {
       assert.notEqual(body.gitSha, fabricated);
     }
   });
+
+  for (const malformed of [
+    "not-a-sha",
+    "7fbe2d2",
+    "7fbe2d295a3ded1313e4e6711bb7e1f7f765a8e", // 39 chars
+    "7FBE2D295A3DED1313E4E6711BB7E1F7F765A8E8", // uppercase
+  ]) {
+    it(`fails closed with 503 for a malformed GIT_SHA (${JSON.stringify(malformed)})`, async () => {
+      process.env.GIT_SHA = malformed;
+      process.env.NODE_ENV = "production";
+
+      const { GET } = await import("./route");
+      const response = await GET();
+      const body = (await response.json()) as Record<string, unknown>;
+
+      assert.equal(response.status, 503);
+      assert.equal(body.ok, false);
+      assert.equal(body.gitSha, null);
+    });
+  }
 
   it("sets cache-control: no-store so the answer is never served stale", async () => {
     process.env.GIT_SHA = "7fbe2d295a3ded1313e4e6711bb7e1f7f765a8e8";

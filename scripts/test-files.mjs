@@ -866,4 +866,7 @@ export const TEST_FILES = [
   // established discipline.
   "src/lib/config/build-info-config.test.ts",
   "src/app/api/version/route.test.ts",
+  // Cursor repair: eliminates stale-SHA publication and the destructive
+  // whole-file overwrite of .env.production.local.
+  "scripts/generate-build-info.test.mjs",
 ];
