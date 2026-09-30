@@ -81,6 +81,28 @@ local auto-triggers do not run in production. See
 [`docs/deployment/generation-worker.md`](./docs/deployment/generation-worker.md)
 and [`docs/deployment/final-artwork-worker.md`](./docs/deployment/final-artwork-worker.md).
 
+### Verifying the deployed commit: `GET /api/version`
+
+`npm run build`'s implicit `prebuild` hook (`scripts/generate-build-info.mjs`)
+captures `git rev-parse HEAD` from the build's own git checkout and writes it
+to `.env.production.local` (git-ignored, never committed) as `GIT_SHA`. Next
+loads that file into `process.env` when `next start` runs, and the read-only
+`GET /api/version` route reports it — no runtime git commands, no assumption
+that `.git` exists in the running container.
+
+```json
+{ "ok": true, "gitSha": "<40-char sha>", "environment": "production" }
+```
+
+If the build couldn't determine its own commit, the endpoint returns `503`
+with `gitSha: null` — never a fabricated value like `"unknown"` or
+`"latest"`. Treat a `503` (or a `gitSha` that doesn't match the expected
+merge SHA) as an unverified deployment.
+
+This replaces inferring a deployment from CDN `Age` headers, chunk hashes,
+timing, or an `origin/main` assumption — see the release verification
+procedure below.
+
 ## Environment variables
 
 Names only. Never commit values. Never log values.
@@ -107,6 +129,12 @@ Related names also used by the codebase (see `.env.example` and
 `ARCHITECTURE.md` §21): `CONCEPT_GENERATION_PROVIDER`, `OPENAI_IMAGE_MODEL`,
 `CONVERSATION_UNDERSTANDING_PROVIDER`, `MAX_GENERATION_JOBS_PER_RUN`,
 `WORKER_HEARTBEAT_INTERVAL`.
+
+`GIT_SHA` is **not** a console-configured variable — do not set it manually
+and do not add it to the console's environment variable list. It is
+generated at build time into `.env.production.local` by the `prebuild` hook
+(`scripts/generate-build-info.mjs`) and consumed by `GET /api/version`; see
+above.
 
 ### Setting an App Platform environment variable
 
@@ -145,7 +173,7 @@ The V1 finalization merge (`bbc7979`) required **no** migration.
 
 1. Merge verified feature work into `main` with a normal merge commit (`--no-ff` unless repository convention changes).
 2. Push `main` to `origin`.
-3. In DigitalOcean App Platform, confirm the deployment checked out the expected commit SHA.
+3. Confirm the deployment checked out the expected commit SHA: `GET /api/version` on the production URL and check `gitSha` equals the merge SHA just pushed (`ok: true`, status `200`). Fall back to the DigitalOcean App Platform console only if the endpoint itself is unreachable.
 4. Confirm deployment status is Success / Healthy / live.
 5. Run an **unpaid** production smoke:
    - `GET https://iheartprints-88sjr.ondigitalocean.app/` → `200`

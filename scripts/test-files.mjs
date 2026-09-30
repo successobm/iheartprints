@@ -860,4 +860,10 @@ export const TEST_FILES = [
   // classes in the first place -- registered immediately per the
   // established discipline.
   "src/components/chat/ArtworkFidelityConfirmationStep.test.tsx",
+  // Production build version endpoint: GET /api/version reports the exact
+  // commit the running build was built from without runtime git commands
+  // or a fabricated placeholder -- registered immediately per the
+  // established discipline.
+  "src/lib/config/build-info-config.test.ts",
+  "src/app/api/version/route.test.ts",
 ];
