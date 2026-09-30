@@ -81,6 +81,65 @@ local auto-triggers do not run in production. See
 [`docs/deployment/generation-worker.md`](./docs/deployment/generation-worker.md)
 and [`docs/deployment/final-artwork-worker.md`](./docs/deployment/final-artwork-worker.md).
 
+### Verifying the deployed commit: `GET /api/version`
+
+`npm run build`'s implicit `prebuild` hook (`scripts/generate-build-info.mjs`)
+captures `git rev-parse HEAD` from the build's own git checkout and writes it
+to `.env.production.local` (git-ignored, never committed) as `GIT_SHA`, never
+touching any other variable that file might already hold. If the build
+can't resolve a full 40-character SHA, the hook **fails the build**
+(`process.exit(1)`) and it also clears any `GIT_SHA` a previous successful
+build had left there first — a failed build can never leave a stale, valid-
+looking commit behind.
+
+Next loads that file into `process.env` when `next start` runs, and the
+read-only `GET /api/version` route reports it — no runtime git commands, no
+assumption that `.git` exists in the running container.
+
+```json
+{ "ok": true, "gitSha": "<40-char sha>", "environment": "production" }
+```
+
+If `GIT_SHA` is missing or isn't a well-formed 40-character hex SHA, the
+endpoint returns `503` with `gitSha: null` — never a fabricated value like
+`"unknown"` or `"latest"`. Treat a `503` (or a `gitSha` that doesn't match
+the expected merge SHA) as an unverified deployment.
+
+**Unverified assumption — read before relying on this in production.** This
+mechanism assumes DigitalOcean App Platform's buildpack build phase and run
+phase share the app directory's filesystem, so a file written during
+`npm run build` (the `prebuild` step) is still present when `next start`
+runs. That has **not** been confirmed against a real DigitalOcean deployment
+— there is no in-repo `app.yaml`/`.do/` spec, `doctl`, or console access
+available to verify it ahead of time (see "Setting an App Platform
+environment variable" below). `next build`'s own log line
+(`- Environments: .env.production.local, .env.local`) only proves Next.js
+reads the file *during the build*; it says nothing about the separate run
+phase.
+
+**First-deployment verification procedure.** The first time this ships:
+1. Deploy as normal (push `main`, or whatever this repo's merge process is).
+2. Immediately `curl` the production URL's `/api/version`.
+3. If it returns `200` with `gitSha` equal to the merge SHA: the assumption
+   holds, and future rollouts can rely on step 3 of the release verification
+   procedure below with no further caveats.
+4. If it returns `503` with `gitSha: null` despite a Success/Healthy deploy:
+   the assumption is **false** for this app — `.env.production.local` does
+   not survive into the run phase. Do not guess further fixes blind. Two
+   known paths forward, neither implemented here because both need a real
+   deployment to validate: (a) have DigitalOcean inject `GIT_SHA` as a real
+   App Platform component environment variable set per-deploy (would need
+   automating via the App Platform API/console — out of scope for this
+   change), or (b) switch the generator to bake `gitSha` into the compiled
+   JS output via a statically-imported generated module instead of an env
+   file, which removes the build→run filesystem-survival dependency
+   entirely at the cost of needing a committed placeholder module for
+   `tsc`/`next dev`/tests to resolve against.
+
+This replaces inferring a deployment from CDN `Age` headers, chunk hashes,
+timing, or an `origin/main` assumption — see the release verification
+procedure below.
+
 ## Environment variables
 
 Names only. Never commit values. Never log values.
@@ -107,6 +166,12 @@ Related names also used by the codebase (see `.env.example` and
 `ARCHITECTURE.md` §21): `CONCEPT_GENERATION_PROVIDER`, `OPENAI_IMAGE_MODEL`,
 `CONVERSATION_UNDERSTANDING_PROVIDER`, `MAX_GENERATION_JOBS_PER_RUN`,
 `WORKER_HEARTBEAT_INTERVAL`.
+
+`GIT_SHA` is **not** a console-configured variable — do not set it manually
+and do not add it to the console's environment variable list. It is
+generated at build time into `.env.production.local` by the `prebuild` hook
+(`scripts/generate-build-info.mjs`) and consumed by `GET /api/version`; see
+above.
 
 ### Setting an App Platform environment variable
 
@@ -145,7 +210,7 @@ The V1 finalization merge (`bbc7979`) required **no** migration.
 
 1. Merge verified feature work into `main` with a normal merge commit (`--no-ff` unless repository convention changes).
 2. Push `main` to `origin`.
-3. In DigitalOcean App Platform, confirm the deployment checked out the expected commit SHA.
+3. Confirm the deployment checked out the expected commit SHA: `GET /api/version` on the production URL and check `gitSha` equals the merge SHA just pushed (`ok: true`, status `200`). A `503` with `gitSha: null` is not "endpoint unreachable" — it means the build→run filesystem assumption behind this endpoint doesn't hold for this app (see the "Unverified assumption" note above); fall back to the DigitalOcean App Platform console's commit display in that case, and treat step (4) below in that note as still open.
 4. Confirm deployment status is Success / Healthy / live.
 5. Run an **unpaid** production smoke:
    - `GET https://iheartprints-88sjr.ondigitalocean.app/` → `200`
