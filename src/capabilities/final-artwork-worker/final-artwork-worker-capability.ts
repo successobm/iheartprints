@@ -189,6 +189,10 @@ import {
 } from "@/capabilities/sign-preparation";
 import type { ArtworkGeometryQualificationCapability } from "@/capabilities/artwork-reconstruction/artwork-geometry-qualification-capability";
 import {
+  resolvePreparedUploadEffectiveSource,
+  type PreparedUploadSourceAuthority,
+} from "@/capabilities/final-artwork/prepared-upload-effective-source";
+import {
   hasSignReconstructionCapability,
   hasSignReconstructionResumeCapability,
   type SignReconstructionProviderOutput,
@@ -524,6 +528,17 @@ export function createFinalArtworkWorkerCapability(
    * the pre-R6B behavior, so every existing non-Signs call site and test is
    * unaffected. Deliberately the LAST parameter, mirroring
    * `signPreservation`'s own doc above.
+   *
+   * DTF-R1 addendum: "never consulted by any apparel/DTF job path" is no
+   * longer true, and that is the whole point of the phase — the SAME
+   * read-only dependency is now also consulted by `runPreparedUploadJob`
+   * via `resolvePreparedUploadEffectiveSource`. Still read-only, still one
+   * direction, still never a write to the qualification tables. A project
+   * with NO recovery lifecycle never reaches it (the lifecycle is detected
+   * from repository reads alone), so every existing apparel test that
+   * omits this parameter behaves exactly as before; a project that HAS one
+   * and is missing this dependency fails CLOSED rather than falling back
+   * to the pre-recovery source.
    */
   artworkGeometryQualification?: ArtworkGeometryQualificationCapability,
 ): FinalArtworkWorkerCapability {
@@ -810,9 +825,57 @@ export function createFinalArtworkWorkerCapability(
    * one — seePhase 28T's own report) preserves EXACTLY the pre-Phase-28T
    * behavior: the first matching asset, trusted unconditionally.
    */
+  /**
+   * DTF-R1 (independent-review repair, BLOCKING #2): "was this plate built
+   * from the source this run is actually working from?"
+   *
+   * `resolveExistingProductionAsset` adopts a plate for a job on PIXEL
+   * GEOMETRY alone, and every caller before DTF-R1 was entitled to: a
+   * source could not move underneath a live job. For the prepared
+   * authority that still holds — re-preparing also produces a new
+   * `ArtworkVersion`, and `runPreparedUploadJob`'s `preparedArtworkVersionId`
+   * binding cancels the job first. A Production-Qualified Clean Master
+   * carries no such binding: it can be superseded, or become current where
+   * none was before, with the `ArtworkPreparation` row untouched. Geometry
+   * is then silent, because the plate's SIZE is identical either way —
+   * only its pixels differ.
+   *
+   * Adopting such a plate would validate one asset while the run declares
+   * another as its source, so it is refused. Refused, not blocked: the job
+   * simply goes on to produce a plate from the current source, additively,
+   * exactly as Phase 28T's own stale-target revival already does. (The
+   * first implementation blocked the whole job instead, which left the
+   * superseded plate and its `ready` validation on file — where the next
+   * request happily re-published it as `print_ready`, defeating the fence
+   * entirely.)
+   *
+   * Judged against the plate's OWN recorded lineage, never a prediction. A
+   * plate that cannot name its source (legacy/malformed) is left exactly as
+   * trustworthy as it was before this phase — `produceProductionAsset`'s
+   * durable-identity machinery still judges it — because "we did not write
+   * it down" is not evidence of drift any more than it is evidence of
+   * currency.
+   */
+  function productionAssetSourceStillCurrent(
+    asset: AssetRecord,
+    currentSourceAssetId: string | null,
+  ): boolean {
+    if (!currentSourceAssetId) return true;
+    const lineage = (asset.metadata as Record<string, unknown> | null | undefined)
+      ?.uploadedPreserve as { preparedAssetId?: unknown } | undefined;
+    if (typeof lineage?.preparedAssetId !== "string") return true;
+    return lineage.preparedAssetId === currentSourceAssetId;
+  }
+
   async function resolveExistingProductionAsset(
     job: FinalArtworkJob,
     targetIn: EffectiveProductionTargetIn | null,
+    /**
+     * DTF-R1: the asset this run resolved as its source, for the
+     * prepared-upload path. `null` (every other caller) preserves exactly
+     * the pre-DTF-R1 behavior.
+     */
+    currentSourceAssetId: string | null = null,
   ): Promise<AssetRecord | null> {
     const existingAssets = await withOperationTiming(
       "resolveExistingProductionAsset.listAssetsForFinalArtworkJob",
@@ -831,12 +894,16 @@ export function createFinalArtworkWorkerCapability(
         // result is EQUALLY an internal reconstruction-stage artifact, never
         // a candidate final deliverable — see
         // `resolveExistingProviderResultIntermediate`.
-        !isProviderResultIntermediateAsset(asset),
+        !isProviderResultIntermediateAsset(asset) &&
+        // DTF-R1: never adopt a plate built from a source this run is no
+        // longer working from — see `productionAssetSourceStillCurrent`.
+        productionAssetSourceStillCurrent(asset, currentSourceAssetId),
     );
     if (candidates.length === 0) return null;
     if (!targetIn) return candidates[0]!;
     return candidates.find((asset) => productionAssetMatchesEffectiveTarget(asset, targetIn)) ?? null;
   }
+
 
   /**
    * Phase 28V (Section 7/8) — the durable proof that a two-pass
@@ -859,6 +926,17 @@ export function createFinalArtworkWorkerCapability(
      * itself.
      */
     callSite: "apparelSelfHeal" | "signSelfHeal" | "persist" | "postProviderResumePrecheck",
+    /**
+     * CURSOR BLOCKER 2: the production identity this claim is actually
+     * working on. When supplied, a pass-1 intermediate is only returned if
+     * it PROVABLY belongs to that identity — see
+     * `intermediateReconstructionSourceMatches`. `null` (Signs, and the
+     * `persist` call site, which is asking "did I already store THIS
+     * result?") preserves the pre-repair behavior exactly.
+     */
+    currentIdentity: CurrentProductionIdentity | null = null,
+    /** CURSOR NB-1: see `produceProductionAsset`'s own `legacySourceAssetId`. */
+    legacySourceAssetId: string | null = null,
   ): Promise<{ asset: AssetRecord; providerRequestId: string } | null> {
     const existingAssets = await withOperationTiming(
       `resolveExistingIntermediateReconstruction.${callSite}.listAssetsForFinalArtworkJob`,
@@ -868,7 +946,12 @@ export function createFinalArtworkWorkerCapability(
       (asset) =>
         asset.finalArtworkJobId === job.id &&
         asset.productionRole === "production_png" &&
-        isReconstructionIntermediateAsset(asset),
+        isReconstructionIntermediateAsset(asset) &&
+        intermediateReconstructionSourceMatches(
+          asset,
+          currentIdentity,
+          legacySourceAssetId,
+        ),
     );
     if (!candidate) return null;
     const meta = candidate.metadata as Record<string, unknown> | null | undefined;
@@ -879,6 +962,130 @@ export function createFinalArtworkWorkerCapability(
     // (never as license to resubmit pass 1 blindly; see the caller).
     if (!providerRequestId) return null;
     return { asset: candidate, providerRequestId };
+  }
+
+  /**
+   * CURSOR BLOCKER 2 — does the job's outstanding provider request belong
+   * to the source this claim is working on?
+   *
+   * `null` binding means "no claim either way" and resumes exactly as
+   * before: a row written before the binding columns existed, whose
+   * request may well be a real, already-paid one still in flight. Treating
+   * those as mismatches would abandon and re-bill them. Every submission
+   * from now on writes the binding, so the tolerance closes itself as
+   * those jobs drain.
+   *
+   * The SHA is compared as well as the asset id because an asset id alone
+   * does not pin bytes — the same comparison
+   * `providerResultIntermediateMatchesIdentity` already makes, kept
+   * identical on purpose.
+   */
+  function providerRequestBelongsToCurrentSource(
+    jobRow: FinalArtworkJob,
+    currentIdentity: CurrentProductionIdentity,
+    legacySourceAssetId: string | null,
+  ): boolean {
+    const boundAsset = jobRow.providerSourceAssetId;
+    const boundSha = jobRow.providerSourceSha256;
+
+    // GENUINE LEGACY: no asset id written. The two fields are written in one
+    // update, so an absent asset id means the binding never happened — a
+    // request submitted before it existed. Interpreted as belonging to the
+    // historical `preparedAssetId` (see `legacySourceAssetId`), never as
+    // belonging to whatever happens to be current now.
+    if (boundAsset === null) {
+      if (legacySourceAssetId === null) return true; // no inference available
+      return legacySourceAssetId === currentIdentity.sourceAssetId;
+    }
+
+    if (boundAsset !== currentIdentity.sourceAssetId) return false;
+
+    // THE SHA HALF, and why it is conditional on the CURRENT identity having
+    // one rather than on the binding having one.
+    //
+    // `CurrentProductionIdentity.sourceBytesSha256` is populated from the
+    // uploaded-preserve lineage, which only the prepared-upload path records.
+    // A create_new job therefore has a legitimately NULL source SHA, and the
+    // binding faithfully stores that null — it is a complete record of a
+    // source that has no hash here, not a half-written one.
+    //
+    // Treating a null bound SHA as "partial, fail closed" is exactly the bug
+    // the existing Topaz resume suite caught: every create_new job would
+    // retire its own healthy in-flight request and SUBMIT A SECOND PAID ONE.
+    // So "partial" is judged against what this path can actually know: when
+    // the current source HAS a SHA (always, for prepared_upload — the path
+    // whose source can move, and the only one this repair is about), a bound
+    // null is genuinely malformed and fails closed. When it has none, the
+    // asset id IS the complete identity.
+    const currentSha =
+      typeof currentIdentity.sourceBytesSha256 === "string"
+        ? currentIdentity.sourceBytesSha256
+        : null;
+    if (currentSha === null) return true;
+    return boundSha === currentSha;
+  }
+
+  /**
+   * CURSOR BLOCKER 2 — a pass-1 intermediate must prove it descends from
+   * the source this claim is working on.
+   *
+   * THE DEFECT THIS CLOSES. A pass-1 intermediate is handed straight back
+   * to the provider as `existingIntermediateReconstruction`, i.e. as the
+   * PIXELS pass 2 continues from. It was matched on job id and stage marker
+   * alone, so once DTF-R1 let a job's effective source move (prepared →
+   * clean master, or master A → master B), a revived job would faithfully
+   * resolve the NEW source, then hand the provider the OLD source's pass-1
+   * bytes — and record the new source's asset id, SHA and `sourceAuthority`
+   * on the result. Pixels from A, provenance claiming B. Print Ready being
+   * withheld afterwards does not make that lineage true.
+   *
+   * The fix is deliberately the SAME identity concept
+   * `providerResultIntermediateMatchesIdentity` already uses for the
+   * provider-result intermediate — source asset id plus source bytes
+   * SHA-256 — rather than a parallel scheme, so the two reconstruction-stage
+   * artifact classes can never disagree about what "belongs to this source"
+   * means. Provider key is included for the same reason it is there: a
+   * result produced by a provider that is no longer configured is not safe
+   * to continue from.
+   *
+   * LEGACY TOLERANCE, and why it is safe here: an intermediate written
+   * before this repair records no source identity. It is treated as
+   * MATCHING, exactly preserving today's behavior for any pass-1 artifact
+   * already on disk — refusing those instead would abandon a real, already
+   * paid-for pass 1 and resubmit it. That tolerance is bounded and
+   * self-closing: every intermediate written from now on carries the
+   * identity, so the window is only as wide as the jobs in flight at
+   * deploy.
+   */
+  function intermediateReconstructionSourceMatches(
+    asset: AssetRecord,
+    currentIdentity: CurrentProductionIdentity | null,
+    legacySourceAssetId: string | null,
+  ): boolean {
+    if (!currentIdentity) return true;
+    const meta = asset.metadata as Record<string, unknown> | null | undefined;
+
+    // Explicit identity always wins when present, and a partial/inconsistent
+    // record still fails closed (a missing SHA compares unequal unless the
+    // current source genuinely has none).
+    if (typeof meta?.sourceAssetId === "string") {
+      return (
+        meta.sourceAssetId === currentIdentity.sourceAssetId &&
+        (meta.sourceBytesSha256 ?? null) === currentIdentity.sourceBytesSha256 &&
+        meta.providerKey === currentIdentity.providerKey
+      );
+    }
+
+    // GENUINE LEGACY: no source identity recorded. Interpreted as the
+    // historical `preparedAssetId`, never as "matches anything current".
+    if (legacySourceAssetId === null) return true; // no inference available
+    // Provider identity is still required. "Old" does not mean "belongs to
+    // preparedAssetId under any provider": a pass-1 intermediate is pass 2's
+    // INPUT, so continuing from one produced by a different engine is not a
+    // resume — and the pre-repair metadata always recorded `providerKey`,
+    // so this costs nothing for real legacy rows.
+    if (meta?.providerKey !== currentIdentity.providerKey) return false;
+    return legacySourceAssetId === currentIdentity.sourceAssetId;
   }
 
   /**
@@ -897,6 +1104,14 @@ export function createFinalArtworkWorkerCapability(
     activeProvider: FinalArtworkProvider,
     storageGroupingId: string,
     result: FinalArtworkProviderIntermediateReconstruction,
+    /**
+     * CURSOR BLOCKER 2: the source these pass-1 pixels actually descend
+     * from, recorded so a later claim can PROVE whether they still answer
+     * the source it is working on. `null` for the Signs call sites, whose
+     * source cannot move underneath a job the way a DTF-R1 effective
+     * source can.
+     */
+    sourceIdentity: { sourceAssetId: string; sourceBytesSha256: unknown } | null = null,
   ): Promise<void> {
     const existing = await resolveExistingIntermediateReconstruction(job, "persist");
     if (!existing || existing.providerRequestId !== result.providerRequestId) {
@@ -928,6 +1143,16 @@ export function createFinalArtworkWorkerCapability(
             reconstructionStage: RECONSTRUCTION_INTERMEDIATE_STAGE_MARKER,
             providerKey: activeProvider.providerKey,
             providerRequestId: result.providerRequestId,
+            // CURSOR BLOCKER 2: the same two identity fields the
+            // provider-result intermediate already records, so both
+            // reconstruction-stage artifact classes answer "does this
+            // belong to the current source?" the same way.
+            ...(sourceIdentity
+              ? {
+                  sourceAssetId: sourceIdentity.sourceAssetId,
+                  sourceBytesSha256: sourceIdentity.sourceBytesSha256,
+                }
+              : {}),
           },
         }),
       );
@@ -1425,6 +1650,35 @@ export function createFinalArtworkWorkerCapability(
      * pre-Phase-28T "trust the first existing asset" behavior).
      */
     targetIn: EffectiveProductionTargetIn | null;
+    /**
+     * CURSOR NB-1 — THE SOURCE THAT PRE-REPAIR (UNBOUND) STATE MUST BE
+     * INTERPRETED AS BELONGING TO.
+     *
+     * Reconstruction state written before the source-binding repair records
+     * no source identity. Reading that absence as "matches whatever is
+     * current now" is exactly backwards: a missing identity is not evidence
+     * that an artifact belongs to a clean master that did not exist when it
+     * was written.
+     *
+     * For a `prepared_upload` job the historical truth is knowable. Before
+     * DTF-R1 the prepared-upload worker resolved its source from
+     * `preparation.preparedAssetId` unconditionally (verified against the
+     * baseline commit), so any provider work it submitted was submitted
+     * against that asset. And a job whose `preparedAssetId` has moved SINCE
+     * can never reach the resume decision at all: repointing it either moves
+     * `preparedArtworkVersionId` too (the version binding cancels the job),
+     * or moves `status` off `"approved"` (the approval check cancels it), or
+     * leaves `artwork.primaryAssetId` disagreeing with it (the
+     * source-agreement check fails it). So for any job that gets this far,
+     * the preparation's CURRENT `preparedAssetId` IS the asset its legacy
+     * state was created for.
+     *
+     * `null` for every other caller (create_new, Signs), where no such
+     * inference exists — and none is needed, because DTF-R1 does not make
+     * those sources movable. There, unbound legacy state keeps its
+     * pre-repair treatment exactly.
+     */
+    legacySourceAssetId: string | null;
   }): Promise<
     | {
         status: "ready";
@@ -1456,7 +1710,20 @@ export function createFinalArtworkWorkerCapability(
     const { job, sourceAsset, sizing, activeProvider } = params;
     let effectiveJob = job;
 
-    const existing = await resolveExistingProductionAsset(job, params.targetIn);
+    // DTF-R1 (independent-review repair, BLOCKING #2): the crash/retry
+    // counterpart of the worker's own source re-resolution. `sourceAsset`
+    // is what THIS run resolved, so a plate whose recorded lineage names a
+    // different asset is not this run's work and is never adopted,
+    // re-validated or delivered as if it were. Harmless for every other
+    // caller: an asset with no `uploadedPreserve` lineage (create_new,
+    // Signs) is judged exactly as before. The durable-identity guard below
+    // already compared `sourceAssetId`; this closes the earlier
+    // short-circuit that ran before it.
+    const existing = await resolveExistingProductionAsset(
+      job,
+      params.targetIn,
+      sourceAsset.id,
+    );
     if (existing) {
       return {
         status: "ready",
@@ -1612,7 +1879,12 @@ export function createFinalArtworkWorkerCapability(
     // is charged. Neither this call nor the self-heal it may perform reads
     // `source`, so nothing here changes what a fresh-execution-exhausted
     // claim costs: it still fails before any asset bytes are read.
-    const existingIntermediate = await resolveExistingIntermediateReconstruction(job, "apparelSelfHeal");
+    const existingIntermediate = await resolveExistingIntermediateReconstruction(
+      job,
+      "apparelSelfHeal",
+      currentProductionIdentity,
+      params.legacySourceAssetId,
+    );
     if (
       existingIntermediate &&
       effectiveJob.providerRequestId !== null &&
@@ -1649,6 +1921,43 @@ export function createFinalArtworkWorkerCapability(
     // (`effectiveJob.providerKey !== activeProvider.providerKey`) is
     // therefore ALSO correctly classified as "fresh": resuming against a
     // provider no longer configured would not be a safe recovery.
+    //
+    // CURSOR BLOCKER 2 — AND the request must belong to the source THIS
+    // claim is working on. `providerRequestId` proves which paid request
+    // exists; it says nothing about which artwork it was submitted for,
+    // and since DTF-R1 a prepared-upload job's effective source can move
+    // between claims. Resuming across that move returns the OLD source's
+    // pixels while the run records the NEW source's lineage.
+    //
+    // Retired rather than merely ignored: leaving the slot populated would
+    // let a later claim (or the recovery-budget accounting) still treat it
+    // as this job's in-flight request. Cleared exactly like the
+    // provider-result-intermediate staleness path immediately above,
+    // including `providerRecoveryAttempts: 0` — a cleared identity has no
+    // recovery history of its own.
+    if (
+      effectiveJob.providerRequestId !== null &&
+      !providerRequestBelongsToCurrentSource(
+        effectiveJob,
+        currentProductionIdentity,
+        params.legacySourceAssetId,
+      )
+    ) {
+      await repo.updateFinalArtworkJob(job.id, {
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      });
+      effectiveJob = {
+        ...effectiveJob,
+        providerKey: null,
+        providerRequestId: null,
+        providerStatus: null,
+        providerRecoveryAttempts: 0,
+      };
+    }
+
     const existingProviderRequest: FinalArtworkProviderResumeContext | null =
       effectiveJob.providerKey === activeProvider.providerKey && effectiveJob.providerRequestId
         ? {
@@ -1799,6 +2108,17 @@ export function createFinalArtworkWorkerCapability(
             providerKey: activeProvider.providerKey,
             providerRequestId,
             providerStatus: "submitted",
+            // CURSOR BLOCKER 2: the source this paid request is FOR,
+            // written in the same durable write as the request id itself
+            // so the two can never disagree. A later claim that resolves a
+            // different effective source can then prove this request does
+            // not belong to it, instead of resuming it and returning the
+            // old source's pixels under the new source's provenance.
+            providerSourceAssetId: currentProductionIdentity.sourceAssetId,
+            providerSourceSha256:
+              typeof currentProductionIdentity.sourceBytesSha256 === "string"
+                ? currentProductionIdentity.sourceBytesSha256
+                : null,
             // "Separate Provider Recovery Attempt Budget": a genuinely
             // NEW paid request has no recovery history against it yet.
             // Belt-and-suspenders — every path that sets a NEW
@@ -1812,7 +2132,16 @@ export function createFinalArtworkWorkerCapability(
         },
         existingIntermediateReconstruction,
         onIntermediateReconstructionProduced: (result) =>
-          persistIntermediateReconstruction(job, activeProvider, params.storageGroupingId, result),
+          persistIntermediateReconstruction(
+            job,
+            activeProvider,
+            params.storageGroupingId,
+            result,
+            {
+              sourceAssetId: currentProductionIdentity.sourceAssetId,
+              sourceBytesSha256: currentProductionIdentity.sourceBytesSha256,
+            },
+          ),
       };
       // Bounded FinalArtwork Production-Execution Repair: prefer the
       // provider's bounded entry point when it has one (Topaz does) — one
@@ -4457,6 +4786,10 @@ export function createFinalArtworkWorkerCapability(
       // concern this phase — see the Phase 28T report) — `null` preserves
       // this path's exact pre-Phase-28T behavior.
       targetIn: null,
+      // CURSOR NB-1: the create_new path has no preparation and no movable
+      // source, so there is no historical asset to interpret unbound state
+      // as — it keeps its pre-repair treatment exactly.
+      legacySourceAssetId: null,
     });
     if (produced.status !== "ready") return;
     const { productionAsset, provenance, providerLatencyMs } = produced;
@@ -4651,7 +4984,57 @@ export function createFinalArtworkWorkerCapability(
     // --- Goal 6: THE source contract. The prepared, transparent PNG — never
     // `preparation.originalAssetId`, and never `snapshot`'s idea of a
     // "selected concept".
-    const sourceAsset = await repo.getAssetById(preparation.preparedAssetId);
+    //
+    // DTF-R1 — THE CLEAN-MASTER HANDOFF, worker side. Resolved AGAIN here,
+    // from scratch, rather than trusting whatever
+    // `requestPreparedUploadFinalArtwork` resolved when this job was
+    // enqueued. Nothing about the request-time answer is carried on the job
+    // (no resolved asset id is frozen onto it), so there is no stale
+    // request-time source for this path to pick up even by accident: a
+    // request is permission to produce, never a permanent authorization of
+    // one specific asset. Authority genuinely moves in this gap — a clean
+    // master can become current, be superseded, or be rejected while a job
+    // sits queued — which is exactly the TOCTOU window the Signs path's own
+    // third currency re-check exists to close.
+    const effectiveSource = await resolvePreparedUploadEffectiveSource(
+      repo,
+      artworkGeometryQualification,
+      {
+        projectId: job.projectId,
+        originalAssetId: preparation.originalAssetId,
+        preparedAssetId: preparation.preparedAssetId,
+      },
+    );
+    if (effectiveSource.status === "blocked") {
+      // Independent-review repair (BLOCKING #1): CANCELLED, not COMPLETED.
+      //
+      // The first implementation used `completeWithoutAsset`, whose own
+      // contract is explicit that completion-without-an-asset means an
+      // "HONEST, TERMINAL, non-retryable verdict" — and
+      // `resolvePreparedUploadJob` believes it: a completed job with no
+      // production asset and no validation row is never revived, so this
+      // job identity (preparation, width, output, treatment) could NEVER
+      // produce a plate again, even after the clean master was confirmed.
+      // CASE C became permanently unreachable for exactly the projects
+      // this phase exists to serve.
+      //
+      // "Recovery has not resolved yet" is the opposite of terminal, and
+      // this is precisely the shape of the two authority-changed
+      // conditions immediately above (`preparation.status !== "approved"`,
+      // and the approved-version mismatch) — both of which correctly use
+      // `cancelJob`, and both of which `resolvePreparedUploadJob` revives
+      // when the customer comes back. Same primitive, same reason.
+      await cancelJob(job, effectiveSource.reason);
+      // ...and the project must not be left sitting in `"finalizing"` with
+      // no claimable work behind it. `finalization_required` is the honest
+      // reading: this needs a human decision (finish recovery review), not
+      // that anything failed.
+      await maybeTransitionProjectStatus(job, "finalization_required");
+      return;
+    }
+    const sourceAuthority: PreparedUploadSourceAuthority = effectiveSource.authority;
+
+    const sourceAsset = await repo.getAssetById(effectiveSource.assetId);
     if (!sourceAsset || sourceAsset.projectId !== job.projectId) {
       await failJob(job, "Prepared artwork asset could not be resolved for this project.");
       return;
@@ -4663,13 +5046,27 @@ export function createFinalArtworkWorkerCapability(
       );
       return;
     }
-    if (artwork.primaryAssetId !== sourceAsset.id) {
+    // Only meaningful for the prepared-upload authority: the approved
+    // `ArtworkVersion` points at `preparedAssetId` by construction, so this
+    // is the check that the approval and the preparation still agree about
+    // WHICH prepared pixels were approved. A Production-Qualified Clean
+    // Master deliberately does NOT satisfy it — it is a different,
+    // separately-authorized derivative that supersedes the prepared asset
+    // rather than replacing what the customer approved. Its own integrity
+    // comes from the shared authority chain
+    // (`getCurrentProductionQualifiedMaster`), which this worker never
+    // re-derives, plus the project-scoping check above.
+    if (
+      sourceAuthority === "prepared_upload" &&
+      artwork.primaryAssetId !== sourceAsset.id
+    ) {
       await failJob(
         job,
         "The approved prepared artwork and the preparation's prepared asset disagree; refusing to finalize an unverified source.",
       );
       return;
     }
+
 
     // Production requirements come from the production context the customer
     // stated in the upload flow. There is no `designDescription` — for
@@ -4925,7 +5322,15 @@ export function createFinalArtworkWorkerCapability(
 
     const uploadedPreserveMeta: UploadedPreserveMeta = {
       preparedArtworkVersionId: artwork.id,
+      // ALWAYS the asset whose pixels this transform actually consumed —
+      // which, since DTF-R1, may be the Production-Qualified Clean Master's
+      // derivative rather than `preparation.preparedAssetId`. Selecting one
+      // source and recording another would make provenance, validation and
+      // the plate itself three different stories; `sourceAuthority` below
+      // says WHICH authority this id belongs to rather than leaving anyone
+      // to infer it from the id.
       preparedAssetId: sourceAsset.id,
+      sourceAuthority,
       originalAssetId: preparation.originalAssetId,
       sourceBytesSha256: measured.sha256,
       sourceAlphaBBoxWidthPx: measured.alphaBBoxWidthPx,
@@ -4972,6 +5377,12 @@ export function createFinalArtworkWorkerCapability(
       // above can tell a genuinely-current existing asset apart from a
       // stale one left over from before the confirmed envelope changed.
       targetIn: { widthIn: recheckTarget.widthIn, heightIn: recheckTarget.heightIn, targetPpi: sizing.targetPpi },
+      // CURSOR NB-1: the asset any PRE-REPAIR reconstruction state for this
+      // job must be interpreted as belonging to. Read from the preparation
+      // this job is bound to, never from the resolved effective source —
+      // the whole point is what the state was created for, not what is
+      // current now.
+      legacySourceAssetId: preparation.preparedAssetId,
     });
     if (produced.status !== "ready") return;
     const { productionAsset, provenance, providerLatencyMs } = produced;
@@ -5615,10 +6026,29 @@ function readUploadedPreserveEvidence(
   ) {
     return fallback;
   }
+  // DTF-R1: the source authority travels with the file like every other
+  // lineage field, so a retried/recovered validation asks the SAME
+  // certification question the first attempt did. Dropping it here would
+  // have been the quietest possible way to undo the phase: the plate would
+  // simply stop mentioning that its pixels came from a reconstruction.
+  //
+  // Absent is legitimate and means `"prepared_upload"` — every plate
+  // produced before this field existed had exactly one possible source.
+  // Present-but-unrecognized is NOT legitimate: a record nobody can read is
+  // no better than no record, so it falls back to this run's own freshly
+  // measured lineage rather than being trusted or patched.
+  if (
+    meta.sourceAuthority !== undefined &&
+    meta.sourceAuthority !== "prepared_upload" &&
+    meta.sourceAuthority !== "production_qualified_clean_master"
+  ) {
+    return fallback;
+  }
 
   return {
     preparedArtworkVersionId: meta.preparedArtworkVersionId as string,
     preparedAssetId: meta.preparedAssetId as string,
+    sourceAuthority: meta.sourceAuthority,
     originalAssetId: meta.originalAssetId as string,
     sourceBytesSha256: meta.sourceBytesSha256 as string,
     sourceAlphaBBoxWidthPx: meta.sourceAlphaBBoxWidthPx as number,

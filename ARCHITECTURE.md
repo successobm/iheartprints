@@ -11778,6 +11778,411 @@ speculatively.
 
 ---
 
+## 23q-DTF. DTF-R1 — Production-Qualified Clean Master → DTF Clean-Master Handoff
+
+**What changed in one sentence.** The prepared-upload (Existing Artwork →
+apparel raster / DTF) production path now resolves its production source
+through the shared recovery lifecycle instead of reading
+`ArtworkPreparation.preparedAssetId` unconditionally — closing, for DTF, the
+exact gap §23q's R6B addendum closed for Signs and explicitly left open
+("DTF still does not — this phase is Signs-only, deliberately").
+
+**Why the gap mattered.** `preparedAssetId` is a deterministic transparent
+derivative of the customer's immutable original. Once the shared recovery
+lifecycle has begun against that original, the system has already decided
+the original is not the thing to print from. Before DTF-R1, DTF neither knew
+nor asked: it would quietly finalize the pre-recovery source — the inferior
+artwork — while recovery sat unresolved, or while a confirmed clean master
+was already on file.
+
+### The one resolver
+
+`final-artwork/prepared-upload-effective-source.ts` —
+`resolvePreparedUploadEffectiveSource(repo, artworkGeometryQualification,
+{ projectId, originalAssetId, preparedAssetId })`. Structurally the apparel twin of
+`sign-preparation/sign-effective-source.ts`: one exported function, asked
+identically by every boundary, never re-implemented at a call site.
+Repository reads plus one capability read — no asset download, no pixel
+decode, no provider, no write.
+
+| Lifecycle state | Resolver | DTF source |
+| --- | --- | --- |
+| No `ArtworkFidelityContract`; or its `sourceAssetId` is not this preparation's `originalAssetId`; or no reconstruction job against that `sourceAssetId` | `{ status: "prepared" }` | `preparedAssetId` — byte-for-byte pre-DTF-R1 behavior |
+| Lifecycle begun, no current confirmed PQCM (queued/running job, candidate pending review, candidate rejected, geometry pending confirmation, geometry rejected, `"unusable"`, superseded authority) | `{ status: "blocked" }` | **none — production blocked.** Never a fallback to `preparedAssetId` |
+| Current confirmed PQCM | `{ status: "master" }` | the qualification's own `derivedAssetId` |
+
+"Current" is never re-derived here.
+`ArtworkGeometryQualificationCapability.getCurrentProductionQualifiedMaster`
+(§23q) remains the ONE authority for that chain-walk — project → current
+confirmed fidelity contract → current accepted reconstruction → that job's
+qualification row → `"confirmed"` → a derivative asset — and every `null` it
+returns is treated as "not eligible". DTF adds no second notion of an
+approved reconstruction, launches no reconstruction of its own, and contacts
+no provider on this path.
+
+**The lifecycle must be about THIS artwork**, which is why
+`originalAssetId` is part of the question rather than implied by the
+project. A fidelity contract binds to
+`getOriginalAssetReference(projectId)` — the preparation's
+`originalAssetId` — when it is proposed, but `uploadOriginal` permits a
+second upload while a preparation is unapproved, and that creates a NEW
+preparation row while leaving the old contract, reconstruction job and
+qualification in place. Without the equality check the project's latest
+contract could describe a DISCARDED upload, and the resolver would hand DTF
+a master derived from artwork the customer replaced — pixels of the wrong
+design, recorded beside an `originalAssetId` they do not descend from,
+which `checkSourceLineage` cannot catch (it only proves source ≠ original).
+Equality holds in every ordinary case, so the check costs nothing; a
+mismatch means no lifecycle has begun *for this artwork*, and it also
+removes the mirror-image false block.
+
+**A certification withhold does not survive a source change.**
+`resolvePreparedUploadJob`'s `terminalCertificationWithhold` refuses to
+revive a completed job whose Print Ready was withheld on
+`reconstruction_certification_evidence`, because re-asking the same
+question about the same artwork would re-spend a credit to reach the
+identical verdict. That premise stops holding when the artwork moves — and
+the Pedro-class project is exactly that shape: a plate from the degraded
+upload, `finalization_required`, then recovery confirms a master. Without
+an exemption the next request would resolve CASE C correctly and still hand
+back the completed job untouched, so no clean-master plate would ever be
+produced for the very projects this phase exists to serve.
+`completedJobSourceSuperseded` is the exemption: the request-side twin of
+the worker's adoption fence, asking the identical question of the identical
+evidence (each plate's own recorded `uploadedPreserve.preparedAssetId`) so
+the two boundaries cannot drift apart.
+
+**Fail-closed on an unwired capability** (deliberately stricter than
+`resolveSignEffectiveSource`, which returns "original"). Detecting *whether a
+lifecycle exists* needs only repository reads, so that detection is never
+gated on the optional capability. A project with a lifecycle and no
+`ArtworkGeometryQualificationCapability` **blocks**; an unwired dependency
+must not be able to reopen the silent-fallback hole this phase closes. A
+project with no lifecycle never reaches the capability at all, which is why
+every pre-existing apparel call site and test — none of which pass it — is
+unaffected.
+
+### Asked twice, on purpose (TOCTOU)
+
+- **Request time** — `FinalArtworkCapability.requestPreparedUploadFinalArtwork`,
+  before any `FinalArtworkJob` exists, so a mid-recovery project never gets a
+  queued job and never reaches a paid provider. `blocked` throws the
+  resolver's own customer sentence.
+- **Worker time** — `FinalArtworkWorkerCapability`'s `runPreparedUploadJob`,
+  resolved again from scratch immediately before execution. `blocked` →
+  `cancelJob` plus a `finalization_required` transition.
+
+**A completed job whose source moved is revived — whatever its validation
+said.** `resolvePreparedUploadJob` treats source supersession
+(`completedJobSourceSuperseded`, judged on the NEWEST plate's own recorded
+lineage) as a revival trigger in its own right, alongside Phase 28T's
+stale-target trigger. It is deliberately NOT a modifier on the
+certification withhold: a job that completed perfectly — `ready` validation,
+project `print_ready` — and whose source then moved to a clean master is
+otherwise "already satisfied" forever, so the worker never reruns and the
+PREPARED plate stays the current deliverable while authority says PQCM.
+That is CASE C silently not happening on the most ordinary success path.
+It terminates by construction: the revived run's plate becomes the newest,
+the predicate goes false, and a further request is a no-op.
+
+**Every read authority is fenced, by the same predicate.** Revival alone is
+not enough: production output is reachable through several doors, and two of
+them disagreeing is worse than either being wrong on its own.
+`completedJobPlateIsPublishable` is asked by
+`resolveSatisfiedProductionDelivery` (so `reconcileCompletedProductionState`
+cannot reconcile a superseded plate back to `print_ready`) **and** by
+`resolveProductionVariantState` — which is where the package/variant card
+(`resolveOneProductionVariant`), the per-treatment customer download
+(`getProductionArtworkDownloadForVariant`) and the Halftone raster-first gate
+all resolve. Without that second fence a superseded prepared-source plate
+could still be shown as ready, downloaded as current, and used to unlock
+Halftone, while `getCurrentProductionAssetId` correctly reported nothing
+current. All of them read the source from the ONE resolver, passed in by the
+capability (`currentPreparedUploadSource`) rather than re-derived.
+
+A `blocked` resolution yields `null` there — blocking NEW production is
+DTF-R1's job; withdrawing an already-validated historical deliverable is not
+(Goal 21).
+
+**A plate with no recorded lineage is judged by the same historical
+inference.** `completedJobSourceCurrency` returns three answers, not two:
+`current`, `superseded`, and `unprovable` (a plate predating the
+`uploadedPreserve` evidence). REVIVAL deliberately does not fire on
+`unprovable` — a job that cannot prove its plate is stale would be re-queued
+on every request forever, achieving nothing. PUBLICATION fails closed on it,
+but only while a clean master is current: a plate that cannot name its source
+is not evidence that it descends from a master that did not exist when it was
+made, and while the prepared asset is still current such a plate is presumably
+from it and stays publishable exactly as before.
+
+**Why `cancelJob` and not `completeWithoutAsset`.** Completion-without-an-asset
+is documented as an *honest, terminal, non-retryable* verdict, and
+`resolvePreparedUploadJob` believes it: a completed job with no production
+asset and no validation row is never revived. Using it here would have made
+CASE C permanently unreachable for the very projects this phase serves —
+blocked while recovery was pending, then still blocked after the master was
+confirmed, with no way to re-request. "Recovery has not resolved yet" is the
+opposite of terminal. `cancelJob` is the primitive the two authority-changed
+conditions directly above it already use (preparation no longer approved;
+approved version mismatch), and `resolvePreparedUploadJob` revives a
+`cancelled` job when the customer comes back.
+
+**No resolved asset id is frozen onto the job.** A request is permission to
+produce, never a permanent authorization of one specific asset, so there is
+no stale request-time source for the worker to pick up even by accident.
+
+**The crash/retry counterpart.** `produceProductionAsset` adopts an existing
+plate for a job on pixel geometry alone (`resolveExistingProductionAsset`).
+That is sound while a source cannot move underneath a live job — true for the
+prepared authority, where re-preparing also produces a new `ArtworkVersion`
+and the existing `preparedArtworkVersionId` binding cancels the job first. It
+is NOT true for a clean master, which can be superseded, or become current
+where none was before, with the `ArtworkPreparation` row untouched. Geometry
+is then silent: the plate's *size* is identical either way, only its pixels
+differ. So `productionAssetSourceStillCurrent` judges each candidate against
+its OWN recorded lineage (`uploadedPreserve.preparedAssetId`) and refuses to
+adopt one the current run did not build.
+
+Refused, **not blocked**: the job goes on to produce a plate from the current
+source, additively, exactly as Phase 28T's stale-target revival already does.
+Blocking instead would leave the superseded plate and its `ready` validation
+on file, where the next request's `reconcileCompletedProductionState` would
+re-publish it as `print_ready` — defeating the fence entirely. Retracting the
+older plate is not an option either: `resolveCurrentMatchingProductionJob`'s
+own Goal 21 note forbids retroactively invalidating produced files. Two plates
+at the same physical size can now share one job, so
+`findProductionAssetIdForJob` takes the NEWEST target-matching candidate
+rather than an arbitrary one, and apparel delivery independently requires the
+latest validation to name that exact asset.
+
+A plate that cannot name its source (legacy/malformed metadata) is left
+exactly as trustworthy as it was before this phase — "we did not write it
+down" is not evidence of drift any more than it is evidence of currency, and
+`produceProductionAsset`'s durable-identity guard (which already compared
+`sourceAssetId`) still judges it.
+
+### Resumable reconstruction state is source-bound
+
+Adopting a finished plate is not the only way old pixels can reach a new
+run. A job's RESUMABLE reconstruction state — a two-pass pass-1
+intermediate, and the single outstanding provider request — is handed
+straight back to the provider, as the pixels pass 2 continues from and as
+the request to poll. Both were keyed on job identity alone, which was
+sufficient while a job's source could not move. Once DTF-R1 lets it move, a
+revived job would correctly resolve the NEW source and then continue from
+the OLD one's bytes, recording the new source's asset id, SHA and
+`sourceAuthority` on the result. Pixels from A with provenance claiming B is
+false lineage, and Print Ready being withheld afterwards does not make it
+true.
+
+Three artifact classes, one identity concept (source asset id + source
+bytes SHA-256, plus provider key):
+
+| State | Where identity lives | Enforced by |
+| --- | --- | --- |
+| Provider-result intermediate | asset metadata (already did) | `providerResultIntermediateMatchesIdentity` |
+| Pass-1 intermediate | asset metadata (added here, no migration) | `intermediateReconstructionSourceMatches` |
+| Outstanding provider request | `final_artwork_jobs.provider_source_asset_id` / `provider_source_sha256` | `providerRequestBelongsToCurrentSource` |
+
+Both dimensions are load-bearing: a request whose bound asset id still matches
+the current source but whose bound SHA does not is retired, because an asset id
+alone does not pin bytes.
+
+A non-matching pass-1 intermediate is simply not returned, so it never
+reaches the provider. A non-matching outstanding request is RETIRED — slot
+cleared, `providerRecoveryAttempts` zeroed, exactly like the
+provider-result-intermediate staleness path already does — so the claim
+classifies as a fresh execution for the current source rather than
+resuming, and no later claim can mistake it for this job's in-flight work.
+
+**Pre-repair (unbound) state is interpreted, never assumed current.** State
+written before this repair records no source identity, and reading that
+absence as "matches whatever is current now" is exactly backwards: a missing
+identity is not evidence that an artifact belongs to a clean master that did
+not exist when it was written. For a `prepared_upload` job the historical
+truth is knowable, and it is a verified invariant rather than an assumption:
+
+- the pre-DTF-R1 worker resolved its source from
+  `preparation.preparedAssetId` unconditionally, so any provider work it
+  submitted was submitted against that asset (checked against the baseline
+  commit); and
+- a job whose `preparedAssetId` has moved since can never reach the resume
+  decision at all — repointing it either moves `preparedArtworkVersionId`
+  too (the version binding cancels the job), or moves `status` off
+  `"approved"` (the approval check cancels it), or leaves
+  `artwork.primaryAssetId` disagreeing with it (the source-agreement check
+  fails it).
+
+So unbound legacy state is interpreted as belonging to the preparation's
+current `preparedAssetId` (`legacySourceAssetId`), then compared against the
+current effective source like any other identity. While the prepared asset is
+still current, legacy state is reused and a paid in-flight request RESUMES —
+retiring it would re-bill every job in flight at deploy. Once a clean master
+is current, the same state provably does not belong to it: the intermediate is
+ignored and the request is retired.
+
+Three rules keep that inference from becoming a loophole: explicit identity
+always wins when present; a malformed binding fails closed rather than being
+reinterpreted as legacy, so new bad state can never masquerade as old; and
+legacy inference still requires provider identity, because a pass-1
+intermediate is pass 2's INPUT and continuing from one produced by a different
+engine is not a resume.
+
+"Malformed" is judged against what the path can know, and getting that wrong
+is a spend bug, not a style question.
+`CurrentProductionIdentity.sourceBytesSha256` comes from the uploaded-preserve
+lineage, which only the prepared-upload path records, so a `create_new` job
+has a legitimately NULL source SHA and the binding faithfully stores that
+null — a complete record of a source with no hash here, not a half-written
+one. A first cut treated any null bound SHA as partial-and-fail-closed, which
+made every `create_new` job retire its own healthy in-flight request and
+submit a SECOND PAID ONE; the existing Topaz resume suite caught it. So the
+SHA is compared when the CURRENT source has one — always, for prepared-upload,
+the only path whose source can move — and a bound null there is genuinely
+malformed. Where the current source has no SHA, the asset id is the whole
+identity. `create_new` and Signs
+pass no `legacySourceAssetId` — their sources are not movable, so their
+unbound state keeps its pre-repair treatment exactly.
+
+**No backfill is required**, and that is the point of the inference: legacy
+NULL is not an unknown to be repaired, it is a value that can be read.
+
+**The one migration in this phase, and why it was unavoidable.** The two
+artifact classes carry their identity in metadata, which needs no schema
+change and covers every window in which an artifact exists. It cannot cover
+the first one: between submission and the first durable download there is no
+artifact, and the only row that exists is the job. The source cannot be
+inferred after the fact, and retiring an unprovable slot instead would
+resubmit — and re-bill — on every poll of a perfectly healthy in-flight
+request. So the binding lives next to the slot it describes. Both columns
+are nullable; `null` means "no claim either way" and resumes exactly as
+before, because treating rows written before the migration as mismatches
+would abandon real, already-paid requests in flight at deploy. Every new
+submission writes the binding, so that tolerance closes itself.
+
+**DEPLOYMENT ORDER: MIGRATION FIRST, APPLICATION SECOND.** This is an
+operational requirement, not a preference. The application writes the binding
+inside the provider-submission callback — i.e. immediately AFTER a paid
+request has been submitted. If the application ran against a database without
+these columns, that write would be rejected at exactly the worst moment: the
+credit is spent, and the durable record of `providerRequestId` is lost, so the
+next claim classifies the work as fresh and submits again. Repeatedly.
+
+The order is safe in both directions:
+
+- **Migration ahead of application**: the old application never reads or
+  writes these columns, and both are nullable with no default, so a
+  migrated-but-not-yet-deployed database behaves identically for it.
+- **Application behind migration**: the new application requires the columns
+  to exist before its first provider submission, which the order guarantees.
+- **No backfill step**: legacy NULL is interpreted, not repaired (above).
+
+### Attempt budget
+
+`attempts` increments per claim and `MAX_FINAL_ARTWORK_ATTEMPTS` bounds it,
+which is right for a job that keeps failing the same work. DTF-R1 added a
+way to consume it that is not a failed attempt at anything: the worker
+claims, finds authority unresolved, and cancels without running a transform.
+Job identity is a DB-unique tuple, so the same row is reused forever and a
+few authority races could strand a job that had never once executed.
+
+`authorityRevivalAttemptReset` rebases the fresh-execution budget on an
+AUTHORITY revival only — a source-superseded revival, or a `cancelled` job
+(fenced out by a decision) — and never on a `failed` one (it ran and broke)
+or a same-source retry, so repeated failure of the same work stays bounded
+exactly as before. `providerRecoveryAttempts` is deliberately untouched: it
+belongs to one specific paid request and its own read-back failures, nothing
+here is evidence about that, and resetting it would weaken a spend
+protection. Signs (`resolveSignJob`) already drew this distinction, so this
+is the established convention rather than a new one.
+
+**Known follow-ups, deliberately not widened into here** (independent review
+rated both non-blocking, and neither is touched by the NB-1/NB-2 changes, so
+enlarging this repair to chase them would add risk without reducing any):
+
+1. `authorityRevivalAttemptReset(existing.status === "cancelled")` treats
+   EVERY cancellation as an authority revival, including a stale-intent
+   cancel. A same-source failure budget could therefore in theory be
+   laundered: fail → re-request → stale-intent cancel → request again →
+   fresh budget. Narrowing it needs a durable "why was this cancelled"
+   signal, which the job row does not currently carry, so it is a schema
+   question rather than a one-line fix.
+2. A supersession revival that produces no plate (the worker blocks again for
+   an unrelated reason) leaves the predicate true, so each customer request
+   re-queues the job. Bounded by the attempt budget and customer-driven
+   rather than a machine loop, but it is more churn than necessary.
+
+### Provenance, validation and the certification boundary
+
+`UploadedPreserveEvidence.preparedAssetId` is, as it always was, *the asset
+whose pixels the transform actually consumed* — so it now carries the clean
+master's `derivedAssetId` when that is what ran. A new field,
+`sourceAuthority` (`"prepared_upload"` | `"production_qualified_clean_master"`,
+absent = `"prepared_upload"` for every plate predating it), states WHICH
+authority that id belongs to rather than leaving anyone to infer it. Source
+selection, the transform, provenance and validation therefore name one asset,
+never two.
+
+**The laundering boundary this closes.** A clean master's pixels were
+manufactured by a reconstruction provider and accepted by a person *for
+recovery* — the capability that resolves it says in as many words that it
+"never sets Print Ready, never authorizes Signs/DTF production", and no
+reconstruction-quality certification surface exists yet. But a DTF plate
+normalized from a master truthfully records `enhancement: "skipped"` and
+`resolutionProvenance: "native"` — nothing was reconstructed *in that job* —
+and would have sailed straight through
+`reconstruction_certification_evidence`, reaching automatic Print Ready by
+arriving as a *source* rather than as an *enhancement*. So that check now
+also fails on `sourceAuthority === "production_qualified_clean_master"`, for
+the halftone representation as well as continuous tone (screening an
+uncertified master renders uncertified artwork faithfully; the lattice's own
+correctness says nothing about that). `readUploadedPreserveEvidence` carries
+`sourceAuthority` across retries for the same reason — dropping it would have
+been the quietest possible way to undo the phase.
+
+Net effect, and it is the intended one: a DTF plate built from a clean master
+is **produced** and **validated**, and lands on `finalization_required` with
+`require_human_review` — never automatic `print_ready`. That is the same
+outcome the Pedro Back production test already produced correctly, preserved
+rather than weakened. DTF-R1 builds no certification surface; when an explicit
+reconstruction-quality/fidelity authority ships, that is where this withhold
+gets replaced.
+
+**`print_ready` remains profile-scoped and `PrintValidationCapability`'s sole
+authority** (§13i/§23n, unchanged). Nothing in this phase sets, relaxes, or
+widens it.
+
+### What DTF-R1 does not do
+
+Exactly one migration, and only the one argued for above
+(`20260928120000_final_artwork_provider_source_binding.sql`): two nullable
+columns binding an outstanding provider request to its source. Additive, no
+backfill, no data rewrite, and every source-selection decision remains
+dynamic. No write to any recovery-lifecycle table.
+No mutation of `ArtworkPreparation.preparedAssetId` or any historical
+preparation record — they remain immutable historical truth, and the handoff
+is runtime current-authority selection only. No reconstruction logic
+duplicated into DTF, no provider/Topaz/OpenAI call added to this path, no
+human reconstruction certification, no near-sufficient-resolution or Topaz
+routing thresholds, no background-removal change, no Signs change, no Pedro
+change, no ProductionUnlock/checkout repair, no UI change. The Create New
+path is untouched — it never read `preparedAssetId`. Halftone's raster-first
+hard gate is unchanged; it simply now sees the correct source's verdict.
+
+**Residual, deliberately not fixed here.** A clean master is the
+qualification's transparent, background-isolated derivative, so it is a valid
+continuous-tone apparel source. Note that the worker's `hasTransparency`
+fence cannot act as a backstop for it: `ensureQualification` records
+`hasTransparency: true` on every derivative it uploads, so the fence reads
+`true` regardless of the pixels. The real guarantee is upstream —
+`qualifyReconstructionGeometry` abstains (`"unusable"`, no derivative, no
+PQCM) unless `classifyRepairability` returned `remove_exterior`, and
+`isolateBackground` genuinely writes alpha 0. DTF-R1 adds no background
+removal of its own, which would be a preparation redesign.
+`production-treatment/preview` (a non-production preview surface) still reads
+`preparedAssetId` directly; it produces no plate and makes no readiness
+claim.
+
 ## 23r. Production-Artifact Storage Identity (Provider Intermediate Storage-Key Collision Repair)
 
 A FinalArtwork job's **storage grouping id** is a folder, never an identity.

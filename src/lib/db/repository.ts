@@ -342,6 +342,10 @@ export type UpdateFinalArtworkJobInput = Partial<
     | "providerKey"
     | "providerRequestId"
     | "providerStatus"
+    // DTF-R1 (Cursor Blocker 2): the outstanding request's source binding,
+    // written alongside the slot it describes.
+    | "providerSourceAssetId"
+    | "providerSourceSha256"
     | "providerRecoveryAttempts"
   >
 >;
